@@ -1,0 +1,19 @@
+[project]
+name = "Rgent"
+version = "0.1.0"
+description = "本机桌面 Agent 客户端（Windows / macOS）"
+authors = [
+    {name = "Skahanium", email = "skahanium@gmail.com"},
+]
+dependencies = ["pydantic-ai>=2.43.0", "pydantic-ai-harness>=0.31.0"]
+requires-python = ">=3.12"
+readme = "README.md"
+license = {text = "MIT"}
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+
+[tool.pdm]
+distribution = true
