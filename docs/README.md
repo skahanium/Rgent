@@ -4,11 +4,13 @@
 
 改产品性格或架构时，以 [已拍板决定](decisions.md) 为对照表：先改那一篇，再改其它篇章和代码。
 
+旧版「Flutter 通用 Agent 驾驶舱」围栏已作废，以当前各篇为准。
+
 ## 建议阅读顺序
 
 1. [理念与远期](vision.md) — 这是什么、要去哪、故意不做什么  
 2. [已拍板决定](decisions.md) — 讨论收口的总账，改围栏时先改这篇  
-3. [架构](architecture.md) — 驾驶舱、发动机、数据与信任边界怎么摆  
+3. [架构](architecture.md) — 进程、ACL、页内 AI、数据放哪  
 4. [施工守则](handbook.md) — 动手时能做什么、禁止做什么  
 5. [开源说明](opensource.md) — 许可、贡献、治理、安全披露  
 
@@ -19,9 +21,9 @@
 | 文档 | 管什么 |
 |------|--------|
 | [vision.md](vision.md) | 理念、远期目标、非目标 |
-| [decisions.md](decisions.md) | 已拍板结论与明确未锁项 |
-| [architecture.md](architecture.md) | 双进程结构、数据流、存储与安全边界 |
-| [handbook.md](handbook.md) | 施工纪律，避免把围栏做歪 |
+| [decisions.md](decisions.md) | 已拍板结论、工具白名单、v0 阶段、明确未锁项 |
+| [architecture.md](architecture.md) | Electron 双进程、AgentHost、信任边界 |
+| [handbook.md](handbook.md) | 施工纪律 |
 | [opensource.md](opensource.md) | MIT、如何贡献、一人维护怎么拍板 |
 
 不设独立 ADR 目录。新的重大决定写进 `decisions.md`，必要时在对应篇章补一句。
@@ -32,10 +34,9 @@
 
 | 用语 | 意思 |
 |------|------|
-| 驾驶舱 | Flutter / Dart 窗口进程 |
-| 发动机 | Python 进程，内含 Pydantic AI 与 Harness 积木 |
-| 工作区 | 用户指定的一块项目目录，Agent 只能动这里面的文件 |
-| 普通 / 归档 / 删除 | 会话在本机库里的三种状态，不是三套目录 |
-| v0 | 围栏内的第一代可演示客户端，不是商店版本名 |
-
-Python 版本以根目录 `pyproject.toml` 的 `requires-python` 为准（当前 `>=3.12`）。
+| 库 | 用户自选的一个文件夹，内含 `.md`、附件与规则 |
+| 成稿 | 给人看的笔记正文，换编辑器也应可读 |
+| 幕后区块 | 同一 `.md` 里包起来的 AI 对话，默认不抢版面 |
+| AgentHost | 主进程里的文档操作器，不是独立聊天产品 |
+| 三档 | 禁止触碰 / 可参考 / 必须遵循 |
+| v0 | 围栏内第一代可安装客户端，不是商店版本名 |

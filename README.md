@@ -1,8 +1,8 @@
 # Rgent
 
-本机桌面 Agent 客户端：在 Windows 与 macOS 上圈定工作区、切换厂商与模型、让 Agent 干活，写文件前过目，任务历史留在这台机器。
+AI 原生的单机笔记软件兼个人资料库。Markdown 文件是根：像普通 md 软件一样写作，也可以在同一页里调用 AI 做润色、扩写、问答。不是通用 Agent，没有第二套会话区。
 
-驾驶舱是 Flutter 窗口，发动机是 Python（[Pydantic AI](https://ai.pydantic.dev/) + [Harness](https://github.com/pydantic/pydantic-ai-harness) 积木）。不是网页应用，也不自研一套 Agent 内核。
+桌面壳是 Electron（macOS + Windows），界面与 Agent 均为 TypeScript。库是用户磁盘上的一个文件夹。
 
 ## 从哪读起
 
@@ -18,4 +18,4 @@
 
 ## 现状
 
-文档体系已经按围栏写好，请以 `docs/` 为准。Flutter 壳与 Python 发动机尚未按文档落地。仓库里若有探路脚本，不是产品骨架。
+产品围栏已按当前愿景重写，请以 `docs/` 为准。Electron 应用尚未落地。根目录若仍有 Python 探路文件（`hello_world.py`、`pyproject.toml`），不是产品骨架。
