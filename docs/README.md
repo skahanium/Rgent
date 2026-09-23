@@ -21,8 +21,8 @@
 | 文档 | 管什么 |
 |------|--------|
 | [vision.md](vision.md) | 理念、远期目标、非目标 |
-| [decisions.md](decisions.md) | 已拍板结论、工具白名单、v0 阶段、明确未锁项 |
-| [architecture.md](architecture.md) | Electron 双进程、AgentHost、信任边界 |
+| [decisions.md](decisions.md) | 已拍板结论、编辑器内核、工具白名单、Harness/外循环、v0 阶段 |
+| [architecture.md](architecture.md) | Electron 双进程、CM6、AgentHost 内循环、信任边界 |
 | [handbook.md](handbook.md) | 施工纪律 |
 | [opensource.md](opensource.md) | MIT、如何贡献、一人维护怎么拍板 |
 
@@ -37,6 +37,9 @@
 | 库 | 用户自选的一个文件夹，内含 `.md`、附件与规则 |
 | 成稿 | 给人看的笔记正文，换编辑器也应可读 |
 | 幕后区块 | 同一 `.md` 里包起来的 AI 对话，默认不抢版面 |
-| AgentHost | 主进程里的文档操作器，不是独立聊天产品 |
+| 即时渲染 | CodeMirror 6：文档仍是 md 字符串，非光标处用 decoration/widget 显示排版 |
+| Harness | 一次页内任务的运行环境：工具、权限、刹车、校验、恢复 |
+| 外循环 | 跨多次运行的自触发与接力；v0 只留方向，不实现无人值守 |
+| AgentHost | 主进程里的文档操作器（Harness），不是独立聊天产品 |
 | 三档 | 禁止触碰 / 可参考 / 必须遵循 |
 | v0 | 围栏内第一代可安装客户端，不是商店版本名 |
