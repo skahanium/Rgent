@@ -9,6 +9,7 @@ import {
   inViewport,
   listedStages,
   partitionSource,
+  findLedgerStart,
   planWidgets,
   recoverCompile,
   STAGE_IDS
@@ -277,6 +278,77 @@ describe('pipeline', () => {
       expect(text).not.toMatch(/from\s+['"]katex['"]/)
       expect(text).not.toMatch(/from\s+['"]mermaid['"]/)
     }
+  })
+})
+
+describe('ledger partition', () => {
+  const anchor = '<!-- rgent:ledger:v1 -->'
+  const body = '# 会议纪要\n\n正文一句。\n'
+  const ledger = `${anchor}\n\n## 2026-09-24 第一次\n\n口令：总结一下\n\n[[幽灵链接]]\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n$$x^2$$\n\n**很粗**\n`
+
+  it('keeps identity when there is no anchor line', () => {
+    const part = partitionSource(fixture)
+    expect(part.body).toBe(fixture)
+    expect(part.ledger).toBeNull()
+    expect(part.bodyOffset).toBe(0)
+  })
+
+  it('treats the anchor as a whole line only', () => {
+    const inline = `正文提到 ${anchor} 这四个字嵌在句子里。\n`
+    expect(findLedgerStart(inline)).toBe(-1)
+    expect(partitionSource(inline).ledger).toBeNull()
+  })
+
+  it('splits the body as a prefix and the ledger from the anchor on', () => {
+    const source = body + ledger
+    const part = partitionSource(source)
+    expect(part.body).toBe(body)
+    expect(part.ledger).toBe(ledger)
+    expect(part.bodyOffset).toBe(0)
+    expect(source.startsWith(part.body)).toBe(true)
+  })
+
+  it('accepts trailing whitespace on the anchor line', () => {
+    const source = `${body + anchor}   \n账本\n`
+    expect(findLedgerStart(source)).toBe(body.length)
+    expect(partitionSource(source).body).toBe(body)
+  })
+
+  it('uses the last anchor so prose quoting the anchor is not swallowed', () => {
+    const source = `正文。\n${anchor}\n这是正文里引用的一行，不该进账本。\n${anchor}\n真账本\n`
+    const part = partitionSource(source)
+    expect(part.body).toContain('不该进账本')
+    expect(part.ledger).toBe(`${anchor}\n真账本\n`)
+  })
+
+  it('yields an empty body when the whole file is a ledger', () => {
+    const part = partitionSource(ledger)
+    expect(part.body).toBe('')
+    expect(part.ledger).toBe(ledger)
+    expect(() => compile(ledger)).not.toThrow()
+  })
+
+  it('keeps the whole file as source while the index sees only the body', () => {
+    const result = compile(body + ledger)
+    expect(result.source).toBe(body + ledger)
+    expect(result.stale).toBe(false)
+    expect(result.partition.body).toBe(body)
+
+    const seen = JSON.stringify(result.index)
+    expect(seen).not.toContain('幽灵链接')
+    expect(seen).not.toContain('2026-09-24')
+    expect(result.index.wikilinks).toEqual([])
+    expect(result.index.tables).toEqual([])
+    expect(result.index.maths).toEqual([])
+    expect(result.index.marks).toEqual([])
+    expect(result.index.blocks.map((block) => block.type)).toEqual(['heading', 'paragraph'])
+  })
+
+  it('plans no widgets from the ledger region', () => {
+    const source = body + ledger
+    const result = compile(source)
+    const widgets = planWidgets(result.index, source, [{ from: 0, to: source.length }])
+    expect(widgets).toEqual([])
   })
 })
 
