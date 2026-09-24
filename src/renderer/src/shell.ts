@@ -1,6 +1,7 @@
-import { IPC, type TreeEntry, type VaultState } from '@shared'
+import { IPC, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { renderBacklinks } from './backlinks.ts'
 import { promptConflict, promptNewNote } from './dialogs.ts'
+import { renderSearchResults } from './search.ts'
 import { pendingWrites, type Tab } from './tabs.ts'
 import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
 import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.ts'
@@ -14,6 +15,10 @@ export async function start(root: HTMLElement): Promise<void> {
         <button type="button" class="tree-toggle" aria-controls="tree-panel" aria-expanded="false">目录</button>
         <p class="brand">Rgent</p>
         <span class="vault-name" hidden></span>
+        <div class="search">
+          <input type="search" class="search-input" placeholder="搜标题或正文" aria-label="搜标题或正文" autocomplete="off" />
+          <div class="search-panel" hidden></div>
+        </div>
       </header>
       <div class="body">
         <aside id="tree-panel" class="tree-panel" hidden>
@@ -47,6 +52,9 @@ export async function start(root: HTMLElement): Promise<void> {
   const editorHostEl = root.querySelector('.editor-host') as HTMLElement
   const emptyEl = root.querySelector('.empty') as HTMLElement
   const backlinksEl = root.querySelector('.backlinks') as HTMLElement
+  const searchEl = root.querySelector('.search') as HTMLElement
+  const searchInput = root.querySelector('.search-input') as HTMLInputElement
+  const searchPanel = root.querySelector('.search-panel') as HTMLElement
 
   const tabs: Tab[] = []
   let active: string | null = null
@@ -54,6 +62,8 @@ export async function start(root: HTMLElement): Promise<void> {
   let saveTimer: number | null = null
   let conflictOpen = false
   let backlinkToken = 0
+  let searchTimer: number | null = null
+  let searchHits: SearchHit[] = []
 
   const editor: EditorHost = mountEditor(editorHostEl, (text) => {
     const tab = current()
@@ -74,6 +84,39 @@ export async function start(root: HTMLElement): Promise<void> {
 
   pickBtn.addEventListener('click', () => {
     void chooseVault()
+  })
+
+  const closeSearch = () => {
+    searchPanel.hidden = true
+    searchHits = []
+  }
+
+  searchInput.addEventListener('input', () => {
+    if (searchTimer != null) window.clearTimeout(searchTimer)
+    searchTimer = window.setTimeout(() => {
+      void runSearch()
+    }, 200)
+  })
+  searchInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      searchInput.value = ''
+      closeSearch()
+      editor.focus()
+      return
+    }
+    if (event.key === 'Enter') {
+      const first = searchHits[0]
+      if (!first) return
+      event.preventDefault()
+      searchInput.value = ''
+      closeSearch()
+      void openNote(first.relPath)
+    }
+  })
+  document.addEventListener('mousedown', (event) => {
+    if (searchPanel.hidden) return
+    if (searchEl.contains(event.target as Node)) return
+    closeSearch()
   })
 
   window.rgent.onMenu(IPC.menuOpenVault, () => {
@@ -154,7 +197,23 @@ export async function start(root: HTMLElement): Promise<void> {
     active = null
     editor.setText('', noteHost())
     renderTabs()
+    closeSearch()
+    searchInput.value = ''
     void refreshBacklinks()
+  }
+
+  async function runSearch(): Promise<void> {
+    const query = searchInput.value
+    try {
+      searchHits = await window.rgent.search(query)
+    } catch {
+      searchHits = []
+    }
+    renderSearchResults(searchPanel, searchHits, query, (relPath) => {
+      searchInput.value = ''
+      closeSearch()
+      void openNote(relPath)
+    })
   }
 
   /**

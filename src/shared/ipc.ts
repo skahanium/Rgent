@@ -46,6 +46,9 @@ export type BacklinkRef = {
   title: string
 }
 
+/** 库根那一层的分组名。 */
+export const ROOT_GROUP = '库根'
+
 export type BacklinkGroup = {
   folder: string
   notes: BacklinkRef[]

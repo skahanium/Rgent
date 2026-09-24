@@ -1,10 +1,10 @@
 import type { BacklinkGroup, BacklinkRef, SearchHit, TreeEntry } from '../shared/ipc.ts'
+import { ROOT_GROUP } from '../shared/ipc.ts'
 import { collectNotePaths, noteTitle } from '../shared/vault-rel.ts'
 import { compile } from '../markdown/index.ts'
 import { readNote } from './notes-fs.ts'
 
-/** 库根那一层的分组名。 */
-export const ROOT_GROUP = '库根'
+export { ROOT_GROUP }
 
 const SNIPPET_PAD = 40
 /** 单篇最多数这么多次命中，只用于排序。 */

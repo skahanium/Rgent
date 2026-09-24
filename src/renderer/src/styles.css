@@ -71,6 +71,83 @@ summary:focus-visible {
   font-size: 0.9rem;
 }
 
+.search {
+  position: relative;
+  margin-left: auto;
+}
+
+.search-input {
+  width: 18rem;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.search-input::-webkit-search-cancel-button { cursor: pointer; }
+
+.search-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 15;
+  width: min(34rem, 62vw);
+  max-height: 60vh;
+  overflow: auto;
+  padding: 6px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+
+.search-panel[hidden] { display: none; }
+
+.search-empty {
+  margin: 0;
+  padding: 10px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.search-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.search-hit {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  text-align: left;
+  border-radius: 8px;
+}
+
+.search-hit:hover { background: var(--bg-side); }
+
+.search-hit-title { font-weight: 600; }
+
+.search-hit-folder {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.search-snippet {
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+.search-snippet mark {
+  background: var(--accent-weak);
+  color: inherit;
+  border-radius: 3px;
+}
+
 .tree-toggle {
   background: var(--paper);
   border-color: var(--line);
