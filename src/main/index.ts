@@ -41,7 +41,7 @@ function createWindow(): void {
     title: 'Rgent',
     backgroundColor: '#f4efe6',
     webPreferences: {
-      preload: path.join(here, '../preload/index.mjs'),
+      preload: path.join(here, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true

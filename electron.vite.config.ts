@@ -10,7 +10,15 @@ export default defineConfig({
   },
   preload: {
     build: {
-      externalizeDeps: false
+      externalizeDeps: false,
+      rollupOptions: {
+        // 渲染进程开着 sandbox，沙箱里的 preload 只能按 CommonJS 执行；
+        // package.json 是 "type": "module"，所以必须显式出 .cjs，否则加载直接失败。
+        output: {
+          format: 'cjs',
+          entryFileNames: 'index.cjs'
+        }
+      }
     }
   },
   renderer: {
