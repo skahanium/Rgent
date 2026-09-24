@@ -2,8 +2,9 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { createNote, listVaultTree, parseStoredVault, readNote, writeNote } from '../../src/main/notes-fs.ts'
+import { createNote, listVaultTree, parseStoredVault, readNote, serializeStoredVault, writeNote } from '../../src/main/notes-fs.ts'
 import { resolveInVault, sanitizeNoteName } from '../../src/main/paths.ts'
+import { collectNotePaths } from '../../src/renderer/src/tree.ts'
 
 describe('vault paths', () => {
   it('keeps paths inside the vault root', () => {
@@ -63,6 +64,21 @@ describe('notes-fs', () => {
     expect(parseStoredVault(null)).toBeNull()
     expect(parseStoredVault('{')).toBeNull()
     expect(parseStoredVault(JSON.stringify({ path: '/tmp/lib' }))).toEqual({ path: '/tmp/lib' })
+    expect(parseStoredVault(serializeStoredVault('/tmp/lib'))).toEqual({ path: '/tmp/lib' })
+  })
+
+  it('collects note paths and ignores non-notes', () => {
+    const paths = collectNotePaths([
+      { name: 'a.md', relPath: 'a.md', kind: 'note' },
+      { name: 'pic.png', relPath: 'pic.png', kind: 'file' },
+      {
+        name: 'sub',
+        relPath: 'sub',
+        kind: 'dir',
+        children: [{ name: 'b.md', relPath: 'sub/b.md', kind: 'note' }]
+      }
+    ])
+    expect([...paths].sort()).toEqual(['a.md', 'sub/b.md'])
   })
 })
 

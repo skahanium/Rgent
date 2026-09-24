@@ -48,14 +48,13 @@ export function watchVault(root: string, onChange: WatchHandler): () => void {
         add(abs)
       }
     }
-    for (const [watched] of watchers) {
+    for (const watched of [...watchers.keys()]) {
       if (watched === dir) continue
       if (!watched.startsWith(dir + path.sep)) continue
-      const next = [...path.relative(dir, watched).split(path.sep)][0]
-      const child = next ? path.join(dir, next) : watched
-      if (!live.has(child) && watched !== root) {
-        /* keep nested watchers until their parent refresh removes them */
-      }
+      const first = path.relative(dir, watched).split(path.sep)[0]
+      if (!first) continue
+      const child = path.join(dir, first)
+      if (!live.has(child)) stopDir(child)
     }
   }
 

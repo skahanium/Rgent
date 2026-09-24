@@ -1,7 +1,7 @@
 import { IPC, type TreeEntry, type VaultState } from '@shared'
 import { promptConflict, promptNewNote } from './dialogs.ts'
 import { mountEditor, type EditorHost } from './view/editor.ts'
-import { renderTree, titleOf } from './tree.ts'
+import { renderTree, titleOf, collectNotePaths } from './tree.ts'
 
 type Tab = {
   relPath: string
@@ -119,7 +119,6 @@ export async function start(root: HTMLElement): Promise<void> {
       tab.dirty = false
       if (active === tab.relPath) editor.setText(payload.content)
     } else {
-      tab.saved = payload.content
       await writeTab(tab)
     }
     renderTabs()
@@ -129,6 +128,7 @@ export async function start(root: HTMLElement): Promise<void> {
 
   async function applyState(state: VaultState): Promise<void> {
     if (state.status === 'needs-pick') {
+      resetSession()
       picker.hidden = false
       pickerCopy.textContent =
         state.reason === 'missing' ? '上次的库找不到了。请重新选一个文件夹。' : '第一次打开，先选一个文件夹当库。空的也行。不选进不去。'
@@ -138,7 +138,15 @@ export async function start(root: HTMLElement): Promise<void> {
     picker.hidden = true
     vaultName.hidden = false
     vaultName.textContent = state.rootName
+    if (state.vaultChanged) resetSession()
     await refreshTree()
+  }
+
+  function resetSession(): void {
+    tabs.length = 0
+    active = null
+    editor.setText('')
+    renderTabs()
   }
 
   async function chooseVault(): Promise<void> {
@@ -147,11 +155,7 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   async function showPicker(lost: boolean): Promise<void> {
-    tabs.length = 0
-    active = null
-    editor.setText('')
     await applyState({ status: 'needs-pick', reason: lost ? 'missing' : 'first-run' })
-    renderTabs()
   }
 
   async function refreshTree(): Promise<void> {
@@ -159,6 +163,12 @@ export async function start(root: HTMLElement): Promise<void> {
       tree = await window.rgent.treeList()
     } catch {
       tree = []
+    }
+    const present = collectNotePaths(tree)
+    for (const tab of [...tabs]) {
+      if (!present.has(tab.relPath) && !tab.dirty) {
+        await closeTab(tab.relPath, { save: false })
+      }
     }
     paintTree()
   }
@@ -226,10 +236,10 @@ export async function start(root: HTMLElement): Promise<void> {
     emptyEl.hidden = tabs.length > 0
   }
 
-  async function closeTab(relPath: string): Promise<void> {
+  async function closeTab(relPath: string, opts: { save?: boolean } = {}): Promise<void> {
     const tab = tabs.find((item) => item.relPath === relPath)
     if (!tab) return
-    if (tab.dirty) await writeTab(tab)
+    if (opts.save !== false && tab.dirty) await writeTab(tab)
     const index = tabs.findIndex((item) => item.relPath === relPath)
     tabs.splice(index, 1)
     if (active === relPath) {
@@ -269,10 +279,11 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   async function createNote(): Promise<void> {
-    const state = await window.rgent.vaultGet()
+    let state = await window.rgent.vaultGet()
     if (state.status !== 'ready') {
       await chooseVault()
-      return
+      state = await window.rgent.vaultGet()
+      if (state.status !== 'ready') return
     }
     const name = await promptNewNote()
     if (!name) return

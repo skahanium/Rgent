@@ -42,11 +42,16 @@ export class VaultSession {
     if (result.canceled || !result.filePaths[0]) {
       return this.currentState()
     }
-    const chosen = result.filePaths[0]
+    const chosen = path.resolve(result.filePaths[0])
     if (!isUsableDir(chosen)) return { status: 'needs-pick', reason: 'missing' }
+    const previous = this.root
     writeFileSync(this.stateFile(), serializeStoredVault(chosen), 'utf8')
     this.attach(chosen)
-    return { status: 'ready', rootName: path.basename(chosen) }
+    return {
+      status: 'ready',
+      rootName: path.basename(chosen),
+      vaultChanged: previous !== chosen
+    }
   }
 
   currentState(): VaultState {
@@ -87,8 +92,8 @@ export class VaultSession {
 
   private attach(root: string): void {
     this.stopWatch?.()
-    this.root = root
-    this.stopWatch = watchVault(root, (relPath) => this.onFsEvent(relPath))
+    this.root = path.resolve(root)
+    this.stopWatch = watchVault(this.root, (relPath) => this.onFsEvent(relPath))
   }
 
   private onFsEvent(relPath: string | null): void {
@@ -102,8 +107,6 @@ export class VaultSession {
       this.emit('tree:changed')
       if (relPath && isNotePath(relPath) && this.root) {
         void this.emitNoteChange(relPath)
-      } else if (this.root) {
-        void this.emitOpenNotes()
       }
     }, 80)
   }
@@ -119,10 +122,6 @@ export class VaultSession {
     } catch {
       /* deleted notes refresh via tree:changed */
     }
-  }
-
-  private async emitOpenNotes(): Promise<void> {
-    /* renderer diffs by path; tree refresh is enough for create/delete */
   }
 
   private readStateFile(): string | null {

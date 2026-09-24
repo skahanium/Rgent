@@ -49,3 +49,11 @@ function node(entry: TreeEntry, activePath: string | null, onOpenNote: (relPath:
 export function titleOf(fileName: string): string {
   return fileName.replace(/\.md$/i, '')
 }
+
+export function collectNotePaths(entries: TreeEntry[], into = new Set<string>()): Set<string> {
+  for (const entry of entries) {
+    if (entry.kind === 'note') into.add(entry.relPath)
+    if (entry.children) collectNotePaths(entry.children, into)
+  }
+  return into
+}

@@ -1,10 +1,22 @@
-import { frontmatter } from 'micromark-extension-frontmatter'
-import { gfm } from 'micromark-extension-gfm'
-import { frontmatterFromMarkdown } from 'mdast-util-frontmatter'
-import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { STAGE_IDS, type StageFlags } from '../types.ts'
+import { calloutStage } from './callout.ts'
+import { frontmatterStage } from './frontmatter.ts'
+import { gfmStage } from './gfm.ts'
+import { mathStage } from './math.ts'
+import { mermaidStage } from './mermaid.ts'
+import type { MarkdownStage } from './stage.ts'
+import { wikilinkStage } from './wikilink.ts'
 
-export const STUB_STAGE_IDS = ['math', 'callout', 'wikilink'] as const
+export const ALL_STAGES: readonly MarkdownStage[] = [
+  frontmatterStage,
+  gfmStage,
+  mathStage,
+  calloutStage,
+  wikilinkStage,
+  mermaidStage
+]
+
+export const STUB_STAGE_IDS = ['math', 'callout', 'wikilink', 'mermaid'] as const
 
 export function extensionsFor(stages: StageFlags): {
   micromark: unknown[]
@@ -12,16 +24,11 @@ export function extensionsFor(stages: StageFlags): {
 } {
   const micromark: unknown[] = []
   const mdast: unknown[] = []
-
-  if (stages.frontmatter) {
-    micromark.push(frontmatter(['yaml']))
-    mdast.push(frontmatterFromMarkdown(['yaml']))
+  for (const stage of ALL_STAGES) {
+    if (!stages[stage.id]) continue
+    if (stage.micromark) micromark.push(stage.micromark())
+    if (stage.mdast) mdast.push(stage.mdast())
   }
-  if (stages.gfm) {
-    micromark.push(gfm())
-    mdast.push(gfmFromMarkdown())
-  }
-
   return { micromark, mdast }
 }
 

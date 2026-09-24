@@ -9,7 +9,12 @@ function mergeStages(overrides?: Partial<StageFlags>): StageFlags {
   return { ...DEFAULT_STAGES, ...overrides }
 }
 
-function fallback(source: string, stages: StageFlags, error: string, prev?: CompileResult): CompileResult {
+export function recoverCompile(
+  source: string,
+  stages: StageFlags,
+  error: string,
+  prev?: CompileResult
+): CompileResult {
   if (prev && !prev.stale) {
     return { ...prev, source, stale: true, error }
   }
@@ -43,6 +48,6 @@ export function compile(source: string, options: CompileOptions = {}): CompileRe
       stale: false
     }
   } catch (err) {
-    return fallback(source, stages, err instanceof Error ? err.message : String(err), options.prev)
+    return recoverCompile(source, stages, err instanceof Error ? err.message : String(err), options.prev)
   }
 }

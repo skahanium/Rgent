@@ -15,7 +15,7 @@ export const IPC = {
 
 export type VaultState =
   | { status: 'needs-pick'; reason: 'first-run' | 'missing' }
-  | { status: 'ready'; rootName: string }
+  | { status: 'ready'; rootName: string; vaultChanged?: boolean }
 
 export type TreeEntry = {
   name: string

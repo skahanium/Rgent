@@ -1,4 +1,4 @@
-import { compile, inViewport, type CompileResult, type ImageRef, type TableRef } from '@markdown'
+import { compile, DEFAULT_STAGES, planWidgets, rangesOverlap, recoverCompile, type CompileResult, type ImageRef, type TableRef } from '@markdown'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { EditorState, type Range } from '@codemirror/state'
 import {
@@ -84,36 +84,32 @@ class ImageWidget extends WidgetType {
 
 function decorationsFor(view: EditorView, result: CompileResult): DecorationSet {
   const decos: Range<Decoration>[] = []
-  const replaced: Array<{ start: number; end: number }> = []
-  const docLen = view.state.doc.length
+  const source = view.state.doc.toString()
+  const docLen = source.length
+  const widgets = planWidgets(result.index, source, view.visibleRanges)
 
-  for (const { from, to } of view.visibleRanges) {
-    for (const table of result.index.tables) {
-      if (!inViewport(table.range, from, to)) continue
-      const start = clamp(table.range.start, 0, docLen)
-      const end = clamp(table.range.end, 0, docLen)
-      if (end <= start) continue
-      replaced.push({ start, end })
-      decos.push(Decoration.replace({ widget: new TableWidget(table), block: true }).range(start, end))
-    }
-    for (const image of result.index.images) {
-      if (!inViewport(image.range, from, to)) continue
-      const start = clamp(image.range.start, 0, docLen)
-      const end = clamp(image.range.end, 0, docLen)
-      if (end <= start) continue
-      if (covered(start, end, replaced)) continue
-      replaced.push({ start, end })
-      decos.push(Decoration.replace({ widget: new ImageWidget(image) }).range(start, end))
+  for (const widget of widgets) {
+    if (widget.kind === 'table') {
+      decos.push(
+        Decoration.replace({ widget: new TableWidget(widget.table), block: true }).range(
+          widget.range.start,
+          widget.range.end
+        )
+      )
+    } else {
+      decos.push(
+        Decoration.replace({ widget: new ImageWidget(widget.image) }).range(widget.range.start, widget.range.end)
+      )
     }
   }
 
   for (const heading of result.index.headings) {
-    if (covered(heading.range.start, heading.range.end, replaced)) continue
+    if (widgets.some((widget) => rangesOverlap(heading.range, widget.range))) continue
     const pos = clamp(heading.range.start, 0, Math.max(0, docLen - 1))
     decos.push(Decoration.line({ class: `md-heading md-h${heading.depth}` }).range(pos))
   }
   for (const mark of result.index.marks) {
-    if (covered(mark.range.start, mark.range.end, replaced)) continue
+    if (widgets.some((widget) => rangesOverlap(mark.range, widget.range))) continue
     const start = clamp(mark.range.start, 0, docLen)
     const end = clamp(mark.range.end, 0, docLen)
     if (end <= start) continue
@@ -127,26 +123,40 @@ function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n))
 }
 
-function covered(start: number, end: number, ranges: Array<{ start: number; end: number }>): boolean {
-  return ranges.some((range) => start >= range.start && end <= range.end)
-}
-
 const pipelinePlugin = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet
     result: CompileResult
 
     constructor(view: EditorView) {
-      this.result = compile(view.state.doc.toString())
-      this.decorations = decorationsFor(view, this.result)
+      try {
+        this.result = compile(view.state.doc.toString())
+        this.decorations = decorationsFor(view, this.result)
+      } catch (err) {
+        this.result = recoverCompile(
+          view.state.doc.toString(),
+          DEFAULT_STAGES,
+          err instanceof Error ? err.message : String(err)
+        )
+        this.decorations = Decoration.none
+      }
     }
 
     update(update: ViewUpdate): void {
-      if (update.docChanged) {
-        this.result = compile(update.state.doc.toString(), { prev: this.result })
-      }
-      if (update.docChanged || update.viewportChanged) {
-        this.decorations = decorationsFor(update.view, this.result)
+      try {
+        if (update.docChanged) {
+          this.result = compile(update.state.doc.toString(), { prev: this.result })
+        }
+        if (update.docChanged || update.viewportChanged) {
+          this.decorations = decorationsFor(update.view, this.result)
+        }
+      } catch (err) {
+        this.result = recoverCompile(
+          update.state.doc.toString(),
+          this.result.stages,
+          err instanceof Error ? err.message : String(err),
+          this.result
+        )
       }
     }
   },
