@@ -26,6 +26,12 @@ pnpm dev
 
 pnpm 版本锁在 `package.json` 的 `packageManager`；pnpm 设置（含发布龄策略）在 `pnpm-workspace.yaml`。`pnpm test` 会先跑 `tsc --noEmit`，再跑 `vitest run`。
 
+Electron 44 起不再随 `pnpm install` 装二进制，改为**首次 `pnpm dev` 时惰性下载**（约 110 MB）。网络受限时：
+
+```bash
+ELECTRON_GET_USE_PROXY=true GLOBAL_AGENT_HTTPS_PROXY=http://127.0.0.1:7897 pnpm dev
+```
+
 ## 现状
 
 产品骨架是 Electron + TypeScript。文档以 `docs/` 为准。
