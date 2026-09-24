@@ -1,6 +1,31 @@
+import type { TreeEntry } from './ipc.ts'
+
 const IMAGE_EXT = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.avif']
 
 export const VAULT_MEDIA_SCHEME = 'rgent-vault'
+
+/** 文件名就是标题（围栏：文件名跟标题走）。传全路径也认。 */
+export function noteTitle(relPath: string): string {
+  const posix = relPath.replaceAll('\\', '/')
+  const base = posix.split('/').pop() ?? posix
+  return base.replace(/\.md$/i, '')
+}
+
+export function collectNotePaths(entries: TreeEntry[], into = new Set<string>()): Set<string> {
+  for (const entry of entries) {
+    if (entry.kind === 'note') into.add(entry.relPath)
+    if (entry.children) collectNotePaths(entry.children, into)
+  }
+  return into
+}
+
+export function collectRelPaths(entries: TreeEntry[], into = new Set<string>()): Set<string> {
+  for (const entry of entries) {
+    if (entry.kind !== 'dir') into.add(entry.relPath)
+    if (entry.children) collectRelPaths(entry.children, into)
+  }
+  return into
+}
 
 export function isVaultImagePath(rel: string): boolean {
   const lower = rel.toLowerCase()

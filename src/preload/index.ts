@@ -1,5 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { IPC, type NotePayload, type NoteWriteResult, type TreeEntry, type VaultState } from '../shared/ipc.ts'
+import {
+  IPC,
+  type BacklinkGroup,
+  type NotePayload,
+  type NoteWriteResult,
+  type SearchHit,
+  type TreeEntry,
+  type VaultState
+} from '../shared/ipc.ts'
 
 const menuChannels = [IPC.menuOpenVault, IPC.menuNewNote, IPC.menuSave] as const
 
@@ -11,6 +19,8 @@ const api = {
   noteWrite: (relPath: string, content: string): Promise<NoteWriteResult> =>
     ipcRenderer.invoke(IPC.noteWrite, relPath, content),
   noteCreate: (name: string): Promise<string> => ipcRenderer.invoke(IPC.noteCreate, name),
+  backlinks: (relPath: string): Promise<BacklinkGroup[]> => ipcRenderer.invoke(IPC.backlinks, relPath),
+  search: (query: string): Promise<SearchHit[]> => ipcRenderer.invoke(IPC.search, query),
   onTreeChanged: (handler: () => void): (() => void) =>
     subscribe(IPC.treeChanged, () => handler()),
   onNoteExternalChange: (handler: (payload: NotePayload) => void): (() => void) =>

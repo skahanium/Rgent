@@ -12,7 +12,9 @@ export const IPC = {
   menuNewNote: 'menu:new-note',
   menuSave: 'menu:save',
   flushRequest: 'app:flush-request',
-  flushDone: 'app:flush-done'
+  flushDone: 'app:flush-done',
+  backlinks: 'note:backlinks',
+  search: 'vault:search'
 } as const
 
 export type VaultState =
@@ -36,4 +38,27 @@ export type NoteWriteResult = {
 } | {
   ok: false
   error: string
+}
+
+/** 反链：谁链到了这篇，按所在文件夹分组。 */
+export type BacklinkRef = {
+  relPath: string
+  title: string
+}
+
+export type BacklinkGroup = {
+  folder: string
+  notes: BacklinkRef[]
+}
+
+/** 一条搜索命中。matchStart / matchLength 是片段内的偏移，供画面上加标记。 */
+export type SearchHit = {
+  relPath: string
+  title: string
+  folder: string
+  titleHit: boolean
+  count: number
+  snippet: string
+  matchStart: number
+  matchLength: number
 }

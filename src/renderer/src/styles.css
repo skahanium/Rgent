@@ -183,6 +183,59 @@ summary:focus-visible {
 
 .empty[hidden] { display: none; }
 
+.backlinks {
+  width: 260px;
+  flex: 0 0 260px;
+  background: var(--bg-side);
+  border-left: 1px solid var(--line);
+  overflow: auto;
+  padding: 14px 12px 24px;
+}
+
+.backlinks-title {
+  margin: 0 0 10px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.backlinks-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.backlinks-group { margin-bottom: 16px; }
+
+.backlinks-folder {
+  margin: 0 0 4px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.backlinks-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.backlinks-note {
+  display: block;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  text-align: left;
+  border-radius: 6px;
+  line-height: 1.35;
+}
+
+.backlinks-note:hover {
+  background: var(--paper);
+}
+
 .picker {
   position: fixed;
   inset: 0;

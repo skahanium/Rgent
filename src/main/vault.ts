@@ -1,9 +1,10 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { dialog, type BrowserWindow } from 'electron'
-import type { NotePayload, TreeEntry, VaultState } from '../shared/ipc.ts'
+import type { BacklinkGroup, NotePayload, SearchHit, TreeEntry, VaultState } from '../shared/ipc.ts'
 import { createNote, listVaultTree, parseStoredVault, readNote, serializeStoredVault, writeNote } from './notes-fs.ts'
 import { isNotePath } from './paths.ts'
+import { VaultIndex } from './vault-index.ts'
 import { watchVault } from './watch.ts'
 
 export class VaultSession {
@@ -11,6 +12,10 @@ export class VaultSession {
   private stopWatch: (() => void) | null = null
   private lastWrites = new Map<string, { content: string; at: number }>()
   private debounce: NodeJS.Timeout | null = null
+  private index = new VaultIndex(
+    () => this.root,
+    () => this.tree()
+  )
 
   constructor(
     private userData: string,
@@ -77,22 +82,38 @@ export class VaultSession {
     if (!this.root) throw new Error('NO_VAULT')
     await writeNote(this.root, relPath, content)
     this.lastWrites.set(relPath, { content, at: Date.now() })
+    this.index.markDirty()
   }
 
   async create(name: string): Promise<string> {
     if (!this.root) throw new Error('NO_VAULT')
-    return createNote(this.root, name)
+    const relPath = await createNote(this.root, name)
+    this.index.markDirty()
+    return relPath
+  }
+
+  async backlinks(relPath: string): Promise<BacklinkGroup[]> {
+    if (!this.root) return []
+    return this.index.backlinks(relPath)
+  }
+
+  async search(query: string): Promise<SearchHit[]> {
+    if (!this.root) return []
+    return this.index.search(query)
   }
 
   dispose(): void {
     this.stopWatch?.()
     this.stopWatch = null
     this.root = null
+    this.index.reset()
   }
 
   private attach(root: string): void {
     this.stopWatch?.()
     this.root = path.resolve(root)
+    // 换库必须清索引，否则新库会看到旧库的反链。
+    this.index.reset()
     this.stopWatch = watchVault(this.root, (relPath) => this.onFsEvent(relPath))
   }
 
@@ -102,6 +123,7 @@ export class VaultSession {
       this.emit('vault:lost')
       return
     }
+    this.index.markDirty()
     if (this.debounce) clearTimeout(this.debounce)
     this.debounce = setTimeout(() => {
       this.emit('tree:changed')

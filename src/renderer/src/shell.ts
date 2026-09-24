@@ -1,4 +1,5 @@
 import { IPC, type TreeEntry, type VaultState } from '@shared'
+import { renderBacklinks } from './backlinks.ts'
 import { promptConflict, promptNewNote } from './dialogs.ts'
 import { pendingWrites, type Tab } from './tabs.ts'
 import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
@@ -23,6 +24,7 @@ export async function start(root: HTMLElement): Promise<void> {
           <div class="editor-host"></div>
           <p class="empty">从目录打开一篇笔记，或新建笔记。</p>
         </section>
+        <aside class="backlinks" aria-label="反链"></aside>
       </div>
     </div>
     <div class="picker" hidden>
@@ -44,12 +46,14 @@ export async function start(root: HTMLElement): Promise<void> {
   const tabsEl = root.querySelector('.tabs') as HTMLElement
   const editorHostEl = root.querySelector('.editor-host') as HTMLElement
   const emptyEl = root.querySelector('.empty') as HTMLElement
+  const backlinksEl = root.querySelector('.backlinks') as HTMLElement
 
   const tabs: Tab[] = []
   let active: string | null = null
   let tree: TreeEntry[] = []
   let saveTimer: number | null = null
   let conflictOpen = false
+  let backlinkToken = 0
 
   const editor: EditorHost = mountEditor(editorHostEl, (text) => {
     const tab = current()
@@ -91,6 +95,10 @@ export async function start(root: HTMLElement): Promise<void> {
     void flushSave().finally(() => {
       window.rgent.flushDone()
     })
+  })
+  window.rgent.onNoteExternalChange(() => {
+    // 别的笔记被外部改了，可能多了或少了指向当前这篇的链接。
+    void refreshBacklinks()
   })
   window.rgent.onNoteExternalChange(async (payload) => {
     const tab = tabs.find((item) => item.relPath === payload.relPath)
@@ -146,6 +154,30 @@ export async function start(root: HTMLElement): Promise<void> {
     active = null
     editor.setText('', noteHost())
     renderTabs()
+    void refreshBacklinks()
+  }
+
+  /**
+   * 只在打开/切换笔记时刷新。索引在主进程里是惰性重建的，所以查的时候就是新的；
+   * 不挂在每次按键或每次自动写盘上，免得打字一直触发全库重扫。
+   */
+  async function refreshBacklinks(): Promise<void> {
+    const token = ++backlinkToken
+    const relPath = active
+    if (!relPath) {
+      renderBacklinks(backlinksEl, [], () => {}, '打开一篇笔记')
+      return
+    }
+    const groups = await window.rgent.backlinks(relPath).catch(() => [])
+    if (token !== backlinkToken) return
+    renderBacklinks(
+      backlinksEl,
+      groups,
+      (target) => {
+        void openNote(target)
+      },
+      '还没有谁链到这篇'
+    )
   }
 
   async function chooseVault(): Promise<void> {
@@ -222,6 +254,7 @@ export async function start(root: HTMLElement): Promise<void> {
     renderTabs()
     paintTree()
     emptyEl.hidden = true
+    void refreshBacklinks()
   }
 
   function current(): Tab | undefined {
@@ -265,6 +298,7 @@ export async function start(root: HTMLElement): Promise<void> {
       const next = tabs[index] ?? tabs[index - 1]
       active = next?.relPath ?? null
       editor.setText(next?.content ?? '', noteHost())
+      void refreshBacklinks()
     }
     renderTabs()
     paintTree()

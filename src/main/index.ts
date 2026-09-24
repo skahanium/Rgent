@@ -141,6 +141,8 @@ function registerIpc(): void {
     if (!vault) throw new Error('NO_VAULT')
     return vault.create(name)
   })
+  ipcMain.handle(IPC.backlinks, async (_event, relPath: string) => vault?.backlinks(relPath) ?? [])
+  ipcMain.handle(IPC.search, async (_event, query: string) => vault?.search(query) ?? [])
   ipcMain.on(IPC.flushDone, () => finishFlush())
 }
 
