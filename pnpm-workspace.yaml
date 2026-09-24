@@ -1,0 +1,10 @@
+# pnpm 设置。pnpm 12 起不再读 package.json 里的 "pnpm" 字段，设置搬到这里。
+
+# 本仓显式关掉发布龄策略：真正的供应链控制是已提交、带 integrity 的锁文件。
+# 重锁依赖后会短暂撞上默认的发布龄检查（新发布的包不满一天），关掉它才能让 README 那条命令为真。
+minimumReleaseAge: 0
+
+# 允许执行安装脚本的依赖（原 package.json 的 pnpm.onlyBuiltDependencies）。
+allowBuilds:
+  esbuild: true
+  electron: true

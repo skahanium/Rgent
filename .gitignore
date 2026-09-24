@@ -11,3 +11,9 @@ coverage/
 .vite/
 .cache/
 *.tsbuildinfo
+
+# 已作废的 Python 探路件留下的本机环境，不进仓库
+.venv/
+.pdm-build/
+__pycache__/
+.pytest_cache/

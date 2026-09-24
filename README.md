@@ -24,6 +24,8 @@ pnpm dev
 
 目标平台是 macOS 与 Windows。Linux 可跑测试，不是产品目标。
 
+pnpm 版本锁在 `package.json` 的 `packageManager`；pnpm 设置（含发布龄策略）在 `pnpm-workspace.yaml`。`pnpm test` 会先跑 `tsc --noEmit`，再跑 `vitest run`。
+
 ## 现状
 
 产品骨架是 Electron + TypeScript。文档以 `docs/` 为准。
