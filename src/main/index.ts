@@ -9,8 +9,21 @@ registerVaultScheme()
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
+/** 退出前给渲染进程留的写盘窗口。渲染进程没回应也不能把它卡死在这里。 */
+const FLUSH_GRACE_MS = 1000
+
 let mainWindow: BrowserWindow | null = null
 let vault: VaultSession | null = null
+let quitting = false
+let flushed = false
+let settleFlush: (() => void) | null = null
+
+function finishFlush(): void {
+  const settle = settleFlush
+  if (!settle) return
+  settleFlush = null
+  settle()
+}
 
 function send(channel: string, payload?: unknown): void {
   const target = mainWindow
@@ -19,6 +32,7 @@ function send(channel: string, payload?: unknown): void {
 }
 
 function createWindow(): void {
+  flushed = false
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -36,6 +50,24 @@ function createWindow(): void {
 
   mainWindow.on('closed', () => {
     mainWindow = null
+  })
+
+  // 关窗前先让渲染进程把脏稿写完，不默默丢掉最后一截。
+  mainWindow.on('close', (event) => {
+    if (flushed) return
+    event.preventDefault()
+    if (settleFlush) return
+    const win = mainWindow
+    if (!win) return
+    const timer = setTimeout(finishFlush, FLUSH_GRACE_MS)
+    settleFlush = () => {
+      clearTimeout(timer)
+      flushed = true
+      if (quitting) app.quit()
+      else win.close()
+    }
+    if (win.webContents.isDestroyed()) finishFlush()
+    else send(IPC.flushRequest)
   })
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -109,6 +141,7 @@ function registerIpc(): void {
     if (!vault) throw new Error('NO_VAULT')
     return vault.create(name)
   })
+  ipcMain.on(IPC.flushDone, () => finishFlush())
 }
 
 app.whenReady().then(() => {
@@ -128,5 +161,10 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  quitting = true
+})
+
+// 必须等渲染进程写完盘再拆库：退出前那次 flush 还要经 noteWrite 落盘。
+app.on('will-quit', () => {
   vault?.dispose()
 })

@@ -10,7 +10,9 @@ export const IPC = {
   vaultLost: 'vault:lost',
   menuOpenVault: 'menu:open-vault',
   menuNewNote: 'menu:new-note',
-  menuSave: 'menu:save'
+  menuSave: 'menu:save',
+  flushRequest: 'app:flush-request',
+  flushDone: 'app:flush-done'
 } as const
 
 export type VaultState =

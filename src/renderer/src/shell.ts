@@ -1,14 +1,8 @@
 import { IPC, type TreeEntry, type VaultState } from '@shared'
 import { promptConflict, promptNewNote } from './dialogs.ts'
+import { pendingWrites, type Tab } from './tabs.ts'
 import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
 import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.ts'
-
-type Tab = {
-  relPath: string
-  content: string
-  saved: string
-  dirty: boolean
-}
 
 const SAVE_MS = 800
 
@@ -92,6 +86,11 @@ export async function start(root: HTMLElement): Promise<void> {
   })
   window.rgent.onVaultLost(() => {
     void showPicker(true)
+  })
+  window.rgent.onFlushRequest(() => {
+    void flushSave().finally(() => {
+      window.rgent.flushDone()
+    })
   })
   window.rgent.onNoteExternalChange(async (payload) => {
     const tab = tabs.find((item) => item.relPath === payload.relPath)
@@ -283,10 +282,13 @@ export async function start(root: HTMLElement): Promise<void> {
       window.clearTimeout(saveTimer)
       saveTimer = null
     }
-    const tab = current()
-    if (!tab) return
-    tab.content = editor.getText()
-    await writeTab(tab)
+    const writes = pendingWrites(tabs, active, editor.getText())
+    for (const write of writes) {
+      const tab = tabs.find((item) => item.relPath === write.relPath)
+      if (!tab) continue
+      tab.content = write.content
+      await writeTab(tab)
+    }
     renderTabs()
   }
 

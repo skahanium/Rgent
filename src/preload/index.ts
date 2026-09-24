@@ -16,6 +16,10 @@ const api = {
   onNoteExternalChange: (handler: (payload: NotePayload) => void): (() => void) =>
     subscribe(IPC.noteExternalChange, (payload) => handler(payload as NotePayload)),
   onVaultLost: (handler: () => void): (() => void) => subscribe(IPC.vaultLost, () => handler()),
+  onFlushRequest: (handler: () => void): (() => void) => subscribe(IPC.flushRequest, () => handler()),
+  flushDone: (): void => {
+    ipcRenderer.send(IPC.flushDone)
+  },
   onMenu: (channel: (typeof menuChannels)[number], handler: () => void): (() => void) => {
     if (!menuChannels.includes(channel)) return () => {}
     return subscribe(channel, handler)
