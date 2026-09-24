@@ -23,9 +23,26 @@ flowchart LR
   Host -->|工具过门禁| Vault
 ```
 
-- **渲染进程：** 画布是 CodeMirror 6。文档是 Markdown 字符串。无 Node，不能直接碰盘。
+- **渲染进程：** 画布是 CodeMirror 6。文档是 Markdown 字符串。无 Node，不能直接碰盘。画布只消费编译结果和源码映射，自己不解析结构。
 - **主进程：** 打开库、读写文件、权限名单、索引、窗口、系统密码库。`AgentHost` 住在这里。
 - **AgentHost：** 一场 `/` 的运行环境。接 Vercel AI SDK 和官方 MCP 客户端。工具过同一套门禁。模型看不到原始文件系统。
+- **正文编译：** 共享一条管线（零 DOM、零 CM6）。注册插件 → 解析 → 索引 → 把源码映射交给画布。日后检索、反链、喂模型走同一份结果。细则见 [已拍板决定](decisions.md)。
+
+## 正文管线
+
+```mermaid
+flowchart LR
+  Src[Markdown字符串]
+  Pipe[共享编译]
+  Idx[块与源码映射]
+  View[CM6画布]
+  Src --> Pipe --> Idx --> View
+  View -->|"写盘=原文"| Src
+```
+
+- 结构只在这一条管线里解析。不要在画布、检索、Agent 里再各写一套。
+- 语法扩展走插件，不改宿主。
+- 写盘永远是编辑器里的字符串。
 
 ## 库内布局
 

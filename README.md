@@ -14,6 +14,16 @@ AI 原生的单机笔记兼资料库。Markdown 是真相。AI 写在文档里�
 
 许可为 [MIT](LICENSE)。参与方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
+## 开发
+
+```bash
+pnpm install
+pnpm test
+pnpm dev
+```
+
+目标平台是 macOS 与 Windows。Linux 可跑测试，不是产品目标。
+
 ## 现状
 
-文档已按笔记产品改写，请以 `docs/` 为准。仓库里若还有 Python / 探路脚本，不是产品骨架。
+产品骨架是 Electron + TypeScript。文档以 `docs/` 为准。

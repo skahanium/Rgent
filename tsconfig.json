@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"],
+    "paths": {
+      "@markdown": ["./src/markdown/index.ts"],
+      "@shared": ["./src/shared/ipc.ts"]
+    }
+  },
+  "include": [
+    "src/**/*",
+    "test/**/*",
+    "electron.vite.config.ts",
+    "vitest.config.ts"
+  ]
+}

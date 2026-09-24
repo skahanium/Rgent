@@ -26,9 +26,9 @@
 
 具体禁令以 [已拍板决定](decisions.md) 为准，不要在这里再抄一份。
 
-## 仓库里的遗留文件
+## 仓库骨架
 
-根目录若仍有 `hello_world.py`、`pyproject.toml` 或同类探路文件，**不是产品骨架**。不要按其写法扩散。产品结构以 `docs/` 为准。Electron / TypeScript 落地后应移除或替换这些探路件，并先改 `decisions.md` 说明迁移。
+产品骨架是 Electron + TypeScript，以根目录 `package.json` 为准。不要把已删除的 Python 探路件写回来，也不要按其写法扩散。产品性格仍以 `docs/` 为准。
 
 ## 文档与代码同步
 

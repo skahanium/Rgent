@@ -29,7 +29,7 @@
 ### 壳与运行时
 
 - 壳是 Electron。v0 就要 Mac 与 Windows。
-- 产品逻辑纯 TypeScript。不上 Python 边车。
+- 产品逻辑纯 TypeScript。不上 Python 边车。探路用的 Python 已移除，产品骨架是 Electron + TypeScript。
 - 主进程 `AgentHost` + [Vercel AI SDK](https://ai-sdk.dev/) + 官方 MCP TypeScript 客户端。
 - Harness 做实：目标 → 工具 → 观察、硬刹车、错误回喂、完成可核对。
 - 外循环以后再说。v0 不无人值守扫库。
@@ -38,6 +38,7 @@
 ### 编辑与渲染
 
 - CodeMirror 6 即时渲染。文档是 Markdown 字符串。
+- 正文只有一条编译管线。语法用插件加。画布不另解析一套。写盘写编辑器里的 Markdown 字符串，不用 AST 倒回去冒充原文。
 - 公式、图、表、wikilink、callout、嵌入做成 viewport widget，懒加载。
 - v0 渲染范围：GFM + frontmatter + 公式 + callout + `[[链接]]` + 嵌入 + Mermaid。
 - Callout 跟 Obsidian 常见写法走（`> [!note]` 这类）。
