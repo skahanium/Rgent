@@ -33,11 +33,14 @@ export function compile(source: string, options: CompileOptions = {}): CompileRe
   const stages = mergeStages(options.stages)
   const partition = partitionSource(source)
   try {
-    const { micromark, mdast } = extensionsFor(stages)
-    const tree = fromMarkdown(partition.body, {
+    const { micromark, mdast, transforms } = extensionsFor(stages)
+    let tree = fromMarkdown(partition.body, {
       extensions: micromark as never,
       mdastExtensions: mdast as never
     })
+    for (const transform of transforms) {
+      tree = transform(tree)
+    }
     const index = buildIndex(tree, partition.body, stages, partition.bodyOffset)
     return {
       source,

@@ -1,106 +1,30 @@
-import { compile, DEFAULT_STAGES, planWidgets, rangesOverlap, recoverCompile, type CompileResult, type ImageRef, type TableRef } from '@markdown'
+import { compile, DEFAULT_STAGES, planWidgets, rangesOverlap, recoverCompile, type CompileResult } from '@markdown'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
-import { EditorState, type Range } from '@codemirror/state'
+import { Compartment, EditorState, Facet, type Range } from '@codemirror/state'
 import {
   Decoration,
   type DecorationSet,
   EditorView,
   ViewPlugin,
-  WidgetType,
   keymap,
   type ViewUpdate
 } from '@codemirror/view'
+import { emptyNoteHost, type NoteHost } from './host.ts'
+import { decorationForWidget } from './widgets/decorate.ts'
 
-
-class TableWidget extends WidgetType {
-  constructor(readonly table: TableRef) {
-    super()
-  }
-
-  eq(other: TableWidget): boolean {
-    return JSON.stringify(this.table.header) === JSON.stringify(other.table.header)
-      && JSON.stringify(this.table.rows) === JSON.stringify(other.table.rows)
-  }
-
-  toDOM(): HTMLElement {
-    const table = document.createElement('table')
-    table.className = 'md-table'
-    table.setAttribute('aria-label', '表格')
-    const thead = document.createElement('thead')
-    const headRow = document.createElement('tr')
-    for (const cell of this.table.header) {
-      const th = document.createElement('th')
-      th.textContent = cell
-      headRow.append(th)
-    }
-    thead.append(headRow)
-    table.append(thead)
-    const tbody = document.createElement('tbody')
-    for (const row of this.table.rows) {
-      const tr = document.createElement('tr')
-      for (const cell of row) {
-        const td = document.createElement('td')
-        td.textContent = cell
-        tr.append(td)
-      }
-      tbody.append(tr)
-    }
-    table.append(tbody)
-    return table
-  }
-
-  ignoreEvent(): boolean {
-    return true
-  }
-}
-
-class ImageWidget extends WidgetType {
-  constructor(readonly image: ImageRef) {
-    super()
-  }
-
-  eq(other: ImageWidget): boolean {
-    return this.image.url === other.image.url && this.image.alt === other.image.alt
-  }
-
-  toDOM(): HTMLElement {
-    const figure = document.createElement('span')
-    figure.className = 'md-image-ph'
-    figure.setAttribute('role', 'img')
-    figure.setAttribute('aria-label', this.image.alt || '图片')
-    const label = document.createElement('span')
-    label.textContent = this.image.alt || '图片'
-    const src = document.createElement('span')
-    src.className = 'md-image-src'
-    src.textContent = this.image.url
-    figure.append(label, src)
-    return figure
-  }
-
-  ignoreEvent(): boolean {
-    return true
-  }
-}
+const noteHostFacet = Facet.define<NoteHost, NoteHost>({
+  combine: (values) => values[0] ?? emptyNoteHost
+})
 
 function decorationsFor(view: EditorView, result: CompileResult): DecorationSet {
   const decos: Range<Decoration>[] = []
   const source = view.state.doc.toString()
   const docLen = source.length
+  const host = view.state.facet(noteHostFacet)
   const widgets = planWidgets(result.index, source, view.visibleRanges)
 
   for (const widget of widgets) {
-    if (widget.kind === 'table') {
-      decos.push(
-        Decoration.replace({ widget: new TableWidget(widget.table), block: true }).range(
-          widget.range.start,
-          widget.range.end
-        )
-      )
-    } else {
-      decos.push(
-        Decoration.replace({ widget: new ImageWidget(widget.image) }).range(widget.range.start, widget.range.end)
-      )
-    }
+    decos.push(decorationForWidget(widget, host).range(widget.range.start, widget.range.end))
   }
 
   for (const heading of result.index.headings) {
@@ -143,11 +67,12 @@ const pipelinePlugin = ViewPlugin.fromClass(
     }
 
     update(update: ViewUpdate): void {
+      const hostChanged = update.startState.facet(noteHostFacet) !== update.state.facet(noteHostFacet)
       try {
         if (update.docChanged) {
           this.result = compile(update.state.doc.toString(), { prev: this.result })
         }
-        if (update.docChanged || update.viewportChanged) {
+        if (update.docChanged || update.viewportChanged || hostChanged) {
           this.decorations = decorationsFor(update.view, this.result)
         }
       } catch (err) {
@@ -190,9 +115,12 @@ export type EditorHost = {
   view: EditorView
   getText: () => string
   setText: (text: string) => void
+  setNoteHost: (host: NoteHost) => void
   focus: () => void
   destroy: () => void
 }
+
+export type { NoteHost }
 
 export function mountEditor(
   parent: HTMLElement,
@@ -200,6 +128,7 @@ export function mountEditor(
   onSave: () => void
 ): EditorHost {
   let applying = false
+  const hostCompartment = new Compartment()
   const state = EditorState.create({
     doc: '',
     extensions: [
@@ -217,6 +146,7 @@ export function mountEditor(
       ]),
       EditorView.lineWrapping,
       theme,
+      hostCompartment.of(noteHostFacet.of(emptyNoteHost)),
       pipelinePlugin,
       EditorView.updateListener.of((update) => {
         if (applying || !update.docChanged) return
@@ -234,6 +164,9 @@ export function mountEditor(
         changes: { from: 0, to: view.state.doc.length, insert: text }
       })
       applying = false
+    },
+    setNoteHost: (host) => {
+      view.dispatch({ effects: hostCompartment.reconfigure(noteHostFacet.of(host)) })
     },
     focus: () => view.focus(),
     destroy: () => view.destroy()

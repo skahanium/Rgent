@@ -1,15 +1,21 @@
-import type { Root, Nodes } from 'mdast'
+import type { Nodes, Root } from 'mdast'
 import { visit } from 'unist-util-visit'
 import type {
   BlockRef,
+  CalloutRef,
   DocIndex,
   HeadingRef,
   ImageRef,
   MarkRef,
+  MathRef,
+  MermaidRef,
   SourceRange,
   StageFlags,
-  TableRef
+  TableRef,
+  WikiLinkRef
 } from './types.ts'
+import type { CalloutNode, WikiLinkNode } from './syntax/nodes.ts'
+import { textOf } from './syntax/callout.ts'
 
 export function emptyIndex(): DocIndex {
   return {
@@ -17,6 +23,9 @@ export function emptyIndex(): DocIndex {
     tables: [],
     images: [],
     mermaid: [],
+    maths: [],
+    callouts: [],
+    wikilinks: [],
     headings: [],
     marks: []
   }
@@ -39,12 +48,6 @@ function offsetAt(source: string, line: number, column: number): number {
     i += 1
   }
   return i + Math.max(0, column - 1)
-}
-
-function textOf(node: { value?: string; children?: unknown[] }): string {
-  if (typeof node.value === 'string') return node.value
-  if (!node.children) return ''
-  return node.children.map((child) => textOf(child as { value?: string; children?: unknown[] })).join('')
 }
 
 function shift(range: SourceRange, delta: number): SourceRange {
@@ -75,19 +78,77 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
   visit(tree, 'image', (node) => {
     const range = rangeFromNode(source, node)
     if (!range) return
-    index.images.push({
+    const image: ImageRef = {
       range: shift(range, bodyOffset),
       url: node.url,
-      alt: node.alt ?? ''
-    })
+      alt: node.alt ?? '',
+      base: 'note'
+    }
+    index.images.push(image)
   })
 
   visit(tree, 'code', (node) => {
+    if (!stages.mermaid) return
     if ((node.lang ?? '').toLowerCase() !== 'mermaid') return
     const range = rangeFromNode(source, node)
     if (!range) return
-    index.mermaid.push({ type: 'mermaid', range: shift(range, bodyOffset) })
+    const item: MermaidRef = { range: shift(range, bodyOffset), value: node.value }
+    index.mermaid.push(item)
   })
+
+  if (stages.math) {
+    visit(tree, 'inlineMath', (node) => {
+      const range = rangeFromNode(source, node)
+      if (!range) return
+      const item: MathRef = {
+        range: shift(range, bodyOffset),
+        value: typeof node.value === 'string' ? node.value : '',
+        block: false
+      }
+      index.maths.push(item)
+    })
+    visit(tree, 'math', (node) => {
+      const range = rangeFromNode(source, node)
+      if (!range) return
+      const item: MathRef = {
+        range: shift(range, bodyOffset),
+        value: typeof node.value === 'string' ? node.value : '',
+        block: true
+      }
+      index.maths.push(item)
+    })
+  }
+
+  if (stages.callout) {
+    visit(tree, 'callout', (node) => {
+      const callout = node as CalloutNode
+      const range = rangeFromNode(source, callout)
+      if (!range) return
+      const item: CalloutRef = {
+        range: shift(range, bodyOffset),
+        kind: callout.kind,
+        title: callout.title,
+        body: textOf(callout)
+      }
+      index.callouts.push(item)
+    })
+  }
+
+  if (stages.wikilink) {
+    visit(tree, 'wikilink', (node) => {
+      const link = node as WikiLinkNode
+      const range = rangeFromNode(source, link)
+      if (!range) return
+      if (!link.target) return
+      const item: WikiLinkRef = {
+        range: shift(range, bodyOffset),
+        target: link.target,
+        display: link.display || link.target,
+        embed: link.embed
+      }
+      index.wikilinks.push(item)
+    })
+  }
 
   visit(tree, 'heading', (node) => {
     const range = rangeFromNode(source, node)
@@ -96,7 +157,7 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
       depth: node.depth,
       range: shift(range, bodyOffset),
       text: textOf(node)
-    })
+    } satisfies HeadingRef)
   })
 
   const markType = (type: MarkRef['type']) => (node: Nodes) => {
@@ -108,6 +169,5 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
   visit(tree, 'emphasis', markType('emphasis'))
   visit(tree, 'inlineCode', markType('inlineCode'))
 
-  void stages
   return index
 }

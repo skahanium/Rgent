@@ -1,7 +1,7 @@
 import { IPC, type TreeEntry, type VaultState } from '@shared'
 import { promptConflict, promptNewNote } from './dialogs.ts'
 import { mountEditor, type EditorHost } from './view/editor.ts'
-import { renderTree, titleOf, collectNotePaths } from './tree.ts'
+import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.ts'
 
 type Tab = {
   relPath: string
@@ -147,6 +147,7 @@ export async function start(root: HTMLElement): Promise<void> {
     active = null
     editor.setText('')
     renderTabs()
+    syncEditorHost()
   }
 
   async function chooseVault(): Promise<void> {
@@ -171,11 +172,23 @@ export async function start(root: HTMLElement): Promise<void> {
       }
     }
     paintTree()
+    syncEditorHost()
   }
 
   function paintTree(): void {
     renderTree(treeScroll, tree, active, (relPath) => {
       void openNote(relPath)
+    })
+  }
+
+  function syncEditorHost(): void {
+    const present = collectRelPaths(tree)
+    editor.setNoteHost({
+      noteRelPath: active ?? '',
+      vaultHas: (relPath) => present.has(relPath),
+      openNote: (relPath) => {
+        void openNote(relPath)
+      }
     })
   }
 
@@ -185,9 +198,13 @@ export async function start(root: HTMLElement): Promise<void> {
       activate(relPath)
       return
     }
-    const content = await window.rgent.noteRead(relPath)
-    tabs.push({ relPath, content, saved: content, dirty: false })
-    activate(relPath)
+    try {
+      const content = await window.rgent.noteRead(relPath)
+      tabs.push({ relPath, content, saved: content, dirty: false })
+      activate(relPath)
+    } catch {
+      /* missing notes stay as broken links */
+    }
   }
 
   function activate(relPath: string): void {
@@ -203,6 +220,7 @@ export async function start(root: HTMLElement): Promise<void> {
     renderTabs()
     paintTree()
     emptyEl.hidden = true
+    syncEditorHost()
   }
 
   function current(): Tab | undefined {
@@ -249,6 +267,7 @@ export async function start(root: HTMLElement): Promise<void> {
     }
     renderTabs()
     paintTree()
+    syncEditorHost()
   }
 
   function scheduleSave(): void {

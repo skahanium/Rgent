@@ -14,10 +14,10 @@ export type StageFlags = Record<StageId, boolean>
 export const DEFAULT_STAGES: StageFlags = {
   gfm: true,
   frontmatter: true,
-  math: false,
-  callout: false,
-  wikilink: false,
-  mermaid: false
+  math: true,
+  callout: true,
+  wikilink: true,
+  mermaid: true
 }
 
 export interface SourceRange {
@@ -40,6 +40,7 @@ export interface ImageRef {
   range: SourceRange
   url: string
   alt: string
+  base: 'note' | 'vault'
 }
 
 export interface HeadingRef {
@@ -53,11 +54,41 @@ export interface MarkRef {
   range: SourceRange
 }
 
+export type CalloutKind = 'note' | 'tip' | 'warning' | 'important' | 'caution'
+
+export interface MathRef {
+  range: SourceRange
+  value: string
+  block: boolean
+}
+
+export interface CalloutRef {
+  range: SourceRange
+  kind: CalloutKind
+  title: string
+  body: string
+}
+
+export interface WikiLinkRef {
+  range: SourceRange
+  target: string
+  display: string
+  embed: boolean
+}
+
+export interface MermaidRef {
+  range: SourceRange
+  value: string
+}
+
 export interface DocIndex {
   blocks: BlockRef[]
   tables: TableRef[]
   images: ImageRef[]
-  mermaid: BlockRef[]
+  mermaid: MermaidRef[]
+  maths: MathRef[]
+  callouts: CalloutRef[]
+  wikilinks: WikiLinkRef[]
   headings: HeadingRef[]
   marks: MarkRef[]
 }

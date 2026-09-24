@@ -3,8 +3,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createNote, listVaultTree, parseStoredVault, readNote, serializeStoredVault, writeNote } from '../../src/main/notes-fs.ts'
-import { resolveInVault, sanitizeNoteName } from '../../src/main/paths.ts'
-import { collectNotePaths } from '../../src/renderer/src/tree.ts'
+import { isVaultImagePath, resolveInVault, sanitizeNoteName, vaultMediaPath } from '../../src/main/paths.ts'
+import { collectNotePaths, collectRelPaths } from '../../src/renderer/src/tree.ts'
+import { joinVaultRel, parseVaultMediaUrl, vaultMediaUrl } from '../../src/shared/vault-rel.ts'
 
 describe('vault paths', () => {
   it('keeps paths inside the vault root', () => {
@@ -18,6 +19,29 @@ describe('vault paths', () => {
     expect(resolveInVault(root, '../secret.md')).toBeNull()
     expect(resolveInVault(root, 'a/../../etc/passwd')).toBeNull()
     expect(resolveInVault(root, '/etc/passwd')).toBeNull()
+  })
+
+  it('joins note-relative media inside the vault and rejects escapes', () => {
+    expect(joinVaultRel('工作/会议纪要.md', 'pic.png', 'note')).toBe('工作/pic.png')
+    expect(joinVaultRel('工作/会议纪要.md', '../pic.png', 'note')).toBe('pic.png')
+    expect(joinVaultRel('工作/会议纪要.md', '../../secret.png', 'note')).toBeNull()
+    expect(joinVaultRel('工作/会议纪要.md', 'pic.png', 'vault')).toBe('pic.png')
+    expect(joinVaultRel('工作/会议纪要.md', '../x.png', 'vault')).toBeNull()
+    expect(joinVaultRel('a.md', 'https://example.com/x.png', 'note')).toBeNull()
+  })
+
+  it('only serves image files from inside the vault', () => {
+    const root = path.join('/tmp', 'vault-root')
+    expect(isVaultImagePath('pic.png')).toBe(true)
+    expect(isVaultImagePath('note.md')).toBe(false)
+    expect(vaultMediaPath(root, 'folder/pic.png')).toBe(path.resolve(root, 'folder', 'pic.png'))
+    expect(vaultMediaPath(root, '../pic.png')).toBeNull()
+    expect(vaultMediaPath(root, 'note.md')).toBeNull()
+  })
+
+  it('encodes vault media urls without letting other schemes through', () => {
+    expect(parseVaultMediaUrl(vaultMediaUrl('工作/pic.png'))).toBe('工作/pic.png')
+    expect(parseVaultMediaUrl('https://example.com/x.png')).toBeNull()
   })
 
   it('sanitizes note names', () => {
@@ -79,6 +103,20 @@ describe('notes-fs', () => {
       }
     ])
     expect([...paths].sort()).toEqual(['a.md', 'sub/b.md'])
+  })
+
+  it('collects notes and other files for vault media lookups', () => {
+    const paths = collectRelPaths([
+      { name: 'a.md', relPath: 'a.md', kind: 'note' },
+      { name: 'pic.png', relPath: 'pic.png', kind: 'file' },
+      {
+        name: 'sub',
+        relPath: 'sub',
+        kind: 'dir',
+        children: [{ name: 'b.md', relPath: 'sub/b.md', kind: 'note' }]
+      }
+    ])
+    expect([...paths].sort()).toEqual(['a.md', 'pic.png', 'sub/b.md'])
   })
 })
 

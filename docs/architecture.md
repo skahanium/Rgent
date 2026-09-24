@@ -41,7 +41,7 @@ flowchart LR
 ```
 
 - 结构只在这一条管线里解析。不要在画布、检索、Agent 里再各写一套。
-- 语法扩展走插件，不改宿主。
+- 语法扩展走插件，不改宿主。v0 插件含 GFM、frontmatter、公式、callout、wikilink、mermaid。callout 用 mdast 变换，不是第二套解析。
 - 写盘永远是编辑器里的字符串。
 
 ## 库内布局

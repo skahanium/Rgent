@@ -57,3 +57,11 @@ export function collectNotePaths(entries: TreeEntry[], into = new Set<string>())
   }
   return into
 }
+
+export function collectRelPaths(entries: TreeEntry[], into = new Set<string>()): Set<string> {
+  for (const entry of entries) {
+    if (entry.kind !== 'dir') into.add(entry.relPath)
+    if (entry.children) collectRelPaths(entry.children, into)
+  }
+  return into
+}

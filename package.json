@@ -20,12 +20,17 @@
     "@codemirror/commands": "^6.11.1",
     "@codemirror/state": "^6.7.6",
     "@codemirror/view": "^6.43.13",
+    "katex": "^0.18.9",
     "mdast-util-from-markdown": "^2.0.3",
     "mdast-util-frontmatter": "^2.0.1",
     "mdast-util-gfm": "^3.1.0",
+    "mdast-util-math": "^3.0.0",
+    "mermaid": "^12.0.0",
     "micromark": "^4.0.2",
     "micromark-extension-frontmatter": "^2.0.0",
     "micromark-extension-gfm": "^3.0.0",
+    "micromark-extension-math": "^3.1.0",
+    "micromark-util-symbol": "^2.0.1",
     "unist-util-visit": "^5.1.0"
   },
   "devDependencies": {
@@ -38,6 +43,9 @@
     "vitest": "^5.0.1"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["electron", "esbuild"]
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
   }
 }

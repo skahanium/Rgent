@@ -1,4 +1,7 @@
 import path from 'node:path'
+import { isVaultImagePath } from '../shared/vault-rel.ts'
+
+export { isVaultImagePath }
 
 export function toPosixRel(rel: string): string {
   return rel.replaceAll('\\', '/').replace(/^\.\//, '')
@@ -30,6 +33,11 @@ export function hasHiddenSegment(relPath: string): boolean {
 
 export function isNotePath(relPath: string): boolean {
   return toPosixRel(relPath).toLowerCase().endsWith('.md')
+}
+
+export function vaultMediaPath(root: string, relPath: string): string | null {
+  if (!isVaultImagePath(relPath)) return null
+  return resolveInVault(root, relPath)
 }
 
 export function sanitizeNoteName(name: string): string {

@@ -2,7 +2,10 @@ import { app, BrowserWindow, ipcMain, Menu, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { IPC } from '../shared/ipc.ts'
+import { attachVaultProtocol, registerVaultScheme } from './vault-protocol.ts'
 import { VaultSession } from './vault.ts'
+
+registerVaultScheme()
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
@@ -111,6 +114,7 @@ function registerIpc(): void {
 app.whenReady().then(() => {
   vault = new VaultSession(app.getPath('userData'), send)
   vault.restore()
+  attachVaultProtocol(() => vault)
   registerIpc()
   buildMenu()
   createWindow()

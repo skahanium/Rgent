@@ -1,4 +1,8 @@
 import type { MarkdownStage } from './stage.ts'
+import { wikilinkFromMarkdown, wikilinkSyntax } from '../syntax/wikilink.ts'
 
-/** `[[全路径]]` 下一刀加 micromark 扩展。 */
-export const wikilinkStage: MarkdownStage = { id: 'wikilink' }
+export const wikilinkStage: MarkdownStage = {
+  id: 'wikilink',
+  micromark: () => wikilinkSyntax(),
+  mdast: () => wikilinkFromMarkdown()
+}
