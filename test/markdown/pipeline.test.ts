@@ -247,6 +247,27 @@ describe('pipeline', () => {
     expect(callout.range.start === 0 || live[callout.range.start - 1] === '\n').toBe(true)
   })
 
+  it('keeps GFM images when wiki embeds are also present', () => {
+    const source = '![alt](pic.png)\n![[pic.png]]\n'
+    const result = compile(source)
+    expect(result.index.images).toHaveLength(1)
+    expect(result.index.images[0]?.url).toBe('pic.png')
+    expect(result.index.wikilinks).toHaveLength(1)
+    expect(result.index.wikilinks[0]?.embed).toBe(true)
+  })
+
+  it('does not stretch stale block widgets across a shorter document', () => {
+    const result = compile('| a | b |\n| --- | --- |\n| 1 | 2 |\n')
+    expect(result.index.tables[0]?.range.start).toBeLessThan(2)
+    const widgets = planWidgets(result.index, 'x\n', [{ from: 0, to: 2 }])
+    expect(widgets.filter((widget) => widget.kind === 'table')).toEqual([])
+    for (const widget of widgets) {
+      expect(widget.range.start).toBeGreaterThanOrEqual(0)
+      expect(widget.range.end).toBeLessThanOrEqual(2)
+      expect(widget.range.end).toBeGreaterThan(widget.range.start)
+    }
+  })
+
   it('does not import katex or mermaid into the markdown pipeline', () => {
     const markdownRoot = join(here, '../../src/markdown')
     const files = collectTs(markdownRoot)

@@ -34,36 +34,48 @@ export function rangesOverlap(a: SourceRange, b: SourceRange): boolean {
   return a.start < b.end && b.start < a.end
 }
 
+export function rangeInDoc(range: SourceRange, docLen: number): SourceRange | null {
+  if (range.start < 0 || range.end > docLen || range.end <= range.start) return null
+  return range
+}
+
 export function planWidgets(
   index: DocIndex,
   source: string,
   viewports: readonly { from: number; to: number }[]
 ): PlannedWidget[] {
   const out: PlannedWidget[] = []
+  const docLen = source.length
 
   for (const callout of index.callouts) {
-    if (!visible(callout.range, viewports)) continue
-    push(out, { kind: 'callout', range: expandToLineBlock(source, callout.range), callout })
+    const range = clipBlock(source, callout.range, viewports, docLen)
+    if (!range) continue
+    push(out, { kind: 'callout', range, callout })
   }
   for (const table of index.tables) {
-    if (!visible(table.range, viewports)) continue
-    push(out, { kind: 'table', range: expandToLineBlock(source, table.range), table })
+    const range = clipBlock(source, table.range, viewports, docLen)
+    if (!range) continue
+    push(out, { kind: 'table', range, table })
   }
   for (const mermaid of index.mermaid) {
-    if (!visible(mermaid.range, viewports)) continue
-    push(out, { kind: 'mermaid', range: expandToLineBlock(source, mermaid.range), mermaid })
+    const range = clipBlock(source, mermaid.range, viewports, docLen)
+    if (!range) continue
+    push(out, { kind: 'mermaid', range, mermaid })
   }
   for (const math of index.maths) {
     if (!math.block) continue
-    if (!visible(math.range, viewports)) continue
-    push(out, { kind: 'math', range: expandToLineBlock(source, math.range), math })
+    const range = clipBlock(source, math.range, viewports, docLen)
+    if (!range) continue
+    push(out, { kind: 'math', range, math })
   }
   for (const image of index.images) {
-    if (!visible(image.range, viewports)) continue
-    push(out, { kind: 'image', range: image.range, image })
+    const range = clipInline(image.range, viewports, docLen)
+    if (!range) continue
+    push(out, { kind: 'image', range, image })
   }
   for (const link of index.wikilinks) {
-    if (!visible(link.range, viewports)) continue
+    const range = clipInline(link.range, viewports, docLen)
+    if (!range) continue
     if (link.embed && isVaultImagePath(link.target)) {
       const image: ImageRef = {
         range: link.range,
@@ -71,21 +83,43 @@ export function planWidgets(
         alt: link.display,
         base: 'vault'
       }
-      push(out, { kind: 'image', range: link.range, image })
+      push(out, { kind: 'image', range, image })
       continue
     }
-    push(out, { kind: 'wikilink', range: link.range, wikilink: link })
+    push(out, { kind: 'wikilink', range, wikilink: link })
   }
   for (const math of index.maths) {
     if (math.block) continue
-    if (!visible(math.range, viewports)) continue
-    push(out, { kind: 'math', range: math.range, math })
+    const range = clipInline(math.range, viewports, docLen)
+    if (!range) continue
+    push(out, { kind: 'math', range, math })
   }
   return out
 }
 
 function visible(range: SourceRange, viewports: readonly { from: number; to: number }[]): boolean {
   return viewports.some((port) => inViewport(range, port.from, port.to))
+}
+
+function clipInline(
+  range: SourceRange,
+  viewports: readonly { from: number; to: number }[],
+  docLen: number
+): SourceRange | null {
+  if (!rangeInDoc(range, docLen)) return null
+  if (!visible(range, viewports)) return null
+  return range
+}
+
+function clipBlock(
+  source: string,
+  range: SourceRange,
+  viewports: readonly { from: number; to: number }[],
+  docLen: number
+): SourceRange | null {
+  const clipped = clipInline(range, viewports, docLen)
+  if (!clipped) return null
+  return expandToLineBlock(source, clipped)
 }
 
 function push(out: PlannedWidget[], widget: PlannedWidget): void {

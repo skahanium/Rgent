@@ -1,6 +1,6 @@
 import { IPC, type TreeEntry, type VaultState } from '@shared'
 import { promptConflict, promptNewNote } from './dialogs.ts'
-import { mountEditor, type EditorHost } from './view/editor.ts'
+import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
 import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.ts'
 
 type Tab = {
@@ -145,9 +145,8 @@ export async function start(root: HTMLElement): Promise<void> {
   function resetSession(): void {
     tabs.length = 0
     active = null
-    editor.setText('')
+    editor.setText('', noteHost())
     renderTabs()
-    syncEditorHost()
   }
 
   async function chooseVault(): Promise<void> {
@@ -181,15 +180,19 @@ export async function start(root: HTMLElement): Promise<void> {
     })
   }
 
-  function syncEditorHost(): void {
+  function noteHost(): NoteHost {
     const present = collectRelPaths(tree)
-    editor.setNoteHost({
+    return {
       noteRelPath: active ?? '',
       vaultHas: (relPath) => present.has(relPath),
       openNote: (relPath) => {
         void openNote(relPath)
       }
-    })
+    }
+  }
+
+  function syncEditorHost(): void {
+    editor.setNoteHost(noteHost())
   }
 
   async function openNote(relPath: string): Promise<void> {
@@ -215,12 +218,11 @@ export async function start(root: HTMLElement): Promise<void> {
       if (prev) prev.content = editor.getText()
     }
     active = relPath
-    editor.setText(tab.content)
+    editor.setText(tab.content, noteHost())
     editor.focus()
     renderTabs()
     paintTree()
     emptyEl.hidden = true
-    syncEditorHost()
   }
 
   function current(): Tab | undefined {
@@ -263,11 +265,10 @@ export async function start(root: HTMLElement): Promise<void> {
     if (active === relPath) {
       const next = tabs[index] ?? tabs[index - 1]
       active = next?.relPath ?? null
-      editor.setText(next?.content ?? '')
+      editor.setText(next?.content ?? '', noteHost())
     }
     renderTabs()
     paintTree()
-    syncEditorHost()
   }
 
   function scheduleSave(): void {

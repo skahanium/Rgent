@@ -24,20 +24,34 @@ function decorationsFor(view: EditorView, result: CompileResult): DecorationSet 
   const widgets = planWidgets(result.index, source, view.visibleRanges)
 
   for (const widget of widgets) {
-    decos.push(decorationForWidget(widget, host).range(widget.range.start, widget.range.end))
+    if (widget.range.start < 0 || widget.range.end > docLen || widget.range.end <= widget.range.start) continue
+    try {
+      decos.push(decorationForWidget(widget, host).range(widget.range.start, widget.range.end))
+    } catch {
+      continue
+    }
   }
 
   for (const heading of result.index.headings) {
+    if (heading.range.start < 0 || heading.range.start >= docLen) continue
     if (widgets.some((widget) => rangesOverlap(heading.range, widget.range))) continue
     const pos = clamp(heading.range.start, 0, Math.max(0, docLen - 1))
-    decos.push(Decoration.line({ class: `md-heading md-h${heading.depth}` }).range(pos))
+    try {
+      decos.push(Decoration.line({ class: `md-heading md-h${heading.depth}` }).range(pos))
+    } catch {
+      continue
+    }
   }
   for (const mark of result.index.marks) {
     if (widgets.some((widget) => rangesOverlap(mark.range, widget.range))) continue
     const start = clamp(mark.range.start, 0, docLen)
     const end = clamp(mark.range.end, 0, docLen)
     if (end <= start) continue
-    decos.push(Decoration.mark({ class: `md-${mark.type}` }).range(start, end))
+    try {
+      decos.push(Decoration.mark({ class: `md-${mark.type}` }).range(start, end))
+    } catch {
+      continue
+    }
   }
 
   return Decoration.set(decos, true)
@@ -82,6 +96,11 @@ const pipelinePlugin = ViewPlugin.fromClass(
           err instanceof Error ? err.message : String(err),
           this.result
         )
+        try {
+          this.decorations = decorationsFor(update.view, this.result)
+        } catch {
+          this.decorations = Decoration.none
+        }
       }
     }
   },
@@ -114,7 +133,7 @@ const theme = EditorView.theme({
 export type EditorHost = {
   view: EditorView
   getText: () => string
-  setText: (text: string) => void
+  setText: (text: string, host?: NoteHost) => void
   setNoteHost: (host: NoteHost) => void
   focus: () => void
   destroy: () => void
@@ -158,10 +177,11 @@ export function mountEditor(
   return {
     view,
     getText: () => view.state.doc.toString(),
-    setText: (text) => {
+    setText: (text, host) => {
       applying = true
       view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: text }
+        changes: { from: 0, to: view.state.doc.length, insert: text },
+        ...(host ? { effects: hostCompartment.reconfigure(noteHostFacet.of(host)) } : {})
       })
       applying = false
     },

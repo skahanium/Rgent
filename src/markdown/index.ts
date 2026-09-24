@@ -18,5 +18,5 @@ export type {
 } from './types.ts'
 export { listedStages, ALL_STAGES } from './stages/registry.ts'
 export { inViewport } from './viewport.ts'
-export { expandToLineBlock, planWidgets, rangesOverlap } from './view-plan.ts'
+export { expandToLineBlock, planWidgets, rangesOverlap, rangeInDoc } from './view-plan.ts'
 export type { PlannedWidget } from './view-plan.ts'

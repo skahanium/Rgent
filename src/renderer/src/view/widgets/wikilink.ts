@@ -28,6 +28,7 @@ export class WikilinkWidget extends WidgetType {
     const open = (event: Event) => {
       event.preventDefault()
       event.stopPropagation()
+      if (!this.link.target.toLowerCase().endsWith('.md')) return
       try {
         this.host.openNote(this.link.target)
       } catch {
@@ -42,7 +43,7 @@ export class WikilinkWidget extends WidgetType {
   }
 
   ignoreEvent(): boolean {
-    return false
+    return true
   }
 
   private missing(): boolean {
