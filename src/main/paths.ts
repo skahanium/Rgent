@@ -1,3 +1,4 @@
+import { existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { isVaultImagePath } from '../shared/vault-rel.ts'
 
@@ -38,6 +39,27 @@ export function isNotePath(relPath: string): boolean {
 export function vaultMediaPath(root: string, relPath: string): string | null {
   if (!isVaultImagePath(relPath)) return null
   return resolveInVault(root, relPath)
+}
+
+export function confineExistingFile(root: string, abs: string): string | null {
+  try {
+    const rootReal = realpathSync(path.resolve(root))
+    const fileReal = realpathSync(abs)
+    const relative = path.relative(rootReal, fileReal)
+    if (relative.startsWith('..') || path.isAbsolute(relative)) return null
+    return fileReal
+  } catch {
+    return null
+  }
+}
+
+export function resolveVaultMediaFile(root: string, relPath: string): { abs: string } | { error: 403 | 404 } {
+  const lexical = vaultMediaPath(root, relPath)
+  if (!lexical) return { error: 403 }
+  if (!existsSync(lexical)) return { error: 404 }
+  const confined = confineExistingFile(root, lexical)
+  if (!confined) return { error: 403 }
+  return { abs: confined }
 }
 
 export function sanitizeNoteName(name: string): string {

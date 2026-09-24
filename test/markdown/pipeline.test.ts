@@ -156,6 +156,14 @@ describe('pipeline', () => {
     expect(result.index.callouts).toHaveLength(2)
   })
 
+  it('keeps nested math and images inside callouts in the index', () => {
+    const source = '> [!note]\n> $a$\n>\n> ![alt](pic.png)\n'
+    const result = compile(source)
+    expect(result.index.callouts).toHaveLength(1)
+    expect(result.index.maths.some((item) => item.value === 'a' && !item.block)).toBe(true)
+    expect(result.index.images.some((image) => image.url === 'pic.png' && image.alt === 'alt')).toBe(true)
+  })
+
   it('indexes wikilinks with vault paths, filename display, and non-transcluding embeds', () => {
     const result = compile(live)
     const note = result.index.wikilinks.find((item) => item.target === '工作/会议纪要.md' && !item.embed)

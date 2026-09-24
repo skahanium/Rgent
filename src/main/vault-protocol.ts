@@ -1,8 +1,7 @@
-import { existsSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { net, protocol } from 'electron'
 import { parseVaultMediaUrl, VAULT_MEDIA_SCHEME } from '../shared/vault-rel.ts'
-import { resolveInVault, vaultMediaPath } from './paths.ts'
+import { resolveVaultMediaFile } from './paths.ts'
 import type { VaultSession } from './vault.ts'
 
 export function registerVaultScheme(): void {
@@ -26,11 +25,8 @@ export function attachVaultProtocol(getVault: () => VaultSession | null): void {
     if (!rel) return new Response('', { status: 400 })
     const root = getVault()?.root
     if (!root) return new Response('', { status: 404 })
-    if (!vaultMediaPath(root, rel) || !resolveInVault(root, rel)) {
-      return new Response('', { status: 403 })
-    }
-    const abs = vaultMediaPath(root, rel)
-    if (!abs || !existsSync(abs)) return new Response('', { status: 404 })
-    return net.fetch(pathToFileURL(abs).href)
+    const resolved = resolveVaultMediaFile(root, rel)
+    if ('error' in resolved) return new Response('', { status: resolved.error })
+    return net.fetch(pathToFileURL(resolved.abs).href)
   })
 }

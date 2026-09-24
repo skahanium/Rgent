@@ -48,19 +48,25 @@ function matchCallout(node: Blockquote): {
   const kind = match[1].toLowerCase() as CalloutKind
   if (!KINDS.has(kind)) return null
   const title = (match[2] ?? '').trim() || CALLOUT_TITLES[kind]
-  const restLine = nl === -1 ? '' : full.slice(nl + 1)
-  const children = [...node.children]
-  if (restLine.trim().length === 0) {
-    children.shift()
-  } else {
-    const rest: Paragraph = {
-      type: 'paragraph',
-      children: [{ type: 'text', value: restLine }],
-      position: first.position
-    }
-    children[0] = rest
-  }
+  const restParagraph = stripMarkerParagraph(first)
+  const children = restParagraph ? [restParagraph, ...node.children.slice(1)] : node.children.slice(1)
   return { kind, title, children }
+}
+
+function stripMarkerParagraph(paragraph: Paragraph): Paragraph | null {
+  const children = [...paragraph.children]
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i]
+    if (child.type !== 'text') continue
+    const nl = child.value.indexOf('\n')
+    if (nl === -1) continue
+    const after = child.value.slice(nl + 1)
+    const rest = children.slice(i + 1)
+    if (after.length > 0) rest.unshift({ ...child, value: after })
+    if (rest.length === 0) return null
+    return { ...paragraph, children: rest }
+  }
+  return null
 }
 
 export function textOf(node: { value?: string; children?: unknown[] }): string {

@@ -1,9 +1,9 @@
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
+import { realpath, symlink, mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createNote, listVaultTree, parseStoredVault, readNote, serializeStoredVault, writeNote } from '../../src/main/notes-fs.ts'
-import { isVaultImagePath, resolveInVault, sanitizeNoteName, vaultMediaPath } from '../../src/main/paths.ts'
+import { confineExistingFile, isVaultImagePath, resolveInVault, resolveVaultMediaFile, sanitizeNoteName, vaultMediaPath } from '../../src/main/paths.ts'
 import { collectNotePaths, collectRelPaths } from '../../src/renderer/src/tree.ts'
 import { joinVaultRel, parseVaultMediaUrl, vaultMediaUrl } from '../../src/shared/vault-rel.ts'
 
@@ -42,6 +42,25 @@ describe('vault paths', () => {
   it('encodes vault media urls without letting other schemes through', () => {
     expect(parseVaultMediaUrl(vaultMediaUrl('工作/pic.png'))).toBe('工作/pic.png')
     expect(parseVaultMediaUrl('https://example.com/x.png')).toBeNull()
+  })
+
+  it('refuses vault media that only stays inside the root via a symlink', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'rgent-out-'))
+    const secret = path.join(outside, 'secret.png')
+    await writeFile(secret, 'secret', 'utf8')
+    const link = path.join(root, 'pic.png')
+    await symlink(secret, link)
+    expect(confineExistingFile(root, link)).toBeNull()
+    expect(resolveVaultMediaFile(root, 'pic.png')).toEqual({ error: 403 })
+  })
+
+  it('serves a real in-vault image path after confinement', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    const file = path.join(root, 'pic.png')
+    await writeFile(file, 'png', 'utf8')
+    const resolved = resolveVaultMediaFile(root, 'pic.png')
+    expect(resolved).toEqual({ abs: await realpath(file) })
   })
 
   it('sanitizes note names', () => {
