@@ -346,7 +346,9 @@ void DeleteOpenedFile(HANDLE handle) {
 void RenameOpenedFile(HANDLE source, HANDLE parent, const std::wstring& target,
                       bool replace) {
   const size_t bytes = target.size() * sizeof(wchar_t);
-  const size_t length = offsetof(FILE_RENAME_INFO, FileName) + bytes + sizeof(wchar_t);
+  // The Windows API validates against sizeof(FILE_RENAME_INFO), including
+  // the structure's trailing alignment padding on 64-bit builds.
+  const size_t length = sizeof(FILE_RENAME_INFO) + bytes + sizeof(wchar_t);
   std::vector<std::max_align_t> storage((length + sizeof(std::max_align_t) - 1) /
                                         sizeof(std::max_align_t));
   std::memset(storage.data(), 0, storage.size() * sizeof(std::max_align_t));

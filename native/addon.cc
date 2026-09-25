@@ -29,6 +29,7 @@ std::string Bytes(napi_env env, napi_value value) {
   void* data = nullptr;
   size_t length = 0;
   Check(env, napi_get_buffer_info(env, value, &data, &length));
+  if (length == 0) return {};
   return std::string(static_cast<const char*>(data), length);
 }
 

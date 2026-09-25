@@ -71,20 +71,20 @@ Fd DupRoot(VaultHandle* root) {
   return copy;
 }
 
-Fd OpenChildDir(int parent, const std::string& name) {
-  Fd child(openat(parent, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-  CheckOpen(child.value);
-  return child;
-}
-
 Fd Dir(VaultHandle* root, const std::vector<std::string>& parts, size_t count) {
   Fd current = DupRoot(root);
-  for (size_t i = 0; i < count; ++i) current = OpenChildDir(current.value, parts[i]);
+  if (count == 0) return current;
+  std::string relative = parts[0];
+  for (size_t i = 1; i < count; ++i) relative += "/" + parts[i];
+  Fd child(openat(current.value, relative.c_str(),
+                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC));
+  CheckOpen(child.value);
+  current = std::move(child);
   return current;
 }
 
 Fd File(int parent, const std::string& name) {
-  Fd file(openat(parent, name.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC));
+  Fd file(openat(parent, name.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC));
   CheckOpen(file.value);
   struct stat info;
   if (fstat(file.value, &info) != 0 || !S_ISREG(info.st_mode)) Fail("UNSAFE_PATH");
@@ -125,6 +125,13 @@ std::string Id(const struct stat& info) {
          std::to_string(static_cast<uint64_t>(info.st_ino));
 }
 
+bool SameObject(int left, int right) {
+  struct stat a;
+  struct stat b;
+  if (fstat(left, &a) != 0 || fstat(right, &b) != 0) Fail("IO_ERROR");
+  return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+}
+
 std::string ActualName(int parent, const struct stat& child) {
   Fd scan_fd(openat(parent, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
   CheckOpen(scan_fd.value);
@@ -146,14 +153,14 @@ std::string ActualName(int parent, const struct stat& child) {
   return name;
 }
 
-void ExpectExisting(int parent, const std::string& name, const std::optional<std::string>& expected) {
+void ExpectExisting(int root, const std::string& relative, const std::optional<std::string>& expected) {
   if (!expected) {
-    struct stat info;
-    if (fstatat(parent, name.c_str(), &info, AT_SYMLINK_NOFOLLOW) == 0) Fail("CONFLICT");
-    if (errno != ENOENT) Fail("IO_ERROR");
+    Fd current(openat(root, relative.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC));
+    if (current.value >= 0) Fail("CONFLICT");
+    if (errno != ENOENT) CheckOpen(current.value);
     return;
   }
-  Fd current = File(parent, name);
+  Fd current = File(root, relative);
   if (ReadFd(current.value) != *expected) Fail("CONFLICT");
 }
 
@@ -197,16 +204,22 @@ std::vector<Entry> List(VaultHandle* root, const std::string& relative_dir) {
     });
   }
   closedir(stream);
+  Fd still_here = Dir(root, parts, parts.size());
+  if (!SameObject(directory.value, still_here.value)) Fail("PATH_CHANGED");
   return out;
 }
 
 std::vector<Component> Resolve(VaultHandle* root, const std::string& relative_path) {
   const auto parts = Parts(relative_path);
   std::vector<Component> out;
-  Fd parent = DupRoot(root);
+  Fd root_fd = DupRoot(root);
+  Fd parent(dup(root_fd.value));
+  CheckOpen(parent.value);
+  std::string prefix;
   for (size_t i = 0; i < parts.size(); ++i) {
     const bool last = i + 1 == parts.size();
-    Fd child(openat(parent.value, parts[i].c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC |
+    prefix += (prefix.empty() ? "" : "/") + parts[i];
+    Fd child(openat(root_fd.value, prefix.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC |
             (last ? 0 : O_DIRECTORY)));
     CheckOpen(child.value);
     struct stat info;
@@ -215,34 +228,40 @@ std::vector<Component> Resolve(VaultHandle* root, const std::string& relative_pa
     out.push_back({ActualName(parent.value, info), Id(info), Kind(info.st_mode)});
     parent = std::move(child);
   }
+  Fd still_here(openat(root_fd.value, relative_path.c_str(),
+                       O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC));
+  CheckOpen(still_here.value);
+  if (!SameObject(parent.value, still_here.value)) Fail("PATH_CHANGED");
   return out;
 }
 
 std::string ReadBytes(VaultHandle* root, const std::string& relative_file) {
-  const auto parts = Parts(relative_file);
-  Fd parent = Dir(root, parts, parts.size() - 1);
-  Fd file = File(parent.value, parts.back());
-  return ReadFd(file.value);
+  (void)Parts(relative_file);
+  Fd root_fd = DupRoot(root);
+  Fd file = File(root_fd.value, relative_file);
+  auto bytes = ReadFd(file.value);
+  Fd still_here = File(root_fd.value, relative_file);
+  if (!SameObject(file.value, still_here.value)) Fail("PATH_CHANGED");
+  return bytes;
 }
 
 void Replace(VaultHandle* root, const std::string& relative_file,
              const std::optional<std::string>& expected, const std::string& content) {
-  const auto parts = Parts(relative_file);
-  Fd parent = Dir(root, parts, parts.size() - 1);
-  const auto& leaf = parts.back();
-  ExpectExisting(parent.value, leaf, expected);
+  (void)Parts(relative_file);
+  Fd root_fd = DupRoot(root);
+  ExpectExisting(root_fd.value, relative_file, expected);
   mode_t mode = 0600;
   if (expected) {
     struct stat info;
-    if (fstatat(parent.value, leaf.c_str(), &info, AT_SYMLINK_NOFOLLOW) != 0 ||
-        !S_ISREG(info.st_mode)) Fail("CONFLICT");
+    Fd current = File(root_fd.value, relative_file);
+    if (fstat(current.value, &info) != 0) Fail("IO_ERROR");
     mode = info.st_mode & 0777;
   }
   std::string temp;
   Fd file;
   for (int attempt = 0; attempt < 10; ++attempt) {
     temp = ".rgent-" + std::to_string(getpid()) + "-" + std::to_string(++sequence) + ".tmp";
-    file = Fd(openat(parent.value, temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode));
+    file = Fd(openat(root_fd.value, temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW_ANY | O_CLOEXEC, mode));
     if (file.value >= 0) break;
     if (errno != EEXIST) CheckOpen(file.value);
   }
@@ -251,32 +270,34 @@ void Replace(VaultHandle* root, const std::string& relative_file,
   try {
     WriteFd(file.value, content);
     if (fsync(file.value) != 0) Fail("IO_ERROR");
-    ExpectExisting(parent.value, leaf, expected);
-    // A missing target must remain missing until commit. Plain renameat would
-    // overwrite a file created after the last revision check.
+    ExpectExisting(root_fd.value, relative_file, expected);
+    // Both names resolve from the pinned root in one kernel rename operation.
+    // A moved child directory or swapped symlink cannot redirect the commit.
 #ifdef __APPLE__
-    const int renamed = expected
-      ? renameat(parent.value, temp.c_str(), parent.value, leaf.c_str())
-      : renameatx_np(parent.value, temp.c_str(), parent.value, leaf.c_str(), RENAME_EXCL);
+    const unsigned int flags = RENAME_NOFOLLOW_ANY | (expected ? 0 : RENAME_EXCL);
+    const int renamed = renameatx_np(root_fd.value, temp.c_str(), root_fd.value,
+                                    relative_file.c_str(), flags);
 #else
-    const int renamed = renameat(parent.value, temp.c_str(), parent.value, leaf.c_str());
+    const int renamed = -1;
+    errno = ENOTSUP;
 #endif
     if (renamed != 0) {
       if (!expected && errno == EEXIST) Fail("CONFLICT");
       Fail("IO_ERROR");
     }
     created = false;
-    (void)fsync(parent.value);
+    (void)fsync(root_fd.value);
   } catch (...) {
-    if (created) (void)unlinkat(parent.value, temp.c_str(), 0);
+    if (created) (void)unlinkat(root_fd.value, temp.c_str(), 0);
     throw;
   }
 }
 
 void Create(VaultHandle* root, const std::string& relative_file) {
-  const auto parts = Parts(relative_file);
-  Fd parent = Dir(root, parts, parts.size() - 1);
-  Fd file(openat(parent.value, parts.back().c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+  (void)Parts(relative_file);
+  Fd root_fd = DupRoot(root);
+  Fd file(openat(root_fd.value, relative_file.c_str(),
+                 O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW_ANY | O_CLOEXEC, 0600));
   CheckOpen(file.value);
 }
 

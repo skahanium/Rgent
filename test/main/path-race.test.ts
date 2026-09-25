@@ -10,6 +10,7 @@ import { listVaultTree, readNoteSnapshot, writeNote } from '../../src/main/notes
 import { loadPermissions, modelTierFor } from '../../src/main/permissions.ts'
 import { readVaultMedia } from '../../src/main/paths.ts'
 import { VaultIndex } from '../../src/main/vault-index.ts'
+import { secureFsFor } from '../../src/main/secure-fs.ts'
 
 const swapWorker = `
   const { parentPort, workerData } = require('node:worker_threads')
@@ -52,7 +53,9 @@ async function withSwappedDirectory(root: string, outside: string, run: () => Pr
       await fs.rename(held, live)
     }
   }
-  expect(Atomics.load(new Int32Array(stop), 1)).toBeGreaterThan(0)
+  // Windows directory handles intentionally deny rename sharing; a blocked
+  // swap is a valid secure outcome there.
+  if (process.platform !== 'win32') expect(Atomics.load(new Int32Array(stop), 1)).toBeGreaterThan(0)
 }
 
 it('never returns outside note, index, or media content while a directory is replaced', async () => {
@@ -106,4 +109,35 @@ it.skipIf(process.platform === 'win32')('rejects named pipes without blocking th
   execFileSync('mkfifo', [path.join(root, '.rgent-permissions')])
   await expect(readNoteSnapshot(root, 'pipe.md')).rejects.toThrow()
   expect((await loadPermissions(root)).status).toBe('invalid')
+})
+
+it.skipIf(process.platform !== 'darwin')('does not commit outside the vault when an opened child directory moves out', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-move-'))
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'rgent-out-'))
+  mkdirSync(path.join(root, 'sub'))
+  writeFileSync(path.join(root, 'sub', 'a.md'), 'old')
+  const moved = new SharedArrayBuffer(4)
+  const worker = new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads')
+    const fs = require('node:fs')
+    const path = require('node:path')
+    const flag = new Int32Array(workerData.moved)
+    parentPort.postMessage('ready')
+    while (Atomics.load(flag, 0) === 0) {
+      if (fs.readdirSync(workerData.root).some((name) => name.startsWith('.rgent-') && name.endsWith('.tmp'))) {
+        fs.renameSync(path.join(workerData.root, 'sub'), path.join(workerData.outside, 'sub'))
+        Atomics.store(flag, 0, 1)
+        break
+      }
+    }
+  `, { eval: true, workerData: { root, outside, moved } })
+  await once(worker, 'message')
+  try {
+    expect(() => secureFsFor(root).replace('sub/a.md', 'old', 'x'.repeat(64 * 1024 * 1024))).toThrow()
+    expect(Atomics.load(new Int32Array(moved), 0)).toBe(1)
+    expect(readFileSync(path.join(outside, 'sub', 'a.md'), 'utf8')).toBe('old')
+  } finally {
+    Atomics.store(new Int32Array(moved), 0, 1)
+    await worker.terminate()
+  }
 })

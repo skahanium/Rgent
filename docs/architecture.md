@@ -94,7 +94,7 @@ flowchart LR
 | CSP | 壳 | `src/renderer/index.html`：`default-src 'self'`；图允许 `data:` 与 `rgent-vault:`。 |
 | 媒体不逃出库 | IO | `resolveInVault` 拒绝 `..` 与绝对路径；`rgent-vault:` 经 `SecureVaultFs.readBytes` 从固定库根句柄逐级相对读取，不向 `net.fetch` 传校验后的路径（`src/main/paths.ts`、`vault-protocol.ts`）。 |
 | 隐藏路径人写盘写不了 | IO | `writeNote` / `readNote` 拒绝含点号段的路径（`src/main/notes-fs.ts`）。文件树不列出点号名。权限名单、技能文件必须落在这类路径上。 |
-| 笔记路径与冲突写盘 | IO | 主进程 Node-API 模块（`native/**`）固定库根目录句柄，逐级相对打开；macOS 用 `openat` / `renameat`，Windows 用 `NtCreateFile` 相对目录句柄 / `FileRenameInfoEx`，拒绝链接与重解析点。树、读写、索引和媒体均走 `src/main/secure-fs.ts`，模块缺失不降级。`noteRead` 给全文及内容修订值，`noteWrite` 带预期修订值；同篇应用内串行检查，同目录临时文件原子替换，冲突交给人选磁盘或窗口稿。目录变化以安全元数据扫描发现，不按旧路径建立监听。**待修：macOS 外部进程搬走已打开的库内子目录，可能使句柄相对替换落到库外；当前实现未满足严格边界。** |
+| 笔记路径与冲突写盘 | IO | 主进程 Node-API 模块（`native/**`）固定库根目录句柄；macOS 以 `O_NOFOLLOW_ANY` 从根打开完整相对路径，库根临时文件经 `renameatx_np(RENAME_NOFOLLOW_ANY)` 原子提交，防止已打开子目录被搬出后写到库外；Windows 用 `NtCreateFile` 逐级相对打开和 `FileRenameInfoEx`，拒绝重解析点。树、读写、索引和媒体均走 `src/main/secure-fs.ts`，模块缺失不降级。`noteRead` 给全文及内容修订值，`noteWrite` 带预期修订值；同篇应用内串行检查，冲突交给人选磁盘或窗口稿。目录变化以安全元数据扫描发现，不按旧路径建立监听。macOS 搬出子目录的回归见 `test/main/path-race.test.ts`；Windows 写盘尚待 CI 验收。 |
 | 权限名单的失效状态 | 主进程 | 名单缺失是空名单；已有名单损坏、无效、无法读取或条目身份不稳是 `invalid`。人读写搜继续，树上提示修复，名单写入只接受经句柄核验的文件夹与三档值并原子替换。权限按文件系统实际路径组成归一，别名冲突与身份变化使 AI 失败关闭。`modelTierFor` 目前仅被测试调用；Host 未接线，尚无实际模型出口。Windows 真实别名与写盘仍待 CI 验收。 |
 | 人写盘 ≠ 模型写盘 | IPC | `noteWrite` 只给人的自动写盘与手动保存。`AgentHost` 不得复用这条通道。Host 未开工，这条先当禁令。 |
 | 索引不见账本 | 管线 / 索引 | `partitionSource` 切开锚点（`src/markdown/partition.ts`）。`compile` 和 `VaultIndex` 只吃 `body`。 |

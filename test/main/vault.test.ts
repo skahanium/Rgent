@@ -101,6 +101,8 @@ describe('notes-fs', () => {
     const revision = await writeNote(root, rel, '正文', initial.revision)
     expect(revision).toBe((await readNoteSnapshot(root, rel)).revision)
     expect(await readNote(root, rel)).toBe('正文')
+    await writeNote(root, rel, '', revision)
+    expect(await readNote(root, rel)).toBe('')
     await expect(createNote(root, '初稿')).rejects.toThrow(/同名/)
   })
 
