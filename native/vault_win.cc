@@ -466,7 +466,7 @@ void Replace(VaultHandle* root, const std::string& relative_file,
     try {
       temporary = OpenChild(chain.current, name,
                             FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
-                            kCreate, kNonDirectory, FILE_SHARE_READ);
+                            kCreate, kNonDirectory, FILE_SHARE_READ | FILE_SHARE_DELETE);
       break;
     } catch (const std::runtime_error& error) {
       if (std::string(error.what()) != "EEXIST") throw;
