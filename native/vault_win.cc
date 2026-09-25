@@ -347,8 +347,7 @@ void DeleteOpenedFile(HANDLE handle) {
     WinError("CLEANUP_TEMP");
 }
 
-void RenameOpenedFile(HANDLE source, HANDLE parent, const std::wstring& target,
-                      bool replace) {
+void RenameOpenedFile(HANDLE source, const std::wstring& target, bool replace) {
   const size_t bytes = target.size() * sizeof(wchar_t);
   // The Windows API validates against sizeof(FILE_RENAME_INFO), including
   // the structure's trailing alignment padding on 64-bit builds.
@@ -359,7 +358,9 @@ void RenameOpenedFile(HANDLE source, HANDLE parent, const std::wstring& target,
   auto* info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
   const DWORD flags = replace ? (kRenameReplace | kRenamePosix) : 0;
   std::memcpy(info, &flags, sizeof(flags));
-  info->RootDirectory = parent;
+  // Source and destination are in the same pinned parent. A null root keeps
+  // the kernel on the source link's parent and avoids reopening that directory.
+  info->RootDirectory = nullptr;
   info->FileNameLength = static_cast<DWORD>(bytes);
   std::memcpy(info->FileName, target.data(), bytes);
   using NtSetInformationFileFn = NTSTATUS (NTAPI *)(HANDLE, PIO_STATUS_BLOCK, PVOID,
@@ -454,7 +455,7 @@ void Replace(VaultHandle* root, const std::string& relative_file,
   const auto parts = Parts(relative_file);
   auto chain = WalkDirectories(root, parts, parts.size() - 1);
   auto target = OpenMaybe(chain.current, parts.back(), FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                          kNonDirectory, FILE_SHARE_READ | FILE_SHARE_DELETE);
+                          kNonDirectory, FILE_SHARE_READ);
   if (target.valid()) RequireKind(target.get(), "file");
   if (expected) {
     if (!target.valid() || ReadAll(target.get()) != *expected) Fail("CONFLICT");
@@ -468,7 +469,7 @@ void Replace(VaultHandle* root, const std::string& relative_file,
     try {
       temporary = OpenChild(chain.current, name,
                             FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
-                            kCreate, kNonDirectory, FILE_SHARE_READ | FILE_SHARE_DELETE);
+                            kCreate, kNonDirectory, FILE_SHARE_READ);
       break;
     } catch (const std::runtime_error& error) {
       if (std::string(error.what()) != "EEXIST") throw;
@@ -481,7 +482,7 @@ void Replace(VaultHandle* root, const std::string& relative_file,
     WriteAll(temporary.get(), content);
     // The target handle denies external writers and deletion through the check/rename interval.
     phase = "RENAME";
-    RenameOpenedFile(temporary.get(), chain.current, parts.back(), expected.has_value());
+    RenameOpenedFile(temporary.get(), parts.back(), expected.has_value());
     renamed = true;
   } catch (const std::exception& error) {
     if (std::getenv("GITHUB_ACTIONS") != nullptr) {
