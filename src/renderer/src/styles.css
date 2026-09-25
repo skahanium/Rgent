@@ -71,6 +71,14 @@ summary:focus-visible {
   font-size: 0.9rem;
 }
 
+.permission-warning {
+  color: var(--danger);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.permission-warning[hidden] { display: none; }
+
 .search {
   position: relative;
   margin-left: auto;
@@ -197,6 +205,32 @@ summary:focus-visible {
   color: var(--muted);
   cursor: default;
 }
+
+.tier-badge {
+  float: right;
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.tier-forbidden { color: var(--danger); background: #f6e6e2; }
+.tier-follow { color: var(--accent); background: var(--accent-weak); }
+
+.tier-menu {
+  position: fixed;
+  z-index: 30;
+  display: grid;
+  min-width: 150px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.tier-menu button { text-align: left; min-height: 32px; }
+.tier-menu button:hover { background: var(--bg-side); }
 
 .stage {
   position: relative;

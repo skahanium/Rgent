@@ -1,5 +1,5 @@
 import { watch, type FSWatcher } from 'node:fs'
-import { readdirSync, statSync } from 'node:fs'
+import { lstatSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { isHiddenName, relFromAbs } from './paths.ts'
 
@@ -12,6 +12,7 @@ export function watchVault(root: string, onChange: WatchHandler): () => void {
     if (watchers.has(dir)) return
     let watcher: FSWatcher
     try {
+      if (dir !== root && !lstatSync(dir).isDirectory()) return
       watcher = watch(dir, (_event, filename) => {
         refresh(dir)
         if (typeof filename === 'string' && filename.length > 0) {
@@ -33,6 +34,11 @@ export function watchVault(root: string, onChange: WatchHandler): () => void {
   const refresh = (dir: string) => {
     let entries
     try {
+      if (dir !== root && !lstatSync(dir).isDirectory()) {
+        stopDir(dir)
+        onChange(null)
+        return
+      }
       entries = readdirSync(dir, { withFileTypes: true })
     } catch {
       stopDir(dir)
@@ -43,7 +49,7 @@ export function watchVault(root: string, onChange: WatchHandler): () => void {
     for (const entry of entries) {
       if (isHiddenName(entry.name)) continue
       const abs = path.join(dir, entry.name)
-      if (entry.isDirectory() || isDir(abs)) {
+      if (entry.isDirectory()) {
         live.add(abs)
         add(abs)
       }
@@ -72,13 +78,5 @@ export function watchVault(root: string, onChange: WatchHandler): () => void {
   return () => {
     for (const watcher of watchers.values()) watcher.close()
     watchers.clear()
-  }
-}
-
-function isDir(abs: string): boolean {
-  try {
-    return statSync(abs).isDirectory()
-  } catch {
-    return false
   }
 }

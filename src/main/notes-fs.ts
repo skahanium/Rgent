@@ -1,4 +1,5 @@
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, stat, writeFile, lstat, realpath, open, rename, unlink } from 'node:fs/promises'
+import { randomUUID, createHash } from 'node:crypto'
 import path from 'node:path'
 import type { TreeEntry } from '../shared/ipc.ts'
 import {
@@ -53,7 +54,7 @@ async function readDir(root: string, dir: string): Promise<TreeEntry[]> {
     out.push({
       name: entry.name,
       relPath,
-      kind: isNotePath(relPath) ? 'note' : 'file'
+      kind: !entry.isSymbolicLink() && isNotePath(relPath) ? 'note' : 'file'
     })
   }
   return out
@@ -61,16 +62,93 @@ async function readDir(root: string, dir: string): Promise<TreeEntry[]> {
 
 export async function readNote(root: string, relPath: string): Promise<string> {
   if (!isNotePath(relPath)) throw new VaultPathError('不是笔记')
-  const abs = mustResolve(root, relPath)
-  const info = await stat(abs)
-  if (!info.isFile()) throw new VaultPathError('不是笔记')
+  const abs = await existingNotePath(root, relPath)
   return readFile(abs, 'utf8')
 }
 
-export async function writeNote(root: string, relPath: string, content: string): Promise<void> {
+export function revisionOf(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex')
+}
+
+export async function readNoteSnapshot(root: string, relPath: string): Promise<{ content: string; revision: string }> {
+  const content = await readNote(root, relPath)
+  return { content, revision: revisionOf(content) }
+}
+
+export async function writeNote(root: string, relPath: string, content: string, expectedRevision: string): Promise<string> {
   if (!isNotePath(relPath)) throw new VaultPathError('不是笔记')
-  const abs = mustResolve(root, relPath)
-  await writeFile(abs, content, 'utf8')
+  const key = mustResolve(root, relPath)
+  return serializedWrite(key, async () => writeNoteNow(root, relPath, content, expectedRevision))
+}
+
+const writes = new Map<string, Promise<void>>()
+
+async function serializedWrite<T>(key: string, work: () => Promise<T>): Promise<T> {
+  const previous = writes.get(key)
+  let release = (): void => {}
+  const turn = new Promise<void>((resolve) => { release = resolve })
+  writes.set(key, turn)
+  await previous
+  try {
+    return await work()
+  } finally {
+    release()
+    if (writes.get(key) === turn) writes.delete(key)
+  }
+}
+
+async function writeNoteNow(root: string, relPath: string, content: string, expectedRevision: string): Promise<string> {
+  const abs = await existingNotePath(root, relPath)
+  const original = await readFile(abs, 'utf8')
+  if (revisionOf(original) !== expectedRevision) throw new VaultPathError('CONFLICT')
+  await atomicReplaceFile(abs, content, async () => {
+    const checked = await existingNotePath(root, relPath)
+    if (checked !== abs || revisionOf(await readFile(abs, 'utf8')) !== expectedRevision) {
+      throw new VaultPathError('CONFLICT')
+    }
+  })
+  return revisionOf(content)
+}
+
+async function existingNotePath(root: string, relPath: string): Promise<string> {
+  const lexical = mustResolve(root, relPath)
+  const rootReal = await realpath(root)
+  const parts = path.relative(path.resolve(root), lexical).split(path.sep)
+  let cursor = rootReal
+  for (const [index, part] of parts.entries()) {
+    cursor = path.join(cursor, part)
+    const info = await lstat(cursor)
+    if (info.isSymbolicLink()) throw new VaultPathError('不能读写符号链接笔记')
+    if (index < parts.length - 1 && !info.isDirectory()) throw new VaultPathError('不是笔记')
+    if (index === parts.length - 1 && !info.isFile()) throw new VaultPathError('不是笔记')
+  }
+  return cursor
+}
+
+/** 同目录替换；写入或校验失败时原文件仍在，临时文件会删除。 */
+export async function atomicReplaceFile(abs: string, content: string, beforeRename?: () => Promise<void>): Promise<void> {
+  const temp = path.join(path.dirname(abs), `.${path.basename(abs)}.${randomUUID()}.tmp`)
+  const current = await lstat(abs).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })
+  if (current && (!current.isFile() || current.isSymbolicLink())) throw new VaultPathError('不能替换符号链接')
+  let created = false
+  try {
+    const handle = await open(temp, 'wx', current?.mode ?? 0o600)
+    created = true
+    try {
+      await handle.writeFile(content, 'utf8')
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    await beforeRename?.()
+    await rename(temp, abs)
+    created = false
+  } finally {
+    if (created) await unlink(temp).catch(() => {})
+  }
 }
 
 export async function createNote(root: string, name: string): Promise<string> {

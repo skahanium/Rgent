@@ -4,7 +4,11 @@ import {
   type BacklinkGroup,
   type FlushDonePayload,
   type NotePayload,
+  type NoteSnapshot,
+  type NoteWriteRequest,
   type NoteWriteResult,
+  type PermissionState,
+  type SetPermissionRequest,
   type SearchHit,
   type TreeEntry,
   type VaultState
@@ -16,9 +20,11 @@ const api = {
   vaultGet: (): Promise<VaultState> => ipcRenderer.invoke(IPC.vaultGet),
   vaultPick: (): Promise<VaultState> => ipcRenderer.invoke(IPC.vaultPick),
   treeList: (): Promise<TreeEntry[]> => ipcRenderer.invoke(IPC.treeList),
-  noteRead: (relPath: string): Promise<string> => ipcRenderer.invoke(IPC.noteRead, relPath),
-  noteWrite: (relPath: string, content: string): Promise<NoteWriteResult> =>
-    ipcRenderer.invoke(IPC.noteWrite, relPath, content),
+  noteRead: (relPath: string): Promise<NoteSnapshot> => ipcRenderer.invoke(IPC.noteRead, relPath),
+  noteWrite: (request: NoteWriteRequest): Promise<NoteWriteResult> =>
+    ipcRenderer.invoke(IPC.noteWrite, request),
+  permissionsGet: (): Promise<PermissionState> => ipcRenderer.invoke(IPC.permissionsGet),
+  permissionsSet: (request: SetPermissionRequest): Promise<PermissionState> => ipcRenderer.invoke(IPC.permissionsSet, request),
   noteCreate: (name: string): Promise<string> => ipcRenderer.invoke(IPC.noteCreate, name),
   backlinks: (relPath: string): Promise<BacklinkGroup[]> => ipcRenderer.invoke(IPC.backlinks, relPath),
   search: (query: string): Promise<SearchHit[]> => ipcRenderer.invoke(IPC.search, query),

@@ -1,8 +1,8 @@
-import { realpath, symlink, mkdtemp, mkdir, writeFile } from 'node:fs/promises'
+import { realpath, symlink, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { createNote, listVaultTree, parseStoredVault, readNote, serializeStoredVault, writeNote } from '../../src/main/notes-fs.ts'
+import { atomicReplaceFile, createNote, listVaultTree, parseStoredVault, readNote, readNoteSnapshot, serializeStoredVault, writeNote } from '../../src/main/notes-fs.ts'
 import { confineExistingFile, isVaultImagePath, resolveInVault, resolveVaultMediaFile, sanitizeNoteName, vaultMediaPath } from '../../src/main/paths.ts'
 import { collectNotePaths, collectRelPaths } from '../../src/renderer/src/tree.ts'
 import { joinVaultRel, parseVaultMediaUrl, vaultMediaUrl } from '../../src/shared/vault-rel.ts'
@@ -98,9 +98,59 @@ describe('notes-fs', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
     const rel = await createNote(root, '初稿')
     expect(rel).toBe('初稿.md')
-    await writeNote(root, rel, '正文')
+    const initial = await readNoteSnapshot(root, rel)
+    const revision = await writeNote(root, rel, '正文', initial.revision)
+    expect(revision).toBe((await readNoteSnapshot(root, rel)).revision)
     expect(await readNote(root, rel)).toBe('正文')
     await expect(createNote(root, '初稿')).rejects.toThrow(/同名/)
+  })
+
+  it('rejects a stale write and preserves the disk version', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    await writeFile(path.join(root, 'a.md'), '初稿', 'utf8')
+    const initial = await readNoteSnapshot(root, 'a.md')
+    await writeFile(path.join(root, 'a.md'), '外部修改', 'utf8')
+    await expect(writeNote(root, 'a.md', '窗口稿', initial.revision)).rejects.toThrow('CONFLICT')
+    expect(await readFile(path.join(root, 'a.md'), 'utf8')).toBe('外部修改')
+  })
+
+  it('serializes concurrent writes of the same revision', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    await writeFile(path.join(root, 'a.md'), '初稿', 'utf8')
+    const initial = await readNoteSnapshot(root, 'a.md')
+    const results = await Promise.allSettled([
+      writeNote(root, 'a.md', '甲', initial.revision),
+      writeNote(root, 'a.md', '乙', initial.revision)
+    ])
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1)
+    expect(['甲', '乙']).toContain(await readFile(path.join(root, 'a.md'), 'utf8'))
+  })
+
+  it('keeps the original and removes the temporary file if replacement fails', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    const target = path.join(root, 'a.md')
+    await writeFile(target, '原文', 'utf8')
+    await expect(atomicReplaceFile(target, '新文', async () => {
+      throw new Error('injected failure')
+    })).rejects.toThrow('injected failure')
+    expect(await readFile(target, 'utf8')).toBe('原文')
+    expect((await listVaultTree(root)).map((entry) => entry.name)).toEqual(['a.md'])
+  })
+
+  it('does not treat symlinked notes or directories as vault notes', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'rgent-out-'))
+    await writeFile(path.join(outside, 'secret.md'), '库外秘密', 'utf8')
+    await symlink(path.join(outside, 'secret.md'), path.join(root, 'link.md'))
+    await symlink(outside, path.join(root, 'linked-dir'))
+    const tree = await listVaultTree(root)
+    expect(tree.find((item) => item.name === 'link.md')?.kind).toBe('file')
+    expect(tree.find((item) => item.name === 'linked-dir')?.kind).toBe('file')
+    await expect(readNote(root, 'link.md')).rejects.toThrow(/符号链接/)
+    await expect(readNote(root, 'linked-dir/secret.md')).rejects.toThrow(/符号链接/)
+    await expect(writeNote(root, 'link.md', '覆盖', 'old')).rejects.toThrow(/符号链接/)
+    expect(await readFile(path.join(outside, 'secret.md'), 'utf8')).toBe('库外秘密')
   })
 
   it('parses stored vault json', () => {

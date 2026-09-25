@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, Menu, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { shouldCloseAfterFlush } from '../shared/flush.ts'
-import { IPC, type FlushDonePayload } from '../shared/ipc.ts'
+import { IPC, type FlushDonePayload, type NoteWriteRequest, type SetPermissionRequest } from '../shared/ipc.ts'
 import { attachVaultProtocol, registerVaultScheme } from './vault-protocol.ts'
 import { VaultSession } from './vault.ts'
 
@@ -141,17 +141,28 @@ function registerIpc(): void {
     if (!vault) throw new Error('NO_VAULT')
     return vault.read(pathInVault)
   })
-  ipcMain.handle(IPC.noteWrite, async (_event, relPath: unknown, content: unknown) => {
-    const pathInVault = asString(relPath)
-    const text = asString(content)
-    if (!pathInVault || text == null) return { ok: false, error: 'BAD_PATH' }
+  ipcMain.handle(IPC.noteWrite, async (_event, value: unknown) => {
+    const request = value as Partial<NoteWriteRequest> | null
+    const pathInVault = asString(request?.relPath)
+    const content = asString(request?.content)
+    const expectedRevision = asString(request?.expectedRevision)
+    if (!pathInVault || content == null || !expectedRevision) return { ok: false, error: 'BAD_PATH' }
     if (!vault) return { ok: false, error: 'NO_VAULT' }
     try {
-      await vault.write(pathInVault, text)
-      return { ok: true }
+      const revision = await vault.write(pathInVault, content, expectedRevision)
+      return { ok: true, revision }
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      return { ok: false, error: err instanceof Error && err.message === 'CONFLICT' ? 'CONFLICT' : 'IO_ERROR' }
     }
+  })
+  ipcMain.handle(IPC.permissionsGet, async () => vault?.permissions() ?? { status: 'invalid', error: '未选择库' })
+  ipcMain.handle(IPC.permissionsSet, async (_event, value: unknown) => {
+    const request = value as Partial<SetPermissionRequest> | null
+    const relPath = asString(request?.relPath)
+    const tier = request?.tier
+    if (!relPath || (tier !== 'reference' && tier !== 'follow' && tier !== 'forbidden')) throw new Error('BAD_PERMISSION')
+    if (!vault) throw new Error('NO_VAULT')
+    return vault.setPermission(relPath, tier)
   })
   ipcMain.handle(IPC.noteCreate, async (_event, name: unknown) => {
     const noteName = asString(name)

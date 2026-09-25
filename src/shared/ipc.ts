@@ -14,7 +14,9 @@ export const IPC = {
   flushRequest: 'app:flush-request',
   flushDone: 'app:flush-done',
   backlinks: 'note:backlinks',
-  search: 'vault:search'
+  search: 'vault:search',
+  permissionsGet: 'permissions:get',
+  permissionsSet: 'permissions:set'
 } as const
 
 export type VaultState =
@@ -25,19 +27,32 @@ export type TreeEntry = {
   name: string
   relPath: string
   kind: 'dir' | 'note' | 'file'
+  tier?: 'follow' | 'forbidden'
   children?: TreeEntry[]
 }
+
+export type PermissionTier = 'reference' | 'follow' | 'forbidden'
+export type PermissionEntry = { relPath: string; tier: PermissionTier }
+export type PermissionState =
+  | { status: 'ready'; entries: PermissionEntry[] }
+  | { status: 'invalid'; error: string }
+export type SetPermissionRequest = { relPath: string; tier: PermissionTier }
+
+export type NoteSnapshot = { content: string; revision: string }
+export type NoteWriteRequest = { relPath: string; content: string; expectedRevision: string }
 
 export type NotePayload = {
   relPath: string
   content: string
+  revision: string
 }
 
 export type NoteWriteResult = {
   ok: true
+  revision: string
 } | {
   ok: false
-  error: string
+  error: 'CONFLICT' | 'BAD_PATH' | 'NO_VAULT' | 'IO_ERROR'
 }
 
 export type FlushDonePayload = {

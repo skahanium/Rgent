@@ -1,9 +1,10 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { dialog, type BrowserWindow } from 'electron'
-import type { BacklinkGroup, NotePayload, SearchHit, TreeEntry, VaultState } from '../shared/ipc.ts'
-import { createNote, listVaultTree, parseStoredVault, readNote, serializeStoredVault, writeNote } from './notes-fs.ts'
+import type { BacklinkGroup, NotePayload, NoteSnapshot, PermissionEntry, PermissionState, PermissionTier, SearchHit, TreeEntry, VaultState } from '../shared/ipc.ts'
+import { createNote, listVaultTree, parseStoredVault, readNoteSnapshot, serializeStoredVault, writeNote } from './notes-fs.ts'
 import { isNotePath } from './paths.ts'
+import { loadPermissions, setPermission as savePermission, tierFor } from './permissions.ts'
 import { VaultIndex } from './vault-index.ts'
 import { watchVault } from './watch.ts'
 
@@ -70,19 +71,35 @@ export class VaultSession {
 
   async tree(): Promise<TreeEntry[]> {
     if (!this.root) throw new Error('NO_VAULT')
-    return listVaultTree(this.root)
+    const entries = await listVaultTree(this.root)
+    const policy = await loadPermissions(this.root)
+    if (policy.status === 'ready') markTiers(entries, policy.entries)
+    return entries
   }
 
-  async read(relPath: string): Promise<string> {
+  async permissions(): Promise<PermissionState> {
     if (!this.root) throw new Error('NO_VAULT')
-    return readNote(this.root, relPath)
+    return loadPermissions(this.root)
   }
 
-  async write(relPath: string, content: string): Promise<void> {
+  async setPermission(relPath: string, tier: PermissionTier): Promise<PermissionState> {
     if (!this.root) throw new Error('NO_VAULT')
-    await writeNote(this.root, relPath, content)
+    const state = await savePermission(this.root, relPath, tier)
+    this.emit('tree:changed')
+    return state
+  }
+
+  async read(relPath: string): Promise<NoteSnapshot> {
+    if (!this.root) throw new Error('NO_VAULT')
+    return readNoteSnapshot(this.root, relPath)
+  }
+
+  async write(relPath: string, content: string, expectedRevision: string): Promise<string> {
+    if (!this.root) throw new Error('NO_VAULT')
+    const revision = await writeNote(this.root, relPath, content, expectedRevision)
     this.lastWrites.set(relPath, { content, at: Date.now() })
     this.index.markDirty()
+    return revision
   }
 
   async create(name: string): Promise<string> {
@@ -136,10 +153,10 @@ export class VaultSession {
   private async emitNoteChange(relPath: string): Promise<void> {
     if (!this.root) return
     try {
-      const content = await readNote(this.root, relPath)
+      const { content, revision } = await readNoteSnapshot(this.root, relPath)
       const recent = this.lastWrites.get(relPath)
       if (recent && recent.content === content && Date.now() - recent.at < 2000) return
-      const payload: NotePayload = { relPath, content }
+      const payload: NotePayload = { relPath, content, revision }
       this.emit('note:external-change', payload)
     } catch {
       /* deleted notes refresh via tree:changed */
@@ -152,6 +169,14 @@ export class VaultSession {
     } catch {
       return null
     }
+  }
+}
+
+function markTiers(entries: TreeEntry[], rules: readonly PermissionEntry[]): void {
+  for (const entry of entries) {
+    const tier = tierFor(entry.relPath, rules)
+    if (tier !== 'reference') entry.tier = tier
+    if (entry.children) markTiers(entry.children, rules)
   }
 }
 

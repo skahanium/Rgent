@@ -1,9 +1,9 @@
-import { IPC, type SearchHit, type TreeEntry, type VaultState } from '@shared'
+import { IPC, type NoteSnapshot, type PermissionState, type PermissionTier, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { renderBacklinks } from './backlinks.ts'
 import { promptConflict, promptNewNote } from './dialogs.ts'
 import { renderSearchResults } from './search.ts'
-import { pendingWrites, type Tab } from './tabs.ts'
+import { applySaved, pendingWrites, type Tab } from './tabs.ts'
 import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
 import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.ts'
 
@@ -16,6 +16,7 @@ export async function start(root: HTMLElement): Promise<void> {
         <button type="button" class="tree-toggle" aria-controls="tree-panel" aria-expanded="false">目录</button>
         <p class="brand">Rgent</p>
         <span class="vault-name" hidden></span>
+        <span class="permission-warning" role="alert" hidden></span>
         <div class="search">
           <input type="search" class="search-input" placeholder="搜标题或正文" aria-label="搜标题或正文" autocomplete="off" />
           <div class="search-panel" hidden></div>
@@ -49,6 +50,7 @@ export async function start(root: HTMLElement): Promise<void> {
   const treeScroll = root.querySelector('.tree-scroll') as HTMLElement
   const treeToggle = root.querySelector('.tree-toggle') as HTMLButtonElement
   const vaultName = root.querySelector('.vault-name') as HTMLElement
+  const permissionWarning = root.querySelector('.permission-warning') as HTMLElement
   const tabsEl = root.querySelector('.tabs') as HTMLElement
   const editorHostEl = root.querySelector('.editor-host') as HTMLElement
   const emptyEl = root.querySelector('.empty') as HTMLElement
@@ -65,6 +67,8 @@ export async function start(root: HTMLElement): Promise<void> {
   let backlinkToken = 0
   let searchTimer: number | null = null
   let searchHits: SearchHit[] = []
+  let permissionState: PermissionState = { status: 'ready', entries: [] }
+  let saveInFlight: Promise<boolean> | null = null
 
   const editor: EditorHost = mountEditor(editorHostEl, (text) => {
     const tab = current()
@@ -150,14 +154,15 @@ export async function start(root: HTMLElement): Promise<void> {
     const tab = tabs.find((item) => item.relPath === payload.relPath)
     if (!tab) return
     const live = composeSource(tab.relPath === active ? editor.getText() : tab.content, tab.ledger)
+    const snapshot: NoteSnapshot = { content: payload.content, revision: payload.revision }
     if (!tab.dirty) {
-      applySource(tab, payload.content)
+      applySource(tab, snapshot)
       if (active === tab.relPath) editor.setText(tab.content)
       renderTabs()
       return
     }
     if (live === payload.content) {
-      applySource(tab, payload.content)
+      applySource(tab, snapshot)
       renderTabs()
       return
     }
@@ -166,10 +171,10 @@ export async function start(root: HTMLElement): Promise<void> {
     const choice = await promptConflict()
     conflictOpen = false
     if (choice === 'disk') {
-      applySource(tab, payload.content)
+      applySource(tab, snapshot)
       if (active === tab.relPath) editor.setText(tab.content)
-    } else {
-      if (active === tab.relPath) tab.content = editor.getText()
+    } else if (choice === 'window') {
+      tab.revision = payload.revision
       await writeTab(tab)
     }
     renderTabs()
@@ -271,9 +276,12 @@ export async function start(root: HTMLElement): Promise<void> {
 
   async function refreshTree(): Promise<void> {
     try {
-      tree = await window.rgent.treeList()
+      const [nextTree, nextPermissions] = await Promise.all([window.rgent.treeList(), window.rgent.permissionsGet()])
+      tree = nextTree
+      permissionState = nextPermissions
     } catch {
       tree = []
+      permissionState = { status: 'invalid', error: '无法读取权限名单' }
     }
     const present = collectNotePaths(tree)
     for (const tab of [...tabs]) {
@@ -288,7 +296,22 @@ export async function start(root: HTMLElement): Promise<void> {
   function paintTree(): void {
     renderTree(treeScroll, tree, active, (relPath) => {
       void openNote(relPath)
-    })
+    }, (relPath, tier) => { void changePermission(relPath, tier) })
+    permissionWarning.hidden = permissionState.status !== 'invalid'
+    if (permissionState.status === 'invalid') permissionWarning.textContent = `AI 门禁暂停：${permissionState.error}。请检查库根 .rgent-permissions。`
+  }
+
+  async function changePermission(relPath: string, tier: PermissionTier): Promise<void> {
+    if (permissionState.status === 'invalid') {
+      window.alert('权限名单损坏或无法读取，请先在库根修复 .rgent-permissions。')
+      return
+    }
+    try {
+      permissionState = await window.rgent.permissionsSet({ relPath, tier })
+      await refreshTree()
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error))
+    }
   }
 
   function noteHost(): NoteHost {
@@ -314,12 +337,13 @@ export async function start(root: HTMLElement): Promise<void> {
     }
     try {
       const source = await window.rgent.noteRead(relPath)
-      const part = partitionSource(source)
+      const part = partitionSource(source.content)
       tabs.push({
         relPath,
         content: part.body,
         ledger: part.ledger,
         saved: part.body,
+        revision: source.revision,
         dirty: false
       })
       activate(relPath)
@@ -378,7 +402,7 @@ export async function start(root: HTMLElement): Promise<void> {
   async function closeTab(relPath: string, opts: { save?: boolean } = {}): Promise<void> {
     const tab = tabs.find((item) => item.relPath === relPath)
     if (!tab) return
-    if (opts.save !== false && tab.dirty) await writeTab(tab)
+    if (opts.save !== false && tab.dirty && (!(await writeTab(tab)) || tab.dirty)) return
     const index = tabs.findIndex((item) => item.relPath === relPath)
     tabs.splice(index, 1)
     if (active === relPath) {
@@ -398,40 +422,91 @@ export async function start(root: HTMLElement): Promise<void> {
     }, SAVE_MS)
   }
 
-  async function flushSave(): Promise<boolean> {
+  function flushSave(): Promise<boolean> {
+    if (saveInFlight) {
+      return saveInFlight.then((ok) => ok && tabs.some((tab) => tab.dirty) ? flushSave() : ok)
+    }
+    const task = performFlushSave()
+    saveInFlight = task
+    return task.finally(() => {
+      if (saveInFlight === task) saveInFlight = null
+    })
+  }
+
+  async function performFlushSave(): Promise<boolean> {
     if (saveTimer != null) {
       window.clearTimeout(saveTimer)
       saveTimer = null
     }
-    const writes = pendingWrites(tabs, active, editor.getText())
     let ok = true
-    for (const write of writes) {
-      const tab = tabs.find((item) => item.relPath === write.relPath)
-      if (!tab) continue
-      tab.content = write.body
-      if (!(await writeTab(tab))) ok = false
+    let wrote = false
+    for (let pass = 0; pass < 3; pass += 1) {
+      const writes = pendingWrites(tabs, active, editor.getText())
+      if (writes.length === 0) break
+      for (const write of writes) {
+        const tab = tabs.find((item) => item.relPath === write.relPath)
+        if (!tab) continue
+        wrote = true
+        if (!(await writeTab(tab, write.body))) ok = false
+      }
+      if (!ok) break
     }
     renderTabs()
-    if (ok && writes.length > 0) void refreshBacklinks()
-    return ok
+    if (ok && wrote) void refreshBacklinks()
+    if (ok && tabs.some((tab) => tab.dirty)) scheduleSave()
+    return ok && !tabs.some((tab) => tab.dirty)
   }
 
-  async function writeTab(tab: Tab): Promise<boolean> {
-    const result = await window.rgent.noteWrite(tab.relPath, composeSource(tab.content, tab.ledger))
+  async function writeTab(tab: Tab, body = tab.relPath === active ? editor.getText() : tab.content): Promise<boolean> {
+    const result = await window.rgent.noteWrite({
+      relPath: tab.relPath,
+      content: composeSource(body, tab.ledger),
+      expectedRevision: tab.revision
+    })
     if (result.ok) {
-      tab.saved = tab.content
-      tab.dirty = false
+      applySaved(tab, body, result.revision)
       void refreshBacklinks()
       return true
+    }
+    if (result.error === 'CONFLICT') {
+      if (conflictOpen) return false
+      conflictOpen = true
+      try {
+        const disk = await window.rgent.noteRead(tab.relPath)
+        const choice = await promptConflict()
+        if (choice === 'disk') {
+          applySource(tab, disk)
+          if (active === tab.relPath) editor.setText(tab.content)
+          return true
+        }
+        if (choice === 'window') {
+          tab.revision = disk.revision
+          const currentBody = tab.relPath === active ? editor.getText() : tab.content
+          const retry = await window.rgent.noteWrite({
+            relPath: tab.relPath,
+            content: composeSource(currentBody, tab.ledger),
+            expectedRevision: tab.revision
+          })
+          if (retry.ok) {
+            applySaved(tab, currentBody, retry.revision)
+            return true
+          }
+        }
+      } catch {
+        // 保留脏稿，等人重试。
+      } finally {
+        conflictOpen = false
+      }
     }
     return false
   }
 
-  function applySource(tab: Tab, source: string): void {
-    const part = partitionSource(source)
+  function applySource(tab: Tab, source: NoteSnapshot): void {
+    const part = partitionSource(source.content)
     tab.content = part.body
     tab.ledger = part.ledger
     tab.saved = part.body
+    tab.revision = source.revision
     tab.dirty = false
   }
 

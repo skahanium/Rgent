@@ -4,13 +4,7 @@ AI 原生的单机笔记兼资料库。Markdown 是真相。AI 写在文档里�
 
 ## 从哪读起
 
-完整说明在 [docs/README.md](docs/README.md)：
-
-1. [理念与远期](docs/vision.md)
-2. [已拍板决定](docs/decisions.md)
-3. [架构](docs/architecture.md)
-4. [施工守则](docs/handbook.md)
-5. [开源说明](docs/opensource.md)
+完整说明在 [docs/README.md](docs/README.md)。围栏从 [已拍板决定](docs/decisions.md) 读。动手看 [施工图](docs/build.md)。工程题看 [施工对象](docs/topics.md)。编码 Agent 读 [AGENTS.md](AGENTS.md)。
 
 许可为 [MIT](LICENSE)。参与方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
@@ -34,4 +28,4 @@ ELECTRON_GET_USE_PROXY=true GLOBAL_AGENT_HTTPS_PROXY=http://127.0.0.1:7897 pnpm 
 
 ## 现状
 
-产品骨架是 Electron + TypeScript。文档以 `docs/` 为准。
+产品骨架是 Electron + TypeScript。笔记壳、正文管线、账本缝、人搜与反链已可跑。**当前阶段是门禁及其前置文件安全**，见 [施工图](docs/build.md)。未开工：身份标记、一场 `/`、`AgentHost`、技能、MCP、设置像素。

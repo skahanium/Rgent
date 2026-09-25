@@ -8,6 +8,8 @@ export type Tab = {
   ledger: string | null
   /** 上次成功写盘时的正文。 */
   saved: string
+  /** 上次读盘或成功写盘的整文件修订值。 */
+  revision: string
   dirty: boolean
 }
 
@@ -17,6 +19,7 @@ export type PendingWrite = {
   body: string
   /** 磁盘整文件：composeSource(body, ledger)。 */
   content: string
+  expectedRevision: string
 }
 
 export function diskOf(tab: Pick<Tab, 'content' | 'ledger'>, body = tab.content): string {
@@ -42,8 +45,15 @@ export function pendingWrites(
     out.push({
       relPath: tab.relPath,
       body,
-      content: composeSource(body, tab.ledger)
+      content: composeSource(body, tab.ledger),
+      expectedRevision: tab.revision
     })
   }
   return out
+}
+
+export function applySaved(tab: Tab, body: string, revision: string): void {
+  tab.saved = body
+  tab.revision = revision
+  tab.dirty = tab.content !== body
 }

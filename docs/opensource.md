@@ -1,8 +1,8 @@
 # 开源说明
 
-本文只约定许可、贡献与治理怎么写清楚。仓库暂不提供 GitHub issue / PR 模板，也不提供 CI；这些以后若要做，再单独立项，不在本文假装已经存在。
+本文只约定许可、贡献与治理怎么写清楚。仓库暂不提供 GitHub issue / PR 模板；已有轻量文档检查与 macOS、Windows CI。
 
-施工纪律见 [施工守则](handbook.md)。围栏见 [已拍板决定](decisions.md)。
+施工纪律见 [施工守则](handbook.md)。围栏见 [已拍板决定](decisions.md)。当前阶段见 [施工图](build.md)。编码 Agent 读仓库根目录 [AGENTS.md](../AGENTS.md)。
 
 ## 许可
 
@@ -12,15 +12,15 @@ Rgent 以 [MIT License](../LICENSE) 发布。
 
 ## 谁在维护
 
-目前为一人维护（Skahanium，`skahanium@gmail.com`）。不承诺响应时限，不承诺路线图日期。
+目前为一人维护（Skahanium，`skahanium@gmail.com`）。不承诺响应时限，不承诺路线图日期。[施工图](build.md) 里的依赖顺序不是排期。
 
 重大围栏以 [已拍板决定](decisions.md) 为准。维护者可以拒绝与围栏冲突的改动，并请先改文档再提实现。
 
 ## 如何贡献
 
-1. 阅读 [文档地图](README.md)、[理念](vision.md) 和 [施工守则](handbook.md)。
-2. 改行为或架构前，说明要动的是哪一条围栏。先改围栏，再实现。
-3. 欢迎讨论、补文档、补测试与实现。当前没有强制的 PR 模板或自动化检查。
+1. 阅读 [文档地图](README.md)、[理念](vision.md) 和 [施工守则](handbook.md)。动手前看 [施工图](build.md) 当前阶段。
+2. 改行为或架构前，说明要动的是哪一条围栏。先改围栏，再实现。未开阶段不要提前写代码。
+3. 欢迎讨论、补文档、补测试与实现。当前没有强制的 PR 模板；CI 运行文档检查、测试与构建。
 4. 不要提交真实密钥、库内容，或把密钥写进示例代码。
 
 根目录 [CONTRIBUTING.md](../CONTRIBUTING.md) 指向这里。
