@@ -454,7 +454,7 @@ void Replace(VaultHandle* root, const std::string& relative_file,
   const auto parts = Parts(relative_file);
   auto chain = WalkDirectories(root, parts, parts.size() - 1);
   auto target = OpenMaybe(chain.current, parts.back(), FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                          kNonDirectory, FILE_SHARE_READ);
+                          kNonDirectory, FILE_SHARE_READ | FILE_SHARE_DELETE);
   if (target.valid()) RequireKind(target.get(), "file");
   if (expected) {
     if (!target.valid() || ReadAll(target.get()) != *expected) Fail("CONFLICT");
