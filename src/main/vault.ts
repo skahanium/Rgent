@@ -4,7 +4,8 @@ import { dialog, type BrowserWindow } from 'electron'
 import type { BacklinkGroup, NotePayload, NoteSnapshot, PermissionEntry, PermissionState, PermissionTier, SearchHit, TreeEntry, VaultState } from '../shared/ipc.ts'
 import { createNote, listVaultTree, parseStoredVault, readNoteSnapshot, serializeStoredVault, writeNote } from './notes-fs.ts'
 import { isNotePath } from './paths.ts'
-import { loadPermissions, setPermission as savePermission, tierFor } from './permissions.ts'
+import { effectivePermissionEntries, loadPermissions, setPermission as savePermission, tierFor } from './permissions.ts'
+import { closeSecureFs } from './secure-fs.ts'
 import { VaultIndex } from './vault-index.ts'
 import { watchVault } from './watch.ts'
 
@@ -13,6 +14,7 @@ export class VaultSession {
   private stopWatch: (() => void) | null = null
   private lastWrites = new Map<string, { content: string; at: number }>()
   private debounce: NodeJS.Timeout | null = null
+  private changedNotes = new Set<string>()
   private index = new VaultIndex(
     () => this.root,
     () => this.tree()
@@ -73,7 +75,7 @@ export class VaultSession {
     if (!this.root) throw new Error('NO_VAULT')
     const entries = await listVaultTree(this.root)
     const policy = await loadPermissions(this.root)
-    if (policy.status === 'ready') markTiers(entries, policy.entries)
+    if (policy.status === 'ready') markTiers(entries, effectivePermissionEntries(this.root, policy.entries))
     return entries
   }
 
@@ -122,12 +124,17 @@ export class VaultSession {
   dispose(): void {
     this.stopWatch?.()
     this.stopWatch = null
+    if (this.debounce) clearTimeout(this.debounce)
+    this.debounce = null
+    this.changedNotes.clear()
+    if (this.root) closeSecureFs(this.root)
     this.root = null
     this.index.reset()
   }
 
   private attach(root: string): void {
     this.stopWatch?.()
+    if (this.root) closeSecureFs(this.root)
     this.root = path.resolve(root)
     // 换库必须清索引，否则新库会看到旧库的反链。
     this.index.reset()
@@ -141,12 +148,13 @@ export class VaultSession {
       return
     }
     this.index.markDirty()
+    if (relPath && isNotePath(relPath)) this.changedNotes.add(relPath)
     if (this.debounce) clearTimeout(this.debounce)
     this.debounce = setTimeout(() => {
       this.emit('tree:changed')
-      if (relPath && isNotePath(relPath) && this.root) {
-        void this.emitNoteChange(relPath)
-      }
+      const notes = this.changedNotes
+      this.changedNotes = new Set()
+      if (this.root) for (const note of notes) void this.emitNoteChange(note)
     }, 80)
   }
 

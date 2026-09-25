@@ -1,9 +1,9 @@
-import { stat, symlink, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, symlink, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { atomicReplaceFile, createNote, listVaultTree, parseStoredVault, readNote, readNoteSnapshot, serializeStoredVault, writeNote } from '../../src/main/notes-fs.ts'
-import { confineExistingFile, isVaultImagePath, resolveInVault, resolveVaultMediaFile, sanitizeNoteName, vaultMediaPath } from '../../src/main/paths.ts'
+import { createNote, listVaultTree, parseStoredVault, readNote, readNoteSnapshot, serializeStoredVault, writeNote } from '../../src/main/notes-fs.ts'
+import { isVaultImagePath, readVaultMedia, resolveInVault, sanitizeNoteName, vaultMediaPath } from '../../src/main/paths.ts'
 import { collectNotePaths, collectRelPaths } from '../../src/renderer/src/tree.ts'
 import { joinVaultRel, parseVaultMediaUrl, vaultMediaUrl } from '../../src/shared/vault-rel.ts'
 
@@ -51,21 +51,15 @@ describe('vault paths', () => {
     await writeFile(secret, 'secret', 'utf8')
     const link = path.join(root, 'pic.png')
     await symlink(secret, link)
-    expect(confineExistingFile(root, link)).toBeNull()
-    expect(resolveVaultMediaFile(root, 'pic.png')).toEqual({ error: 403 })
+    expect(readVaultMedia(root, 'pic.png')).toEqual({ error: 403 })
   })
 
   it('serves a real in-vault image path after confinement', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
     const file = path.join(root, 'pic.png')
     await writeFile(file, 'png', 'utf8')
-    const resolved = resolveVaultMediaFile(root, 'pic.png')
-    expect(resolved).toHaveProperty('abs')
-    if (!('abs' in resolved)) return
-    // Windows 可用 8.3 短路径表示同一文件；比较文件身份，而非路径字符串。
-    const [actual, expected] = await Promise.all([stat(resolved.abs), stat(file)])
-    expect([actual.dev, actual.ino]).toEqual([expected.dev, expected.ino])
-    expect(await readFile(resolved.abs, 'utf8')).toBe('png')
+    const resolved = readVaultMedia(root, 'pic.png')
+    expect('bytes' in resolved ? resolved.bytes.toString('utf8') : resolved).toBe('png')
   })
 
   it('sanitizes note names', () => {
@@ -132,13 +126,17 @@ describe('notes-fs', () => {
     expect(['甲', '乙']).toContain(await readFile(path.join(root, 'a.md'), 'utf8'))
   })
 
-  it('keeps the original and removes the temporary file if replacement fails', async () => {
+  it.skipIf(process.platform === 'win32')('keeps the original when the directory refuses a temporary file', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
     const target = path.join(root, 'a.md')
     await writeFile(target, '原文', 'utf8')
-    await expect(atomicReplaceFile(target, '新文', async () => {
-      throw new Error('injected failure')
-    })).rejects.toThrow('injected failure')
+    const old = await readNoteSnapshot(root, 'a.md')
+    await chmod(root, 0o555)
+    try {
+      await expect(writeNote(root, 'a.md', '新文', old.revision)).rejects.toThrow()
+    } finally {
+      await chmod(root, 0o755)
+    }
     expect(await readFile(target, 'utf8')).toBe('原文')
     expect((await listVaultTree(root)).map((entry) => entry.name)).toEqual(['a.md'])
   })

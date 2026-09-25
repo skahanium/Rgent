@@ -1,10 +1,12 @@
-import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { loadPermissions, modelTierFor, setPermission, tierFor } from '../../src/main/permissions.ts'
 import { listVaultTree, readNoteSnapshot, writeNote } from '../../src/main/notes-fs.ts'
 import { VaultIndex } from '../../src/main/vault-index.ts'
+import { SecureVaultFs } from '../../src/main/secure-fs.ts'
 
 const file = (root: string) => path.join(root, '.rgent-permissions')
 
@@ -50,6 +52,22 @@ describe('permission policy', () => {
     expect(tierFor('工作/公开的.md', entries)).toBe('forbidden')
   })
 
+  it('does not apply a folder rule to its same-name note', () => {
+    const entries = [{ relPath: '工作/X', tier: 'forbidden' as const }]
+    expect(tierFor('工作/X.md', entries)).toBe('reference')
+    expect(tierFor('工作/X/a.png', entries)).toBe('forbidden')
+  })
+
+  it('prefers a direct folder rule over a same-length rule derived from its note', () => {
+    const entries = [
+      { relPath: '工作/X', tier: 'follow' as const },
+      { relPath: '工作/X.md', tier: 'forbidden' as const }
+    ]
+    expect(tierFor('工作/X/a.png', entries)).toBe('follow')
+    expect(tierFor('工作/X.md', entries)).toBe('forbidden')
+    expect(tierFor('工作/X/a.png', [...entries].reverse())).toBe('follow')
+  })
+
   it('writes folder rules atomically, reloads external edits, and leaves human search intact', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-policy-'))
     await mkdir(path.join(root, '工作'))
@@ -90,5 +108,70 @@ describe('permission policy', () => {
     if (state.status !== 'ready') return
     expect(tierFor('甲/a.md', state.entries)).toBe('forbidden')
     expect(tierFor('乙/a.md', state.entries)).toBe('follow')
+  })
+
+  it('does not overwrite an external list edit between reading and committing', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-policy-'))
+    await mkdir(path.join(root, '工作'))
+    await writeFile(file(root), JSON.stringify({ 工作: 'forbidden' }), 'utf8')
+    const original = SecureVaultFs.prototype.readText
+    let changed = false
+    const spy = vi.spyOn(SecureVaultFs.prototype, 'readText').mockImplementation(function (this: SecureVaultFs, relPath) {
+      const value = original.call(this, relPath)
+      if (relPath === '.rgent-permissions' && !changed) {
+        changed = true
+        writeFileSync(file(root), '{broken', 'utf8')
+      }
+      return value
+    })
+    try {
+      await expect(setPermission(root, '工作', 'follow')).rejects.toThrow()
+      expect(await readFile(file(root), 'utf8')).toBe('{broken')
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('does not weaken a folder rule through a real filesystem case alias', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-policy-'))
+    await mkdir(path.join(root, 'Secret'))
+    await writeFile(path.join(root, 'Secret', 'a.md'), 'secret', 'utf8')
+    await writeFile(file(root), JSON.stringify({ Secret: 'forbidden' }), 'utf8')
+    const alias = path.join(root, 'secret', 'a.md')
+    const same = await stat(alias).then(async (info) => {
+      const original = await stat(path.join(root, 'Secret', 'a.md'))
+      return info.dev === original.dev && info.ino === original.ino
+    }).catch(() => false)
+    if (!same) return // case-sensitive volume: these are distinct paths
+    await expect(modelTierFor(root, 'secret/a.md')).rejects.toThrow('FORBIDDEN')
+  })
+
+  it('carries a note rule to a differently cased same-name attachment folder', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-policy-'))
+    await writeFile(path.join(root, 'X.md'), 'note', 'utf8')
+    await mkdir(path.join(root, 'x'))
+    await writeFile(path.join(root, 'x', 'pic.png'), 'image', 'utf8')
+    await writeFile(file(root), JSON.stringify({ 'X.md': 'forbidden' }), 'utf8')
+    const sameFolder = await stat(path.join(root, 'X')).then(async (info) => {
+      const actual = await stat(path.join(root, 'x'))
+      return info.dev === actual.dev && info.ino === actual.ino
+    }).catch(() => false)
+    if (!sameFolder) return
+    await expect(modelTierFor(root, 'x/pic.png')).rejects.toThrow('FORBIDDEN')
+  })
+
+  it('uses a Unicode alias only when the filesystem resolves it to the same folder', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-policy-'))
+    const composed = 'Caf\u00e9'
+    const decomposed = 'Cafe\u0301'
+    await mkdir(path.join(root, composed))
+    await writeFile(path.join(root, composed, 'a.md'), 'note', 'utf8')
+    await writeFile(file(root), JSON.stringify({ [composed]: 'forbidden' }), 'utf8')
+    const same = await stat(path.join(root, decomposed)).then(async (info) => {
+      const actual = await stat(path.join(root, composed))
+      return info.dev === actual.dev && info.ino === actual.ino
+    }).catch(() => false)
+    if (!same) return
+    await expect(modelTierFor(root, `${decomposed}/a.md`)).rejects.toThrow('FORBIDDEN')
   })
 })

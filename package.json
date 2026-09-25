@@ -8,10 +8,10 @@
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "dev": "node scripts/build-native.mjs && electron-vite dev",
+    "build": "node scripts/build-native.mjs && electron-vite build && node scripts/copy-native.mjs",
     "preview": "electron-vite preview",
-    "test": "tsc --noEmit && vitest run",
+    "test": "node scripts/build-native.mjs && tsc --noEmit && vitest run",
     "docs:check": "node scripts/check-docs.mjs"
   },
   "engines": {
@@ -40,6 +40,7 @@
     "@types/node": "^26.6.2",
     "electron": "^44.4.5",
     "electron-vite": "^5.0.0",
+    "node-gyp": "^12.4.0",
     "typescript": "^7.0.2",
     "vite": "^7.3.6",
     "vitest": "^5.0.1"

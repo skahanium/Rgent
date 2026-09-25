@@ -92,15 +92,15 @@ flowchart LR
 | IPC 是唯一通道 | 壳 | 通道名和载荷类型在 `src/shared/ipc.ts`。渲染进程不得再开通道。 |
 | 不随便开页 | 壳 | `setWindowOpenHandler` 一律 deny。`will-navigate` 一律 `preventDefault`；`http(s)` 走系统浏览器（`src/main/index.ts`）。 |
 | CSP | 壳 | `src/renderer/index.html`：`default-src 'self'`；图允许 `data:` 与 `rgent-vault:`。 |
-| 媒体不逃出库 | IO | `resolveInVault` 拒绝 `..` 与绝对路径。`confineExistingFile` 用 `realpath` 挡住符号链接逃出（`src/main/paths.ts`）。`rgent-vault:` 协议只给收敛后的文件（`src/main/vault-protocol.ts`）。 |
+| 媒体不逃出库 | IO | `resolveInVault` 拒绝 `..` 与绝对路径；`rgent-vault:` 经 `SecureVaultFs.readBytes` 从固定库根句柄逐级相对读取，不向 `net.fetch` 传校验后的路径（`src/main/paths.ts`、`vault-protocol.ts`）。 |
 | 隐藏路径人写盘写不了 | IO | `writeNote` / `readNote` 拒绝含点号段的路径（`src/main/notes-fs.ts`）。文件树不列出点号名。权限名单、技能文件必须落在这类路径上。 |
-| 笔记路径与冲突写盘 | IO | 静态符号链接笔记或父目录被拒绝，树仅按普通文件显示；读写、索引和监听不主动跟随。`noteRead` 给全文及内容修订值，`noteWrite` 带预期修订值；同篇应用内串行检查，同目录临时文件原子替换，冲突交给人选磁盘或窗口稿。`lstat` 后再按路径读取仍有并发换链窗口，尚未完成此威胁的验收。 |
-| 权限名单的失效状态 | 主进程 | 名单缺失是空名单；已有名单损坏、无效或不可读是 `invalid`。人读写搜继续，树上提示修复，名单写入只接受有效文件夹与三档值并原子替换。`modelTierFor` 目前仅被测试调用；Host 未接线，尚无实际模型出口。名单读取的并发换链与 Windows 路径别名仍待收口。 |
+| 笔记路径与冲突写盘 | IO | 主进程 Node-API 模块（`native/**`）固定库根目录句柄，逐级相对打开；macOS 用 `openat` / `renameat`，Windows 用 `NtCreateFile` 相对目录句柄 / `FileRenameInfoEx`，拒绝链接与重解析点。树、读写、索引和媒体均走 `src/main/secure-fs.ts`，模块缺失不降级。`noteRead` 给全文及内容修订值，`noteWrite` 带预期修订值；同篇应用内串行检查，同目录临时文件原子替换，冲突交给人选磁盘或窗口稿。目录变化以安全元数据扫描发现，不按旧路径建立监听。**待修：macOS 外部进程搬走已打开的库内子目录，可能使句柄相对替换落到库外；当前实现未满足严格边界。** |
+| 权限名单的失效状态 | 主进程 | 名单缺失是空名单；已有名单损坏、无效、无法读取或条目身份不稳是 `invalid`。人读写搜继续，树上提示修复，名单写入只接受经句柄核验的文件夹与三档值并原子替换。权限按文件系统实际路径组成归一，别名冲突与身份变化使 AI 失败关闭。`modelTierFor` 目前仅被测试调用；Host 未接线，尚无实际模型出口。Windows 真实别名与写盘仍待 CI 验收。 |
 | 人写盘 ≠ 模型写盘 | IPC | `noteWrite` 只给人的自动写盘与手动保存。`AgentHost` 不得复用这条通道。Host 未开工，这条先当禁令。 |
 | 索引不见账本 | 管线 / 索引 | `partitionSource` 切开锚点（`src/markdown/partition.ts`）。`compile` 和 `VaultIndex` 只吃 `body`。 |
 | 画布不见账本 | 画布 | Tab 拆 `content`（正文）与 `ledger`（`src/renderer/src/tabs.ts`）。编辑器只 `setText(body)`。写盘 `composeSource`。 |
 | 人搜含禁区 | 索引 | `VaultIndex` 是全量语料，建索引时不按权限过滤。当前人搜是惰性全量 + 子串。模型检索尚未开工，未来在查询期过滤。 |
-| 退出不丢稿 | 壳 | 关窗先 `flushRequest`。保存失败时主进程原生对话框让人重试、继续编辑或明确放弃；关窗和 `Cmd+Q` 走同一状态流程，重复请求不重复弹框。超时只在渲染进程已死时关。`vault.dispose()` 在 `will-quit`，不在 `before-quit`（退出 flush 还要走 `noteWrite`）。流程测试见 `test/shared/flush.test.ts`；构建后窗口已验证可启动，失败弹窗仍待实际交互复核。 |
+| 退出不丢稿 | 壳 | 关窗先 `flushRequest`。保存失败时主进程原生对话框让人重试、继续编辑或明确放弃；关窗和 `Cmd+Q` 走同一状态流程，重复请求不重复弹框。超时只在渲染进程已死时关。`vault.dispose()` 在 `will-quit`，不在 `before-quit`（退出 flush 还要走 `noteWrite`）。流程测试见 `test/shared/flush.test.ts`；失败弹窗的三条路径已在本机实际复核，本次原生模块构建后窗口已启动并读到笔记。 |
 | 密钥不进库 | 主进程 | Host 最小环接 Electron `safeStorage`，密文只存应用数据目录；尚未接线。 |
 
 ## 选定值（可迁，不是永久合同）

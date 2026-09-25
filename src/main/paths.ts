@@ -1,6 +1,6 @@
-import { existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { isVaultImagePath } from '../shared/vault-rel.ts'
+import { secureFsFor } from './secure-fs.ts'
 
 export { isVaultImagePath }
 
@@ -41,25 +41,13 @@ export function vaultMediaPath(root: string, relPath: string): string | null {
   return resolveInVault(root, relPath)
 }
 
-export function confineExistingFile(root: string, abs: string): string | null {
+export function readVaultMedia(root: string, relPath: string): { bytes: Buffer } | { error: 403 | 404 } {
+  if (!vaultMediaPath(root, relPath)) return { error: 403 }
   try {
-    const rootReal = realpathSync(path.resolve(root))
-    const fileReal = realpathSync(abs)
-    const relative = path.relative(rootReal, fileReal)
-    if (relative.startsWith('..') || path.isAbsolute(relative)) return null
-    return fileReal
-  } catch {
-    return null
+    return { bytes: secureFsFor(root).readBytes(relPath) }
+  } catch (error) {
+    return { error: error instanceof Error && error.message === 'ENOENT' ? 404 : 403 }
   }
-}
-
-export function resolveVaultMediaFile(root: string, relPath: string): { abs: string } | { error: 403 | 404 } {
-  const lexical = vaultMediaPath(root, relPath)
-  if (!lexical) return { error: 403 }
-  if (!existsSync(lexical)) return { error: 404 }
-  const confined = confineExistingFile(root, lexical)
-  if (!confined) return { error: 403 }
-  return { abs: confined }
 }
 
 export function sanitizeNoteName(name: string): string {

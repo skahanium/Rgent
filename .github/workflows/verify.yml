@@ -26,3 +26,4 @@ jobs:
       - run: pnpm build
       - run: node -e "if (!require('node:fs').existsSync('out/main/index.js')) process.exit(1)"
       - run: node --check out/preload/index.cjs
+      - run: node scripts/check-native.mjs

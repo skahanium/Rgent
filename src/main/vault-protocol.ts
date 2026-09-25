@@ -1,7 +1,7 @@
-import { pathToFileURL } from 'node:url'
-import { net, protocol } from 'electron'
+import path from 'node:path'
+import { protocol } from 'electron'
 import { parseVaultMediaUrl, VAULT_MEDIA_SCHEME } from '../shared/vault-rel.ts'
-import { resolveVaultMediaFile } from './paths.ts'
+import { readVaultMedia } from './paths.ts'
 import type { VaultSession } from './vault.ts'
 
 export function registerVaultScheme(): void {
@@ -25,8 +25,24 @@ export function attachVaultProtocol(getVault: () => VaultSession | null): void {
     if (!rel) return new Response('', { status: 400 })
     const root = getVault()?.root
     if (!root) return new Response('', { status: 404 })
-    const resolved = resolveVaultMediaFile(root, rel)
+    const resolved = readVaultMedia(root, rel)
     if ('error' in resolved) return new Response('', { status: resolved.error })
-    return net.fetch(pathToFileURL(resolved.abs).href)
+    return new Response(new Uint8Array(resolved.bytes), {
+      headers: { 'content-type': contentType(rel) }
+    })
   })
+}
+
+function contentType(relPath: string): string {
+  switch (path.extname(relPath).toLowerCase()) {
+    case '.png': return 'image/png'
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg'
+    case '.gif': return 'image/gif'
+    case '.webp': return 'image/webp'
+    case '.svg': return 'image/svg+xml'
+    case '.bmp': return 'image/bmp'
+    case '.avif': return 'image/avif'
+    default: return 'application/octet-stream'
+  }
 }

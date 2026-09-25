@@ -1,82 +1,43 @@
-import { watch, type FSWatcher } from 'node:fs'
-import { lstatSync, readdirSync } from 'node:fs'
-import path from 'node:path'
-import { isHiddenName, relFromAbs } from './paths.ts'
+import { isHiddenName } from './paths.ts'
+import { secureFsFor } from './secure-fs.ts'
 
 export type WatchHandler = (relPath: string | null) => void
 
+const POLL_MS = 1000
+
+/** Metadata polling only uses directory handles pinned to the selected vault. */
 export function watchVault(root: string, onChange: WatchHandler): () => void {
-  const watchers = new Map<string, FSWatcher>()
+  const fs = secureFsFor(root)
+  const scan = (): Map<string, string> => {
+    const snapshot = new Map<string, string>()
+    const visit = (dir: string): void => {
+      for (const entry of fs.list(dir)) {
+        const rel = dir ? `${dir}/${entry.name}` : entry.name
+        snapshot.set(rel, `${entry.kind}:${entry.size}:${entry.mtimeMs}`)
+        if (entry.kind === 'dir' && !isHiddenName(entry.name)) visit(rel)
+      }
+    }
+    visit('')
+    return snapshot
+  }
 
-  const add = (dir: string) => {
-    if (watchers.has(dir)) return
-    let watcher: FSWatcher
+  let previous = scan()
+  let failed = false
+  const timer = setInterval(() => {
     try {
-      if (dir !== root && !lstatSync(dir).isDirectory()) return
-      watcher = watch(dir, (_event, filename) => {
-        refresh(dir)
-        if (typeof filename === 'string' && filename.length > 0) {
-          onChange(relFromAbs(root, path.join(dir, filename)))
-        } else {
-          onChange(relFromAbs(root, dir) || null)
-        }
-      })
+      const current = scan()
+      const changed = new Set<string>()
+      for (const [rel, value] of current) if (previous.get(rel) !== value) changed.add(rel)
+      for (const rel of previous.keys()) if (!current.has(rel)) changed.add(rel)
+      previous = current
+      failed = false
+      if (changed.size > 20) onChange(null)
+      else for (const rel of changed) onChange(rel)
     } catch {
-      return
+      if (!failed) onChange(null)
+      failed = true
     }
-    watcher.on('error', () => {
-      onChange(null)
-    })
-    watchers.set(dir, watcher)
-    refresh(dir)
-  }
-
-  const refresh = (dir: string) => {
-    let entries
-    try {
-      if (dir !== root && !lstatSync(dir).isDirectory()) {
-        stopDir(dir)
-        onChange(null)
-        return
-      }
-      entries = readdirSync(dir, { withFileTypes: true })
-    } catch {
-      stopDir(dir)
-      onChange(null)
-      return
-    }
-    const live = new Set<string>()
-    for (const entry of entries) {
-      if (isHiddenName(entry.name)) continue
-      const abs = path.join(dir, entry.name)
-      if (entry.isDirectory()) {
-        live.add(abs)
-        add(abs)
-      }
-    }
-    for (const watched of [...watchers.keys()]) {
-      if (watched === dir) continue
-      if (!watched.startsWith(dir + path.sep)) continue
-      const first = path.relative(dir, watched).split(path.sep)[0]
-      if (!first) continue
-      const child = path.join(dir, first)
-      if (!live.has(child)) stopDir(child)
-    }
-  }
-
-  const stopDir = (dir: string) => {
-    for (const [watched, watcher] of watchers) {
-      if (watched === dir || watched.startsWith(dir + path.sep)) {
-        watcher.close()
-        watchers.delete(watched)
-      }
-    }
-  }
-
-  add(root)
-
-  return () => {
-    for (const watcher of watchers.values()) watcher.close()
-    watchers.clear()
-  }
+  }, POLL_MS)
+  timer.unref()
+  return () => clearInterval(timer)
 }

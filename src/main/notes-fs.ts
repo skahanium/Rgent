@@ -1,12 +1,10 @@
-import { mkdir, readdir, readFile, stat, writeFile, lstat, realpath, open, rename, unlink } from 'node:fs/promises'
-import { randomUUID, createHash } from 'node:crypto'
-import path from 'node:path'
+import { createHash } from 'node:crypto'
 import type { TreeEntry } from '../shared/ipc.ts'
+import { secureFsFor } from './secure-fs.ts'
 import {
   hasHiddenSegment,
   isHiddenName,
   isNotePath,
-  relFromAbs,
   resolveInVault,
   sanitizeNoteName
 } from './paths.ts'
@@ -26,35 +24,34 @@ function mustResolve(root: string, relPath: string): string {
 }
 
 export async function listVaultTree(root: string): Promise<TreeEntry[]> {
-  return readDir(root, root)
+  return readDir(root, '')
 }
 
 async function readDir(root: string, dir: string): Promise<TreeEntry[]> {
-  const entries = await readdir(dir, { withFileTypes: true })
+  const entries = secureFsFor(root).list(dir)
   const visible = entries.filter((entry) => !isHiddenName(entry.name))
   visible.sort((a, b) => {
-    const dirA = a.isDirectory() ? 0 : 1
-    const dirB = b.isDirectory() ? 0 : 1
+    const dirA = a.kind === 'dir' ? 0 : 1
+    const dirB = b.kind === 'dir' ? 0 : 1
     if (dirA !== dirB) return dirA - dirB
     return a.name.localeCompare(b.name, 'zh')
   })
   const out: TreeEntry[] = []
   for (const entry of visible) {
-    const abs = path.join(dir, entry.name)
-    const relPath = relFromAbs(root, abs)
-    if (entry.isDirectory()) {
+    const relPath = dir ? `${dir}/${entry.name}` : entry.name
+    if (entry.kind === 'dir') {
       out.push({
         name: entry.name,
         relPath,
         kind: 'dir',
-        children: await readDir(root, abs)
+        children: await readDir(root, relPath)
       })
       continue
     }
     out.push({
       name: entry.name,
       relPath,
-      kind: !entry.isSymbolicLink() && isNotePath(relPath) ? 'note' : 'file'
+      kind: entry.kind === 'file' && isNotePath(relPath) ? 'note' : 'file'
     })
   }
   return out
@@ -62,8 +59,13 @@ async function readDir(root: string, dir: string): Promise<TreeEntry[]> {
 
 export async function readNote(root: string, relPath: string): Promise<string> {
   if (!isNotePath(relPath)) throw new VaultPathError('不是笔记')
-  const abs = await existingNotePath(root, relPath)
-  return readFile(abs, 'utf8')
+  mustResolve(root, relPath)
+  try {
+    return secureFsFor(root).readText(relPath)
+  } catch (error) {
+    if (error instanceof Error && error.message === 'UNSAFE_PATH') throw new VaultPathError('不能读写符号链接笔记')
+    throw error
+  }
 }
 
 export function revisionOf(content: string): string {
@@ -77,7 +79,14 @@ export async function readNoteSnapshot(root: string, relPath: string): Promise<{
 
 export async function writeNote(root: string, relPath: string, content: string, expectedRevision: string): Promise<string> {
   if (!isNotePath(relPath)) throw new VaultPathError('不是笔记')
-  const key = mustResolve(root, relPath)
+  mustResolve(root, relPath)
+  let key: string
+  try {
+    key = secureFsFor(root).resolve(relPath).map((part) => part.id).join('/')
+  } catch (error) {
+    if (error instanceof Error && error.message === 'UNSAFE_PATH') throw new VaultPathError('不能读写符号链接笔记')
+    throw error
+  }
   return serializedWrite(key, async () => writeNoteNow(root, relPath, content, expectedRevision))
 }
 
@@ -98,74 +107,20 @@ async function serializedWrite<T>(key: string, work: () => Promise<T>): Promise<
 }
 
 async function writeNoteNow(root: string, relPath: string, content: string, expectedRevision: string): Promise<string> {
-  const abs = await existingNotePath(root, relPath)
-  const original = await readFile(abs, 'utf8')
+  const fs = secureFsFor(root)
+  const original = fs.readText(relPath)
   if (revisionOf(original) !== expectedRevision) throw new VaultPathError('CONFLICT')
-  await atomicReplaceFile(abs, content, async () => {
-    const checked = await existingNotePath(root, relPath)
-    if (checked !== abs || revisionOf(await readFile(abs, 'utf8')) !== expectedRevision) {
-      throw new VaultPathError('CONFLICT')
-    }
-  })
+  fs.replace(relPath, original, content)
   return revisionOf(content)
-}
-
-async function existingNotePath(root: string, relPath: string): Promise<string> {
-  const lexical = mustResolve(root, relPath)
-  const rootReal = await realpath(root)
-  const parts = path.relative(path.resolve(root), lexical).split(path.sep)
-  let cursor = rootReal
-  for (const [index, part] of parts.entries()) {
-    cursor = path.join(cursor, part)
-    const info = await lstat(cursor)
-    if (info.isSymbolicLink()) throw new VaultPathError('不能读写符号链接笔记')
-    if (index < parts.length - 1 && !info.isDirectory()) throw new VaultPathError('不是笔记')
-    if (index === parts.length - 1 && !info.isFile()) throw new VaultPathError('不是笔记')
-  }
-  return cursor
-}
-
-/** 同目录替换；写入或校验失败时原文件仍在，临时文件会删除。 */
-export async function atomicReplaceFile(abs: string, content: string, beforeRename?: () => Promise<void>): Promise<void> {
-  const temp = path.join(path.dirname(abs), `.${path.basename(abs)}.${randomUUID()}.tmp`)
-  const current = await lstat(abs).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === 'ENOENT') return null
-    throw error
-  })
-  if (current && (!current.isFile() || current.isSymbolicLink())) throw new VaultPathError('不能替换符号链接')
-  let created = false
-  try {
-    const handle = await open(temp, 'wx', current?.mode ?? 0o600)
-    created = true
-    try {
-      await handle.writeFile(content, 'utf8')
-      await handle.sync()
-    } finally {
-      await handle.close()
-    }
-    await beforeRename?.()
-    await rename(temp, abs)
-    created = false
-  } finally {
-    if (created) await unlink(temp).catch(() => {})
-  }
 }
 
 export async function createNote(root: string, name: string): Promise<string> {
   const fileName = sanitizeNoteName(name)
-  const abs = mustResolve(root, fileName)
+  mustResolve(root, fileName)
   try {
-    await stat(abs)
-    throw new VaultPathError('已有同名笔记')
+    secureFsFor(root).create(fileName)
   } catch (err) {
-    if (err instanceof VaultPathError) throw err
-  }
-  await mkdir(path.dirname(abs), { recursive: true })
-  try {
-    await writeFile(abs, '', { encoding: 'utf8', flag: 'wx' })
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code === 'EEXIST') throw new VaultPathError('已有同名笔记')
+    if (err instanceof Error && err.message === 'EEXIST') throw new VaultPathError('已有同名笔记')
     throw err
   }
   return fileName
