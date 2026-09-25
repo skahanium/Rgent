@@ -360,8 +360,13 @@ void RenameOpenedFile(HANDLE source, HANDLE parent, const std::wstring& target,
   info->RootDirectory = parent;
   info->FileNameLength = static_cast<DWORD>(bytes);
   std::memcpy(info->FileName, target.data(), bytes);
-  if (!SetFileInformationByHandle(source, FileRenameInfoEx, info, static_cast<DWORD>(length)))
+  if (!SetFileInformationByHandle(source, FileRenameInfoEx, info, static_cast<DWORD>(length))) {
+    const DWORD code = GetLastError();
+    if (std::getenv("GITHUB_ACTIONS") != nullptr)
+      std::fprintf(stderr, "::error title=Windows rename code::%lu\n", code);
+    SetLastError(code);
     WinError("RENAME");
+  }
 }
 
 } // namespace

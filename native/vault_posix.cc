@@ -20,6 +20,11 @@ namespace rgent {
 namespace {
 
 std::atomic<uint64_t> sequence{0};
+#ifdef __APPLE__
+constexpr int kResolveBeneath = O_RESOLVE_BENEATH;
+#else
+constexpr int kResolveBeneath = 0;
+#endif
 
 [[noreturn]] void Fail(const char* code) { throw std::runtime_error(code); }
 
@@ -77,14 +82,15 @@ Fd Dir(VaultHandle* root, const std::vector<std::string>& parts, size_t count) {
   std::string relative = parts[0];
   for (size_t i = 1; i < count; ++i) relative += "/" + parts[i];
   Fd child(openat(current.value, relative.c_str(),
-                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC));
+                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | kResolveBeneath | O_CLOEXEC));
   CheckOpen(child.value);
   current = std::move(child);
   return current;
 }
 
 Fd File(int parent, const std::string& name) {
-  Fd file(openat(parent, name.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC));
+  Fd file(openat(parent, name.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY |
+                                  kResolveBeneath | O_CLOEXEC));
   CheckOpen(file.value);
   struct stat info;
   if (fstat(file.value, &info) != 0 || !S_ISREG(info.st_mode)) Fail("UNSAFE_PATH");
@@ -155,7 +161,8 @@ std::string ActualName(int parent, const struct stat& child) {
 
 void ExpectExisting(int root, const std::string& relative, const std::optional<std::string>& expected) {
   if (!expected) {
-    Fd current(openat(root, relative.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC));
+    Fd current(openat(root, relative.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY |
+                                            kResolveBeneath | O_CLOEXEC));
     if (current.value >= 0) Fail("CONFLICT");
     if (errno != ENOENT) CheckOpen(current.value);
     return;
@@ -219,7 +226,8 @@ std::vector<Component> Resolve(VaultHandle* root, const std::string& relative_pa
   for (size_t i = 0; i < parts.size(); ++i) {
     const bool last = i + 1 == parts.size();
     prefix += (prefix.empty() ? "" : "/") + parts[i];
-    Fd child(openat(root_fd.value, prefix.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC |
+    Fd child(openat(root_fd.value, prefix.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY |
+            kResolveBeneath | O_CLOEXEC |
             (last ? 0 : O_DIRECTORY)));
     CheckOpen(child.value);
     struct stat info;
@@ -229,7 +237,7 @@ std::vector<Component> Resolve(VaultHandle* root, const std::string& relative_pa
     parent = std::move(child);
   }
   Fd still_here(openat(root_fd.value, relative_path.c_str(),
-                       O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC));
+                       O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | kResolveBeneath | O_CLOEXEC));
   CheckOpen(still_here.value);
   if (!SameObject(parent.value, still_here.value)) Fail("PATH_CHANGED");
   return out;
@@ -261,7 +269,8 @@ void Replace(VaultHandle* root, const std::string& relative_file,
   Fd file;
   for (int attempt = 0; attempt < 10; ++attempt) {
     temp = ".rgent-" + std::to_string(getpid()) + "-" + std::to_string(++sequence) + ".tmp";
-    file = Fd(openat(root_fd.value, temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW_ANY | O_CLOEXEC, mode));
+    file = Fd(openat(root_fd.value, temp.c_str(), O_WRONLY | O_CREAT | O_EXCL |
+                                             O_NOFOLLOW_ANY | kResolveBeneath | O_CLOEXEC, mode));
     if (file.value >= 0) break;
     if (errno != EEXIST) CheckOpen(file.value);
   }
@@ -274,7 +283,8 @@ void Replace(VaultHandle* root, const std::string& relative_file,
     // Both names resolve from the pinned root in one kernel rename operation.
     // A moved child directory or swapped symlink cannot redirect the commit.
 #ifdef __APPLE__
-    const unsigned int flags = RENAME_NOFOLLOW_ANY | (expected ? 0 : RENAME_EXCL);
+    const unsigned int flags = RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH |
+                               (expected ? 0 : RENAME_EXCL);
     const int renamed = renameatx_np(root_fd.value, temp.c_str(), root_fd.value,
                                     relative_file.c_str(), flags);
 #else
@@ -297,7 +307,8 @@ void Create(VaultHandle* root, const std::string& relative_file) {
   (void)Parts(relative_file);
   Fd root_fd = DupRoot(root);
   Fd file(openat(root_fd.value, relative_file.c_str(),
-                 O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW_ANY | O_CLOEXEC, 0600));
+                 O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW_ANY |
+                     kResolveBeneath | O_CLOEXEC, 0600));
   CheckOpen(file.value);
 }
 
