@@ -13,8 +13,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <cstdio>
-#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -373,12 +371,7 @@ void RenameOpenedFile(HANDLE source, const std::wstring& target, bool replace) {
   IO_STATUS_BLOCK io{};
   const auto status = function(source, &io, info, static_cast<ULONG>(length),
                                static_cast<FILE_INFORMATION_CLASS>(65)); // FileRenameInformationEx
-  if (status < 0) {
-    if (std::getenv("GITHUB_ACTIONS") != nullptr)
-      std::fprintf(stderr, "::error title=Windows rename status::%lu\n",
-                   static_cast<unsigned long>(status));
-    NtError("RENAME", status);
-  }
+  if (status < 0) NtError("RENAME", status);
 }
 
 } // namespace
@@ -477,22 +470,11 @@ void Replace(VaultHandle* root, const std::string& relative_file,
   }
   if (!temporary.valid()) Fail("TEMP_COLLISION");
   bool renamed = false;
-  const char* phase = "WRITE";
   try {
     WriteAll(temporary.get(), content);
     // The target handle denies external writers and deletion through the check/rename interval.
-    phase = "RENAME";
     RenameOpenedFile(temporary.get(), parts.back(), expected.has_value());
     renamed = true;
-  } catch (const std::exception& error) {
-    if (std::getenv("GITHUB_ACTIONS") != nullptr) {
-      std::fprintf(stderr, "::error title=Windows replace phase::%s:%s\n",
-                   phase, error.what()[0] ? error.what() : "EMPTY");
-    }
-    if (!renamed) {
-      try { DeleteOpenedFile(temporary.get()); } catch (...) { /* Preserve the original error. */ }
-    }
-    throw;
   } catch (...) {
     if (!renamed) {
       try { DeleteOpenedFile(temporary.get()); } catch (...) { /* Preserve the original error. */ }

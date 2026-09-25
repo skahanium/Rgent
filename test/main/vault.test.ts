@@ -98,16 +98,7 @@ describe('notes-fs', () => {
     const rel = await createNote(root, '初稿')
     expect(rel).toBe('初稿.md')
     const initial = await readNoteSnapshot(root, rel)
-    let revision: string
-    try {
-      revision = await writeNote(root, rel, '正文', initial.revision)
-    } catch (error) {
-      const native = error as Error & { code?: unknown; errno?: unknown }
-      throw new Error(`native replace diagnostic: ${JSON.stringify({
-        name: native.name, message: native.message, code: native.code,
-        errno: native.errno, own: Object.getOwnPropertyNames(native), string: String(native)
-      })}`)
-    }
+    const revision = await writeNote(root, rel, '正文', initial.revision)
     expect(revision).toBe((await readNoteSnapshot(root, rel)).revision)
     expect(await readNote(root, rel)).toBe('正文')
     await writeNote(root, rel, '', revision)

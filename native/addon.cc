@@ -1,8 +1,6 @@
 #include <node_api.h>
 
 #include <exception>
-#include <cstdio>
-#include <cstdlib>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -12,7 +10,7 @@
 namespace {
 
 void Check(napi_env env, napi_status status) {
-  if (status != napi_ok) throw std::runtime_error("NAPI_ERROR:" + std::to_string(status));
+  if (status != napi_ok) throw std::runtime_error("NAPI_ERROR");
 }
 
 std::string String(napi_env env, napi_value value) {
@@ -64,24 +62,7 @@ napi_value Invoke(napi_env env, Work&& work) {
   try {
     return work();
   } catch (const std::exception& error) {
-#ifdef _WIN32
-    if (std::getenv("GITHUB_ACTIONS") != nullptr) {
-      const std::string detail = error.what();
-      if (detail.empty() || (detail != "CONFLICT" && detail != "UNSAFE_PATH" &&
-                             detail != "ENOENT" && detail != "EEXIST" &&
-                             detail != "PATH_CHANGED")) {
-        std::fprintf(stderr, "::error title=Unexpected native error::%s\n",
-                     detail.empty() ? "EMPTY_NATIVE_EXCEPTION" : detail.c_str());
-      }
-    }
-#endif
-    const auto throw_status = napi_throw_error(env, nullptr, error.what());
-#ifdef _WIN32
-    if (std::getenv("GITHUB_ACTIONS") != nullptr && throw_status != napi_ok) {
-      std::fprintf(stderr, "::error title=Native JS exception state::%d\n",
-                   static_cast<int>(throw_status));
-    }
-#endif
+    napi_throw_error(env, nullptr, error.what());
     return nullptr;
   }
 }
