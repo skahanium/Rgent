@@ -5,12 +5,17 @@ release/
 coverage/
 *.log
 .DS_Store
+Thumbs.db
 .env
 .env.*
 !.env.example
 .vite/
 .cache/
 *.tsbuildinfo
+
+# 本机包管理器缓存，不进仓库
+.pnpm-store/
+pnpm-debug.log*
 
 # 已作废的 Python 探路件留下的本机环境，不进仓库
 .venv/

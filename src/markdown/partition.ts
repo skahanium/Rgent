@@ -9,8 +9,8 @@ export const LEDGER_ANCHOR = '<!-- rgent:ledger:v1 -->'
 /**
  * 返回账本起始偏移（锚点那一行的行首）。没有锚点返回 -1。
  *
- * 取最后一次整行命中：正文里偶然写出锚点字符串不会把正文截进账本，
- * 而真账本永远被追加在最末尾。
+ * 只认整行（行尾空白可有）。取最后一次命中：正文里引用锚点、文末还有真账本时，
+ * 不会把中间那段正文切进账本。正文里单独一整行锚点、后面没有第二次，就会切开——这是选定行为。
  */
 export function findLedgerStart(source: string): number {
   let lineStart = 0
@@ -30,4 +30,14 @@ export function partitionSource(source: string): Partition {
   const start = findLedgerStart(source)
   if (start < 0) return { body: source, ledger: null, bodyOffset: 0 }
   return { body: source.slice(0, start), ledger: source.slice(start), bodyOffset: 0 }
+}
+
+/**
+ * 把画布里的正文和旁路账本拼回磁盘上的整文件。
+ * 没有账本就不注入锚点。有账本时保证锚点落在行首。
+ */
+export function composeSource(body: string, ledger: string | null): string {
+  if (ledger == null) return body
+  if (body.length > 0 && !body.endsWith('\n')) return `${body}\n${ledger}`
+  return `${body}${ledger}`
 }

@@ -1,7 +1,8 @@
 import { app, BrowserWindow, ipcMain, Menu, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { IPC } from '../shared/ipc.ts'
+import { shouldCloseAfterFlush } from '../shared/flush.ts'
+import { IPC, type FlushDonePayload } from '../shared/ipc.ts'
 import { attachVaultProtocol, registerVaultScheme } from './vault-protocol.ts'
 import { VaultSession } from './vault.ts'
 
@@ -16,13 +17,14 @@ let mainWindow: BrowserWindow | null = null
 let vault: VaultSession | null = null
 let quitting = false
 let flushed = false
-let settleFlush: (() => void) | null = null
+let settleFlush: ((close: boolean) => void) | null = null
+let flushTimer: NodeJS.Timeout | null = null
 
-function finishFlush(): void {
+function finishFlush(close: boolean): void {
   const settle = settleFlush
   if (!settle) return
   settleFlush = null
-  settle()
+  settle(close)
 }
 
 function send(channel: string, payload?: unknown): void {
@@ -33,6 +35,8 @@ function send(channel: string, payload?: unknown): void {
 
 function createWindow(): void {
   flushed = false
+  flushTimer = null
+  settleFlush = null
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -52,21 +56,28 @@ function createWindow(): void {
     mainWindow = null
   })
 
-  // 关窗前先让渲染进程把脏稿写完，不默默丢掉最后一截。
+  // 关窗前先让渲染进程把脏稿写完。写失败则留下窗口；渲染进程挂了才靠超时关。
   mainWindow.on('close', (event) => {
     if (flushed) return
     event.preventDefault()
     if (settleFlush) return
     const win = mainWindow
     if (!win) return
-    const timer = setTimeout(finishFlush, FLUSH_GRACE_MS)
-    settleFlush = () => {
-      clearTimeout(timer)
+    flushTimer = setTimeout(() => {
+      const alive = Boolean(win && !win.isDestroyed() && !win.webContents.isDestroyed())
+      if (!alive) finishFlush(shouldCloseAfterFlush(false, false))
+    }, FLUSH_GRACE_MS)
+    settleFlush = (close) => {
+      if (flushTimer) {
+        clearTimeout(flushTimer)
+        flushTimer = null
+      }
+      if (!close) return
       flushed = true
       if (quitting) app.quit()
       else win.close()
     }
-    if (win.webContents.isDestroyed()) finishFlush()
+    if (win.webContents.isDestroyed()) finishFlush(shouldCloseAfterFlush(false, false))
     else send(IPC.flushRequest)
   })
 
@@ -124,26 +135,48 @@ function registerIpc(): void {
     return vault.pick(mainWindow)
   })
   ipcMain.handle(IPC.treeList, async () => vault?.tree() ?? [])
-  ipcMain.handle(IPC.noteRead, async (_event, relPath: string) => {
+  ipcMain.handle(IPC.noteRead, async (_event, relPath: unknown) => {
+    const pathInVault = asString(relPath)
+    if (!pathInVault) throw new Error('BAD_PATH')
     if (!vault) throw new Error('NO_VAULT')
-    return vault.read(relPath)
+    return vault.read(pathInVault)
   })
-  ipcMain.handle(IPC.noteWrite, async (_event, relPath: string, content: string) => {
+  ipcMain.handle(IPC.noteWrite, async (_event, relPath: unknown, content: unknown) => {
+    const pathInVault = asString(relPath)
+    const text = asString(content)
+    if (!pathInVault || text == null) return { ok: false, error: 'BAD_PATH' }
     if (!vault) return { ok: false, error: 'NO_VAULT' }
     try {
-      await vault.write(relPath, content)
+      await vault.write(pathInVault, text)
       return { ok: true }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
-  ipcMain.handle(IPC.noteCreate, async (_event, name: string) => {
+  ipcMain.handle(IPC.noteCreate, async (_event, name: unknown) => {
+    const noteName = asString(name)
+    if (!noteName) throw new Error('BAD_PATH')
     if (!vault) throw new Error('NO_VAULT')
-    return vault.create(name)
+    return vault.create(noteName)
   })
-  ipcMain.handle(IPC.backlinks, async (_event, relPath: string) => vault?.backlinks(relPath) ?? [])
-  ipcMain.handle(IPC.search, async (_event, query: string) => vault?.search(query) ?? [])
-  ipcMain.on(IPC.flushDone, () => finishFlush())
+  ipcMain.handle(IPC.backlinks, async (_event, relPath: unknown) => {
+    const pathInVault = asString(relPath)
+    if (!pathInVault) return []
+    return vault?.backlinks(pathInVault) ?? []
+  })
+  ipcMain.handle(IPC.search, async (_event, query: unknown) => {
+    const text = asString(query)
+    if (text == null) return []
+    return vault?.search(text) ?? []
+  })
+  ipcMain.on(IPC.flushDone, (_event, payload: FlushDonePayload) => {
+    const ok = payload != null && payload.ok === true
+    finishFlush(shouldCloseAfterFlush(ok, true))
+  })
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
 }
 
 app.whenReady().then(() => {

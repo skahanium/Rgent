@@ -1,4 +1,5 @@
 import { IPC, type SearchHit, type TreeEntry, type VaultState } from '@shared'
+import { composeSource, partitionSource } from '@markdown'
 import { renderBacklinks } from './backlinks.ts'
 import { promptConflict, promptNewNote } from './dialogs.ts'
 import { renderSearchResults } from './search.ts'
@@ -135,9 +136,11 @@ export async function start(root: HTMLElement): Promise<void> {
     void showPicker(true)
   })
   window.rgent.onFlushRequest(() => {
-    void flushSave().finally(() => {
-      window.rgent.flushDone()
-    })
+    void (async () => {
+      const ok = await flushSave()
+      if (!ok) window.alert('写盘失败，窗口先不关。')
+      window.rgent.flushDone({ ok })
+    })()
   })
   window.rgent.onNoteExternalChange(() => {
     // 别的笔记被外部改了，可能多了或少了指向当前这篇的链接。
@@ -146,16 +149,15 @@ export async function start(root: HTMLElement): Promise<void> {
   window.rgent.onNoteExternalChange(async (payload) => {
     const tab = tabs.find((item) => item.relPath === payload.relPath)
     if (!tab) return
+    const live = composeSource(tab.relPath === active ? editor.getText() : tab.content, tab.ledger)
     if (!tab.dirty) {
-      tab.content = payload.content
-      tab.saved = payload.content
-      if (active === tab.relPath) editor.setText(payload.content)
+      applySource(tab, payload.content)
+      if (active === tab.relPath) editor.setText(tab.content)
       renderTabs()
       return
     }
-    if (tab.content === payload.content) {
-      tab.saved = payload.content
-      tab.dirty = false
+    if (live === payload.content) {
+      applySource(tab, payload.content)
       renderTabs()
       return
     }
@@ -164,11 +166,10 @@ export async function start(root: HTMLElement): Promise<void> {
     const choice = await promptConflict()
     conflictOpen = false
     if (choice === 'disk') {
-      tab.content = payload.content
-      tab.saved = payload.content
-      tab.dirty = false
-      if (active === tab.relPath) editor.setText(payload.content)
+      applySource(tab, payload.content)
+      if (active === tab.relPath) editor.setText(tab.content)
     } else {
+      if (active === tab.relPath) tab.content = editor.getText()
       await writeTab(tab)
     }
     renderTabs()
@@ -178,6 +179,14 @@ export async function start(root: HTMLElement): Promise<void> {
 
   async function applyState(state: VaultState): Promise<void> {
     if (state.status === 'needs-pick') {
+      const ok = await flushSave()
+      if (!ok && tabs.some((tab) => tab.dirty)) {
+        picker.hidden = false
+        pickerCopy.textContent =
+          state.reason === 'missing' ? '上次的库找不到了。请重新选一个文件夹。' : '第一次打开，先选一个文件夹当库。空的也行。不选进不去。'
+        vaultName.hidden = true
+        return
+      }
       resetSession()
       picker.hidden = false
       pickerCopy.textContent =
@@ -188,7 +197,11 @@ export async function start(root: HTMLElement): Promise<void> {
     picker.hidden = true
     vaultName.hidden = false
     vaultName.textContent = state.rootName
-    if (state.vaultChanged) resetSession()
+    if (state.vaultChanged) {
+      const ok = await flushSave()
+      if (!ok) return
+      resetSession()
+    }
     await refreshTree()
   }
 
@@ -240,6 +253,14 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   async function chooseVault(): Promise<void> {
+    const current = await window.rgent.vaultGet()
+    if (current.status === 'ready') {
+      const ok = await flushSave()
+      if (!ok) {
+        window.alert('写盘失败，先处理后再换库。')
+        return
+      }
+    }
     const state = await window.rgent.vaultPick()
     await applyState(state)
   }
@@ -292,8 +313,15 @@ export async function start(root: HTMLElement): Promise<void> {
       return
     }
     try {
-      const content = await window.rgent.noteRead(relPath)
-      tabs.push({ relPath, content, saved: content, dirty: false })
+      const source = await window.rgent.noteRead(relPath)
+      const part = partitionSource(source)
+      tabs.push({
+        relPath,
+        content: part.body,
+        ledger: part.ledger,
+        saved: part.body,
+        dirty: false
+      })
       activate(relPath)
     } catch {
       /* missing notes stay as broken links */
@@ -370,27 +398,41 @@ export async function start(root: HTMLElement): Promise<void> {
     }, SAVE_MS)
   }
 
-  async function flushSave(): Promise<void> {
+  async function flushSave(): Promise<boolean> {
     if (saveTimer != null) {
       window.clearTimeout(saveTimer)
       saveTimer = null
     }
     const writes = pendingWrites(tabs, active, editor.getText())
+    let ok = true
     for (const write of writes) {
       const tab = tabs.find((item) => item.relPath === write.relPath)
       if (!tab) continue
-      tab.content = write.content
-      await writeTab(tab)
+      tab.content = write.body
+      if (!(await writeTab(tab))) ok = false
     }
     renderTabs()
+    if (ok && writes.length > 0) void refreshBacklinks()
+    return ok
   }
 
-  async function writeTab(tab: Tab): Promise<void> {
-    const result = await window.rgent.noteWrite(tab.relPath, tab.content)
+  async function writeTab(tab: Tab): Promise<boolean> {
+    const result = await window.rgent.noteWrite(tab.relPath, composeSource(tab.content, tab.ledger))
     if (result.ok) {
       tab.saved = tab.content
       tab.dirty = false
+      void refreshBacklinks()
+      return true
     }
+    return false
+  }
+
+  function applySource(tab: Tab, source: string): void {
+    const part = partitionSource(source)
+    tab.content = part.body
+    tab.ledger = part.ledger
+    tab.saved = part.body
+    tab.dirty = false
   }
 
   async function createNote(): Promise<void> {

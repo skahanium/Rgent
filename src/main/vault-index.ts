@@ -24,8 +24,8 @@ type IndexedNote = {
 /**
  * 全库索引，住主进程（架构：主进程管索引）。
  *
- * 这是「人」的那一份可见范围：它含禁止触碰。将来模型的检索必须是另一份结构，
- * 不在这一份上加过滤器（围栏 §检索与联网）。
+ * 这是人的全量索引，含禁止触碰。将来模型检索是同一份语料上的另一套可见范围，
+ * 不得在建索引时把禁区抹掉（围栏 §检索与联网）。
  *
  * 重建是惰性全量的：变脏后等下一次查询才重扫。查询由人的动作触发（切笔记、搜一次），
  * 不跟着按键走，所以现在还不需要增量索引。
@@ -105,20 +105,22 @@ export class VaultIndex {
   }
 
   private async ready(): Promise<void> {
-    if (!this.dirty) return
-    if (!this.rebuilding) {
-      this.rebuilding = this.rebuild().finally(() => {
-        this.rebuilding = null
-      })
+    while (this.dirty) {
+      if (!this.rebuilding) {
+        this.rebuilding = this.rebuild().finally(() => {
+          this.rebuilding = null
+        })
+      }
+      await this.rebuilding
     }
-    await this.rebuilding
   }
 
   private async rebuild(): Promise<void> {
+    this.dirty = false
     const root = this.getRoot()
     if (!root) {
-      this.reset()
-      this.dirty = false
+      this.notes.clear()
+      this.byTarget.clear()
       return
     }
     const notes = new Map<string, IndexedNote>()
@@ -135,7 +137,6 @@ export class VaultIndex {
     }
     this.notes = notes
     this.byTarget = byTarget
-    this.dirty = false
   }
 
   private async readOne(root: string, relPath: string): Promise<IndexedNote | null> {

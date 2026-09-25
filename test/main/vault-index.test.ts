@@ -156,4 +156,29 @@ describe('vault index lifecycle', () => {
     expect(await index.backlinks('a.md')).toEqual([])
     expect(await index.search('甲')).toEqual([])
   })
+
+  it('rebuilds again if marked dirty while a rebuild is in flight', async () => {
+    const root = await vault()
+    await note(root, 'a.md', '甲\n')
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let listCalls = 0
+    const index = new VaultIndex(
+      () => root,
+      async () => {
+        listCalls += 1
+        if (listCalls === 1) await gate
+        return listVaultTree(root)
+      }
+    )
+    const first = index.search('甲')
+    await note(root, 'a.md', '乙\n')
+    index.markDirty()
+    release()
+    await first
+    expect(await index.search('乙')).toHaveLength(1)
+    expect(await index.search('甲')).toEqual([])
+  })
 })

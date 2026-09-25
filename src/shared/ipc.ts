@@ -40,6 +40,10 @@ export type NoteWriteResult = {
   error: string
 }
 
+export type FlushDonePayload = {
+  ok: boolean
+}
+
 /** 反链：谁链到了这篇，按所在文件夹分组。 */
 export type BacklinkRef = {
   relPath: string

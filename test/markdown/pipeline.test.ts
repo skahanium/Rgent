@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ALL_STAGES,
   compile,
+  composeSource,
   expandToLineBlock,
   inViewport,
   listedStages,
@@ -349,6 +350,40 @@ describe('ledger partition', () => {
     const result = compile(source)
     const widgets = planWidgets(result.index, source, [{ from: 0, to: source.length }])
     expect(widgets).toEqual([])
+  })
+
+  it('composes identity when there is no ledger', () => {
+    expect(composeSource(fixture, null)).toBe(fixture)
+    const part = partitionSource(fixture)
+    expect(composeSource(part.body, part.ledger)).toBe(fixture)
+  })
+
+  it('round-trips body plus ledger, inserting a newline if the body lacks one', () => {
+    const source = body + ledger
+    const part = partitionSource(source)
+    expect(composeSource(part.body, part.ledger)).toBe(source)
+    expect(composeSource('正文没有换行', ledger)).toBe(`正文没有换行\n${ledger}`)
+    const again = partitionSource(composeSource('正文没有换行', ledger))
+    expect(again.body).toBe('正文没有换行\n')
+    expect(again.ledger).toBe(ledger)
+  })
+
+  it('splits when the only whole-line anchor sits in the body', () => {
+    const source = `正文。\n${anchor}\n后面本是正文，但会进账本。\n`
+    expect(findLedgerStart(source)).toBeGreaterThanOrEqual(0)
+    const part = partitionSource(source)
+    expect(part.body).toBe('正文。\n')
+    expect(part.ledger).toContain('后面本是正文，但会进账本。')
+  })
+
+  it('plans body tables and ignores tables that only exist in the ledger', () => {
+    const source = '| a | b |\n| --- | --- |\n| 1 | 2 |\n\n' + ledger
+    const result = compile(source)
+    const widgets = planWidgets(result.index, source, [{ from: 0, to: source.length }])
+    const tables = widgets.filter((widget) => widget.kind === 'table')
+    expect(tables).toHaveLength(1)
+    expect(source.slice(tables[0]!.range.start, tables[0]!.range.end)).toContain('| 1 | 2 |')
+    expect(tables[0]!.range.end).toBeLessThan(findLedgerStart(source))
   })
 })
 
