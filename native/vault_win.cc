@@ -45,6 +45,8 @@ constexpr NTSTATUS kNameNotFound = static_cast<NTSTATUS>(0xC0000034u);
 constexpr NTSTATUS kPathNotFound = static_cast<NTSTATUS>(0xC000003Au);
 constexpr NTSTATUS kNoSuchFile = static_cast<NTSTATUS>(0xC000000Fu);
 constexpr NTSTATUS kNameCollision = static_cast<NTSTATUS>(0xC0000035u);
+constexpr ACCESS_MASK kDirectoryAccess = FILE_LIST_DIRECTORY | FILE_TRAVERSE |
+                                         FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
 class UniqueHandle {
  public:
@@ -231,7 +233,7 @@ DirectoryChain WalkDirectories(VaultHandle* root, const std::vector<std::wstring
   chain.owned.reserve(count);
   for (size_t i = 0; i < count; ++i) {
     // Omitting FILE_SHARE_DELETE pins every ancestor against a concurrent move.
-    auto child = OpenChild(chain.current, parts[i], MAXIMUM_ALLOWED | SYNCHRONIZE,
+    auto child = OpenChild(chain.current, parts[i], kDirectoryAccess,
                            kOpen, 0, FILE_SHARE_READ | FILE_SHARE_WRITE);
     RequireKind(child.get(), "dir");
     chain.current = child.get();
@@ -383,7 +385,7 @@ void RenameOpenedFile(HANDLE source, HANDLE parent, const std::wstring& target,
 VaultHandle* OpenRoot(const std::string& absolute_path) {
   const auto wide = Wide(absolute_path);
   if (wide.empty() || wide.find(L'\0') != std::wstring::npos) Fail("BAD_PATH");
-  UniqueHandle handle(CreateFileW(wide.c_str(), MAXIMUM_ALLOWED | SYNCHRONIZE,
+  UniqueHandle handle(CreateFileW(wide.c_str(), kDirectoryAccess,
                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                                   FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
   if (!handle.valid()) WinError("OPEN_ROOT");
