@@ -1,7 +1,7 @@
-import { app, BrowserWindow, ipcMain, Menu, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { shouldCloseAfterFlush } from '../shared/flush.ts'
+import { CloseFlow, shouldCloseAfterFlush, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { IPC, type FlushDonePayload, type NoteWriteRequest, type SetPermissionRequest } from '../shared/ipc.ts'
 import { attachVaultProtocol, registerVaultScheme } from './vault-protocol.ts'
 import { VaultSession } from './vault.ts'
@@ -17,14 +17,14 @@ let mainWindow: BrowserWindow | null = null
 let vault: VaultSession | null = null
 let quitting = false
 let flushed = false
-let settleFlush: ((close: boolean) => void) | null = null
+let rendererGone = false
+let closeFlow = new CloseFlow()
 let flushTimer: NodeJS.Timeout | null = null
 
-function finishFlush(close: boolean): void {
-  const settle = settleFlush
-  if (!settle) return
-  settleFlush = null
-  settle(close)
+function clearFlushTimer(): void {
+  if (!flushTimer) return
+  clearTimeout(flushTimer)
+  flushTimer = null
 }
 
 function send(channel: string, payload?: unknown): void {
@@ -33,10 +33,53 @@ function send(channel: string, payload?: unknown): void {
   target.webContents.send(channel, payload)
 }
 
+function runCloseAction(action: CloseAction, win: BrowserWindow): void {
+  if (action === 'none') return
+  if (action !== 'flush') clearFlushTimer()
+  if (action === 'flush') {
+    clearFlushTimer()
+    if (win.webContents.isDestroyed()) {
+      runCloseAction(closeFlow.rendererGone(), win)
+      return
+    }
+    flushTimer = setTimeout(() => {
+      const alive = !rendererGone && !win.isDestroyed() && !win.webContents.isDestroyed()
+      if (shouldCloseAfterFlush(false, alive)) runCloseAction(closeFlow.rendererGone(), win)
+    }, FLUSH_GRACE_MS)
+    win.webContents.send(IPC.flushRequest)
+  } else if (action === 'prompt') {
+    const abandon = quitting || process.platform !== 'darwin'
+      ? '放弃未保存修改并退出应用'
+      : '放弃未保存修改并关闭窗口'
+    void dialog.showMessageBox(win, {
+      type: 'warning',
+      title: '笔记尚未保存',
+      message: '写盘失败，仍有未保存的修改。',
+      detail: '可以重试保存、继续编辑，或明确放弃本次未保存的修改。',
+      buttons: ['重试保存', '继续编辑', abandon],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true
+    }).then(({ response }) => {
+      const choice: CloseDecision = response === 0 ? 'retry' : response === 2 ? 'discard' : 'continue'
+      runCloseAction(closeFlow.decide(choice), win)
+    }).catch(() => {
+      runCloseAction(closeFlow.decide('continue'), win)
+    })
+  } else if (action === 'cancel') {
+    quitting = false
+  } else if (action === 'close') {
+    flushed = true
+    if (quitting) app.quit()
+    else if (!win.isDestroyed()) win.close()
+  }
+}
+
 function createWindow(): void {
   flushed = false
+  rendererGone = false
   flushTimer = null
-  settleFlush = null
+  closeFlow = new CloseFlow()
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -55,30 +98,17 @@ function createWindow(): void {
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+  mainWindow.webContents.on('render-process-gone', () => {
+    rendererGone = true
+  })
 
-  // 关窗前先让渲染进程把脏稿写完。写失败则留下窗口；渲染进程挂了才靠超时关。
+  // 关窗前先写盘；失败时由主进程给出重试、继续编辑或明确放弃的选择。
   mainWindow.on('close', (event) => {
     if (flushed) return
     event.preventDefault()
-    if (settleFlush) return
     const win = mainWindow
     if (!win) return
-    flushTimer = setTimeout(() => {
-      const alive = Boolean(win && !win.isDestroyed() && !win.webContents.isDestroyed())
-      if (!alive) finishFlush(shouldCloseAfterFlush(false, false))
-    }, FLUSH_GRACE_MS)
-    settleFlush = (close) => {
-      if (flushTimer) {
-        clearTimeout(flushTimer)
-        flushTimer = null
-      }
-      if (!close) return
-      flushed = true
-      if (quitting) app.quit()
-      else win.close()
-    }
-    if (win.webContents.isDestroyed()) finishFlush(shouldCloseAfterFlush(false, false))
-    else send(IPC.flushRequest)
+    runCloseAction(closeFlow.request(), win)
   })
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -180,9 +210,11 @@ function registerIpc(): void {
     if (text == null) return []
     return vault?.search(text) ?? []
   })
-  ipcMain.on(IPC.flushDone, (_event, payload: FlushDonePayload) => {
+  ipcMain.on(IPC.flushDone, (event, payload: FlushDonePayload) => {
+    const win = mainWindow
+    if (!win || event.sender !== win.webContents) return
     const ok = payload != null && payload.ok === true
-    finishFlush(shouldCloseAfterFlush(ok, true))
+    runCloseAction(closeFlow.flushed(ok), win)
   })
 }
 

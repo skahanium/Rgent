@@ -24,3 +24,5 @@ jobs:
       - run: pnpm docs:check
       - run: pnpm test
       - run: pnpm build
+      - run: node -e "if (!require('node:fs').existsSync('out/main/index.js')) process.exit(1)"
+      - run: node --check out/preload/index.cjs

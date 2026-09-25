@@ -1,5 +1,6 @@
 import { IPC, type NoteSnapshot, type PermissionState, type PermissionTier, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
+import { reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
 import { promptConflict, promptNewNote } from './dialogs.ts'
 import { renderSearchResults } from './search.ts'
@@ -140,11 +141,7 @@ export async function start(root: HTMLElement): Promise<void> {
     void showPicker(true)
   })
   window.rgent.onFlushRequest(() => {
-    void (async () => {
-      const ok = await flushSave()
-      if (!ok) window.alert('写盘失败，窗口先不关。')
-      window.rgent.flushDone({ ok })
-    })()
+    void reportFlush(flushSave, (payload) => window.rgent.flushDone(payload))
   })
   window.rgent.onNoteExternalChange(() => {
     // 别的笔记被外部改了，可能多了或少了指向当前这篇的链接。

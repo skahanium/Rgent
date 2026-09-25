@@ -1,4 +1,4 @@
-import { realpath, symlink, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { stat, symlink, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -60,7 +60,12 @@ describe('vault paths', () => {
     const file = path.join(root, 'pic.png')
     await writeFile(file, 'png', 'utf8')
     const resolved = resolveVaultMediaFile(root, 'pic.png')
-    expect(resolved).toEqual({ abs: await realpath(file) })
+    expect(resolved).toHaveProperty('abs')
+    if (!('abs' in resolved)) return
+    // Windows 可用 8.3 短路径表示同一文件；比较文件身份，而非路径字符串。
+    const [actual, expected] = await Promise.all([stat(resolved.abs), stat(file)])
+    expect([actual.dev, actual.ino]).toEqual([expected.dev, expected.ino])
+    expect(await readFile(resolved.abs, 'utf8')).toBe('png')
   })
 
   it('sanitizes note names', () => {
