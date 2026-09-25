@@ -22,7 +22,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm docs:check
-      - run: pnpm test
+      - run: node scripts/ci-test.mjs
       - run: pnpm build
       - run: node -e "if (!require('node:fs').existsSync('out/main/index.js')) process.exit(1)"
       - run: node --check out/preload/index.cjs

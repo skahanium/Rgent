@@ -1,8 +1,6 @@
 #include <node_api.h>
 
 #include <exception>
-#include <cstdio>
-#include <cstdlib>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -64,12 +62,6 @@ napi_value Invoke(napi_env env, Work&& work) {
   try {
     return work();
   } catch (const std::exception& error) {
-#ifdef _WIN32
-    // Temporary CI diagnostic: only fixed native error codes, never file content.
-    if (std::getenv("GITHUB_ACTIONS") != nullptr) {
-      std::fprintf(stderr, "::error title=Rgent native filesystem::%s\n", error.what());
-    }
-#endif
     napi_throw_error(env, nullptr, error.what());
     return nullptr;
   }
