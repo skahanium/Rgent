@@ -360,12 +360,21 @@ void RenameOpenedFile(HANDLE source, HANDLE parent, const std::wstring& target,
   info->RootDirectory = parent;
   info->FileNameLength = static_cast<DWORD>(bytes);
   std::memcpy(info->FileName, target.data(), bytes);
-  if (!SetFileInformationByHandle(source, FileRenameInfoEx, info, static_cast<DWORD>(length))) {
-    const DWORD code = GetLastError();
+  using NtSetInformationFileFn = NTSTATUS (NTAPI *)(HANDLE, PIO_STATUS_BLOCK, PVOID,
+                                                    ULONG, FILE_INFORMATION_CLASS);
+  const auto module = GetModuleHandleW(L"ntdll.dll");
+  if (!module) WinError("NTDLL");
+  const auto function = reinterpret_cast<NtSetInformationFileFn>(
+      GetProcAddress(module, "NtSetInformationFile"));
+  if (!function) WinError("NT_SET_INFORMATION_FILE");
+  IO_STATUS_BLOCK io{};
+  const auto status = function(source, &io, info, static_cast<ULONG>(length),
+                               static_cast<FILE_INFORMATION_CLASS>(65)); // FileRenameInformationEx
+  if (status < 0) {
     if (std::getenv("GITHUB_ACTIONS") != nullptr)
-      std::fprintf(stderr, "::error title=Windows rename code::%lu\n", code);
-    SetLastError(code);
-    WinError("RENAME");
+      std::fprintf(stderr, "::error title=Windows rename status::%lu\n",
+                   static_cast<unsigned long>(status));
+    NtError("RENAME", status);
   }
 }
 

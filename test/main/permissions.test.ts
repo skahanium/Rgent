@@ -174,4 +174,19 @@ describe('permission policy', () => {
     if (!same) return
     await expect(modelTierFor(root, `${decomposed}/a.md`)).rejects.toThrow('FORBIDDEN')
   })
+
+  it.skipIf(process.platform !== 'win32')('keeps a real 8.3 folder alias inside the same permission rule', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-policy-'))
+    const longName = 'LongFolderName'
+    const shortName = 'LONGFO~1'
+    await mkdir(path.join(root, longName))
+    await writeFile(path.join(root, longName, 'a.md'), 'note', 'utf8')
+    await writeFile(file(root), JSON.stringify({ [longName]: 'forbidden' }), 'utf8')
+    const same = await stat(path.join(root, shortName)).then(async (info) => {
+      const actual = await stat(path.join(root, longName))
+      return info.dev === actual.dev && info.ino === actual.ino
+    }).catch(() => false)
+    if (!same) return // 8.3 aliases may be disabled on this volume.
+    await expect(modelTierFor(root, `${shortName}/a.md`)).rejects.toThrow('FORBIDDEN')
+  })
 })
