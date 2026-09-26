@@ -55,7 +55,9 @@ describe('edit lock', () => {
 
   it('allows deleting a whole AI block or a whole marker, because that is discard and adopt', () => {
     expect(blocked(aiBlock.start, aiBlock.end, '')).toBe(false)
-    // 采纳走的是删整行，范围比标记本身宽，也必须放行。
+    // 采纳走的是删整行，范围比标记本身宽，也必须放行。这条豁免会让「删标记行 + 它
+    // 前后的换行」把上一段并进 AI 块——但标记同时没了，合并后的段就是人写的，
+    // 不会把人字锁住，所以这是「等于采纳」，不是漏网。
     expect(blocked(marker.start - 1, marker.end + 1, '')).toBe(false)
   })
 
