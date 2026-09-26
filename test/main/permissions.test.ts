@@ -204,7 +204,8 @@ describe('permission policy', () => {
 
   it.skipIf(process.platform !== 'win32')('rejects a colon on Windows, where it separates data streams', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-policy-'))
-    await mkdir(path.join(root, 'a:b'))
+    // Windows 上根本建不出含 ':' 的目录（EINVAL），所以这条只验校验先于任何文件系统访问。
     await expect(setPermission(root, 'a:b', 'forbidden')).rejects.toThrow('BAD_PATH')
+    await expect(modelTierFor(root, 'a:b/c.md')).rejects.toThrow('BAD_PATH')
   })
 })

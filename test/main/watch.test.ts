@@ -18,9 +18,9 @@ async function vault(): Promise<string> {
 }
 
 /** 收集回调，直到 stop() 被调用为止。 */
-function collect(root: string): { seen: Array<string | null>; stop: () => void } {
+function collect(root: string, pollMs: number = POLL): { seen: Array<string | null>; stop: () => void } {
   const seen: Array<string | null> = []
-  const stop = watchVault(root, (relPath) => seen.push(relPath), POLL)
+  const stop = watchVault(root, (relPath) => seen.push(relPath), pollMs)
   return { seen, stop }
 }
 
@@ -66,11 +66,15 @@ describe('watchVault', () => {
 
   it('collapses a bulk change into one null signal instead of flooding the handler', async () => {
     const root = await vault()
-    const { seen, stop } = collect(root)
+    // 轮询放慢，保证 25 个文件全部落在两次扫描之间：这条测的是「一次扫描看到
+    // 超过 20 处变化就折叠成一个 null」，不是竞态。
+    const { seen, stop } = collect(root, 200)
     try {
-      for (let i = 0; i < 25; i += 1) await writeFile(path.join(root, `n${i}.md`), '甲', 'utf8')
+      await Promise.all(
+        Array.from({ length: 25 }, (_, index) => writeFile(path.join(root, `n${index}.md`), '甲', 'utf8'))
+      )
       await waitFor(() => seen.includes(null))
-      expect(seen).toContain(null)
+      expect(seen.every((item) => item === null)).toBe(true)
     } finally {
       stop()
       closeSecureFs(root)
