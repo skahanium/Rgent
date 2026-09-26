@@ -38,11 +38,20 @@ constexpr ULONG kNonDirectory = 0x40;
 constexpr ULONG kOpenReparsePoint = 0x00200000;
 constexpr DWORD kRenameReplace = 0x1;
 constexpr DWORD kRenamePosix = 0x2;
+/**
+ * 所有句柄都用最宽松的共享模式。库内边界靠「从固定库根句柄逐级相对打开」成立，
+ * 不靠拒绝别人的改名：即使祖先目录被外部搬走，我们手里的子句柄仍指向原对象，
+ * 读不到库外。反过来，拒绝 FILE_SHARE_DELETE 只会让我们和资源管理器、网盘、
+ * 杀软互相卡死，而且会让自己后续的改名撞 STATUS_SHARING_VIOLATION。
+ */
+constexpr ULONG kShareAll = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 constexpr int64_t kUnixEpochInFiletime = 116444736000000000LL;
 constexpr NTSTATUS kNameNotFound = static_cast<NTSTATUS>(0xC0000034u);
 constexpr NTSTATUS kPathNotFound = static_cast<NTSTATUS>(0xC000003Au);
 constexpr NTSTATUS kNoSuchFile = static_cast<NTSTATUS>(0xC000000Fu);
 constexpr NTSTATUS kNameCollision = static_cast<NTSTATUS>(0xC0000035u);
+/** 碰到重解析点（符号链接 / junction）：拒绝跟随，按不可信路径处理。 */
+constexpr NTSTATUS kReparseEncountered = static_cast<NTSTATUS>(0xC000050Bu);
 constexpr ACCESS_MASK kDirectoryAccess = FILE_LIST_DIRECTORY | FILE_TRAVERSE |
                                          FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
@@ -79,6 +88,9 @@ class UniqueHandle {
 [[noreturn]] void NtError(const char* operation, NTSTATUS status) {
   if (status == kNameNotFound || status == kPathNotFound || status == kNoSuchFile) Fail("ENOENT");
   if (status == kNameCollision) Fail("EEXIST");
+  // JS 层按 "UNSAFE_PATH" 判等来决定用户可见的提示（不能读写符号链接笔记 / 文件夹）。
+  // 不映射的话 Windows 上抛的是裸 NTSTATUS，那些判断全部失效。
+  if (status == kReparseEncountered) Fail("UNSAFE_PATH");
   throw std::runtime_error(std::string(operation) + ":NTSTATUS:" +
                            std::to_string(static_cast<uint32_t>(status)));
 }
@@ -230,9 +242,8 @@ DirectoryChain WalkDirectories(VaultHandle* root, const std::vector<std::wstring
   chain.current = RootHandle(root);
   chain.owned.reserve(count);
   for (size_t i = 0; i < count; ++i) {
-    // Omitting FILE_SHARE_DELETE pins every ancestor against a concurrent move.
     auto child = OpenChild(chain.current, parts[i], kDirectoryAccess,
-                           kOpen, 0, FILE_SHARE_READ | FILE_SHARE_WRITE);
+                           kOpen, 0, kShareAll);
     RequireKind(child.get(), "dir");
     chain.current = child.get();
     chain.owned.push_back(std::move(child));
@@ -380,7 +391,7 @@ VaultHandle* OpenRoot(const std::string& absolute_path) {
   const auto wide = Wide(absolute_path);
   if (wide.empty() || wide.find(L'\0') != std::wstring::npos) Fail("BAD_PATH");
   UniqueHandle handle(CreateFileW(wide.c_str(), kDirectoryAccess,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                  kShareAll, nullptr, OPEN_EXISTING,
                                   FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
   if (!handle.valid()) WinError("OPEN_ROOT");
   RequireKind(handle.get(), "dir");
@@ -421,7 +432,7 @@ std::vector<Component> Resolve(VaultHandle* root, const std::string& relative_pa
     const ACCESS_MASK access = FILE_READ_ATTRIBUTES | SYNCHRONIZE |
                                (i + 1 < parts.size() ? FILE_LIST_DIRECTORY : 0);
     auto child = OpenChild(chain.current, parts[i], access,
-                           kOpen, 0, FILE_SHARE_READ | FILE_SHARE_WRITE);
+                           kOpen, 0, kShareAll);
     const auto kind = Kind(child.get());
     if (kind == "link" || (i + 1 < parts.size() && kind != "dir")) Fail("UNSAFE_PATH");
     const auto identity = Identity(child.get());
@@ -438,7 +449,7 @@ std::string ReadBytes(VaultHandle* root, const std::string& relative_file) {
   const auto parts = Parts(relative_file);
   auto chain = WalkDirectories(root, parts, parts.size() - 1);
   auto leaf = OpenChild(chain.current, parts.back(), FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                        kOpen, kNonDirectory, FILE_SHARE_READ);
+                        kOpen, kNonDirectory, kShareAll);
   RequireKind(leaf.get(), "file");
   return ReadAll(leaf.get());
 }
@@ -448,7 +459,7 @@ void Replace(VaultHandle* root, const std::string& relative_file,
   const auto parts = Parts(relative_file);
   auto chain = WalkDirectories(root, parts, parts.size() - 1);
   auto target = OpenMaybe(chain.current, parts.back(), FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                          kNonDirectory, FILE_SHARE_READ);
+                          kNonDirectory, kShareAll);
   if (target.valid()) RequireKind(target.get(), "file");
   if (expected) {
     if (!target.valid() || ReadAll(target.get()) != *expected) Fail("CONFLICT");
@@ -462,7 +473,7 @@ void Replace(VaultHandle* root, const std::string& relative_file,
     try {
       temporary = OpenChild(chain.current, name,
                             FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
-                            kCreate, kNonDirectory, FILE_SHARE_READ);
+                            kCreate, kNonDirectory, kShareAll);
       break;
     } catch (const std::runtime_error& error) {
       if (std::string(error.what()) != "EEXIST") throw;
@@ -472,7 +483,8 @@ void Replace(VaultHandle* root, const std::string& relative_file,
   bool renamed = false;
   try {
     WriteAll(temporary.get(), content);
-    // The target handle denies external writers and deletion through the check/rename interval.
+    // 目标句柄全程用最宽松共享：边界靠句柄相对解析成立，不靠拒绝别人的改名。
+    // 核对点之后、提交之前若目标被外部换掉，属已知残余，靠修订值报冲突并交给人。
     RenameOpenedFile(temporary.get(), parts.back(), expected.has_value());
     renamed = true;
   } catch (...) {
@@ -487,7 +499,7 @@ void Create(VaultHandle* root, const std::string& relative_file) {
   const auto parts = Parts(relative_file);
   auto chain = WalkDirectories(root, parts, parts.size() - 1);
   auto file = OpenChild(chain.current, parts.back(), FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                        kCreate, kNonDirectory, FILE_SHARE_READ);
+                        kCreate, kNonDirectory, kShareAll);
   RequireKind(file.get(), "file");
   if (!FlushFileBuffers(file.get())) WinError("FLUSH");
 }

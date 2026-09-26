@@ -143,17 +143,30 @@ describe('notes-fs', () => {
     expect((await listVaultTree(root)).map((entry) => entry.name)).toEqual(['a.md'])
   })
 
-  it('does not treat symlinked notes or directories as vault notes', async () => {
+  // 目录链接在两平台都能建（Windows 用 junction，不需要特权），
+  // 它同时钉住 Windows 上「重解析点要映射成 UNSAFE_PATH」这条：
+  // 映射缺失时这里抛的是裸 NTSTATUS，而 JS 层按 'UNSAFE_PATH' 判等，消息就不会是「符号链接」。
+  it('does not treat a linked directory as vault notes', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'rgent-out-'))
+    await writeFile(path.join(outside, 'secret.md'), '库外秘密', 'utf8')
+    await symlink(outside, path.join(root, 'linked-dir'), process.platform === 'win32' ? 'junction' : 'dir')
+    const tree = await listVaultTree(root)
+    expect(tree.find((item) => item.name === 'linked-dir')?.kind).toBe('file')
+    await expect(readNote(root, 'linked-dir/secret.md')).rejects.toThrow(/符号链接/)
+    await expect(writeNote(root, 'linked-dir/secret.md', '覆盖', 'old')).rejects.toThrow(/符号链接/)
+    expect(await readFile(path.join(outside, 'secret.md'), 'utf8')).toBe('库外秘密')
+  })
+
+  // 文件符号链接在 Windows 上要特权，所以只在非 Windows 跑。
+  it.skipIf(process.platform === 'win32')('does not treat a linked note file as a vault note', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
     const outside = await mkdtemp(path.join(os.tmpdir(), 'rgent-out-'))
     await writeFile(path.join(outside, 'secret.md'), '库外秘密', 'utf8')
     await symlink(path.join(outside, 'secret.md'), path.join(root, 'link.md'))
-    await symlink(outside, path.join(root, 'linked-dir'))
     const tree = await listVaultTree(root)
     expect(tree.find((item) => item.name === 'link.md')?.kind).toBe('file')
-    expect(tree.find((item) => item.name === 'linked-dir')?.kind).toBe('file')
     await expect(readNote(root, 'link.md')).rejects.toThrow(/符号链接/)
-    await expect(readNote(root, 'linked-dir/secret.md')).rejects.toThrow(/符号链接/)
     await expect(writeNote(root, 'link.md', '覆盖', 'old')).rejects.toThrow(/符号链接/)
     expect(await readFile(path.join(outside, 'secret.md'), 'utf8')).toBe('库外秘密')
   })
