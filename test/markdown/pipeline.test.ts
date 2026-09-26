@@ -31,7 +31,8 @@ describe('pipeline', () => {
       math: true,
       callout: true,
       wikilink: true,
-      mermaid: true
+      mermaid: true,
+      identity: true
     })
     expect(new Set(ALL_STAGES.map((stage) => stage.id))).toEqual(new Set(STAGE_IDS))
   })

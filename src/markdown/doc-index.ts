@@ -15,11 +15,13 @@ import type {
   WikiLinkRef
 } from './types.ts'
 import type { CalloutNode, WikiLinkNode } from './syntax/nodes.ts'
+import { identityOf, markersOf } from './syntax/identity.ts'
 import { textOf } from './syntax/callout.ts'
 
 export function emptyIndex(): DocIndex {
   return {
     blocks: [],
+    markers: [],
     tables: [],
     images: [],
     mermaid: [],
@@ -61,7 +63,17 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
   for (const child of tree.children) {
     const range = rangeFromNode(source, child)
     if (!range) continue
-    index.blocks.push({ type: child.type, range: shift(range, bodyOffset) })
+    const block: BlockRef = { type: child.type, range: shift(range, bodyOffset) }
+    const identity = identityOf(child)
+    if (identity) block.identity = identity.identity
+    index.blocks.push(block)
+  }
+
+  for (const marker of markersOf(tree)) {
+    index.markers.push({
+      range: shift({ start: marker.start, end: marker.end }, bodyOffset),
+      identity: marker.identity
+    })
   }
 
   visit(tree, 'table', (node) => {

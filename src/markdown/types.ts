@@ -1,10 +1,13 @@
+import type { BlockIdentity } from './identity.ts'
+
 export const STAGE_IDS = [
   'gfm',
   'frontmatter',
   'math',
   'callout',
   'wikilink',
-  'mermaid'
+  'mermaid',
+  'identity'
 ] as const
 
 export type StageId = (typeof STAGE_IDS)[number]
@@ -17,7 +20,8 @@ export const DEFAULT_STAGES: StageFlags = {
   math: true,
   callout: true,
   wikilink: true,
-  mermaid: true
+  mermaid: true,
+  identity: true
 }
 
 export interface SourceRange {
@@ -28,6 +32,14 @@ export interface SourceRange {
 export interface BlockRef {
   type: string
   range: SourceRange
+  /** 缺省即人写的。只有未采纳的 AI 块与口令才带这个字段。 */
+  identity?: BlockIdentity
+}
+
+/** 一枚身份标记在文件里的位置。它不是块，只给画布藏行与「采纳」删除用。 */
+export interface MarkerRef {
+  range: SourceRange
+  identity: BlockIdentity
 }
 
 export interface TableRef {
@@ -83,6 +95,8 @@ export interface MermaidRef {
 
 export interface DocIndex {
   blocks: BlockRef[]
+  /** 身份标记的位置。它们不在 `blocks` 里。 */
+  markers: MarkerRef[]
   tables: TableRef[]
   images: ImageRef[]
   mermaid: MermaidRef[]

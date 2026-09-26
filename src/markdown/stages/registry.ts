@@ -3,6 +3,7 @@ import { STAGE_IDS, type StageFlags } from '../types.ts'
 import { calloutStage } from './callout.ts'
 import { frontmatterStage } from './frontmatter.ts'
 import { gfmStage } from './gfm.ts'
+import { identityStage } from './identity.ts'
 import { mathStage } from './math.ts'
 import { mermaidStage } from './mermaid.ts'
 import type { MarkdownStage } from './stage.ts'
@@ -14,7 +15,8 @@ export const ALL_STAGES: readonly MarkdownStage[] = [
   mathStage,
   calloutStage,
   wikilinkStage,
-  mermaidStage
+  mermaidStage,
+  identityStage
 ]
 
 export function extensionsFor(stages: StageFlags): {
