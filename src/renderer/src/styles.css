@@ -548,3 +548,139 @@ summary:focus-visible {
   max-width: 100%;
   height: auto;
 }
+
+/* 身份标记：机器语法在画布上不可见，只留 chip 与块的两种样子。 */
+
+.rgent-marker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 14px 0 2px;
+  font-family: var(--ui);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+
+.rgent-marker-label {
+  padding: 1px 6px;
+  border: 1px dashed var(--line);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.rgent-marker-ai .rgent-marker-label {
+  border-style: solid;
+  border-color: #c9a227;
+  background: #fdf6dd;
+  color: #7a5c00;
+}
+
+.rgent-marker button {
+  font: inherit;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.rgent-marker button:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.rgent-marker button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.rgent-marker-discard:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* 未采纳的 AI 块：整段有底色和左边线，一眼能看出不是自己写的。 */
+.rgent-block-ai {
+  background: #fdf6dd;
+  border-left: 2px solid #c9a227;
+  padding-left: 10px;
+  margin-left: -12px;
+}
+
+/* 口令：只有一条很轻的边线，字还是自己的字，随时能改。 */
+.rgent-block-command {
+  border-left: 2px solid var(--accent-weak);
+  padding-left: 10px;
+  margin-left: -12px;
+  color: var(--muted);
+}
+
+/* 账本回顾：临时、只读、关掉就走。它不是文件，也不占右侧反链。 */
+
+.ledger-open {
+  margin-left: auto;
+  align-self: center;
+  font-family: var(--ui);
+  font-size: 0.75rem;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.ledger-open:hover,
+.ledger-open[aria-pressed='true'] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.ledger-view {
+  position: absolute;
+  inset: 48px 0 0;
+  z-index: 3;
+  overflow-y: auto;
+  background: var(--paper);
+}
+
+.ledger-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--ui);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.ledger-close {
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.ledger-close:hover {
+  color: var(--danger);
+}
+
+.ledger-body {
+  margin: 0;
+  padding: 18px 16px 48px;
+  max-width: 42rem;
+  margin: 0 auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--text);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--ink);
+}

@@ -88,6 +88,8 @@ flowchart LR
 
 | 性质 | 层 | 现状 |
 |------|----|------|
+| 画布装饰只从 StateField 出 | 渲染进程 | 编译结果与装饰由一个 `StateField` 提供（`src/renderer/src/view/editor.ts`），**不能**由 `ViewPlugin` 提供：CM6 禁止插件产生块装饰，表格 / callout / mermaid / 块级公式会抛 `RangeError`，异常再被上层的 `catch` 吞掉，表现成「含表格的笔记点不开、界面毫无提示」。另：块级替换会吞掉紧随其后的行装饰，所以身份标记的 chip 用行内替换。改这里时窗口要各起一次含表格与含标记的笔记。 |
+| 未采纳的 AI 块不能改字 | 渲染进程 | 判定是纯函数（`src/markdown/identity-lock.ts`）：锁住标记与 AI 块的范围，字面上的改动一律挡，整段删掉（采纳 / 丢弃）放行。画布用 `EditorState.transactionFilter` 只拦用户输入与删除——程序化变更（切 tab、采纳、丢弃、搬家）本来就不该被拦。**不许**用整篇只读冒充。 |
 | 渲染进程不碰盘 | 壳 | `contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`（`src/main/index.ts`）。preload 只经 `contextBridge` 暴露白名单（`src/preload/index.ts`）。sandbox 下 preload 必须打成 `out/preload/index.cjs`（`electron.vite.config.ts`）。 |
 | IPC 是唯一通道 | 壳 | 通道名和载荷类型在 `src/shared/ipc.ts`。渲染进程不得再开通道。 |
 | 不随便开页 | 壳 | `setWindowOpenHandler` 一律 deny。`will-navigate` 一律 `preventDefault`；`http(s)` 走系统浏览器（`src/main/index.ts`）。 |
@@ -98,7 +100,7 @@ flowchart LR
 | 权限名单的失效状态 | 主进程 | 名单缺失是空名单；已有名单损坏、无效、无法读取或条目身份不稳是 `invalid`。人读写搜继续，树上提示修复，名单写入只接受经句柄核验的文件夹与三档值并原子替换。权限按文件系统实际路径组成归一，别名冲突与身份变化使 AI 失败关闭。`modelTierFor` 目前仅被测试调用；Host 未接线，尚无实际模型出口。Windows 侧别名与写盘已过 CI。 |
 | 人写盘 ≠ 模型写盘 | IPC | `noteWrite` 只给人的自动写盘与手动保存。`AgentHost` 不得复用这条通道。Host 未开工，这条先当禁令。 |
 | 索引不见账本 | 管线 / 索引 | `partitionSource` 切开锚点（`src/markdown/partition.ts`）。`compile` 和 `VaultIndex` 只吃 `body`。 |
-| 画布不见账本 | 画布 | Tab 拆 `content`（正文）与 `ledger`（`src/renderer/src/tabs.ts`）。编辑器只 `setText(body)`。写盘 `composeSource`。 |
+| 画布不见账本 | 画布 | Tab 拆 `content`（正文）与 `ledger`（`src/renderer/src/tabs.ts`）。编辑器只 `setText(body)`。写盘 `composeSource`。账本回顾是临时只读面板，入口在笔记标题旁，关掉就走，不占右侧反链。 |
 | 人搜含禁区 | 索引 | `VaultIndex` 是全量语料，建索引时不按权限过滤。当前人搜是惰性全量 + 子串。模型检索尚未开工，未来在查询期过滤。 |
 | 退出不丢稿 | 壳 | 关窗先 `flushRequest`。保存失败时主进程原生对话框让人重试、继续编辑或明确放弃；关窗和 `Cmd+Q` 走同一状态流程，重复请求不重复弹框。超时只在渲染进程已死时关。`vault.dispose()` 在 `will-quit`，不在 `before-quit`（退出 flush 还要走 `noteWrite`）。流程测试见 `test/shared/flush.test.ts`；失败弹窗的三条路径已在本机实际复核，本次原生模块构建后窗口已启动并读到笔记。 |
 | 密钥不进库 | 主进程 | Host 最小环接 Electron `safeStorage`，密文只存应用数据目录；尚未接线。 |

@@ -30,6 +30,13 @@ export async function start(root: HTMLElement): Promise<void> {
         <section class="stage">
           <div class="tabs" role="tablist"></div>
           <div class="editor-host"></div>
+          <div class="ledger-view" hidden>
+            <div class="ledger-head">
+              <span class="ledger-title"></span>
+              <button type="button" class="ledger-close" aria-label="关闭账本回顾">×</button>
+            </div>
+            <pre class="ledger-body"></pre>
+          </div>
           <p class="empty">从目录打开一篇笔记，或新建笔记。</p>
         </section>
         <aside class="backlinks" aria-label="反链"></aside>
@@ -56,6 +63,10 @@ export async function start(root: HTMLElement): Promise<void> {
   const editorHostEl = root.querySelector('.editor-host') as HTMLElement
   const emptyEl = root.querySelector('.empty') as HTMLElement
   const backlinksEl = root.querySelector('.backlinks') as HTMLElement
+  const ledgerEl = root.querySelector('.ledger-view') as HTMLElement
+  const ledgerTitle = root.querySelector('.ledger-title') as HTMLElement
+  const ledgerBody = root.querySelector('.ledger-body') as HTMLElement
+  const ledgerClose = root.querySelector('.ledger-close') as HTMLButtonElement
   const searchEl = root.querySelector('.search') as HTMLElement
   const searchInput = root.querySelector('.search-input') as HTMLInputElement
   const searchPanel = root.querySelector('.search-panel') as HTMLElement
@@ -70,6 +81,7 @@ export async function start(root: HTMLElement): Promise<void> {
   let searchHits: SearchHit[] = []
   let permissionState: PermissionState = { status: 'ready', entries: [] }
   let saveInFlight: Promise<boolean> | null = null
+  let ledgerOpen = false
 
   const editor: EditorHost = mountEditor(editorHostEl, (text) => {
     const tab = current()
@@ -91,6 +103,7 @@ export async function start(root: HTMLElement): Promise<void> {
   pickBtn.addEventListener('click', () => {
     void chooseVault()
   })
+  ledgerClose.addEventListener('click', () => closeLedger())
 
   const closeSearch = () => {
     searchPanel.hidden = true
@@ -361,6 +374,7 @@ export async function start(root: HTMLElement): Promise<void> {
     active = relPath
     editor.setText(tab.content, noteHost())
     editor.focus()
+    closeLedger()
     renderTabs()
     paintTree()
     emptyEl.hidden = true
@@ -395,7 +409,44 @@ export async function start(root: HTMLElement): Promise<void> {
       wrap.append(button, close)
       tabsEl.append(wrap)
     }
+    // 账本回顾：入口就放在当前笔记标题旁边，临时、只读、关掉就走，
+    // 不占右侧反链（围栏 §账本）。它不是文件，所以不进 tabs 数组。
+    if (active) {
+      const ledger = document.createElement('button')
+      ledger.type = 'button'
+      ledger.className = 'ledger-open'
+      ledger.textContent = '账本'
+      ledger.title = '看这篇笔记的账本回顾'
+      ledger.setAttribute('aria-pressed', String(ledgerOpen))
+      ledger.addEventListener('click', () => toggleLedger())
+      tabsEl.append(ledger)
+    }
     emptyEl.hidden = tabs.length > 0
+  }
+
+  function toggleLedger(): void {
+    if (ledgerOpen) {
+      closeLedger()
+      return
+    }
+    const tab = current()
+    if (!tab) return
+    ledgerOpen = true
+    ledgerTitle.textContent = `${titleOf(tab.relPath.split('/').pop() ?? tab.relPath)} · 账本回顾`
+    // 账本是旁路原文，只读展示；分场要等写入方（Host 阶段）定下章节写法。
+    ledgerBody.textContent =
+      tab.ledger && tab.ledger.trim() !== ''
+        ? tab.ledger
+        : '这篇笔记还没有账本。账本由生成任务写下，写入方属于 Host 阶段。'
+    ledgerEl.hidden = false
+    renderTabs()
+  }
+
+  function closeLedger(): void {
+    if (!ledgerOpen) return
+    ledgerOpen = false
+    ledgerEl.hidden = true
+    renderTabs()
   }
 
   async function closeTab(relPath: string, opts: { save?: boolean } = {}): Promise<void> {

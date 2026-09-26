@@ -1,8 +1,10 @@
 import { isVaultImagePath } from '../shared/vault-rel.ts'
+import { acceptMarker, blockAfterMarker, discardMarkedBlock, moveUnit, type TextEdit } from './identity-edit.ts'
 import type {
   CalloutRef,
   DocIndex,
   ImageRef,
+  MarkerRef,
   MathRef,
   MermaidRef,
   SourceRange,
@@ -18,6 +20,19 @@ export type PlannedWidget =
   | { kind: 'callout'; range: SourceRange; callout: CalloutRef }
   | { kind: 'wikilink'; range: SourceRange; wikilink: WikiLinkRef }
   | { kind: 'mermaid'; range: SourceRange; mermaid: MermaidRef }
+  /**
+   * 身份标记的 chip：替掉整行注释。这一处能做的动作在这里一次算完，
+   * 画布那边只负责 dispatch——视图层不重算管线，也不自己拼文本。
+   */
+  | {
+      kind: 'marker'
+      range: SourceRange
+      marker: MarkerRef
+      accept: TextEdit | null
+      discard: TextEdit | null
+      moveUp: TextEdit | null
+      moveDown: TextEdit | null
+    }
 
 export function expandToLineBlock(source: string, range: SourceRange): SourceRange {
   let start = Math.max(0, range.start)
@@ -46,6 +61,24 @@ export function planWidgets(
 ): PlannedWidget[] {
   const out: PlannedWidget[] = []
   const docLen = source.length
+
+  for (const marker of index.markers) {
+    // 只替换注释本身，不连整行一起换：块级替换会在 CM6 里吞掉紧随其后的行装饰
+    // （实测：装饰集里 [29,29,'rgent-block-ai'] 正确存在，却没落到 DOM 上），
+    // 而这一行本来就是空的，留着它也看不出区别。
+    const range = clipInline(marker.range, viewports, docLen)
+    if (!range) continue
+    const block = blockAfterMarker(index, marker)
+    push(out, {
+      kind: 'marker',
+      range,
+      marker,
+      accept: acceptMarker(source, marker),
+      discard: block ? discardMarkedBlock(source, marker, block) : null,
+      moveUp: block ? moveUnit(source, index, block.start, 'up') : null,
+      moveDown: block ? moveUnit(source, index, block.start, 'down') : null
+    })
+  }
 
   for (const callout of index.callouts) {
     const range = clipBlock(source, callout.range, viewports, docLen)

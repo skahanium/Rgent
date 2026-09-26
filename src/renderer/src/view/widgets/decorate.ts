@@ -3,6 +3,7 @@ import type { PlannedWidget } from '@markdown'
 import type { NoteHost } from '../host.ts'
 import { CalloutWidget } from './callout.ts'
 import { ImageWidget } from './image.ts'
+import { MarkerWidget } from './marker.ts'
 import { MathWidget } from './math.ts'
 import { MermaidWidget } from './mermaid.ts'
 import { TableWidget } from './table.ts'
@@ -25,5 +26,8 @@ export function decorationForWidget(widget: PlannedWidget, host: NoteHost): Deco
       return Decoration.replace({ widget: new WikilinkWidget(widget.wikilink, host) })
     case 'mermaid':
       return Decoration.replace({ widget: new MermaidWidget(widget.mermaid), block: true })
+    case 'marker':
+      // 行内部件：只换掉注释文本。块级替换会吞掉紧随其后的行装饰（见 view-plan.ts）。
+      return Decoration.replace({ widget: new MarkerWidget(widget) })
   }
 }

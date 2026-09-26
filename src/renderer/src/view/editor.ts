@@ -1,13 +1,21 @@
-import { compile, DEFAULT_STAGES, planWidgets, rangesOverlap, recoverCompile, type CompileResult } from '@markdown'
+import {
+  compile,
+  DEFAULT_STAGES,
+  editBlocked,
+  lockedRanges,
+  planWidgets,
+  rangesOverlap,
+  recoverCompile,
+  type CompileResult,
+  type EditChange
+} from '@markdown'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
-import { Compartment, EditorState, Facet, type Range } from '@codemirror/state'
+import { Compartment, EditorState, Facet, StateField, type Range } from '@codemirror/state'
 import {
   Decoration,
   type DecorationSet,
   EditorView,
-  ViewPlugin,
-  keymap,
-  type ViewUpdate
+  keymap
 } from '@codemirror/view'
 import { emptyNoteHost, type NoteHost } from './host.ts'
 import { decorationForWidget } from './widgets/decorate.ts'
@@ -16,12 +24,70 @@ const noteHostFacet = Facet.define<NoteHost, NoteHost>({
   combine: (values) => values[0] ?? emptyNoteHost
 })
 
-function decorationsFor(view: EditorView, result: CompileResult): DecorationSet {
+/**
+ * 装饰必须由 **StateField** 提供，不能由 ViewPlugin 提供。
+ *
+ * CM6 明确禁止插件产生块装饰（`Block decorations may not be specified via plugins`），
+ * 而表格 / callout / mermaid / 块级公式都是整块替换。原先这些挂在 ViewPlugin 上，
+ * `view.dispatch` 一渲染就抛 RangeError，异常又被 `openNote` 的 catch 吞掉——
+ * 结果是「含表格的笔记点不开，界面毫无提示」。
+ *
+ * 顺带的好处：事务过滤可以直接读这个字段判「未采纳的 AI 块不能改字」。
+ */
+type MarkdownState = {
+  result: CompileResult
+  decorations: DecorationSet
+}
+
+function computeState(source: string, host: NoteHost, previous?: CompileResult): MarkdownState {
+  try {
+    const result = compile(source, previous ? { prev: previous } : {})
+    return { result, decorations: decorationsFor(result, source, host) }
+  } catch (err) {
+    const result = recoverCompile(
+      source,
+      previous?.stages ?? DEFAULT_STAGES,
+      err instanceof Error ? err.message : String(err),
+      previous
+    )
+    try {
+      return { result, decorations: decorationsFor(result, source, host) }
+    } catch {
+      return { result, decorations: Decoration.none }
+    }
+  }
+}
+
+const markdownField = StateField.define<MarkdownState>({
+  // 注意：这里不能 `state.field(markdownField)` 读自己——CM6 会报
+  // 「Cyclic dependency between fields and/or facets」，代价是整个界面渲染不出来。
+  // 上一代结果由 update 的 value 参数直接带过来。
+  create: (state) => computeState(state.doc.toString(), state.facet(noteHostFacet)),
+  update: (value, tr) => {
+    const hostChanged = tr.startState.facet(noteHostFacet) !== tr.state.facet(noteHostFacet)
+    if (!tr.docChanged && !hostChanged) return value
+    return computeState(tr.state.doc.toString(), tr.state.facet(noteHostFacet), value.result)
+  },
+  provide: (field) => EditorView.decorations.from(field, (value) => value.decorations)
+})
+
+function decorationsFor(result: CompileResult, source: string, host: NoteHost): DecorationSet {
   const decos: Range<Decoration>[] = []
-  const source = view.state.doc.toString()
   const docLen = source.length
-  const host = view.state.facet(noteHostFacet)
-  const widgets = planWidgets(result.index, source, view.visibleRanges)
+  // 整篇一次算完：CM6 只会为可见范围建 DOM，所以这里不必再按视口裁一遍。
+  const widgets = planWidgets(result.index, source, [{ from: 0, to: docLen }])
+  // 同一行可能既是标题又是 AI 块，行装饰必须合并成一条，不能挤两条。
+  const lineClasses = new Map<number, string[]>()
+
+  const addLine = (pos: number, className: string): void => {
+    if (pos < 0 || pos > docLen) return
+    const current = lineClasses.get(pos)
+    if (current) {
+      if (!current.includes(className)) current.push(className)
+      return
+    }
+    lineClasses.set(pos, [className])
+  }
 
   for (const widget of widgets) {
     if (widget.range.start < 0 || widget.range.end > docLen || widget.range.end <= widget.range.start) continue
@@ -35,13 +101,31 @@ function decorationsFor(view: EditorView, result: CompileResult): DecorationSet 
   for (const heading of result.index.headings) {
     if (heading.range.start < 0 || heading.range.start >= docLen) continue
     if (widgets.some((widget) => rangesOverlap(heading.range, widget.range))) continue
-    const pos = clamp(heading.range.start, 0, Math.max(0, docLen - 1))
+    addLine(lineStartOf(source, heading.range.start), `md-heading md-h${heading.depth}`)
+  }
+
+  // 两种样子：人写的没有任何装饰；未采纳的 AI 块与口令各挂一种行样式。
+  for (const block of result.index.blocks) {
+    if (!block.identity) continue
+    if (block.range.start < 0 || block.range.start >= docLen) continue
+    const className = block.identity === 'ai' ? 'rgent-block-ai' : 'rgent-block-command'
+    let line = lineStartOf(source, block.range.start)
+    for (;;) {
+      addLine(line, className)
+      const next = source.indexOf('\n', line)
+      if (next < 0 || next + 1 > block.range.end) break
+      line = next + 1
+    }
+  }
+
+  for (const [pos, classes] of lineClasses) {
     try {
-      decos.push(Decoration.line({ class: `md-heading md-h${heading.depth}` }).range(pos))
+      decos.push(Decoration.line({ class: classes.join(' ') }).range(pos))
     } catch {
       continue
     }
   }
+
   for (const mark of result.index.marks) {
     if (widgets.some((widget) => rangesOverlap(mark.range, widget.range))) continue
     const start = clamp(mark.range.start, 0, docLen)
@@ -57,55 +141,37 @@ function decorationsFor(view: EditorView, result: CompileResult): DecorationSet 
   return Decoration.set(decos, true)
 }
 
+function lineStartOf(source: string, pos: number): number {
+  const found = source.lastIndexOf('\n', Math.max(0, pos) - 1)
+  return found < 0 ? 0 : found + 1
+}
+
 function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n))
 }
 
-const pipelinePlugin = ViewPlugin.fromClass(
-  class {
-    decorations: DecorationSet
-    result: CompileResult
+function changesOf(tr: { changes: { iterChanges: (fn: (fromA: number, toA: number, fromB: number, toB: number, inserted: { toString: () => string }) => void) => void } }): EditChange[] {
+  const changes: EditChange[] = []
+  tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+    changes.push({ from: fromA, to: toA, insert: inserted.toString() })
+  })
+  return changes
+}
 
-    constructor(view: EditorView) {
-      try {
-        this.result = compile(view.state.doc.toString())
-        this.decorations = decorationsFor(view, this.result)
-      } catch (err) {
-        this.result = recoverCompile(
-          view.state.doc.toString(),
-          DEFAULT_STAGES,
-          err instanceof Error ? err.message : String(err)
-        )
-        this.decorations = Decoration.none
-      }
-    }
+/**
+ * 围栏：未采纳的 AI 块不能改字（先采纳再改，或删掉再问）。
+ *
+ * 只管用户的输入与删除。程序化变更（切 tab 的整篇替换、chip 上的采纳 / 丢弃 /
+ * 搬家）本来就不该被这道闸拦住，它们没有 input / delete 的用户事件标记。
+ */
+const identityLock = EditorState.transactionFilter.of((tr) => {
+  if (!tr.docChanged) return tr
+  if (!tr.isUserEvent('input') && !tr.isUserEvent('delete')) return tr
+  const locked = lockedRanges(tr.startState.field(markdownField).result.index)
+  if (locked.length === 0) return tr
+  return editBlocked(changesOf(tr), locked) ? [] : tr
+})
 
-    update(update: ViewUpdate): void {
-      const hostChanged = update.startState.facet(noteHostFacet) !== update.state.facet(noteHostFacet)
-      try {
-        if (update.docChanged) {
-          this.result = compile(update.state.doc.toString(), { prev: this.result })
-        }
-        if (update.docChanged || update.viewportChanged || hostChanged) {
-          this.decorations = decorationsFor(update.view, this.result)
-        }
-      } catch (err) {
-        this.result = recoverCompile(
-          update.state.doc.toString(),
-          this.result.stages,
-          err instanceof Error ? err.message : String(err),
-          this.result
-        )
-        try {
-          this.decorations = decorationsFor(update.view, this.result)
-        } catch {
-          this.decorations = Decoration.none
-        }
-      }
-    }
-  },
-  { decorations: (value) => value.decorations }
-)
 
 const theme = EditorView.theme({
   '&': {
@@ -166,7 +232,8 @@ export function mountEditor(
       EditorView.lineWrapping,
       theme,
       hostCompartment.of(noteHostFacet.of(emptyNoteHost)),
-      pipelinePlugin,
+      markdownField,
+      identityLock,
       EditorView.updateListener.of((update) => {
         if (applying || !update.docChanged) return
         onChange(update.state.doc.toString())
