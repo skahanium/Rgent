@@ -10,16 +10,17 @@
 #include <unistd.h>
 #ifdef __APPLE__
 #include <stdio.h>
+#include <stdlib.h>
+#else
+#include <cstdlib>
 #endif
 
-#include <atomic>
 #include <stdexcept>
 #include <utility>
 
 namespace rgent {
 namespace {
 
-std::atomic<uint64_t> sequence{0};
 #ifdef __APPLE__
 constexpr int kResolveBeneath = O_RESOLVE_BENEATH;
 #else
@@ -27,6 +28,23 @@ constexpr int kResolveBeneath = 0;
 #endif
 
 [[noreturn]] void Fail(const char* code) { throw std::runtime_error(code); }
+
+/** 不可预测的临时名：同目录里的别的进程猜不到，也就抢不了。 */
+std::string TemporaryName() {
+  unsigned char bytes[8] = {};
+#ifdef __APPLE__
+  arc4random_buf(bytes, sizeof(bytes));
+#else
+  for (size_t i = 0; i < sizeof(bytes); ++i) bytes[i] = static_cast<unsigned char>(random());
+#endif
+  static constexpr char hex[] = "0123456789abcdef";
+  std::string name = ".rgent-";
+  for (const auto byte : bytes) {
+    name.push_back(hex[byte >> 4]);
+    name.push_back(hex[byte & 15]);
+  }
+  return name + ".tmp";
+}
 
 void CheckOpen(int fd) {
   if (fd >= 0) return;
@@ -255,7 +273,7 @@ std::string ReadBytes(VaultHandle* root, const std::string& relative_file) {
 
 void Replace(VaultHandle* root, const std::string& relative_file,
              const std::optional<std::string>& expected, const std::string& content) {
-  (void)Parts(relative_file);
+  const auto parts = Parts(relative_file);
   Fd root_fd = DupRoot(root);
   ExpectExisting(root_fd.value, relative_file, expected);
   mode_t mode = 0600;
@@ -265,27 +283,36 @@ void Replace(VaultHandle* root, const std::string& relative_file,
     if (fstat(current.value, &info) != 0) Fail("IO_ERROR");
     mode = info.st_mode & 0777;
   }
+  // 临时文件建在目标父目录里（与 Windows 一致）：跨挂载点不会 EXDEV，
+  // 库根只读而子目录可写时也能保存；提交后要同步的正是这个目录。
+  Fd parent = Dir(root, parts, parts.size() - 1);
   std::string temp;
   Fd file;
   for (int attempt = 0; attempt < 10; ++attempt) {
-    temp = ".rgent-" + std::to_string(getpid()) + "-" + std::to_string(++sequence) + ".tmp";
-    file = Fd(openat(root_fd.value, temp.c_str(), O_WRONLY | O_CREAT | O_EXCL |
-                                             O_NOFOLLOW_ANY | kResolveBeneath | O_CLOEXEC, mode));
+    temp = TemporaryName();
+    file = Fd(openat(parent.value, temp.c_str(), O_WRONLY | O_CREAT | O_EXCL |
+                                               O_NOFOLLOW_ANY | kResolveBeneath | O_CLOEXEC, mode));
     if (file.value >= 0) break;
     if (errno != EEXIST) CheckOpen(file.value);
   }
   CheckOpen(file.value);
+  // O_CREAT 会把 mode 与 ~umask 相与，能悄悄削掉 group/other 位。
+  // 显式补一次，保证存盘不改动用户文件的权限。
+  if (fchmod(file.value, mode) != 0) {
+    (void)unlinkat(parent.value, temp.c_str(), 0);
+    Fail("IO_ERROR");
+  }
   bool created = true;
   try {
     WriteFd(file.value, content);
     if (fsync(file.value) != 0) Fail("IO_ERROR");
     ExpectExisting(root_fd.value, relative_file, expected);
-    // Both names resolve from the pinned root in one kernel rename operation.
-    // A moved child directory or swapped symlink cannot redirect the commit.
+    // 来源与目标都在一次内核改名里从固定库根/固定父目录解析：
+    // 被搬走的子目录或被换掉的符号链接都改不了提交去向。
 #ifdef __APPLE__
     const unsigned int flags = RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH |
                                (expected ? 0 : RENAME_EXCL);
-    const int renamed = renameatx_np(root_fd.value, temp.c_str(), root_fd.value,
+    const int renamed = renameatx_np(parent.value, temp.c_str(), root_fd.value,
                                     relative_file.c_str(), flags);
 #else
     const int renamed = -1;
@@ -296,9 +323,11 @@ void Replace(VaultHandle* root, const std::string& relative_file,
       Fail("IO_ERROR");
     }
     created = false;
-    (void)fsync(root_fd.value);
+    // 改名已经提交，这里只是让它在断电后也可见。失败不能报成写盘失败——
+    // 磁盘上已经是新内容，报错会让人以为没存上。
+    (void)fsync(parent.value);
   } catch (...) {
-    if (created) (void)unlinkat(root_fd.value, temp.c_str(), 0);
+    if (created) (void)unlinkat(parent.value, temp.c_str(), 0);
     throw;
   }
 }

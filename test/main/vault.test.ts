@@ -1,4 +1,4 @@
-import { chmod, symlink, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, stat, symlink, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -104,6 +104,19 @@ describe('notes-fs', () => {
     await writeNote(root, rel, '', revision)
     expect(await readNote(root, rel)).toBe('')
     await expect(createNote(root, '初稿')).rejects.toThrow(/同名/)
+  })
+
+  it('keeps the note mode and leaves no temporary file behind when replacing', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    const target = path.join(root, 'a.md')
+    await writeFile(target, '旧稿', 'utf8')
+    // 0666：只要 umask 不是 0，走「新建临时文件再改名」就会把 group/other 写位削掉。
+    await chmod(target, 0o666)
+    const initial = await readNoteSnapshot(root, 'a.md')
+    await writeNote(root, 'a.md', '新稿', initial.revision)
+    expect(await readFile(target, 'utf8')).toBe('新稿')
+    expect((await stat(target)).mode & 0o777).toBe(0o666)
+    expect((await listVaultTree(root)).map((entry) => entry.name)).toEqual(['a.md'])
   })
 
   it('rejects a stale write and preserves the disk version', async () => {

@@ -123,14 +123,15 @@ it.skipIf(process.platform !== 'darwin')('does not commit outside the vault when
     const path = require('node:path')
     const flag = new Int32Array(workerData.moved)
     parentPort.postMessage('ready')
+    // 临时文件建在目标父目录里（见 vault_posix.cc 的 Replace），所以盯 sub 而不是库根。
     while (Atomics.load(flag, 0) === 0) {
-      if (fs.readdirSync(workerData.root).some((name) => name.startsWith('.rgent-') && name.endsWith('.tmp'))) {
-        fs.renameSync(path.join(workerData.root, 'sub'), path.join(workerData.outside, 'sub'))
+      if (fs.readdirSync(workerData.live).some((name) => name.startsWith('.rgent-') && name.endsWith('.tmp'))) {
+        fs.renameSync(workerData.live, path.join(workerData.outside, 'sub'))
         Atomics.store(flag, 0, 1)
         break
       }
     }
-  `, { eval: true, workerData: { root, outside, moved } })
+  `, { eval: true, workerData: { live: path.join(root, 'sub'), outside, moved } })
   await once(worker, 'message')
   try {
     expect(() => secureFsFor(root).replace('sub/a.md', 'old', 'x'.repeat(64 * 1024 * 1024))).toThrow()
