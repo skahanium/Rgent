@@ -2,7 +2,8 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
-import { IPC, type FlushDonePayload, type NoteWriteRequest, type SetPermissionRequest } from '../shared/ipc.ts'
+import { asString, parseFlushDone, parseNoteName, parseNoteWriteRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
+import { IPC } from '../shared/ipc.ts'
 import { attachVaultProtocol, registerVaultScheme } from './vault-protocol.ts'
 import { VaultSession } from './vault.ts'
 
@@ -181,14 +182,11 @@ function registerIpc(): void {
     return vault.read(pathInVault)
   })
   ipcMain.handle(IPC.noteWrite, async (_event, value: unknown) => {
-    const request = value as Partial<NoteWriteRequest> | null
-    const pathInVault = asString(request?.relPath)
-    const content = asString(request?.content)
-    const expectedRevision = asString(request?.expectedRevision)
-    if (!pathInVault || content == null || !expectedRevision) return { ok: false, error: 'BAD_PATH' }
+    const request = parseNoteWriteRequest(value)
+    if (!request) return { ok: false, error: 'BAD_PATH' }
     if (!vault) return { ok: false, error: 'NO_VAULT' }
     try {
-      const revision = await vault.write(pathInVault, content, expectedRevision)
+      const revision = await vault.write(request.relPath, request.content, request.expectedRevision)
       return { ok: true, revision }
     } catch (err) {
       return { ok: false, error: err instanceof Error && err.message === 'CONFLICT' ? 'CONFLICT' : 'IO_ERROR' }
@@ -196,15 +194,13 @@ function registerIpc(): void {
   })
   ipcMain.handle(IPC.permissionsGet, async () => vault?.permissions() ?? { status: 'invalid', error: '未选择库' })
   ipcMain.handle(IPC.permissionsSet, async (_event, value: unknown) => {
-    const request = value as Partial<SetPermissionRequest> | null
-    const relPath = asString(request?.relPath)
-    const tier = request?.tier
-    if (!relPath || (tier !== 'reference' && tier !== 'follow' && tier !== 'forbidden')) throw new Error('BAD_PERMISSION')
+    const request = parseSetPermissionRequest(value)
+    if (!request) throw new Error('BAD_PERMISSION')
     if (!vault) throw new Error('NO_VAULT')
-    return vault.setPermission(relPath, tier)
+    return vault.setPermission(request.relPath, request.tier)
   })
   ipcMain.handle(IPC.noteCreate, async (_event, name: unknown) => {
-    const noteName = asString(name)
+    const noteName = parseNoteName(name)
     if (!noteName) throw new Error('BAD_PATH')
     if (!vault) throw new Error('NO_VAULT')
     return vault.create(noteName)
@@ -219,16 +215,11 @@ function registerIpc(): void {
     if (text == null) return []
     return vault?.search(text) ?? []
   })
-  ipcMain.on(IPC.flushDone, (event, payload: FlushDonePayload) => {
+  ipcMain.on(IPC.flushDone, (event, payload: unknown) => {
     const win = mainWindow
     if (!win || event.sender !== win.webContents) return
-    const ok = payload != null && payload.ok === true
-    runCloseAction(closeFlow.flushed(ok), win)
+    runCloseAction(closeFlow.flushed(parseFlushDone(payload).ok), win)
   })
-}
-
-function asString(value: unknown): string | null {
-  return typeof value === 'string' ? value : null
 }
 
 app.whenReady().then(() => {

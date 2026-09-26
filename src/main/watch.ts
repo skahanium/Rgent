@@ -5,8 +5,8 @@ export type WatchHandler = (relPath: string | null) => void
 
 const POLL_MS = 1000
 
-/** Metadata polling only uses directory handles pinned to the selected vault. */
-export function watchVault(root: string, onChange: WatchHandler): () => void {
+/** 元数据轮询只经固定在所选库上的目录句柄。`pollMs` 只为测试留口，生产用默认值。 */
+export function watchVault(root: string, onChange: WatchHandler, pollMs: number = POLL_MS): () => void {
   const fs = secureFsFor(root)
   const scan = (): Map<string, string> => {
     const snapshot = new Map<string, string>()
@@ -37,7 +37,7 @@ export function watchVault(root: string, onChange: WatchHandler): () => void {
       if (!failed) onChange(null)
       failed = true
     }
-  }, POLL_MS)
+  }, pollMs)
   timer.unref()
   return () => clearInterval(timer)
 }

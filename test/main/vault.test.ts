@@ -132,6 +132,27 @@ describe('notes-fs', () => {
     expect((await listVaultTree(root)).map((entry) => entry.name)).toEqual(['a.md'])
   })
 
+  it('refuses hidden paths and the permission list through the human write channel', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    await mkdir(path.join(root, '.hidden'), { recursive: true })
+    await writeFile(path.join(root, '.secret.md'), '秘密', 'utf8')
+    await writeFile(path.join(root, '.hidden', 'a.md'), '秘密', 'utf8')
+    await writeFile(path.join(root, '.rgent-permissions'), '{}', 'utf8')
+
+    await expect(readNote(root, '.secret.md')).rejects.toThrow(/隐藏/)
+    await expect(writeNote(root, '.secret.md', '改', 'rev')).rejects.toThrow(/隐藏/)
+    await expect(readNote(root, '.hidden/a.md')).rejects.toThrow(/隐藏/)
+    await expect(writeNote(root, '.hidden/a.md', '改', 'rev')).rejects.toThrow(/隐藏/)
+
+    // 权限名单不是 .md，先被「不是笔记」挡下；不管哪一条，人的写盘通道都碰不到它。
+    await expect(writeNote(root, '.rgent-permissions', '{"工作":"forbidden"}', 'rev')).rejects.toThrow()
+    await expect(readNote(root, '.rgent-permissions')).rejects.toThrow()
+    expect(await readFile(path.join(root, '.rgent-permissions'), 'utf8')).toBe('{}')
+
+    // 新建笔记也不能造出点号开头的文件名。
+    expect(await createNote(root, '.secrets')).toBe('_secrets.md')
+  })
+
   it('rejects a stale write and preserves the disk version', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
     await writeFile(path.join(root, 'a.md'), '初稿', 'utf8')
