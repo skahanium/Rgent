@@ -13,8 +13,16 @@ function sameComponents(left: readonly ResolvedComponent[], right: readonly Reso
     part.id === right[i].id && part.name === right[i].name && part.kind === right[i].kind)
 }
 
+/**
+ * `:` 在 Windows 上是数据流（ADS）分隔符，必须拒。在 POSIX 上它是普通文件名字符——
+ * Finder 里给文件夹起个带斜杠的名字，落到磁盘就是 `a:b`；拒了它，这类已存在的目录
+ * 就永远设不上档，而围栏要求「文件树里对文件夹右键设档」。
+ */
+const rejectsColon = process.platform === 'win32'
+
 function validRelPath(relPath: string): boolean {
-  if (!relPath || relPath.includes('\\') || relPath.includes(':') || relPath.startsWith('/')) return false
+  if (!relPath || relPath.includes('\\') || relPath.startsWith('/')) return false
+  if (rejectsColon && relPath.includes(':')) return false
   return relPath.split('/').every((part) => part !== '' && part !== '.' && part !== '..' && !part.startsWith('.'))
 }
 

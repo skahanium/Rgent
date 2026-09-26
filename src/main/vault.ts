@@ -3,6 +3,7 @@ import path from 'node:path'
 import { dialog, type BrowserWindow } from 'electron'
 import type { BacklinkGroup, NotePayload, NoteSnapshot, PermissionEntry, PermissionState, PermissionTier, SearchHit, TreeEntry, VaultState } from '../shared/ipc.ts'
 import { createNote, listVaultTree, parseStoredVault, readNoteSnapshot, serializeStoredVault, writeNote } from './notes-fs.ts'
+import { isOwnEcho, type RecentWrite } from './echo.ts'
 import { isNotePath } from './paths.ts'
 import { effectivePermissionEntries, loadPermissions, setPermission as savePermission, tierFor } from './permissions.ts'
 import { closeSecureFs } from './secure-fs.ts'
@@ -12,7 +13,7 @@ import { watchVault } from './watch.ts'
 export class VaultSession {
   root: string | null = null
   private stopWatch: (() => void) | null = null
-  private lastWrites = new Map<string, { content: string; at: number }>()
+  private lastWrites = new Map<string, RecentWrite>()
   private debounce: NodeJS.Timeout | null = null
   private changedNotes = new Set<string>()
   private index = new VaultIndex(
@@ -99,7 +100,7 @@ export class VaultSession {
   async write(relPath: string, content: string, expectedRevision: string): Promise<string> {
     if (!this.root) throw new Error('NO_VAULT')
     const revision = await writeNote(this.root, relPath, content, expectedRevision)
-    this.lastWrites.set(relPath, { content, at: Date.now() })
+    this.lastWrites.set(relPath, { revision, at: Date.now() })
     this.index.markDirty()
     return revision
   }
@@ -160,10 +161,12 @@ export class VaultSession {
 
   private async emitNoteChange(relPath: string): Promise<void> {
     if (!this.root) return
+    // 先取回声记录，再读盘。读盘有一次 await，顺序反了就会拿「新落盘的记录」
+    // 去比「读到的旧内容」，把自家存盘误报成外部改动，让画布把稿回退一版。
+    const recent = this.lastWrites.get(relPath)
     try {
       const { content, revision } = await readNoteSnapshot(this.root, relPath)
-      const recent = this.lastWrites.get(relPath)
-      if (recent && recent.content === content && Date.now() - recent.at < 2000) return
+      if (isOwnEcho(recent, revision, Date.now())) return
       const payload: NotePayload = { relPath, content, revision }
       this.emit('note:external-change', payload)
     } catch {

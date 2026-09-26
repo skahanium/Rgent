@@ -38,6 +38,10 @@ export function isNotePath(relPath: string): boolean {
 
 export function vaultMediaPath(root: string, relPath: string): string | null {
   if (!isVaultImagePath(relPath)) return null
+  // 与 writeNote / readNote 同一口径：点号路径是应用自己的地盘（权限名单、技能），
+  // 不许经 rgent-vault: 协议露给画布。原生层允许点号名（它要读名单），所以挡在
+  // 这里——这是隐藏路径唯一没设防的入口。
+  if (hasHiddenSegment(relPath)) return null
   return resolveInVault(root, relPath)
 }
 

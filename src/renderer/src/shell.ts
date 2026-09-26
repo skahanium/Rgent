@@ -1,5 +1,5 @@
 import { IPC, type NoteSnapshot, type PermissionState, type PermissionTier, type SearchHit, type TreeEntry, type VaultState } from '@shared'
-import { composeSource, partitionSource } from '@markdown'
+import { composeSource, partitionSource, preferDiskLedger } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
 import { promptConflict, promptNewNote } from './dialogs.ts'
@@ -171,6 +171,8 @@ export async function start(root: HTMLElement): Promise<void> {
       applySource(tab, snapshot)
       if (active === tab.relPath) editor.setText(tab.content)
     } else if (choice === 'window') {
+      // 同上：正文听窗口，账本听磁盘。
+      tab.ledger = preferDiskLedger(partitionSource(payload.content).ledger, tab.ledger)
       tab.revision = payload.revision
       await writeTab(tab)
     }
@@ -477,6 +479,8 @@ export async function start(root: HTMLElement): Promise<void> {
           return true
         }
         if (choice === 'window') {
+          // 窗口赢的只是正文：账本以磁盘为准，否则会把外部新追加的章节抹掉。
+          tab.ledger = preferDiskLedger(partitionSource(disk.content).ledger, tab.ledger)
           tab.revision = disk.revision
           const currentBody = tab.relPath === active ? editor.getText() : tab.content
           const retry = await window.rgent.noteWrite({

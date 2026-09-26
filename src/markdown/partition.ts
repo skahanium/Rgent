@@ -33,6 +33,17 @@ export function partitionSource(source: string): Partition {
 }
 
 /**
+ * 「听窗口」时该用哪份账本。
+ *
+ * 账本是机器写的追加记录，围栏要求原文不动；而写盘是整文件替换，所以窗口赢的
+ * 只能是正文——用画布手里那份旧账本会把磁盘上新追加的章节整段抹掉。磁盘有账本
+ * 就以磁盘为准。
+ */
+export function preferDiskLedger(diskLedger: string | null, tabLedger: string | null): string | null {
+  return diskLedger ?? tabLedger
+}
+
+/**
  * 把画布里的正文和旁路账本拼回磁盘上的整文件。
  * 没有账本就不注入锚点。有账本时保证锚点落在行首。
  */

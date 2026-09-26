@@ -1,5 +1,5 @@
 export { compile, recoverCompile } from './pipeline.ts'
-export { LEDGER_ANCHOR, composeSource, findLedgerStart, partitionSource } from './partition.ts'
+export { LEDGER_ANCHOR, composeSource, findLedgerStart, partitionSource, preferDiskLedger } from './partition.ts'
 export { STAGE_IDS, DEFAULT_STAGES } from './types.ts'
 export type {
   CalloutKind,

@@ -12,6 +12,7 @@ import {
   partitionSource,
   findLedgerStart,
   planWidgets,
+  preferDiskLedger,
   recoverCompile,
   STAGE_IDS
 } from '../../src/markdown/index.ts'
@@ -366,6 +367,14 @@ describe('ledger partition', () => {
     const again = partitionSource(composeSource('正文没有换行', ledger))
     expect(again.body).toBe('正文没有换行\n')
     expect(again.ledger).toBe(ledger)
+  })
+
+  it('keeps the disk ledger when the window wins a conflict', () => {
+    // 磁盘上新追加了一章，画布手里是旧的：听窗口只能赢正文，账本必须听磁盘，
+    // 否则追加的章节会被整文件替换抹掉。磁盘没有账本时才退回画布那份。
+    expect(preferDiskLedger(ledger, '旧账本')).toBe(ledger)
+    expect(preferDiskLedger(null, '画布账本')).toBe('画布账本')
+    expect(preferDiskLedger(null, null)).toBeNull()
   })
 
   it('splits when the only whole-line anchor sits in the body', () => {

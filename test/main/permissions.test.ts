@@ -189,4 +189,22 @@ describe('permission policy', () => {
     if (!same) return // 8.3 aliases may be disabled on this volume.
     await expect(modelTierFor(root, `${shortName}/a.md`)).rejects.toThrow('FORBIDDEN')
   })
+
+  // `:` 是 POSIX 的普通字符：Finder 里名字带斜杠的文件夹落盘就是 `a:b`。
+  // 拒了它这类目录就永远设不上档，而围栏要求「文件树里对文件夹右键设档」。
+  it.skipIf(process.platform === 'win32')('accepts a colon so POSIX-style folder names can be gated', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-policy-'))
+    await mkdir(path.join(root, '工作:秘密'))
+    await writeFile(path.join(root, '工作:秘密', 'a.md'), 'note', 'utf8')
+    const saved = await setPermission(root, '工作:秘密', 'forbidden')
+    expect(saved.status).toBe('ready')
+    expect(tierFor('工作:秘密/a.md', saved.status === 'ready' ? saved.entries : [])).toBe('forbidden')
+    await expect(modelTierFor(root, '工作:秘密/a.md')).rejects.toThrow('FORBIDDEN')
+  })
+
+  it.skipIf(process.platform !== 'win32')('rejects a colon on Windows, where it separates data streams', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-policy-'))
+    await mkdir(path.join(root, 'a:b'))
+    await expect(setPermission(root, 'a:b', 'forbidden')).rejects.toThrow('BAD_PATH')
+  })
 })

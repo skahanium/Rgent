@@ -44,6 +44,19 @@ describe('vault paths', () => {
     expect(parseVaultMediaUrl('https://example.com/x.png')).toBeNull()
   })
 
+  it('refuses to serve hidden media over the vault protocol', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    await mkdir(path.join(root, '.hidden'), { recursive: true })
+    await writeFile(path.join(root, '.secret.png'), 'secret-root', 'utf8')
+    await writeFile(path.join(root, '.hidden', 'x.png'), 'secret-dir', 'utf8')
+    expect(readVaultMedia(root, '.secret.png')).toEqual({ error: 403 })
+    expect(readVaultMedia(root, '.hidden/x.png')).toEqual({ error: 403 })
+    expect(vaultMediaPath(root, '.secret.png')).toBeNull()
+    // 非隐藏的照常可读，别把这道口子开成一律拒绝。
+    await writeFile(path.join(root, 'ok.png'), 'ok', 'utf8')
+    expect(readVaultMedia(root, 'ok.png')).toEqual({ bytes: Buffer.from('ok') })
+  })
+
   it('refuses vault media that only stays inside the root via a symlink', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
     const outside = await mkdtemp(path.join(os.tmpdir(), 'rgent-out-'))
