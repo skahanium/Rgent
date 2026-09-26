@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CloseFlow, shouldCloseAfterFlush, type CloseAction, type CloseDecision } from '../shared/flush.ts'
+import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { IPC, type FlushDonePayload, type NoteWriteRequest, type SetPermissionRequest } from '../shared/ipc.ts'
 import { attachVaultProtocol, registerVaultScheme } from './vault-protocol.ts'
 import { VaultSession } from './vault.ts'
@@ -33,7 +33,7 @@ function send(channel: string, payload?: unknown): void {
   target.webContents.send(channel, payload)
 }
 
-function runCloseAction(action: CloseAction, win: BrowserWindow): void {
+function runCloseAction(action: CloseAction, win: BrowserWindow, stalled = false): void {
   if (action === 'none') return
   if (action !== 'flush') clearFlushTimer()
   if (action === 'flush') {
@@ -44,7 +44,10 @@ function runCloseAction(action: CloseAction, win: BrowserWindow): void {
     }
     flushTimer = setTimeout(() => {
       const alive = !rendererGone && !win.isDestroyed() && !win.webContents.isDestroyed()
-      if (shouldCloseAfterFlush(false, alive)) runCloseAction(closeFlow.rendererGone(), win)
+      // 渲染进程只是挂起（或计时器触发之后才崩）也要给出一条出路，
+      // 否则流程停在 flushing，窗口关不掉、Cmd+Q 也被挡住。
+      const next = timeoutAction(closeFlow, alive)
+      runCloseAction(next, win, next === 'prompt')
     }, FLUSH_GRACE_MS)
     win.webContents.send(IPC.flushRequest)
   } else if (action === 'prompt') {
@@ -53,16 +56,18 @@ function runCloseAction(action: CloseAction, win: BrowserWindow): void {
       : '放弃未保存修改并关闭窗口'
     void dialog.showMessageBox(win, {
       type: 'warning',
-      title: '笔记尚未保存',
-      message: '写盘失败，仍有未保存的修改。',
-      detail: '可以重试保存、继续编辑，或明确放弃本次未保存的修改。',
+      title: stalled ? '保存没有回应' : '笔记尚未保存',
+      message: stalled ? '窗口没有在时限内确认写盘结果。' : '写盘失败，仍有未保存的修改。',
+      detail: stalled
+        ? '可以重试保存、继续编辑，或明确放弃本次未保存的修改。若窗口已无响应，只有后两项可选。'
+        : '可以重试保存、继续编辑，或明确放弃本次未保存的修改。',
       buttons: ['重试保存', '继续编辑', abandon],
       defaultId: 0,
       cancelId: 1,
       noLink: true
     }).then(({ response }) => {
       const choice: CloseDecision = response === 0 ? 'retry' : response === 2 ? 'discard' : 'continue'
-      runCloseAction(closeFlow.decide(choice), win)
+      runCloseAction(closeFlow.decide(choice), win, stalled)
     }).catch(() => {
       runCloseAction(closeFlow.decide('continue'), win)
     })
@@ -100,6 +105,10 @@ function createWindow(): void {
   })
   mainWindow.webContents.on('render-process-gone', () => {
     rendererGone = true
+    // 渲染进程没了本身就要推进关窗流程：只置标志的话，若它是在超时之后才崩的，
+    // CloseFlow 会永远停在 flushing，窗口再也关不掉。空闲态这里返回 'none'，无副作用。
+    const win = mainWindow
+    if (win) runCloseAction(closeFlow.rendererGone(), win)
   })
 
   // 关窗前先写盘；失败时由主进程给出重试、继续编辑或明确放弃的选择。

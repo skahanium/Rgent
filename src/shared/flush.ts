@@ -52,13 +52,24 @@ export class CloseFlow {
     this.state = 'closing'
     return 'close'
   }
+
+  /**
+   * 超时了但渲染进程没死（挂起、或计时器触发之后才崩）。不能什么都不做：
+   * 那会让流程永久停在 flushing，之后每次关窗都返回 'none'，窗口关不掉、Cmd+Q
+   * 也被挡住。转成决策态，由主进程原生对话框给出重试 / 继续编辑 / 放弃。
+   */
+  stalled(): CloseAction {
+    if (this.state !== 'flushing') return 'none'
+    this.state = 'deciding'
+    return 'prompt'
+  }
 }
 
 /**
- * 渲染进程还活着时：只有写盘成功才关窗。
- * 渲染进程已经没了：超时关窗，避免卡死在 preventDefault。
+ * 关窗把保存请求发出去后的两条出路。
+ * 注意 rendererAlive 为真时**不能**直接放行，也不能什么都不做——
+ * 前者会静默丢稿，后者会把应用锁死（见 stalled 的注释）。
  */
-export function shouldCloseAfterFlush(ok: boolean, rendererAlive: boolean): boolean {
-  if (!rendererAlive) return true
-  return ok
+export function timeoutAction(flow: CloseFlow, rendererAlive: boolean): CloseAction {
+  return rendererAlive ? flow.stalled() : flow.rendererGone()
 }

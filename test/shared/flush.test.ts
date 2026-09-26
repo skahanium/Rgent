@@ -1,15 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { CloseFlow, reportFlush, shouldCloseAfterFlush } from '../../src/shared/flush.ts'
+import { CloseFlow, reportFlush, timeoutAction } from '../../src/shared/flush.ts'
 
-describe('shouldCloseAfterFlush', () => {
-  it('closes only after a successful flush while the renderer is alive', () => {
-    expect(shouldCloseAfterFlush(true, true)).toBe(true)
-    expect(shouldCloseAfterFlush(false, true)).toBe(false)
+describe('timeoutAction', () => {
+  it('never leaves a live renderer without an escape', () => {
+    const flow = new CloseFlow()
+    expect(flow.request()).toBe('flush')
+    expect(timeoutAction(flow, true)).toBe('prompt')
+    // 关键回归：不能返回 'none'，否则流程停在 flushing，窗口关不掉。
+    expect(flow.request()).toBe('none')
+    expect(timeoutAction(flow, true)).toBe('none')
   })
 
   it('closes when the renderer is gone so a hung flush cannot pin the window', () => {
-    expect(shouldCloseAfterFlush(false, false)).toBe(true)
-    expect(shouldCloseAfterFlush(true, false)).toBe(true)
+    const flow = new CloseFlow()
+    expect(flow.request()).toBe('flush')
+    expect(timeoutAction(flow, false)).toBe('close')
   })
 })
 
@@ -63,5 +68,23 @@ describe('CloseFlow', () => {
     const flow = new CloseFlow()
     expect(flow.request()).toBe('flush')
     expect(flow.rendererGone()).toBe('close')
+  })
+
+  it('turns a stall into a decision instead of doing nothing', () => {
+    const idle = new CloseFlow()
+    expect(idle.stalled()).toBe('none')
+    const flow = new CloseFlow()
+    expect(flow.request()).toBe('flush')
+    expect(flow.stalled()).toBe('prompt')
+    expect(flow.stalled()).toBe('none')
+    expect(flow.decide('continue')).toBe('cancel')
+    expect(flow.request()).toBe('flush')
+  })
+
+  it('lets a late reply still drive the flow after the renderer died', () => {
+    const flow = new CloseFlow()
+    expect(flow.request()).toBe('flush')
+    expect(flow.rendererGone()).toBe('close')
+    expect(flow.flushed(true)).toBe('none')
   })
 })
