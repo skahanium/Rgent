@@ -29,7 +29,11 @@ constexpr int kResolveBeneath = 0;
 
 [[noreturn]] void Fail(const char* code) { throw std::runtime_error(code); }
 
-/** 不可预测的临时名：同目录里的别的进程猜不到，也就抢不了。 */
+/**
+ * 不可预测的临时名：同目录里的别的进程猜不到，也就抢不了。
+ * 本项目只在 macOS 构建这个文件（`binding.gyp` 只有 mac 与 win 两条分支），
+ * 非 Apple 分支只是占位，别当它有同样的随机质量。
+ */
 std::string TemporaryName() {
   unsigned char bytes[8] = {};
 #ifdef __APPLE__

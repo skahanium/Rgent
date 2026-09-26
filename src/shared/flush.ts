@@ -57,6 +57,10 @@ export class CloseFlow {
    * 超时了但渲染进程没死（挂起、或计时器触发之后才崩）。不能什么都不做：
    * 那会让流程永久停在 flushing，之后每次关窗都返回 'none'，窗口关不掉、Cmd+Q
    * 也被挡住。转成决策态，由主进程原生对话框给出重试 / 继续编辑 / 放弃。
+   *
+   * 已知取舍：进了决策态之后，渲染进程迟到的 `{ ok: true }` 会被忽略
+   * （`flushed` 只在 flushing 态生效），窗口不自动关。人点「重试保存」即可自愈，
+   * 比「关窗流程悬空」安全。
    */
   stalled(): CloseAction {
     if (this.state !== 'flushing') return 'none'
