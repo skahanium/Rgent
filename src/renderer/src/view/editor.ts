@@ -2,6 +2,7 @@ import {
   compile,
   DEFAULT_STAGES,
   editBlocked,
+  lineStartOf,
   lockedRanges,
   planWidgets,
   rangesOverlap,
@@ -139,11 +140,6 @@ function decorationsFor(result: CompileResult, source: string, host: NoteHost): 
   }
 
   return Decoration.set(decos, true)
-}
-
-function lineStartOf(source: string, pos: number): number {
-  const found = source.lastIndexOf('\n', Math.max(0, pos) - 1)
-  return found < 0 ? 0 : found + 1
 }
 
 function clamp(n: number, min: number, max: number): number {
