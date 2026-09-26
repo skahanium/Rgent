@@ -37,7 +37,7 @@ v0 Host 阶段须兑现 [Agent 上下文与历史](topics.md#v0-上下文与历�
 
 - 门禁早于 AgentHost。
 - 身份标记早于 Host 最小环。
-- Host 最小环早于五件工具（已拍：拆刀）。
+- Host 最小环早于写工具五件。
 - 搜库工具晚于最小环；方法不与人搜子串绑定。
 - `partition.body` 早于一切索引（已满足）。
 - 无法代转的 MCP 不准接。
@@ -50,7 +50,7 @@ v0 Host 阶段须兑现 [Agent 上下文与历史](topics.md#v0-上下文与历�
 | 对象 | 代码地盘 | 状态 |
 |------|----------|------|
 | 壳与信任 | `src/main/index.ts`、`src/preload`、`src/shared/ipc.ts`、`src/shared/flush.ts` | **已交** `pnpm test`；`test/shared/flush.test.ts`。preload 为 `index.cjs`。 |
-| 库与文件 | `src/main/vault.ts`、`secure-fs.ts`、`notes-fs.ts`、`paths.ts`、`watch.ts`、`vault-protocol.ts`、`native/**` | **已交** 选库、树、读写、媒体；本阶段原生文件边界待双系统验收。附件插入 UI 未开。 |
+| 库与文件 | `src/main/vault.ts`、`secure-fs.ts`、`notes-fs.ts`、`paths.ts`、`watch.ts`、`vault-protocol.ts`、`native/**` | **已交** 选库、树、读写、媒体、原生文件边界。附件插入 UI 未开。 |
 | 正文与画布 | `src/markdown/**`、`src/renderer/src/view/**` | **已交** 一条管线 + viewport widget；`test/markdown/pipeline.test.ts`。 |
 | 账本缝 | `src/markdown/partition.ts`、`src/renderer/src/tabs.ts` | **已交** 画布只吃正文，写盘 `composeSource`。 |
 | 检索 | `src/main/vault-index.ts`、`src/renderer/src/search.ts`、`backlinks.ts` | **已交** 人搜当前使用惰性全量 + 子串；人的全量可见是合同。模型检索方法未锁。 |
@@ -61,9 +61,19 @@ v0 Host 阶段须兑现 [Agent 上下文与历史](topics.md#v0-上下文与历�
 | MCP / 联网 | 尚未 | **未开** 只接能代转的。 |
 | 设置 | 尚未 | **未开** 像素未锁。Host 阶段须有运行上限的最小配置入口；门禁总表等到设置收口。 |
 
+## 已落地现状
+
+代码事实，不是合同。人搜当前是惰性全量 + 子串；最多 100 条、排序与片段规则未写成合同数字。
+
+- **人搜：** 惰性全量重建，下一次查询才重扫。标题与正文子串匹配（小写）。测试：`test/main/vault-index.test.ts`、`test/renderer/search.test.ts`。
+- **反链：** 同源索引，吃编译结果里的 `[[全路径]]`。只在打开/切换笔记时刷新，不挂按键，也不挂每次自动写盘。
+- **索引脏标记：** 重建开始时清 `dirty`；重建期间再脏就再扫一轮（`VaultIndex.ready`）。
+- **换库：** `attach` 时 `index.reset()`，避免新库看到旧库反链。
+- **目录变化：** 固定库根句柄的元数据轮询（1 秒）。这是 v0 选择，大库压测后可调整频率与执行位置，不改变不跟随链接的边界。
+
 ## 门禁
 
-本阶段把三档权限做成库内可执行的名单，并让人在树上改档；同时收口阻塞门禁安全性的笔记 IO、冲突写盘和退出失败路径。不为模型开工具，不改人搜语料。
+本阶段把三档权限做成库内可执行的名单，并让人在树上改档；同时收口阻塞门禁安全性的笔记 IO、冲突写盘、退出失败路径与两平台一致的原生文件边界。不为模型开工具，不改人搜语料。
 
 ### 入口
 
@@ -85,9 +95,9 @@ v0 Host 阶段须兑现 [Agent 上下文与历史](topics.md#v0-上下文与历�
 - `src/preload/index.ts`、`src/main/index.ts`：登记通道，载荷做类型检查（与现有 `asString` 同一纪律）。
 - `src/main/vault.ts`：打开库时加载名单；改档后刷新树。
 - `src/renderer/src/tree.ts`、`src/renderer/src/shell.ts`：禁止 / 必须遵循打标；**只对文件夹**右键设档。默认可参考不挂徽章。接线走 `permissions:set`，不要让渲染进程写盘。
-- `notes-fs.ts`、`watch.ts`、`vault.ts`、编辑器保存：拒绝跟随笔记文件及父目录符号链接；树可把链接显示为普通文件。临时文件写满后在同一库文件系统内原子替换，失败保留原文并清理临时文件。macOS 临时文件放在固定库根，再用库根相对且全路径不跟链的改名提交；Windows 在固定父目录句柄下建临时文件并替换。`noteRead` 返回全文与内容修订值；人的 `noteWrite` 带预期修订值，主进程串行提交同篇，冲突返回明确结果，沿用选磁盘或窗口稿的交互。
-- `native/**`、`src/main/secure-fs.ts`：库根固定为目录句柄，逐级相对打开并拒绝符号链接 / Windows 重解析点；树、笔记、名单、索引、媒体和目录变化扫描统一走此边界。缺模块或安全状态不明时失败，不回退路径式读取。原生模块仅在主进程加载；构建后必须在 Electron 中实测装载。
-- `scripts/check-docs.mjs` 与 GitHub CI：检查相对链接和当前阶段一致性；macOS、Windows 用锁文件安装，运行测试与构建。
+- `notes-fs.ts`、`watch.ts`、`vault.ts`、编辑器保存：拒绝跟随笔记文件及父目录符号链接；树可把链接显示为普通文件。临时文件写满后在同一库文件系统内原子替换，失败保留原文并清理临时文件。两平台都在**目标父目录**内建临时文件，来源与目标都从固定库根相对解析且全路径不跟链，改名后同步父目录。`noteRead` 返回全文与内容修订值；人的 `noteWrite` 带预期修订值，主进程串行提交同篇，冲突返回明确结果，沿用选磁盘或窗口稿的交互。
+- `native/**`、`src/main/secure-fs.ts`：库根固定为目录句柄，逐级相对打开并拒绝符号链接 / Windows 重解析点；所有句柄用最宽松共享模式（边界靠句柄相对解析成立，不靠拒绝别人的改名）。树、笔记、名单、索引、媒体和目录变化扫描统一走此边界。缺模块或安全状态不明时失败，不回退路径式读取。原生模块仅在主进程加载；构建后必须在 Electron 中实测装载。
+- `scripts/check-docs.mjs` 与 GitHub CI：检查相对链接和当前阶段一致性；macOS、Windows 用锁文件安装，**先构建再做测试**，保证构建与原生装载检查在两腿都会执行。
 - 退出保存失败：提供继续编辑、重试和明确放弃未保存修改并退出的路径；`Cmd+Q` 与关窗都走同一决策，不得靠强制退出。构建后增加跨平台的 preload CommonJS 语法检查；实际窗口启动仍需单独验证。
 
 禁止：
@@ -135,16 +145,20 @@ v0 Host 阶段须兑现 [Agent 上下文与历史](topics.md#v0-上下文与历�
 - 名单外部改动后的重新加载；路径覆盖和同名附件夹。
 - 符号链接越库、写入失败保留原文、并发写与外部修改冲突。
 - 并发换链时笔记、名单、索引、媒体不得从库外读，替换不得改写库外文件；Windows 真实存在的大小写、Unicode、短文件名别名不得绕过禁区。无法安全判定则 AI 失败关闭。
-- 保存失败时关窗与 `Cmd+Q` 均能让人继续编辑、重试，或明确放弃修改并退出。
-- 相对文档链接和当前阶段检查；macOS、Windows CI 测试、构建，以及构建后 `out/main/index.js` 存在、`node --check out/preload/index.cjs` 通过、原生模块能被 Electron 装载。语法检查与装载探针不能代替窗口启动。
+- 两平台同一口径：替换已存在文件成功且内容正确；符号链接笔记的读写报 `UNSAFE_PATH`；外部以写方式持有该笔记时仍能读到它。
+- 保存失败时关窗与 `Cmd+Q` 均能让人继续编辑、重试，或明确放弃修改并退出；渲染进程不应答或计时器触发后才崩时同样有出路，不得停在无法退出的状态。
+- 相对文档链接和当前阶段检查；macOS、Windows CI 测试、构建，以及构建后 `out/main/index.js` 存在、`node --check out/preload/index.cjs` 通过、原生模块能被 Electron 装载。CI 必须先构建再做测试，保证构建与原生装载检查在两腿都会执行；语法检查与装载探针不能代替窗口启动。
 - 树上禁止 / 必须遵循打标，可参考不打。
 - 文件夹右键改档后能再读回来。
+- 干净工作树上 `pnpm dev` 能起窗口并读到笔记。
 
 改壳或 preload 时：`pnpm build` 后窗口能起来。
 
 ### 本阶段还差
 
-权限名单、IPC、树徽章与 macOS 原生文件边界已接线；`modelTierFor` 仍只在测试中调用，没有实际模型出口。`X/` 与 `X.md`、平局规则已有断言；保存失败弹窗已在本机分别操作重试、继续编辑和放弃，关窗与 `Cmd+Q` 均经过。受控链接换入及搬出子目录时不改写库外原文的 macOS 定向测试通过，最新构建产物已启动窗口并读到测试笔记。**Windows 原子写盘仍阻塞阶段：** Windows CI 复现 `FileRenameInformationEx` 在目标文件保持禁止外部删除 / 改名共享时返回 `STATUS_SHARING_VIOLATION`。开放 `FILE_SHARE_DELETE` 可使测试通过，但外部进程可在修订核对与提交间换掉目标文件，现有改名接口没有“仅当目标仍是预期文件身份时替换”的条件，不能据此宣称并发冲突安全。保留失败关闭，继续研究可验的 OS 级原子提交方案；未解决前不翻阶段、不开放身份标记或 Host。依据：[微软文件改名行为说明](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/4e3695bd-7574-4f24-a223-b4679c065b63)。
+权限名单、IPC、树徽章、原生文件边界与两平台共享模式已接线；`modelTierFor` 仍只在测试中调用，没有实际模型出口。`X/` 与 `X.md`、平局规则、隐藏路径、IPC 通道结构与载荷校验都有断言；保存失败弹窗的三条路径（重试 / 继续编辑 / 放弃）与关窗、`Cmd+Q` 都在本机实际走过，渲染进程不应答或计时器触发后才崩时也有出路。受控链接换入及搬出子目录时不改写库外原文的 macOS 定向测试通过；`pnpm test`、`pnpm build`、`pnpm dev` 都能起窗口并读到笔记。
+
+Windows 侧（共享模式、重解析点错误映射、原子替换）已推 CI，**两条腿连续绿之前不算交付**；获绿前不翻阶段、不开放身份标记或 Host。并发替换的保证口径已按实际可达强度写进围栏（见 [已拍板决定](decisions.md) §库、文件、窗口）：不写出库外，且到修订值核对点为止的外部改动能被发现并报冲突；核对点之后的替换属已知残余，交给人选磁盘或窗口稿。
 
 ### 交给下一阶段
 
@@ -161,6 +175,10 @@ export type PermissionEntry = {
 export function tierFor(relPath: string, entries: readonly PermissionEntry[]): PermissionTier
 ```
 
-`VaultSession` 的 `permissions()` 每次重新读名单；未来模型出口取得 `ready` 才调用 `tierFor`，`invalid` 必须拒绝。模型检索做查询期过滤，不要另建一份抹掉禁区的索引。身份标记格式在身份阶段确定。Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界见 [施工对象](topics.md#agent-核心框架)；这些仍未开工。
+`VaultSession` 的 `permissions()` 每次重新读名单；未来模型出口取得 `ready` 才调用 `tierFor`，`invalid` 必须拒绝。模型检索做查询期过滤，不要另建一份抹掉禁区的索引。身份标记格式在身份阶段确定。
+
+工具阶段补一条：`modelTierFor` 对**尚不存在的路径**会失败（它按句柄解析，解析不到就抛）。所以要判定「新建 / 改名 / 挪的目标是否落在禁区」时，按**规范化后的父目录**查档，且父目录必须存在、必须是目录、必须不是链接。
+
+Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界见 [施工对象](topics.md#agent-核心框架)；这些仍未开工。
 
 相关：[文档地图](README.md) · [已拍板决定](decisions.md) · [架构](architecture.md) · [施工对象](topics.md) · [施工守则](handbook.md)

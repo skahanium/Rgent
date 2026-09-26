@@ -26,7 +26,7 @@ flowchart LR
 ```
 
 - **渲染进程：** 画布是 CodeMirror 6。文档是 Markdown 字符串。无 Node，不能直接碰盘。画布只消费编译结果和源码映射，自己不解析结构。
-- **主进程：** 打开库、读写文件、权限名单、索引、窗口。v0 的 `AgentHost` 先住在这里，压测后可迁移。
+- **主进程：** 打开库、读写文件、权限名单、索引、窗口。v0 的 `AgentHost` 先住在这里；是否迁移属工程选型，见 [施工对象](topics.md#多进程--并发)。
 - **AgentHost：** 一场 `/` 的运行环境。愿景 / 选型 / 路线见 [施工对象](topics.md#agent-核心框架)。当前未开工。
 - **正文编译：** 共享一条管线（零 DOM、零 CM6）。注册插件 → 解析 → 索引 → 把源码映射交给画布。日后检索、反链、喂模型走同一份结果。细则见 [已拍板决定](decisions.md)。
 
@@ -51,7 +51,7 @@ flowchart LR
 - `.md` 就是笔记。
 - 每篇笔记带一个附件夹，名字与笔记同名。图和 PDF 跟这篇走。引用写全路径，解析走 Markdown 标准相对路径。
 - 权限名单和技能文件跟库走，对文件树隐藏。权限名单的选定路径见下方强制点。
-- 账本写在这篇笔记同一个文件里，放在最末尾，用一行机器锚点分隔；正文永远在锚点之前。树上没有单独一条。
+- 账本写在这篇笔记同一个文件里，放在最末尾，用一行机器锚点分隔（锚点值见 [已拍板决定](decisions.md) §账本）；正文永远在锚点之前。树上没有单独一条。
 - 人搜、反链与日后的模型检索只索引锚点之前的正文，不得索引账本。Host 组模型上下文时另行读取本篇账本，按 [产品合同 · 喂给模型](decisions.md#喂给模型) 的预算与来源规则处理。
 - 密钥不进库。Host 阶段以 Electron `safeStorage` 加密，密文只存应用数据目录，解密材料由操作系统保护。
 
@@ -93,8 +93,8 @@ flowchart LR
 | 不随便开页 | 壳 | `setWindowOpenHandler` 一律 deny。`will-navigate` 一律 `preventDefault`；`http(s)` 走系统浏览器（`src/main/index.ts`）。 |
 | CSP | 壳 | `src/renderer/index.html`：`default-src 'self'`；图允许 `data:` 与 `rgent-vault:`。 |
 | 媒体不逃出库 | IO | `resolveInVault` 拒绝 `..` 与绝对路径；`rgent-vault:` 经 `SecureVaultFs.readBytes` 从固定库根句柄逐级相对读取，不向 `net.fetch` 传校验后的路径（`src/main/paths.ts`、`vault-protocol.ts`）。 |
-| 隐藏路径人写盘写不了 | IO | `writeNote` / `readNote` 拒绝含点号段的路径（`src/main/notes-fs.ts`）。文件树不列出点号名。权限名单、技能文件必须落在这类路径上。 |
-| 笔记路径与冲突写盘 | IO | 主进程 Node-API 模块（`native/**`）固定库根目录句柄；macOS 从根相对打开时同时使用 `O_NOFOLLOW_ANY` / `O_RESOLVE_BENEATH`，库根临时文件经 `renameatx_np(RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH)` 原子提交，防止已打开子目录被搬出后写到库外；Windows 用 `NtCreateFile` 逐级相对打开并拒绝重解析点，替换尝试 `NtSetInformationFile(FileRenameInformationEx)`。树、读写、索引和媒体均走 `src/main/secure-fs.ts`，模块缺失不降级。`noteRead` 给全文及内容修订值，`noteWrite` 带预期修订值；同篇应用内串行检查，冲突交给人选磁盘或窗口稿。目录变化以安全元数据扫描发现，不按旧路径建立监听。macOS 搬出子目录的回归见 `test/main/path-race.test.ts`；Windows 目标文件保持禁止外部改名时替换仍报共享冲突，本项未交付。 |
+| 隐藏路径人写盘写不了 | IO | `writeNote` / `readNote` / `readVaultMedia` 拒绝含点号段的路径（`src/main/notes-fs.ts`、`src/main/paths.ts`）。文件树不列出点号名。权限名单落在库根 `.rgent-permissions`，与技能文件一样必须落在这类路径上。 |
+| 笔记路径与冲突写盘 | IO | 主进程 Node-API 模块（`native/**`）固定库根目录句柄，树、读写、索引、媒体、目录扫描统一走 `src/main/secure-fs.ts`，模块缺失不降级。macOS 逐级从库根相对打开并用 `O_NOFOLLOW_ANY` / `O_RESOLVE_BENEATH`；Windows 用 `NtCreateFile` 逐级相对打开、`OBJ_DONT_REPARSE` 拒绝重解析点，替换经 `NtSetInformationFile(FileRenameInformationEx)`。提交前核对修订值，临时文件建在目标父目录内再原子改名，冲突交给人选磁盘或窗口稿；同名目录被搬出库外的回归见 `test/main/path-race.test.ts`。两平台保证口径一致：不写出库外，且到核对点为止的外部改动能被发现；核对点之后的替换属已知残余，见 [已拍板决定](decisions.md) §库、文件、窗口。句柄一律用最宽松共享模式——边界靠句柄相对解析成立，不靠拒绝别人的改名。目录变化以安全元数据扫描发现，不按旧路径建立监听。 |
 | 权限名单的失效状态 | 主进程 | 名单缺失是空名单；已有名单损坏、无效、无法读取或条目身份不稳是 `invalid`。人读写搜继续，树上提示修复，名单写入只接受经句柄核验的文件夹与三档值并原子替换。权限按文件系统实际路径组成归一，别名冲突与身份变化使 AI 失败关闭。`modelTierFor` 目前仅被测试调用；Host 未接线，尚无实际模型出口。Windows 真实别名与写盘仍待 CI 验收。 |
 | 人写盘 ≠ 模型写盘 | IPC | `noteWrite` 只给人的自动写盘与手动保存。`AgentHost` 不得复用这条通道。Host 未开工，这条先当禁令。 |
 | 索引不见账本 | 管线 / 索引 | `partitionSource` 切开锚点（`src/markdown/partition.ts`）。`compile` 和 `VaultIndex` 只吃 `body`。 |
@@ -102,23 +102,5 @@ flowchart LR
 | 人搜含禁区 | 索引 | `VaultIndex` 是全量语料，建索引时不按权限过滤。当前人搜是惰性全量 + 子串。模型检索尚未开工，未来在查询期过滤。 |
 | 退出不丢稿 | 壳 | 关窗先 `flushRequest`。保存失败时主进程原生对话框让人重试、继续编辑或明确放弃；关窗和 `Cmd+Q` 走同一状态流程，重复请求不重复弹框。超时只在渲染进程已死时关。`vault.dispose()` 在 `will-quit`，不在 `before-quit`（退出 flush 还要走 `noteWrite`）。流程测试见 `test/shared/flush.test.ts`；失败弹窗的三条路径已在本机实际复核，本次原生模块构建后窗口已启动并读到笔记。 |
 | 密钥不进库 | 主进程 | Host 最小环接 Electron `safeStorage`，密文只存应用数据目录；尚未接线。 |
-
-## 选定值（可迁，不是永久合同）
-
-改这些等于一次扫描或一次迁移，不要悄悄换。
-
-| 项 | 值 | 说明 |
-|----|----|------|
-| 账本锚点 | `<!-- rgent:ledger:v1 -->` | 整行匹配，取最后一次。围栏见 [已拍板决定](decisions.md) §账本。 |
-| 权限名单 | 库根 `.rgent-permissions` | 点号开头，树上看不见，`noteWrite` 写不了。条目格式未锁，本阶段在 [施工图](build.md) 里选定。 |
-
-## 已落地现状
-
-这些是代码事实。人搜当前是惰性全量 + 子串；最多 100 条、排序、片段未写成合同数字。
-
-- **人搜：** 惰性全量重建，下一次查询才重扫。标题与正文子串匹配（小写）。测试：`test/main/vault-index.test.ts`、`test/renderer/search.test.ts`。
-- **反链：** 同源索引，吃编译结果里的 `[[全路径]]`。只在打开/切换笔记时刷新，不挂按键，也不挂每次自动写盘。
-- **索引脏标记：** 重建开始时清 `dirty`；重建期间再脏就再扫一轮（`VaultIndex.ready`）。
-- **换库：** `attach` 时 `index.reset()`，避免新库看到旧库反链。
 
 相关：[理念](vision.md) · [已拍板决定](decisions.md) · [施工守则](handbook.md) · [施工图](build.md) · [施工对象](topics.md)

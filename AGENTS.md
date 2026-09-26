@@ -39,4 +39,7 @@
 
 ```bash
 pnpm test
+pnpm docs:check
 ```
+
+`pnpm test` 先构建库读写的原生模块（需要系统 C++ 工具链与 Python 3），再跑类型检查与测试。改壳或 preload 时还要 `pnpm build` 并确认窗口能起。换阶段按 [施工守则](docs/handbook.md) 的四步走：改 [施工图](docs/build.md) 的「当前」与本文的「当前阶段」，两处字符串必须一致，`pnpm docs:check` 会核对。
