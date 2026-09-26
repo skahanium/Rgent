@@ -111,7 +111,10 @@ it.skipIf(process.platform === 'win32')('rejects named pipes without blocking th
   expect((await loadPermissions(root)).status).toBe('invalid')
 })
 
-it.skipIf(process.platform !== 'darwin')('does not commit outside the vault when an opened child directory moves out', async () => {
+it('does not commit outside the vault when an opened child directory moves out', async () => {
+  // 两平台同一条保证：已打开的子目录被整体搬出库外时，提交必须失败，库外原文一字不动。
+  // macOS 靠 RENAME_RESOLVE_BENEATH；Windows 靠提交前从库根重走父目录、比对身份，
+  // 再把目标名解析在核验过的父句柄上（见 native/vault_win.cc 的 Replace）。
   const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-move-'))
   const outside = await mkdtemp(path.join(os.tmpdir(), 'rgent-out-'))
   mkdirSync(path.join(root, 'sub'))
@@ -123,20 +126,41 @@ it.skipIf(process.platform !== 'darwin')('does not commit outside the vault when
     const path = require('node:path')
     const flag = new Int32Array(workerData.moved)
     parentPort.postMessage('ready')
-    // 临时文件建在目标父目录里（见 vault_posix.cc 的 Replace），所以盯 sub 而不是库根。
+    // 临时文件建在目标父目录里（两平台一致），所以盯 sub 而不是库根。
     while (Atomics.load(flag, 0) === 0) {
       if (fs.readdirSync(workerData.live).some((name) => name.startsWith('.rgent-') && name.endsWith('.tmp'))) {
-        fs.renameSync(workerData.live, path.join(workerData.outside, 'sub'))
-        Atomics.store(flag, 0, 1)
+        try {
+          fs.renameSync(workerData.live, path.join(workerData.outside, 'sub'))
+          Atomics.store(flag, 0, 1)   // 搬成功了
+        } catch {
+          Atomics.store(flag, 0, 2)   // 系统不让搬（我们的句柄把它钉住了）
+        }
         break
       }
     }
   `, { eval: true, workerData: { live: path.join(root, 'sub'), outside, moved } })
   await once(worker, 'message')
   try {
-    expect(() => secureFsFor(root).replace('sub/a.md', 'old', 'x'.repeat(64 * 1024 * 1024))).toThrow()
-    expect(Atomics.load(new Int32Array(moved), 0)).toBe(1)
-    expect(readFileSync(path.join(outside, 'sub', 'a.md'), 'utf8')).toBe('old')
+    // 先跑提交（临时文件只在提交过程中存在，标志也是在那时被置上），再看结果。
+    let threw = false
+    try {
+      secureFsFor(root).replace('sub/a.md', 'old', 'x'.repeat(64 * 1024 * 1024))
+    } catch {
+      threw = true
+    }
+    const outcome = Atomics.load(new Int32Array(moved), 0)
+    expect([1, 2]).toContain(outcome)
+    if (outcome === 1) {
+      // 目录真被搬出去了：提交必须失败，库外原文一字不动。
+      expect(threw).toBe(true)
+      expect(readFileSync(path.join(outside, 'sub', 'a.md'), 'utf8')).toBe('old')
+    } else {
+      // 系统没让搬（Windows 上我们持有的句柄可能就把目录钉住）：那就没有这个窗口，
+      // 提交照常落在库内，库外什么也没多出来。
+      expect(threw).toBe(false)
+      expect(readFileSync(path.join(root, 'sub', 'a.md'), 'utf8')).toBe('x'.repeat(64 * 1024 * 1024))
+      expect(existsSync(path.join(outside, 'sub'))).toBe(false)
+    }
   } finally {
     Atomics.store(new Int32Array(moved), 0, 1)
     await worker.terminate()

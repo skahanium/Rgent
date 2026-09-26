@@ -1,9 +1,8 @@
 import {
   compile,
   DEFAULT_STAGES,
-  editBlocked,
   lineStartOf,
-  lockedRanges,
+  planIdentityEdit,
   planWidgets,
   rangesOverlap,
   recoverCompile,
@@ -11,7 +10,7 @@ import {
   type EditChange
 } from '@markdown'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
-import { Compartment, EditorState, Facet, StateField, type Range } from '@codemirror/state'
+import { Compartment, EditorState, Facet, StateField, Transaction, type Range } from '@codemirror/state'
 import {
   Decoration,
   type DecorationSet,
@@ -157,15 +156,24 @@ function changesOf(tr: { changes: { iterChanges: (fn: (fromA: number, toA: numbe
 /**
  * 围栏：未采纳的 AI 块不能改字（先采纳再改，或删掉再问）。
  *
- * 只管用户的输入与删除。程序化变更（切 tab 的整篇替换、chip 上的采纳 / 丢弃 /
- * 搬家）本来就不该被这道闸拦住，它们没有 input / delete 的用户事件标记。
+ * 默认**拦下所有改文档的事务**，而不是只认 input / delete 两类用户事件——
+ * 后者会被 Alt-上下移行、拖动搬字、Ctrl-T 换位、缩进重排整批绕过（实测 Ctrl-T
+ * 能把 AI 块里的字换位），因为它们报的是 `move.*`。只有明确属于我们自己的动作
+ * （chip 上的删标记 / 丢弃 / 搬家、切 tab 的整篇替换）才放行，靠 `rgent` 前缀的
+ * userEvent 认领。
+ *
+ * 另：整块删掉未采纳的 AI 块时，把它的标记行一起删（见 planIdentityEdit），
+ * 否则标记会就近标到下一段人写的字上。
  */
 const identityLock = EditorState.transactionFilter.of((tr) => {
   if (!tr.docChanged) return tr
-  if (!tr.isUserEvent('input') && !tr.isUserEvent('delete')) return tr
-  const locked = lockedRanges(tr.startState.field(markdownField).result.index)
-  if (locked.length === 0) return tr
-  return editBlocked(changesOf(tr), locked) ? [] : tr
+  if (tr.isUserEvent('rgent')) return tr
+  const index = tr.startState.field(markdownField).result.index
+  const changes = changesOf(tr)
+  const plan = planIdentityEdit(tr.startState.doc.toString(), changes, index)
+  if (plan.blocked) return []
+  if (plan.extra.length === 0) return tr
+  return { changes: [...changes, ...plan.extra], userEvent: 'rgent.discardBlock' }
 })
 
 
@@ -210,10 +218,13 @@ export function mountEditor(
 ): EditorHost {
   let applying = false
   const hostCompartment = new Compartment()
+  // 撤销历史按笔记隔离：整篇替换若留在历史里，切 tab 之后按撤销会把上一篇的文本
+  // 填进当前篇（随后还会被自动保存写盘）——实测过。
+  const historyCompartment = new Compartment()
   const state = EditorState.create({
     doc: '',
     extensions: [
-      history(),
+      historyCompartment.of(history()),
       keymap.of([
         ...defaultKeymap,
         ...historyKeymap,
@@ -244,7 +255,13 @@ export function mountEditor(
       applying = true
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: text },
-        ...(host ? { effects: hostCompartment.reconfigure(noteHostFacet.of(host)) } : {})
+        // 换一篇笔记 = 换一份撤销历史，外加这次替换本身不进历史。
+        effects: [
+          historyCompartment.reconfigure(history()),
+          ...(host ? [hostCompartment.reconfigure(noteHostFacet.of(host))] : [])
+        ],
+        annotations: Transaction.addToHistory.of(false),
+        userEvent: 'rgent.setText'
       })
       applying = false
     },

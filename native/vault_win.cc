@@ -356,7 +356,7 @@ void DeleteOpenedFile(HANDLE handle) {
     WinError("CLEANUP_TEMP");
 }
 
-void RenameOpenedFile(HANDLE source, const std::wstring& target, bool replace) {
+void RenameOpenedFile(HANDLE source, HANDLE parent, const std::wstring& target, bool replace) {
   const size_t bytes = target.size() * sizeof(wchar_t);
   // The Windows API validates against sizeof(FILE_RENAME_INFO), including
   // the structure's trailing alignment padding on 64-bit builds.
@@ -367,9 +367,11 @@ void RenameOpenedFile(HANDLE source, const std::wstring& target, bool replace) {
   auto* info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
   const DWORD flags = replace ? (kRenameReplace | kRenamePosix) : 0;
   std::memcpy(info, &flags, sizeof(flags));
-  // Source and destination are in the same pinned parent. A null root keeps
-  // the kernel on the source link's parent and avoids reopening that directory.
-  info->RootDirectory = nullptr;
+  // Destination resolves against the parent handle the caller has just re-verified
+  // from the pinned vault root. Passing nullptr here would let the kernel fall back
+  // to the source file's parent as it exists now, which is the directory an external
+  // process may have moved out of the vault during the temp-write window.
+  info->RootDirectory = parent;
   info->FileNameLength = static_cast<DWORD>(bytes);
   std::memcpy(info->FileName, target.data(), bytes);
   using NtSetInformationFileFn = NTSTATUS (NTAPI *)(HANDLE, PIO_STATUS_BLOCK, PVOID,
@@ -458,14 +460,17 @@ void Replace(VaultHandle* root, const std::string& relative_file,
              const std::optional<std::string>& expected, const std::string& content) {
   const auto parts = Parts(relative_file);
   auto chain = WalkDirectories(root, parts, parts.size() - 1);
-  auto target = OpenMaybe(chain.current, parts.back(), FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                          kNonDirectory, kShareAll);
-  if (target.valid()) RequireKind(target.get(), "file");
-  if (expected) {
-    if (!target.valid() || ReadAll(target.get()) != *expected) Fail("CONFLICT");
-  } else if (target.valid()) {
-    Fail("CONFLICT");
-  }
+  // 从父句柄按名重开目标并核修订值：与 macOS 的 ExpectExisting 同一条，
+  // 提交前再核一次，检测的是**名字**被换掉，而不只是我们手里那个对象的内容。
+  const auto check_target = [&]() {
+    auto target = OpenMaybe(chain.current, parts.back(),
+                            FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                            kNonDirectory, kShareAll);
+    if (!target.valid()) return !expected.has_value();
+    RequireKind(target.get(), "file");
+    return expected.has_value() && ReadAll(target.get()) == *expected;
+  };
+  if (!check_target()) Fail("CONFLICT");
 
   UniqueHandle temporary;
   for (int attempt = 0; attempt < 8; ++attempt) {
@@ -483,9 +488,22 @@ void Replace(VaultHandle* root, const std::string& relative_file,
   bool renamed = false;
   try {
     WriteAll(temporary.get(), content);
-    // 目标句柄全程用最宽松共享：边界靠句柄相对解析成立，不靠拒绝别人的改名。
-    // 核对点之后、提交之前若目标被外部换掉，属已知残余，靠修订值报冲突并交给人。
-    RenameOpenedFile(temporary.get(), parts.back(), expected.has_value());
+    // 提交前再核一次修订值：与 macOS 同口径，把窗口压缩到「这次核对 → 改名」之间。
+    if (!check_target()) Fail("CONFLICT");
+    // 从固定库根**重新走一遍父目录**（OBJ_DONT_REPARSE），确认它还是我们建临时文件
+    // 时的那个对象。全共享模式下外部可以在「写好临时文件 → 提交」之间把父目录整体
+    // 搬出库外，或换成一个重解析点；改名若只按裸文件名解析在源文件的父目录上，
+    // 提交就会落到库外。这里不认同一个对象就直接失败，与 macOS 的
+    // RENAME_RESOLVE_BENEATH 同一条保证：不写出库外。
+    auto fresh = WalkDirectories(root, parts, parts.size() - 1);
+    const auto pinned_id = Identity(chain.current);
+    const auto fresh_id = Identity(fresh.current);
+    if (pinned_id.VolumeSerialNumber != fresh_id.VolumeSerialNumber ||
+        !SameId(pinned_id.FileId, fresh_id.FileId))
+      Fail("UNSAFE_PATH");
+    // 目标名解析在**刚核验过的那个父句柄**上，而不是 nullptr：这样即使核验之后
+    // 父目录再被换掉，改名也不会被引到别的目录去。
+    RenameOpenedFile(temporary.get(), fresh.current, parts.back(), expected.has_value());
     renamed = true;
   } catch (...) {
     if (!renamed) {

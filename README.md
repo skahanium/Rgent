@@ -28,4 +28,4 @@ ELECTRON_GET_USE_PROXY=true GLOBAL_AGENT_HTTPS_PROXY=http://127.0.0.1:7897 pnpm 
 
 ## 现状
 
-产品骨架是 Electron + TypeScript，库的读写边界是一个受控的 Node-API 原生模块。笔记壳、正文管线、账本缝、人搜与反链已可跑。**当前阶段是门禁及其前置文件安全**，见 [施工图](docs/build.md)。未开工：身份标记、一场 `/`、`AgentHost`、技能、MCP、设置像素。
+产品骨架是 Electron + TypeScript，库的读写边界是一个受控的 Node-API 原生模块。笔记壳、正文管线、账本缝、人搜与反链、门禁（三档权限名单）已可跑。**当前阶段是身份标记**，见 [施工图](docs/build.md)。未开工：一场 `/`、`AgentHost`、技能、MCP、设置像素。

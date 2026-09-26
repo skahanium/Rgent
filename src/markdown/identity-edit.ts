@@ -1,3 +1,4 @@
+import type { BlockIdentity } from './identity.ts'
 import type { DocIndex, MarkerRef, SourceRange } from './types.ts'
 
 /**
@@ -65,6 +66,8 @@ export function discardMarkedBlock(source: string, marker: MarkerRef, block: Sou
 export type IdentityUnit = {
   marker: MarkerRef | null
   block: SourceRange
+  /** 这个块的身份；缺省即人写的。 */
+  identity?: BlockIdentity
 }
 
 /**
@@ -81,7 +84,9 @@ export function identityUnits(index: DocIndex): IdentityUnit[] {
       marker = markers[next]!
       next += 1
     }
-    units.push({ marker, block: block.range })
+    const unit: IdentityUnit = { marker, block: block.range }
+    if (block.identity) unit.identity = block.identity
+    units.push(unit)
   }
   return units
 }

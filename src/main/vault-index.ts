@@ -1,7 +1,7 @@
 import type { BacklinkGroup, BacklinkRef, SearchHit, TreeEntry } from '../shared/ipc.ts'
 import { ROOT_GROUP } from '../shared/ipc.ts'
 import { collectNotePaths, noteTitle } from '../shared/vault-rel.ts'
-import { compile } from '../markdown/index.ts'
+import { compile, type MarkerRef } from '../markdown/index.ts'
 import { readNote } from './notes-fs.ts'
 
 export { ROOT_GROUP }
@@ -153,7 +153,9 @@ export class VaultIndex {
         relPath,
         folder: folderOf(relPath),
         title: noteTitle(relPath),
-        body: partition.body,
+        // 身份标记是机器语法，不该出现在人的搜索命中与片段里（搜 "rgent" 会搜到它们）。
+        // 等长填空格，偏移不变，片段位置照旧对得上。
+        body: blankMarkers(partition.body, index.markers),
         targets: [...new Set(targets)]
       }
     } catch {
@@ -165,6 +167,22 @@ export class VaultIndex {
 
 function isNoteTarget(target: string): boolean {
   return target.toLowerCase().endsWith('.md')
+}
+
+/** 把身份标记的位置换成等长空格：机器语法不进人的搜索语料，偏移也不动。 */
+function blankMarkers(body: string, markers: readonly MarkerRef[]): string {
+  if (markers.length === 0) return body
+  const parts: string[] = []
+  let at = 0
+  for (const marker of [...markers].sort((left, right) => left.range.start - right.range.start)) {
+    const start = Math.max(at, Math.min(body.length, marker.range.start))
+    const end = Math.max(start, Math.min(body.length, marker.range.end))
+    if (end === start) continue
+    parts.push(body.slice(at, start), ' '.repeat(end - start))
+    at = end
+  }
+  parts.push(body.slice(at))
+  return parts.join('')
 }
 
 function folderOf(relPath: string): string {

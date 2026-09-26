@@ -105,6 +105,20 @@ describe('vault index search', () => {
     expect(await index.search('正文一句话')).toHaveLength(1)
     expect(await index.backlinks('幽灵笔记.md')).toEqual([])
   })
+
+  it('never sees identity markers: machine syntax is not human search material', async () => {
+    const root = await vault()
+    await note(root, 'a.md', '人写的一段。\n\n<!-- rgent:ai:v1 -->\nAI 的回答。\n\n<!-- rgent:prompt:v1 -->\n口令原文。\n')
+
+    const index = indexFor(root)
+    expect(await index.search('rgent')).toEqual([])
+    expect(await index.search('AI 的回答')).toHaveLength(1)
+    expect(await index.search('口令原文')).toHaveLength(1)
+    // 标记被等长空格替掉，片段里的偏移照旧对得上。
+    const hit = (await index.search('AI 的回答'))[0]!
+    expect(hit.snippet.slice(hit.matchStart, hit.matchStart + hit.matchLength)).toBe('AI 的回答')
+    expect(hit.snippet).not.toContain('<!--')
+  })
 })
 
 describe('vault index lifecycle', () => {

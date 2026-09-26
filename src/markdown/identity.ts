@@ -33,12 +33,19 @@ export function parseMarker(value: string): MarkerParse | null {
   return { identity: match[1] === 'ai' ? 'ai' : 'command', attrs }
 }
 
-/** 写标记的唯一入口。键名与取值都要能原样读回来，否则不写。 */
+/**
+ * 写标记的唯一入口。键名与取值都要能原样读回来，否则不写：
+ * 取值里出现 `-->` 会把注释提前截断，身份就静默丢了——那比少一个属性糟得多。
+ */
 export function markerLine(identity: BlockIdentity, attrs: Record<string, string> = {}): string {
   const name = identity === 'ai' ? 'ai' : 'prompt'
   const suffix = Object.entries(attrs)
-    .filter(([key, value]) => /^[A-Za-z][\w-]*$/.test(key) && !value.includes('"'))
+    .filter(([key, value]) => /^[A-Za-z][\w-]*$/.test(key) && safeAttrValue(value))
     .map(([key, value]) => ` ${key}="${value}"`)
     .join('')
   return `<!-- rgent:${name}:v1${suffix} -->`
+}
+
+function safeAttrValue(value: string): boolean {
+  return !value.includes('"') && !value.includes('--') && !value.includes('>') && !value.includes('\n')
 }

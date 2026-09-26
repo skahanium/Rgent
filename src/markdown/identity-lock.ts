@@ -1,3 +1,5 @@
+import { identityUnits, markerLineBlock, type TextEdit } from './identity-edit.ts'
+import type { BlockIdentity } from './identity.ts'
 import type { DocIndex, SourceRange } from './types.ts'
 
 /**
@@ -60,4 +62,49 @@ export function editBlocked(changes: readonly EditChange[], locked: readonly Sou
     }
   }
   return false
+}
+
+export type EditPlan = {
+  /** 这次事务整不整批丢掉。 */
+  blocked: boolean
+  /** 需要补上的删除：整块删掉未采纳的 AI 块时，连它的标记行一起删。 */
+  extra: readonly TextEdit[]
+}
+
+/**
+ * 判定一次事务，并算出要不要补一笔删除。
+ *
+ * 为什么要补：整块删掉未采纳的 AI 块是允许的（围栏「删掉再问」），但标记行若留下，
+ * 「就近标下面那一块」的规则会让它标到**下一段人写的字**上——那段于是被锁住，
+ * 还带一个会删掉人字的「丢弃」。删块时把标记一起删掉，就没有这种错位。
+ */
+export function planIdentityEdit(
+  source: string,
+  changes: readonly EditChange[],
+  index: DocIndex
+): EditPlan {
+  const locked = lockedRanges(index)
+  if (locked.length === 0) return { blocked: false, extra: [] }
+  const sanctioned: EditChange[] = []
+  for (const change of changes) {
+    const covers = locked.some((range) => coversWhole(change, range))
+    for (const range of locked) {
+      if (coversWhole(change, range)) continue
+      if (overlaps(change, range)) return { blocked: true, extra: [] }
+      if (!covers && mergesAcross(change, range)) return { blocked: true, extra: [] }
+    }
+    if (covers) sanctioned.push(change)
+  }
+  if (sanctioned.length === 0) return { blocked: false, extra: [] }
+
+  const extra: TextEdit[] = []
+  for (const unit of identityUnits(index)) {
+    if (!unit.marker || unit.identity !== 'ai') continue
+    const removedBlock = sanctioned.some((change) => coversWhole(change, unit.block))
+    if (!removedBlock) continue
+    const line = markerLineBlock(source, unit.marker.range)
+    if (changes.some((change) => coversWhole(change, line))) continue
+    extra.push({ from: line.start, to: line.end, insert: '' })
+  }
+  return { blocked: false, extra }
 }

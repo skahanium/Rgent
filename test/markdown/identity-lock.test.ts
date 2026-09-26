@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { AI_MARKER, PROMPT_MARKER, compile } from '../../src/markdown/index.ts'
-import { editBlocked, lockedRanges } from '../../src/markdown/identity-lock.ts'
+import { editBlocked, lockedRanges, planIdentityEdit } from '../../src/markdown/identity-lock.ts'
 
 const AI = AI_MARKER
 const PROMPT = PROMPT_MARKER
@@ -74,5 +74,55 @@ describe('edit lock', () => {
 
   it('blocks a change that touches one locked range even when another is untouched', () => {
     expect(editBlocked([{ from: humanBlock.start, to: humanBlock.end, insert: '' }, { from: aiBlock.start + 1, to: aiBlock.start + 1, insert: 'x' }], locked)).toBe(true)
+  })
+})
+
+describe('planIdentityEdit', () => {
+  const plan = (changes: Array<{ from: number; to: number; insert?: string }>) =>
+    planIdentityEdit(source, changes, index)
+
+  it('lets ordinary edits in human text through untouched', () => {
+    const result = plan([{ from: humanBlock.start, to: humanBlock.start, insert: '补' }])
+    expect(result.blocked).toBe(false)
+    expect(result.extra).toEqual([])
+  })
+
+  it('drops a transaction that would type inside an unadopted AI block', () => {
+    expect(plan([{ from: aiBlock.start + 1, to: aiBlock.start + 1, insert: 'x' }]).blocked).toBe(true)
+  })
+
+  it('drops the whole transaction when any one change touches a locked range', () => {
+    // 半途生效比整批拒绝更危险：人以为改了，磁盘上却只改了一半。
+    const result = plan([
+      { from: humanBlock.start, to: humanBlock.end, insert: '换掉' },
+      { from: aiBlock.start + 1, to: aiBlock.start + 1, insert: 'x' }
+    ])
+    expect(result.blocked).toBe(true)
+  })
+
+  it('adopts by deleting the marker line, with no extra change', () => {
+    const line = { from: marker.start, to: marker.end + 1, insert: '' }
+    const result = plan([line])
+    expect(result.blocked).toBe(false)
+    expect(result.extra).toEqual([])
+  })
+
+  it('takes the marker with it when a whole unadopted block is deleted by hand', () => {
+    // 否则标记会就近标到下一段人写的字上，把它锁住、还带一个会删掉人字的「丢弃」。
+    const result = plan([{ from: aiBlock.start, to: aiBlock.end, insert: '' }])
+    expect(result.blocked).toBe(false)
+    // 补的正是标记那一整行（含换行）。
+    expect(result.extra).toEqual([{ from: marker.start, to: marker.end + 1, insert: '' }])
+  })
+
+  it('does not add a second deletion when the marker is already inside the change', () => {
+    const result = plan([{ from: marker.start - 1, to: aiBlock.end, insert: '' }])
+    expect(result.blocked).toBe(false)
+    expect(result.extra).toEqual([])
+  })
+
+  it('has nothing to do when no range is locked', () => {
+    const plain = compile('人写的一段。\n')
+    expect(planIdentityEdit('人写的一段。\n', [], plain.index)).toEqual({ blocked: false, extra: [] })
   })
 })

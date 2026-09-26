@@ -33,6 +33,18 @@ describe('identity markers', () => {
     })
   })
 
+  it('refuses to write an attribute value that would truncate the comment', () => {
+    // 取值里出现 `-->` 会把注释提前截断，身份静默丢失：宁可丢掉这个属性。
+    const unsafe = markerLine('ai', { skill: '前 --> 后' })
+    expect(unsafe).toBe(AI)
+    expect(parseMarker(unsafe)).toEqual({ identity: 'ai', attrs: {} })
+    // 换行与引号同理。
+    expect(markerLine('ai', { skill: '带"引号' })).toBe(AI)
+    expect(markerLine('ai', { skill: '带\n换行' })).toBe(AI)
+    // 正常取值照旧带上。
+    expect(parseMarker(markerLine('ai', { skill: '周报' }))?.attrs).toEqual({ skill: '周报' })
+  })
+
   it('does not mistake other HTML comments for markers', () => {
     // 不认识的注释要看得见：照旧落成一个块，不能悄悄吞掉。
     expect(parseMarker('<!-- TODO: 补一节 -->')).toBeNull()

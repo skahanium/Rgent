@@ -89,20 +89,20 @@ flowchart LR
 | 性质 | 层 | 现状 |
 |------|----|------|
 | 画布装饰只从 StateField 出 | 渲染进程 | 编译结果与装饰由一个 `StateField` 提供（`src/renderer/src/view/editor.ts`），**不能**由 `ViewPlugin` 提供：CM6 禁止插件产生块装饰，表格 / callout / mermaid / 块级公式会抛 `RangeError`，异常再被上层的 `catch` 吞掉，表现成「含表格的笔记点不开、界面毫无提示」。另：块级替换会吞掉紧随其后的行装饰，所以身份标记的 chip 用行内替换。改这里时窗口要各起一次含表格与含标记的笔记。 |
-| 未采纳的 AI 块不能改字 | 渲染进程 | 判定是纯函数（`src/markdown/identity-lock.ts`）：锁住标记与 AI 块的范围，字面上的改动一律挡，整段删掉（采纳 / 丢弃）放行。画布用 `EditorState.transactionFilter` 只拦用户输入与删除——程序化变更（切 tab、采纳、丢弃、搬家）本来就不该被拦。**不许**用整篇只读冒充。 |
+| 未采纳的 AI 块不能改字 | 渲染进程 | 判定是纯函数（`src/markdown/identity-lock.ts`）：锁住标记与 AI 块的范围，字面上的改动一律挡，整段删掉（采纳 / 丢弃）放行；整块删掉时把标记行一起删，避免标记错位到下一段人写的字上。画布用 `EditorState.transactionFilter` **默认拦下所有改文档的事务**，只放行带 `rgent` 前缀 userEvent 的自家动作——只认 `input` / `delete` 会被移行、拖动搬字、Ctrl-T 换位整批绕过。**不许**用整篇只读冒充。切 tab 的整篇替换要换一份撤销历史（`history` 装进 Compartment 重新配置），否则撤销会跨笔记把上一篇的文本填进当前篇。 |
 | 渲染进程不碰盘 | 壳 | `contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`（`src/main/index.ts`）。preload 只经 `contextBridge` 暴露白名单（`src/preload/index.ts`）。sandbox 下 preload 必须打成 `out/preload/index.cjs`（`electron.vite.config.ts`）。 |
 | IPC 是唯一通道 | 壳 | 通道名和载荷类型在 `src/shared/ipc.ts`。渲染进程不得再开通道。 |
 | 不随便开页 | 壳 | `setWindowOpenHandler` 一律 deny。`will-navigate` 一律 `preventDefault`；`http(s)` 走系统浏览器（`src/main/index.ts`）。 |
 | CSP | 壳 | `src/renderer/index.html`：`default-src 'self'`；图允许 `data:` 与 `rgent-vault:`。 |
 | 媒体不逃出库 | IO | `resolveInVault` 拒绝 `..` 与绝对路径；`rgent-vault:` 经 `SecureVaultFs.readBytes` 从固定库根句柄逐级相对读取，不向 `net.fetch` 传校验后的路径（`src/main/paths.ts`、`vault-protocol.ts`）。 |
 | 隐藏路径人写盘写不了 | IO | `writeNote` / `readNote` / `readVaultMedia` 拒绝含点号段的路径（`src/main/notes-fs.ts`、`src/main/paths.ts`）。文件树不列出点号名。权限名单落在库根 `.rgent-permissions`，与技能文件一样必须落在这类路径上。 |
-| 笔记路径与冲突写盘 | IO | 主进程 Node-API 模块（`native/**`）固定库根目录句柄，树、读写、索引、媒体、目录扫描统一走 `src/main/secure-fs.ts`，模块缺失不降级。macOS 逐级从库根相对打开并用 `O_NOFOLLOW_ANY` / `O_RESOLVE_BENEATH`；Windows 用 `NtCreateFile` 逐级相对打开、`OBJ_DONT_REPARSE` 拒绝重解析点，替换经 `NtSetInformationFile(FileRenameInformationEx)`。提交前核对修订值，临时文件建在目标父目录内再原子改名，冲突交给人选磁盘或窗口稿；已打开的子目录被搬出库外、不得改写库外原文的回归见 `test/main/path-race.test.ts`。两平台保证口径一致：不写出库外，且到核对点为止的外部改动能被发现；核对点之后的替换属已知残余，见 [已拍板决定](decisions.md) §库、文件、窗口。Windows 句柄一律用最宽松共享模式——边界靠句柄相对解析成立，不靠拒绝别人的改名。目录变化以安全元数据扫描发现，不按旧路径建立监听。 |
+| 笔记路径与冲突写盘 | IO | 主进程 Node-API 模块（`native/**`）固定库根目录句柄，树、读写、索引、媒体、目录扫描统一走 `src/main/secure-fs.ts`，模块缺失不降级。macOS 逐级从库根相对打开并用 `O_NOFOLLOW_ANY` / `O_RESOLVE_BENEATH`；Windows 用 `NtCreateFile` 逐级相对打开、`OBJ_DONT_REPARSE` 拒绝重解析点。提交前核对修订值，临时文件建在目标父目录内再原子改名，冲突交给人选磁盘或窗口稿。**提交那一步必须锚回库根**：macOS 靠 `renameatx_np` + `RENAME_RESOLVE_BENEATH`；Windows 在提交前从库根重走一遍父目录（`OBJ_DONT_REPARSE`）并比对其文件身份，只把目标名解析在**核验过的那一个父句柄**上——这样父目录被外部整体搬出库外时提交会失败，而不是落到库外。已打开的子目录被搬出库外、不得改写库外原文的回归见 `test/main/path-race.test.ts`（两平台同一条）。两平台保证口径一致：判不出「仍在库内」就失败关闭，且到核对点为止的外部改动能被发现；核对点之后的替换属已知残余（不报冲突、不弹窗），见 [已拍板决定](decisions.md) §库、文件、窗口。Windows 句柄一律用最宽松共享模式——边界靠句柄相对解析成立，不靠拒绝别人的改名。目录变化以安全元数据扫描发现，不按旧路径建立监听。 |
 | 权限名单的失效状态 | 主进程 | 名单缺失是空名单；已有名单损坏、无效、无法读取或条目身份不稳是 `invalid`。人读写搜继续，树上提示修复，名单写入只接受经句柄核验的文件夹与三档值并原子替换。权限按文件系统实际路径组成归一，别名冲突与身份变化使 AI 失败关闭。`modelTierFor` 目前仅被测试调用；Host 未接线，尚无实际模型出口。Windows 侧别名与写盘已过 CI。 |
 | 人写盘 ≠ 模型写盘 | IPC | `noteWrite` 只给人的自动写盘与手动保存。`AgentHost` 不得复用这条通道。Host 未开工，这条先当禁令。 |
-| 索引不见账本 | 管线 / 索引 | `partitionSource` 切开锚点（`src/markdown/partition.ts`）。`compile` 和 `VaultIndex` 只吃 `body`。 |
+| 索引不见账本 | 管线 / 索引 | `partitionSource` 切开锚点（`src/markdown/partition.ts`）。`compile` 和 `VaultIndex` 只吃 `body`。身份标记是机器语法，人搜的语料里把它等长填空格（偏移不变）——搜 `rgent` 不该搜到它，片段里也不该出现。 |
 | 画布不见账本 | 画布 | Tab 拆 `content`（正文）与 `ledger`（`src/renderer/src/tabs.ts`）。编辑器只 `setText(body)`。写盘 `composeSource`。账本回顾是临时只读面板，入口在笔记标题旁，关掉就走，不占右侧反链。 |
 | 人搜含禁区 | 索引 | `VaultIndex` 是全量语料，建索引时不按权限过滤。当前人搜是惰性全量 + 子串。模型检索尚未开工，未来在查询期过滤。 |
-| 退出不丢稿 | 壳 | 关窗先 `flushRequest`。保存失败时主进程原生对话框让人重试、继续编辑或明确放弃；关窗和 `Cmd+Q` 走同一状态流程，重复请求不重复弹框。超时只在渲染进程已死时关。`vault.dispose()` 在 `will-quit`，不在 `before-quit`（退出 flush 还要走 `noteWrite`）。流程测试见 `test/shared/flush.test.ts`；失败弹窗的三条路径已在本机实际复核，本次原生模块构建后窗口已启动并读到笔记。 |
+| 退出不丢稿 | 壳 | 关窗先 `flushRequest`。保存失败时主进程原生对话框让人重试、继续编辑或明确放弃；**渲染进程活着但不应答**（超时，或计时器触发之后才崩）时也进同一个决策态，文案按「写盘失败 / 没有回应」区分——不能让流程停在 flushing，那会让窗口关不掉、`Cmd+Q` 也被挡住。关窗和 `Cmd+Q` 走同一状态流程，重复请求不重复弹框。`vault.dispose()` 在 `will-quit`，不在 `before-quit`（退出 flush 还要走 `noteWrite`）。流程测试见 `test/shared/flush.test.ts`。 |
 | 密钥不进库 | 主进程 | Host 最小环接 Electron `safeStorage`，密文只存应用数据目录；尚未接线。 |
 
 相关：[理念](vision.md) · [已拍板决定](decisions.md) · [施工守则](handbook.md) · [施工图](build.md) · [施工对象](topics.md)

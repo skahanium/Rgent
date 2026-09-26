@@ -67,7 +67,11 @@ export class MarkerWidget extends WidgetType {
     button.addEventListener('click', (event) => {
       event.preventDefault()
       event.stopPropagation()
-      view.dispatch({ changes: { from: edit.from, to: edit.to, insert: edit.insert } })
+      view.dispatch({
+        changes: { from: edit.from, to: edit.to, insert: edit.insert },
+        // 认领成我们自己的动作：身份锁定那道闸默认拦下所有改文档的事务。
+        userEvent: 'rgent.markerAction'
+      })
       view.focus()
     })
     return button
