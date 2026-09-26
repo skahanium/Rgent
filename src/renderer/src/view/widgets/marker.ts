@@ -30,7 +30,11 @@ export class MarkerWidget extends WidgetType {
     label.className = 'rgent-marker-label'
     label.textContent = ai ? '未采纳的 AI 块' : '口令'
     root.append(label)
-    if (!ai) return root
+    if (!ai) {
+      // 口令是自己的字：只留一个删标记的出口，免得标记行被 chip 挡住后再也去不掉。
+      root.append(this.button(view, '删标记', 'rgent-marker-discard', this.plan.accept, '去掉口令标记，正文不动'))
+      return root
+    }
 
     root.append(this.button(view, '采纳', 'rgent-marker-accept', this.plan.accept))
     root.append(this.button(view, '丢弃', 'rgent-marker-discard', this.plan.discard))

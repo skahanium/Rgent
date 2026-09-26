@@ -26,15 +26,7 @@ export function markerLineBlock(source: string, marker: SourceRange): SourceRang
   return { start: lineStartOf(source, marker.start), end: lineEndOf(source, marker.end) }
 }
 
-/** 标记下面紧接的那个块。标记在文件末尾时没有块。 */
-export function blockAfterMarker(index: DocIndex, marker: MarkerRef): SourceRange | null {
-  let best: SourceRange | null = null
-  for (const block of index.blocks) {
-    if (block.range.start < marker.range.end) continue
-    if (!best || block.range.start < best.start) best = block.range
-  }
-  return best
-}
+
 
 /**
  * 采纳：删掉标记那一行。正文一个字都不动，块从此跟手写的一样。
@@ -48,14 +40,25 @@ export function acceptMarker(source: string, marker: MarkerRef): TextEdit | null
 /**
  * 丢弃：标记行连同它标的块一起删，并把两侧的空行收成一个。
  * 块是文件最后一块时不留尾空行。
+ *
+ * 只算这一处，**不做整篇切片**：这个函数在每次按键时都会为每个标记跑一遍，
+ * 整篇切一次就是 O(正文 × 标记数)——实测 57 KB、1000 个标记时要 119 ms 一次。
  */
 export function discardMarkedBlock(source: string, marker: MarkerRef, block: SourceRange): TextEdit | null {
   const line = markerLineBlock(source, marker.range)
   if (block.end < line.end) return null
-  const before = source.slice(0, line.start).replace(/\n+$/u, '')
-  const after = source.slice(block.end).replace(/^\n+/u, '')
-  const gap = before === '' ? '' : after === '' ? '\n' : '\n\n'
-  return { from: 0, to: source.length, insert: `${before}${gap}${after}` }
+  let to = block.end
+  while (to < source.length && source[to] === '\n') to += 1
+  let from = line.start
+  if (to >= source.length) {
+    // 块在文件末尾：把前面的空行也收掉，只留一个换行收尾。
+    while (from > 0 && source[from - 1] === '\n') from -= 1
+    return { from, to, insert: from === 0 ? '' : '\n' }
+  }
+  if (from === 0) return { from, to, insert: '' }
+  const beforeIsNewline = source[from - 1] === '\n'
+  const beforeIsBlank = beforeIsNewline && from >= 2 && source[from - 2] === '\n'
+  return { from, to, insert: beforeIsBlank ? '' : beforeIsNewline ? '\n' : '\n\n' }
 }
 
 /** 一个「搬家单位」= 一个顶层块，加上紧挨在它前面的那枚标记（如果有）。 */
@@ -91,9 +94,23 @@ function unitText(source: string, unit: IdentityUnit): string {
   return source.slice(unitStart(source, unit), unit.block.end)
 }
 
+/** 把相邻两个单位换个位置：两边的文本整段调换，中间固定收成一个空行。 */
+export function swapUnits(source: string, units: readonly IdentityUnit[], first: number, second: number): TextEdit | null {
+  const left = units[first]
+  const right = units[second]
+  if (!left || !right || first === second) return null
+  const [a, b] = first < second ? [left, right] : [right, left]
+  return {
+    from: unitStart(source, a),
+    to: b.block.end,
+    insert: `${unitText(source, b)}\n\n${unitText(source, a)}`
+  }
+}
+
 /**
  * 拖动是搬家：只和相邻的那一个单位换位置，身份不变。带标记的块连标记一起搬。
- * 换位后两个单位之间固定收成一个空行，避免越搬越空。
+ * 计划层要按标记逐个算动作，所以它用 `swapUnits` 复用在外面算好的单位表——
+ * 这里这份是给单点调用（与测试）用的。
  */
 export function moveUnit(
   source: string,
@@ -106,11 +123,5 @@ export function moveUnit(
   if (at < 0) return null
   const other = direction === 'up' ? at - 1 : at + 1
   if (other < 0 || other >= units.length) return null
-  const first = units[Math.min(at, other)]!
-  const second = units[Math.max(at, other)]!
-  return {
-    from: unitStart(source, first),
-    to: second.block.end,
-    insert: `${unitText(source, second)}\n\n${unitText(source, first)}`
-  }
+  return swapUnits(source, units, at, other)
 }

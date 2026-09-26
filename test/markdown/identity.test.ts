@@ -126,14 +126,17 @@ describe('identity markers', () => {
     expect(identities(source)).toEqual(['human', 'ai', 'command'])
   })
 
-  it('marks a block nested inside a blockquote too, and takes the marker out of the tree', () => {
+  it('leaves a marker inside a container alone, so nothing is marked that the index cannot act on', () => {
+    // 索引只收顶层块；认了嵌套标记就会变成「管线标了、锁定与画布却管不着」的半实现。
+    // 不认的注释照旧留在正文里看得见，不静默吞掉。
     const source = `> ${AI}\n> 引用里的一段。\n`
     const result = compile(source)
-    expect(result.index.markers).toHaveLength(1)
+    expect(result.index.markers).toEqual([])
+    expect(result.index.blocks).toHaveLength(1)
+    expect(result.index.blocks[0]!.identity).toBeUndefined()
     const quote = treeOf(source).children![0]!
     expect(quote.type).toBe('blockquote')
-    expect(quote.children!.map((node) => node.type)).toEqual(['paragraph'])
-    expect(quote.children![0]!.data?.rgentIdentity).toEqual({ identity: 'ai', attrs: {} })
+    expect(quote.children!.some((node) => node.type === 'html' && node.value === AI)).toBe(true)
   })
 
   it('can be switched off, and then the marker is an ordinary block again', () => {

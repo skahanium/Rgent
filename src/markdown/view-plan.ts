@@ -1,5 +1,5 @@
 import { isVaultImagePath } from '../shared/vault-rel.ts'
-import { acceptMarker, blockAfterMarker, discardMarkedBlock, moveUnit, type TextEdit } from './identity-edit.ts'
+import { acceptMarker, discardMarkedBlock, identityUnits, swapUnits, type TextEdit } from './identity-edit.ts'
 import type {
   CalloutRef,
   DocIndex,
@@ -62,23 +62,12 @@ export function planWidgets(
   const out: PlannedWidget[] = []
   const docLen = source.length
 
-  for (const marker of index.markers) {
-    // 只替换注释本身，不连整行一起换：块级替换会在 CM6 里吞掉紧随其后的行装饰
-    // （实测：装饰集里 [29,29,'rgent-block-ai'] 正确存在，却没落到 DOM 上），
-    // 而这一行本来就是空的，留着它也看不出区别。
-    const range = clipInline(marker.range, viewports, docLen)
-    if (!range) continue
-    const block = blockAfterMarker(index, marker)
-    push(out, {
-      kind: 'marker',
-      range,
-      marker,
-      accept: acceptMarker(source, marker),
-      discard: block ? discardMarkedBlock(source, marker, block) : null,
-      moveUp: block ? moveUnit(source, index, block.start, 'up') : null,
-      moveDown: block ? moveUnit(source, index, block.start, 'down') : null
-    })
-  }
+  // 单位表与下标表都只算一次：这段每次按键都会跑，逐个标记重算就是 O(块 × 标记)。
+  const units = index.markers.length > 0 ? identityUnits(index) : []
+  const unitOfMarker = new Map<number, number>()
+  units.forEach((unit, at) => {
+    if (unit.marker) unitOfMarker.set(unit.marker.range.start, at)
+  })
 
   for (const callout of index.callouts) {
     const range = clipBlock(source, callout.range, viewports, docLen)
@@ -126,6 +115,33 @@ export function planWidgets(
     const range = clipInline(math.range, viewports, docLen)
     if (!range) continue
     push(out, { kind: 'math', range, math })
+  }
+
+  // 标记排在最后，而且**不走 push 的重叠去重**：去重是 `out.some(...)`，整篇规划下
+  // 标记一多就是 O(标记²)——实测 250 / 500 / 1000 / 2000 个标记的每标记耗时一路翻倍
+  // （1.6 / 2.3 / 4.2 / 8.1 µs）。标记是整行注释叶子，本来就不可能和别的部件重叠。
+  for (const marker of index.markers) {
+    // 只替换注释本身，不连整行一起换：块级替换会在 CM6 里吞掉紧随其后的行装饰
+    // （实测：装饰集里 [29,29,'rgent-block-ai'] 正确存在，却没落到 DOM 上）；
+    // 而这一行本来就是空的，留着它也看不出区别。
+    const range = clipInline(marker.range, viewports, docLen)
+    if (!range) continue
+    const at = unitOfMarker.get(marker.range.start)
+    const unit = at == null ? null : units[at]!
+    const block = unit ? unit.block : null
+    out.push({
+      kind: 'marker',
+      range,
+      marker,
+      // 删标记对人写的口令也成立（身份没了而已），丢弃 / 搬家只对 AI 块有意义。
+      accept: acceptMarker(source, marker),
+      discard: block && marker.identity === 'ai' ? discardMarkedBlock(source, marker, block) : null,
+      moveUp: at != null && at > 0 && marker.identity === 'ai' ? swapUnits(source, units, at - 1, at) : null,
+      moveDown:
+        at != null && at + 1 < units.length && marker.identity === 'ai'
+          ? swapUnits(source, units, at, at + 1)
+          : null
+    })
   }
   return out
 }

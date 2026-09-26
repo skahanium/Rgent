@@ -3,12 +3,12 @@ export { AI_MARKER, PROMPT_MARKER, markerLine, parseMarker } from './identity.ts
 export type { BlockIdentity, MarkerParse } from './identity.ts'
 export {
   acceptMarker,
-  blockAfterMarker,
   discardMarkedBlock,
   identityUnits,
   lineStartOf,
   markerLineBlock,
-  moveUnit
+  moveUnit,
+  swapUnits
 } from './identity-edit.ts'
 export type { IdentityUnit, TextEdit } from './identity-edit.ts'
 export { editBlocked, lockedRanges } from './identity-lock.ts'

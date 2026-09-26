@@ -36,9 +36,11 @@ describe('marker chips', () => {
     // 它上面还有一段人写的字，所以能上移。
     expect(ai.moveUp).not.toBeNull()
     expect(ai.moveDown).not.toBeNull()
-    // 口令就是自己的字，没有采纳 / 丢弃可言。
+    // 口令就是自己的字：只给「删标记」，没有丢弃，也没有搬家。
     expect(prompt.accept).not.toBeNull()
-    expect(prompt.discard).not.toBeNull()
+    expect(prompt.discard).toBeNull()
+    expect(prompt.moveUp).toBeNull()
+    expect(prompt.moveDown).toBeNull()
 
     const last = chips[2]
     if (last?.kind !== 'marker') throw new Error('少了第三个 chip')
