@@ -22,8 +22,10 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm docs:check
-      - run: pnpm test
+      # 先构建再做测试：测试失败时后面的步骤会被跳过，而「构建产物存在、preload 语法、
+      # 原生模块能被 Electron 装载」必须每腿都真正执行，否则原生侧回归会被红测试掩盖。
       - run: pnpm build
       - run: node -e "if (!require('node:fs').existsSync('out/main/index.js')) process.exit(1)"
       - run: node --check out/preload/index.cjs
       - run: node scripts/check-native.mjs
+      - run: pnpm test
