@@ -105,12 +105,17 @@ export class VaultIndex {
   }
 
   private async ready(): Promise<void> {
-    while (this.dirty) {
-      if (!this.rebuilding) {
-        this.rebuilding = this.rebuild().finally(() => {
-          this.rebuilding = null
-        })
+    // 条件必须同时看 rebuilding：rebuild() 在第一个 await 之前就把 dirty 清了，
+    // 所以「dirty 为假」不等于「已建好」。第二项防的是同一 tick 里的第二个查询
+    // 误判成已建好、读到上一代的 notes / byTarget。
+    while (this.dirty || this.rebuilding) {
+      if (this.rebuilding) {
+        await this.rebuilding
+        continue
       }
+      this.rebuilding = this.rebuild().finally(() => {
+        this.rebuilding = null
+      })
       await this.rebuilding
     }
   }

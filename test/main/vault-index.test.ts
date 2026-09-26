@@ -181,4 +181,30 @@ describe('vault index lifecycle', () => {
     expect(await index.search('乙')).toHaveLength(1)
     expect(await index.search('甲')).toEqual([])
   })
+
+  it('makes a concurrent query wait for the in-flight rebuild instead of reading the previous generation', async () => {
+    const root = await vault()
+    await note(root, 'a.md', '链到 [[t]]\n')
+    await note(root, 't.md', '目标\n')
+    const index = new VaultIndex(
+      () => root,
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        return listVaultTree(root)
+      }
+    )
+    expect(await index.backlinks('t.md')).toEqual([
+      { folder: ROOT_GROUP, notes: [{ relPath: 'a.md', title: 'a' }] }
+    ])
+
+    // 换一代语料：a.md 消失，b.md 接手同一个链接。
+    await rm(path.join(root, 'a.md'))
+    await note(root, 'b.md', '链到 [[t]]\n')
+    index.markDirty()
+    // 同一 tick 内发两个查询：第一个触发重建，第二个必须等它，不能读上一代。
+    const hits = index.search('目标')
+    const links = index.backlinks('t.md')
+    await hits
+    expect((await links).flatMap((group) => group.notes.map((item) => item.title))).toEqual(['b'])
+  })
 })
