@@ -86,7 +86,7 @@ describe('planIdentityEdit', () => {
   it('lets ordinary edits in human text through untouched', () => {
     const result = plan([{ from: humanBlock.start, to: humanBlock.start, insert: '补' }])
     expect(result.blocked).toBe(false)
-    expect(result.extra).toEqual([])
+    expect(result.changes).toBeUndefined()
   })
 
   it('drops a transaction that would type inside an unadopted AI block', () => {
@@ -102,29 +102,68 @@ describe('planIdentityEdit', () => {
     expect(result.blocked).toBe(true)
   })
 
-  it('adopts by deleting the marker line, with no extra change', () => {
+  it('adopts by deleting the marker line, with no rewrite', () => {
     const line = { from: marker.start, to: marker.end + 1, insert: '' }
     const result = plan([line])
     expect(result.blocked).toBe(false)
-    expect(result.extra).toEqual([])
+    expect(result.changes).toBeUndefined()
   })
 
   it('takes the marker with it when a whole unadopted block is deleted by hand', () => {
     // 否则标记会就近标到下一段人写的字上，把它锁住、还带一个会删掉人字的「丢弃」。
     const result = plan([{ from: aiBlock.start, to: aiBlock.end, insert: '' }])
     expect(result.blocked).toBe(false)
-    // 补的正是标记那一整行（含换行）。
-    expect(result.extra).toEqual([{ from: marker.start, to: marker.end + 1, insert: '' }])
+    // 原变更 + 补删的那一整行标记（含换行）。
+    expect(result.changes).toEqual([
+      { from: aiBlock.start, to: aiBlock.end, insert: '' },
+      { from: marker.start, to: marker.end + 1, insert: '' }
+    ])
+  })
+
+  describe('打字并进锁定块', () => {
+    // Markdown 里相邻两行同段：在 AI 块下面那行打字，重编译后那一段身份仍是 ai，
+    // 用户刚打的字被锁住。风险点正好是「块所在行的行尾 + 1」。
+    const risky = source.indexOf('\n', aiBlock.end) + 1
+
+    it('separates the paragraph first when typing right below an unadopted block', () => {
+      const result = plan([{ from: risky, to: risky, insert: '我写的。' }])
+      expect(result.blocked).toBe(false)
+      expect(result.prefixed).toEqual([risky])
+      expect(result.changes).toEqual([{ from: risky, to: risky, insert: '\n我写的。' }])
+    })
+
+    it('leaves an insertion alone when the user types the break themselves', () => {
+      expect(plan([{ from: risky, to: risky, insert: '\n我写的。' }]).changes).toBeUndefined()
+    })
+
+    it('does not touch the line after the blank line, which already starts a new paragraph', () => {
+      // 再下面那一行原样并进的是人写的段，不会锁住谁。
+      expect(plan([{ from: risky + 1, to: risky + 1, insert: '我写的。' }]).changes).toBeUndefined()
+    })
+
+    it('proves the rewrite actually keeps the identity human', () => {
+      const after = source.slice(0, risky) + '\n我写的。' + source.slice(risky)
+      const mine = compile(after).index.blocks.find(
+        (block) => block.range.start <= risky + 2 && risky + 2 < block.range.end
+      )
+      expect(mine?.identity ?? 'human').toBe('human')
+      // 对照：不补断段符就会被并进 AI 块。
+      const naive = source.slice(0, risky) + '我写的。' + source.slice(risky)
+      const merged = compile(naive).index.blocks.find(
+        (block) => block.range.start <= risky + 2 && risky + 2 < block.range.end
+      )
+      expect(merged?.identity).toBe('ai')
+    })
   })
 
   it('does not add a second deletion when the marker is already inside the change', () => {
     const result = plan([{ from: marker.start - 1, to: aiBlock.end, insert: '' }])
     expect(result.blocked).toBe(false)
-    expect(result.extra).toEqual([])
+    expect(result.changes).toBeUndefined()
   })
 
   it('has nothing to do when no range is locked', () => {
     const plain = compile('人写的一段。\n')
-    expect(planIdentityEdit('人写的一段。\n', [], plain.index)).toEqual({ blocked: false, extra: [] })
+    expect(planIdentityEdit('人写的一段。\n', [], plain.index)).toEqual({ blocked: false, prefixed: [] })
   })
 })

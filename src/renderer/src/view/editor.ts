@@ -58,7 +58,13 @@ function computeState(source: string, host: NoteHost, previous?: CompileResult):
   }
 }
 
-const markdownField = StateField.define<MarkdownState>({
+/**
+ * 编译结果与装饰都由这一个字段提供（块装饰只能来自 StateField，见上面的注释）。
+ *
+ * 导出它和 `identityLock` 是为了能在没有 DOM 的情况下单测状态层：执法逻辑以前
+ * 零覆盖，绕过与光标错位都藏在这条缝里（`test/renderer/identity-guard.test.ts`）。
+ */
+export const markdownField = StateField.define<MarkdownState>({
   // 注意：这里不能 `state.field(markdownField)` 读自己——CM6 会报
   // 「Cyclic dependency between fields and/or facets」，代价是整个界面渲染不出来。
   // 上一代结果由 update 的 value 参数直接带过来。
@@ -162,18 +168,32 @@ function changesOf(tr: { changes: { iterChanges: (fn: (fromA: number, toA: numbe
  * （chip 上的删标记 / 丢弃 / 搬家、切 tab 的整篇替换）才放行，靠 `rgent` 前缀的
  * userEvent 认领。
  *
- * 另：整块删掉未采纳的 AI 块时，把它的标记行一起删（见 planIdentityEdit），
- * 否则标记会就近标到下一段人写的字上。
+ * 另两条改写（都在 planIdentityEdit 里算）：
+ * - 整块删掉未采纳的 AI 块时，把它的标记行一起删，否则标记会就近标到下一段人写的字上；
+ * - 在锁定块**下方那行**打字时先补一个断段符——Markdown 里相邻两行同段，不补的话
+ *   用户刚打的字会被并进 AI 块，然后被自己锁住。
  */
-const identityLock = EditorState.transactionFilter.of((tr) => {
+export const identityLock = EditorState.transactionFilter.of((tr) => {
   if (!tr.docChanged) return tr
   if (tr.isUserEvent('rgent')) return tr
   const index = tr.startState.field(markdownField).result.index
   const changes = changesOf(tr)
   const plan = planIdentityEdit(tr.startState.doc.toString(), changes, index)
   if (plan.blocked) return []
-  if (plan.extra.length === 0) return tr
-  return { changes: [...changes, ...plan.extra], userEvent: 'rgent.discardBlock' }
+  if (!plan.changes) return tr
+  // 补过断段符的插入点要让光标一起右移，否则下一键会插在断段符之前。
+  // 注意这里是「原位置 + 前面补过的断段符个数」，不是那个个数本身。
+  const shifted = (position: number): number =>
+    position + plan.prefixed.filter((at) => at <= position).length
+  const selection = tr.selection ?? tr.startState.selection
+  return {
+    changes: plan.changes,
+    selection: {
+      anchor: shifted(selection.main.anchor),
+      head: shifted(selection.main.head)
+    },
+    userEvent: 'rgent.adjust'
+  }
 })
 
 

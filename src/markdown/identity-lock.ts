@@ -67,14 +67,47 @@ export function editBlocked(changes: readonly EditChange[], locked: readonly Sou
 export type EditPlan = {
   /** 这次事务整不整批丢掉。 */
   blocked: boolean
-  /** 需要补上的删除：整块删掉未采纳的 AI 块时，连它的标记行一起删。 */
-  extra: readonly TextEdit[]
+  /**
+   * 改写后的变更；`undefined` 表示照原样放行。
+   * 两种改写：整块删掉 AI 块时补删它的标记行；在锁定块下方那行打字时先补一个断段符。
+   */
+  changes?: readonly EditChange[]
+  /** 被补过断段符的插入点。调用方要把光标按它右移，否则下一键会插在断段符之前。 */
+  prefixed: readonly number[]
 }
 
 /**
- * 判定一次事务，并算出要不要补一笔删除。
+ * 在锁定块下方那行打字，会把新字并进那块。
  *
- * 为什么要补：整块删掉未采纳的 AI 块是允许的（围栏「删掉再问」），但标记行若留下，
+ * Markdown 里相邻两行属于同一个段落，所以「AI 回答」下面直接换行写感想，重编译后
+ * 那一段的身份仍是 ai——用户刚打的字被锁住，还带一个会删掉它的「丢弃」。实测：
+ * 块范围 [21,29)，在偏移 30 插入「我写的。」，编译后同一段变成 [21,42) 且身份 ai。
+ * 风险点正好是「块所在行的行尾 + 1」这一个位置；在那里打字就先补一个断段符，
+ * 让用户的字落进自己的段落。
+ */
+function boundaryInsertions(source: string, changes: readonly EditChange[], index: DocIndex): number[] {
+  const risks = new Set<number>()
+  for (const block of index.blocks) {
+    if (block.identity !== 'ai') continue
+    const lineEnd = source.indexOf('\n', block.range.end)
+    if (lineEnd < 0) continue
+    risks.add(lineEnd + 1)
+  }
+  if (risks.size === 0) return []
+  const prefixed: number[] = []
+  for (const change of changes) {
+    if (change.from !== change.to) continue
+    if ((change.insert ?? '') === '') continue
+    if (change.insert!.startsWith('\n')) continue
+    if (risks.has(change.from)) prefixed.push(change.from)
+  }
+  return prefixed
+}
+
+/**
+ * 判定一次事务，并算出要不要改写它。
+ *
+ * 改写之一：整块删掉未采纳的 AI 块是允许的（围栏「删掉再问」），但标记行若留下，
  * 「就近标下面那一块」的规则会让它标到**下一段人写的字**上——那段于是被锁住，
  * 还带一个会删掉人字的「丢弃」。删块时把标记一起删掉，就没有这种错位。
  */
@@ -84,18 +117,30 @@ export function planIdentityEdit(
   index: DocIndex
 ): EditPlan {
   const locked = lockedRanges(index)
-  if (locked.length === 0) return { blocked: false, extra: [] }
+  if (locked.length === 0) return { blocked: false, prefixed: [] }
   const sanctioned: EditChange[] = []
   for (const change of changes) {
     const covers = locked.some((range) => coversWhole(change, range))
     for (const range of locked) {
       if (coversWhole(change, range)) continue
-      if (overlaps(change, range)) return { blocked: true, extra: [] }
-      if (!covers && mergesAcross(change, range)) return { blocked: true, extra: [] }
+      if (overlaps(change, range)) return { blocked: true, prefixed: [] }
+      if (!covers && mergesAcross(change, range)) return { blocked: true, prefixed: [] }
     }
     if (covers) sanctioned.push(change)
   }
-  if (sanctioned.length === 0) return { blocked: false, extra: [] }
+
+  const prefixed = boundaryInsertions(source, changes, index)
+  const rewritten: EditChange[] = prefixed.length
+    ? changes.map((change) =>
+        prefixed.includes(change.from) ? { ...change, insert: `\n${change.insert ?? ''}` } : change
+      )
+    : [...changes]
+
+  if (sanctioned.length === 0) {
+    return prefixed.length
+      ? { blocked: false, changes: rewritten, prefixed }
+      : { blocked: false, prefixed: [] }
+  }
 
   const extra: TextEdit[] = []
   for (const unit of identityUnits(index)) {
@@ -106,5 +151,6 @@ export function planIdentityEdit(
     if (changes.some((change) => coversWhole(change, line))) continue
     extra.push({ from: line.start, to: line.end, insert: '' })
   }
-  return { blocked: false, extra }
+  if (extra.length === 0 && prefixed.length === 0) return { blocked: false, prefixed: [] }
+  return { blocked: false, changes: [...rewritten, ...extra], prefixed }
 }

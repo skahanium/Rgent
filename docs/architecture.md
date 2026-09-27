@@ -89,7 +89,7 @@ flowchart LR
 | 性质 | 层 | 现状 |
 |------|----|------|
 | 画布装饰只从 StateField 出 | 渲染进程 | 编译结果与装饰由一个 `StateField` 提供（`src/renderer/src/view/editor.ts`），**不能**由 `ViewPlugin` 提供：CM6 禁止插件产生块装饰，表格 / callout / mermaid / 块级公式会抛 `RangeError`，异常再被上层的 `catch` 吞掉，表现成「含表格的笔记点不开、界面毫无提示」。另：块级替换会吞掉紧随其后的行装饰，所以身份标记的 chip 用行内替换。改这里时窗口要各起一次含表格与含标记的笔记。 |
-| 未采纳的 AI 块不能改字 | 渲染进程 | 判定是纯函数（`src/markdown/identity-lock.ts`）：锁住标记与 AI 块的范围，字面上的改动一律挡，整段删掉（采纳 / 丢弃）放行；整块删掉时把标记行一起删，避免标记错位到下一段人写的字上。画布用 `EditorState.transactionFilter` **默认拦下所有改文档的事务**，只放行带 `rgent` 前缀 userEvent 的自家动作——只认 `input` / `delete` 会被移行、拖动搬字、Ctrl-T 换位整批绕过。**不许**用整篇只读冒充。切 tab 的整篇替换要换一份撤销历史（`history` 装进 Compartment 重新配置），否则撤销会跨笔记把上一篇的文本填进当前篇。 |
+| 未采纳的 AI 块不能改字 | 渲染进程 | 判定是纯函数（`src/markdown/identity-lock.ts`）：锁住标记与 AI 块的范围，字面上的改动一律挡，整段删掉（采纳 / 丢弃）放行；整块删掉时把标记行一起删；在锁定块**下面那行**打字时先补一个断段符并右移光标（Markdown 相邻两行同段，不补的话用户刚打的字会被并进 AI 块、然后被自己锁住）。画布用 `EditorState.transactionFilter` **默认拦下所有改文档的事务**，只放行带 `rgent` 前缀 userEvent 的自家动作——只认 `input` / `delete` 会被移行、拖动搬字、Ctrl-T 换位整批绕过。**不许**用整篇只读冒充。切 tab 的整篇替换要换一份撤销历史（`history` 装进 Compartment 重新配置），否则撤销会跨笔记把上一篇的文本填进当前篇。状态级测试见 `test/renderer/identity-guard.test.ts`（不需要 DOM）。 |
 | 渲染进程不碰盘 | 壳 | `contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`（`src/main/index.ts`）。preload 只经 `contextBridge` 暴露白名单（`src/preload/index.ts`）。sandbox 下 preload 必须打成 `out/preload/index.cjs`（`electron.vite.config.ts`）。 |
 | IPC 是唯一通道 | 壳 | 通道名和载荷类型在 `src/shared/ipc.ts`。渲染进程不得再开通道。 |
 | 不随便开页 | 壳 | `setWindowOpenHandler` 一律 deny。`will-navigate` 一律 `preventDefault`；`http(s)` 走系统浏览器（`src/main/index.ts`）。 |
