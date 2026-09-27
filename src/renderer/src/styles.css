@@ -845,46 +845,91 @@ input:focus-visible,
   height: auto;
 }
 
-/* 身份标记：机器语法在画布上不可见，只留 chip 与块的两种样子。 */
+/*
+ * 身份标记与两种样子。围栏 docs/frontend.md §编辑画布与辅助信息：
+ * 提问留在正文里，用较粗字重 + 前缀 `>` 标识，**不显示触发时的 `/`**；
+ * 回答向内缩进一个字宽；两者用不同强度的同系点缀区分，不用底部卡片或粗边框。
+ * 前缀由 CSS 的 ::before 产生，绝不写进文件。
+ */
+.rgent-block-command {
+  font-weight: 650;
+  color: var(--ai-prompt);
+}
 
+/* `>` 落在页边：先向内缩一个字宽再把它拉回左边，正文因此与后面的回答对齐。 */
+.rgent-block-command::before {
+  content: '>';
+  display: inline-block;
+  width: 1em;
+  margin-left: -1em;
+  color: var(--ai-prompt);
+  font-family: var(--font-ui);
+  font-weight: 500;
+}
+
+/* 用 .cm-line 提高优先级：CM6 的基础主题在运行时注入，同优先级的 .cm-line padding
+ * 排在后面会把这里的缩进盖掉（实测量到的是 CM6 的 6px，而不是一个字宽）。
+ * 加 6px 是 CM6 自己那层 padding——不算它，相对缩进只有 11px（量过）。 */
+.cm-line.rgent-block-ai {
+  padding-left: calc(1em + 6px);
+  color: var(--ai-answer);
+}
+
+.cm-line.rgent-block-command {
+  padding-left: calc(1em + 6px);
+  color: var(--ai-prompt);
+}
+
+.rgent-block-command,
+.rgent-block-ai {
+  background: none;
+  border: none;
+}
+
+/* chip：状态标签 + 直露的两个动作 + 「更多」。 */
 .rgent-marker {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin: 14px 0 2px;
-  font-family: var(--ui);
+  gap: 8px;
+  margin: 16px 0 2px;
+  font-family: var(--font-ui);
   font-size: 0.72rem;
   letter-spacing: 0.02em;
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 .rgent-marker-label {
-  padding: 1px 6px;
-  border: 1px dashed var(--line);
+  padding: 1px 7px;
+  border: 1px solid var(--border-subtle);
   border-radius: 999px;
   white-space: nowrap;
 }
 
 .rgent-marker-ai .rgent-marker-label {
-  border-style: solid;
-  border-color: var(--ai-prompt);
-  background: var(--accent-soft);
-  color: var(--ai-prompt);
+  border-color: var(--ai-answer);
+  color: var(--ai-answer);
+}
+
+.rgent-marker-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .rgent-marker button {
-  font: inherit;
-  color: var(--muted);
+  min-height: 24px;
+  padding: 0 9px;
+  color: var(--text-muted);
   background: transparent;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border-subtle);
   border-radius: 999px;
-  padding: 1px 8px;
-  cursor: pointer;
+  font: inherit;
 }
 
 .rgent-marker button:hover:not(:disabled) {
-  color: var(--accent);
-  border-color: var(--accent);
+  color: var(--accent-primary);
+  border-color: var(--accent-primary);
 }
 
 .rgent-marker button:disabled {
@@ -892,316 +937,44 @@ input:focus-visible,
   cursor: default;
 }
 
+.rgent-marker-accept {
+  color: var(--accent-primary) !important;
+  border-color: var(--accent-primary) !important;
+}
+
 .rgent-marker-discard:hover:not(:disabled) {
-  color: var(--danger);
-  border-color: var(--danger);
+  color: var(--status-error) !important;
+  border-color: var(--status-error) !important;
 }
 
-/* 未采纳的 AI 块：整段有底色和左边线，一眼能看出不是自己写的。 */
-.rgent-block-ai {
-  background: var(--accent-soft);
-  border-left: 2px solid var(--ai-prompt);
-  padding-left: 10px;
-  margin-left: -12px;
+.rgent-marker-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
-/* 口令：只有一条很轻的边线，字还是自己的字，随时能改。 */
-.rgent-block-command {
-  border-left: 2px solid var(--accent-weak);
-  padding-left: 10px;
-  margin-left: -12px;
-  color: var(--muted);
-}
-
-/* 账本回顾：临时、只读、关掉就走。它不是文件，也不占右侧反链。 */
-
-.ledger-open {
-  margin-left: auto;
-  align-self: center;
-  font-family: var(--ui);
-  font-size: 0.75rem;
-  color: var(--muted);
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 2px 10px;
-  cursor: pointer;
-}
-
-.ledger-open:hover,
-.ledger-open[aria-pressed='true'] {
-  color: var(--accent);
-  border-color: var(--accent);
-}
-
-.ledger-view {
+.rgent-marker-menu {
   position: absolute;
-  inset: 48px 0 0;
-  z-index: 3;
-  overflow-y: auto;
-  background: var(--paper);
-}
-
-.ledger-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--line);
-  font-family: var(--ui);
-  font-size: 0.78rem;
-  color: var(--muted);
-}
-
-.ledger-close {
-  font: inherit;
-  font-size: 1rem;
-  line-height: 1;
-  color: var(--muted);
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-}
-
-.ledger-close:hover {
-  color: var(--danger);
-}
-
-.ledger-body {
-  margin: 0;
-  padding: 18px 16px 48px;
-  max-width: 42rem;
-  margin: 0 auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: var(--text);
-  font-size: 0.95rem;
-  line-height: 1.6;
-  color: var(--ink);
-}
-
-/* 左栏的搜索入口：保留圆角轮廓，文字旁显示平台快捷键，不放放大镜。 */
-.search-field {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 8px 0 10px;
-  min-height: 34px;
-  background: var(--surface-canvas);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-}
-
-.search-field:focus-within {
-  outline: 2px solid var(--accent-focus);
-  outline-offset: 1px;
-}
-
-.search-field .search-input {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  outline: none;
-  background: transparent;
-  color: var(--text-body);
-  font-family: var(--font-ui);
-  font-size: 0.84rem;
-}
-
-.search-field .search-input::placeholder { color: var(--text-muted); }
-
-.shortcut-hint {
-  flex: 0 0 auto;
-  padding: 1px 5px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  font-family: var(--font-ui);
-  font-size: 0.68rem;
-}
-
-/* 标题索引：画布右缘的状态标识，不取代右侧反链。 */
-.outline {
-  position: absolute;
-  top: 72px;
-  right: 6px;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0;
-  padding: 6px 4px;
-}
-
-.outline[hidden] { display: none; }
-
-.outline-mark {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  width: 100%;
-  min-height: 18px;
-  padding: 2px 4px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  background: transparent;
-}
-
-.outline-rule {
-  display: block;
-  height: 2px;
-  border-radius: 2px;
-  background: currentColor;
-  opacity: 0.55;
-}
-
-.outline-mark:hover,
-.outline-mark:focus-visible {
-  color: var(--accent-primary);
-  background: var(--state-hover);
-}
-
-.outline-mark[aria-current='true'] {
-  color: var(--accent-primary);
-}
-
-.outline-mark[aria-current='true'] .outline-rule { opacity: 1; }
-
-/* 悬停/聚焦才出完整标题；平时只留短横线，不占正文宽度。 */
-.outline-label {
-  position: absolute;
-  right: 100%;
-  margin-right: 8px;
-  max-width: 30ch;
-  padding: 3px 8px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--surface-overlay);
-  color: var(--text-body);
-  box-shadow: var(--shadow-1);
-  font-family: var(--font-ui);
-  font-size: 0.76rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--motion-fast) ease;
-}
-
-.outline-mark:hover .outline-label,
-.outline-mark:focus-visible .outline-label { opacity: 1; }
-
-/* 浮层：搜索、冲突决策、选库共用一套语言。 */
-.overlay {
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  padding: 0;
-  color: var(--text-body);
-  background: var(--surface-overlay);
-  box-shadow: var(--shadow-2);
-}
-
-.overlay::backdrop {
-  background: rgba(0, 0, 0, 0.42);
-}
-
-.overlay-search {
-  width: min(560px, calc(100vw - 32px));
-  margin: 12vh auto auto;
-}
-
-.overlay-search-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.overlay-search-input {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  outline: none;
-  background: transparent;
-  color: var(--text-body);
-  font-family: var(--font-ui);
-  font-size: 0.95rem;
-}
-
-.overlay-search-results {
-  max-height: min(52vh, 420px);
-  overflow-y: auto;
-  padding: 8px 8px 12px;
-}
-
-.overlay-hint {
-  margin: 6px 8px;
-  color: var(--text-muted);
-  font-family: var(--font-ui);
-  font-size: 0.78rem;
-}
-
-/* 搜索浮层里的结果列表沿用既有渲染，只调整密度。 */
-.overlay-search-results .search-list { padding: 0; }
-.overlay-search-results .search-hit {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: inherit;
-}
-
-.overlay-search-results .search-hit:hover,
-.overlay-search-results .search-hit:focus-visible {
-  background: var(--state-hover);
-}
-
-/* 左栏的搜索入口：保留圆角轮廓，文字旁显示平台快捷键，不放放大镜。 */
-.search-open {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  background: var(--surface-canvas);
-  color: var(--text-muted);
-  font-family: var(--font-ui);
-  font-size: 0.84rem;
-}
-
-.search-open:hover {
-  color: var(--text-body);
-  border-color: var(--accent-primary);
-}
-
-/* 选库：不可 Esc 关闭，焦点锁在浮层里。 */
-.picker-card {
-  width: min(420px, calc(100vw - 32px));
-  padding: 22px 20px 18px;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 5;
   display: grid;
-  gap: 10px;
-  justify-items: start;
+  min-width: 96px;
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-overlay);
+  box-shadow: var(--shadow-1);
 }
 
-.picker-card h1 {
-  margin: 0;
-  font-size: 1.3rem;
-  color: var(--text-heading);
+.rgent-marker-menu[hidden] { display: none; }
+
+.rgent-marker-menu button {
+  min-height: 26px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  justify-content: flex-start;
 }
 
-.picker-card p {
-  margin: 0 0 6px;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
+.rgent-marker-menu button:hover:not(:disabled) { background: var(--state-hover); }
