@@ -1094,3 +1094,114 @@ input:focus-visible,
 
 .outline-mark:hover .outline-label,
 .outline-mark:focus-visible .outline-label { opacity: 1; }
+
+/* 浮层：搜索、冲突决策、选库共用一套语言。 */
+.overlay {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 0;
+  color: var(--text-body);
+  background: var(--surface-overlay);
+  box-shadow: var(--shadow-2);
+}
+
+.overlay::backdrop {
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.overlay-search {
+  width: min(560px, calc(100vw - 32px));
+  margin: 12vh auto auto;
+}
+
+.overlay-search-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.overlay-search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-body);
+  font-family: var(--font-ui);
+  font-size: 0.95rem;
+}
+
+.overlay-search-results {
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+  padding: 8px 8px 12px;
+}
+
+.overlay-hint {
+  margin: 6px 8px;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 0.78rem;
+}
+
+/* 搜索浮层里的结果列表沿用既有渲染，只调整密度。 */
+.overlay-search-results .search-list { padding: 0; }
+.overlay-search-results .search-hit {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+}
+
+.overlay-search-results .search-hit:hover,
+.overlay-search-results .search-hit:focus-visible {
+  background: var(--state-hover);
+}
+
+/* 左栏的搜索入口：保留圆角轮廓，文字旁显示平台快捷键，不放放大镜。 */
+.search-open {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-canvas);
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 0.84rem;
+}
+
+.search-open:hover {
+  color: var(--text-body);
+  border-color: var(--accent-primary);
+}
+
+/* 选库：不可 Esc 关闭，焦点锁在浮层里。 */
+.picker-card {
+  width: min(420px, calc(100vw - 32px));
+  padding: 22px 20px 18px;
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+}
+
+.picker-card h1 {
+  margin: 0;
+  font-size: 1.3rem;
+  color: var(--text-heading);
+}
+
+.picker-card p {
+  margin: 0 0 6px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}

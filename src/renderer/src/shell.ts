@@ -3,7 +3,8 @@ import { compile, composeSource, partitionSource, preferDiskLedger } from '@mark
 import { reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
 import { promptConflict, promptNewNote } from './dialogs.ts'
-import { renderSearchResults } from './search.ts'
+import { openOverlay } from './overlay.ts'
+import { createSearchOverlay } from './search-overlay.ts'
 import { applySaved, pendingWrites, type Tab } from './tabs.ts'
 import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
 import { icon } from './icons.ts'
@@ -26,11 +27,10 @@ export async function start(root: HTMLElement): Promise<void> {
       <div class="body">
         <aside id="tree-panel" class="tree-panel" hidden>
           <div class="tree-tools">
-            <div class="search-field">
-              <input type="search" class="search-input" placeholder="搜索笔记" aria-label="搜索笔记" autocomplete="off" />
+            <button type="button" class="search-open">
+              <span class="search-open-label">搜索笔记</span>
               <kbd class="shortcut-hint"></kbd>
-            </div>
-            <div class="search-panel" hidden></div>
+            </button>
           </div>
           <div class="tree-scroll"></div>
         </aside>
@@ -50,18 +50,8 @@ export async function start(root: HTMLElement): Promise<void> {
       </div>
       <footer class="status" aria-label="状态栏"></footer>
     </div>
-    <div class="picker" hidden>
-      <div class="picker-card">
-        <h1>选择笔记库</h1>
-        <p class="picker-copy"></p>
-        <button type="button" class="pick-btn">选择文件夹</button>
-      </div>
-    </div>
   `
 
-  const picker = root.querySelector('.picker') as HTMLElement
-  const pickerCopy = root.querySelector('.picker-copy') as HTMLElement
-  const pickBtn = root.querySelector('.pick-btn') as HTMLButtonElement
   const treePanel = root.querySelector('#tree-panel') as HTMLElement
   const treeScroll = root.querySelector('.tree-scroll') as HTMLElement
   const treeToggle = root.querySelector('.tree-toggle') as HTMLButtonElement
@@ -76,20 +66,36 @@ export async function start(root: HTMLElement): Promise<void> {
   const ledgerTitle = root.querySelector('.ledger-title') as HTMLElement
   const ledgerBody = root.querySelector('.ledger-body') as HTMLElement
   const ledgerClose = root.querySelector('.ledger-close') as HTMLButtonElement
-  const searchInput = root.querySelector('.search-input') as HTMLInputElement
+  const searchOpen = root.querySelector('.search-open') as HTMLButtonElement
   const shortcutHint = root.querySelector('.shortcut-hint') as HTMLElement
-  const searchPanel = root.querySelector('.search-panel') as HTMLElement
+
 
   const tabs: Tab[] = []
   let active: string | null = null
   let tree: TreeEntry[] = []
   let saveTimer: number | null = null
-  let conflictOpen = false
+  // 冲突串行化：一次只问一个，后来的排队——旧实现用全局标志直接丢掉，
+  // 第二条冲突的通知就永远没人处理了。
+  let conflictChain: Promise<void> = Promise.resolve()
+
+  function runExclusiveConflict(run: () => Promise<void>): Promise<void> {
+    const next = conflictChain.then(run, run)
+    conflictChain = next.then(
+      () => undefined,
+      () => undefined
+    )
+    return next
+  }
   let backlinkToken = 0
-  let searchTimer: number | null = null
-  let searchHits: SearchHit[] = []
   let permissionState: PermissionState = { status: 'ready', entries: [] }
   let vaultNameText: string | null = null
+  // 声明放在状态区：applyState 会在定义点之前调用 closeVaultPicker，
+  // 用 let 声明在后面会撞 TDZ（实测 ReferenceError）。
+  let vaultPicker: ReturnType<typeof openOverlay> | null = null
+  const searchOverlay = createSearchOverlay({
+    search: (query) => window.rgent.search(query),
+    onOpenNote: (relPath) => void openNote(relPath)
+  })
   let saveInFlight: Promise<boolean> | null = null
   let ledgerOpen = false
 
@@ -103,19 +109,12 @@ export async function start(root: HTMLElement): Promise<void> {
     scheduleSave()
   })
 
-  // ⌘K 先接到当前这个搜索输入上；下一刀换成悬浮页时只改这一处。
   installShortcuts({
-    onSearch: () => {
-      if (treePanel.hasAttribute('hidden')) {
-        treePanel.removeAttribute('hidden')
-        treeToggle.setAttribute('aria-expanded', 'true')
-      }
-      searchInput.focus()
-      searchInput.select()
-    },
+    onSearch: () => searchOverlay.open(),
     onSave: () => void flushSave()
   })
   shortcutHint.textContent = shortcutLabel('k')
+  searchOpen.addEventListener('click', () => searchOverlay.open())
 
   // 主题跟着系统走（围栏：自动切换方式未锁，手动开关归设置阶段）。
   editor.onStateChange(() => {
@@ -133,43 +132,7 @@ export async function start(root: HTMLElement): Promise<void> {
     treeToggle.setAttribute('aria-expanded', String(open))
   })
 
-  pickBtn.addEventListener('click', () => {
-    void chooseVault()
-  })
   ledgerClose.addEventListener('click', () => closeLedger())
-
-  const closeSearch = () => {
-    searchPanel.hidden = true
-    searchHits = []
-  }
-
-  searchInput.addEventListener('input', () => {
-    if (searchTimer != null) window.clearTimeout(searchTimer)
-    searchTimer = window.setTimeout(() => {
-      void runSearch()
-    }, 200)
-  })
-  searchInput.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      searchInput.value = ''
-      closeSearch()
-      editor.focus()
-      return
-    }
-    if (event.key === 'Enter') {
-      const first = searchHits[0]
-      if (!first) return
-      event.preventDefault()
-      searchInput.value = ''
-      closeSearch()
-      void openNote(first.relPath)
-    }
-  })
-  document.addEventListener('mousedown', (event) => {
-    if (searchPanel.hidden) return
-    if (searchPanel.contains(event.target as Node) || searchInput === event.target) return
-    closeSearch()
-  })
 
   window.rgent.onMenu(IPC.menuOpenVault, () => {
     void chooseVault()
@@ -209,20 +172,21 @@ export async function start(root: HTMLElement): Promise<void> {
       renderTabs()
       return
     }
-    if (conflictOpen) return
-    conflictOpen = true
-    const choice = await promptConflict()
-    conflictOpen = false
-    if (choice === 'disk') {
-      applySource(tab, snapshot)
-      if (active === tab.relPath) editor.setText(tab.content)
-    } else if (choice === 'window') {
-      // 同上：正文听窗口，账本听磁盘。
-      tab.ledger = preferDiskLedger(partitionSource(payload.content).ledger, tab.ledger)
-      tab.revision = payload.revision
-      await writeTab(tab)
-    }
-    renderTabs()
+    // 冲突一次只问一个，后来的排队等：不丢通知，也不叠弹窗。
+    await runExclusiveConflict(async () => {
+      const choice = await promptConflict()
+      if (choice === 'disk') {
+        applySource(tab, snapshot)
+        if (active === tab.relPath) editor.setText(tab.content)
+      } else if (choice === 'window') {
+        // 正文听窗口，账本听磁盘；否则会把外部新追加的章节抹掉。
+        tab.ledger = preferDiskLedger(partitionSource(payload.content).ledger, tab.ledger)
+        tab.revision = payload.revision
+        await writeTab(tab)
+      }
+      renderTabs()
+      updateStatus()
+    })
   })
 
   await applyState(await window.rgent.vaultGet())
@@ -231,22 +195,18 @@ export async function start(root: HTMLElement): Promise<void> {
     if (state.status === 'needs-pick') {
       const ok = await flushSave()
       if (!ok && tabs.some((tab) => tab.dirty)) {
-        picker.hidden = false
-        pickerCopy.textContent =
-          state.reason === 'missing' ? '上次的库找不到了。请重新选一个文件夹。' : '第一次打开，先选一个文件夹当库。空的也行。不选进不去。'
         vaultNameText = null
         updateStatus()
+        showVaultPicker(state.reason)
         return
       }
       resetSession()
-      picker.hidden = false
-      pickerCopy.textContent =
-        state.reason === 'missing' ? '上次的库找不到了。请重新选一个文件夹。' : '第一次打开，先选一个文件夹当库。空的也行。不选进不去。'
       vaultNameText = null
       updateStatus()
+      showVaultPicker(state.reason)
       return
     }
-    picker.hidden = true
+    closeVaultPicker()
     vaultNameText = state.rootName
     updateStatus()
     if (state.vaultChanged) {
@@ -264,24 +224,9 @@ export async function start(root: HTMLElement): Promise<void> {
     active = null
     editor.setText('', noteHost())
     renderTabs()
-    closeSearch()
-    searchInput.value = ''
     void refreshBacklinks()
   }
 
-  async function runSearch(): Promise<void> {
-    const query = searchInput.value
-    try {
-      searchHits = await window.rgent.search(query)
-    } catch {
-      searchHits = []
-    }
-    renderSearchResults(searchPanel, searchHits, query, (relPath) => {
-      searchInput.value = ''
-      closeSearch()
-      void openNote(relPath)
-    })
-  }
 
   /**
    * 只在打开/切换笔记时刷新。索引在主进程里是惰性重建的，所以查的时候就是新的；
@@ -321,6 +266,45 @@ export async function start(root: HTMLElement): Promise<void> {
 
   async function showPicker(lost: boolean): Promise<void> {
     await applyState({ status: 'needs-pick', reason: lost ? 'missing' : 'first-run' })
+  }
+
+  /**
+   * 选库浮层：不可 Esc 关闭——没库进不去，必须给个答复。
+   * 与设置、搜索共用同一套浮层语言（围栏 §浮层与特殊状态）。
+   */
+
+  function closeVaultPicker(): void {
+    vaultPicker?.close()
+    vaultPicker = null
+  }
+
+  function showVaultPicker(reason: 'first-run' | 'missing'): void {
+    if (vaultPicker?.isOpen()) return
+    const overlay = openOverlay({
+      label: '选择笔记库',
+      dismissable: false,
+      initialFocus: () => overlay.root.querySelector<HTMLElement>('.pick-btn')
+    })
+    vaultPicker = overlay
+    const card = document.createElement('div')
+    card.className = 'picker-card'
+    const heading = document.createElement('h1')
+    heading.textContent = '选择笔记库'
+    const copy = document.createElement('p')
+    copy.className = 'picker-copy'
+    copy.textContent =
+      reason === 'missing'
+        ? '上次的库找不到了。请重新选一个文件夹。'
+        : '第一次打开，先选一个文件夹当库。空的也行。不选进不去。'
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'pick-btn'
+    button.textContent = '选择文件夹'
+    button.addEventListener('click', () => {
+      void chooseVault()
+    })
+    card.append(heading, copy, button)
+    overlay.root.append(card)
   }
 
   async function refreshTree(): Promise<void> {
@@ -645,18 +629,20 @@ export async function start(root: HTMLElement): Promise<void> {
       return true
     }
     if (result.error === 'CONFLICT') {
-      if (conflictOpen) return false
-      conflictOpen = true
-      try {
+      // 排队而不是丢弃：旧实现用一个全局标志，第二条冲突直接 return false，
+      // 用户永远等不到那个提示。
+      let handled = false
+      await runExclusiveConflict(async () => {
         const disk = await window.rgent.noteRead(tab.relPath)
         const choice = await promptConflict()
         if (choice === 'disk') {
           applySource(tab, disk)
           if (active === tab.relPath) editor.setText(tab.content)
-          return true
+          handled = true
+          return
         }
         if (choice === 'window') {
-          // 窗口赢的只是正文：账本以磁盘为准，否则会把外部新追加的章节抹掉。
+          // 窗口赢的只是正文：账本以磁盘为准。
           tab.ledger = preferDiskLedger(partitionSource(disk.content).ledger, tab.ledger)
           tab.revision = disk.revision
           const currentBody = tab.relPath === active ? editor.getText() : tab.content
@@ -667,14 +653,13 @@ export async function start(root: HTMLElement): Promise<void> {
           })
           if (retry.ok) {
             applySaved(tab, currentBody, retry.revision)
-            return true
+            handled = true
           }
         }
-      } catch {
-        // 保留脏稿，等人重试。
-      } finally {
-        conflictOpen = false
-      }
+      })
+      renderTabs()
+      updateStatus()
+      return handled
     }
     return false
   }
