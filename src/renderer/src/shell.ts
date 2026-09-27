@@ -35,7 +35,7 @@ export async function start(root: HTMLElement): Promise<void> {
           </div>
           <div class="tree-scroll"></div>
         </aside>
-        <section class="stage">
+        <section class="stage" id="note-panel" role="tabpanel" aria-label="正文">
           <div class="ledger-view" hidden>
             <div class="ledger-head">
               <span class="ledger-title"></span>
@@ -421,6 +421,7 @@ export async function start(root: HTMLElement): Promise<void> {
       button.className = 'tab'
       button.setAttribute('role', 'tab')
       button.setAttribute('aria-selected', String(tab.relPath === active))
+      button.setAttribute('aria-controls', 'note-panel')
       // 一组 tab 只留一个焦点站：当前项进 Tab 键序，其余用左右方向键走。
       button.tabIndex = tab.relPath === active ? 0 : -1
       button.dataset.rel = tab.relPath

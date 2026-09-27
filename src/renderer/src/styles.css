@@ -1099,3 +1099,23 @@ input:focus-visible,
   .conflict-grid { grid-template-columns: 1fr; }
   .conflict-actions { grid-template-columns: 1fr; }
 }
+
+/*
+ * 窄窗（围栏 §可访问性与验收：窗口缩到 800×560 时右反链与正文都不能无声消失）。
+ * 左树本来就是可收起且默认收起，这里只让反链和正文各让一步。
+ */
+.stage { min-width: 280px; }
+.backlinks { min-width: 172px; }
+
+@media (max-width: 960px) {
+  .backlinks { flex-basis: 200px; width: 200px; padding: 12px 10px 20px; }
+}
+
+@media (max-width: 820px) {
+  .backlinks { flex-basis: 176px; width: 176px; }
+  .tree-panel { width: 208px; flex-basis: 208px; }
+  .cm-content { padding-left: 4px !important; padding-right: 4px !important; }
+}
+
+/* 状态点要能被键盘用户感知到：它现在只是状态显示，用 title + aria-label 说明。 */
+.status-dot[data-state='offline'] { outline: none; }

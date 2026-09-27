@@ -12,7 +12,8 @@
     "build": "node scripts/build-native.mjs && electron-vite build",
     "preview": "electron-vite preview",
     "test": "node scripts/build-native.mjs && tsc --noEmit && vitest run",
-    "docs:check": "node scripts/check-docs.mjs"
+    "docs:check": "node scripts/check-docs.mjs",
+    "ui:check": "node scripts/verify-ui.mjs"
   },
   "engines": {
     "node": ">=20"

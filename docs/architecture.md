@@ -107,8 +107,9 @@ flowchart LR
 | 颜色只有一个来源 | 渲染进程 | 组件一律引用 [前端协议](frontend.md) §语义 token 的角色（`--surface-*`、`--text-*`、`--accent-*`、`--border-*`、`--state-*`、`--ai-*`、`--status-*`）；不在组件里写死色值，也不在 CM6 主题里写死（`src/renderer/src/view/editor.ts` 的主题走 token）。日夜两套值只写在 `src/renderer/src/styles.css` 的 `:root` 与 `[data-theme='night']` 两段里，token 取值用纯 hex，好让对比度测试直接解析。 |
 | 主题不碰文档 | 渲染进程 | 切主题或跟随系统只改 `document.documentElement.dataset.theme` 与 CM6 的 `darkTheme` facet，**不产生事务、不触发保存、不进撤销栈**（`src/renderer/src/theme.ts`）。 |
 | AI 前缀是显示层 | 画布 | 提问的 `>` 前缀与回答的缩进由行装饰 / 类名产生（`src/renderer/src/view/editor.ts` 的装饰层），**不改写正文**；落盘仍走 `composeSource`，`composeSource` 往返必须逐字节不变。参考图里的前缀不是文件内容。 |
-| 浮层只有一个栈 | 渲染进程 | 同时最多一个模态浮层；打开时焦点进入浮层、关闭回到触发元素；模态期间焦点不落到底层，破坏性选项不是默认焦点。实现在 `src/renderer/src/overlay.ts`，搜索、冲突决策、选库共用它。 |
-| 冲突预览不是第二条写盘通道 | 渲染进程 | 冲突决策的并排双预览只读渲染（`src/renderer/src/conflict.ts` + `diff.ts`），仍然只有 `noteWrite` 一条写盘通道；「听窗口 / 听磁盘 / 继续编辑」复用既有分支。 |
-| 底栏数据只在渲染层算 | 渲染进程 | 行列与字数由编辑器的 doc、selection 推出（`src/renderer/src/statusbar.ts`），不经 IPC、不落盘；字数只计正文，不含账本与身份标记行。 |
+| 浮层只有一个栈 | 渲染进程 | 同时最多一个模态浮层；打开时焦点进入浮层、关闭回到触发元素；模态期间焦点不落到底层，破坏性选项不是默认焦点。实现在 `src/renderer/src/overlay.ts`，搜索（`search-overlay.ts`）、冲突决策（`conflict.ts`）、选库共用它。 |
+| 冲突预览不是第二条写盘通道 | 渲染进程 | 冲突决策的并排双预览只读渲染（`src/renderer/src/conflict.ts` + `diff.ts`），仍然只有 `noteWrite` 一条写盘通道；「听窗口 / 听磁盘 / 继续编辑」复用既有分支，被上层浮层顶掉或 Esc 关闭一律按「继续编辑」结算，不留悬空 Promise。 |
+| 底栏数据只在渲染层算 | 渲染进程 | 行列与字数由编辑器的 doc、selection 推出（`src/renderer/src/statusbar.ts`），不经 IPC、不落盘；字数只计正文，不含账本与身份标记行（取词与索引共用 `src/markdown/prose.ts` 的 `proseOf` + `countWords`，口径只有一份）。 |
+| 索引只按渲染层数据算 | 渲染进程 | 标题索引吃 `DocIndex.headings` 的 h1–h3（`src/renderer/src/outline.ts`），当前项由「光标在可视范围内则以光标为准，否则以视口起点为准」推出，不另存状态、不发 IPC。 |
 
 相关：[理念](vision.md) · [已拍板决定](decisions.md) · [施工守则](handbook.md) · [施工图](build.md) · [施工对象](topics.md)
