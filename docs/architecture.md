@@ -104,7 +104,7 @@ flowchart LR
 | 人搜含禁区 | 索引 | `VaultIndex` 是全量语料，建索引时不按权限过滤。当前人搜是惰性全量 + 子串。模型检索尚未开工，未来在查询期过滤。 |
 | 退出不丢稿 | 壳 | 关窗先 `flushRequest`。保存失败时主进程原生对话框让人重试、继续编辑或明确放弃；**渲染进程活着但不应答**（超时，或计时器触发之后才崩）时也进同一个决策态，文案按「写盘失败 / 没有回应」区分——不能让流程停在 flushing，那会让窗口关不掉、`Cmd+Q` 也被挡住。关窗和 `Cmd+Q` 走同一状态流程，重复请求不重复弹框。`vault.dispose()` 在 `will-quit`，不在 `before-quit`（退出 flush 还要走 `noteWrite`）。流程测试见 `test/shared/flush.test.ts`。 |
 | 密钥不进库 | 主进程 | Host 最小环接 Electron `safeStorage`，密文只存应用数据目录；尚未接线。 |
-| 颜色只有一个来源 | 渲染进程 | 组件一律引用 [前端协议](frontend.md) §语义 token 的角色（`--surface-*`、`--text-*`、`--accent-*`、`--border-*`、`--state-*`、`--ai-*`、`--status-*`）；不在组件里写死色值，也不在 CM6 主题里写死（`src/renderer/src/view/editor.ts` 的主题走 token）。日夜两套值只写在 `src/renderer/src/styles.css` 的 `:root` 与 `[data-theme='night']` 两段里，token 取值用纯 hex，好让对比度测试直接解析。 |
+| 颜色只有一个来源 | 渲染进程 | 组件一律引用 [前端协议](frontend.md) §语义 token 的角色（`--surface-*`、`--text-*`、`--accent-*`、`--border-*`、`--state-*`、`--ai-*`、`--status-*`）；不在组件里写死色值，也不在 CM6 主题里写死（`src/renderer/src/view/editor.ts` 的主题走 token）。日夜两套值只写在 `src/renderer/src/styles.css` 的 `:root` 与 `[data-theme='night']` 两段里，token 取值用纯 hex，好让对比度测试直接解析。**已知例外**：主进程的窗口外观（`src/main/index.ts` 的启动底色与 Windows 标题栏覆盖层）读不到 CSS token，是同一批值的第二份拷贝，必须与 `--surface-nav` 同步（日 `#f5f6f8` / 夜 `#1d2933`）；改 token 时两处一起改。 |
 | 主题不碰文档 | 渲染进程 | 切主题或跟随系统只改 `document.documentElement.dataset.theme` 与 CM6 的 `darkTheme` facet，**不产生事务、不触发保存、不进撤销栈**（`src/renderer/src/theme.ts`）。 |
 | AI 前缀是显示层 | 画布 | 提问仅在块首行显示一枚 `>`，回答缩进由行装饰 / 类名产生（`src/renderer/src/view/editor.ts`），**不改写正文**；落盘仍走 `composeSource`，`composeSource` 往返必须逐字节不变。参考图里的前缀不是文件内容。 |
 | 浮层只有一个栈 | 渲染进程 | 同时最多一个模态浮层；打开时焦点进入浮层、关闭回到触发元素；模态期间焦点不落到底层，破坏性选项不是默认焦点。实现在 `src/renderer/src/overlay.ts`，搜索（`search-overlay.ts`）、冲突决策（`conflict.ts`）、选库共用它。 |

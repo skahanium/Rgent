@@ -87,6 +87,9 @@ function createWindow(): void {
   flushTimer = null
   closeFlow = new CloseFlow()
   const dark = nativeTheme.shouldUseDarkColors
+  // 主进程读不到渲染层的 CSS token，所以窗口外观这两个色值是第二份拷贝：
+  // 必须与 src/renderer/src/styles.css 的 --surface-nav 同值（日 #f5f6f8 / 夜 #1d2933）。
+  // 见 docs/architecture.md「颜色只有一个来源」那一行的已知例外。
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -110,6 +113,7 @@ function createWindow(): void {
       sandbox: true
     }
   })
+  // 同上的第二份拷贝：跟随系统切换时两处一起改，别只改上面创建时那一处。
   const updateWindowTheme = (): void => {
     const win = mainWindow
     if (!win || win.isDestroyed()) return
