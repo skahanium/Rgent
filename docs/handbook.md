@@ -20,7 +20,7 @@
 - Host 阶段用 Electron `safeStorage` 加密密钥，密文只存应用数据目录；解密材料由操作系统保护。不要把真实密钥、库内容、权限名单样例写成真实秘密。
 - 测试不把真实 API Key 写进仓库。
 - 改壳、preload 或 sandbox 之后：`pnpm test` 必须过，且 `pnpm build` 后窗口能起来。sandbox 下 preload 必须是可加载的 CommonJS（`out/preload/index.cjs`）。
-- 当前阶段提交前跑 `pnpm docs:check`；CI 在 macOS、Windows 上以锁文件安装，运行 `pnpm test` 与 `pnpm build`。
+- 当前阶段提交前跑 `pnpm docs:check`；CI 在 macOS、Windows 上以锁文件安装，运行 `pnpm test`、`pnpm build` 与 `pnpm ui:check`（真实窗口的界面验收，两腿都跑）。
 - 功能走分支 + PR。GitHub 是源码枢纽。不要用未 push 的本机工作树当云端起点。
 
 ## 禁止

@@ -41,6 +41,7 @@
 ```bash
 pnpm test
 pnpm docs:check
+pnpm ui:check   # 界面改动；需要先 pnpm build。CI 的 macOS 与 Windows 两腿都会跑
 ```
 
-`pnpm test` 先构建库读写的原生模块（需要系统 C++ 工具链与 Python 3），再跑类型检查与测试。改壳或 preload 时还要 `pnpm build` 并确认窗口能起。换阶段按 [施工守则](docs/handbook.md) 的四步走：改 [施工图](docs/build.md) 的「当前」与本文的「当前阶段」，两处字符串必须一致，`pnpm docs:check` 会核对。
+`pnpm test` 先构建库读写的原生模块（需要系统 C++ 工具链与 Python 3），再跑类型检查与测试。改壳或 preload 时还要 `pnpm build` 并确认窗口能起。改界面壳、样式或渲染层时跑 `pnpm ui:check`（真实窗口 + CDP 的验收，44 项）；它已在 CI 两腿里，别等到推送后才知道红。换阶段按 [施工守则](docs/handbook.md) 的四步走：改 [施工图](docs/build.md) 的「当前」与本文的「当前阶段」，两处字符串必须一致，`pnpm docs:check` 会核对。

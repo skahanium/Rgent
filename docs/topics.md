@@ -119,14 +119,14 @@ Host 与工具开放前，用虚构笔记库固定验收样例检查模型上下
 - **CM6 与样式的作用顺序**：CM6 的基础主题是运行时注入的，同优先级的行类规则（如 `.rgent-block-ai` 上的 `padding-left`）会被它的 `.cm-line` 盖掉，要用 `.cm-line.xxx` 提优先级；相对缩进还要自己抵掉它那层 6px padding，否则写 `1em` 只有 11px。
 - **字数口径（阶段默认值，不是产品数字）**：CJK 逐字计 1，拉丁字母与数字的连续串计 1，只计正文（不含账本与身份标记行）。要精确到别的口径时先改围栏。
 - **阶段边界**：底栏字数只在渲染层计算；主进程人搜与 Markdown 管线保持原实现，不为界面施工新增跨层取词模块。因此「标记不进语料」这件事现在有两份实现——主进程 `src/main/vault-index.ts` 的 `blankMarkers` 与渲染层 `src/renderer/src/statusbar.ts` 的 `wordsOf`（口径一致，都是等长跳过标记范围）；**改口径要两处一起改**。要合回去就从 `src/markdown/` 抽纯函数，但那属于索引那一刀的授权。
-- **DOM 测试**：`jsdom@30` 进依赖后，widget 级测试（callout / table / wikilink / safe-html / read-only）用文件级 `// @vitest-environment jsdom` 跑在 `pnpm test` 里；窗口级规则（焦点归属、Esc、浮层栈、真实布局）用 `scripts/verify-ui.mjs`（`pnpm ui:check`）在真实窗口里验——这两层互补，不要互相替代。
+- **DOM 测试**：`jsdom@30` 进依赖后，widget 级测试（callout / table / wikilink / safe-html / read-only）用文件级 `// @vitest-environment jsdom` 跑在 `pnpm test` 里；窗口级规则（焦点归属、Esc、浮层栈、真实布局）用 `scripts/verify-ui.mjs`（`pnpm ui:check`）在真实窗口里验，**CI 的 macOS 与 Windows 两腿都会跑**——这两层互补，不要互相替代。
 - **键盘**：window 级一层映射表（⌘K 搜索、⌘S 保存），编辑器内的 `Mod-s` 移出去以免双触发；⌘F 只保留键位，篇内查找的界面未定，等后续一刀。
 
 ### 实现路线
 
 token → 壳结构（树、tab、底栏）→ 标题索引与快捷键 → 浮层与搜索 → 画布呈现（`>` 前缀、回答缩进、动作层级）→ 冲突双预览 → 可访问性收口（对比度、焦点态、窄窗、减少动效）。
 
-验收在 `800×560` 与 `1200×800`、日/夜、长文、多 tab、长文件名下各走一遍；真实窗口用 CDP 脚本驱动，脚本不进 CI（CI 没有窗口）。
+验收在 `800×560` 与 `1200×800`、日/夜、长文、多 tab、长文件名下各走一遍；真实窗口用 CDP 脚本驱动（`scripts/verify-ui.mjs`），脚本在 CI 的 macOS 与 Windows 两腿都跑。CI runner 的虚拟显示器会把窗口夹到 1024 上下，所以脚本把「窗口尺寸」与「1200×800 布局」分开验：前者只卡下限 `800×560`，后者用设备度量模拟，与屏幕无关。
 
 ---
 
