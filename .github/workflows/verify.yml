@@ -29,3 +29,19 @@ jobs:
       - run: node --check out/preload/index.cjs
       - run: node scripts/check-native.mjs
       - run: pnpm test
+      # 界面验收：真实窗口 + CDP，43 项（日夜、两种窗口尺寸、键盘往返、账本隔离、
+      # 冲突双栏、显示层不改文件等）。复用上面 pnpm build 的产物，不重复构建。
+      # 放在最后：这条红了也不影响「构建产物存在、preload 语法、原生模块可装载」的既有保证。
+      # 超时兜底：脚本自己对「CDP 起没起来」有 30 秒上限，但窗口起来后卡住没有兜底。
+      - run: pnpm ui:check
+        timeout-minutes: 5
+        env:
+          RGENT_UI_SCREENSHOTS: ${{ runner.temp }}/ui-shots
+      # 截图是给「对照四张参考图」用的材料：两平台、日夜、窄窗、搜索、阅读态各一张。
+      # 失败时也上传——排查「窗口起不来」时这几张往往是最直接的证据。
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-shots-${{ matrix.os }}
+          path: ${{ runner.temp }}/ui-shots
+          if-no-files-found: ignore
