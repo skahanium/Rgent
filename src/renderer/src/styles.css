@@ -980,3 +980,117 @@ input:focus-visible,
   line-height: 1.6;
   color: var(--ink);
 }
+
+/* 左栏的搜索入口：保留圆角轮廓，文字旁显示平台快捷键，不放放大镜。 */
+.search-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 10px;
+  min-height: 34px;
+  background: var(--surface-canvas);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+}
+
+.search-field:focus-within {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
+}
+
+.search-field .search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-body);
+  font-family: var(--font-ui);
+  font-size: 0.84rem;
+}
+
+.search-field .search-input::placeholder { color: var(--text-muted); }
+
+.shortcut-hint {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 0.68rem;
+}
+
+/* 标题索引：画布右缘的状态标识，不取代右侧反链。 */
+.outline {
+  position: absolute;
+  top: 72px;
+  right: 6px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0;
+  padding: 6px 4px;
+}
+
+.outline[hidden] { display: none; }
+
+.outline-mark {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 100%;
+  min-height: 18px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: transparent;
+}
+
+.outline-rule {
+  display: block;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+  opacity: 0.55;
+}
+
+.outline-mark:hover,
+.outline-mark:focus-visible {
+  color: var(--accent-primary);
+  background: var(--state-hover);
+}
+
+.outline-mark[aria-current='true'] {
+  color: var(--accent-primary);
+}
+
+.outline-mark[aria-current='true'] .outline-rule { opacity: 1; }
+
+/* 悬停/聚焦才出完整标题；平时只留短横线，不占正文宽度。 */
+.outline-label {
+  position: absolute;
+  right: 100%;
+  margin-right: 8px;
+  max-width: 30ch;
+  padding: 3px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-overlay);
+  color: var(--text-body);
+  box-shadow: var(--shadow-1);
+  font-family: var(--font-ui);
+  font-size: 0.76rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) ease;
+}
+
+.outline-mark:hover .outline-label,
+.outline-mark:focus-visible .outline-label { opacity: 1; }

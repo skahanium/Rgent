@@ -254,9 +254,15 @@ export type EditorHost = {
   setNoteHost: (host: NoteHost) => void
   /** 只跟着系统主题走；不写盘、不进撤销栈。 */
   setTheme: (night: boolean) => void
-  /** 行列（1 起）与当前编译结果，供底栏与标题索引消费。 */
+  /** 行列（1 起）、标题与可视起点，供底栏与标题索引消费。 */
   selectionInfo: () => { line: number; column: number }
   headings: () => HeadingRef[]
+  /** 当前可视范围（文档偏移）；索引靠它算「读到哪了」。 */
+  viewport: () => { from: number; to: number }
+  /** 光标位置；不在可视范围内时返回 null。 */
+  caret: () => number | null
+  /** 跳过去：滚动到该处并把光标也放过去。 */
+  scrollTo: (position: number) => void
   /** 选区或可视范围变化时回调；返回取消订阅。 */
   onStateChange: (listener: () => void) => () => void
   focus: () => void
@@ -267,8 +273,7 @@ export type { NoteHost }
 
 export function mountEditor(
   parent: HTMLElement,
-  onChange: (text: string) => void,
-  onSave: () => void
+  onChange: (text: string) => void
 ): EditorHost {
   let applying = false
   const hostCompartment = new Compartment()
@@ -282,17 +287,8 @@ export function mountEditor(
     doc: '',
     extensions: [
       historyCompartment.of(history()),
-      keymap.of([
-        ...defaultKeymap,
-        ...historyKeymap,
-        {
-          key: 'Mod-s',
-          run: () => {
-            onSave()
-            return true
-          }
-        }
-      ]),
+      // Mod-s 不在这里：保存的键位统一由 shortcuts.ts 定义，免得两处都能触发。
+      keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorView.lineWrapping,
       theme,
       themeCompartment.of([EditorView.darkTheme.of(false), themeFacet.of(false)]),
@@ -350,6 +346,23 @@ export function mountEditor(
     },
     headings: () =>
       view.state.field(markdownField).result.index.headings.filter((heading) => heading.depth <= 3),
+    viewport: () => ({
+      from: view.visibleRanges[0]?.from ?? 0,
+      to: view.visibleRanges[view.visibleRanges.length - 1]?.to ?? view.state.doc.length
+    }),
+    caret: () => {
+      const head = view.state.selection.main.head
+      const [first] = view.visibleRanges
+      if (!first) return null
+      const last = view.visibleRanges[view.visibleRanges.length - 1]!
+      return head >= first.from && head <= last.to ? head : null
+    },
+    scrollTo: (position) => {
+      view.dispatch({
+        selection: { anchor: position },
+        effects: EditorView.scrollIntoView(position, { y: 'start' })
+      })
+    },
     onStateChange: (listener) => {
       stateListeners.add(listener)
       return () => stateListeners.delete(listener)

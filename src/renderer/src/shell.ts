@@ -7,6 +7,8 @@ import { renderSearchResults } from './search.ts'
 import { applySaved, pendingWrites, type Tab } from './tabs.ts'
 import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
 import { icon } from './icons.ts'
+import { outlineLabel, outlineMarks } from './outline.ts'
+import { installShortcuts, shortcutLabel } from './shortcuts.ts'
 import { renderStatusbar, statusModel, wordsOf } from './statusbar.ts'
 import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.ts'
 import type { Theme } from './theme.ts'
@@ -24,7 +26,10 @@ export async function start(root: HTMLElement): Promise<void> {
       <div class="body">
         <aside id="tree-panel" class="tree-panel" hidden>
           <div class="tree-tools">
-            <input type="search" class="search-input" placeholder="搜标题或正文" aria-label="搜标题或正文" autocomplete="off" />
+            <div class="search-field">
+              <input type="search" class="search-input" placeholder="搜索笔记" aria-label="搜索笔记" autocomplete="off" />
+              <kbd class="shortcut-hint"></kbd>
+            </div>
             <div class="search-panel" hidden></div>
           </div>
           <div class="tree-scroll"></div>
@@ -38,6 +43,7 @@ export async function start(root: HTMLElement): Promise<void> {
             <pre class="ledger-body"></pre>
           </div>
           <div class="editor-host"></div>
+          <nav class="outline" aria-label="标题索引" hidden></nav>
           <p class="empty">从目录打开一篇笔记，或新建笔记。</p>
         </section>
         <aside class="backlinks" aria-label="反链"></aside>
@@ -64,12 +70,14 @@ export async function start(root: HTMLElement): Promise<void> {
   const tabsEl = root.querySelector('.tabs') as HTMLElement
   const editorHostEl = root.querySelector('.editor-host') as HTMLElement
   const emptyEl = root.querySelector('.empty') as HTMLElement
+  const outlineEl = root.querySelector('.outline') as HTMLElement
   const backlinksEl = root.querySelector('.backlinks') as HTMLElement
   const ledgerEl = root.querySelector('.ledger-view') as HTMLElement
   const ledgerTitle = root.querySelector('.ledger-title') as HTMLElement
   const ledgerBody = root.querySelector('.ledger-body') as HTMLElement
   const ledgerClose = root.querySelector('.ledger-close') as HTMLButtonElement
   const searchInput = root.querySelector('.search-input') as HTMLInputElement
+  const shortcutHint = root.querySelector('.shortcut-hint') as HTMLElement
   const searchPanel = root.querySelector('.search-panel') as HTMLElement
 
   const tabs: Tab[] = []
@@ -91,13 +99,29 @@ export async function start(root: HTMLElement): Promise<void> {
     tab.content = text
     tab.dirty = text !== tab.saved
     renderTabs()
+    updateStatus()
     scheduleSave()
-  }, () => {
-    void flushSave()
   })
 
+  // ⌘K 先接到当前这个搜索输入上；下一刀换成悬浮页时只改这一处。
+  installShortcuts({
+    onSearch: () => {
+      if (treePanel.hasAttribute('hidden')) {
+        treePanel.removeAttribute('hidden')
+        treeToggle.setAttribute('aria-expanded', 'true')
+      }
+      searchInput.focus()
+      searchInput.select()
+    },
+    onSave: () => void flushSave()
+  })
+  shortcutHint.textContent = shortcutLabel('k')
+
   // 主题跟着系统走（围栏：自动切换方式未锁，手动开关归设置阶段）。
-  editor.onStateChange(() => updateStatus())
+  editor.onStateChange(() => {
+    updateStatus()
+    renderOutline()
+  })
   window.addEventListener('rgent:theme', (event) => {
     editor.setTheme((event as CustomEvent<Theme>).detail === 'night')
   })
@@ -391,6 +415,7 @@ export async function start(root: HTMLElement): Promise<void> {
     renderTabs()
     paintTree()
     updateStatus()
+    renderOutline()
     emptyEl.hidden = true
     void refreshBacklinks()
   }
@@ -469,6 +494,44 @@ export async function start(root: HTMLElement): Promise<void> {
       tabsEl.append(ledger)
     }
     emptyEl.hidden = tabs.length > 0
+  }
+
+  /**
+   * 标题索引：只取 h1–h3，当前阅读位置由可视范围起点推出。
+   * 点一下跳过去；悬停或键盘聚焦显示完整标题。
+   */
+  function renderOutline(): void {
+    if (!current()) {
+      outlineEl.hidden = true
+      outlineEl.replaceChildren()
+      return
+    }
+    const marks = outlineMarks(editor.headings(), editor.viewport(), editor.caret())
+    outlineEl.hidden = marks.length === 0
+    outlineEl.replaceChildren()
+    for (const mark of marks) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'outline-mark'
+      button.dataset.depth = String(mark.heading.depth)
+      button.dataset.scale = String(mark.scale)
+      if (mark.current) button.setAttribute('aria-current', 'true')
+      const rule = document.createElement('span')
+      rule.className = 'outline-rule'
+      rule.style.width = `${Math.round(26 * mark.scale)}px`
+      button.append(rule)
+      const label = document.createElement('span')
+      label.className = 'outline-label'
+      label.textContent = outlineLabel(mark.heading)
+      button.append(label)
+      button.title = outlineLabel(mark.heading)
+      button.setAttribute('aria-label', outlineLabel(mark.heading))
+      button.addEventListener('click', () => {
+        editor.scrollTo(mark.heading.range.start)
+        editor.focus()
+      })
+      outlineEl.append(button)
+    }
   }
 
   /** 底栏：行列、字数、库名。字数只算正文，标记行不算。 */
