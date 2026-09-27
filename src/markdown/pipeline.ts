@@ -1,6 +1,6 @@
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import type { Root } from 'mdast'
-import { DEFAULT_STAGES, type CompileOptions, type CompileResult, type StageFlags } from './types.ts'
+import { DEFAULT_STAGES, type CompileOptions, type CompileResult, type Partition, type StageFlags } from './types.ts'
 import { partitionSource } from './partition.ts'
 import { extensionsFor } from './stages/registry.ts'
 import { buildIndex, emptyIndex } from './doc-index.ts'
@@ -29,9 +29,8 @@ export function recoverCompile(
   }
 }
 
-export function compile(source: string, options: CompileOptions = {}): CompileResult {
+function compilePart(source: string, partition: Partition, options: CompileOptions): CompileResult {
   const stages = mergeStages(options.stages)
-  const partition = partitionSource(source)
   try {
     const { micromark, mdast, transforms } = extensionsFor(stages)
     let tree = fromMarkdown(partition.body, {
@@ -53,4 +52,13 @@ export function compile(source: string, options: CompileOptions = {}): CompileRe
   } catch (err) {
     return recoverCompile(source, stages, err instanceof Error ? err.message : String(err), options.prev)
   }
+}
+
+export function compile(source: string, options: CompileOptions = {}): CompileResult {
+  return compilePart(source, partitionSource(source), options)
+}
+
+/** Read-only fragments such as ledger text use the same parser without another partition. */
+export function compileFragment(source: string, options: CompileOptions = {}): CompileResult {
+  return compilePart(source, { body: source, ledger: null, bodyOffset: 0 }, options)
 }

@@ -46,6 +46,9 @@ export interface TableRef {
   range: SourceRange
   header: string[]
   rows: string[][]
+  /** Original mdast node; table cells must not be reparsed with another Markdown grammar. */
+  node?: import('mdast').Table
+  source?: string
 }
 
 export interface ImageRef {
@@ -79,6 +82,8 @@ export interface CalloutRef {
   kind: CalloutKind
   title: string
   body: string
+  node?: import('./syntax/nodes.ts').CalloutNode
+  source?: string
 }
 
 export interface WikiLinkRef {

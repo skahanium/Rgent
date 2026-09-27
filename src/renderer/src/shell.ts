@@ -1,5 +1,5 @@
 import { IPC, type NoteSnapshot, type PermissionState, type PermissionTier, type SearchHit, type TreeEntry, type VaultState } from '@shared'
-import { compile, composeSource, partitionSource } from '@markdown'
+import { composeSource, partitionSource } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
 import { promptNewNote } from './dialogs.ts'
@@ -8,6 +8,7 @@ import { openOverlay } from './overlay.ts'
 import { createSearchOverlay } from './search-overlay.ts'
 import { applySaved, pendingWrites, type Tab } from './tabs.ts'
 import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
+import { renderReadOnlyMarkdown } from './view/read-only.ts'
 import { icon } from './icons.ts'
 import { outlineLabel, outlineMarks } from './outline.ts'
 import { installShortcuts, shortcutLabel } from './shortcuts.ts'
@@ -42,7 +43,7 @@ export async function start(root: HTMLElement): Promise<void> {
               <span class="ledger-title"></span>
               <button type="button" class="ledger-close" aria-label="关闭账本回顾">×</button>
             </div>
-            <pre class="ledger-body"></pre>
+            <div class="ledger-body"></div>
           </div>
           <div class="editor-host"></div>
           <nav class="outline" aria-label="标题索引" hidden></nav>
@@ -102,6 +103,9 @@ export async function start(root: HTMLElement): Promise<void> {
   })
   let saveInFlight: Promise<boolean> | null = null
   let ledgerOpen = false
+  let countedPath: string | null = null
+  let countedSource: string | null = null
+  let countedWords = 0
 
   const editor: EditorHost = mountEditor(editorHostEl, (text) => {
     const tab = current()
@@ -122,6 +126,8 @@ export async function start(root: HTMLElement): Promise<void> {
 
   // 主题跟着系统走（围栏：自动切换方式未锁，手动开关归设置阶段）。
   editor.onStateChange(() => {
+    const tab = current()
+    if (tab) tab.selection = editor.selectionRange()
     updateStatus()
     renderOutline()
   })
@@ -407,7 +413,7 @@ export async function start(root: HTMLElement): Promise<void> {
       if (prev) prev.content = editor.getText()
     }
     active = relPath
-    editor.setText(tab.content, noteHost())
+    editor.setText(tab.content, noteHost(), tab.selection)
     editor.focus()
     closeLedger()
     renderTabs()
@@ -490,7 +496,9 @@ export async function start(root: HTMLElement): Promise<void> {
       ledger.title = '看这篇笔记的账本回顾'
       ledger.setAttribute('aria-pressed', String(ledgerOpen))
       ledger.addEventListener('click', () => toggleLedger())
-      tabsEl.append(ledger)
+      const currentTab = tabsEl.querySelector('.tab[aria-selected="true"]')?.closest('.tab-wrap')
+      if (currentTab) currentTab.after(ledger)
+      else tabsEl.append(ledger)
     }
     emptyEl.hidden = tabs.length > 0
   }
@@ -537,12 +545,17 @@ export async function start(root: HTMLElement): Promise<void> {
   function updateStatus(): void {
     const tab = current()
     const info = tab ? editor.selectionInfo() : null
+    if (tab && (tab.relPath !== countedPath || tab.content !== countedSource)) {
+      countedWords = wordsOf(tab.content, editor.markers())
+      countedPath = tab.relPath
+      countedSource = tab.content
+    }
     renderStatusbar(
       statusEl,
       statusModel({
         line: info?.line ?? 1,
         column: info?.column ?? 1,
-        words: tab ? wordsOf(tab.content, compile(tab.content).index.markers) : 0,
+        words: tab ? countedWords : 0,
         vaultName: vaultNameText,
         noteOpen: tab != null
       })
@@ -559,10 +572,9 @@ export async function start(root: HTMLElement): Promise<void> {
     ledgerOpen = true
     ledgerTitle.textContent = `${titleOf(tab.relPath.split('/').pop() ?? tab.relPath)} · 账本回顾`
     // 账本是旁路原文，只读展示；分场要等写入方（Host 阶段）定下章节写法。
-    ledgerBody.textContent =
-      tab.ledger && tab.ledger.trim() !== ''
-        ? tab.ledger
-        : '这篇笔记还没有账本。账本由生成任务写下，写入方属于 Host 阶段。'
+    const ledgerSource = tab.ledger?.replace(/^<!-- rgent:ledger:v1 -->\s*\r?\n?/, '') ?? ''
+    if (ledgerSource.trim()) renderReadOnlyMarkdown(ledgerBody, ledgerSource, noteHost())
+    else ledgerBody.textContent = '这篇笔记还没有账本。账本由生成任务写下，写入方属于 Host 阶段。'
     ledgerEl.hidden = false
     renderTabs()
   }
@@ -583,7 +595,7 @@ export async function start(root: HTMLElement): Promise<void> {
     if (active === relPath) {
       const next = tabs[index] ?? tabs[index - 1]
       active = next?.relPath ?? null
-      editor.setText(next?.content ?? '', noteHost())
+      editor.setText(next?.content ?? '', noteHost(), next?.selection)
       void refreshBacklinks()
     }
     renderTabs()

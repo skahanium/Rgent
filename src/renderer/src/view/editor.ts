@@ -1,13 +1,17 @@
 import {
   compile,
   DEFAULT_STAGES,
+  expandToLineBlock,
   type HeadingRef,
+  type MarkerRef,
   lineStartOf,
   planIdentityEdit,
+  planPresentation,
   planWidgets,
   rangesOverlap,
   recoverCompile,
   type CompileResult,
+  type PresentationPlan,
   type EditChange
 } from '@markdown'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
@@ -16,10 +20,98 @@ import {
   Decoration,
   type DecorationSet,
   EditorView,
-  keymap
+  keymap,
+  WidgetType
 } from '@codemirror/view'
 import { emptyNoteHost, type NoteHost } from './host.ts'
 import { decorationForWidget } from './widgets/decorate.ts'
+import { renderSafeHtmlFragment } from './safe-html.ts'
+import { renderReadOnlyNode } from './read-only.ts'
+import { joinVaultRel } from '../../../shared/vault-rel.ts'
+import type { PresentationBlock, PresentationSyntax } from '../../../markdown/presentation.ts'
+
+class SyntaxMarkerWidget extends WidgetType {
+  constructor(readonly marker: PresentationSyntax) { super() }
+
+  eq(other: SyntaxMarkerWidget): boolean {
+    return this.marker.kind === other.marker.kind && this.marker.text === other.marker.text && this.marker.checked === other.marker.checked
+  }
+
+  toDOM(): HTMLElement {
+    const span = document.createElement('span')
+    span.className = `md-syntax-marker md-syntax-${this.marker.kind}`
+    if (this.marker.kind === 'task') {
+      span.textContent = this.marker.checked ? '☑' : '☐'
+      span.setAttribute('aria-label', this.marker.checked ? '已完成' : '未完成')
+    } else span.textContent = this.marker.text ?? ''
+    return span
+  }
+}
+
+class PresentationBlockWidget extends WidgetType {
+  constructor(readonly block: PresentationBlock) { super() }
+
+  eq(other: PresentationBlockWidget): boolean {
+    return this.block.kind === other.block.kind
+      && this.block.range.start === other.block.range.start
+      && this.block.range.end === other.block.range.end
+      && this.block.value === other.block.value
+      && this.block.language === other.block.language
+  }
+
+  toDOM(view: EditorView): HTMLElement {
+    const reveal = (element: HTMLElement): HTMLElement => {
+      // CM6 把整块替换后，落在 widget 上的鼠标坐标可能映射到块尾的下一行。
+      // 明确把光标放回当前源码范围，保证点摘要/代码/HTML 都能进入编辑。
+      element.addEventListener('mousedown', (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        view.dispatch({ selection: { anchor: Math.min(this.block.range.start + 1, this.block.range.end) } })
+        view.focus()
+      })
+      return element
+    }
+    if (this.block.kind === 'rule') {
+      const rule = document.createElement('hr')
+      rule.className = 'md-rule'
+      return reveal(rule)
+    }
+    if (this.block.kind === 'frontmatter') {
+      const summary = document.createElement('div')
+      summary.className = 'md-frontmatter'
+      const entries = this.block.value.split('\n').map((line) => line.trim()).filter(Boolean)
+      const label = document.createElement('span')
+      label.className = 'md-frontmatter-label'
+      label.textContent = '属性'
+      const preview = document.createElement('span')
+      preview.textContent = entries.slice(0, 3).join(' · ') || '空属性'
+      summary.append(label, preview)
+      return reveal(summary)
+    }
+    if (this.block.kind === 'html') {
+      const wrapper = document.createElement('div')
+      wrapper.className = 'md-html'
+      wrapper.append(this.block.node
+        ? renderReadOnlyNode(this.block.node, this.block.source ?? this.block.value)
+        : renderSafeHtmlFragment(this.block.value))
+      return reveal(wrapper)
+    }
+    const wrapper = document.createElement('div')
+    wrapper.className = 'md-code-block'
+    if (this.block.language) {
+      const label = document.createElement('div')
+      label.className = 'md-code-language'
+      label.textContent = this.block.language
+      wrapper.append(label)
+    }
+    const pre = document.createElement('pre')
+    const code = document.createElement('code')
+    code.textContent = this.block.value
+    pre.append(code)
+    wrapper.append(pre)
+    return reveal(wrapper)
+  }
+}
 
 const noteHostFacet = Facet.define<NoteHost, NoteHost>({
   combine: (values) => values[0] ?? emptyNoteHost
@@ -44,13 +136,16 @@ const themeFacet = Facet.define<boolean, boolean>({
  */
 type MarkdownState = {
   result: CompileResult
+  presentation: PresentationPlan
   decorations: DecorationSet
+  editing: boolean
 }
 
-function computeState(source: string, host: NoteHost, dark: boolean, previous?: CompileResult): MarkdownState {
+function computeState(source: string, host: NoteHost, dark: boolean, selection: { from: number; to: number }, editing: boolean, previous?: CompileResult): MarkdownState {
   try {
     const result = compile(source, previous ? { prev: previous } : {})
-    return { result, decorations: decorationsFor(result, source, host, dark) }
+    const presentation = result.stale ? planPresentation(null, source) : planPresentation(result.tree, result.partition.body)
+    return { result, presentation, decorations: decorationsFor(result, presentation, source, host, dark, selection, editing), editing }
   } catch (err) {
     const result = recoverCompile(
       source,
@@ -59,9 +154,10 @@ function computeState(source: string, host: NoteHost, dark: boolean, previous?: 
       previous
     )
     try {
-      return { result, decorations: decorationsFor(result, source, host, dark) }
+      const presentation = planPresentation(null, source)
+      return { result, presentation, decorations: decorationsFor(result, presentation, source, host, dark, selection, editing), editing }
     } catch {
-      return { result, decorations: Decoration.none }
+      return { result, presentation: planPresentation(null, source), decorations: Decoration.none, editing }
     }
   }
 }
@@ -77,15 +173,25 @@ export const markdownField = StateField.define<MarkdownState>({
   // 「Cyclic dependency between fields and/or facets」，代价是整个界面渲染不出来。
   // 上一代结果由 update 的 value 参数直接带过来。
   create: (state) =>
-    computeState(state.doc.toString(), state.facet(noteHostFacet), state.facet(themeFacet)),
+    computeState(state.doc.toString(), state.facet(noteHostFacet), state.facet(themeFacet), state.selection.main, false),
   update: (value, tr) => {
     const hostChanged = tr.startState.facet(noteHostFacet) !== tr.state.facet(noteHostFacet)
     const themeChanged = tr.startState.facet(themeFacet) !== tr.state.facet(themeFacet)
-    if (!tr.docChanged && !hostChanged && !themeChanged) return value
+    if (!tr.docChanged && !hostChanged && !themeChanged && !tr.selection) return value
+    const editing = tr.isUserEvent('rgent.setText') ? false : value.editing || Boolean(tr.selection) || (tr.docChanged && !tr.isUserEvent('rgent'))
+    if (!tr.docChanged && !hostChanged && !themeChanged) {
+      return {
+        ...value,
+        editing,
+        decorations: decorationsFor(value.result, value.presentation, tr.state.doc.toString(), tr.state.facet(noteHostFacet), tr.state.facet(themeFacet), tr.state.selection.main, editing)
+      }
+    }
     return computeState(
       tr.state.doc.toString(),
       tr.state.facet(noteHostFacet),
       tr.state.facet(themeFacet),
+      tr.state.selection.main,
+      editing,
       value.result
     )
   },
@@ -94,12 +200,21 @@ export const markdownField = StateField.define<MarkdownState>({
 
 function decorationsFor(
   result: CompileResult,
+  presentation: PresentationPlan,
   source: string,
   host: NoteHost,
-  dark: boolean
+  dark: boolean,
+  selection: { from: number; to: number },
+  editing: boolean
 ): DecorationSet {
   const decos: Range<Decoration>[] = []
   const docLen = source.length
+  if (result.stale) return Decoration.none
+  const active = editing ? result.index.blocks.filter((block) =>
+    block.range.start <= selection.to && block.range.end >= selection.from
+  ) : []
+  const isActive = (range: { start: number; end: number }): boolean =>
+    active.some((block) => rangesOverlap(block.range, range))
   // 整篇一次算完：CM6 只会为可见范围建 DOM，所以这里不必再按视口裁一遍。
   const widgets = planWidgets(result.index, source, [{ from: 0, to: docLen }])
   // 同一行可能既是标题又是 AI 块，行装饰必须合并成一条，不能挤两条。
@@ -117,8 +232,20 @@ function decorationsFor(
 
   for (const widget of widgets) {
     if (widget.range.start < 0 || widget.range.end > docLen || widget.range.end <= widget.range.start) continue
+    if (isActive(widget.range)) continue
     try {
       decos.push(decorationForWidget(widget, host, dark).range(widget.range.start, widget.range.end))
+    } catch {
+      continue
+    }
+  }
+
+  for (const block of presentation.blocks) {
+    if (isActive(block.range) || widgets.some((widget) => rangesOverlap(widget.range, block.range))) continue
+    const range = expandToLineBlock(source, block.range)
+    if (range.end <= range.start || range.end > docLen) continue
+    try {
+      decos.push(Decoration.replace({ widget: new PresentationBlockWidget(block), block: true, rgentBlock: block.kind }).range(range.start, range.end))
     } catch {
       continue
     }
@@ -129,6 +256,8 @@ function decorationsFor(
     if (widgets.some((widget) => rangesOverlap(heading.range, widget.range))) continue
     addLine(lineStartOf(source, heading.range.start), `md-heading md-h${heading.depth}`)
   }
+
+  for (const line of presentation.lines) addLine(line.at, line.className)
 
   // 两种样子：人写的没有任何装饰；未采纳的 AI 块与口令各挂一种行样式。
   for (const block of result.index.blocks) {
@@ -153,13 +282,33 @@ function decorationsFor(
     }
   }
 
-  for (const mark of result.index.marks) {
-    if (widgets.some((widget) => rangesOverlap(mark.range, widget.range))) continue
+  const renderedWidgets = [
+    ...widgets.filter((widget) => !isActive(widget.range)),
+    ...presentation.blocks.filter((block) => !isActive(block.range)).map((block) => ({ range: expandToLineBlock(source, block.range) }))
+  ]
+  for (const mark of presentation.styles) {
+    if (renderedWidgets.some((widget) => rangesOverlap(mark.range, widget.range))) continue
     const start = clamp(mark.range.start, 0, docLen)
     const end = clamp(mark.range.end, 0, docLen)
     if (end <= start) continue
     try {
-      decos.push(Decoration.mark({ class: `md-${mark.type}` }).range(start, end))
+      const link = mark.className === 'md-link'
+        ? presentation.links.find((item) => item.range.start === start && item.range.end === end)
+        : undefined
+      decos.push(Decoration.mark({ class: mark.className, ...(link ? { attributes: { 'data-md-url': link.url } } : {}) }).range(start, end))
+    } catch {
+      continue
+    }
+  }
+
+  for (const syntax of presentation.syntax) {
+    if (isActive(syntax.range) || renderedWidgets.some((widget) => rangesOverlap(syntax.range, widget.range))) continue
+    const start = clamp(syntax.range.start, 0, docLen)
+    const end = clamp(syntax.range.end, 0, docLen)
+    if (end <= start) continue
+    try {
+      if (syntax.kind === 'hide') decos.push(Decoration.replace({ rgentSyntax: 'hide' }).range(start, end))
+      else decos.push(Decoration.replace({ widget: new SyntaxMarkerWidget(syntax), rgentSyntax: syntax.kind }).range(start, end))
     } catch {
       continue
     }
@@ -197,7 +346,9 @@ function changesOf(tr: { changes: { iterChanges: (fn: (fromA: number, toA: numbe
 export const identityLock = EditorState.transactionFilter.of((tr) => {
   if (!tr.docChanged) return tr
   if (tr.isUserEvent('rgent')) return tr
-  const index = tr.startState.field(markdownField).result.index
+  const result = tr.startState.field(markdownField).result
+  if (result.stale) return []
+  const index = result.index
   const changes = changesOf(tr)
   const plan = planIdentityEdit(tr.startState.doc.toString(), changes, index)
   if (plan.blocked) return []
@@ -251,13 +402,15 @@ const theme = EditorView.theme({
 export type EditorHost = {
   view: EditorView
   getText: () => string
-  setText: (text: string, host?: NoteHost) => void
+  setText: (text: string, host?: NoteHost, selection?: { anchor: number; head: number }) => void
   setNoteHost: (host: NoteHost) => void
   /** 只跟着系统主题走；不写盘、不进撤销栈。 */
   setTheme: (night: boolean) => void
   /** 行列（1 起）、标题与可视起点，供底栏与标题索引消费。 */
   selectionInfo: () => { line: number; column: number }
+  selectionRange: () => { anchor: number; head: number }
   headings: () => HeadingRef[]
+  markers: () => MarkerRef[]
   /** 当前可视范围（文档偏移）；索引靠它算「读到哪了」。 */
   viewport: () => { from: number; to: number }
   /** 光标位置；不在可视范围内时返回 null。 */
@@ -277,10 +430,18 @@ export function mountEditor(
   onChange: (text: string) => void
 ): EditorHost {
   let applying = false
+  const warning = document.createElement('div')
+  warning.className = 'md-render-warning'
+  warning.setAttribute('role', 'status')
+  warning.hidden = true
+  parent.append(warning)
   const hostCompartment = new Compartment()
   // 撤销历史按笔记隔离：整篇替换若留在历史里，切 tab 之后按撤销会把上一篇的文本
   // 填进当前篇（随后还会被自动保存写盘）——实测过。
   const historyCompartment = new Compartment()
+  // CM6 默认把 CRLF 规范化成 LF。每篇采用自己的原文换行符，避免只改一个字
+  // 就把整篇的换行全部改写；与 tab 的撤销历史一起切换。
+  const lineBreakCompartment = new Compartment()
   // 主题：CM6 自带的默认样式跟 darkTheme 走，装饰跟 themeFacet 走。
   const themeCompartment = new Compartment()
   let dark = false
@@ -288,6 +449,7 @@ export function mountEditor(
     doc: '',
     extensions: [
       historyCompartment.of(history()),
+      lineBreakCompartment.of(EditorState.lineSeparator.of('\n')),
       // Mod-s 不在这里：保存的键位统一由 shortcuts.ts 定义，免得两处都能触发。
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorView.lineWrapping,
@@ -296,7 +458,29 @@ export function mountEditor(
       hostCompartment.of(noteHostFacet.of(emptyNoteHost)),
       markdownField,
       identityLock,
+      EditorView.domEventHandlers({
+        click: (event, view) => {
+          if (!event.metaKey && !event.ctrlKey) return false
+          const target = event.target instanceof Element ? event.target.closest<HTMLElement>('.md-link[data-md-url]') : null
+          const href = target?.dataset.mdUrl
+          if (!href) return false
+          event.preventDefault()
+          const host = view.state.facet(noteHostFacet)
+          const rel = joinVaultRel(host.noteRelPath, href)
+          if (rel?.toLowerCase().endsWith('.md') && host.vaultHas(rel)) host.openNote(rel)
+          else {
+            try {
+              const url = new URL(href)
+              if (url.protocol === 'https:' || url.protocol === 'http:') window.location.assign(url.href)
+            } catch { /* malformed links stay visible but inert */ }
+          }
+          return true
+        }
+      }),
       EditorView.updateListener.of((update) => {
+        const result = update.state.field(markdownField).result
+        warning.hidden = !result.stale
+        warning.textContent = result.stale ? `阅读呈现失败，以下是当前原文：${result.error ?? '解析错误'}` : ''
         if (update.docChanged || update.selectionSet || update.viewportChanged) {
           for (const listener of stateListeners) listener()
         }
@@ -310,16 +494,21 @@ export function mountEditor(
   return {
     view,
     getText: () => view.state.doc.toString(),
-    setText: (text, host) => {
+    setText: (text, host, selection) => {
       applying = true
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: text },
         // 换一篇笔记 = 换一份撤销历史 + 光标回到篇首；不归零的话上一篇的行列会被
         // 映射进新篇（实测：切过去停在「第 7 行」）。
-        selection: { anchor: 0 },
+        selection: {
+          anchor: clamp(selection?.anchor ?? 0, 0, text.length),
+          head: clamp(selection?.head ?? selection?.anchor ?? 0, 0, text.length)
+        },
         effects: [
           historyCompartment.reconfigure(history()),
-          ...(host ? [hostCompartment.reconfigure(noteHostFacet.of(host))] : [])
+          lineBreakCompartment.reconfigure(EditorState.lineSeparator.of(text.includes('\r\n') ? '\r\n' : text.includes('\r') ? '\r' : '\n')),
+          ...(host ? [hostCompartment.reconfigure(noteHostFacet.of(host))] : []),
+          EditorView.scrollIntoView(clamp(selection?.head ?? 0, 0, text.length), { y: selection?.head ? 'center' : 'start' })
         ],
         annotations: Transaction.addToHistory.of(false),
         userEvent: 'rgent.setText'
@@ -345,8 +534,15 @@ export function mountEditor(
       const line = view.state.doc.lineAt(head)
       return { line: line.number, column: head - line.from + 1 }
     },
-    headings: () =>
-      view.state.field(markdownField).result.index.headings.filter((heading) => heading.depth <= 3),
+    selectionRange: () => ({ anchor: view.state.selection.main.anchor, head: view.state.selection.main.head }),
+    headings: () => {
+      const result = view.state.field(markdownField).result
+      return result.stale ? [] : result.index.headings.filter((heading) => heading.depth <= 3)
+    },
+    markers: () => {
+      const result = view.state.field(markdownField).result
+      return result.stale ? [] : result.index.markers
+    },
     viewport: () => ({
       from: view.visibleRanges[0]?.from ?? 0,
       to: view.visibleRanges[view.visibleRanges.length - 1]?.to ?? view.state.doc.length
@@ -369,6 +565,6 @@ export function mountEditor(
       return () => stateListeners.delete(listener)
     },
     focus: () => view.focus(),
-    destroy: () => view.destroy()
+    destroy: () => { view.destroy(); warning.remove() }
   }
 }

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
@@ -86,13 +86,23 @@ function createWindow(): void {
   rendererGone = false
   flushTimer = null
   closeFlow = new CloseFlow()
+  const dark = nativeTheme.shouldUseDarkColors
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 800,
     minHeight: 560,
     title: 'Rgent',
-    backgroundColor: '#f4efe6',
+    backgroundColor: dark ? '#1d2933' : '#f5f6f8',
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' as const } : {}),
+    ...(process.platform === 'win32' ? {
+      titleBarStyle: 'hidden' as const,
+      titleBarOverlay: {
+        color: dark ? '#1d2933' : '#f5f6f8',
+        symbolColor: dark ? '#dfe3e8' : '#1c1f23',
+        height: 46
+      }
+    } : {}),
     webPreferences: {
       preload: path.join(here, '../preload/index.cjs'),
       contextIsolation: true,
@@ -100,8 +110,21 @@ function createWindow(): void {
       sandbox: true
     }
   })
+  const updateWindowTheme = (): void => {
+    const win = mainWindow
+    if (!win || win.isDestroyed()) return
+    const isDark = nativeTheme.shouldUseDarkColors
+    win.setBackgroundColor(isDark ? '#1d2933' : '#f5f6f8')
+    if (process.platform === 'win32') win.setTitleBarOverlay({
+      color: isDark ? '#1d2933' : '#f5f6f8',
+      symbolColor: isDark ? '#dfe3e8' : '#1c1f23',
+      height: 46
+    })
+  }
+  nativeTheme.on('updated', updateWindowTheme)
 
   mainWindow.on('closed', () => {
+    nativeTheme.off('updated', updateWindowTheme)
     mainWindow = null
   })
   mainWindow.webContents.on('render-process-gone', () => {

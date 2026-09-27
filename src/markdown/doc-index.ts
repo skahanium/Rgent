@@ -84,7 +84,7 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
     )
     const header = rows[0] ?? []
     const body = rows.slice(1)
-    index.tables.push({ range: shift(range, bodyOffset), header, rows: body })
+    index.tables.push({ range: shift(range, bodyOffset), header, rows: body, node, source })
   })
 
   visit(tree, 'image', (node) => {
@@ -140,7 +140,9 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
         range: shift(range, bodyOffset),
         kind: callout.kind,
         title: callout.title,
-        body: textOf(callout)
+        body: textOf(callout),
+        node: callout,
+        source
       }
       index.callouts.push(item)
     })

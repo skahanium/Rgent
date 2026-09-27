@@ -1,4 +1,4 @@
-import { WidgetType } from '@codemirror/view'
+import { EditorView, WidgetType } from '@codemirror/view'
 import type { WikiLinkRef } from '@markdown'
 import type { NoteHost } from '../host.ts'
 
@@ -11,13 +11,15 @@ export class WikilinkWidget extends WidgetType {
   }
 
   eq(other: WikilinkWidget): boolean {
-    return this.link.target === other.link.target
+    return this.link.range.start === other.link.range.start
+      && this.host === other.host
+      && this.link.target === other.link.target
       && this.link.display === other.link.display
       && this.link.embed === other.link.embed
       && this.missing() === other.missing()
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const a = document.createElement('a')
     a.className = this.missing() ? 'md-wikilink md-wikilink-missing' : 'md-wikilink'
     a.href = '#'
@@ -28,6 +30,11 @@ export class WikilinkWidget extends WidgetType {
     const open = (event: Event) => {
       event.preventDefault()
       event.stopPropagation()
+      if (event instanceof MouseEvent && !event.metaKey && !event.ctrlKey) {
+        view.dispatch({ selection: { anchor: this.link.range.start } })
+        view.focus()
+        return
+      }
       if (!this.link.target.toLowerCase().endsWith('.md')) return
       try {
         this.host.openNote(this.link.target)

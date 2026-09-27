@@ -1,4 +1,4 @@
-import { WidgetType } from '@codemirror/view'
+import { WidgetType, type EditorView } from '@codemirror/view'
 import type { MathRef } from '@markdown'
 
 export class MathWidget extends WidgetType {
@@ -12,11 +12,11 @@ export class MathWidget extends WidgetType {
     return this.math.value === other.math.value && this.math.block === other.math.block
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view?: EditorView): HTMLElement {
     const el = document.createElement(this.math.block ? 'div' : 'span')
     el.className = this.math.block ? 'md-math md-math-block' : 'md-math'
     el.textContent = this.math.value
-    void paint(el, this.math.value, this.math.block, () => this.dead)
+    void paint(el, this.math.value, this.math.block, () => this.dead, () => view?.requestMeasure())
     return el
   }
 
@@ -33,7 +33,8 @@ async function paint(
   el: HTMLElement,
   value: string,
   displayMode: boolean,
-  isDead: () => boolean
+  isDead: () => boolean,
+  measure: () => void
 ): Promise<void> {
   try {
     const [{ default: katex }] = await Promise.all([
@@ -42,8 +43,10 @@ async function paint(
     ])
     if (isDead() || !el.isConnected) return
     katex.render(value, el, { displayMode, throwOnError: false })
+    measure()
   } catch {
     if (isDead()) return
     el.textContent = value
+    measure()
   }
 }

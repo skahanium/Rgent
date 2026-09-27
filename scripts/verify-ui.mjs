@@ -127,7 +127,8 @@ async function connect(port) {
   return page
 }
 
-const note = ['# 研究记录', '', '第一段正文，用来数字数。', '', '## 二级小节', '', '第二段正文。'].join('\n')
+const note = ['# 研究记录', '', '第一段正文，用来数字数。', '', '### **设计动机**', '', '普通 *斜体* 与 ~~删除~~。', '', '- 第一项', '- 第二项', '', '```ts', 'const n = 1', '```'].join('\n')
+const initialWithLedger = `${note}\n<!-- rgent:ledger:v1 -->\n## 第一场\n\n**账本结论**\n`
 const longNote = (() => {
   const lines = ['# 一级标题', '']
   for (let section = 1; section <= 4; section += 1) {
@@ -146,12 +147,20 @@ async function main() {
   mkdirSync(profile)
   mkdirSync(vault)
   writeFileSync(path.join(profile, 'vault.json'), JSON.stringify({ path: vault }))
-  writeFileSync(path.join(vault, '研究记录.md'), note)
+  writeFileSync(path.join(vault, '研究记录.md'), initialWithLedger)
   writeFileSync(path.join(vault, '过程稿.md'), longNote)
   writeFileSync(path.join(vault, '一个特别特别长的笔记文件名用来验证省略号.md'), '短文。\n')
   mkdirSync(path.join(vault, '资料'))
 
   const modifier = process.platform === 'darwin' ? 4 : 2
+  const shotDir = process.env.RGENT_UI_SCREENSHOTS
+  if (shotDir) mkdirSync(shotDir, { recursive: true })
+  const shot = async (page, name) => {
+    if (!shotDir) return
+    const response = await page.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
+    const data = response.result?.data
+    if (data) writeFileSync(path.join(shotDir, `${name}.png`), Buffer.from(data, 'base64'))
+  }
   let startupError = ''
   let stderr = ''
   const child = spawn(
@@ -186,13 +195,28 @@ async function main() {
     check('顶栏是 tab 条，没有品牌文字', (await page.eval(`!!document.querySelector('.top .tabs') && !document.querySelector('.brand')`)) === true)
     check('tab 有图标与标题', (await page.eval(`!!document.querySelector('.tab .icon') && document.querySelector('.tab').innerText.trim().length > 0`)) === true)
     check('底栏有行列、字数与库名', (await page.eval(`!!document.querySelector('.status-left')?.innerText && !!document.querySelector('.status-vault')?.innerText`)) === true)
+    await probe('阅读态标题不露 Markdown 定界符', async () =>
+      (await page.eval(`(() => {
+        const line = [...document.querySelectorAll('.cm-line')].find((n) => n.innerText.includes('设计动机'))
+        return !!line && line.innerText.trim() === '设计动机' && getComputedStyle(line).fontFamily.includes('sans-serif')
+      })()`)) === true
+    )
+    await probe('账本复用阅读呈现且正文不含账本', async () => {
+      const before = readFileSync(path.join(vault, '研究记录.md'), 'utf8')
+      await page.eval(`document.querySelector('.ledger-open')?.click()`)
+      const state = JSON.parse(await page.eval(`(() => JSON.stringify({ heading: document.querySelector('.ledger-body h2')?.textContent, strong: document.querySelector('.ledger-body strong')?.textContent, editor: document.querySelector('.cm-content')?.innerText, outline: [...document.querySelectorAll('.outline-mark')].map((n) => n.title), editable: !!document.querySelector('.ledger-body [contenteditable]') }))()`))
+      await page.eval(`document.querySelector('.ledger-close')?.click()`)
+      return { ok: state.heading === '第一场' && state.strong === '账本结论' && !state.editor?.includes('账本结论') && !state.outline.includes('第一场') && !state.editable && readFileSync(path.join(vault, '研究记录.md'), 'utf8') === before, detail: JSON.stringify({ heading: state.heading, strong: state.strong, outline: state.outline }) }
+    })
 
     await page.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] })
     await sleep(300)
     const dayTokens = await page.eval(`getComputedStyle(document.documentElement).getPropertyValue('--surface-canvas').trim()`)
+    await shot(page, 'day-workspace')
     await page.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] })
     await sleep(400)
     const nightTokens = await page.eval(`getComputedStyle(document.documentElement).getPropertyValue('--surface-canvas').trim()`)
+    await shot(page, 'night-workspace')
     check('主题跟随系统：夜间换了一套 token', dayTokens !== nightTokens, `${dayTokens} → ${nightTokens}`)
     check('CM6 也跟着换（画布文字色走 token）', (await page.eval(`getComputedStyle(document.querySelector('.cm-content')).color !== 'rgb(28, 31, 35)'`)) === true)
     // 窗口是 1200×800，内容区少了标题栏，所以量 innerWidth/innerHeight。
@@ -221,6 +245,7 @@ async function main() {
     })()`)
     const narrowState = JSON.parse(narrow)
     check('800×560：右反链与正文都没消失', narrowState.反链可见 && narrowState.正文宽 > 120, narrow)
+    await shot(page, 'night-narrow')
     check('长文件名有省略号', (await page.eval(`(() => { const el = [...document.querySelectorAll('.tree-note .tree-label')].find((n) => n.textContent.includes('特别特别长')); return !el || el.scrollWidth > el.clientWidth ? getComputedStyle(el).textOverflow === 'ellipsis' : true })()`)) === true)
     await probe('文件夹收起仍显示文件夹图标，聚焦时原位变为折叠控件', async () =>
       (await page.eval(`(() => {
@@ -244,6 +269,23 @@ async function main() {
       const state = await page.eval(`JSON.stringify({ 浮层: document.querySelectorAll('dialog.overlay[open]').length, 焦点: document.activeElement?.className })`)
       return state.includes('"浮层":1') && state.includes('overlay-search-input')
     })())
+    await probe('搜索是有遮罩、可见输入与结果区域的居中浮层', async () => {
+      const state = JSON.parse(await page.eval(`(() => {
+        const modal = document.querySelector('dialog.overlay-search')
+        const input = modal?.querySelector('.overlay-search-input')
+        const results = modal?.querySelector('.overlay-search-results')
+        const r = modal?.getBoundingClientRect()
+        return JSON.stringify({ display: modal && getComputedStyle(modal).display, bg: modal && getComputedStyle(modal).backgroundColor, width: r?.width, x: r?.x, y: r?.y, inputHeight: input?.getBoundingClientRect().height, results: !!results })
+      })()`))
+      return { ok: state.display !== 'none' && state.width > 300 && state.width < 700 && state.x > 0 && state.y > 0 && state.inputHeight >= 40 && state.results && state.bg !== 'rgba(0, 0, 0, 0)', detail: JSON.stringify(state) }
+    })
+    await shot(page, 'search-overlay')
+    await page.eval(`(() => { const input = document.querySelector('.overlay-search-input'); input.value = '设计动机'; input.dispatchEvent(new Event('input', { bubbles: true })) })()`)
+    await probe('搜索浮层显示实际结果而非空壳', async () => {
+      const found = await waitFor(page, `document.querySelectorAll('.overlay-search-results .search-hit').length > 0`)
+      await shot(page, 'search-results')
+      return found && (await page.eval(`[...document.querySelectorAll('.overlay-search-results .search-hit')].some((n) => n.innerText.includes('研究记录'))`)) === true
+    })
     check('搜索浮层：Esc 关闭并把焦点还给触发点', await (async () => {
       await page.key('Escape', 'Escape', 0, 27)
       return (await page.eval(`document.querySelectorAll('dialog.overlay[open]').length === 0 && document.activeElement?.classList.contains('tree-note')`)) === true
@@ -266,6 +308,17 @@ async function main() {
       return widths.size >= 2 && marks.some((m) => m.getAttribute('aria-current') === 'true')
     })()`)) === true)
     check('标题索引：只有 h1–h3', (await page.eval(`[...document.querySelectorAll('.outline-mark')].every((m) => ['1','2','3'].includes(m.dataset.depth))`)) === true)
+    await probe('标题索引悬浮在画布右缘且常态只露短线', async () => {
+      const position = JSON.parse(await page.eval(`(() => {
+        const stage = document.querySelector('.stage').getBoundingClientRect()
+        const editor = document.querySelector('.editor-host').getBoundingClientRect()
+        const outline = document.querySelector('.outline').getBoundingClientRect()
+        const label = document.querySelector('.outline-label')
+        const rule = document.querySelector('.outline-rule')?.getBoundingClientRect()
+        return JSON.stringify({ stageRight: stage.right, editorBottom: editor.bottom, left: outline.left, right: outline.right, top: outline.top, bottom: outline.bottom, labelDisplay: label && getComputedStyle(label).display, ruleWidth: rule?.width })
+      })()`))
+      return { ok: position.left > position.stageRight - 70 && position.right <= position.stageRight && position.top < position.editorBottom && position.bottom < position.editorBottom && position.labelDisplay === 'none' && position.ruleWidth > 5 && position.ruleWidth < 35, detail: JSON.stringify(position) }
+    })
     await probe('正文衬线、标题无衬线', async () => {
       const fonts = JSON.parse(await page.eval(`(() => {
         const body = getComputedStyle(document.querySelector('.cm-scroller')).fontFamily
@@ -273,6 +326,77 @@ async function main() {
         return JSON.stringify({ body, heading })
       })()`))
       return { ok: fonts.body !== fonts.heading && /sans-serif/.test(fonts.heading), detail: `${fonts.body} → ${fonts.heading}` }
+    })
+    await probe('切换 tab 后恢复各自光标位置', async () => {
+      const point = JSON.parse(await page.eval(`(() => {
+        const line = [...document.querySelectorAll('.cm-line')].find((n) => n.innerText.includes('章节1的第 0 段'))
+        const box = line?.getBoundingClientRect()
+        return JSON.stringify({ x: box ? Math.round(box.left + 24) : 0, y: box ? Math.round(box.top + box.height / 2) : 0 })
+      })()`))
+      if (!point.x || !point.y) return false
+      await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+      await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+      const before = await page.eval(`document.querySelector('.status-left')?.innerText`)
+      await page.eval(`(() => { const tabs = [...document.querySelectorAll('.tab')]; tabs[0]?.click(); tabs.find((n) => n.innerText.includes('过程稿'))?.click() })()`)
+      await sleep(300)
+      const after = await page.eval(`document.querySelector('.status-left')?.innerText`)
+      return { ok: before === after && /第 [3-9] 行/.test(after), detail: `${before} → ${after}` }
+    })
+
+    process.stdout.write('\nMarkdown 阅读管线\n')
+    const syntaxNote = [
+      '---', 'title: 混合样例', '---', '',
+      '### **混合标题**', '',
+      '中文 English 😀，*斜体*、~~删除~~、[链接](https://example.com)。', '',
+      '- [ ] 待办', '1. 有序项', '', '> 引用段落', '', '---', '',
+      '| **列名** | 值 |', '| --- | --- |', '| *一* | ~~二~~ |', '',
+      '```ts', 'const answer = 42', '```', '',
+      '$x^2$', '', '> [!note] 提示', '> **内容**', '',
+      '[[研究记录]]', '', '```mermaid', 'graph LR', 'A-->B', '```', '',
+      '安全的 <strong>行内 HTML</strong>。', '', '<iframe src="https://example.com"></iframe>', ''
+    ].join('\r\n')
+    writeFileSync(path.join(vault, '过程稿.md'), syntaxNote)
+    await waitFor(page, `document.querySelector('.cm-content')?.innerText.includes('混合标题')`, 12000)
+    await shot(page, 'markdown-syntax')
+    await probe('CRLF 混合样例中标题、表格、公式、callout 与 Mermaid 均进入阅读态', async () => {
+      const result = JSON.parse(await page.eval(`(() => {
+        const lines = [...document.querySelectorAll('.cm-line')]
+        const heading = lines.find((n) => n.innerText.includes('混合标题'))
+        return JSON.stringify({ heading: heading?.innerText.trim(), table: !!document.querySelector('.md-table th strong'), math: !!document.querySelector('.md-math'), callout: !!document.querySelector('.md-callout strong'), mermaid: !!document.querySelector('.md-mermaid'), iframe: !!document.querySelector('iframe') })
+      })()`))
+      return { ok: result.heading === '混合标题' && result.table && result.math && result.callout && result.mermaid && !result.iframe, detail: JSON.stringify(result) }
+    })
+    await probe('公式与 Mermaid 完成实际渲染', async () =>
+      await waitFor(page, `!!document.querySelector('.md-math .katex') && !!document.querySelector('.md-mermaid svg')`, 12000)
+    )
+    await probe('恶意 HTML 显示为源码且没有执行节点', async () => {
+      const state = JSON.parse(await page.eval(`JSON.stringify({ html: [...document.querySelectorAll('.md-html')].map((n) => n.textContent), iframe: !!document.querySelector('iframe'), sourceLine: [...document.querySelectorAll('.cm-line')].filter((n) => n.innerText.includes('iframe')).map((n) => n.innerText) })`))
+      return { ok: state.html.some((value) => value.includes('<iframe')) && !state.iframe, detail: JSON.stringify(state) }
+    })
+    await probe('阅读装饰不修改 CRLF 文件字节', async () => readFileSync(path.join(vault, '过程稿.md'), 'utf8') === syntaxNote)
+    await probe('点入属性摘要可编辑原始 YAML', async () => {
+      const point = JSON.parse(await page.eval(`(() => { const box = document.querySelector('.md-frontmatter')?.getBoundingClientRect(); return JSON.stringify({ x: box ? Math.round(box.left + 32) : 0, y: box ? Math.round(box.top + box.height / 2) : 0 }) })()`))
+      if (!point.x || !point.y) return false
+      await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+      await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+      return (await page.eval(`[...document.querySelectorAll('.cm-line')].some((n) => n.innerText.includes('title: 混合样例'))`)) === true
+    })
+    await sleep(150)
+    await probe('进入标题后显示原始 Markdown 供编辑', async () => {
+      const point = JSON.parse(await page.eval(`(() => { const line = [...document.querySelectorAll('.cm-line')].find((n) => n.innerText.includes('混合标题')); const text = line?.querySelector('.md-strong')?.getBoundingClientRect(); return JSON.stringify({ x: text ? Math.round(text.left + text.width / 2) : 0, y: text ? Math.round(text.top + text.height / 2) : 0 }) })()`))
+      if (!point.x || !point.y) return false
+      await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+      await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+      const lines = await page.eval(`[...document.querySelectorAll('.cm-line')].filter((n) => n.innerText.includes('混合标题')).map((n) => n.innerText)`)
+      return { ok: lines.some((line) => line.includes('### **混合标题**')), detail: JSON.stringify(lines) }
+    })
+    await probe('编辑并保存 CRLF 笔记时只改所输入的字', async () => {
+      await page.key('End', 'End', 0, 35)
+      await page.key('X', 'KeyX', 0, 88, 'X')
+      await page.key('s', 'KeyS', modifier, 83)
+      for (let i = 0; i < 30 && readFileSync(path.join(vault, '过程稿.md'), 'utf8') === syntaxNote; i += 1) await sleep(200)
+      const saved = readFileSync(path.join(vault, '过程稿.md'), 'utf8')
+      return { ok: saved !== syntaxNote && saved.replace('X', '') === syntaxNote && !/(?<!\r)\n/.test(saved), detail: `原长 ${syntaxNote.length}，保存长 ${saved.length}，CRLF ${saved.includes('\r\n')}` }
     })
 
     process.stdout.write('\n画布呈现\n')
@@ -346,6 +470,45 @@ async function main() {
     await probe('只强调变化处', async () =>
       (await page.eval(`document.querySelectorAll('.conflict-emph').length > 0`)) === true
     )
+
+    process.stdout.write('\n长文响应\n')
+    await page.eval(`document.querySelector('.conflict [data-action="disk"]')?.click()`)
+    await page.call('Emulation.clearDeviceMetricsOverride', {})
+    for (let i = 1; i <= 5; i += 1) {
+      const paragraphs = Array.from({ length: 450 }, (_, n) => `第 ${n} 段：这是一段用于观察长文输入和滚动响应的混合文字 English ${i}。`)
+      writeFileSync(path.join(vault, `长文样例${i}.md`), [`# 长文样例${i}`, '', ...paragraphs].join('\n\n'))
+    }
+    await probe('五篇长文的打开、输入与滚动都有可记录的响应', async () => {
+      const rows = await waitFor(page, `document.querySelectorAll('.tree-note').length >= 8`)
+      if (!rows) return false
+      const samples = JSON.parse(await page.eval(`(async () => {
+        const out = []
+        for (let i = 1; i <= 5; i++) {
+          const row = [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('长文样例' + i))
+          if (!row) break
+          const start = performance.now()
+          row.click()
+          for (let tick = 0; tick < 120; tick++) {
+            if (document.querySelector('.tab[aria-selected="true"]')?.innerText.includes('长文样例' + i) && document.querySelector('.cm-content')?.innerText.includes('第 0 段')) break
+            await new Promise((resolve) => setTimeout(resolve, 25))
+          }
+          const open = performance.now() - start
+          const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+          if (!view) break
+          const inputStart = performance.now()
+          view.dispatch({ changes: { from: view.state.doc.length, insert: '测' } })
+          const input = performance.now() - inputStart
+          const scrollStart = performance.now()
+          view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+          const scroll = performance.now() - scrollStart
+          out.push({ bytes: view.state.doc.length, open: Math.round(open), input: Math.round(input), scroll: Math.round(scroll) })
+        }
+        return JSON.stringify(out)
+      })()`))
+      const maxInput = Math.max(...samples.map((sample) => sample.input))
+      return { ok: samples.length === 5 && samples.every((sample) => sample.bytes > 18_000 && sample.open < 5000 && sample.scroll < 1000) && maxInput < 250, detail: JSON.stringify(samples) }
+    })
 
     process.stdout.write('\n收尾\n')
     check('整轮没有未捕获异常', page.errors.length === 0, page.errors.slice(0, 1).join(''))

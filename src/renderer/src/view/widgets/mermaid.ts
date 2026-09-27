@@ -1,5 +1,6 @@
-import { WidgetType } from '@codemirror/view'
+import { WidgetType, type EditorView } from '@codemirror/view'
 import type { MermaidRef } from '@markdown'
+import DOMPurify from 'dompurify'
 
 let mermaidLoader: Promise<{ default: MermaidApi }> | null = null
 let seq = 0
@@ -24,14 +25,14 @@ export class MermaidWidget extends WidgetType {
     return this.mermaid.value === other.mermaid.value && this.dark === other.dark
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view?: EditorView): HTMLElement {
     const el = document.createElement('div')
     el.className = 'md-mermaid'
     el.setAttribute('role', 'img')
     el.setAttribute('aria-label', '图表')
     el.textContent = this.mermaid.value
     const token = ++seq
-    void paint(el, this.mermaid.value, token, this.dark, () => this.dead)
+    void paint(el, this.mermaid.value, token, this.dark, () => this.dead, () => view?.requestMeasure())
     return el
   }
 
@@ -64,16 +65,25 @@ async function paint(
   value: string,
   token: number,
   dark: boolean,
-  isDead: () => boolean
+  isDead: () => boolean,
+  measure: () => void
 ): Promise<void> {
   try {
     const mermaid = await loadMermaid(dark)
     if (isDead() || !el.isConnected) return
     const { svg } = await mermaid.render(`rgtm${token}`, value)
     if (isDead() || !el.isConnected) return
-    el.innerHTML = svg
+    const safe = DOMPurify.sanitize(svg, {
+      USE_PROFILES: { svg: true, svgFilters: true },
+      FORBID_TAGS: ['foreignObject', 'script', 'iframe'],
+      RETURN_DOM_FRAGMENT: true
+    })
+    if (!safe.querySelector('svg')) throw new Error('Mermaid 图形未通过净化')
+    el.replaceChildren(safe)
+    measure()
   } catch {
     if (isDead()) return
     el.textContent = value
+    measure()
   }
 }

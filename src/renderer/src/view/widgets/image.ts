@@ -1,4 +1,4 @@
-import { WidgetType } from '@codemirror/view'
+import { WidgetType, type EditorView } from '@codemirror/view'
 import type { ImageRef } from '@markdown'
 import { joinVaultRel, vaultMediaUrl } from '../../../../shared/vault-rel.ts'
 import type { NoteHost } from '../host.ts'
@@ -19,7 +19,7 @@ export class ImageWidget extends WidgetType {
       && this.resolved() === other.resolved()
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view?: EditorView): HTMLElement {
     const rel = this.resolved()
     if (!rel || !this.host.vaultHas(rel)) {
       return placeholder(this.image.alt, this.image.url)
@@ -28,8 +28,10 @@ export class ImageWidget extends WidgetType {
     img.className = 'md-image'
     img.alt = this.image.alt || '图片'
     img.src = vaultMediaUrl(rel)
+    img.addEventListener('load', () => view?.requestMeasure(), { once: true })
     img.addEventListener('error', () => {
       img.replaceWith(placeholder(this.image.alt, this.image.url))
+      view?.requestMeasure()
     })
     return img
   }

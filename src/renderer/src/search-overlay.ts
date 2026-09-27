@@ -1,5 +1,4 @@
 import type { SearchHit } from '@shared'
-import { icon } from './icons.ts'
 import { openOverlay } from './overlay.ts'
 import { renderSearchResults } from './search.ts'
 
@@ -30,12 +29,29 @@ export function createSearchOverlay(handlers: SearchOverlayHandlers): SearchOver
 
   const run = async (input: HTMLInputElement, results: HTMLElement): Promise<void> => {
     const mine = ++token
-    const hits = await handlers.search(input.value)
-    if (mine !== token || !overlay?.isOpen()) return
-    renderSearchResults(results, hits, input.value, (relPath) => {
-      handlers.onOpenNote(relPath)
-      close()
-    })
+    if (!input.value.trim()) {
+      results.replaceChildren()
+      const hint = document.createElement('p')
+      hint.className = 'overlay-hint'
+      hint.textContent = '输入关键字搜索标题和正文。'
+      results.append(hint)
+      return
+    }
+    try {
+      const hits = await handlers.search(input.value)
+      if (mine !== token || !overlay?.isOpen()) return
+      renderSearchResults(results, hits, input.value, (relPath) => {
+        handlers.onOpenNote(relPath)
+        close()
+      })
+      const heading = document.createElement('p')
+      heading.className = 'overlay-results-title'
+      heading.textContent = '搜索结果'
+      results.prepend(heading)
+    } catch {
+      if (mine !== token || !overlay?.isOpen()) return
+      results.textContent = '搜索暂时不可用，请稍后重试。'
+    }
   }
 
   const open = (): void => {
@@ -51,15 +67,21 @@ export function createSearchOverlay(handlers: SearchOverlayHandlers): SearchOver
     overlay = current
 
     const head = document.createElement('div')
-    head.className = 'overlay-search-head'
-    head.append(icon('note', 'icon-type'))
+    head.className = 'overlay-search-title'
+    const title = document.createElement('span')
+    title.textContent = '搜索笔记'
+    const escape = document.createElement('kbd')
+    escape.textContent = 'Esc'
+    head.append(title, escape)
     const input = document.createElement('input')
     input.type = 'search'
     input.className = 'overlay-search-input'
     input.placeholder = '搜标题或正文'
     input.setAttribute('aria-label', '搜标题或正文')
     input.autocomplete = 'off'
-    head.append(input)
+    const field = document.createElement('div')
+    field.className = 'overlay-search-head'
+    field.append(input)
 
     const results = document.createElement('div')
     results.className = 'overlay-search-results'
@@ -70,7 +92,7 @@ export function createSearchOverlay(handlers: SearchOverlayHandlers): SearchOver
 
     const root = current.root
     root.classList.add('overlay-search')
-    root.append(head, results)
+    root.append(head, field, results)
 
     input.addEventListener('input', () => {
       if (timer != null) window.clearTimeout(timer)

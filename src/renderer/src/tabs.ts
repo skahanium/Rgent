@@ -11,6 +11,8 @@ export type Tab = {
   /** 上次读盘或成功写盘的整文件修订值。 */
   revision: string
   dirty: boolean
+  /** Editor selection kept per open tab; document bytes remain the only persisted content. */
+  selection?: { anchor: number; head: number }
 }
 
 export type PendingWrite = {

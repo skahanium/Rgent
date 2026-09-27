@@ -1,4 +1,4 @@
-export { compile, recoverCompile } from './pipeline.ts'
+export { compile, compileFragment, recoverCompile } from './pipeline.ts'
 export { AI_MARKER, PROMPT_MARKER, markerLine, parseMarker } from './identity.ts'
 export type { BlockIdentity, MarkerParse } from './identity.ts'
 export {
@@ -37,3 +37,5 @@ export { listedStages, ALL_STAGES } from './stages/registry.ts'
 export { inViewport } from './viewport.ts'
 export { expandToLineBlock, planWidgets, rangesOverlap, rangeInDoc } from './view-plan.ts'
 export type { PlannedWidget } from './view-plan.ts'
+export { planPresentation } from './presentation.ts'
+export type { PresentationPlan } from './presentation.ts'
