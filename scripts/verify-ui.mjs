@@ -170,6 +170,21 @@ async function main() {
     const nightTokens = await page.eval(`getComputedStyle(document.documentElement).getPropertyValue('--surface-canvas').trim()`)
     check('主题跟随系统：夜间换了一套 token', dayTokens !== nightTokens, `${dayTokens} → ${nightTokens}`)
     check('CM6 也跟着换（画布文字色走 token）', (await page.eval(`getComputedStyle(document.querySelector('.cm-content')).color !== 'rgb(28, 31, 35)'`)) === true)
+    // 窗口是 1200×800，内容区少了标题栏，所以量 innerWidth/innerHeight。
+    const size = JSON.parse(await page.eval(`JSON.stringify({ w: window.innerWidth, h: window.innerHeight })`))
+    check('默认窗口就是验收尺寸 1200×800', size.w === 1200 && size.h >= 740, `${size.w}×${size.h}（内容区）`)
+    // 注意：setEmulatedMedia 会整体替换特性列表，所以这条要放在配色模拟之后，
+    // 否则会把上面的夜间模拟冲掉（第一版就这么写错了）。
+    await page.call('Emulation.setEmulatedMedia', {
+      features: [
+        { name: 'prefers-color-scheme', value: 'dark' },
+        { name: 'prefers-reduced-motion', value: 'reduce' }
+      ]
+    })
+    await sleep(300)
+    const motion = await page.eval(`getComputedStyle(document.querySelector('.tab-wrap')).transitionDuration`)
+    check('减少动态效果：过渡归零', motion === '0s', motion)
+    check('减少动态效果不影响主题', (await page.eval(`document.documentElement.dataset.theme`)) === 'night')
 
     process.stdout.write('\n窄窗与长内容\n')
     await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
