@@ -25,6 +25,13 @@ const noteHostFacet = Facet.define<NoteHost, NoteHost>({
 })
 
 /**
+ * 主题是不是夜间。装饰要跟着它重建——mermaid 的 SVG 自带主题，不重建就还是旧色。
+ */
+const themeFacet = Facet.define<boolean, boolean>({
+  combine: (values) => values[0] ?? false
+})
+
+/**
  * 装饰必须由 **StateField** 提供，不能由 ViewPlugin 提供。
  *
  * CM6 明确禁止插件产生块装饰（`Block decorations may not be specified via plugins`），
@@ -39,10 +46,10 @@ type MarkdownState = {
   decorations: DecorationSet
 }
 
-function computeState(source: string, host: NoteHost, previous?: CompileResult): MarkdownState {
+function computeState(source: string, host: NoteHost, dark: boolean, previous?: CompileResult): MarkdownState {
   try {
     const result = compile(source, previous ? { prev: previous } : {})
-    return { result, decorations: decorationsFor(result, source, host) }
+    return { result, decorations: decorationsFor(result, source, host, dark) }
   } catch (err) {
     const result = recoverCompile(
       source,
@@ -51,7 +58,7 @@ function computeState(source: string, host: NoteHost, previous?: CompileResult):
       previous
     )
     try {
-      return { result, decorations: decorationsFor(result, source, host) }
+      return { result, decorations: decorationsFor(result, source, host, dark) }
     } catch {
       return { result, decorations: Decoration.none }
     }
@@ -68,16 +75,28 @@ export const markdownField = StateField.define<MarkdownState>({
   // 注意：这里不能 `state.field(markdownField)` 读自己——CM6 会报
   // 「Cyclic dependency between fields and/or facets」，代价是整个界面渲染不出来。
   // 上一代结果由 update 的 value 参数直接带过来。
-  create: (state) => computeState(state.doc.toString(), state.facet(noteHostFacet)),
+  create: (state) =>
+    computeState(state.doc.toString(), state.facet(noteHostFacet), state.facet(themeFacet)),
   update: (value, tr) => {
     const hostChanged = tr.startState.facet(noteHostFacet) !== tr.state.facet(noteHostFacet)
-    if (!tr.docChanged && !hostChanged) return value
-    return computeState(tr.state.doc.toString(), tr.state.facet(noteHostFacet), value.result)
+    const themeChanged = tr.startState.facet(themeFacet) !== tr.state.facet(themeFacet)
+    if (!tr.docChanged && !hostChanged && !themeChanged) return value
+    return computeState(
+      tr.state.doc.toString(),
+      tr.state.facet(noteHostFacet),
+      tr.state.facet(themeFacet),
+      value.result
+    )
   },
   provide: (field) => EditorView.decorations.from(field, (value) => value.decorations)
 })
 
-function decorationsFor(result: CompileResult, source: string, host: NoteHost): DecorationSet {
+function decorationsFor(
+  result: CompileResult,
+  source: string,
+  host: NoteHost,
+  dark: boolean
+): DecorationSet {
   const decos: Range<Decoration>[] = []
   const docLen = source.length
   // 整篇一次算完：CM6 只会为可见范围建 DOM，所以这里不必再按视口裁一遍。
@@ -98,7 +117,7 @@ function decorationsFor(result: CompileResult, source: string, host: NoteHost): 
   for (const widget of widgets) {
     if (widget.range.start < 0 || widget.range.end > docLen || widget.range.end <= widget.range.start) continue
     try {
-      decos.push(decorationForWidget(widget, host).range(widget.range.start, widget.range.end))
+      decos.push(decorationForWidget(widget, host, dark).range(widget.range.start, widget.range.end))
     } catch {
       continue
     }
@@ -197,26 +216,33 @@ export const identityLock = EditorState.transactionFilter.of((tr) => {
 })
 
 
+// 颜色一律走 token（围栏：颜色只有一个来源），这里不写死任何色值。
 const theme = EditorView.theme({
   '&': {
     height: '100%',
     backgroundColor: 'transparent',
+    color: 'var(--text-body)',
     fontSize: '17px'
   },
   '.cm-scroller': {
-    fontFamily: '"Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif',
+    fontFamily: 'var(--font-body)',
     lineHeight: '1.65'
   },
   '.cm-content': {
-    caretColor: '#215c45',
+    caretColor: 'var(--accent-focus)',
     padding: '28px 8px 48px',
     maxWidth: '42rem',
     margin: '0 auto'
   },
   '.cm-focused': { outline: 'none' },
-  '.cm-cursor': { borderLeftColor: '#215c45' },
+  '.cm-cursor': { borderLeftColor: 'var(--accent-focus)' },
   '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
-    backgroundColor: '#cde3d6'
+    backgroundColor: 'var(--accent-soft)'
+  },
+  '.cm-gutters': {
+    backgroundColor: 'transparent',
+    color: 'var(--text-muted)',
+    border: 'none'
   }
 })
 
@@ -225,6 +251,8 @@ export type EditorHost = {
   getText: () => string
   setText: (text: string, host?: NoteHost) => void
   setNoteHost: (host: NoteHost) => void
+  /** 只跟着系统主题走；不写盘、不进撤销栈。 */
+  setTheme: (night: boolean) => void
   focus: () => void
   destroy: () => void
 }
@@ -241,6 +269,9 @@ export function mountEditor(
   // 撤销历史按笔记隔离：整篇替换若留在历史里，切 tab 之后按撤销会把上一篇的文本
   // 填进当前篇（随后还会被自动保存写盘）——实测过。
   const historyCompartment = new Compartment()
+  // 主题：CM6 自带的默认样式跟 darkTheme 走，装饰跟 themeFacet 走。
+  const themeCompartment = new Compartment()
+  let dark = false
   const state = EditorState.create({
     doc: '',
     extensions: [
@@ -258,6 +289,7 @@ export function mountEditor(
       ]),
       EditorView.lineWrapping,
       theme,
+      themeCompartment.of([EditorView.darkTheme.of(false), themeFacet.of(false)]),
       hostCompartment.of(noteHostFacet.of(emptyNoteHost)),
       markdownField,
       identityLock,
@@ -287,6 +319,17 @@ export function mountEditor(
     },
     setNoteHost: (host) => {
       view.dispatch({ effects: hostCompartment.reconfigure(noteHostFacet.of(host)) })
+    },
+    setTheme: (night) => {
+      if (night === dark) return
+      dark = night
+      // 只重配置，不产生文档事务：主题不该进撤销栈、也不该触发保存。
+      view.dispatch({
+        effects: themeCompartment.reconfigure([
+          EditorView.darkTheme.of(night),
+          themeFacet.of(night)
+        ])
+      })
     },
     focus: () => view.focus(),
     destroy: () => view.destroy()

@@ -1,17 +1,116 @@
+/*
+ * 语义 token。角色与相互关系是围栏（docs/frontend.md §语义 token）；
+ * 具体数值是实现里可调的，但要过 test/renderer/tokens.test.ts 的对比度门槛。
+ * 取值只用纯 hex，测试直接解析这里算对比度。
+ *
+ * 下面还有一层旧名别名（--bg / --paper / --ink …）：老规则继续引用它们，
+ * 换主题时不用一次性改遍整张表。新写的规则请直接用语义角色。
+ */
 :root {
   color-scheme: light;
-  --bg: #f4efe6;
-  --bg-side: #ebe4d8;
-  --ink: #1f1a16;
-  --muted: #6f675e;
-  --line: #d9d0c3;
-  --accent: #215c45;
-  --accent-weak: #cde3d6;
-  --paper: #faf7f1;
-  --danger: #8c2f21;
-  --shadow: 0 16px 40px rgba(31, 26, 22, 0.12);
-  --ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --text: 'Iowan Old Style', Palatino, 'Palatino Linotype', Georgia, serif;
+
+  --surface-canvas: #ffffff;
+  --surface-nav: #f5f6f8;
+  --surface-overlay: #ffffff;
+
+  --text-body: #1c1f23;
+  --text-heading: #14171a;
+  --text-muted: #5f6570;
+  --text-on-accent: #ffffff;
+
+  --accent-primary: #4a56c8;
+  --accent-solid: #4a56c8;
+  --accent-soft: #e6e8fb;
+  --accent-focus: #4a56c8;
+
+  --border-subtle: #e3e5ea;
+  --border-strong: #878d97;
+
+  --state-hover: #eef0f4;
+  --state-selected: #e6e8fb;
+  --state-disabled: #a8adb6;
+
+  --ai-prompt: #3f4bb5;
+  --ai-answer: #616ab2;
+
+  --status-online: #2f6fd0;
+  --status-offline: #6b7178;
+  --status-error: #b3261e;
+
+  --font-body: 'Iowan Old Style', Palatino, 'Palatino Linotype', Georgia, serif;
+  --font-ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  --shadow-1: 0 1px 2px rgba(20, 23, 26, 0.06);
+  --shadow-2: 0 16px 40px rgba(20, 23, 26, 0.12);
+
+  --motion-fast: 90ms;
+  --motion-base: 140ms;
+
+  /* 旧名别名：只在这里定义一次，换主题自动跟随。 */
+  --bg: var(--surface-nav);
+  --bg-side: var(--state-hover);
+  --ink: var(--text-body);
+  --muted: var(--text-muted);
+  --line: var(--border-subtle);
+  --accent: var(--accent-primary);
+  --accent-weak: var(--accent-soft);
+  --paper: var(--surface-canvas);
+  --danger: var(--status-error);
+  --shadow: var(--shadow-2);
+  --ui: var(--font-ui);
+  --text: var(--font-body);
+}
+
+[data-theme='night'] {
+  color-scheme: dark;
+
+  --surface-canvas: #171b21;
+  --surface-nav: #12161b;
+  --surface-overlay: #1d222a;
+
+  --text-body: #dfe3e8;
+  --text-heading: #f2f5f8;
+  --text-muted: #9aa3ae;
+  --text-on-accent: #ffffff;
+
+  --accent-primary: #8b96f2;
+  --accent-solid: #5560cf;
+  --accent-soft: #262d47;
+  --accent-focus: #8b96f2;
+
+  --border-subtle: #2a3038;
+  --border-strong: #646d79;
+
+  --state-hover: #222831;
+  --state-selected: #262d47;
+  --state-disabled: #6b737d;
+
+  --ai-prompt: #a9b4ff;
+  --ai-answer: #9fa8c9;
+
+  --status-online: #6fa8ff;
+  --status-offline: #7c848f;
+  --status-error: #ff8a80;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 16px 40px rgba(0, 0, 0, 0.5);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+  }
+
+  *, *::before, *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -214,8 +313,8 @@ summary:focus-visible {
   font-weight: 650;
 }
 
-.tier-forbidden { color: var(--danger); background: #f6e6e2; }
-.tier-follow { color: var(--accent); background: var(--accent-weak); }
+.tier-forbidden { color: var(--status-error); background: color-mix(in srgb, var(--status-error) 12%, var(--surface-canvas)); }
+.tier-follow { color: var(--accent-primary); background: var(--accent-soft); }
 
 .tier-menu {
   position: fixed;
@@ -380,8 +479,8 @@ summary:focus-visible {
 .pick-btn,
 .modal-actions button[value='ok'],
 .modal-actions button:last-child {
-  background: var(--accent);
-  color: #f7fff9;
+  background: var(--accent-solid);
+  color: var(--text-on-accent);
   padding: 0 16px;
 }
 
@@ -395,7 +494,7 @@ summary:focus-visible {
 }
 
 .modal::backdrop {
-  background: rgba(31, 26, 22, 0.35);
+  background: rgba(0, 0, 0, 0.45);
 }
 
 .modal h2 { margin: 0 0 8px; font-size: 1.15rem; }
@@ -406,7 +505,7 @@ summary:focus-visible {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 0 10px;
-  background: #fff;
+  background: var(--surface-canvas);
 }
 
 .modal-actions {
@@ -423,7 +522,7 @@ summary:focus-visible {
 .md-strong { font-weight: 700; }
 .md-emphasis { font-style: italic; }
 .md-inlineCode {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 0.9em;
   background: var(--bg-side);
   border-radius: 4px;
@@ -434,7 +533,7 @@ summary:focus-visible {
   border-collapse: collapse;
   width: 100%;
   margin: 8px 0;
-  background: #fff;
+  background: var(--surface-canvas);
   font-family: var(--ui);
   font-size: 0.95rem;
 }
@@ -498,14 +597,14 @@ summary:focus-visible {
 }
 
 .md-callout-warning {
-  border-left-color: #8a5a12;
-  background: #f3ead6;
+  border-left-color: var(--status-offline);
+  background: var(--state-hover);
 }
 
 .md-callout-important,
 .md-callout-caution {
-  border-left-color: var(--danger);
-  background: #f6e6e2;
+  border-left-color: var(--status-error);
+  background: color-mix(in srgb, var(--status-error) 12%, var(--surface-canvas));
 }
 
 .md-wikilink {
@@ -536,7 +635,7 @@ summary:focus-visible {
   overflow-x: auto;
   margin: 8px 0;
   padding: 10px;
-  background: #fff;
+  background: var(--surface-canvas);
   border: 1px solid var(--line);
   border-radius: 8px;
   font-family: var(--ui);
@@ -571,9 +670,9 @@ summary:focus-visible {
 
 .rgent-marker-ai .rgent-marker-label {
   border-style: solid;
-  border-color: #c9a227;
-  background: #fdf6dd;
-  color: #7a5c00;
+  border-color: var(--ai-prompt);
+  background: var(--accent-soft);
+  color: var(--ai-prompt);
 }
 
 .rgent-marker button {
@@ -603,8 +702,8 @@ summary:focus-visible {
 
 /* 未采纳的 AI 块：整段有底色和左边线，一眼能看出不是自己写的。 */
 .rgent-block-ai {
-  background: #fdf6dd;
-  border-left: 2px solid #c9a227;
+  background: var(--accent-soft);
+  border-left: 2px solid var(--ai-prompt);
   padding-left: 10px;
   margin-left: -12px;
 }

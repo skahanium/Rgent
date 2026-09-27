@@ -7,6 +7,7 @@ import { renderSearchResults } from './search.ts'
 import { applySaved, pendingWrites, type Tab } from './tabs.ts'
 import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
 import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.ts'
+import type { Theme } from './theme.ts'
 
 const SAVE_MS = 800
 
@@ -93,6 +94,12 @@ export async function start(root: HTMLElement): Promise<void> {
   }, () => {
     void flushSave()
   })
+
+  // 主题跟着系统走（围栏：自动切换方式未锁，手动开关归设置阶段）。
+  window.addEventListener('rgent:theme', (event) => {
+    editor.setTheme((event as CustomEvent<Theme>).detail === 'night')
+  })
+  editor.setTheme(document.documentElement.dataset.theme === 'night')
 
   treeToggle.addEventListener('click', () => {
     const open = treePanel.hasAttribute('hidden')

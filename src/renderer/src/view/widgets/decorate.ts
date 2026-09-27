@@ -9,7 +9,11 @@ import { MermaidWidget } from './mermaid.ts'
 import { TableWidget } from './table.ts'
 import { WikilinkWidget } from './wikilink.ts'
 
-export function decorationForWidget(widget: PlannedWidget, host: NoteHost): Decoration {
+export function decorationForWidget(
+  widget: PlannedWidget,
+  host: NoteHost,
+  dark = false
+): Decoration {
   switch (widget.kind) {
     case 'table':
       return Decoration.replace({ widget: new TableWidget(widget.table), block: true })
@@ -25,7 +29,8 @@ export function decorationForWidget(widget: PlannedWidget, host: NoteHost): Deco
     case 'wikilink':
       return Decoration.replace({ widget: new WikilinkWidget(widget.wikilink, host) })
     case 'mermaid':
-      return Decoration.replace({ widget: new MermaidWidget(widget.mermaid), block: true })
+      // mermaid 的 SVG 自带配色，主题换了要重建才跟着变（见 MermaidWidget）。
+      return Decoration.replace({ widget: new MermaidWidget(widget.mermaid, dark), block: true })
     case 'marker':
       // 行内部件：只换掉注释文本。块级替换会吞掉紧随其后的行装饰（见 view-plan.ts）。
       return Decoration.replace({ widget: new MarkerWidget(widget) })

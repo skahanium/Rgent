@@ -12,12 +12,16 @@ type MermaidApi = {
 export class MermaidWidget extends WidgetType {
   private dead = false
 
-  constructor(readonly mermaid: MermaidRef) {
+  constructor(
+    readonly mermaid: MermaidRef,
+    readonly dark = false
+  ) {
     super()
   }
 
   eq(other: MermaidWidget): boolean {
-    return this.mermaid.value === other.mermaid.value
+    // 主题也算身份：变了就要重建，否则 SVG 还是旧配色。
+    return this.mermaid.value === other.mermaid.value && this.dark === other.dark
   }
 
   toDOM(): HTMLElement {
@@ -27,7 +31,7 @@ export class MermaidWidget extends WidgetType {
     el.setAttribute('aria-label', '图表')
     el.textContent = this.mermaid.value
     const token = ++seq
-    void paint(el, this.mermaid.value, token, () => this.dead)
+    void paint(el, this.mermaid.value, token, this.dark, () => this.dead)
     return el
   }
 
@@ -40,26 +44,30 @@ export class MermaidWidget extends WidgetType {
   }
 }
 
-async function loadMermaid(): Promise<MermaidApi> {
+async function loadMermaid(dark: boolean): Promise<MermaidApi> {
   if (!mermaidLoader) {
-    mermaidLoader = import('mermaid').then((mod) => {
-      const api = mod.default as unknown as MermaidApi
-      api.initialize({
-        startOnLoad: false,
-        securityLevel: 'strict',
-        theme: 'neutral',
-        fontFamily: 'ui-sans-serif, system-ui, sans-serif'
-      })
-      return { default: api }
-    })
+    mermaidLoader = import('mermaid').then((mod) => ({ default: mod.default as unknown as MermaidApi }))
   }
   const mod = await mermaidLoader
+  // initialize 是全局的，每次渲染前按当前主题设一次即可。
+  mod.default.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: dark ? 'dark' : 'neutral',
+    fontFamily: 'var(--font-ui)'
+  })
   return mod.default
 }
 
-async function paint(el: HTMLElement, value: string, token: number, isDead: () => boolean): Promise<void> {
+async function paint(
+  el: HTMLElement,
+  value: string,
+  token: number,
+  dark: boolean,
+  isDead: () => boolean
+): Promise<void> {
   try {
-    const mermaid = await loadMermaid()
+    const mermaid = await loadMermaid(dark)
     if (isDead() || !el.isConnected) return
     const { svg } = await mermaid.render(`rgtm${token}`, value)
     if (isDead() || !el.isConnected) return
