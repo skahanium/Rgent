@@ -357,11 +357,10 @@ input:focus-visible,
 /* 文件夹平时是文件夹图标，悬停或聚焦时同一位置换成展开／折叠的图标。 */
 .tree-dir .icon-folder-open { display: none; }
 .tree-dir:hover .icon-folder,
-.tree-dir:focus-visible .icon-folder,
-.tree-dir[aria-expanded='false'] .icon-folder { display: none; }
+.tree-dir:focus-visible .icon-folder { display: none; }
 .tree-dir:hover .icon-folder-open,
-.tree-dir:focus-visible .icon-folder-open,
-.tree-dir[aria-expanded='false'] .icon-folder-open { display: block; }
+.tree-dir:focus-visible .icon-folder-open { display: block; }
+.tree-dir[aria-expanded='true'] .icon-folder-open { transform: rotate(90deg); }
 
 .tree-row:hover { background: var(--state-hover); }
 
@@ -712,7 +711,7 @@ input:focus-visible,
   margin-top: 16px;
 }
 
-.md-heading { font-weight: 700; }
+.md-heading { font-family: var(--font-ui); font-weight: 700; }
 .md-h1 { font-size: 1.7rem; }
 .md-h2 { font-size: 1.4rem; }
 .md-h3 { font-size: 1.2rem; }
@@ -857,7 +856,7 @@ input:focus-visible,
 }
 
 /* `>` 落在页边：先向内缩一个字宽再把它拉回左边，正文因此与后面的回答对齐。 */
-.rgent-block-command::before {
+.rgent-block-command-first::before {
   content: '>';
   display: inline-block;
   width: 1em;
@@ -1001,7 +1000,7 @@ input:focus-visible,
 
 .conflict-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 14px;
   max-height: min(48vh, 420px);
   overflow: auto;
@@ -1060,7 +1059,7 @@ input:focus-visible,
 
 .conflict-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-top: 14px;
 }
@@ -1094,11 +1093,8 @@ input:focus-visible,
   font-size: 0.72rem;
   line-height: 1.45;
 }
-
-@media (max-width: 880px) {
-  .conflict-grid { grid-template-columns: 1fr; }
-  .conflict-actions { grid-template-columns: 1fr; }
-}
+.conflict-continue { margin-top: 12px; }
+.conflict-continue button { min-width: 160px; }
 
 /*
  * 窄窗（围栏 §可访问性与验收：窗口缩到 800×560 时右反链与正文都不能无声消失）。

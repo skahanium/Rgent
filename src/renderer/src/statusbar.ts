@@ -1,4 +1,4 @@
-import { countWords, proseOf, type MarkerRef } from '@markdown'
+import type { MarkerRef } from '@markdown'
 
 /**
  * 底栏。围栏 docs/frontend.md §编辑画布与辅助信息：
@@ -32,9 +32,35 @@ export function statusModel(input: StatusInput): StatusModel {
   }
 }
 
-/** 正文（含标记行）→ 字数。标记行不算，机器语法不是文章；口径与索引侧同一份。 */
+/** 正文（含标记行）→ 字数。标记行不算，机器语法不是文章。 */
 export function wordsOf(body: string, markers: readonly MarkerRef[]): number {
-  return countWords(proseOf(body, markers))
+  const ranges = [...markers].map(({ range }) => range).sort((a, b) => a.start - b.start)
+  const cjk = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/u
+  const wordish = /[\p{L}\p{N}_]/u
+  let count = 0
+  let inRun = false
+  let rangeIndex = 0
+  for (let at = 0; at < body.length;) {
+    const range = ranges[rangeIndex]
+    if (range && at >= range.start) {
+      at = Math.max(at, range.end)
+      rangeIndex += 1
+      inRun = false
+      continue
+    }
+    const char = String.fromCodePoint(body.codePointAt(at)!)
+    if (cjk.test(char)) {
+      count += 1
+      inRun = false
+    } else if (wordish.test(char)) {
+      if (!inRun) count += 1
+      inRun = true
+    } else {
+      inRun = false
+    }
+    at += char.length
+  }
+  return count
 }
 
 export function renderStatusbar(host: HTMLElement, model: StatusModel): void {

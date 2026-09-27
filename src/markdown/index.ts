@@ -12,7 +12,6 @@ export {
 } from './identity-edit.ts'
 export type { IdentityUnit, TextEdit } from './identity-edit.ts'
 export { editBlocked, lockedRanges, planIdentityEdit } from './identity-lock.ts'
-export { countWords, proseOf } from './prose.ts'
 export type { EditChange, EditPlan } from './identity-lock.ts'
 export { LEDGER_ANCHOR, composeSource, findLedgerStart, partitionSource, preferDiskLedger } from './partition.ts'
 export { STAGE_IDS, DEFAULT_STAGES } from './types.ts'

@@ -12,12 +12,14 @@
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const PORT = 9577
+const require = createRequire(import.meta.url)
 const results = []
 let failures = 0
 
@@ -97,8 +99,17 @@ function makePage(send, close) {
   }
 }
 
-async function connect() {
-  const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json()
+async function availablePort() {
+  const server = createServer()
+  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  const port = typeof address === 'object' && address ? address.port : 0
+  await new Promise((resolve) => server.close(resolve))
+  return port
+}
+
+async function connect(port) {
+  const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()
   const target = list.find((entry) => entry.type === 'page')
   if (!target) throw new Error('没有找到窗口页面')
   const socket = new WebSocket(target.webSocketDebuggerUrl)
@@ -127,6 +138,8 @@ const longNote = (() => {
 })()
 
 async function main() {
+  const port = await availablePort()
+  const electron = require('electron')
   const workdir = mkdtempSync(path.join(tmpdir(), 'rgent-ui-'))
   const profile = path.join(workdir, 'profile')
   const vault = path.join(workdir, 'vault')
@@ -136,34 +149,46 @@ async function main() {
   writeFileSync(path.join(vault, '研究记录.md'), note)
   writeFileSync(path.join(vault, '过程稿.md'), longNote)
   writeFileSync(path.join(vault, '一个特别特别长的笔记文件名用来验证省略号.md'), '短文。\n')
+  mkdirSync(path.join(vault, '资料'))
 
-  const electron = path.join(root, 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron')
+  const modifier = process.platform === 'darwin' ? 4 : 2
+  let startupError = ''
+  let stderr = ''
   const child = spawn(
     electron,
-    ['.', `--user-data-dir=${profile}`, '--no-sandbox', '--disable-gpu', `--remote-debugging-port=${PORT}`],
-    { cwd: root, env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }, stdio: 'ignore' }
+    ['.', `--user-data-dir=${profile}`, '--no-sandbox', '--disable-gpu', `--remote-debugging-port=${port}`],
+    { cwd: root, env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }, stdio: ['ignore', 'ignore', 'pipe'] }
   )
+  child.on('error', (error) => { startupError = error.message })
+  child.stderr?.on('data', (data) => { stderr = `${stderr}${String(data)}`.slice(-12000) })
 
   try {
+    let ready = false
     for (let i = 0; i < 60; i += 1) {
       try {
-        await fetch(`http://127.0.0.1:${PORT}/json/version`)
+        const response = await fetch(`http://127.0.0.1:${port}/json/version`)
+        if (!response.ok) throw new Error(`CDP HTTP ${response.status}`)
+        ready = true
         break
       } catch {
+        if (startupError || child.exitCode != null) break
         await sleep(500)
       }
     }
-    const page = await connect()
+    if (!ready) throw new Error(`Electron/CDP 未启动：${startupError || `exit=${child.exitCode ?? '仍在运行'}`}\n${stderr || '子进程没有错误输出'}`)
+    const page = await connect(port)
 
     process.stdout.write('\n外壳与主题\n')
     await waitFor(page, `document.querySelectorAll('.tree-row').length > 0`)
-    check('窗口起来了，库里三篇都在', (await page.eval(`document.querySelectorAll('.tree-row').length`)) === 3)
+    check('窗口起来了，库里三篇都在', (await page.eval(`document.querySelectorAll('.tree-note').length`)) === 3)
     await page.eval(`document.querySelectorAll('.tree-note')[1].click()`)
     await waitFor(page, `document.querySelectorAll('.tab').length > 0`)
     check('顶栏是 tab 条，没有品牌文字', (await page.eval(`!!document.querySelector('.top .tabs') && !document.querySelector('.brand')`)) === true)
     check('tab 有图标与标题', (await page.eval(`!!document.querySelector('.tab .icon') && document.querySelector('.tab').innerText.trim().length > 0`)) === true)
     check('底栏有行列、字数与库名', (await page.eval(`!!document.querySelector('.status-left')?.innerText && !!document.querySelector('.status-vault')?.innerText`)) === true)
 
+    await page.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] })
+    await sleep(300)
     const dayTokens = await page.eval(`getComputedStyle(document.documentElement).getPropertyValue('--surface-canvas').trim()`)
     await page.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] })
     await sleep(400)
@@ -197,21 +222,31 @@ async function main() {
     const narrowState = JSON.parse(narrow)
     check('800×560：右反链与正文都没消失', narrowState.反链可见 && narrowState.正文宽 > 120, narrow)
     check('长文件名有省略号', (await page.eval(`(() => { const el = [...document.querySelectorAll('.tree-note .tree-label')].find((n) => n.textContent.includes('特别特别长')); return !el || el.scrollWidth > el.clientWidth ? getComputedStyle(el).textOverflow === 'ellipsis' : true })()`)) === true)
+    await probe('文件夹收起仍显示文件夹图标，聚焦时原位变为折叠控件', async () =>
+      (await page.eval(`(() => {
+        const row = document.querySelector('.tree-dir'); if (!row) return false
+        row.click()
+        const folder = row.querySelector('.icon-folder'), toggle = row.querySelector('.icon-folder-open')
+        const normal = getComputedStyle(folder).display !== 'none' && getComputedStyle(toggle).display === 'none'
+        row.focus()
+        const focused = getComputedStyle(folder).display === 'none' && getComputedStyle(toggle).display !== 'none'
+        return normal && focused && row.getAttribute('aria-expanded') === 'false'
+      })()`)) === true
+    )
     await page.call('Emulation.clearDeviceMetricsOverride', {})
     await page.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] })
     await sleep(300)
 
     process.stdout.write('\n键盘可达\n')
     await page.eval(`document.querySelector('.tree-note').focus()`)
-    await page.keyboard ?? null
-    check('搜索浮层：⌘K 打开且焦点在输入框', await (async () => {
-      await page.key('k', 'KeyK', 4, 75)
+    check('搜索浮层：快捷键打开且焦点在输入框', await (async () => {
+      await page.key('k', 'KeyK', modifier, 75)
       const state = await page.eval(`JSON.stringify({ 浮层: document.querySelectorAll('dialog.overlay[open]').length, 焦点: document.activeElement?.className })`)
       return state.includes('"浮层":1') && state.includes('overlay-search-input')
     })())
     check('搜索浮层：Esc 关闭并把焦点还给触发点', await (async () => {
       await page.key('Escape', 'Escape', 0, 27)
-      return (await page.eval(`document.querySelectorAll('dialog.overlay[open]').length === 0`)) === true
+      return (await page.eval(`document.querySelectorAll('dialog.overlay[open]').length === 0 && document.activeElement?.classList.contains('tree-note')`)) === true
     })())
     // 索引在长文上验：先打开长的那篇，再点开其余几篇看多 tab。
     const opened = await page.eval(`(async () => {
@@ -231,10 +266,18 @@ async function main() {
       return widths.size >= 2 && marks.some((m) => m.getAttribute('aria-current') === 'true')
     })()`)) === true)
     check('标题索引：只有 h1–h3', (await page.eval(`[...document.querySelectorAll('.outline-mark')].every((m) => ['1','2','3'].includes(m.dataset.depth))`)) === true)
+    await probe('正文衬线、标题无衬线', async () => {
+      const fonts = JSON.parse(await page.eval(`(() => {
+        const body = getComputedStyle(document.querySelector('.cm-scroller')).fontFamily
+        const heading = getComputedStyle(document.querySelector('.cm-line.md-heading')).fontFamily
+        return JSON.stringify({ body, heading })
+      })()`))
+      return { ok: fonts.body !== fonts.heading && /sans-serif/.test(fonts.heading), detail: `${fonts.body} → ${fonts.heading}` }
+    })
 
     process.stdout.write('\n画布呈现\n')
     // 外部写入带标记的正文：宿主会把它当外部改动收进来，然后重开这一篇。
-    const marked = ['人写的一段。', '', '<!-- rgent:prompt:v1 -->', '把上周的会议整理成周报。', '', '<!-- rgent:ai:v1 -->', '好，这是周报。', ''].join('\n')
+    const marked = ['人写的一段。', '', '<!-- rgent:prompt:v1 -->', '把上周的会议整理成周报。', '保留关键决定。', '', '<!-- rgent:ai:v1 -->', '好，这是周报。', ''].join('\n')
     writeFileSync(path.join(vault, '研究记录.md'), marked)
     // 上一段把长文留成了当前 tab，这里显式切回带标记的那一篇。
     await page.eval(`(async () => {
@@ -246,7 +289,7 @@ async function main() {
     await waitFor(page, `document.querySelectorAll('.rgent-block-command').length > 0`, 15000)
     const before = readFileSync(path.join(vault, '研究记录.md'), 'utf8')
     await probe('提问前缀由显示层产生', async () =>
-      (await page.eval(`(() => { const el = document.querySelector('.cm-line.rgent-block-command'); return el ? getComputedStyle(el, '::before').content : null })()`)) === '">"'
+      (await page.eval(`(() => { const lines = [...document.querySelectorAll('.cm-line.rgent-block-command')]; return lines.length === 2 && getComputedStyle(lines[0], '::before').content === '">"' && getComputedStyle(lines[1], '::before').content === 'none' })()`)) === true
     )
     await probe('回答缩进正好一个字宽', async () => {
       const delta = await page.eval(`(() => {
@@ -283,13 +326,16 @@ async function main() {
     writeFileSync(path.join(vault, '研究记录.md'), `${marked}磁盘改的一行。\n`)
     const appeared = await waitFor(page, `document.querySelectorAll('dialog.conflict[open]').length > 0`, 12000)
     await probe('脏稿遇上外部改动会弹冲突', async () => appeared)
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
+    await sleep(300)
     await probe('并排两栏、各自标清是哪一份', async () => {
       const state = JSON.parse(await page.eval(`(() => {
         const heads = [...document.querySelectorAll('.conflict-head')].map((h) => h.textContent)
         const cols = getComputedStyle(document.querySelector('.conflict-grid')).gridTemplateColumns.split(' ').length
-        return JSON.stringify({ heads, cols })
+        const buttons = [...document.querySelectorAll('.conflict-actions button')].map((b) => b.getBoundingClientRect())
+        return JSON.stringify({ heads, cols, aligned: buttons.length === 2 && buttons[0].right < buttons[1].left })
       })()`))
-      return { ok: state.cols === 2 && state.heads.length === 2, detail: `${state.cols} 栏 / ${state.heads.join(' · ')}` }
+      return { ok: state.cols === 2 && state.heads.length === 2 && state.aligned, detail: `${state.cols} 栏 / ${state.heads.join(' · ')}` }
     })
     await probe('三个动作与各自的舍弃说明', async () =>
       (await page.eval(`document.querySelectorAll('.conflict-action button').length === 3 && document.querySelectorAll('.conflict-note').length === 3`)) === true
@@ -304,9 +350,15 @@ async function main() {
     process.stdout.write('\n收尾\n')
     check('整轮没有未捕获异常', page.errors.length === 0, page.errors.slice(0, 1).join(''))
 
-    rmSync(workdir, { recursive: true, force: true })
   } finally {
-    child.kill('SIGKILL')
+    if (child.exitCode == null) {
+      child.kill()
+      await Promise.race([
+        new Promise((resolve) => child.once('exit', resolve)),
+        sleep(3000).then(() => { if (child.exitCode == null) child.kill('SIGKILL') })
+      ])
+    }
+    rmSync(workdir, { recursive: true, force: true })
   }
 
   process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)

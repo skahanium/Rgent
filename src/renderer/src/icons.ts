@@ -20,10 +20,7 @@ export type IconName =
 
 const PATHS: Record<IconName, string[]> = {
   folder: ['M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 2h4.5A1.5 1.5 0 0 1 14 6.5v5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z'],
-  'folder-open': [
-    'M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 2h4.5A1.5 1.5 0 0 1 14 6.5V7',
-    'M2 7h12l-1.4 5.2a1 1 0 0 1-1 .8H3.6a1 1 0 0 1-1-.8z'
-  ],
+  'folder-open': ['M6 4l4 4-4 4'],
   note: ['M4 2h5l3 3v9H4z', 'M9 2v3h3', 'M6 8h4', 'M6 11h4'],
   pdf: ['M4 2h5l3 3v9H4z', 'M9 2v3h3', 'M6 12V9h1.2a1 1 0 0 1 0 2H6'],
   image: ['M3 3h10v10H3z', 'M3 10l3-3 3 3 2-2 2 2', 'M6.5 6.5h.01'],

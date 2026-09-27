@@ -136,6 +136,7 @@ function decorationsFor(
     if (block.range.start < 0 || block.range.start >= docLen) continue
     const className = block.identity === 'ai' ? 'rgent-block-ai' : 'rgent-block-command'
     let line = lineStartOf(source, block.range.start)
+    if (block.identity === 'command') addLine(line, 'rgent-block-command-first')
     for (;;) {
       addLine(line, className)
       const next = source.indexOf('\n', line)

@@ -79,12 +79,13 @@ export function promptConflict(input: ConflictInput): Promise<ConflictChoice> {
     const panes = document.createElement('div')
     panes.className = 'conflict-actions'
     panes.append(
-      action('window', '听窗口', '上面那一栏会覆盖写盘；磁盘上这份文件的改动会被丢弃。'),
-      action('disk', '听磁盘', '下面那一栏会替换窗口里的稿；窗口里未保存的改动会被丢弃。'),
-      action('continue', '继续编辑', '两份都留着，什么都不写，等你决定。')
+      action('window', '听窗口', '采用左侧窗口稿写盘；右侧磁盘稿的修改会被丢弃。'),
+      action('disk', '听磁盘', '采用右侧磁盘稿；左侧窗口里未保存的修改会被丢弃。')
     )
+    const continueAction = action('continue', '继续编辑', '两份都留着，什么都不写，等你决定。')
+    continueAction.classList.add('conflict-continue')
 
-    dialog.append(heading, sub, grid, panes)
+    dialog.append(heading, sub, grid, panes, continueAction)
 
     function action(value: ConflictChoice, label: string, hint: string): HTMLElement {
       const wrapper = document.createElement('div')

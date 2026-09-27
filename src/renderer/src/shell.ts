@@ -1,5 +1,5 @@
 import { IPC, type NoteSnapshot, type PermissionState, type PermissionTier, type SearchHit, type TreeEntry, type VaultState } from '@shared'
-import { compile, composeSource, partitionSource, preferDiskLedger } from '@markdown'
+import { compile, composeSource, partitionSource } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
 import { promptNewNote } from './dialogs.ts'
@@ -12,6 +12,7 @@ import { icon } from './icons.ts'
 import { outlineLabel, outlineMarks } from './outline.ts'
 import { installShortcuts, shortcutLabel } from './shortcuts.ts'
 import { renderStatusbar, statusModel, wordsOf } from './statusbar.ts'
+import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.ts'
 import type { Theme } from './theme.ts'
 
@@ -79,7 +80,7 @@ export async function start(root: HTMLElement): Promise<void> {
   // 第二条冲突的通知就永远没人处理了。
   let conflictChain: Promise<void> = Promise.resolve()
 
-  function runExclusiveConflict(run: () => Promise<void>): Promise<void> {
+  function runExclusiveConflict<T>(run: () => Promise<T>): Promise<T> {
     const next = conflictChain.then(run, run)
     conflictChain = next.then(
       () => undefined,
@@ -88,6 +89,8 @@ export async function start(root: HTMLElement): Promise<void> {
     return next
   }
   let backlinkToken = 0
+  let vaultEpoch = 0
+  let conflictDecisionOpen = false
   let permissionState: PermissionState = { status: 'ready', entries: [] }
   let vaultNameText: string | null = null
   // 声明放在状态区：applyState 会在定义点之前调用 closeVaultPicker，
@@ -111,11 +114,11 @@ export async function start(root: HTMLElement): Promise<void> {
   })
 
   installShortcuts({
-    onSearch: () => searchOverlay.open(),
+    onSearch: () => { if (!conflictDecisionOpen) searchOverlay.open() },
     onSave: () => void flushSave()
   })
   shortcutHint.textContent = shortcutLabel('k')
-  searchOpen.addEventListener('click', () => searchOverlay.open())
+  searchOpen.addEventListener('click', () => { if (!conflictDecisionOpen) searchOverlay.open() })
 
   // 主题跟着系统走（围栏：自动切换方式未锁，手动开关归设置阶段）。
   editor.onStateChange(() => {
@@ -157,46 +160,51 @@ export async function start(root: HTMLElement): Promise<void> {
     // 别的笔记被外部改了，可能多了或少了指向当前这篇的链接。
     void refreshBacklinks()
   })
-  window.rgent.onNoteExternalChange(async (payload) => {
+  window.rgent.onNoteExternalChange((payload) => {
     const tab = tabs.find((item) => item.relPath === payload.relPath)
     if (!tab) return
-    const live = composeSource(tab.relPath === active ? editor.getText() : tab.content, tab.ledger)
-    const snapshot: NoteSnapshot = { content: payload.content, revision: payload.revision }
-    if (!tab.dirty) {
-      applySource(tab, snapshot)
-      if (active === tab.relPath) editor.setText(tab.content)
-      renderTabs()
-      return
-    }
-    if (live === payload.content) {
-      applySource(tab, snapshot)
-      renderTabs()
-      return
-    }
-    // 冲突一次只问一个，后来的排队等：不丢通知，也不叠弹窗。
-    await runExclusiveConflict(async () => {
-      const choice = await promptConflict({
-        title: titleOf(tab.relPath.split('/').pop() ?? tab.relPath),
-        windowText: partitionSource(live).body,
-        diskText: partitionSource(payload.content).body
-      })
-      if (choice === 'disk') {
-        applySource(tab, snapshot)
-        if (active === tab.relPath) editor.setText(tab.content)
-      } else if (choice === 'window') {
-        // 正文听窗口，账本听磁盘；否则会把外部新追加的章节抹掉。
-        tab.ledger = preferDiskLedger(partitionSource(payload.content).ledger, tab.ledger)
-        tab.revision = payload.revision
-        await writeTab(tab)
-      }
+    const epoch = vaultEpoch
+    // 事件负载只提示需要复核；排队后必须重新读盘，不能采用排队前的旧快照。
+    void runExclusiveConflict(() => reconcileTab(tab, epoch)).then(() => {
       renderTabs()
       updateStatus()
-    })
+    }).catch(() => { /* 读写失败时保留窗口稿，后续保存仍会复核修订值。 */ })
   })
+
+  function reconcileTab(tab: Tab, epoch = vaultEpoch): Promise<ReconcileResult> {
+    return reconcileNote(tab, {
+      isCurrent: () => vaultEpoch === epoch && tabs.includes(tab),
+      read: () => window.rgent.noteRead(tab.relPath),
+      draft: () => tab.relPath === active ? editor.getText() : tab.content,
+      choose: async (windowBody, diskBody) => {
+        conflictDecisionOpen = true
+        try {
+          return await promptConflict({
+            title: titleOf(tab.relPath.split('/').pop() ?? tab.relPath),
+            windowText: windowBody,
+            diskText: diskBody
+          })
+        } finally {
+          conflictDecisionOpen = false
+        }
+      },
+      write: (request) => window.rgent.noteWrite(request),
+      applyDisk: (snapshot) => {
+        applySource(tab, snapshot)
+        if (active === tab.relPath) editor.setText(tab.content)
+      },
+      applySaved: (body, ledger, revision) => {
+        tab.ledger = ledger
+        applySaved(tab, body, revision)
+        void refreshBacklinks()
+      }
+    })
+  }
 
   await applyState(await window.rgent.vaultGet())
 
   async function applyState(state: VaultState): Promise<void> {
+    if (state.status === 'needs-pick' || state.vaultChanged) vaultEpoch += 1
     if (state.status === 'needs-pick') {
       const ok = await flushSave()
       if (!ok && tabs.some((tab) => tab.dirty)) {
@@ -223,6 +231,7 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   function resetSession(): void {
+    vaultEpoch += 1
     // 底栏跟着库与 tab 走，重置之后统一刷一次。
     queueMicrotask(() => updateStatus())
     tabs.length = 0
@@ -635,41 +644,10 @@ export async function start(root: HTMLElement): Promise<void> {
       return true
     }
     if (result.error === 'CONFLICT') {
-      // 排队而不是丢弃：旧实现用一个全局标志，第二条冲突直接 return false，
-      // 用户永远等不到那个提示。
-      let handled = false
-      await runExclusiveConflict(async () => {
-        const disk = await window.rgent.noteRead(tab.relPath)
-        const currentBody = tab.relPath === active ? editor.getText() : tab.content
-        const choice = await promptConflict({
-          title: titleOf(tab.relPath.split('/').pop() ?? tab.relPath),
-          windowText: currentBody,
-          diskText: partitionSource(disk.content).body
-        })
-        if (choice === 'disk') {
-          applySource(tab, disk)
-          if (active === tab.relPath) editor.setText(tab.content)
-          handled = true
-          return
-        }
-        if (choice === 'window') {
-          // 窗口赢的只是正文：账本以磁盘为准。
-          tab.ledger = preferDiskLedger(partitionSource(disk.content).ledger, tab.ledger)
-          tab.revision = disk.revision
-          const retry = await window.rgent.noteWrite({
-            relPath: tab.relPath,
-            content: composeSource(currentBody, tab.ledger),
-            expectedRevision: tab.revision
-          })
-          if (retry.ok) {
-            applySaved(tab, currentBody, retry.revision)
-            handled = true
-          }
-        }
-      })
+      const outcome = await runExclusiveConflict(() => reconcileTab(tab))
       renderTabs()
       updateStatus()
-      return handled
+      return outcome === 'disk' || outcome === 'saved' || outcome === 'unchanged'
     }
     return false
   }
