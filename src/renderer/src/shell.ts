@@ -2,7 +2,8 @@ import { IPC, type NoteSnapshot, type PermissionState, type PermissionTier, type
 import { compile, composeSource, partitionSource, preferDiskLedger } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
-import { promptConflict, promptNewNote } from './dialogs.ts'
+import { promptNewNote } from './dialogs.ts'
+import { promptConflict } from './conflict.ts'
 import { openOverlay } from './overlay.ts'
 import { createSearchOverlay } from './search-overlay.ts'
 import { applySaved, pendingWrites, type Tab } from './tabs.ts'
@@ -174,7 +175,11 @@ export async function start(root: HTMLElement): Promise<void> {
     }
     // 冲突一次只问一个，后来的排队等：不丢通知，也不叠弹窗。
     await runExclusiveConflict(async () => {
-      const choice = await promptConflict()
+      const choice = await promptConflict({
+        title: titleOf(tab.relPath.split('/').pop() ?? tab.relPath),
+        windowText: partitionSource(live).body,
+        diskText: partitionSource(payload.content).body
+      })
       if (choice === 'disk') {
         applySource(tab, snapshot)
         if (active === tab.relPath) editor.setText(tab.content)
@@ -634,7 +639,12 @@ export async function start(root: HTMLElement): Promise<void> {
       let handled = false
       await runExclusiveConflict(async () => {
         const disk = await window.rgent.noteRead(tab.relPath)
-        const choice = await promptConflict()
+        const currentBody = tab.relPath === active ? editor.getText() : tab.content
+        const choice = await promptConflict({
+          title: titleOf(tab.relPath.split('/').pop() ?? tab.relPath),
+          windowText: currentBody,
+          diskText: partitionSource(disk.content).body
+        })
         if (choice === 'disk') {
           applySource(tab, disk)
           if (active === tab.relPath) editor.setText(tab.content)
@@ -645,7 +655,6 @@ export async function start(root: HTMLElement): Promise<void> {
           // 窗口赢的只是正文：账本以磁盘为准。
           tab.ledger = preferDiskLedger(partitionSource(disk.content).ledger, tab.ledger)
           tab.revision = disk.revision
-          const currentBody = tab.relPath === active ? editor.getText() : tab.content
           const retry = await window.rgent.noteWrite({
             relPath: tab.relPath,
             content: composeSource(currentBody, tab.ledger),

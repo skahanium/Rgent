@@ -978,3 +978,124 @@ input:focus-visible,
 }
 
 .rgent-marker-menu button:hover:not(:disabled) { background: var(--state-hover); }
+
+/* 冲突双预览：并排两份可读预览，同样的前后文，各自强调变化处。 */
+.conflict {
+  width: min(920px, calc(100vw - 40px));
+  padding: 20px 20px 16px;
+  font-family: var(--font-ui);
+}
+
+.conflict h2 {
+  margin: 0 0 6px;
+  font-size: 1.1rem;
+  color: var(--text-heading);
+}
+
+.conflict-sub {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.conflict-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 14px;
+  max-height: min(48vh, 420px);
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-canvas);
+}
+
+.conflict-cell {
+  padding: 2px 4px;
+  font-family: var(--font-body);
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: var(--text-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: 3px;
+}
+
+.conflict-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-bottom: 6px;
+  background: var(--surface-canvas);
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.conflict-changed { background: var(--state-hover); }
+
+.conflict-cell[data-absent='absent'] {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* 变化处的强调：只用 token，日夜都成立。 */
+.conflict-emph {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: var(--accent-soft);
+  color: var(--text-heading);
+  box-shadow: inset 0 -2px 0 var(--accent-primary);
+}
+
+.conflict-gap {
+  padding: 3px 4px;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 0.76rem;
+}
+
+.conflict-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.conflict-action {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.conflict-action button {
+  min-height: 34px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-canvas);
+  color: var(--text-body);
+  font-family: var(--font-ui);
+  font-size: 0.86rem;
+}
+
+.conflict-action button:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+
+.conflict-action button[data-action='continue'] {
+  background: var(--accent-solid);
+  border-color: var(--accent-solid);
+  color: var(--text-on-accent);
+}
+
+.conflict-note {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+@media (max-width: 880px) {
+  .conflict-grid { grid-template-columns: 1fr; }
+  .conflict-actions { grid-template-columns: 1fr; }
+}
