@@ -9,14 +9,44 @@ const files = ['AGENTS.md', 'README.md', 'CONTRIBUTING.md', ...[
 ].map((name) => `docs/${name}`)]
 const errors = []
 
+/** GitHub 风格的标题锚点：小写、去标点、空白转连字符。中文保留原字。 */
+function anchorsOf(source) {
+  const anchors = new Set()
+  const withoutCode = source.replace(/```[\s\S]*?```/g, '')
+  for (const match of withoutCode.matchAll(/^#{1,6}\s+(.+?)\s*$/gm)) {
+    const text = match[1]
+      .replace(/`[^`]*`/g, '')
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/[*_~]/g, '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s-]/gu, '')
+      // 每个空格各换一个连字符，不合并：`多进程 / 并发` 去掉 `/` 是两个空格，
+      // GitHub 的锚点就是 `多进程--并发`。
+      .replace(/ /g, '-')
+    if (text) anchors.add(text)
+  }
+  return anchors
+}
+
 for (const file of files) {
   const source = readFileSync(path.join(root, file), 'utf8')
   const withoutCode = source.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '')
   for (const match of withoutCode.matchAll(/!?\[[^\]\n]*\]\(([^)]+)\)/g)) {
-    const target = match[1].trim().replace(/^<|>$/g, '').split('#')[0]
-    if (!target || /^[a-z][a-z\d+.-]*:/i.test(target)) continue
-    if (!existsSync(path.resolve(root, path.dirname(file), decodeURIComponent(target)))) {
+    const raw = match[1].trim().replace(/^<|>$/g, '')
+    const [target, hash] = raw.split('#')
+    if (!target) continue
+    if (/^[a-z][a-z\d+.-]*:/i.test(target)) continue
+    const resolved = path.resolve(root, path.dirname(file), decodeURIComponent(target))
+    if (!existsSync(resolved)) {
       errors.push(`${file}: 相对链接不存在：${match[1]}`)
+      continue
+    }
+    // 锚点也要存在：跨篇引用很多，标题一改就会悄悄失效。
+    if (!hash || !resolved.endsWith('.md')) continue
+    const anchors = anchorsOf(readFileSync(resolved, 'utf8'))
+    if (!anchors.has(decodeURIComponent(hash).toLowerCase())) {
+      errors.push(`${file}: 锚点不存在：${match[1]}`)
     }
   }
 }
