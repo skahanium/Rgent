@@ -1,11 +1,13 @@
 import { IPC, type NoteSnapshot, type PermissionState, type PermissionTier, type SearchHit, type TreeEntry, type VaultState } from '@shared'
-import { composeSource, partitionSource, preferDiskLedger } from '@markdown'
+import { compile, composeSource, partitionSource, preferDiskLedger } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
 import { promptConflict, promptNewNote } from './dialogs.ts'
 import { renderSearchResults } from './search.ts'
 import { applySaved, pendingWrites, type Tab } from './tabs.ts'
 import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
+import { icon } from './icons.ts'
+import { renderStatusbar, statusModel, wordsOf } from './statusbar.ts'
 import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.ts'
 import type { Theme } from './theme.ts'
 
@@ -15,22 +17,19 @@ export async function start(root: HTMLElement): Promise<void> {
   root.innerHTML = `
     <div class="app">
       <header class="top">
-        <button type="button" class="tree-toggle" aria-controls="tree-panel" aria-expanded="false">目录</button>
-        <p class="brand">Rgent</p>
-        <span class="vault-name" hidden></span>
+        <button type="button" class="tree-toggle" aria-controls="tree-panel" aria-expanded="false" aria-label="目录"></button>
+        <div class="tabs" role="tablist" aria-label="打开中的笔记"></div>
         <span class="permission-warning" role="alert" hidden></span>
-        <div class="search">
-          <input type="search" class="search-input" placeholder="搜标题或正文" aria-label="搜标题或正文" autocomplete="off" />
-          <div class="search-panel" hidden></div>
-        </div>
       </header>
       <div class="body">
         <aside id="tree-panel" class="tree-panel" hidden>
+          <div class="tree-tools">
+            <input type="search" class="search-input" placeholder="搜标题或正文" aria-label="搜标题或正文" autocomplete="off" />
+            <div class="search-panel" hidden></div>
+          </div>
           <div class="tree-scroll"></div>
         </aside>
         <section class="stage">
-          <div class="tabs" role="tablist"></div>
-          <div class="editor-host"></div>
           <div class="ledger-view" hidden>
             <div class="ledger-head">
               <span class="ledger-title"></span>
@@ -38,10 +37,12 @@ export async function start(root: HTMLElement): Promise<void> {
             </div>
             <pre class="ledger-body"></pre>
           </div>
+          <div class="editor-host"></div>
           <p class="empty">从目录打开一篇笔记，或新建笔记。</p>
         </section>
         <aside class="backlinks" aria-label="反链"></aside>
       </div>
+      <footer class="status" aria-label="状态栏"></footer>
     </div>
     <div class="picker" hidden>
       <div class="picker-card">
@@ -58,8 +59,8 @@ export async function start(root: HTMLElement): Promise<void> {
   const treePanel = root.querySelector('#tree-panel') as HTMLElement
   const treeScroll = root.querySelector('.tree-scroll') as HTMLElement
   const treeToggle = root.querySelector('.tree-toggle') as HTMLButtonElement
-  const vaultName = root.querySelector('.vault-name') as HTMLElement
   const permissionWarning = root.querySelector('.permission-warning') as HTMLElement
+  const statusEl = root.querySelector('.status') as HTMLElement
   const tabsEl = root.querySelector('.tabs') as HTMLElement
   const editorHostEl = root.querySelector('.editor-host') as HTMLElement
   const emptyEl = root.querySelector('.empty') as HTMLElement
@@ -68,7 +69,6 @@ export async function start(root: HTMLElement): Promise<void> {
   const ledgerTitle = root.querySelector('.ledger-title') as HTMLElement
   const ledgerBody = root.querySelector('.ledger-body') as HTMLElement
   const ledgerClose = root.querySelector('.ledger-close') as HTMLButtonElement
-  const searchEl = root.querySelector('.search') as HTMLElement
   const searchInput = root.querySelector('.search-input') as HTMLInputElement
   const searchPanel = root.querySelector('.search-panel') as HTMLElement
 
@@ -81,6 +81,7 @@ export async function start(root: HTMLElement): Promise<void> {
   let searchTimer: number | null = null
   let searchHits: SearchHit[] = []
   let permissionState: PermissionState = { status: 'ready', entries: [] }
+  let vaultNameText: string | null = null
   let saveInFlight: Promise<boolean> | null = null
   let ledgerOpen = false
 
@@ -96,6 +97,7 @@ export async function start(root: HTMLElement): Promise<void> {
   })
 
   // 主题跟着系统走（围栏：自动切换方式未锁，手动开关归设置阶段）。
+  editor.onStateChange(() => updateStatus())
   window.addEventListener('rgent:theme', (event) => {
     editor.setTheme((event as CustomEvent<Theme>).detail === 'night')
   })
@@ -141,7 +143,7 @@ export async function start(root: HTMLElement): Promise<void> {
   })
   document.addEventListener('mousedown', (event) => {
     if (searchPanel.hidden) return
-    if (searchEl.contains(event.target as Node)) return
+    if (searchPanel.contains(event.target as Node) || searchInput === event.target) return
     closeSearch()
   })
 
@@ -208,19 +210,21 @@ export async function start(root: HTMLElement): Promise<void> {
         picker.hidden = false
         pickerCopy.textContent =
           state.reason === 'missing' ? '上次的库找不到了。请重新选一个文件夹。' : '第一次打开，先选一个文件夹当库。空的也行。不选进不去。'
-        vaultName.hidden = true
+        vaultNameText = null
+        updateStatus()
         return
       }
       resetSession()
       picker.hidden = false
       pickerCopy.textContent =
         state.reason === 'missing' ? '上次的库找不到了。请重新选一个文件夹。' : '第一次打开，先选一个文件夹当库。空的也行。不选进不去。'
-      vaultName.hidden = true
+      vaultNameText = null
+      updateStatus()
       return
     }
     picker.hidden = true
-    vaultName.hidden = false
-    vaultName.textContent = state.rootName
+    vaultNameText = state.rootName
+    updateStatus()
     if (state.vaultChanged) {
       const ok = await flushSave()
       if (!ok) return
@@ -230,6 +234,8 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   function resetSession(): void {
+    // 底栏跟着库与 tab 走，重置之后统一刷一次。
+    queueMicrotask(() => updateStatus())
     tabs.length = 0
     active = null
     editor.setText('', noteHost())
@@ -384,6 +390,7 @@ export async function start(root: HTMLElement): Promise<void> {
     closeLedger()
     renderTabs()
     paintTree()
+    updateStatus()
     emptyEl.hidden = true
     void refreshBacklinks()
   }
@@ -400,13 +407,38 @@ export async function start(root: HTMLElement): Promise<void> {
       button.className = 'tab'
       button.setAttribute('role', 'tab')
       button.setAttribute('aria-selected', String(tab.relPath === active))
-      button.textContent = `${titleOf(tab.relPath.split('/').pop() ?? tab.relPath)}${tab.dirty ? ' •' : ''}`
+      // 一组 tab 只留一个焦点站：当前项进 Tab 键序，其余用左右方向键走。
+      button.tabIndex = tab.relPath === active ? 0 : -1
+      button.dataset.rel = tab.relPath
+      button.append(icon('note', 'icon-type'))
+      const label = document.createElement('span')
+      label.className = 'tab-label'
+      label.textContent = titleOf(tab.relPath.split('/').pop() ?? tab.relPath)
+      button.append(label)
+      if (tab.dirty) {
+        const dot = document.createElement('span')
+        dot.className = 'tab-dirty'
+        dot.setAttribute('aria-label', '未保存')
+        dot.textContent = '•'
+        button.append(dot)
+      }
+      button.title = tab.relPath
       button.addEventListener('click', () => activate(tab.relPath))
+      button.addEventListener('keydown', (event) => {
+        const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
+        if (step === 0) return
+        event.preventDefault()
+        const at = tabs.findIndex((item) => item.relPath === tab.relPath)
+        const next = tabs[(at + step + tabs.length) % tabs.length]
+        if (!next) return
+        activate(next.relPath)
+        tabsEl.querySelector<HTMLButtonElement>(`.tab[data-rel="${CSS.escape(next.relPath)}"]`)?.focus()
+      })
       const close = document.createElement('button')
       close.type = 'button'
       close.className = 'tab-close'
-      close.setAttribute('aria-label', `关闭 ${button.textContent}`)
-      close.textContent = '×'
+      close.setAttribute('aria-label', `关闭 ${label.textContent}`)
+      close.append(icon('close'))
       close.addEventListener('click', (event) => {
         event.stopPropagation()
         void closeTab(tab.relPath)
@@ -416,6 +448,14 @@ export async function start(root: HTMLElement): Promise<void> {
       wrap.append(button, close)
       tabsEl.append(wrap)
     }
+    const add = document.createElement('button')
+    add.type = 'button'
+    add.className = 'tab-new'
+    add.setAttribute('aria-label', '新建笔记')
+    add.title = '新建笔记'
+    add.append(icon('plus'))
+    add.addEventListener('click', () => void createNote())
+    tabsEl.append(add)
     // 账本回顾：入口就放在当前笔记标题旁边，临时、只读、关掉就走，
     // 不占右侧反链（围栏 §账本）。它不是文件，所以不进 tabs 数组。
     if (active) {
@@ -429,6 +469,22 @@ export async function start(root: HTMLElement): Promise<void> {
       tabsEl.append(ledger)
     }
     emptyEl.hidden = tabs.length > 0
+  }
+
+  /** 底栏：行列、字数、库名。字数只算正文，标记行不算。 */
+  function updateStatus(): void {
+    const tab = current()
+    const info = tab ? editor.selectionInfo() : null
+    renderStatusbar(
+      statusEl,
+      statusModel({
+        line: info?.line ?? 1,
+        column: info?.column ?? 1,
+        words: tab ? wordsOf(tab.content, compile(tab.content).index.markers) : 0,
+        vaultName: vaultNameText,
+        noteOpen: tab != null
+      })
+    )
   }
 
   function toggleLedger(): void {

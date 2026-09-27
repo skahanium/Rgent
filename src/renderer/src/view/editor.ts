@@ -1,6 +1,7 @@
 import {
   compile,
   DEFAULT_STAGES,
+  type HeadingRef,
   lineStartOf,
   planIdentityEdit,
   planWidgets,
@@ -253,6 +254,11 @@ export type EditorHost = {
   setNoteHost: (host: NoteHost) => void
   /** 只跟着系统主题走；不写盘、不进撤销栈。 */
   setTheme: (night: boolean) => void
+  /** 行列（1 起）与当前编译结果，供底栏与标题索引消费。 */
+  selectionInfo: () => { line: number; column: number }
+  headings: () => HeadingRef[]
+  /** 选区或可视范围变化时回调；返回取消订阅。 */
+  onStateChange: (listener: () => void) => () => void
   focus: () => void
   destroy: () => void
 }
@@ -294,11 +300,15 @@ export function mountEditor(
       markdownField,
       identityLock,
       EditorView.updateListener.of((update) => {
+        if (update.docChanged || update.selectionSet || update.viewportChanged) {
+          for (const listener of stateListeners) listener()
+        }
         if (applying || !update.docChanged) return
         onChange(update.state.doc.toString())
       })
     ]
   })
+  const stateListeners = new Set<() => void>()
   const view = new EditorView({ state, parent })
   return {
     view,
@@ -307,7 +317,9 @@ export function mountEditor(
       applying = true
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: text },
-        // 换一篇笔记 = 换一份撤销历史，外加这次替换本身不进历史。
+        // 换一篇笔记 = 换一份撤销历史 + 光标回到篇首；不归零的话上一篇的行列会被
+        // 映射进新篇（实测：切过去停在「第 7 行」）。
+        selection: { anchor: 0 },
         effects: [
           historyCompartment.reconfigure(history()),
           ...(host ? [hostCompartment.reconfigure(noteHostFacet.of(host))] : [])
@@ -330,6 +342,17 @@ export function mountEditor(
           themeFacet.of(night)
         ])
       })
+    },
+    selectionInfo: () => {
+      const head = view.state.selection.main.head
+      const line = view.state.doc.lineAt(head)
+      return { line: line.number, column: head - line.from + 1 }
+    },
+    headings: () =>
+      view.state.field(markdownField).result.index.headings.filter((heading) => heading.depth <= 3),
+    onStateChange: (listener) => {
+      stateListeners.add(listener)
+      return () => stateListeners.delete(listener)
     },
     focus: () => view.focus(),
     destroy: () => view.destroy()

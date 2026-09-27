@@ -1,4 +1,4 @@
-import { EditorState } from '@codemirror/state'
+import { EditorState, Transaction } from '@codemirror/state'
 import { describe, expect, it } from 'vitest'
 import { markdownField, identityLock } from '../../src/renderer/src/view/editor.ts'
 
@@ -113,5 +113,23 @@ describe('identity guard, state level', () => {
     const remaining = after.field(markdownField).result.index
     expect(remaining.markers).toEqual([])
     expect(remaining.blocks.every((block) => block.identity === undefined)).toBe(true)
+  })
+})
+
+describe('换笔记', () => {
+  it('整篇替换把光标带回篇首，并换掉撤销历史', () => {
+    const before = state()
+    const { ai } = ranges(before)
+    const moved = before.update({ selection: { anchor: ai.end } }).state
+    expect(moved.selection.main.anchor).toBe(ai.end)
+    // 与 editor.setText 同形：整篇替换 + selection 归零 + 不进历史。
+    const replaced = moved.update({
+      changes: { from: 0, to: moved.doc.length, insert: '另一篇。\n' },
+      selection: { anchor: 0 },
+      annotations: Transaction.addToHistory.of(false),
+      userEvent: 'rgent.setText'
+    }).state
+    expect(replaced.doc.toString()).toBe('另一篇。\n')
+    expect(replaced.selection.main.anchor).toBe(0)
   })
 })
