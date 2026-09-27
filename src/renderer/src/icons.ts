@@ -17,7 +17,6 @@ export type IconName =
   | 'file'
   | 'plus'
   | 'close'
-  | 'ledger'
 
 const PATHS: Record<IconName, string[]> = {
   folder: ['M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 2h4.5A1.5 1.5 0 0 1 14 6.5v5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z'],
@@ -30,8 +29,7 @@ const PATHS: Record<IconName, string[]> = {
   image: ['M3 3h10v10H3z', 'M3 10l3-3 3 3 2-2 2 2', 'M6.5 6.5h.01'],
   file: ['M4 2h5l3 3v9H4z', 'M9 2v3h3'],
   plus: ['M8 3.5v9', 'M3.5 8h9'],
-  close: ['M4.5 4.5l7 7', 'M11.5 4.5l-7 7'],
-  ledger: ['M4 3h8v10H4z', 'M6 5.5h4', 'M6 8h4', 'M6 10.5h2']
+  close: ['M4.5 4.5l7 7', 'M11.5 4.5l-7 7']
 }
 
 export function icon(name: IconName, className = ''): SVGSVGElement {

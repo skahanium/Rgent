@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { outlineLabel, outlineMarks, OUTLINE_GAP_PX } from '../../src/renderer/src/outline.ts'
+import { outlineLabel, outlineMarks } from '../../src/renderer/src/outline.ts'
 import { isApple, shortcutFor, shortcutLabel } from '../../src/renderer/src/shortcuts.ts'
 
 function key(init: Partial<KeyboardEvent> & { key: string }): KeyboardEvent {
@@ -46,7 +46,6 @@ describe('标题索引', () => {
 
   it('没有标题就没有索引', () => {
     expect(outlineMarks([], at(0))).toEqual([])
-    expect(OUTLINE_GAP_PX).toBeLessThan(20)
   })
 
   it('空标题有兜底文案', () => {

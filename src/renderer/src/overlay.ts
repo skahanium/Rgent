@@ -85,7 +85,3 @@ function firstFocusable(root: HTMLElement): HTMLElement | null {
     'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
   )
 }
-
-export function openOverlayCount(): number {
-  return stack.filter((overlay) => overlay.isOpen()).length
-}

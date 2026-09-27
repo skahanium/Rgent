@@ -17,9 +17,6 @@ export type OutlineMark = {
 
 const SCALE: Record<number, number> = { 1: 1, 2: 0.72, 3: 0.5 }
 
-/** 每行标签之间的垂直间距（早期稿的 40%）。 */
-export const OUTLINE_GAP_PX = 18
-
 /**
  * 把标题算成索引短横线。
  *

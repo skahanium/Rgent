@@ -1119,3 +1119,52 @@ input:focus-visible,
 
 /* 状态点要能被键盘用户感知到：它现在只是状态显示，用 title + aria-label 说明。 */
 .status-dot[data-state='offline'] { outline: none; }
+
+/*
+ * 账本只读回顾：临时面板，关掉就走，不占右侧反链（围栏 §账本）。
+ * 这一块曾在重写身份标记样式时被整段替换掉（从注释标记一直替到文件末尾），
+ * 自查时发现并补回，配色顺带走 token。
+ */
+.ledger-view {
+  position: absolute;
+  inset: 48px 0 0;
+  z-index: 3;
+  overflow-y: auto;
+  background: var(--surface-canvas);
+}
+
+.ledger-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-ui);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.ledger-close {
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.ledger-close:hover { color: var(--status-error); }
+
+.ledger-body {
+  padding: 18px 16px 48px;
+  max-width: 42rem;
+  margin: 0 auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--text-body);
+}
