@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const files = ['AGENTS.md', 'README.md', 'CONTRIBUTING.md', ...[
-  'README.md', 'architecture.md', 'build.md', 'decisions.md', 'handbook.md',
+  'README.md', 'architecture.md', 'build.md', 'decisions.md', 'frontend.md', 'handbook.md',
   'opensource.md', 'topics.md', 'vision.md'
 ].map((name) => `docs/${name}`)]
 const errors = []

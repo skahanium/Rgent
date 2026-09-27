@@ -8,7 +8,8 @@
 2. [docs/build.md](docs/build.md) 的「当前阶段」
 3. 工程题（Agent 栈、检索、隔离）看 [docs/topics.md](docs/topics.md)，不要把那里的未开项写成代码
 4. 动到壳、索引、账本、路径时：[docs/architecture.md](docs/architecture.md) 的强制点
-5. 相关代码
+5. 前端工作读 [docs/frontend.md](docs/frontend.md)；当前未开放的界面仍按硬停处理
+6. 相关代码
 
 产品合同：[docs/decisions.md](docs/decisions.md)。冲突先改围栏再改代码。
 
@@ -21,7 +22,7 @@
 ## 硬停（未开，禁止实现）
 
 - `AgentHost`、一场 `/`、技能加载、MCP 连接、联网搜索与抓页
-- 设置面板像素、主题、图谱
+- 设置面板及主题的代码施工、图谱；已确认的前端协议不解除当前阶段硬停
 - 向量检索、独立聊天、Linux 作为产品目标、Python / Flutter 边车
 - 复用 `noteWrite` 给模型
 - 建索引时把「禁止触碰」从人的那份语料抹掉
