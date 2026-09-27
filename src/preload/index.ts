@@ -10,6 +10,8 @@ import {
   type PermissionState,
   type SetPermissionRequest,
   type SearchHit,
+  type ThemeMode,
+  type ThemeSetResult,
   type TreeEntry,
   type VaultState
 } from '../shared/ipc.ts'
@@ -28,6 +30,8 @@ const api = {
   noteCreate: (name: string): Promise<string> => ipcRenderer.invoke(IPC.noteCreate, name),
   backlinks: (relPath: string): Promise<BacklinkGroup[]> => ipcRenderer.invoke(IPC.backlinks, relPath),
   search: (query: string): Promise<SearchHit[]> => ipcRenderer.invoke(IPC.search, query),
+  themeGet: (): Promise<ThemeMode> => ipcRenderer.invoke(IPC.themeGet),
+  themeSet: (mode: ThemeMode): Promise<ThemeSetResult> => ipcRenderer.invoke(IPC.themeSet, mode),
   onTreeChanged: (handler: () => void): (() => void) =>
     subscribe(IPC.treeChanged, () => handler()),
   onNoteExternalChange: (handler: (payload: NotePayload) => void): (() => void) =>

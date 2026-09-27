@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { asString, parseFlushDone, parseNoteName, parseNoteWriteRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
 import { IPC } from '../shared/ipc.ts'
+import type { ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
+import { isThemeMode, loadThemePreference, saveThemePreference } from './theme-preference.ts'
 import { attachVaultProtocol, registerVaultScheme } from './vault-protocol.ts'
 import { VaultSession } from './vault.ts'
 
@@ -21,6 +23,7 @@ let flushed = false
 let rendererGone = false
 let closeFlow = new CloseFlow()
 let flushTimer: NodeJS.Timeout | null = null
+let themeMode: ThemeMode = 'system'
 
 function clearFlushTimer(): void {
   if (!flushTimer) return
@@ -196,6 +199,18 @@ function buildMenu(): void {
 }
 
 function registerIpc(): void {
+  ipcMain.handle(IPC.themeGet, () => themeMode)
+  ipcMain.handle(IPC.themeSet, (_event, value: unknown): ThemeSetResult => {
+    if (!isThemeMode(value)) return { ok: false, error: 'BAD_MODE' }
+    try {
+      saveThemePreference(app.getPath('userData'), value)
+      themeMode = value
+      nativeTheme.themeSource = value === 'day' ? 'light' : value === 'night' ? 'dark' : 'system'
+      return { ok: true, mode: value }
+    } catch {
+      return { ok: false, error: 'IO_ERROR' }
+    }
+  })
   ipcMain.handle(IPC.vaultGet, () => vault?.currentState() ?? { status: 'needs-pick', reason: 'first-run' })
   ipcMain.handle(IPC.vaultPick, async () => {
     if (!vault) return { status: 'needs-pick', reason: 'first-run' }
@@ -250,6 +265,8 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(() => {
+  themeMode = loadThemePreference(app.getPath('userData'))
+  nativeTheme.themeSource = themeMode === 'day' ? 'light' : themeMode === 'night' ? 'dark' : 'system'
   vault = new VaultSession(app.getPath('userData'), send)
   vault.restore()
   attachVaultProtocol(() => vault)

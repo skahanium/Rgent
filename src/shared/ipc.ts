@@ -16,8 +16,13 @@ export const IPC = {
   backlinks: 'note:backlinks',
   search: 'vault:search',
   permissionsGet: 'permissions:get',
-  permissionsSet: 'permissions:set'
+  permissionsSet: 'permissions:set',
+  themeGet: 'theme:get',
+  themeSet: 'theme:set'
 } as const
+
+export type ThemeMode = 'day' | 'night' | 'system'
+export type ThemeSetResult = { ok: true; mode: ThemeMode } | { ok: false; error: 'BAD_MODE' | 'IO_ERROR' }
 
 export type VaultState =
   | { status: 'needs-pick'; reason: 'first-run' | 'missing' }

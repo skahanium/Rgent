@@ -147,6 +147,7 @@ async function main() {
   mkdirSync(profile)
   mkdirSync(vault)
   writeFileSync(path.join(profile, 'vault.json'), JSON.stringify({ path: vault }))
+  writeFileSync(path.join(profile, 'theme.json'), JSON.stringify({ mode: 'night' }))
   writeFileSync(path.join(vault, '研究记录.md'), initialWithLedger)
   writeFileSync(path.join(vault, '过程稿.md'), longNote)
   writeFileSync(path.join(vault, '一个特别特别长的笔记文件名用来验证省略号.md'), '短文。\n')
@@ -189,12 +190,91 @@ async function main() {
 
     process.stdout.write('\n外壳与主题\n')
     await waitFor(page, `document.querySelectorAll('.tree-row').length > 0`)
+    check('本机主题偏好在窗口首帧生效', (await page.eval(`document.documentElement.dataset.theme === 'night' && getComputedStyle(document.documentElement).colorScheme === 'dark' && window.rgent.themeGet().then((mode) => mode === 'night')`)) === true)
     check('窗口起来了，库里三篇都在', (await page.eval(`document.querySelectorAll('.tree-note').length`)) === 3)
     await page.eval(`document.querySelectorAll('.tree-note')[1].click()`)
     await waitFor(page, `document.querySelectorAll('.tab').length > 0`)
     check('顶栏是 tab 条，没有品牌文字', (await page.eval(`!!document.querySelector('.top .tabs') && !document.querySelector('.brand')`)) === true)
     check('tab 有图标与标题', (await page.eval(`!!document.querySelector('.tab .icon') && document.querySelector('.tab').innerText.trim().length > 0`)) === true)
+    await probe('tab 在单层顶栏中垂直居中', async () => {
+      const state = JSON.parse(await page.eval(`(() => {
+        const top = document.querySelector('.top').getBoundingClientRect()
+        const tab = document.querySelector('.tab-wrap').getBoundingClientRect()
+        return JSON.stringify({ difference: Math.abs((tab.top + tab.bottom) / 2 - (top.top + top.bottom) / 2), height: top.height })
+      })()`))
+      return { ok: state.difference <= 3 && state.height <= 54, detail: JSON.stringify(state) }
+    })
     check('底栏有行列、字数与库名', (await page.eval(`!!document.querySelector('.status-left')?.innerText && !!document.querySelector('.status-vault')?.innerText`)) === true)
+    await probe('侧栏底部设置入口在收起与展开时均可用', async () => {
+      const state = JSON.parse(await page.eval(`(() => {
+        const button = document.querySelector('.settings-open')
+        if (!button) return JSON.stringify({ exists: false })
+        const collapsed = button.getBoundingClientRect()
+        document.querySelector('.tree-toggle').click()
+        const expanded = button.getBoundingClientRect()
+        const panel = document.querySelector('.tree-panel').getBoundingClientRect()
+        const scroll = document.querySelector('.tree-scroll').getBoundingClientRect()
+        document.querySelector('.tree-toggle').click()
+        return JSON.stringify({ exists: true, collapsedVisible: collapsed.width > 0 && collapsed.height > 0, expandedVisible: expanded.width > collapsed.width, atBottom: expanded.bottom >= panel.bottom - 14, afterScroll: expanded.top >= scroll.bottom - 2, backToCollapsed: button.getBoundingClientRect().width > 0 })
+      })()`))
+      return { ok: Object.values(state).every(Boolean), detail: JSON.stringify(state) }
+    })
+    await probe('设置浮层只提供三档主题并能保存切换', async () => {
+      const state = JSON.parse(await page.eval(`(async () => {
+        document.querySelector('.settings-open')?.click()
+        await new Promise((resolve) => setTimeout(resolve, 120))
+        const dialog = document.querySelector('.overlay-settings')
+        const modes = [...document.querySelectorAll('.settings-choice input')].map((input) => input.value)
+        document.querySelector('.settings-choice input[value="night"]')?.click()
+        await new Promise((resolve) => setTimeout(resolve, 160))
+        const night = { mode: await window.rgent.themeGet(), rendered: document.documentElement.dataset.theme }
+        document.querySelector('.settings-choice input[value="day"]')?.click()
+        await new Promise((resolve) => setTimeout(resolve, 160))
+        const day = { mode: await window.rgent.themeGet(), rendered: document.documentElement.dataset.theme }
+        document.querySelector('.settings-choice input[value="system"]')?.click()
+        await new Promise((resolve) => setTimeout(resolve, 160))
+        const system = await window.rgent.themeGet()
+        dialog?.querySelector('.settings-close')?.click()
+        return JSON.stringify({ modes, night, day, system })
+      })()`))
+      const closed = await waitFor(page, `!document.querySelector('.overlay-settings')`)
+      return { ok: state.modes.join(',') === 'day,night,system' && state.night.mode === 'night' && state.night.rendered === 'night' && state.day.mode === 'day' && state.day.rendered === 'day' && state.system === 'system' && closed, detail: JSON.stringify({ ...state, closed }) }
+    })
+    if (shotDir) {
+      await page.eval(`window.rgent.themeSet('day')`)
+      await page.eval(`document.querySelector('.settings-open').click()`)
+      await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
+      await shot(page, 'day-settings')
+      await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
+      const fits = await page.eval(`(() => { const r = document.querySelector('.overlay-settings').getBoundingClientRect(); return r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight })()`)
+      check('800×560：设置面板完整留在窗口内', fits === true)
+      await shot(page, 'day-settings-narrow')
+      await page.call('Emulation.clearDeviceMetricsOverride', {})
+      await page.eval(`document.querySelector('.settings-close').click()`)
+      await waitFor(page, `!document.querySelector('.overlay-settings')`)
+      await page.eval(`window.rgent.themeSet('night')`)
+      await page.eval(`document.querySelector('.settings-open').click()`)
+      await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
+      await shot(page, 'night-settings')
+      await page.eval(`document.querySelector('.settings-close').click()`)
+      await waitFor(page, `!document.querySelector('.overlay-settings')`)
+      await page.eval(`window.rgent.themeSet('system')`)
+    }
+    await page.eval(`document.querySelector('.tree-toggle').click()`)
+    await probe('账本入口固定在画布右上角且不增加 tab', async () => {
+      const state = JSON.parse(await page.eval(`(() => {
+        const button = document.querySelector('.ledger-open')
+        const stage = document.querySelector('.stage').getBoundingClientRect()
+        const tabCount = document.querySelectorAll('.tab').length
+        if (!button) return JSON.stringify({ exists: false })
+        const rect = button.getBoundingClientRect()
+        button.click()
+        const opened = !document.querySelector('.ledger-view')?.hidden
+        document.querySelector('.ledger-close')?.click()
+        return JSON.stringify({ exists: true, inStage: button.closest('.stage') !== null, top: rect.top - stage.top, right: stage.right - rect.right, opened, sameTabs: document.querySelectorAll('.tab').length === tabCount })
+      })()`))
+      return { ok: state.exists && state.inStage && state.top >= 0 && state.top <= 28 && state.right >= 0 && state.right <= 28 && state.opened && state.sameTabs, detail: JSON.stringify(state) }
+    })
     await probe('阅读态标题不露 Markdown 定界符', async () =>
       (await page.eval(`(() => {
         const line = [...document.querySelectorAll('.cm-line')].find((n) => n.innerText.includes('设计动机'))
@@ -212,6 +292,8 @@ async function main() {
     await page.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] })
     await sleep(300)
     const dayTokens = await page.eval(`getComputedStyle(document.documentElement).getPropertyValue('--surface-canvas').trim()`)
+    await page.eval(`(() => { document.querySelector('.ledger-open')?.blur(); document.querySelector('.tree-toggle')?.blur() })()`)
+    check('账本关闭后入口不保持选中态', (await page.eval(`document.querySelector('.ledger-open')?.getAttribute('aria-pressed') === 'false'`)) === true)
     await shot(page, 'day-workspace')
     await page.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] })
     await sleep(400)
@@ -270,6 +352,8 @@ async function main() {
     })()`)
     const narrowState = JSON.parse(narrow)
     check('800×560：右反链与正文都没消失', narrowState.反链可见 && narrowState.正文宽 > 120, narrow)
+    const ledgerClear = await page.eval(`(() => { const button = document.querySelector('.ledger-open').getBoundingClientRect(); const line = document.querySelector('.cm-line').getBoundingClientRect(); return line.top >= button.bottom + 6 })()`)
+    check('800×560：账本入口不压住首行正文', ledgerClear === true)
     await shot(page, 'night-narrow')
     check('长文件名有省略号', (await page.eval(`(() => { const el = [...document.querySelectorAll('.tree-note .tree-label')].find((n) => n.textContent.includes('特别特别长')); return !el || el.scrollWidth > el.clientWidth ? getComputedStyle(el).textOverflow === 'ellipsis' : true })()`)) === true)
     await probe('文件夹收起仍显示文件夹图标，聚焦时原位变为折叠控件', async () =>
@@ -325,6 +409,19 @@ async function main() {
     })()`)
     const openedState = JSON.parse(opened)
     check('多 tab：三篇都开得出来，tab 条可横向滚动', openedState.tabs === 3 && openedState.scrollable, opened)
+    await probe('账本关闭后保持正文光标与滚动位置', async () => {
+      const result = JSON.parse(await page.eval(`(() => {
+        const scroller = document.querySelector('.cm-scroller')
+        scroller.scrollTop = 180
+        const selection = window.getSelection()
+        const before = { scroll: scroller.scrollTop, anchor: selection?.anchorOffset, focus: selection?.focusOffset }
+        document.querySelector('.ledger-open').click()
+        document.querySelector('.ledger-close').click()
+        const after = window.getSelection()
+        return JSON.stringify({ before, afterScroll: scroller.scrollTop, afterAnchor: after?.anchorOffset, afterFocus: after?.focusOffset, ledgerClosed: document.querySelector('.ledger-view').hidden })
+      })()`))
+      return { ok: result.before.scroll > 0 && result.afterScroll === result.before.scroll && result.ledgerClosed && result.before.anchor === result.afterAnchor && result.before.focus === result.afterFocus, detail: JSON.stringify(result) }
+    })
     await sleep(400)
     check('标题索引：短横线分三级、当前项有状态', (await page.eval(`(() => {
       const marks = [...document.querySelectorAll('.outline-mark')]

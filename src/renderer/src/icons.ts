@@ -16,6 +16,7 @@ export type IconName =
   | 'image'
   | 'file'
   | 'plus'
+  | 'settings'
   | 'close'
 
 const PATHS: Record<IconName, string[]> = {
@@ -26,6 +27,7 @@ const PATHS: Record<IconName, string[]> = {
   image: ['M3 3h10v10H3z', 'M3 10l3-3 3 3 2-2 2 2', 'M6.5 6.5h.01'],
   file: ['M4 2h5l3 3v9H4z', 'M9 2v3h3'],
   plus: ['M8 3.5v9', 'M3.5 8h9'],
+  settings: ['M8 2.5l1.1.6 1.2-.2.7 1 .9.6-.1 1.2.6 1.1-.6 1.1.1 1.2-.9.6-.7 1-1.2-.2-1.1.6-1.1-.6-1.2.2-.7-1-.9-.6.1-1.2-.6-1.1.6-1.1-.1-1.2.9-.6.7-1 1.2.2z', 'M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4'],
   close: ['M4.5 4.5l7 7', 'M11.5 4.5l-7 7']
 }
 

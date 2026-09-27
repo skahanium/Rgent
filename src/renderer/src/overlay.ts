@@ -63,7 +63,8 @@ export function openOverlay(options: OverlayOptions): Overlay {
     root.remove()
     options.onClose?.()
     // 关掉之后把焦点还给触发它的地方。
-    if (previouslyFocused?.isConnected) previouslyFocused.focus()
+    // close 事件可能在下一帧才到；若已有新模态打开，旧浮层不能把焦点抢回底层。
+    if (previouslyFocused?.isConnected && !stack.some((item) => item.isOpen())) previouslyFocused.focus()
   })
 
   // 模态之上再开一个模态：拒绝，栈里永远只有一个。

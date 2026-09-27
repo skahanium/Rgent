@@ -383,7 +383,8 @@ const theme = EditorView.theme({
   },
   '.cm-content': {
     caretColor: 'var(--accent-focus)',
-    padding: '28px 8px 48px',
+    // 画布右上角的账本入口需要一条不被首行文字侵入的安静空间。
+    padding: '52px 8px 48px',
     maxWidth: '42rem',
     margin: '0 auto'
   },
@@ -404,7 +405,7 @@ export type EditorHost = {
   getText: () => string
   setText: (text: string, host?: NoteHost, selection?: { anchor: number; head: number }) => void
   setNoteHost: (host: NoteHost) => void
-  /** 只跟着系统主题走；不写盘、不进撤销栈。 */
+  /** 应用主进程选择后的实际日夜外观；不写笔记、不进撤销栈。 */
   setTheme: (night: boolean) => void
   /** 行列（1 起）、标题与可视起点，供底栏与标题索引消费。 */
   selectionInfo: () => { line: number; column: number }

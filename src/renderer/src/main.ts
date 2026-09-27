@@ -9,7 +9,7 @@ if (!root) throw new Error('missing #app')
 document.documentElement.dataset.platform = navigator.platform.startsWith('Mac') ? 'darwin' :
   navigator.platform.startsWith('Win') ? 'win32' : 'other'
 
-// 主题只跟随系统；窗口创建前先落一次，避免闪一下日间配色。
+// 主进程已在窗口创建前设置主题来源；渲染层取实际生效的日夜值。
 watchTheme((theme) => {
   window.dispatchEvent(new CustomEvent('rgent:theme', { detail: theme }))
 })

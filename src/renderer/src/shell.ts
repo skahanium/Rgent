@@ -6,6 +6,7 @@ import { promptNewNote } from './dialogs.ts'
 import { promptConflict } from './conflict.ts'
 import { openOverlay } from './overlay.ts'
 import { createSearchOverlay } from './search-overlay.ts'
+import { createSettingsOverlay } from './settings.ts'
 import { applySaved, pendingWrites, type Tab } from './tabs.ts'
 import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
 import { renderReadOnlyMarkdown } from './view/read-only.ts'
@@ -28,7 +29,7 @@ export async function start(root: HTMLElement): Promise<void> {
         <span class="permission-warning" role="alert" hidden></span>
       </header>
       <div class="body">
-        <aside id="tree-panel" class="tree-panel" hidden>
+        <aside id="tree-panel" class="tree-panel is-collapsed" aria-label="笔记目录">
           <div class="tree-tools">
             <button type="button" class="search-open">
               <span class="search-open-label">搜索笔记</span>
@@ -36,8 +37,10 @@ export async function start(root: HTMLElement): Promise<void> {
             </button>
           </div>
           <div class="tree-scroll"></div>
+          <div class="tree-settings"><button type="button" class="settings-open" aria-label="设置" title="设置"><span class="settings-open-label">设置</span></button></div>
         </aside>
         <section class="stage" id="note-panel" role="tabpanel" aria-label="正文">
+          <button type="button" class="ledger-open" aria-pressed="false" hidden>账本</button>
           <div class="ledger-view" hidden>
             <div class="ledger-head">
               <span class="ledger-title"></span>
@@ -70,6 +73,8 @@ export async function start(root: HTMLElement): Promise<void> {
   const ledgerBody = root.querySelector('.ledger-body') as HTMLElement
   const ledgerClose = root.querySelector('.ledger-close') as HTMLButtonElement
   const searchOpen = root.querySelector('.search-open') as HTMLButtonElement
+  const settingsOpen = root.querySelector('.settings-open') as HTMLButtonElement
+  const ledgerOpenButton = root.querySelector('.ledger-open') as HTMLButtonElement
   const shortcutHint = root.querySelector('.shortcut-hint') as HTMLElement
 
 
@@ -101,6 +106,10 @@ export async function start(root: HTMLElement): Promise<void> {
     search: (query) => window.rgent.search(query),
     onOpenNote: (relPath) => void openNote(relPath)
   })
+  const settingsOverlay = createSettingsOverlay({
+    getMode: () => window.rgent.themeGet(),
+    setMode: (mode) => window.rgent.themeSet(mode)
+  })
   let saveInFlight: Promise<boolean> | null = null
   let ledgerOpen = false
   let countedPath: string | null = null
@@ -123,8 +132,9 @@ export async function start(root: HTMLElement): Promise<void> {
   })
   shortcutHint.textContent = shortcutLabel('k')
   searchOpen.addEventListener('click', () => { if (!conflictDecisionOpen) searchOverlay.open() })
+  settingsOpen.prepend(icon('settings'))
+  settingsOpen.addEventListener('click', () => { if (!conflictDecisionOpen) settingsOverlay.open() })
 
-  // 主题跟着系统走（围栏：自动切换方式未锁，手动开关归设置阶段）。
   editor.onStateChange(() => {
     const tab = current()
     if (tab) tab.selection = editor.selectionRange()
@@ -137,12 +147,13 @@ export async function start(root: HTMLElement): Promise<void> {
   editor.setTheme(document.documentElement.dataset.theme === 'night')
 
   treeToggle.addEventListener('click', () => {
-    const open = treePanel.hasAttribute('hidden')
-    treePanel.toggleAttribute('hidden', !open)
+    const open = treePanel.classList.contains('is-collapsed')
+    treePanel.classList.toggle('is-collapsed', !open)
     treeToggle.setAttribute('aria-expanded', String(open))
   })
 
-  ledgerClose.addEventListener('click', () => closeLedger())
+  ledgerOpenButton.addEventListener('click', () => toggleLedger())
+  ledgerClose.addEventListener('click', () => closeLedger(true))
 
   window.rgent.onMenu(IPC.menuOpenVault, () => {
     void chooseVault()
@@ -486,20 +497,10 @@ export async function start(root: HTMLElement): Promise<void> {
     add.append(icon('plus'))
     add.addEventListener('click', () => void createNote())
     tabsEl.append(add)
-    // 账本回顾：入口就放在当前笔记标题旁边，临时、只读、关掉就走，
-    // 不占右侧反链（围栏 §账本）。它不是文件，所以不进 tabs 数组。
-    if (active) {
-      const ledger = document.createElement('button')
-      ledger.type = 'button'
-      ledger.className = 'ledger-open'
-      ledger.textContent = '账本'
-      ledger.title = '看这篇笔记的账本回顾'
-      ledger.setAttribute('aria-pressed', String(ledgerOpen))
-      ledger.addEventListener('click', () => toggleLedger())
-      const currentTab = tabsEl.querySelector('.tab[aria-selected="true"]')?.closest('.tab-wrap')
-      if (currentTab) currentTab.after(ledger)
-      else tabsEl.append(ledger)
-    }
+    ledgerOpenButton.hidden = !active
+    ledgerOpenButton.textContent = ledgerOpen ? '返回正文' : '账本'
+    ledgerOpenButton.title = ledgerOpen ? '返回这篇笔记的正文' : '看这篇笔记的账本回顾'
+    ledgerOpenButton.setAttribute('aria-pressed', String(ledgerOpen))
     emptyEl.hidden = tabs.length > 0
   }
 
@@ -564,7 +565,7 @@ export async function start(root: HTMLElement): Promise<void> {
 
   function toggleLedger(): void {
     if (ledgerOpen) {
-      closeLedger()
+      closeLedger(true)
       return
     }
     const tab = current()
@@ -579,11 +580,12 @@ export async function start(root: HTMLElement): Promise<void> {
     renderTabs()
   }
 
-  function closeLedger(): void {
+  function closeLedger(restoreFocus = false): void {
     if (!ledgerOpen) return
     ledgerOpen = false
     ledgerEl.hidden = true
     renderTabs()
+    if (restoreFocus) ledgerOpenButton.focus()
   }
 
   async function closeTab(relPath: string, opts: { save?: boolean } = {}): Promise<void> {
@@ -593,6 +595,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const index = tabs.findIndex((item) => item.relPath === relPath)
     tabs.splice(index, 1)
     if (active === relPath) {
+      closeLedger()
       const next = tabs[index] ?? tabs[index - 1]
       active = next?.relPath ?? null
       editor.setText(next?.content ?? '', noteHost(), next?.selection)
