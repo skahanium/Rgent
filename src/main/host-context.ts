@@ -57,8 +57,9 @@ function ledgerChapters(ledger: string | null): ContextChapter[] {
   const taskStarts = [...content.matchAll(/^<!-- rgent:ledger-task:v1 id="[A-Za-z0-9_-]+" -->\r?$/gm)]
     .map((match) => match.index)
   const starts = taskStarts.length > 0
-    ? (content.slice(0, taskStarts[0]).trim() ? [0, ...taskStarts] : taskStarts)
+    ? [...taskStarts]
     : parsed.index.headings.filter((heading) => heading.depth === 2).map((heading) => heading.range.start)
+  if (starts.length > 0 && content.slice(0, starts[0]).trim()) starts.unshift(0)
   const chapterId = (start: number, text: string): string =>
     `ledger-${start}-${createHash('sha256').update(text).digest('hex').slice(0, 12)}`
   if (starts.length === 0) return [{ sourceId: chapterId(0, content), text: content }]

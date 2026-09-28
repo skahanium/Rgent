@@ -74,6 +74,9 @@ export class AgentHost {
     if (this.launching.has(key) || this.tasks.active().some((task) => task.root === root && task.relPath === input.relPath)) {
       throw new Error('NOTE_BUSY')
     }
+    if ([...this.pending.values()].some((item) => item.root === root && item.relPath === input.relPath)) {
+      throw new Error('PREVIOUS_TASK_UNSAVED')
+    }
     this.launching.add(key)
     try {
       await this.requirePermission(root, input.relPath)
@@ -132,7 +135,7 @@ export class AgentHost {
               await this.requirePermission(root, input.relPath)
               if (++steps > limits.steps) throw new Error('MODEL_STEP_LIMIT')
               let text = ''
-              for await (const chunk of this.deps.stream({ ...credential, system: SYSTEM_RULES, prompt: `请仅摘要下列旧账本，标明来源 ID；不补写未知细节，摘要不超过 400 字：\n${batch}`, maxOutputTokens: Math.min(512, this.outputBudget(credential.contextTokens)) }, signal)) {
+              for await (const chunk of safeModelStream(() => this.deps.stream({ ...credential, system: SYSTEM_RULES, prompt: `请仅摘要下列旧账本，标明来源 ID；不补写未知细节，摘要不超过 400 字：\n${batch}`, maxOutputTokens: Math.min(512, this.outputBudget(credential.contextTokens)) }, signal), signal, credential.apiKey)) {
                 if (signal.aborted) return
                 await this.requirePermission(root, input.relPath)
                 text += chunk
@@ -149,8 +152,9 @@ export class AgentHost {
           const prompt = `${plan.content}${omitted}`
           if ((await this.deps.read(input.relPath)).content !== source) { summary = undefined; continue }
           await this.requirePermission(root, input.relPath)
-          for await (const chunk of this.deps.stream({ ...credential, system: SYSTEM_RULES, prompt, maxOutputTokens: this.outputBudget(credential.contextTokens) }, signal)) {
-            if (signal.aborted) break
+          for await (const chunk of safeModelStream(() => this.deps.stream({ ...credential, system: SYSTEM_RULES, prompt, maxOutputTokens: this.outputBudget(credential.contextTokens) }, signal), signal, credential.apiKey)) {
+            // The redactor may release already-received safe text when aborting.
+            if (signal.aborted) { answer += chunk; break }
             await this.requirePermission(root, input.relPath)
             answer += chunk
             snapshot('running')
@@ -220,6 +224,61 @@ export class AgentHost {
 }
 
 function byteCount(text: string): number { return Buffer.byteLength(text, 'utf8') }
+
+/** Keep only a suffix that might become the key in the next chunk. */
+async function* safeModelStream(create: () => AsyncIterable<string>, signal: AbortSignal, secret: string): AsyncGenerator<string> {
+  if (!secret) throw new Error('NO_API_KEY')
+  let pending = ''
+  try {
+    for await (const chunk of abortableStream(create(), signal)) {
+      pending += chunk
+      let visible = ''
+      let found = pending.indexOf(secret)
+      while (found >= 0) {
+        visible += pending.slice(0, found) + '[密钥已隐藏]'
+        pending = pending.slice(found + secret.length)
+        found = pending.indexOf(secret)
+      }
+      let keep = 0
+      for (let length = Math.min(secret.length - 1, pending.length); length > 0; length--) {
+        if (pending.endsWith(secret.slice(0, length))) { keep = length; break }
+      }
+      visible += pending.slice(0, pending.length - keep)
+      pending = pending.slice(pending.length - keep)
+      if (visible) yield visible
+    }
+    if (pending) yield pending
+  } catch {
+    if (pending) yield pending
+    // Remote error text may echo request headers. Never persist it or send it to the renderer.
+    if (signal.aborted) return
+    throw new Error('MODEL_REQUEST_FAILED')
+  }
+}
+
+/** A provider may never settle iterator.next() after abort; stop the task without waiting for it. */
+async function* abortableStream(stream: AsyncIterable<string>, signal: AbortSignal): AsyncGenerator<string> {
+  const iterator = stream[Symbol.asyncIterator]()
+  let onAbort = (): void => {}
+  const aborted = new Promise<IteratorResult<string>>((resolve) => {
+    onAbort = () => resolve({ done: true, value: undefined })
+  })
+  signal.addEventListener('abort', onAbort, { once: true })
+  if (signal.aborted) onAbort()
+  try {
+    while (!signal.aborted) {
+      const next = await Promise.race([iterator.next(), aborted])
+      if (next.done || signal.aborted) return
+      yield next.value
+    }
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+    if (signal.aborted) {
+      try { void iterator.return?.().catch(() => {}) }
+      catch { /* Cancellation must not wait for a non-cooperative provider. */ }
+    }
+  }
+}
 
 /** Split long old chapters into bounded model calls without losing their source labels. */
 function summaryBatches(chapters: readonly ContextChapter[], maxBytes: number): string[] {

@@ -43,4 +43,14 @@ describe('model stream adapter', () => {
     }).rejects.toThrow()
     expect(redirected).toBe(false)
   })
+
+  it('turns a provider HTTP failure into a failed stream', async () => {
+    const baseURL = await serverFor((_request, response) => {
+      response.writeHead(503, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ error: { message: 'service unavailable' } }))
+    })
+    await expect(async () => {
+      for await (const _chunk of streamModelText({ baseURL, modelId: 'test', apiKey: 'fixture-key', prompt: 'hi', signal: new AbortController().signal })) { /* consume */ }
+    }).rejects.toThrow()
+  })
 })

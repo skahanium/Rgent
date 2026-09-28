@@ -21,6 +21,20 @@ import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.t
 import type { Theme } from './theme.ts'
 
 const SAVE_MS = 800
+const HOST_ERROR_MESSAGES: Record<string, string> = {
+  NO_API_KEY: '请先在设置的「模型」页保存当前供应商的密钥。',
+  ENCRYPTION_UNAVAILABLE: '系统密钥保护当前不可用。',
+  KEY_DECRYPT_FAILED: '已保存的模型密钥无法解密，请在设置中替换。',
+  PERMISSIONS_INVALID: '权限名单无法核对，请先修复库根名单。',
+  FORBIDDEN: '这篇笔记禁止 AI 触碰。',
+  NOTE_NOT_REFERENCE: '这篇笔记当前不允许发起 AI 任务。',
+  NOTE_BUSY: '这篇笔记已有正在运行的任务。',
+  PREVIOUS_TASK_UNSAVED: '上一场生成内容尚未保存，请先处理保存失败。',
+  MODEL_STEP_LIMIT: '已达到本场模型步骤上限。',
+  MODEL_REQUEST_FAILED: '模型请求失败，请检查接口、密钥和网络。',
+  CONFLICT: '笔记已变化，请先处理冲突。'
+}
+const hostErrorText = (error: string): string => HOST_ERROR_MESSAGES[error] ?? error
 
 export async function start(root: HTMLElement): Promise<void> {
   root.innerHTML = `
@@ -253,7 +267,7 @@ export async function start(root: HTMLElement): Promise<void> {
       promptText: submission.prompt
     })
     if (!result.ok) {
-      hostNotice = `无法开始：${result.error}`
+      hostNotice = `无法开始：${hostErrorText(result.error)}`
       updateStatus()
       return
     }
@@ -270,7 +284,7 @@ export async function start(root: HTMLElement): Promise<void> {
     } else {
       endedTaskIds.add(event.id)
       activeTasks.delete(event.id)
-      if (event.status === 'failed') hostNotice = `生成失败：${event.reason ?? '未知错误'}`
+      if (event.status === 'failed') hostNotice = `生成失败：${hostErrorText(event.reason ?? '未知错误')}`
       else if (event.status === 'cancelled') hostNotice = `已停止：${event.relPath}`
     }
     syncActiveLocks()
@@ -370,8 +384,8 @@ export async function start(root: HTMLElement): Promise<void> {
     vaultNameText = state.rootName
     updateStatus()
     if (state.vaultChanged) {
-      const ok = await flushSave()
-      if (!ok) return
+      // chooseVault flushed the old vault before vaultPick switched the root.
+      // Never send an old tab's path through noteWrite after the new root is active.
       resetSession()
     }
     await refreshTree()
@@ -787,7 +801,7 @@ export async function start(root: HTMLElement): Promise<void> {
     if (!tab) return
     ledgerOpen = true
     ledgerTitle.textContent = `${titleOf(tab.relPath.split('/').pop() ?? tab.relPath)} · 账本回顾`
-    // 账本是旁路原文，只读展示；分场要等写入方（Host 阶段）定下章节写法。
+    // 账本是同文件的旁路原文，只读展示；Host 按任务追加的章节也走同一视图。
     const ledgerSource = tab.ledger?.replace(/^<!-- rgent:ledger:v1 -->\s*\r?\n?/, '') ?? ''
     if (ledgerSource.trim()) renderReadOnlyMarkdown(ledgerBody, ledgerSource, noteHost())
     else ledgerBody.textContent = '这篇笔记还没有账本。完成一次生成任务后，可在这里回顾。'

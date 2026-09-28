@@ -99,6 +99,33 @@ describe('Host minimal loop', () => {
     expect(sent).toBe(false)
   })
 
+  it('finishes cancellation even if a provider does not settle its next stream chunk', async () => {
+    let resume = () => {}
+    let waiting = () => {}
+    const blocked = new Promise<void>((resolve) => { resume = resolve })
+    const reachedNext = new Promise<void>((resolve) => { waiting = resolve })
+    const app = harness(async function* () {
+      yield '已生成'
+      waiting()
+      await blocked
+      yield '迟到内容'
+    })
+    const source = app.source()
+    const start = source.indexOf('/')
+    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    await reachedNext
+    const stop = app.host.cancel(task.id, 'user')
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 1000) })
+    const timely = await Promise.race([stop.then(() => true), deadline])
+    clearTimeout(timer)
+    resume()
+    await task.done
+    expect(timely).toBe(true)
+    expect(app.source()).toContain('已生成')
+    expect(app.source()).not.toContain('迟到内容')
+  })
+
   it('retains an unwritten final chapter for retry and appends it only once', async () => {
     const app = harness(async function* () { yield '回答' })
     app.failLedgerOnce()
@@ -110,6 +137,40 @@ describe('Host minimal loop', () => {
     await app.host.retryPending()
     expect(app.host.hasPending()).toBe(false)
     expect(app.source().match(/<!-- rgent:ledger-task:v1/g)).toHaveLength(1)
+  })
+
+  it('does not start a later task in a note with an unsaved prior answer', async () => {
+    const app = harness(async function* () { yield '回答' }, '前言\n\n/写个回答\n\n/第二问\n')
+    app.failLedgerOnce()
+    const source = app.source()
+    const first = source.indexOf('/写个回答')
+    const task = await app.host.start({ relPath: 'a.md', range: { start: first, end: first + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    await expect(task.done).rejects.toThrow('IO_ERROR')
+    expect(app.host.hasPending()).toBe(true)
+    const secondSource = app.source()
+    const second = secondSource.indexOf('/第二问')
+    await expect(app.host.start({ relPath: 'a.md', range: { start: second, end: second + '/第二问'.length }, expectedText: '/第二问', promptText: '第二问' })).rejects.toThrow('PREVIOUS_TASK_UNSAVED')
+  })
+
+  it('does not place provider error text containing a key into events or the ledger', async () => {
+    const app = harness(async function* () { throw new Error('remote echoed secret in failure') })
+    const source = app.source()
+    const start = source.indexOf('/')
+    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    expect(await task.done).toEqual({ status: 'failed', reason: 'MODEL_REQUEST_FAILED' })
+    expect(app.source()).not.toContain('remote echoed secret')
+    expect(JSON.stringify(app.events)).not.toContain('remote echoed secret')
+  })
+
+  it('redacts an API key echoed across model stream chunks before display or write', async () => {
+    const app = harness(async function* () { yield '前缀 sec'; yield 'ret 后缀' })
+    const source = app.source()
+    const start = source.indexOf('/')
+    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    expect(await task.done).toEqual({ status: 'completed' })
+    expect(app.source()).not.toContain('secret')
+    expect(JSON.stringify(app.events)).not.toContain('secret')
+    expect(app.source()).toContain('密钥已隐藏')
   })
 
   it('summarizes an oversized old ledger in bounded task-local calls before final generation', async () => {

@@ -23,6 +23,20 @@ const CHOICES: Array<{ mode: ThemeMode; name: string; detail: string }> = [
   { mode: 'system', name: '跟随系统', detail: '随设备外观自动切换' }
 ]
 
+const CONFIG_ERRORS: Record<string, string> = {
+  BAD_MODEL_CONFIG: '本机模型配置文件损坏，请先修复；笔记仍可正常使用。',
+  BAD_BASE_URL: '接口地址须为 HTTPS，或本机回环地址的 HTTP。',
+  BAD_MODEL_ID: '请填写有效的模型 ID。',
+  BAD_CONTEXT_TOKENS: '请填写有限的正整数上下文容量。',
+  BAD_API_KEY: '请填写非空密钥。',
+  ENCRYPTION_UNAVAILABLE: '系统密钥保护当前不可用，密钥未保存。',
+  KEY_ENCRYPT_FAILED: '密钥加密失败，原配置保持不变。',
+  KEY_DECRYPT_FAILED: '已保存的密钥无法解密，请替换。',
+  BAD_LIMITS: '运行上限须为允许范围内的有限整数。',
+  IO_ERROR: '写入本机配置失败，原配置保持不变。'
+}
+const configErrorText = (error: string): string => CONFIG_ERRORS[error] ?? error
+
 export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverlay {
   let overlay: Overlay | null = null
   let request = 0
@@ -165,7 +179,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       const { body, error } = pageFrame('模型', '配置文本模型。密钥保存在此设备，读取时只显示保存状态。')
       const result = await handlers.getConfig().catch(() => ({ ok: false, error: '读取失败' }) as ModelConfigResult)
       if (!current.isOpen() || openedPage !== '模型' || mine !== request) return
-      if (!result.ok) { showError(error, `模型配置不可用：${result.error}`); return }
+      if (!result.ok) { showError(error, `模型配置不可用：${configErrorText(result.error)}`); return }
       const config = result.config
       const provider = document.createElement('select')
       provider.className = 'settings-provider'
@@ -210,7 +224,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         void handlers.setProfile!({ provider: id, fields: { baseURL: base.value, modelId: model.value, contextTokens: Number(context.value) }, ...(newKey ? { newKey } : {}) })
           .then((updated) => {
             if (!current.isOpen() || openedPage !== '模型') return
-            if (!updated.ok) { showError(error, `保存失败：${updated.error}`); return }
+            if (!updated.ok) { showError(error, `保存失败：${configErrorText(updated.error)}`); return }
             config.profiles = updated.config.profiles
             secret.value = ''
             paintProfile()
@@ -220,7 +234,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       const select = action('设为当前模型', () => {
         void handlers.selectModel!(provider.value as ModelProvider).then((updated) => {
           if (!current.isOpen() || openedPage !== '模型') return
-          if (!updated.ok) { showError(error, `切换失败：${updated.error}`); return }
+          if (!updated.ok) { showError(error, `切换失败：${configErrorText(updated.error)}`); return }
           config.selected = updated.config.selected
           paintProfile()
           showError(error, '')
@@ -229,7 +243,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       const remove = action('删除密钥', () => {
         void handlers.deleteKey!(provider.value as ModelProvider).then((updated) => {
           if (!current.isOpen() || openedPage !== '模型') return
-          if (!updated.ok) { showError(error, `删除失败：${updated.error}`); return }
+          if (!updated.ok) { showError(error, `删除失败：${configErrorText(updated.error)}`); return }
           config.profiles = updated.config.profiles
           paintProfile()
           showError(error, '')
@@ -246,7 +260,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       const { body, error } = pageFrame('运行', '上限按任务启动时的快照生效。当前最小环不调用工具。')
       const result = await handlers.getConfig().catch(() => ({ ok: false, error: '读取失败' }) as ModelConfigResult)
       if (!current.isOpen() || openedPage !== '运行' || mine !== request) return
-      if (!result.ok) { showError(error, `运行设置不可用：${result.error}`); return }
+      if (!result.ok) { showError(error, `运行设置不可用：${configErrorText(result.error)}`); return }
       const labels: Record<LimitTier, string> = { none: '无工具', local: '本地工具', network: '联网或 MCP' }
       for (const tier of ['none', 'local', 'network'] as LimitTier[]) {
         const group = document.createElement('fieldset')
@@ -263,7 +277,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         const save = action('保存上限', () => {
           save.disabled = true
           void handlers.setLimits!({ tier, limits: { seconds: Number(seconds.value), steps: Number(steps.value), tools: tier === 'none' ? 0 : Number(tools.value) } })
-            .then((updated) => showError(error, updated.ok ? '' : `保存失败：${updated.error}`))
+            .then((updated) => showError(error, updated.ok ? '' : `保存失败：${configErrorText(updated.error)}`))
             .catch(() => showError(error, '保存失败，请重试。'))
             .finally(() => { save.disabled = false })
         })

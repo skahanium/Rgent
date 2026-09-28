@@ -89,6 +89,15 @@ describe('Host context assembly', () => {
     expect(plan.refs.filter((ref) => ref.kind === 'ledger')).toHaveLength(2)
   })
 
+  it('retains ledger text before the first handwritten H2 chapter', () => {
+    const source = '落点。\n<!-- rgent:ledger:v1 -->\n旧版前言不可丢。\n## 手写章节\n后文。\n'
+    const plan = buildHostContext({ source, prompt: '问', placement: 0, inputBudgetTokens: 1000, countTokens })
+    expect(plan.status).toBe('ready')
+    if (plan.status !== 'ready') return
+    expect(plan.content).toContain('旧版前言不可丢')
+    expect(plan.content).toContain('后文')
+  })
+
   it('reserves space for a valid old-history summary before middle body blocks', () => {
     const body = '开头。\n\n落点。\n\n' + Array.from({ length: 8 }, (_, at) => `中间${at}。`).join('\n\n')
     const source = `${body}\n<!-- rgent:ledger:v1 -->\n## 旧章\n${'旧内容'.repeat(100)}\n## 新章\n最近。\n`
