@@ -327,6 +327,10 @@ input:focus-visible,
   font-weight: 600;
 }
 .settings-nav-current::before { content: ''; width: 3px; height: 20px; margin-right: 10px; border-radius: 3px; background: var(--accent-primary); }
+.settings-nav button { width: 100%; text-align: left; cursor: pointer; font-family: var(--font-ui); }
+.settings-nav-item { display: flex; align-items: center; min-height: 36px; padding: 0 25px; border-radius: var(--radius-md); color: var(--text-muted); font-size: 0.86rem; }
+.settings-nav-item:hover { background: var(--state-hover); color: var(--text-heading); }
+.settings-nav button:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
 
 .settings-main { min-width: 0; overflow: auto; padding: 26px 36px 32px; }
 .settings-page-title { margin: 0 0 6px; color: var(--text-heading); font-size: 1.42rem; font-weight: 600; }
@@ -375,6 +379,17 @@ input:focus-visible,
 .settings-preview-system::after { background: linear-gradient(90deg, var(--preview-day-accent) 50%, var(--preview-night-accent) 50%); box-shadow: 0 13px 0 var(--preview-night-ink); }
 .settings-error { margin: 16px 0 0; color: var(--status-error); font-size: 0.78rem; }
 .settings-error[hidden] { display: none; }
+.settings-form { display: grid; align-content: start; gap: 12px; }
+.settings-field { display: grid; gap: 5px; color: var(--text-muted); font-size: 0.78rem; }
+.settings-field input, .settings-field select { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-overlay); color: var(--text-heading); font: 0.84rem var(--font-ui); }
+.settings-field input:focus-visible, .settings-field select:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 1px; }
+.settings-field input:disabled { opacity: 0.65; }
+.settings-key-state { margin: 0; color: var(--text-muted); font-size: 0.78rem; }
+.settings-action { justify-self: start; min-height: 34px; padding: 5px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-overlay); color: var(--text-heading); cursor: pointer; font: 0.8rem var(--font-ui); }
+.settings-action:hover { border-color: var(--accent-primary); background: var(--state-hover); }
+.settings-action:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
+.settings-limit-group { display: grid; gap: 8px; margin: 0 0 10px; padding: 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
+.settings-limit-group legend { color: var(--text-heading); font-size: 0.85rem; font-weight: 600; }
 
 @media (max-width: 820px) {
   :root { --editor-top-padding: 52px; }
@@ -831,6 +846,15 @@ input:focus-visible,
 }
 
 .status-vault { max-width: 22ch; }
+.status-task, .status-host-notice { color: var(--accent-primary); max-width: 36ch; }
+.status-task-stop, .status-task-more { min-height: 22px; padding: 1px 7px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-body); cursor: pointer; font: inherit; }
+.status-task-stop:hover, .status-task-more:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+.status-task-stop:focus-visible, .status-task-more:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
+.overlay-tasks { width: min(420px, calc(100vw - 40px)); }
+.overlay-tasks h2 { margin: 0 0 16px; font-size: 1rem; }
+.task-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border-subtle); font-size: 0.82rem; }
+.task-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-row button { padding: 4px 9px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-heading); cursor: pointer; }
 
 .status-dot {
   width: 7px;

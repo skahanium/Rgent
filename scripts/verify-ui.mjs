@@ -14,6 +14,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync
 import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
+import { createServer as createHttpServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -397,6 +398,7 @@ async function main() {
   }
   let startupError = ''
   let stderr = ''
+  let hostServer = null
   const child = spawn(
     electron,
     ['.', `--user-data-dir=${profile}`, '--no-sandbox', '--disable-gpu', `--remote-debugging-port=${port}`],
@@ -886,6 +888,96 @@ async function main() {
       return { ok: samples.length === 5 && samples.every((sample) => sample.bytes > 18_000 && sample.open < 5000 && sample.scroll < 1000) && maxInput < 250, detail: JSON.stringify(samples) }
     })
 
+    process.stdout.write('\nHost 最小环\n')
+    hostServer = createHttpServer((request, response) => {
+      let body = ''
+      request.on('data', (chunk) => { body += String(chunk) })
+      request.on('end', () => {
+        response.writeHead(200, { 'content-type': 'text/event-stream' })
+        response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"受控回答第一句。"},"finish_reason":null}]}\n\n')
+        const timer = setTimeout(() => {
+          if (response.destroyed) return
+          response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"第二句。"},"finish_reason":null}]}\n\n')
+          response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n')
+          response.end('data: [DONE]\n\n')
+        }, body.includes('多任务') ? 10000 : body.includes('快速完成') ? 0 : 1200)
+        response.on('close', () => clearTimeout(timer))
+      })
+    })
+    await new Promise((resolve) => hostServer.listen(0, '127.0.0.1', resolve))
+    const hostAddress = hostServer.address()
+    const hostBaseURL = `http://127.0.0.1:${hostAddress.port}/v1`
+    const configured = await page.eval(`(async () => {
+      const profile = await window.rgent.modelProfileSet({ provider: 'custom', fields: { baseURL: '${hostBaseURL}', modelId: 'test', contextTokens: 20000 }, newKey: 'ui-fixture-secret' })
+      if (!profile.ok || !profile.config.profiles.custom.hasKey) return false
+      const selected = await window.rgent.modelSelect('custom')
+      return selected.ok && selected.config.selected === 'custom'
+    })()`)
+    check('本机模型配置能保存密钥状态并选用受控兼容接口', configured === true)
+    await page.eval(`document.querySelector('.settings-open')?.click()`)
+    await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
+    await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '模型')?.click() })()`)
+    check('模型设置页只显示密钥状态，密码输入不回填', await waitFor(page, `document.querySelector('.settings-key-state')?.textContent === '密钥已保存' && document.querySelector('input[type=password]')?.value === ''`))
+    await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '运行')?.click() })()`)
+    check('运行设置页提供三档有限上限', await waitFor(page, `document.querySelectorAll('.settings-limit-group').length === 3`))
+    await page.eval(`document.querySelector('.settings-close')?.click()`)
+    writeFileSync(path.join(vault, 'Host 环路.md'), '')
+    check('新笔记在目录中出现', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host 环路'))`, 8000))
+    await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('Host 环路'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
+    await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('Host 环路')`)
+    await page.call('Input.insertText', { text: '/请写两句话' })
+    check('空段内输入的口令留在编辑器', await waitFor(page, `document.querySelector('.cm-content')?.textContent.includes('/请写两句话')`))
+    await page.key('Enter', 'Enter', 0, 13)
+    const running = await waitFor(page, `!!document.querySelector('.status-task-stop')`, 4000)
+    check('回车后底栏出现当前篇停止入口', running, running ? '' : await page.eval(`(async () => JSON.stringify({ status: document.querySelector('.status-left')?.innerText, note: (await window.rgent.noteRead('Host 环路.md')).content, editor: document.querySelector('.cm-content')?.textContent }))()`))
+    check('回答与账本写回同一篇，回答为未采纳块', await waitFor(page, `(async () => {
+      const note = await window.rgent.noteRead('Host 环路.md')
+      return note.content.includes('受控回答第一句。第二句。') && note.content.includes('<!-- rgent:ai:v1 task-id=') && note.content.includes('<!-- rgent:ledger-task:v1 id=')
+    })()`, 10000))
+    await page.eval(`document.querySelector('.ledger-open')?.click()`)
+    check('同一 tab 的只读账本能回顾口令和回答', await waitFor(page, `document.querySelector('.ledger-body')?.textContent.includes('请写两句话') && document.querySelector('.ledger-body')?.textContent.includes('受控回答第一句。')`))
+    await page.eval(`document.querySelector('.ledger-close')?.click()`)
+    writeFileSync(path.join(vault, 'Host 快速.md'), '')
+    await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((note) => note.innerText.includes('Host 快速'))`)
+    await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((note) => note.innerText.includes('Host 快速'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
+    await page.call('Input.insertText', { text: '/快速完成' })
+    await page.key('Enter', 'Enter', 0, 13)
+    check('快速流结束后底栏不残留运行任务', await waitFor(page, `(async () => {
+      const note = await window.rgent.noteRead('Host 快速.md')
+      return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 && !document.querySelector('.status-task-stop')
+    })()`, 8000))
+    writeFileSync(path.join(vault, 'Host A.md'), '')
+    writeFileSync(path.join(vault, 'Host B.md'), '')
+    check('两篇待运行笔记进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host A')) && [...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host B'))`, 8000))
+    for (const name of ['Host A', 'Host B']) {
+      await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('${name}'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
+      await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('${name}')`)
+      await page.call('Input.insertText', { text: '/多任务测试' })
+      await page.key('Enter', 'Enter', 0, 13)
+      await waitFor(page, `document.querySelector('.status-left')?.innerText.includes('生成中')`)
+    }
+    check('异篇并行时底栏显示任务数量', await waitFor(page, `document.querySelector('.status-task-more')?.textContent.includes('2 项')`))
+    await page.eval(`(() => { [...document.querySelectorAll('.tab-wrap')].find((tab) => tab.textContent.includes('Host A'))?.querySelector('.tab-close')?.click() })()`)
+    check('关闭 A 的 tab 不取消其生成', await waitFor(page, `(async () =>
+      ![...document.querySelectorAll('.tab-wrap')].some((tab) => tab.textContent.includes('Host A')) &&
+      (await window.rgent.agentTasks()).length === 2
+    )()`))
+    await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((note) => note.innerText.includes('Host A'))?.click() })()`)
+    check('重开 A 可回到正在生成的原篇', await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('Host A') && (async () => (await window.rgent.agentTasks()).length === 2)()`))
+    await page.eval(`(() => { [...document.querySelectorAll('.tab-wrap')].find((tab) => tab.textContent.includes('Host B'))?.querySelector('.tab')?.click() })()`)
+    await page.eval(`document.querySelector('.status-task-more')?.click()`)
+    check('任务浮层逐篇给出停止按钮', await waitFor(page, `document.querySelectorAll('.overlay-tasks .task-row').length === 2`))
+    await page.eval(`(() => { [...document.querySelectorAll('.overlay-tasks .task-row')].find((n) => n.textContent.includes('Host A'))?.querySelector('button')?.click() })()`)
+    check('停止 A 后 B 仍可继续运行', await waitFor(page, `document.querySelector('.status-task')?.textContent.includes('Host B')`))
+    await page.key('Escape', 'Escape', 0, 27)
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    await page.key('Escape', 'Escape', 0, 27)
+    check('Esc 停止当前 B，两个任务均写入取消账本', await waitFor(page, `(async () => {
+      const a = await window.rgent.noteRead('Host A.md')
+      const b = await window.rgent.noteRead('Host B.md')
+      return a.content.includes('· cancelled') && b.content.includes('· cancelled') && (await window.rgent.agentTasks()).length === 0
+    })()`, 8000))
+
     process.stdout.write('\n收尾\n')
     check('整轮没有未捕获异常', page.errors.length === 0, page.errors.slice(0, 1).join(''))
 
@@ -898,6 +990,7 @@ async function main() {
       ])
     }
     rmSync(workdir, { recursive: true, force: true })
+    if (hostServer) await new Promise((resolve) => hostServer.close(resolve))
   }
 
   process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)

@@ -19,8 +19,47 @@ export const IPC = {
   permissionsSet: 'permissions:set',
   themeGet: 'theme:get',
   themeSet: 'theme:set',
-  remoteImageGet: 'image:get'
+  remoteImageGet: 'image:get',
+  modelConfigGet: 'model-config:get',
+  modelProfileSet: 'model-config:profile-set',
+  modelSelect: 'model-config:select',
+  modelKeyDelete: 'model-config:key-delete',
+  modelLimitsSet: 'model-config:limits-set',
+  agentStart: 'agent:start',
+  agentCancel: 'agent:cancel',
+  agentTasks: 'agent:tasks',
+  agentEvent: 'agent:event'
 } as const
+
+export type ModelProvider = 'deepseek' | 'minimax' | 'custom'
+export type LimitTier = 'none' | 'local' | 'network'
+export type ModelProfileFields = { baseURL: string; modelId: string; contextTokens: number }
+export type RunLimits = { seconds: number; steps: number; tools: number }
+export type PublicModelConfig = {
+  selected: ModelProvider
+  profiles: Record<ModelProvider, ModelProfileFields & { hasKey: boolean }>
+  limits: Record<LimitTier, RunLimits>
+}
+export type ModelConfigResult = { ok: true; config: PublicModelConfig } | { ok: false; error: string }
+export type ModelProfileSetRequest = { provider: ModelProvider; fields: ModelProfileFields; newKey?: string }
+export type ModelLimitsSetRequest = { tier: LimitTier; limits: RunLimits }
+export type AgentStartRequest = {
+  relPath: string
+  range: { start: number; end: number }
+  expectedText: string
+  promptText: string
+}
+export type AgentStartResult = { ok: true; id: string } | { ok: false; error: string }
+export type AgentTaskView = { id: string; relPath: string; startedAt: number }
+export type AgentEvent = {
+  id: string
+  relPath: string
+  status: 'running' | 'completed' | 'cancelled' | 'failed'
+  answer?: string
+  reason?: string
+  persisted?: boolean
+  revision?: string
+}
 
 export type RemoteImageGetRequest = { url: string; allowHttp: boolean }
 export type RemoteImageGetResult =

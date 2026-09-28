@@ -23,7 +23,8 @@ export class VaultSession {
 
   constructor(
     private userData: string,
-    private emit: (channel: string, payload?: unknown) => void
+    private emit: (channel: string, payload?: unknown) => void,
+    private beforeChange: (previousRoot: string) => Promise<void> = async () => {}
   ) {}
 
   private stateFile(): string {
@@ -54,6 +55,7 @@ export class VaultSession {
     const chosen = path.resolve(result.filePaths[0])
     if (!isUsableDir(chosen)) return { status: 'needs-pick', reason: 'missing' }
     const previous = this.root
+    if (previous && previous !== chosen) await this.beforeChange(previous)
     writeFileSync(this.stateFile(), serializeStoredVault(chosen), 'utf8')
     this.attach(chosen)
     return {

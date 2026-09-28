@@ -1,4 +1,4 @@
-import { IPC, type NoteSnapshot, type PermissionState, type PermissionTier, type SearchHit, type TreeEntry, type VaultState } from '@shared'
+import { IPC, type AgentEvent, type AgentTaskView, type NoteSnapshot, type PermissionState, type PermissionTier, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
@@ -15,6 +15,8 @@ import { outlineLabel, outlineMarks } from './outline.ts'
 import { installShortcuts, shortcutLabel } from './shortcuts.ts'
 import { renderStatusbar, statusModel, wordsOf } from './statusbar.ts'
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
+import { mergeHostBody } from './host-merge.ts'
+import { slashAtCaret } from './slash.ts'
 import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.ts'
 import type { Theme } from './theme.ts'
 
@@ -110,13 +112,23 @@ export async function start(root: HTMLElement): Promise<void> {
   })
   const settingsOverlay = createSettingsOverlay({
     getMode: () => window.rgent.themeGet(),
-    setMode: (mode) => window.rgent.themeSet(mode)
+    setMode: (mode) => window.rgent.themeSet(mode),
+    getConfig: () => window.rgent.modelConfigGet(),
+    setProfile: (request) => window.rgent.modelProfileSet(request),
+    selectModel: (provider) => window.rgent.modelSelect(provider),
+    deleteKey: (provider) => window.rgent.modelKeyDelete(provider),
+    setLimits: (request) => window.rgent.modelLimitsSet(request)
   })
   let saveInFlight: Promise<boolean> | null = null
   let ledgerOpen = false
   let countedPath: string | null = null
   let countedSource: string | null = null
   let countedWords = 0
+  const activeTasks = new Map<string, AgentTaskView>()
+  const endedTaskIds = new Set<string>()
+  const hostRevisions = new Map<string, string>()
+  let taskOverlay: ReturnType<typeof openOverlay> | null = null
+  let hostNotice = ''
 
   const editor: EditorHost = mountEditor(editorHostEl, (text) => {
     const tab = current()
@@ -147,6 +159,23 @@ export async function start(root: HTMLElement): Promise<void> {
     editor.setTheme((event as CustomEvent<Theme>).detail === 'night')
   })
   editor.setTheme(document.documentElement.dataset.theme === 'night')
+
+  editor.view.dom.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return
+    const selection = editor.selectionRange()
+    if (selection.anchor !== selection.head) return
+    const submission = slashAtCaret(editor.getText(), selection.head)
+    if (!submission) return
+    event.preventDefault()
+    void submitSlash(submission)
+  }, { capture: true })
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !active || document.querySelector('dialog[open]')) return
+    const task = [...activeTasks.values()].find((item) => item.relPath === active)
+    if (!task) return
+    event.preventDefault()
+    void window.rgent.agentCancel(task.id)
+  }, true)
 
   treeToggle.addEventListener('click', () => {
     const open = treePanel.classList.contains('is-collapsed')
@@ -189,6 +218,105 @@ export async function start(root: HTMLElement): Promise<void> {
       updateStatus()
     }).catch(() => { /* 读写失败时保留窗口稿，后续保存仍会复核修订值。 */ })
   })
+  window.rgent.onAgentEvent((event) => {
+    onHostEvent(event)
+  })
+
+  void window.rgent.agentTasks().then((tasks) => {
+    for (const task of tasks) {
+      if (!endedTaskIds.has(task.id)) activeTasks.set(task.id, task)
+    }
+    syncActiveLocks()
+    updateStatus()
+  }).catch(() => {})
+
+  async function submitSlash(submission: { range: { start: number; end: number }; prompt: string }): Promise<void> {
+    const tab = current()
+    if (!tab) return
+    const draft = editor.getText()
+    if (activeTasks.size && [...activeTasks.values()].some((task) => task.relPath === tab.relPath)) {
+      hostNotice = '这篇笔记已有正在运行的任务。'
+      updateStatus()
+      return
+    }
+    hostNotice = ''
+    if (tab.dirty && (!(await writeTab(tab, draft)) || tab.dirty)) {
+      hostNotice = '先保存当前笔记，才能发送口令。'
+      updateStatus()
+      return
+    }
+    if (!tabs.includes(tab) || editor.getText() !== draft || tab.content !== draft) return
+    const result = await window.rgent.agentStart({
+      relPath: tab.relPath,
+      range: submission.range,
+      expectedText: draft.slice(submission.range.start, submission.range.end),
+      promptText: submission.prompt
+    })
+    if (!result.ok) {
+      hostNotice = `无法开始：${result.error}`
+      updateStatus()
+      return
+    }
+    if (!endedTaskIds.has(result.id)) activeTasks.set(result.id, { id: result.id, relPath: tab.relPath, startedAt: Date.now() })
+    syncActiveLocks()
+    updateStatus()
+    void runExclusiveConflict(() => syncHostTab(tab, vaultEpoch))
+  }
+
+  function onHostEvent(event: AgentEvent): void {
+    if (event.persisted && event.revision) hostRevisions.set(event.relPath, event.revision)
+    if (event.status === 'running') {
+      if (!endedTaskIds.has(event.id) && !activeTasks.has(event.id)) activeTasks.set(event.id, { id: event.id, relPath: event.relPath, startedAt: Date.now() })
+    } else {
+      endedTaskIds.add(event.id)
+      activeTasks.delete(event.id)
+      if (event.status === 'failed') hostNotice = `生成失败：${event.reason ?? '未知错误'}`
+      else if (event.status === 'cancelled') hostNotice = `已停止：${event.relPath}`
+    }
+    syncActiveLocks()
+    updateStatus()
+    renderTaskOverlay()
+    if (!event.persisted) return
+    const tab = tabs.find((item) => item.relPath === event.relPath)
+    if (tab) void runExclusiveConflict(() => syncHostTab(tab, vaultEpoch))
+  }
+
+  function syncActiveLocks(): void {
+    editor.setActiveTaskIds(new Set([...activeTasks.values()]
+      .filter((task) => task.relPath === active)
+      .map((task) => task.id)))
+  }
+
+  async function syncHostTab(tab: Tab, epoch: number): Promise<'merged' | ReconcileResult> {
+    if (epoch !== vaultEpoch || !tabs.includes(tab)) return 'stale'
+    const snapshot = await window.rgent.noteRead(tab.relPath)
+    if (epoch !== vaultEpoch || !tabs.includes(tab)) return 'stale'
+    if (snapshot.revision === tab.revision) return 'unchanged'
+    // Only a revision reported by Host may be merged automatically. External
+    // writes still need the user's existing two-preview conflict decision.
+    if (snapshot.revision !== hostRevisions.get(tab.relPath)) return reconcileTab(tab, epoch)
+    const part = partitionSource(snapshot.content)
+    const draft = tab.relPath === active ? editor.getText() : tab.content
+    const merged = tab.dirty ? mergeHostBody(tab.saved, draft, part.body) : part.body
+    if (merged === null) {
+      return reconcileTab(tab, epoch)
+    }
+    tab.content = merged
+    tab.saved = part.body
+    tab.ledger = part.ledger
+    tab.revision = snapshot.revision
+    tab.dirty = merged !== part.body
+    if (active === tab.relPath) editor.applyExternalText(merged)
+    if (tab.dirty) scheduleSave()
+    if (ledgerOpen && active === tab.relPath) {
+      ledgerOpen = false
+      toggleLedger()
+    }
+    renderTabs()
+    updateStatus()
+    renderOutline()
+    return 'merged'
+  }
 
   function reconcileTab(tab: Tab, epoch = vaultEpoch): Promise<ReconcileResult> {
     return reconcileNote(tab, {
@@ -254,6 +382,10 @@ export async function start(root: HTMLElement): Promise<void> {
     // 底栏跟着库与 tab 走，重置之后统一刷一次。
     queueMicrotask(() => updateStatus())
     tabs.length = 0
+    activeTasks.clear()
+    endedTaskIds.clear()
+    hostRevisions.clear()
+    syncActiveLocks()
     active = null
     editor.setText('', noteHost())
     renderTabs()
@@ -293,8 +425,13 @@ export async function start(root: HTMLElement): Promise<void> {
         return
       }
     }
-    const state = await window.rgent.vaultPick()
-    await applyState(state)
+    try {
+      const state = await window.rgent.vaultPick()
+      await applyState(state)
+    } catch (error) {
+      hostNotice = error instanceof Error ? error.message : '换库失败，请先保存当前生成内容。'
+      updateStatus()
+    }
   }
 
   async function showPicker(lost: boolean): Promise<void> {
@@ -428,6 +565,7 @@ export async function start(root: HTMLElement): Promise<void> {
     }
     active = relPath
     editor.setText(tab.content, noteHost(), tab.selection)
+    syncActiveLocks()
     editor.focus()
     closeLedger()
     renderTabs()
@@ -578,6 +716,66 @@ export async function start(root: HTMLElement): Promise<void> {
         noteOpen: tab != null
       })
     )
+    const left = statusEl.querySelector('.status-left')
+    if (hostNotice && left) {
+      const notice = document.createElement('span')
+      notice.className = 'status-item status-host-notice'
+      notice.setAttribute('role', 'status')
+      notice.textContent = hostNotice
+      left.append(notice)
+    }
+    if (activeTasks.size && left) {
+      if (activeTasks.size === 1) {
+        const task = [...activeTasks.values()][0]!
+        const label = document.createElement('span')
+        label.className = 'status-item status-task'
+        label.textContent = `${titleOf(task.relPath.split('/').pop() ?? task.relPath)} · 生成中`
+        const stop = document.createElement('button')
+        stop.type = 'button'
+        stop.className = 'status-task-stop'
+        stop.textContent = '停止'
+        stop.setAttribute('aria-label', `停止 ${task.relPath} 的任务`)
+        stop.addEventListener('click', () => { void window.rgent.agentCancel(task.id) })
+        left.append(label, stop)
+      } else {
+        const more = document.createElement('button')
+        more.type = 'button'
+        more.className = 'status-task-more'
+        more.textContent = `${activeTasks.size} 项生成中`
+        more.addEventListener('click', openTaskOverlay)
+        left.append(more)
+      }
+    }
+  }
+
+  function openTaskOverlay(): void {
+    if (taskOverlay?.isOpen()) return
+    const overlay = openOverlay({ label: '运行中的任务', initialFocus: () => overlay.root.querySelector<HTMLElement>('button') })
+    taskOverlay = overlay
+    overlay.root.classList.add('overlay-tasks')
+    renderTaskOverlay()
+  }
+
+  function renderTaskOverlay(): void {
+    if (!taskOverlay?.isOpen()) return
+    taskOverlay.root.replaceChildren()
+    const title = document.createElement('h2')
+    title.textContent = '运行中的任务'
+    taskOverlay.root.append(title)
+    for (const task of activeTasks.values()) {
+      const row = document.createElement('div')
+      row.className = 'task-row'
+      const name = document.createElement('span')
+      name.textContent = task.relPath
+      const stop = document.createElement('button')
+      stop.type = 'button'
+      stop.textContent = '停止'
+      stop.setAttribute('aria-label', `停止 ${task.relPath} 的任务`)
+      stop.addEventListener('click', () => { void window.rgent.agentCancel(task.id) })
+      row.append(name, stop)
+      taskOverlay.root.append(row)
+    }
+    if (!activeTasks.size) taskOverlay.close()
   }
 
   function toggleLedger(): void {
@@ -592,7 +790,7 @@ export async function start(root: HTMLElement): Promise<void> {
     // 账本是旁路原文，只读展示；分场要等写入方（Host 阶段）定下章节写法。
     const ledgerSource = tab.ledger?.replace(/^<!-- rgent:ledger:v1 -->\s*\r?\n?/, '') ?? ''
     if (ledgerSource.trim()) renderReadOnlyMarkdown(ledgerBody, ledgerSource, noteHost())
-    else ledgerBody.textContent = '这篇笔记还没有账本。账本由生成任务写下，写入方属于 Host 阶段。'
+    else ledgerBody.textContent = '这篇笔记还没有账本。完成一次生成任务后，可在这里回顾。'
     ledgerEl.hidden = false
     renderTabs()
   }
@@ -616,6 +814,7 @@ export async function start(root: HTMLElement): Promise<void> {
       const next = tabs[index] ?? tabs[index - 1]
       active = next?.relPath ?? null
       editor.setText(next?.content ?? '', noteHost(), next?.selection)
+      syncActiveLocks()
       void refreshBacklinks()
     }
     renderTabs()
@@ -664,7 +863,7 @@ export async function start(root: HTMLElement): Promise<void> {
     return ok && !tabs.some((tab) => tab.dirty)
   }
 
-  async function writeTab(tab: Tab, body = tab.relPath === active ? editor.getText() : tab.content): Promise<boolean> {
+  async function writeTab(tab: Tab, body = tab.relPath === active ? editor.getText() : tab.content, attempt = 0): Promise<boolean> {
     const result = await window.rgent.noteWrite({
       relPath: tab.relPath,
       content: composeSource(body, tab.ledger),
@@ -676,9 +875,17 @@ export async function start(root: HTMLElement): Promise<void> {
       return true
     }
     if (result.error === 'CONFLICT') {
-      const outcome = await runExclusiveConflict(() => reconcileTab(tab))
+      if (!hostRevisions.has(tab.relPath)) {
+        const outcome = await runExclusiveConflict(() => reconcileTab(tab))
+        renderTabs()
+        updateStatus()
+        return outcome === 'disk' || outcome === 'saved' || outcome === 'unchanged'
+      }
+      const outcome = await runExclusiveConflict(() => syncHostTab(tab, vaultEpoch))
       renderTabs()
       updateStatus()
+      if (outcome === 'merged' && tab.dirty && attempt < 3) return writeTab(tab, tab.relPath === active ? editor.getText() : tab.content, attempt + 1)
+      if (outcome === 'merged') return !tab.dirty
       return outcome === 'disk' || outcome === 'saved' || outcome === 'unchanged'
     }
     return false

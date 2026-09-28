@@ -20,9 +20,11 @@
   },
   "packageManager": "pnpm@12.4.1",
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.57",
     "@codemirror/commands": "^6.11.1",
     "@codemirror/state": "^6.7.6",
     "@codemirror/view": "^6.43.13",
+    "ai": "^7.0.118",
     "dompurify": "^3.4.16",
     "katex": "^0.18.9",
     "mdast-util-from-markdown": "^2.0.3",

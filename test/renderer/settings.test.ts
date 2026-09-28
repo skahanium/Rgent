@@ -21,6 +21,41 @@ afterEach(() => {
 })
 
 describe('settings interface page', () => {
+  it('saves a model profile without displaying a stored secret, and edits finite run limits', async () => {
+    const config = {
+      selected: 'custom' as const,
+      profiles: {
+        deepseek: { baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1000000, hasKey: false },
+        minimax: { baseURL: 'https://api.minimax.io/v1', modelId: 'MiniMax-M2.7', contextTokens: 204800, hasKey: false },
+        custom: { baseURL: 'http://127.0.0.1:5555/v1', modelId: 'test', contextTokens: 16000, hasKey: true }
+      },
+      limits: { none: { seconds: 180, steps: 4, tools: 0 }, local: { seconds: 300, steps: 12, tools: 24 }, network: { seconds: 600, steps: 20, tools: 40 } }
+    }
+    const setProfile = vi.fn().mockResolvedValue({ ok: true, config })
+    const setLimits = vi.fn().mockResolvedValue({ ok: true, config })
+    const panel = createSettingsOverlay({
+      getMode: async () => 'day', setMode: async (mode) => ({ ok: true, mode }),
+      getConfig: async () => ({ ok: true, config }), setProfile,
+      selectModel: async () => ({ ok: true, config }), deleteKey: async () => ({ ok: true, config }), setLimits
+    })
+    panel.open()
+    const nav = [...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')]
+    nav.find((button) => button.textContent === '模型')?.click()
+    await vi.waitFor(() => expect(document.querySelector('.settings-key-state')?.textContent).toBe('密钥已保存'))
+    expect((document.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('')
+    const fields = [...document.querySelectorAll<HTMLInputElement>('.settings-form input')]
+    fields.find((input) => input.type === 'password')!.value = 'new-key'
+    const saveButton = [...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find((button) => button.textContent === '保存配置')
+    saveButton?.click()
+    await vi.waitFor(() => expect(setProfile).toHaveBeenCalledWith(expect.objectContaining({ provider: 'custom', newKey: 'new-key' })))
+    nav.find((button) => button.textContent === '运行')?.click()
+    await vi.waitFor(() => expect(document.querySelectorAll('.settings-limit-group')).toHaveLength(3))
+    expect(document.querySelector<HTMLInputElement>('.settings-limit-group input:disabled')?.value).toBe('0')
+    const limitButton = document.querySelector<HTMLButtonElement>('.settings-limit-group .settings-action')
+    limitButton?.click()
+    await vi.waitFor(() => expect(setLimits).toHaveBeenCalledWith({ tier: 'none', limits: { seconds: 180, steps: 4, tools: 0 } }))
+    panel.close()
+  })
   it('shows only three live theme choices, saves one, and returns focus on close', async () => {
     const trigger = document.createElement('button')
     document.body.append(trigger)

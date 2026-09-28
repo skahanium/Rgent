@@ -27,7 +27,7 @@ flowchart LR
 
 - **渲染进程：** 画布是 CodeMirror 6。文档是 Markdown 字符串。无 Node，不能直接碰盘。画布只消费编译结果和源码映射，自己不解析结构。
 - **主进程：** 打开库、读写文件、权限名单、索引、窗口。v0 的 `AgentHost` 先住在这里；是否迁移属工程选型，见 [施工对象](topics.md#多进程--并发)。
-- **AgentHost：** 一场 `/` 的运行环境。愿景 / 选型 / 路线见 [施工对象](topics.md#agent-核心框架)。当前未开工。
+- **AgentHost：** 一场 `/` 的运行环境。愿景 / 选型 / 路线见 [施工对象](topics.md#agent-核心框架)。Host 最小环是当前施工阶段；实际接线与验收状态看 [施工图](build.md#当前阶段)。
 - **正文编译：** 共享一条管线（零 DOM、零 CM6）。注册插件 → 解析 → 索引 → 把源码映射交给画布。日后检索、反链、喂模型走同一份结果。细则见 [已拍板决定](decisions.md)。
 
 ## 正文管线
@@ -98,7 +98,7 @@ flowchart LR
 | 隐藏路径人写盘写不了 | IO | `writeNote` / `readNote` / `readVaultMedia` 拒绝含点号段的路径（`src/main/notes-fs.ts`、`src/main/paths.ts`）。文件树不列出点号名。权限名单落在库根 `.rgent-permissions`，与技能文件一样必须落在这类路径上。 |
 | 笔记路径与冲突写盘 | IO | 主进程 Node-API 模块（`native/**`）固定库根目录句柄，树、读写、索引、媒体、目录扫描统一走 `src/main/secure-fs.ts`，模块缺失不降级。macOS 逐级从库根相对打开并用 `O_NOFOLLOW_ANY` / `O_RESOLVE_BENEATH`；Windows 用 `NtCreateFile` 逐级相对打开、`OBJ_DONT_REPARSE` 拒绝重解析点。提交前核对修订值，临时文件建在目标父目录内再原子改名，冲突交给人选磁盘或窗口稿。**提交那一步必须锚回库根**：macOS 靠 `renameatx_np` + `RENAME_RESOLVE_BENEATH`；Windows 在提交前从库根重走一遍父目录（`OBJ_DONT_REPARSE`）并比对其文件身份，只把目标名解析在**核验过的那一个父句柄**上——这样父目录被外部整体搬出库外时提交会失败，而不是落到库外。已打开的子目录被搬出库外、不得改写库外原文的回归见 `test/main/path-race.test.ts`（两平台同一条）。两平台保证口径一致：判不出「仍在库内」就失败关闭，且到核对点为止的外部改动能被发现；核对点之后的替换属已知残余（不报冲突、不弹窗），见 [已拍板决定](decisions.md) §库、文件、窗口。Windows 句柄一律用最宽松共享模式——边界靠句柄相对解析成立，不靠拒绝别人的改名。目录变化以安全元数据扫描发现，不按旧路径建立监听。 |
 | 权限名单的失效状态 | 主进程 | 名单缺失是空名单；已有名单损坏、无效、无法读取或条目身份不稳是 `invalid`。人读写搜继续，树上提示修复，名单写入只接受经句柄核验的文件夹与三档值并原子替换。权限按文件系统实际路径组成归一，别名冲突与身份变化使 AI 失败关闭。`modelTierFor` 目前仅被测试调用；Host 未接线，尚无实际模型出口。Windows 侧别名与写盘已过 CI。 |
-| 人写盘 ≠ 模型写盘 | IPC | `noteWrite` 只给人的自动写盘与手动保存。`AgentHost` 不得复用这条通道。Host 未开工，这条先当禁令。 |
+| 人写盘 ≠ 模型写盘 | IPC | `noteWrite` 只给人的自动写盘与手动保存。`AgentHost` 不得复用这条通道；Host 阶段建立独立模型入口，并与同篇人的写入串行协调。 |
 | 索引不见账本 | 管线 / 索引 | `partitionSource` 切开锚点（`src/markdown/partition.ts`）。`compile` 和 `VaultIndex` 只吃 `body`。身份标记是机器语法，人搜的语料里把它等长填空格（偏移不变）——搜 `rgent` 不该搜到它，片段里也不该出现。 |
 | 画布不见账本 | 画布 | Tab 拆 `content`（正文）与 `ledger`（`src/renderer/src/tabs.ts`）。编辑器只 `setText(body)`。写盘 `composeSource`。账本回顾是临时只读面板，入口在笔记标题旁，关掉就走，不占右侧反链。 |
 | 人搜含禁区 | 索引 | `VaultIndex` 是全量语料，建索引时不按权限过滤。当前人搜是惰性全量 + 子串。模型检索尚未开工，未来在查询期过滤。 |

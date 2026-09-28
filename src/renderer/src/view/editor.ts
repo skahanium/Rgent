@@ -2,10 +2,12 @@ import {
   compile,
   DEFAULT_STAGES,
   expandToLineBlock,
+  identityUnits,
   type HeadingRef,
   type MarkerRef,
   lineStartOf,
   planIdentityEdit,
+  parseMarker,
   planPresentation,
   planWidgets,
   rangesOverlap,
@@ -122,6 +124,10 @@ const noteHostFacet = Facet.define<NoteHost, NoteHost>({
  */
 const themeFacet = Facet.define<boolean, boolean>({
   combine: (values) => values[0] ?? false
+})
+
+const activeTaskIdsFacet = Facet.define<ReadonlySet<string>, ReadonlySet<string>>({
+  combine: (values) => values[0] ?? new Set<string>()
 })
 
 /**
@@ -352,6 +358,18 @@ export const identityLock = EditorState.transactionFilter.of((tr) => {
   if (result.stale) return []
   const index = result.index
   const changes = changesOf(tr)
+  const activeIds = tr.startState.facet(activeTaskIdsFacet)
+  if (activeIds.size) {
+    const source = tr.startState.doc.toString()
+    for (const unit of identityUnits(index)) {
+      if (!unit.marker) continue
+      const taskId = parseMarker(source.slice(unit.marker.range.start, unit.marker.range.end))?.attrs['task-id']
+      if (!taskId || !activeIds.has(taskId)) continue
+      const start = lineStartOf(source, unit.marker.range.start)
+      const end = unit.block.end
+      if (changes.some((change) => change.from <= end && change.to >= start)) return []
+    }
+  }
   const plan = planIdentityEdit(tr.startState.doc.toString(), changes, index)
   if (plan.blocked) return []
   if (!plan.changes) return tr
@@ -408,6 +426,9 @@ export type EditorHost = {
   view: EditorView
   getText: () => string
   setText: (text: string, host?: NoteHost, selection?: { anchor: number; head: number }) => void
+  /** Apply a saved Host change without replacing this tab's history or scroll position. */
+  applyExternalText: (text: string) => void
+  setActiveTaskIds: (ids: ReadonlySet<string>) => void
   setNoteHost: (host: NoteHost) => void
   /** 应用主进程选择后的实际日夜外观；不写笔记、不进撤销栈。 */
   setTheme: (night: boolean) => void
@@ -449,6 +470,7 @@ export function mountEditor(
   const lineBreakCompartment = new Compartment()
   // 主题：CM6 自带的默认样式跟 darkTheme 走，装饰跟 themeFacet 走。
   const themeCompartment = new Compartment()
+  const activeTaskCompartment = new Compartment()
   let dark = false
   const state = EditorState.create({
     doc: '',
@@ -460,6 +482,7 @@ export function mountEditor(
       EditorView.lineWrapping,
       theme,
       themeCompartment.of([EditorView.darkTheme.of(false), themeFacet.of(false)]),
+      activeTaskCompartment.of(activeTaskIdsFacet.of(new Set<string>())),
       hostCompartment.of(noteHostFacet.of(emptyNoteHost)),
       markdownField,
       identityLock,
@@ -519,6 +542,29 @@ export function mountEditor(
         userEvent: 'rgent.setText'
       })
       applying = false
+    },
+    applyExternalText: (text) => {
+      const old = view.state.doc.toString()
+      if (old === text) return
+      let from = 0
+      while (from < old.length && from < text.length && old[from] === text[from]) from += 1
+      let oldEnd = old.length
+      let newEnd = text.length
+      while (oldEnd > from && newEnd > from && old[oldEnd - 1] === text[newEnd - 1]) {
+        oldEnd -= 1
+        newEnd -= 1
+      }
+      applying = true
+      try {
+        view.dispatch({
+          changes: { from, to: oldEnd, insert: text.slice(from, newEnd) },
+          annotations: Transaction.addToHistory.of(false),
+          userEvent: 'rgent.host'
+        })
+      } finally { applying = false }
+    },
+    setActiveTaskIds: (ids) => {
+      view.dispatch({ effects: activeTaskCompartment.reconfigure(activeTaskIdsFacet.of(new Set(ids))) })
     },
     setNoteHost: (host) => {
       view.dispatch({ effects: hostCompartment.reconfigure(noteHostFacet.of(host)) })

@@ -15,7 +15,15 @@ import {
   type ThemeMode,
   type ThemeSetResult,
   type TreeEntry,
-  type VaultState
+  type VaultState,
+  type ModelConfigResult,
+  type ModelProfileSetRequest,
+  type ModelLimitsSetRequest,
+  type ModelProvider,
+  type AgentStartRequest,
+  type AgentStartResult,
+  type AgentTaskView,
+  type AgentEvent
 } from '../shared/ipc.ts'
 
 const menuChannels = [IPC.menuOpenVault, IPC.menuNewNote, IPC.menuSave] as const
@@ -36,6 +44,16 @@ const api = {
   themeSet: (mode: ThemeMode): Promise<ThemeSetResult> => ipcRenderer.invoke(IPC.themeSet, mode),
   remoteImageGet: (request: RemoteImageGetRequest): Promise<RemoteImageGetResult> =>
     ipcRenderer.invoke(IPC.remoteImageGet, request),
+  modelConfigGet: (): Promise<ModelConfigResult> => ipcRenderer.invoke(IPC.modelConfigGet),
+  modelProfileSet: (request: ModelProfileSetRequest): Promise<ModelConfigResult> => ipcRenderer.invoke(IPC.modelProfileSet, request),
+  modelSelect: (provider: ModelProvider): Promise<ModelConfigResult> => ipcRenderer.invoke(IPC.modelSelect, provider),
+  modelKeyDelete: (provider: ModelProvider): Promise<ModelConfigResult> => ipcRenderer.invoke(IPC.modelKeyDelete, provider),
+  modelLimitsSet: (request: ModelLimitsSetRequest): Promise<ModelConfigResult> => ipcRenderer.invoke(IPC.modelLimitsSet, request),
+  agentStart: (request: AgentStartRequest): Promise<AgentStartResult> => ipcRenderer.invoke(IPC.agentStart, request),
+  agentCancel: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC.agentCancel, id),
+  agentTasks: (): Promise<AgentTaskView[]> => ipcRenderer.invoke(IPC.agentTasks),
+  onAgentEvent: (handler: (payload: AgentEvent) => void): (() => void) =>
+    subscribe(IPC.agentEvent, (payload) => handler(payload as AgentEvent)),
   onTreeChanged: (handler: () => void): (() => void) =>
     subscribe(IPC.treeChanged, () => handler()),
   onNoteExternalChange: (handler: (payload: NotePayload) => void): (() => void) =>
