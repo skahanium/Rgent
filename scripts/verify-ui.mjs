@@ -10,8 +10,8 @@
  * 最后给总账；有失败就退出码 1。
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -174,7 +174,7 @@ function seedVisualVault(vault) {
   writeFileSync(path.join(assets, '说明.txt'), '')
 }
 
-async function captureVisualBaseline(page, shot) {
+async function captureVisualBaseline(page, shot, nativeShot) {
   process.stdout.write('\n同内容视觉样例\n')
   // CI 虚拟屏幕会把真实窗口夹到 1024px 左右；比较 1200×800 稿前先固定页面度量。
   await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
@@ -244,6 +244,7 @@ async function captureVisualBaseline(page, shot) {
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
     await sleep(250)
     await shot(page, `reference-${mode}-workspace`)
+    nativeShot(mode)
     await page.eval(`document.querySelector('.settings-open')?.click()`)
     await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
     if (mode === 'day') await probe('设置浮层的标题和比例接近参考图', async () => {
@@ -304,6 +305,30 @@ async function main() {
     const data = response.result?.data
     if (data) writeFileSync(path.join(shotDir, `${name}.png`), Buffer.from(data, 'base64'))
   }
+  const nativeShot = (mode) => {
+    if (process.platform !== 'win32' || !shotDir) return
+    const destination = path.join(shotDir, `native-windows-${mode}.png`)
+    const script = `
+      Add-Type -AssemblyName System.Windows.Forms
+      Add-Type -AssemblyName System.Drawing
+      $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+      $bitmap = [System.Drawing.Bitmap]::new($bounds.Width, $bounds.Height)
+      $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+      try {
+        $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+        $bitmap.Save($env:RGENT_NATIVE_SCREENSHOT, [System.Drawing.Imaging.ImageFormat]::Png)
+      } finally {
+        $graphics.Dispose()
+        $bitmap.Dispose()
+      }
+    `
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 15000,
+      env: { ...process.env, RGENT_NATIVE_SCREENSHOT: destination }
+    })
+    check(`Windows ${mode} 原生桌面截图包含系统窗控件`, result.status === 0 && existsSync(destination), result.stderr?.trim().slice(0, 160) ?? '')
+  }
   let startupError = ''
   let stderr = ''
   const child = spawn(
@@ -331,7 +356,7 @@ async function main() {
     const page = await connect(port)
 
     if (visualOnly) {
-      await captureVisualBaseline(page, shot)
+      await captureVisualBaseline(page, shot, nativeShot)
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
       process.exitCode = failures === 0 ? 0 : 1
       return
