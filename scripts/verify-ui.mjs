@@ -176,6 +176,9 @@ function seedVisualVault(vault) {
 
 async function captureVisualBaseline(page, shot) {
   process.stdout.write('\n同内容视觉样例\n')
+  // CI 虚拟屏幕会把真实窗口夹到 1024px 左右；比较 1200×800 稿前先固定页面度量。
+  await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+  check('视觉对照使用 1200×800 页面度量', await page.eval(`innerWidth === 1200 && innerHeight === 800`) === true)
   const ready = await waitFor(page, `document.querySelectorAll('.tree-dir').length >= 2`)
   check('固定演示库含文件夹和多种文件类型', ready)
   if (!ready) return
