@@ -2,7 +2,7 @@
 /**
  * 界面验收：真实窗口 + CDP，按围栏 docs/frontend.md §可访问性与验收 逐条走。
  *
- * CI 没有窗口，所以这不是 CI 门，是本机/桌面门：
+ * 在构建后的真实窗口运行，CI 的 macOS、Windows 两腿也会执行：
  *
  *   pnpm ui:check            # 先 pnpm build，再跑这一套
  *
@@ -138,20 +138,159 @@ const longNote = (() => {
   return lines.join('\n')
 })()
 
+const visualOnly = process.env.RGENT_UI_VISUAL_ONLY === '1'
+
+function seedVisualVault(vault) {
+  const research = path.join(vault, '研究记录')
+  const assets = path.join(vault, '素材')
+  mkdirSync(research)
+  mkdirSync(assets)
+  writeFileSync(path.join(research, '自然生长.md'), [
+    '# 自然生长', '',
+    '想让一款笔记软件真正陪伴思考，它要允许未完成的念头停留在正文里。文字是主角，工具只在需要时出现。', '',
+    '今天先记下一个问题：打开一篇笔记之后，怎样继续写，同时迅速回到它所依赖的上下文？',
+    '<!-- rgent:prompt:v1 -->',
+    '把“自然生长”拆成两个可观察的行为，',
+    '并结合这篇笔记给我一个例子。',
+    '<!-- rgent:ai:v1 -->',
+    '可以观察两件事：离开笔记后再回来，能否直接从上次的位置继续写；打开一处引用时，能否顺着它找到当时的讨论，而不丢失当前落点。', '',
+    '## 继续写作', '',
+    '### 回到落点', '',
+    '记录应留在文章里，让后来阅读的人看见问题如何演进。', '',
+    '## 阅读线索', '', '从这篇笔记回到问题发生的地方。', '',
+    '### 当前片段', '', '保留尚未写完的想法。', '',
+    '## 写作节奏', '', '让工具退到文字之后。', '',
+    '### 离开与返回', '', '回到此前的光标。', '',
+    '## 引用关系', '', '沿着引用找到相关笔记。', '',
+    '### 重新核对', '', '确认当时的正文。', '',
+    '## 下一步', '', '继续观察自己的工作方式。', '',
+    '<!-- rgent:ledger:v1 -->',
+    '## 第一场', '', '这是一份只读账本。', ''
+  ].join('\n'))
+  writeFileSync(path.join(research, '知识的落点.md'), '# 知识的落点\n\n接着阅读 [[研究记录/自然生长]]。\n')
+  writeFileSync(path.join(research, '设计片段.md'), '# 设计片段\n\n在 [[研究记录/自然生长]] 中讨论编辑器观察。\n')
+  writeFileSync(path.join(assets, '研究资料.pdf'), '')
+  writeFileSync(path.join(assets, '参考图片.png'), '')
+  writeFileSync(path.join(assets, '说明.txt'), '')
+}
+
+async function captureVisualBaseline(page, shot) {
+  process.stdout.write('\n同内容视觉样例\n')
+  const ready = await waitFor(page, `document.querySelectorAll('.tree-dir').length >= 2`)
+  check('固定演示库含文件夹和多种文件类型', ready)
+  if (!ready) return
+  await page.eval(`(() => {
+    document.querySelector('.tree-toggle')?.click()
+    for (const row of document.querySelectorAll('.tree-dir')) {
+      if (row.innerText.includes('研究记录') && row.getAttribute('aria-expanded') === 'false') row.click()
+      if (row.innerText.includes('素材') && row.getAttribute('aria-expanded') === 'false') row.click()
+    }
+  })()`)
+  const rows = await waitFor(page, `document.querySelectorAll('.tree-note').length >= 3`)
+  check('演示库能显示三篇笔记及附件类型', rows && (await page.eval(`document.querySelectorAll('.tree-file').length >= 3`)) === true)
+  const opened = await page.eval(`(async () => {
+    for (const title of ['自然生长', '知识的落点', '设计片段']) {
+      const row = [...document.querySelectorAll('.tree-note')].find((item) => item.innerText.includes(title))
+      row?.click()
+      await new Promise((resolve) => setTimeout(resolve, 350))
+    }
+    [...document.querySelectorAll('.tab')].find((item) => item.innerText.includes('自然生长'))?.click()
+    return document.querySelectorAll('.tab').length
+  })()`)
+  check('视觉样例打开三个 tab', opened === 3)
+  check('视觉样例包含 AI、反链与三级标题', await waitFor(page, `document.querySelectorAll('.rgent-block-command').length > 0 && document.querySelectorAll('.outline-mark').length >= 3 && document.querySelectorAll('.backlinks-note').length >= 2`))
+  await page.eval(`(() => { document.activeElement?.blur(); document.querySelector('.cm-scroller').scrollTop = 0 })()`)
+  await waitFor(page, `document.querySelector('.cm-scroller').scrollTop === 0 && document.querySelector('.cm-line.md-h1')?.getBoundingClientRect().top - document.querySelector('.stage').getBoundingClientRect().top >= 85`)
+  await probe('宽窗画布留白接近参考图', async () => {
+    const gaps = JSON.parse(await page.eval(`(() => {
+      const stage = document.querySelector('.stage').getBoundingClientRect()
+      const heading = document.querySelector('.cm-line.md-h1').getBoundingClientRect()
+      return JSON.stringify({ top: Math.round(heading.top - stage.top), left: Math.round(heading.left - stage.left) })
+    })()`))
+    return { ok: gaps.top >= 85 && gaps.top <= 120 && gaps.left >= 70 && gaps.left <= 100, detail: JSON.stringify(gaps) }
+  })
+  await probe('正文标题的字号与字重接近参考图', async () => {
+    const state = JSON.parse(await page.eval(`(() => {
+      const style = getComputedStyle(document.querySelector('.cm-line.md-h1'))
+      return JSON.stringify({ size: parseFloat(style.fontSize), weight: Number(style.fontWeight) })
+    })()`))
+    return { ok: state.size >= 30 && state.size <= 34 && state.weight <= 500, detail: JSON.stringify(state) }
+  })
+  await probe('页边索引位于画布上缘且保持紧凑', async () => {
+    const geometry = JSON.parse(await page.eval(`(() => {
+      const stage = document.querySelector('.stage').getBoundingClientRect()
+      const outline = document.querySelector('.outline').getBoundingClientRect()
+      return JSON.stringify({ top: Math.round(outline.top - stage.top), marks: document.querySelectorAll('.outline-mark').length, height: Math.round(outline.height) })
+    })()`))
+    return { ok: geometry.top >= 90 && geometry.top <= 135 && geometry.marks >= 9 && geometry.height <= 180, detail: JSON.stringify(geometry) }
+  })
+  await probe('导航和反链的密度接近参考图', async () => {
+    const state = JSON.parse(await page.eval(`(() => {
+      const tree = document.querySelector('.tree-panel')
+      const selected = document.querySelector('.tree-note[aria-current="page"]')
+      const tab = document.querySelector('.tab[aria-selected="true"]')
+      const back = document.querySelector('.backlinks-note')
+      return JSON.stringify({ sidebar: Math.round(tree.getBoundingClientRect().width), treeWeight: Number(getComputedStyle(selected).fontWeight), tabWeight: Number(getComputedStyle(tab).fontWeight), backlinkSize: parseFloat(getComputedStyle(back).fontSize) })
+    })()`))
+    return { ok: state.sidebar >= 220 && state.sidebar <= 228 && state.treeWeight <= 500 && state.tabWeight <= 500 && state.backlinkSize <= 14, detail: JSON.stringify(state) }
+  })
+
+  for (const mode of ['day', 'night']) {
+    await page.eval(`window.rgent.themeSet('${mode}')`)
+    await waitFor(page, `document.documentElement.dataset.theme === '${mode}'`)
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+    await sleep(250)
+    await shot(page, `reference-${mode}-workspace`)
+    await page.eval(`document.querySelector('.settings-open')?.click()`)
+    await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
+    if (mode === 'day') await probe('设置浮层的标题和比例接近参考图', async () => {
+      const geometry = JSON.parse(await page.eval(`(() => {
+        const panel = document.querySelector('.overlay-settings').getBoundingClientRect()
+        const title = document.querySelector('.settings-page-title').getBoundingClientRect()
+        return JSON.stringify({ top: Math.round(panel.top), width: Math.round(panel.width), height: Math.round(panel.height), titleTop: Math.round(title.top - panel.top), titleLeft: Math.round(title.left - panel.left) })
+      })()`))
+      return { ok: geometry.top >= 75 && geometry.top <= 130 && geometry.width >= 690 && geometry.width <= 730 && geometry.height >= 535 && geometry.titleTop <= 58 && geometry.titleLeft >= 230, detail: JSON.stringify(geometry) }
+    })
+    await shot(page, `reference-${mode}-settings`)
+    await page.eval(`document.querySelector('.settings-close')?.click()`)
+    await waitFor(page, `!document.querySelector('.overlay-settings')`)
+    await page.eval(`document.querySelector('.tree-tools button')?.click()`)
+    await waitFor(page, `!!document.querySelector('.overlay-search[open]')`)
+    await shot(page, `reference-${mode}-search`)
+    await page.eval(`document.querySelector('.overlay-search-input').value = '自然生长'; document.querySelector('.overlay-search-input').dispatchEvent(new Event('input', { bubbles: true }))`)
+    await waitFor(page, `document.querySelectorAll('.search-hit').length > 0`)
+    await page.key('ArrowDown', 'ArrowDown', 0, 40)
+    if (mode === 'day') await probe('搜索结果浮层位置接近参考图', async () => {
+      const top = Math.round(await page.eval(`document.querySelector('.overlay-search').getBoundingClientRect().top`))
+      return { ok: top >= 105 && top <= 150, detail: `顶部 ${top}px` }
+    })
+    await shot(page, `reference-${mode}-search-results`)
+    await page.eval(`document.querySelector('.overlay-search')?.close()`)
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
+    await sleep(250)
+    await shot(page, `reference-${mode}-narrow`)
+    await page.call('Emulation.clearDeviceMetricsOverride', {})
+  }
+  check('同内容日夜截图无运行时异常', page.errors.length === 0, page.errors.slice(0, 1).join(''))
+}
+
 async function main() {
   const port = await availablePort()
   const electron = require('electron')
   const workdir = mkdtempSync(path.join(tmpdir(), 'rgent-ui-'))
   const profile = path.join(workdir, 'profile')
-  const vault = path.join(workdir, 'vault')
+  const vault = path.join(workdir, visualOnly ? '本地笔记库' : 'vault')
   mkdirSync(profile)
   mkdirSync(vault)
   writeFileSync(path.join(profile, 'vault.json'), JSON.stringify({ path: vault }))
   writeFileSync(path.join(profile, 'theme.json'), JSON.stringify({ mode: 'night' }))
-  writeFileSync(path.join(vault, '研究记录.md'), initialWithLedger)
-  writeFileSync(path.join(vault, '过程稿.md'), longNote)
-  writeFileSync(path.join(vault, '一个特别特别长的笔记文件名用来验证省略号.md'), '短文。\n')
-  mkdirSync(path.join(vault, '资料'))
+  if (visualOnly) seedVisualVault(vault)
+  else {
+    writeFileSync(path.join(vault, '研究记录.md'), initialWithLedger)
+    writeFileSync(path.join(vault, '过程稿.md'), longNote)
+    writeFileSync(path.join(vault, '一个特别特别长的笔记文件名用来验证省略号.md'), '短文。\n')
+    mkdirSync(path.join(vault, '资料'))
+  }
 
   const modifier = process.platform === 'darwin' ? 4 : 2
   const shotDir = process.env.RGENT_UI_SCREENSHOTS
@@ -188,6 +327,13 @@ async function main() {
     if (!ready) throw new Error(`Electron/CDP 未启动：${startupError || `exit=${child.exitCode ?? '仍在运行'}`}\n${stderr || '子进程没有错误输出'}`)
     const page = await connect(port)
 
+    if (visualOnly) {
+      await captureVisualBaseline(page, shot)
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode = failures === 0 ? 0 : 1
+      return
+    }
+
     process.stdout.write('\n外壳与主题\n')
     await waitFor(page, `document.querySelectorAll('.tree-row').length > 0`)
     check('本机主题偏好在窗口首帧生效', (await page.eval(`document.documentElement.dataset.theme === 'night' && getComputedStyle(document.documentElement).colorScheme === 'dark' && window.rgent.themeGet().then((mode) => mode === 'night')`)) === true)
@@ -196,13 +342,15 @@ async function main() {
     await waitFor(page, `document.querySelectorAll('.tab').length > 0`)
     check('顶栏是 tab 条，没有品牌文字', (await page.eval(`!!document.querySelector('.top .tabs') && !document.querySelector('.brand')`)) === true)
     check('tab 有图标与标题', (await page.eval(`!!document.querySelector('.tab .icon') && document.querySelector('.tab').innerText.trim().length > 0`)) === true)
-    await probe('tab 在单层顶栏中垂直居中', async () => {
+    await probe('tab 与系统窗口控制区处于同一视觉中线', async () => {
       const state = JSON.parse(await page.eval(`(() => {
         const top = document.querySelector('.top').getBoundingClientRect()
         const tab = document.querySelector('.tab-wrap').getBoundingClientRect()
-        return JSON.stringify({ difference: Math.abs((tab.top + tab.bottom) / 2 - (top.top + top.bottom) / 2), height: top.height })
+        const toggle = document.querySelector('.tree-toggle').getBoundingClientRect()
+        const center = (r) => (r.top + r.bottom) / 2
+        return JSON.stringify({ offset: center(tab) - center(top), toggleOffset: center(toggle) - center(top), height: top.height })
       })()`))
-      return { ok: state.difference <= 3 && state.height <= 54, detail: JSON.stringify(state) }
+      return { ok: Math.abs(state.offset) <= 1.5 && Math.abs(state.toggleOffset - state.offset) <= 1.5 && state.height <= 54, detail: JSON.stringify(state) }
     })
     check('底栏有行列、字数与库名', (await page.eval(`!!document.querySelector('.status-left')?.innerText && !!document.querySelector('.status-vault')?.innerText`)) === true)
     await probe('侧栏底部设置入口在收起与展开时均可用', async () => {

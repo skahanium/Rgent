@@ -100,7 +100,11 @@ function createWindow(): void {
     minHeight: 560,
     title: 'Rgent',
     backgroundColor: dark ? '#1d2933' : '#f5f6f8',
-    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' as const } : {}),
+    ...(process.platform === 'darwin' ? {
+      titleBarStyle: 'hiddenInset' as const,
+      // hiddenInset 默认交通灯偏上；将原生控件移到 46px tab 栏的中线。
+      trafficLightPosition: { x: 13, y: 16 }
+    } : {}),
     ...(process.platform === 'win32' ? {
       titleBarStyle: 'hidden' as const,
       titleBarOverlay: {

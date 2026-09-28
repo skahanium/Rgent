@@ -383,9 +383,9 @@ const theme = EditorView.theme({
   },
   '.cm-content': {
     caretColor: 'var(--accent-focus)',
-    // 画布右上角的账本入口需要一条不被首行文字侵入的安静空间。
-    padding: '52px 8px 48px',
-    maxWidth: '42rem',
+    // 宽窗按参考图留出页眉呼吸感；窄窗由语义布局 token 缩小顶部留白。
+    padding: 'var(--editor-top-padding) 8px 48px',
+    maxWidth: '39rem',
     margin: '0 auto'
   },
   '.cm-focused': { outline: 'none' },
