@@ -15,7 +15,7 @@ import { inViewport } from './viewport.ts'
 
 export type PlannedWidget =
   | { kind: 'table'; range: SourceRange; table: TableRef }
-  | { kind: 'image'; range: SourceRange; image: ImageRef }
+  | { kind: 'image'; range: SourceRange; image: ImageRef; standalone: boolean }
   | { kind: 'math'; range: SourceRange; math: MathRef }
   | { kind: 'callout'; range: SourceRange; callout: CalloutRef }
   | { kind: 'wikilink'; range: SourceRange; wikilink: WikiLinkRef }
@@ -93,7 +93,7 @@ export function planWidgets(
   for (const image of index.images) {
     const range = clipInline(image.range, viewports, docLen)
     if (!range) continue
-    push(out, { kind: 'image', range, image })
+    push(out, { kind: 'image', range, image, standalone: image.standalone === true })
   }
   for (const link of index.wikilinks) {
     const range = clipInline(link.range, viewports, docLen)
@@ -105,7 +105,7 @@ export function planWidgets(
         alt: link.display,
         base: 'vault'
       }
-      push(out, { kind: 'image', range, image })
+      push(out, { kind: 'image', range, image, standalone: link.standalone === true })
       continue
     }
     push(out, { kind: 'wikilink', range, wikilink: link })

@@ -87,14 +87,15 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
     index.tables.push({ range: shift(range, bodyOffset), header, rows: body, node, source })
   })
 
-  visit(tree, 'image', (node) => {
+  visit(tree, 'image', (node, _index, parent) => {
     const range = rangeFromNode(source, node)
     if (!range) return
     const image: ImageRef = {
       range: shift(range, bodyOffset),
       url: node.url,
       alt: node.alt ?? '',
-      base: 'note'
+      base: 'note',
+      standalone: parent?.type === 'paragraph' && parent.children.length === 1
     }
     index.images.push(image)
   })
@@ -149,7 +150,7 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
   }
 
   if (stages.wikilink) {
-    visit(tree, 'wikilink', (node) => {
+    visit(tree, 'wikilink', (node, _index, parent) => {
       const link = node as WikiLinkNode
       const range = rangeFromNode(source, link)
       if (!range) return
@@ -158,7 +159,8 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
         range: shift(range, bodyOffset),
         target: link.target,
         display: link.display || link.target,
-        embed: link.embed
+        embed: link.embed,
+        standalone: parent?.type === 'paragraph' && parent.children.length === 1
       }
       index.wikilinks.push(item)
     })

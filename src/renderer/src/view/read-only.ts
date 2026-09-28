@@ -5,6 +5,7 @@ import type { NoteHost } from './host.ts'
 import { renderSafeHtmlFragment } from './safe-html.ts'
 import { MathWidget } from './widgets/math.ts'
 import { MermaidWidget } from './widgets/mermaid.ts'
+import { createImageElement } from './widgets/image.ts'
 
 type ExtendedNode = Nodes & { children?: Nodes[]; value?: string; label?: string; title?: string; url?: string; lang?: string; depth?: number; ordered?: boolean; start?: number; checked?: boolean | null; align?: Array<'left' | 'right' | 'center' | null>; kind?: string; target?: string; display?: string }
 
@@ -21,8 +22,10 @@ export function renderReadOnlyNode(node: Nodes, source: string, host?: NoteHost)
   return render(node as ExtendedNode, source, host)
 }
 
-function render(node: ExtendedNode, source: string, host?: NoteHost): Node {
-  const children = (): Node[] => (node.children ?? []).map((child) => render(child as ExtendedNode, source, host))
+function render(node: ExtendedNode, source: string, host?: NoteHost, standaloneImage = false): Node {
+  const children = (): Node[] => (node.children ?? []).map((child) =>
+    render(child as ExtendedNode, source, host,
+      node.type === 'paragraph' && node.children?.length === 1 && child.type === 'image'))
   const element = (name: string, className?: string): HTMLElement => {
     const el = document.createElement(name)
     if (className) el.className = className
@@ -95,6 +98,9 @@ function render(node: ExtendedNode, source: string, host?: NoteHost): Node {
       return link
     }
     case 'image': {
+      if (/^https?:\/\//i.test(node.url ?? '')) {
+        return createImageElement(node.alt ?? '', node.url ?? '', standaloneImage, host?.remoteImageGet)
+      }
       const image = document.createElement('img')
       image.alt = node.alt ?? ''
       const rel = host && joinVaultRel(host.noteRelPath, node.url ?? '')

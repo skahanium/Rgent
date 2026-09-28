@@ -50,6 +50,7 @@ export async function start(root: HTMLElement): Promise<void> {
           </div>
           <div class="editor-host"></div>
           <nav class="outline" aria-label="标题索引" hidden></nav>
+          <div class="outline-tooltip" hidden></div>
           <p class="empty">从目录打开一篇笔记，或新建笔记。</p>
         </section>
         <aside class="backlinks" aria-label="反链"></aside>
@@ -67,6 +68,7 @@ export async function start(root: HTMLElement): Promise<void> {
   const editorHostEl = root.querySelector('.editor-host') as HTMLElement
   const emptyEl = root.querySelector('.empty') as HTMLElement
   const outlineEl = root.querySelector('.outline') as HTMLElement
+  const outlineTooltip = root.querySelector('.outline-tooltip') as HTMLElement
   const backlinksEl = root.querySelector('.backlinks') as HTMLElement
   const ledgerEl = root.querySelector('.ledger-view') as HTMLElement
   const ledgerTitle = root.querySelector('.ledger-title') as HTMLElement
@@ -383,6 +385,7 @@ export async function start(root: HTMLElement): Promise<void> {
     return {
       noteRelPath: active ?? '',
       vaultHas: (relPath) => present.has(relPath),
+      remoteImageGet: (request) => window.rgent.remoteImageGet(request),
       openNote: (relPath) => {
         void openNote(relPath)
       }
@@ -509,12 +512,14 @@ export async function start(root: HTMLElement): Promise<void> {
    * 点一下跳过去；悬停或键盘聚焦显示完整标题。
    */
   function renderOutline(): void {
+    outlineTooltip.hidden = true
     if (!current()) {
       outlineEl.hidden = true
       outlineEl.replaceChildren()
       return
     }
     const marks = outlineMarks(editor.headings(), editor.viewport(), editor.caret())
+    const previousScroll = outlineEl.scrollTop
     outlineEl.hidden = marks.length === 0
     outlineEl.replaceChildren()
     for (const mark of marks) {
@@ -528,17 +533,29 @@ export async function start(root: HTMLElement): Promise<void> {
       rule.className = 'outline-rule'
       rule.style.width = `${Math.round(26 * mark.scale)}px`
       button.append(rule)
-      const label = document.createElement('span')
-      label.className = 'outline-label'
-      label.textContent = outlineLabel(mark.heading)
-      button.append(label)
-      button.title = outlineLabel(mark.heading)
-      button.setAttribute('aria-label', outlineLabel(mark.heading))
+      const title = outlineLabel(mark.heading)
+      button.setAttribute('aria-label', title)
+      const showTitle = (): void => {
+        const stage = outlineEl.parentElement!.getBoundingClientRect()
+        const line = button.getBoundingClientRect()
+        outlineTooltip.textContent = title
+        outlineTooltip.style.top = `${line.top + line.height / 2 - stage.top}px`
+        outlineTooltip.hidden = false
+      }
+      button.addEventListener('mouseenter', showTitle)
+      button.addEventListener('mouseleave', () => { outlineTooltip.hidden = true })
+      button.addEventListener('focus', showTitle)
+      button.addEventListener('blur', () => { outlineTooltip.hidden = true })
       button.addEventListener('click', () => {
         editor.scrollTo(mark.heading.range.start)
         editor.focus()
       })
       outlineEl.append(button)
+    }
+    outlineEl.scrollTop = previousScroll
+    const currentMark = outlineEl.querySelector<HTMLElement>(".outline-mark[aria-current='true']")
+    if (currentMark && (currentMark.offsetTop < outlineEl.scrollTop || currentMark.offsetTop + currentMark.offsetHeight > outlineEl.scrollTop + outlineEl.clientHeight)) {
+      outlineEl.scrollTop = currentMark.offsetTop - outlineEl.clientHeight / 2
     }
   }
 

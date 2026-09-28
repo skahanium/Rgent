@@ -18,8 +18,14 @@ export const IPC = {
   permissionsGet: 'permissions:get',
   permissionsSet: 'permissions:set',
   themeGet: 'theme:get',
-  themeSet: 'theme:set'
+  themeSet: 'theme:set',
+  remoteImageGet: 'image:get'
 } as const
+
+export type RemoteImageGetRequest = { url: string; allowHttp: boolean }
+export type RemoteImageGetResult =
+  | { ok: true; src: string }
+  | { ok: false; error: 'INVALID_URL' | 'HTTP_CONFIRM' | 'NOT_IMAGE' | 'TOO_LARGE' | 'UNAVAILABLE' | 'BUSY' }
 
 export type ThemeMode = 'day' | 'night' | 'system'
 export type ThemeSetResult = { ok: true; mode: ThemeMode } | { ok: false; error: 'BAD_MODE' | 'IO_ERROR' }

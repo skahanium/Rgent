@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 import {
   IPC,
   type BacklinkGroup,
+  type RemoteImageGetRequest,
+  type RemoteImageGetResult,
   type FlushDonePayload,
   type NotePayload,
   type NoteSnapshot,
@@ -32,6 +34,8 @@ const api = {
   search: (query: string): Promise<SearchHit[]> => ipcRenderer.invoke(IPC.search, query),
   themeGet: (): Promise<ThemeMode> => ipcRenderer.invoke(IPC.themeGet),
   themeSet: (mode: ThemeMode): Promise<ThemeSetResult> => ipcRenderer.invoke(IPC.themeSet, mode),
+  remoteImageGet: (request: RemoteImageGetRequest): Promise<RemoteImageGetResult> =>
+    ipcRenderer.invoke(IPC.remoteImageGet, request),
   onTreeChanged: (handler: () => void): (() => void) =>
     subscribe(IPC.treeChanged, () => handler()),
   onNoteExternalChange: (handler: (payload: NotePayload) => void): (() => void) =>

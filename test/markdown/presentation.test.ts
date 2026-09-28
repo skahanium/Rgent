@@ -3,6 +3,12 @@ import { compile, compileFragment } from '../../src/markdown/pipeline.ts'
 import { planPresentation } from '../../src/markdown/presentation.ts'
 
 describe('Markdown presentation plan', () => {
+  it('marks only top-level prose lines for justified reading and editing', () => {
+    const source = '中文 English 混排\n续行内容。\n\n- 列表文字\n\n> 引用文字\n\n## 标题\n'
+    const plan = planPresentation(compile(source).tree, source)
+    const prose = plan.lines.filter((line) => line.className === 'md-prose').map((line) => source.slice(line.at).split('\n')[0])
+    expect(prose).toEqual(['中文 English 混排', '续行内容。'])
+  })
   it('can render a read-only ledger fragment without treating an anchor-looking line as a partition', () => {
     const source = '## 第一场\n\n<!-- rgent:ledger:v1 -->\n\n## 第二场\n'
     expect(compile(source).index.headings).toHaveLength(1)

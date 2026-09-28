@@ -1,15 +1,22 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, session, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { asString, parseFlushDone, parseNoteName, parseNoteWriteRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
 import { IPC } from '../shared/ipc.ts'
 import type { ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
+import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import { isThemeMode, loadThemePreference, saveThemePreference } from './theme-preference.ts'
-import { attachVaultProtocol, registerVaultScheme } from './vault-protocol.ts'
+import { attachVaultProtocol } from './vault-protocol.ts'
+import { RemoteImageService, REMOTE_IMAGE_SCHEME, remoteImageUrl } from './remote-image.ts'
+import { attachRemoteImageProtocol } from './remote-image-protocol.ts'
+import { VAULT_MEDIA_SCHEME } from '../shared/vault-rel.ts'
 import { VaultSession } from './vault.ts'
 
-registerVaultScheme()
+protocol.registerSchemesAsPrivileged([
+  { scheme: VAULT_MEDIA_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
+  { scheme: REMOTE_IMAGE_SCHEME, privileges: { standard: true, secure: true } }
+])
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
@@ -24,6 +31,7 @@ let rendererGone = false
 let closeFlow = new CloseFlow()
 let flushTimer: NodeJS.Timeout | null = null
 let themeMode: ThemeMode = 'system'
+let remoteImages: RemoteImageService | null = null
 
 function clearFlushTimer(): void {
   if (!flushTimer) return
@@ -203,6 +211,17 @@ function buildMenu(): void {
 }
 
 function registerIpc(): void {
+  ipcMain.handle(IPC.remoteImageGet, async (event, value: unknown): Promise<RemoteImageGetResult> => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || !remoteImages ||
+        !value || typeof value !== 'object' ||
+        typeof (value as { url?: unknown }).url !== 'string' ||
+        typeof (value as { allowHttp?: unknown }).allowHttp !== 'boolean') {
+      return { ok: false, error: 'INVALID_URL' }
+    }
+    const request = value as { url: string; allowHttp: boolean }
+    const result = await remoteImages.load(request.url, request.allowHttp)
+    return result.ok ? { ok: true, src: remoteImageUrl(result.token) } : result
+  })
   ipcMain.handle(IPC.themeGet, () => themeMode)
   ipcMain.handle(IPC.themeSet, (_event, value: unknown): ThemeSetResult => {
     if (!isThemeMode(value)) return { ok: false, error: 'BAD_MODE' }
@@ -274,6 +293,9 @@ app.whenReady().then(() => {
   vault = new VaultSession(app.getPath('userData'), send)
   vault.restore()
   attachVaultProtocol(() => vault)
+  const imageSession = session.fromPartition('rgent-remote-images')
+  remoteImages = new RemoteImageService((url, init) => imageSession.fetch(url, init))
+  attachRemoteImageProtocol(remoteImages)
   registerIpc()
   buildMenu()
   createWindow()

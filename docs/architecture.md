@@ -93,7 +93,7 @@ flowchart LR
 | 渲染进程不碰盘 | 壳 | `contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`（`src/main/index.ts`）。preload 只经 `contextBridge` 暴露白名单（`src/preload/index.ts`）。sandbox 下 preload 必须打成 `out/preload/index.cjs`（`electron.vite.config.ts`）。 |
 | IPC 是唯一通道 | 壳 | 通道名和载荷类型在 `src/shared/ipc.ts`。渲染进程不得再开通道。 |
 | 不随便开页 | 壳 | `setWindowOpenHandler` 一律 deny。`will-navigate` 一律 `preventDefault`；`http(s)` 走系统浏览器（`src/main/index.ts`）。 |
-| CSP | 壳 | `src/renderer/index.html`：`default-src 'self'`；图允许 `data:` 与 `rgent-vault:`。 |
+| CSP | 壳 | `src/renderer/index.html`：`default-src 'self'`；图允许 `data:`、`rgent-vault:` 与仅返回验明图片字节的 `rgent-image:`。外链地址由主进程受控图片请求获取，渲染层没有 HTTP/HTTPS 通用出口。 |
 | 媒体不逃出库 | IO | `resolveInVault` 拒绝 `..` 与绝对路径；`rgent-vault:` 经 `SecureVaultFs.readBytes` 从固定库根句柄逐级相对读取，不向 `net.fetch` 传校验后的路径（`src/main/paths.ts`、`vault-protocol.ts`）。 |
 | 隐藏路径人写盘写不了 | IO | `writeNote` / `readNote` / `readVaultMedia` 拒绝含点号段的路径（`src/main/notes-fs.ts`、`src/main/paths.ts`）。文件树不列出点号名。权限名单落在库根 `.rgent-permissions`，与技能文件一样必须落在这类路径上。 |
 | 笔记路径与冲突写盘 | IO | 主进程 Node-API 模块（`native/**`）固定库根目录句柄，树、读写、索引、媒体、目录扫描统一走 `src/main/secure-fs.ts`，模块缺失不降级。macOS 逐级从库根相对打开并用 `O_NOFOLLOW_ANY` / `O_RESOLVE_BENEATH`；Windows 用 `NtCreateFile` 逐级相对打开、`OBJ_DONT_REPARSE` 拒绝重解析点。提交前核对修订值，临时文件建在目标父目录内再原子改名，冲突交给人选磁盘或窗口稿。**提交那一步必须锚回库根**：macOS 靠 `renameatx_np` + `RENAME_RESOLVE_BENEATH`；Windows 在提交前从库根重走一遍父目录（`OBJ_DONT_REPARSE`）并比对其文件身份，只把目标名解析在**核验过的那一个父句柄**上——这样父目录被外部整体搬出库外时提交会失败，而不是落到库外。已打开的子目录被搬出库外、不得改写库外原文的回归见 `test/main/path-race.test.ts`（两平台同一条）。两平台保证口径一致：判不出「仍在库内」就失败关闭，且到核对点为止的外部改动能被发现；核对点之后的替换属已知残余（不报冲突、不弹窗），见 [已拍板决定](decisions.md) §库、文件、窗口。Windows 句柄一律用最宽松共享模式——边界靠句柄相对解析成立，不靠拒绝别人的改名。目录变化以安全元数据扫描发现，不按旧路径建立监听。 |

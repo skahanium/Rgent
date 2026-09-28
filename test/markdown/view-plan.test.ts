@@ -57,3 +57,11 @@ describe('marker chips', () => {
     expect(new Set(ranges.map((range) => range.start)).size).toBe(ranges.length)
   })
 })
+
+describe('image layout plan', () => {
+  it('distinguishes standalone pictures from pictures inside prose', () => {
+    const doc = '![独立](https://images.example/a.png)\n\n文字 ![行内](https://images.example/b.png) 后文。\n\n- ![列表中的独立图片](https://images.example/c.png)\n'
+    const images = planWidgets(compile(doc).index, doc, [{ from: 0, to: doc.length }]).filter((widget) => widget.kind === 'image')
+    expect(images.map((widget) => widget.kind === 'image' && widget.standalone)).toEqual([true, false, true])
+  })
+})

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { renderReadOnlyMarkdown } from '../../src/renderer/src/view/read-only.ts'
 
 describe('read-only ledger presentation', () => {
@@ -24,5 +24,15 @@ describe('read-only ledger presentation', () => {
     renderReadOnlyMarkdown(host, '前文 <strong>强调</strong> 后文。')
     expect(host.querySelector('p strong')?.textContent).toBe('强调')
     expect(host.textContent).toBe('前文 强调 后文。')
+  })
+
+  it('uses the same external image loader and no raw URL in ledger review', async () => {
+    const host = document.createElement('div')
+    const remoteImageGet = vi.fn(async () => ({ ok: true as const, src: 'rgent-image://media/?t=abc' }))
+    renderReadOnlyMarkdown(host, '![旧图](https://images.example/p?secret=1)', {
+      noteRelPath: '笔记.md', vaultHas: () => false, openNote: () => {}, remoteImageGet
+    })
+    await vi.waitFor(() => expect(host.querySelector('img')?.getAttribute('src')).toBe('rgent-image://media/?t=abc'))
+    expect(host.textContent).not.toContain('secret=1')
   })
 })

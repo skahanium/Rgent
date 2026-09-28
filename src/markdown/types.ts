@@ -56,6 +56,8 @@ export interface ImageRef {
   url: string
   alt: string
   base: 'note' | 'vault'
+  /** Derived from the same mdast paragraph, including paragraphs inside list items. */
+  standalone?: boolean
 }
 
 export interface HeadingRef {
@@ -91,6 +93,7 @@ export interface WikiLinkRef {
   target: string
   display: string
   embed: boolean
+  standalone?: boolean
 }
 
 export interface MermaidRef {

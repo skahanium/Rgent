@@ -122,9 +122,18 @@ export function planPresentation(tree: unknown, source: string): PresentationPla
     const whole = range(node)
     if (whole) out.blocks.push({ kind: 'rule', range: whole, value: '' })
   })
-  visit(root, 'paragraph', (node) => {
-    if (!node.children.some((child) => child.type === 'html')) return
+  visit(root, 'paragraph', (node, _index, parent) => {
     const whole = range(node)
+    if (whole && parent?.type === 'root') {
+      let at = whole.start
+      while (at < whole.end) {
+        addLine(at, 'md-prose')
+        const next = source.indexOf('\n', at)
+        if (next < 0 || next >= whole.end) break
+        at = next + 1
+      }
+    }
+    if (!node.children.some((child) => child.type === 'html')) return
     if (whole) out.blocks.push({ kind: 'html', range: whole, value: source.slice(whole.start, whole.end), node, source })
   })
   visit(root, 'html', (node, _index, parent) => {

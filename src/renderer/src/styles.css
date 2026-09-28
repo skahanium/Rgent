@@ -37,7 +37,7 @@
   --status-offline: #6b7178;
   --status-error: #b3261e;
 
-  --font-body: 'Iowan Old Style', Palatino, 'Palatino Linotype', Georgia, serif;
+  --font-body: 'Iowan Old Style', Palatino, 'Palatino Linotype', Georgia, 'Songti SC', 'STSong', 'Noto Serif CJK SC', 'Source Han Serif SC', SimSun, serif;
   --font-ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
@@ -51,6 +51,8 @@
   --motion-fast: 90ms;
   --motion-base: 140ms;
   --editor-top-padding: 94px;
+  --reading-max-width: 48rem;
+  --reading-side-gap: clamp(28px, 6vw, 74px);
 
   /* 设置里的主题缩略图固定展示两套外观，不随当前主题反转。 */
   --preview-day-nav: #f5f6f8;
@@ -532,14 +534,14 @@ input:focus-visible,
   padding: 0 0 0 8px;
 }
 
-.tree-list > li { margin: 1px 0; }
+.tree-list > li { margin: 2px 0; }
 
 .tree-row {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   width: 100%;
-  min-height: 32px;
+  min-height: 36px;
   padding: 4px 8px;
   border: 0;
   border-radius: var(--radius-sm);
@@ -551,7 +553,7 @@ input:focus-visible,
   cursor: pointer;
 }
 
-.tree-row .icon { flex: 0 0 auto; color: var(--text-muted); }
+.tree-row .icon { flex: 0 0 auto; width: 18px; height: 18px; color: var(--text-muted); }
 .tree-note { color: var(--text-muted); }
 .tree-label {
   flex: 1;
@@ -639,22 +641,20 @@ input:focus-visible,
 .outline {
   position: absolute;
   z-index: 2;
-  top: 108px;
+  top: 50%;
+  transform: translateY(-50%);
   right: 10px;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 3px;
-  max-height: min(calc(100% - 136px), 520px);
+  max-height: min(65%, 520px);
   overflow-y: auto;
   width: 36px;
   padding: 4px;
-  border-radius: var(--radius-md);
   scrollbar-width: none;
 }
 .outline[hidden] { display: none; }
-.outline:hover,
-.outline:focus-within { width: min(240px, 42%); background: var(--surface-overlay); box-shadow: var(--shadow-1); }
 .outline-mark {
   position: relative;
   display: flex;
@@ -671,21 +671,25 @@ input:focus-visible,
 }
 .outline-rule { display: block; flex: 0 0 auto; height: 2px; background: var(--border-strong); border-radius: 2px; }
 .outline-mark[aria-current='true'] .outline-rule { background: var(--accent-primary); }
-.outline-label {
+.outline-tooltip {
   position: absolute;
-  right: 34px;
-  top: 50%;
+  z-index: 3;
+  right: 46px;
   transform: translateY(-50%);
-  display: none;
-  max-width: 190px;
+  max-width: min(290px, 55%);
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 0.72rem;
-  font-family: var(--font-ui);
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-overlay);
+  box-shadow: var(--shadow-1);
+  color: var(--text-body);
+  font: 0.76rem/1.25 var(--font-ui);
+  pointer-events: none;
 }
-.outline-mark:hover .outline-label,
-.outline-mark:focus-visible .outline-label { display: block; }
+.outline-tooltip[hidden] { display: none; }
 .outline-mark:hover .outline-rule,
 .outline-mark:focus-visible .outline-rule { background: var(--accent-primary); }
 
@@ -730,6 +734,7 @@ input:focus-visible,
   border-radius: var(--radius-md) var(--radius-md) 0 0;
   font-size: 0.84rem;
 }
+.tab .icon { width: 17px; height: 17px; }
 
 .tab-label {
   overflow: hidden;
@@ -843,10 +848,12 @@ input:focus-visible,
 .editor-host {
   flex: 1;
   min-height: 0;
+  container-type: inline-size;
 }
 
 .editor-host .cm-editor { height: 100%; }
 .editor-host .cm-editor.cm-focused { outline: none; }
+.cm-line.md-prose { text-align: justify; text-align-last: start; overflow-wrap: anywhere; }
 .md-render-warning { position: absolute; z-index: 4; top: 8px; left: 50%; transform: translateX(-50%); max-width: 80%; padding: 6px 10px; border: 1px solid var(--status-error); border-radius: var(--radius-sm); background: var(--surface-overlay); color: var(--status-error); font: 0.75rem var(--font-ui); }
 .md-render-warning[hidden] { display: none; }
 
@@ -1000,7 +1007,7 @@ input:focus-visible,
 .md-syntax-task { color: var(--accent-primary); }
 /* CodeMirror block widgets cannot have vertical margins: its height map would
  * disagree with the DOM and clicks below them would land on the next line. */
-.md-code-block, .md-frontmatter, .md-html { max-width: 42rem; margin: 0 auto; }
+.md-code-block, .md-frontmatter, .md-html { max-width: var(--reading-max-width); margin: 0 auto; }
 .md-code-block { background: var(--surface-nav); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: auto; }
 .md-code-block pre { margin: 0; padding: 12px 16px; font: 0.82rem/1.5 var(--font-mono); overflow: auto; }
 .md-code-language { padding: 6px 14px; border-bottom: 1px solid var(--border-subtle); color: var(--text-muted); font: 0.7rem var(--font-ui); }
@@ -1036,24 +1043,34 @@ input:focus-visible,
 
 .md-image-ph {
   display: inline-flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
-  border: 1px dashed var(--line);
-  border-radius: 8px;
-  background: var(--bg);
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 2px 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-nav);
+  color: var(--text-muted);
   font-family: var(--ui);
-  font-size: 0.85rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
 }
-
-.md-image-src { color: var(--muted); }
+.md-image-ph button { min-height: 28px; padding: 2px 6px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-body); background: var(--surface-overlay); cursor: pointer; }
+.md-image-ph button:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+.md-image-block { display: block; width: 100%; }
+.md-image-block.md-image-ph { width: fit-content; max-width: 100%; }
+.md-image-inline { display: inline-flex; vertical-align: baseline; }
+.md-image-inline.md-image-ph { max-width: min(18em, 100%); gap: 4px; padding: 0; border: 0; background: transparent; vertical-align: baseline; line-height: 1.2; }
+.md-image-inline.md-image-ph button { min-height: 24px; padding: 0; border: 0; border-radius: 0; color: var(--accent-primary); background: transparent; text-decoration: underline; text-underline-offset: 2px; }
+.md-image-inline.md-image-ph button:hover { color: var(--text-body); background: transparent; }
+.md-image-inline .md-image { display: inline-block; max-width: 3em; max-height: 2em; margin: 0 0.15em; vertical-align: middle; }
 
 .md-image {
   display: block;
   max-width: 100%;
   height: auto;
-  border-radius: 8px;
-  margin: 8px 0;
+  border-radius: var(--radius-sm);
+  margin: 0;
 }
 
 .md-callout {
@@ -1446,7 +1463,7 @@ input:focus-visible,
 
 .ledger-body {
   padding: 18px 16px 48px;
-  max-width: 42rem;
+  max-width: var(--reading-max-width);
   margin: 0 auto;
   white-space: normal;
   word-break: break-word;
@@ -1455,7 +1472,7 @@ input:focus-visible,
   line-height: 1.6;
   color: var(--text-body);
 }
-.ledger-body p { margin: 0 0 1em; }
+.ledger-body p { margin: 0 0 1em; text-align: justify; text-align-last: start; overflow-wrap: anywhere; }
 .ledger-body h1, .ledger-body h2, .ledger-body h3 { font-family: var(--font-ui); color: var(--text-heading); }
 .ledger-body pre { overflow: auto; padding: 12px; border-radius: var(--radius-md); background: var(--surface-nav); }
 .ledger-body blockquote { margin: 1em 0; padding-left: 14px; border-left: 2px solid var(--accent-primary); color: var(--text-muted); }

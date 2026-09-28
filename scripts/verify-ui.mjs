@@ -141,6 +141,7 @@ const longNote = (() => {
 const visualOnly = process.env.RGENT_UI_VISUAL_ONLY === '1'
 
 function seedVisualVault(vault) {
+  const liveImage = process.env.RGENT_UI_LIVE_IMAGE_URL || 'https://media.example.invalid/file?id=sample%2Fone'
   const research = path.join(vault, '研究记录')
   const assets = path.join(vault, '素材')
   mkdirSync(research)
@@ -169,6 +170,14 @@ function seedVisualVault(vault) {
   ].join('\n'))
   writeFileSync(path.join(research, '知识的落点.md'), '# 知识的落点\n\n接着阅读 [[研究记录/自然生长]]。\n')
   writeFileSync(path.join(research, '设计片段.md'), '# 设计片段\n\n在 [[研究记录/自然生长]] 中讨论编辑器观察。\n')
+  const longParagraph = '今天重新核对 GLM-5.2、Code Arena 与 Agent 工作流的说明：Chinese prose 和 English terms 应在同一行保持均衡间距；写作时仍须能看见原始 Markdown、选择文字、撤销，并在保存后保留全部原文字节。'
+  writeFileSync(path.join(research, '长文排版.md'), [
+    '# 长文排版验收', '', longParagraph.repeat(2), '',
+    `![带查询参数的外链图](${liveImage})`, '',
+    '句内图 ![行内图](http://media.example.invalid/icon?version=2) 不应形成大卡片。', '',
+    '![加载失败的图片](https://media.example.invalid/missing.png)', '',
+    ...Array.from({ length: 8 }, (_, index) => [`## 第 ${index + 1} 节 · 阅读与编辑`, '', longParagraph.repeat(3), '', '### 小节与页边索引', '', longParagraph.repeat(2), '']).flat()
+  ].join('\n'))
   writeFileSync(path.join(assets, '研究资料.pdf'), '')
   writeFileSync(path.join(assets, '参考图片.png'), '')
   writeFileSync(path.join(assets, '说明.txt'), '')
@@ -208,7 +217,8 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     const gaps = JSON.parse(await page.eval(`(() => {
       const stage = document.querySelector('.stage').getBoundingClientRect()
       const heading = document.querySelector('.cm-line.md-h1').getBoundingClientRect()
-      return JSON.stringify({ top: Math.round(heading.top - stage.top), left: Math.round(heading.left - stage.left) })
+      const content = document.querySelector('.cm-content').getBoundingClientRect()
+      return JSON.stringify({ top: Math.round(heading.top - stage.top), left: Math.round(heading.left - stage.left), contentWidth: Math.round(content.width), contentLeft: Math.round(content.left - stage.left) })
     })()`))
     return { ok: gaps.top >= 85 && gaps.top <= 120 && gaps.left >= 70 && gaps.left <= 100, detail: JSON.stringify(gaps) }
   })
@@ -219,13 +229,24 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     })()`))
     return { ok: state.size >= 30 && state.size <= 34 && state.weight <= 500, detail: JSON.stringify(state) }
   })
-  await probe('页边索引位于画布上缘且保持紧凑', async () => {
+  await probe('页边索引在画布右缘纵向居中且保持紧凑', async () => {
     const geometry = JSON.parse(await page.eval(`(() => {
       const stage = document.querySelector('.stage').getBoundingClientRect()
       const outline = document.querySelector('.outline').getBoundingClientRect()
-      return JSON.stringify({ top: Math.round(outline.top - stage.top), marks: document.querySelectorAll('.outline-mark').length, height: Math.round(outline.height) })
+      return JSON.stringify({ centerDelta: Math.round((outline.top + outline.bottom - stage.top - stage.bottom) / 2), marks: document.querySelectorAll('.outline-mark').length, height: Math.round(outline.height) })
     })()`))
-    return { ok: geometry.top >= 90 && geometry.top <= 135 && geometry.marks >= 9 && geometry.height <= 180, detail: JSON.stringify(geometry) }
+    return { ok: Math.abs(geometry.centerDelta) <= 24 && geometry.marks >= 9 && geometry.height <= 180, detail: JSON.stringify(geometry) }
+  })
+  await probe('宽窗普通段落适度拓宽并两端对齐', async () => {
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false })
+    const state = JSON.parse(await page.eval(`(() => {
+      const content = document.querySelector('.cm-content').getBoundingClientRect()
+      const stage = document.querySelector('.stage').getBoundingClientRect()
+      const paragraph = document.querySelector('.cm-line.md-prose')
+      return JSON.stringify({ contentWidth: Math.round(content.width), sideGap: Math.round(content.left - stage.left), align: paragraph && getComputedStyle(paragraph).textAlign })
+    })()`))
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+    return { ok: state.contentWidth >= 730 && state.contentWidth <= 800 && state.sideGap >= 32 && state.align === 'justify', detail: JSON.stringify(state) }
   })
   await probe('导航和反链的密度接近参考图', async () => {
     const state = JSON.parse(await page.eval(`(() => {
@@ -275,6 +296,31 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     await shot(page, `reference-${mode}-narrow`)
     await page.call('Emulation.clearDeviceMetricsOverride', {})
   }
+  await page.eval(`([...document.querySelectorAll('.tree-note')].find((item) => item.innerText.includes('长文排版')))?.click()`)
+  check('长文样例含中英混排与外链图片', await waitFor(page, `document.querySelector('.cm-line.md-prose') && document.querySelectorAll('.md-image-slot').length >= 3`))
+  if (process.env.RGENT_UI_LIVE_IMAGE_URL) {
+    check('公开 HTTPS 图片在真实窗口解码显示', await waitFor(page, `[...document.querySelectorAll('.md-image-slot img')].some((image) => image.complete && image.naturalWidth > 0)`, 22000))
+  }
+  await page.call('Emulation.setDeviceMetricsOverride', { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false })
+  await page.eval(`document.querySelector('.cm-scroller').scrollTop = 0`)
+  await probe('长文与图片状态不露出长 URL', async () => {
+    const state = JSON.parse(await page.eval(`(() => {
+      const content = document.querySelector('.cm-content').getBoundingClientRect()
+      const prose = document.querySelector('.cm-line.md-prose')
+      const http = [...document.querySelectorAll('.md-image-slot')].find((node) => node.textContent.includes('HTTP'))
+      return JSON.stringify({ width: Math.round(content.width), align: prose && getComputedStyle(prose).textAlign, slots: document.querySelectorAll('.md-image-slot').length, httpButton: !!http?.querySelector('button'), inlineHeight: Math.round(http?.getBoundingClientRect().height || 0), rawUrlVisible: document.querySelector('.cm-content').innerText.includes('media.example.invalid') })
+    })()`))
+    return { ok: state.width >= 730 && state.width <= 800 && state.align === 'justify' && state.slots >= 3 && state.httpButton && state.inlineHeight <= 25 && !state.rawUrlVisible, detail: JSON.stringify(state) }
+  })
+  for (const mode of ['day', 'night']) {
+    await page.eval(`window.rgent.themeSet('${mode}')`)
+    await waitFor(page, `document.documentElement.dataset.theme === '${mode}'`)
+    await shot(page, `reference-${mode}-longform`)
+    await page.eval(`document.querySelectorAll('.outline-mark')[1]?.focus()`)
+    await shot(page, `reference-${mode}-outline-focus`)
+    await page.eval(`document.querySelectorAll('.outline-mark')[1]?.blur()`)
+  }
+  await page.call('Emulation.clearDeviceMetricsOverride', {})
   check('同内容日夜截图无运行时异常', page.errors.length === 0, page.errors.slice(0, 1).join(''))
 }
 
@@ -610,12 +656,24 @@ async function main() {
       const position = JSON.parse(await page.eval(`(() => {
         const stage = document.querySelector('.stage').getBoundingClientRect()
         const editor = document.querySelector('.editor-host').getBoundingClientRect()
-        const outline = document.querySelector('.outline').getBoundingClientRect()
-        const label = document.querySelector('.outline-label')
+        const outlineNode = document.querySelector('.outline')
+        const outline = outlineNode.getBoundingClientRect()
+        const tooltip = document.querySelector('.outline-tooltip')
         const rule = document.querySelector('.outline-rule')?.getBoundingClientRect()
-        return JSON.stringify({ stageRight: stage.right, editorBottom: editor.bottom, left: outline.left, right: outline.right, top: outline.top, bottom: outline.bottom, labelDisplay: label && getComputedStyle(label).display, ruleWidth: rule?.width })
+        return JSON.stringify({ stageRight: stage.right, editorBottom: editor.bottom, left: outline.left, right: outline.right, top: outline.top, bottom: outline.bottom, centerDelta: Math.round((outline.top + outline.bottom - stage.top - stage.bottom) / 2), tooltipHidden: tooltip?.hidden, ruleWidth: rule?.width, background: getComputedStyle(outlineNode).backgroundColor })
       })()`))
-      return { ok: position.left > position.stageRight - 70 && position.right <= position.stageRight && position.top < position.editorBottom && position.bottom < position.editorBottom && position.labelDisplay === 'none' && position.ruleWidth > 5 && position.ruleWidth < 35, detail: JSON.stringify(position) }
+      return { ok: position.left > position.stageRight - 70 && position.right <= position.stageRight && position.top < position.editorBottom && position.bottom < position.editorBottom && Math.abs(position.centerDelta) <= 24 && position.tooltipHidden && position.ruleWidth > 5 && position.ruleWidth < 35 && position.background === 'rgba(0, 0, 0, 0)', detail: JSON.stringify(position) }
+    })
+    await probe('标题索引只显示聚焦短线对应的标题', async () => {
+      const state = JSON.parse(await page.eval(`(() => {
+        const marks = [...document.querySelectorAll('.outline-mark')]
+        marks[1].focus()
+        const tooltip = document.querySelector('.outline-tooltip')
+        const focused = { text: tooltip.textContent, hidden: tooltip.hidden, aria: marks[1].getAttribute('aria-label'), background: getComputedStyle(document.querySelector('.outline')).backgroundColor }
+        marks[1].blur()
+        return JSON.stringify({ focused, hiddenAfterBlur: tooltip.hidden })
+      })()`))
+      return { ok: !state.focused.hidden && state.focused.text === state.focused.aria && state.hiddenAfterBlur && state.focused.background === 'rgba(0, 0, 0, 0)', detail: JSON.stringify(state) }
     })
     await probe('正文衬线、标题无衬线', async () => {
       const fonts = JSON.parse(await page.eval(`(() => {

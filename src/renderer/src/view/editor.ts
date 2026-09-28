@@ -383,9 +383,11 @@ const theme = EditorView.theme({
   },
   '.cm-content': {
     caretColor: 'var(--accent-focus)',
+    flex: '0 0 auto',
     // 宽窗按参考图留出页眉呼吸感；窄窗由语义布局 token 缩小顶部留白。
     padding: 'var(--editor-top-padding) 8px 48px',
-    maxWidth: '39rem',
+    width: 'calc(100cqw - var(--reading-side-gap) - var(--reading-side-gap))',
+    maxWidth: 'var(--reading-max-width)',
     margin: '0 auto'
   },
   '.cm-focused': { outline: 'none' },
