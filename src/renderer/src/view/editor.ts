@@ -211,7 +211,9 @@ function decorationsFor(
   const docLen = source.length
   if (result.stale) return Decoration.none
   const active = editing ? result.index.blocks.filter((block) =>
-    block.range.start <= selection.to && block.range.end >= selection.from
+    selection.from === selection.to
+      ? block.range.start <= selection.from && selection.from < block.range.end
+      : rangesOverlap(block.range, { start: selection.from, end: selection.to })
   ) : []
   const isActive = (range: { start: number; end: number }): boolean =>
     active.some((block) => rangesOverlap(block.range, range))

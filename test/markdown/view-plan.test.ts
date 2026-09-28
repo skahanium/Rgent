@@ -64,4 +64,42 @@ describe('image layout plan', () => {
     const images = planWidgets(compile(doc).index, doc, [{ from: 0, to: doc.length }]).filter((widget) => widget.kind === 'image')
     expect(images.map((widget) => widget.kind === 'image' && widget.standalone)).toEqual([true, false, true])
   })
+
+  it('keeps an image on its own source line block sized when prose follows without a blank line', () => {
+    const doc = '前文\n![图](https://images.example/chart.png)\n后文\n'
+    const image = planWidgets(compile(doc).index, doc, [{ from: 0, to: doc.length }]).find((widget) => widget.kind === 'image')
+    expect(image?.kind === 'image' && image.standalone).toBe(true)
+  })
+
+  it('keeps a heading after a standalone image as a separate heading', () => {
+    const doc = '![图](https://images.example/chart.png)\n## 后面的标题\n'
+    const result = compile(doc)
+    expect(result.index.headings.map((heading) => heading.text)).toEqual(['后面的标题'])
+    const image = planWidgets(result.index, doc, [{ from: 0, to: doc.length }]).find((widget) => widget.kind === 'image')
+    expect(image?.kind === 'image' && image.standalone).toBe(true)
+  })
+
+  it('presents a leading image as a block even when imported prose starts on the same source line', () => {
+    const doc = '![图](https://images.example/chart.png)正文继续。\n'
+    const image = planWidgets(compile(doc).index, doc, [{ from: 0, to: doc.length }]).find((widget) => widget.kind === 'image')
+    expect(image?.kind === 'image' && image.standalone && image.block).toBe(true)
+    expect(image?.range.end).toBe(doc.indexOf('正文'))
+  })
+
+  it('recognizes a heading following a leading image on the same source line without changing source', () => {
+    const doc = '![图](https://images.example/chart.png)## 后面的标题\n'
+    const result = compile(doc)
+    expect(result.source).toBe(doc)
+    expect(result.index.headings.map((heading) => heading.text)).toEqual(['后面的标题'])
+  })
+
+  it('keeps exact source offsets with CRLF when splitting a leading figure for reading', () => {
+    const doc = '前文\r\n\r\n![图](https://images.example/chart.png)## 标题\r\n后文\r\n'
+    const result = compile(doc)
+    const heading = result.index.headings[0]
+    const image = result.index.images[0]
+    expect(doc.slice(image!.range.start, image!.range.end)).toBe('![图](https://images.example/chart.png)')
+    expect(doc.slice(heading!.range.start, heading!.range.end)).toBe('## 标题')
+    expect(result.source).toBe(doc)
+  })
 })

@@ -853,7 +853,7 @@ input:focus-visible,
 
 .editor-host .cm-editor { height: 100%; }
 .editor-host .cm-editor.cm-focused { outline: none; }
-.cm-line.md-prose { text-align: justify; text-align-last: start; overflow-wrap: anywhere; }
+.cm-line.md-prose, .cm-line:has(.md-prose-leading) { text-align: justify; text-align-last: start; overflow-wrap: anywhere; }
 .md-render-warning { position: absolute; z-index: 4; top: 8px; left: 50%; transform: translateX(-50%); max-width: 80%; padding: 6px 10px; border: 1px solid var(--status-error); border-radius: var(--radius-sm); background: var(--surface-overlay); color: var(--status-error); font: 0.75rem var(--font-ui); }
 .md-render-warning[hidden] { display: none; }
 
@@ -992,10 +992,10 @@ input:focus-visible,
   margin-top: 16px;
 }
 
-.md-heading { font-family: var(--font-ui); font-weight: 600; color: var(--text-heading); }
-.md-h1 { font-size: 2rem; font-weight: 400; }
-.md-h2 { font-size: 1.4rem; }
-.md-h3 { font-size: 1.2rem; }
+.md-heading, .cm-line:has(.md-heading-leading) { font-family: var(--font-ui); font-weight: 600; color: var(--text-heading); }
+.md-h1, .cm-line:has(.md-heading-leading.md-h1) { font-size: 2rem; font-weight: 400; }
+.md-h2, .cm-line:has(.md-heading-leading.md-h2) { font-size: 1.4rem; }
+.md-h3, .cm-line:has(.md-heading-leading.md-h3) { font-size: 1.2rem; }
 .md-strong { font-weight: 700; }
 .md-emphasis { font-style: italic; }
 .md-delete { text-decoration: line-through; }

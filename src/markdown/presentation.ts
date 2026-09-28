@@ -34,6 +34,11 @@ function pushSyntax(out: PresentationPlan, start: number, end: number, kind: Pre
   out.syntax.push({ range: { start, end }, kind, ...(text == null ? {} : { text }), ...(checked == null ? {} : { checked }) })
 }
 
+function followsFigureOnLine(source: string, at: number): boolean {
+  const start = source.lastIndexOf('\n', at - 1) + 1
+  return source.slice(start, at).includes('![')
+}
+
 /** A visual projection of one mdast tree. Every range still addresses the original Markdown. */
 export function planPresentation(tree: unknown, source: string): PresentationPlan {
   const out: PresentationPlan = { syntax: [], styles: [], lines: [], links: [], blocks: [] }
@@ -48,6 +53,9 @@ export function planPresentation(tree: unknown, source: string): PresentationPla
     const inner = childBounds(node)
     if (!whole) return
     addLine(whole.start, `md-heading md-h${node.depth}`)
+    if (inner && followsFigureOnLine(source, whole.start)) {
+      out.styles.push({ range: inner, className: `md-heading-leading md-h${node.depth}` })
+    }
     if (inner) {
       pushSyntax(out, whole.start, inner.start, 'hide')
       pushSyntax(out, inner.end, whole.end, 'hide')
@@ -125,6 +133,9 @@ export function planPresentation(tree: unknown, source: string): PresentationPla
   visit(root, 'paragraph', (node, _index, parent) => {
     const whole = range(node)
     if (whole && parent?.type === 'root') {
+      if (followsFigureOnLine(source, whole.start)) {
+        out.styles.push({ range: whole, className: 'md-prose-leading' })
+      }
       let at = whole.start
       while (at < whole.end) {
         addLine(at, 'md-prose')

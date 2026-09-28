@@ -173,9 +173,11 @@ function seedVisualVault(vault) {
   const longParagraph = '今天重新核对 GLM-5.2、Code Arena 与 Agent 工作流的说明：Chinese prose 和 English terms 应在同一行保持均衡间距；写作时仍须能看见原始 Markdown、选择文字、撤销，并在保存后保留全部原文字节。'
   writeFileSync(path.join(research, '长文排版.md'), [
     '# 长文排版验收', '', longParagraph.repeat(2), '',
-    `![带查询参数的外链图](${liveImage})`, '',
+    `![带查询参数的外链图](${liveImage})图片同一行紧接的正文仍应在图片下方独立显示。`, '',
     '句内图 ![行内图](http://media.example.invalid/icon?version=2) 不应形成大卡片。', '',
-    '![加载失败的图片](https://media.example.invalid/missing.png)', '',
+    '![加载失败的图片](https://media.example.invalid/missing.png)## 紧接图片的标题', '',
+    '![独占行图片](https://media.example.invalid/solo.png)',
+    '图片下一行的正文也应独立显示。', '',
     ...Array.from({ length: 8 }, (_, index) => [`## 第 ${index + 1} 节 · 阅读与编辑`, '', longParagraph.repeat(3), '', '### 小节与页边索引', '', longParagraph.repeat(2), '']).flat()
   ].join('\n'))
   writeFileSync(path.join(assets, '研究资料.pdf'), '')
@@ -298,8 +300,26 @@ async function captureVisualBaseline(page, shot, nativeShot) {
   }
   await page.eval(`([...document.querySelectorAll('.tree-note')].find((item) => item.innerText.includes('长文排版')))?.click()`)
   check('长文样例含中英混排与外链图片', await waitFor(page, `document.querySelector('.cm-line.md-prose') && document.querySelectorAll('.md-image-slot').length >= 3`))
+  await probe('行首图片与同一行后文分块，标题仍被识别', async () => {
+    const state = JSON.parse(await page.eval(`(() => {
+      const blocks = [...document.querySelectorAll('.md-image-block')]
+      const heading = [...document.querySelectorAll('.cm-line')].find((node) => node.textContent.includes('紧接图片的标题'))
+      const prose = [...document.querySelectorAll('.cm-line')].find((node) => node.textContent.includes('图片同一行紧接'))
+      return JSON.stringify({ blocks: blocks.length, heading: !!heading, headingSize: heading && parseFloat(getComputedStyle(heading).fontSize), rawHeading: heading?.textContent.includes('##'), proseAlign: prose && getComputedStyle(prose).textAlign, separated: !!(blocks[0] && prose && prose.getBoundingClientRect().top >= blocks[0].getBoundingClientRect().bottom) })
+    })()`))
+    return { ok: state.blocks >= 3 && state.headingSize >= 21 && !state.rawHeading && state.proseAlign === 'justify' && state.separated, detail: JSON.stringify(state) }
+  })
   if (process.env.RGENT_UI_LIVE_IMAGE_URL) {
     check('公开 HTTPS 图片在真实窗口解码显示', await waitFor(page, `[...document.querySelectorAll('.md-image-slot img')].some((image) => image.complete && image.naturalWidth > 0)`, 22000))
+    await probe('独立图片按自身尺寸铺开且不超过正文画布', async () => {
+      const state = JSON.parse(await page.eval(`(() => {
+        const image = [...document.querySelectorAll('.md-image-block img')].find((node) => node.complete && node.naturalWidth > 0)
+        const width = image?.getBoundingClientRect().width || 0
+        const canvas = document.querySelector('.cm-content').getBoundingClientRect().width
+        return JSON.stringify({ naturalWidth: image?.naturalWidth || 0, width: Math.round(width), canvas: Math.round(canvas) })
+      })()`))
+      return { ok: state.naturalWidth > 0 && state.width >= Math.min(state.naturalWidth, state.canvas) * 0.9 && state.width <= state.canvas + 1, detail: JSON.stringify(state) }
+    })
   }
   await page.call('Emulation.setDeviceMetricsOverride', { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false })
   await page.eval(`document.querySelector('.cm-scroller').scrollTop = 0`)

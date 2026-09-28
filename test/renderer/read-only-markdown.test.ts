@@ -35,4 +35,13 @@ describe('read-only ledger presentation', () => {
     await vi.waitFor(() => expect(host.querySelector('img')?.getAttribute('src')).toBe('rgent-image://media/?t=abc'))
     expect(host.textContent).not.toContain('secret=1')
   })
+
+  it('separates a leading image from following prose and headings in read-only review', () => {
+    const host = document.createElement('div')
+    renderReadOnlyMarkdown(host, '![图](https://images.example/a.png)正文。\n\n![图](https://images.example/b.png)## 标题\n')
+    expect(host.querySelectorAll('.md-image-block')).toHaveLength(2)
+    expect([...host.querySelectorAll('p')].some((node) => node.textContent === '正文。')).toBe(true)
+    expect(host.querySelector('h2')?.textContent).toBe('标题')
+    expect(host.textContent).not.toContain('##')
+  })
 })

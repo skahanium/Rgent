@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { createImageElement } from '../../src/renderer/src/view/widgets/image.ts'
+import { EditorState } from '@codemirror/state'
+import { markdownField } from '../../src/renderer/src/view/editor.ts'
+import { createImageElement, ImageWidget } from '../../src/renderer/src/view/widgets/image.ts'
 
 describe('Markdown external image presentation', () => {
   it('loads HTTPS through the typed image entry and never displays the raw URL', async () => {
@@ -25,5 +27,17 @@ describe('Markdown external image presentation', () => {
     await vi.waitFor(() => expect(node.textContent).toContain('地址没有返回图片'))
     expect(node.classList.contains('md-image-inline')).toBe(true)
     expect(node.textContent).not.toContain('very-long-secret-address')
+  })
+
+  it('keeps the figure rendered when the caret enters the prose immediately after it', () => {
+    const doc = '![图](https://images.example/p.png)后文。\n'
+    const at = doc.indexOf('后文')
+    const before = EditorState.create({ doc, extensions: [markdownField] })
+    const after = before.update({ selection: { anchor: at } }).state
+    let images = 0
+    after.field(markdownField).decorations.between(0, doc.length, (_from, _to, deco) => {
+      if (deco.spec.widget instanceof ImageWidget) images += 1
+    })
+    expect(images).toBe(1)
   })
 })

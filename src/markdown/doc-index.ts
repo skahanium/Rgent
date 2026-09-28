@@ -57,6 +57,19 @@ function shift(range: SourceRange, delta: number): SourceRange {
   return { start: range.start + delta, end: range.end + delta }
 }
 
+/** A picture at the start of a source line acts as a figure in Rgent's reading projection. */
+export function startsLine(source: string, range: SourceRange): boolean {
+  const before = source.lastIndexOf('\n', range.start - 1) + 1
+  return source.slice(before, range.start).trim() === ''
+}
+
+/** A picture can occupy a source line even when CommonMark keeps adjacent lines in one paragraph. */
+export function aloneOnLine(source: string, range: SourceRange): boolean {
+  const next = source.indexOf('\n', range.end)
+  const after = next < 0 ? source.length : next
+  return startsLine(source, range) && source.slice(range.end, after).trim() === ''
+}
+
 export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyOffset = 0): DocIndex {
   const index = emptyIndex()
 
@@ -95,7 +108,7 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
       url: node.url,
       alt: node.alt ?? '',
       base: 'note',
-      standalone: parent?.type === 'paragraph' && parent.children.length === 1
+      standalone: startsLine(source, range) || (parent?.type === 'paragraph' && parent.children.length === 1)
     }
     index.images.push(image)
   })
@@ -160,7 +173,7 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
         target: link.target,
         display: link.display || link.target,
         embed: link.embed,
-        standalone: parent?.type === 'paragraph' && parent.children.length === 1
+        standalone: startsLine(source, range) || (parent?.type === 'paragraph' && parent.children.length === 1)
       }
       index.wikilinks.push(item)
     })

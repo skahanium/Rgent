@@ -25,6 +25,15 @@ describe('Markdown presentation plan', () => {
     expect(source).toBe('### **1. 设计动机**\n\n普通 *斜体* 与 ~~删除~~。\n')
   })
 
+  it('styles prose and a heading that follow a leading figure on the same source line', () => {
+    const source = '![图](https://images.example/a.png)后面的正文。\n\n![图](https://images.example/b.png)## 后面的标题\n'
+    const result = compile(source)
+    const plan = planPresentation(result.tree, result.partition.body)
+    expect(plan.styles.some((item) => item.className === 'md-prose-leading' && source.slice(item.range.start, item.range.end) === '后面的正文。')).toBe(true)
+    expect(plan.styles.some((item) => item.className === 'md-heading-leading md-h2' && source.slice(item.range.start, item.range.end) === '后面的标题')).toBe(true)
+    expect(plan.syntax.some((item) => item.kind === 'hide' && source.slice(item.range.start, item.range.end) === '## ')).toBe(true)
+  })
+
   it('plans lists, quotes, links and fenced code from AST ranges', () => {
     const source = '- [ ] 待办\n- 第二项\n\n> 引用\n\n[站点](https://example.com)\n\n```ts\nconst n = 1\n```\n'
     const result = compile(source)

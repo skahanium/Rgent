@@ -12,10 +12,11 @@ import type {
   WikiLinkRef
 } from './types.ts'
 import { inViewport } from './viewport.ts'
+import { aloneOnLine, startsLine } from './doc-index.ts'
 
 export type PlannedWidget =
   | { kind: 'table'; range: SourceRange; table: TableRef }
-  | { kind: 'image'; range: SourceRange; image: ImageRef; standalone: boolean }
+  | { kind: 'image'; range: SourceRange; image: ImageRef; standalone: boolean; block: boolean }
   | { kind: 'math'; range: SourceRange; math: MathRef }
   | { kind: 'callout'; range: SourceRange; callout: CalloutRef }
   | { kind: 'wikilink'; range: SourceRange; wikilink: WikiLinkRef }
@@ -91,21 +92,25 @@ export function planWidgets(
     push(out, { kind: 'math', range, math })
   }
   for (const image of index.images) {
-    const range = clipInline(image.range, viewports, docLen)
+    const block = startsLine(source, image.range)
+    const range = block
+      ? clipImageBlock(source, image.range, viewports, docLen)
+      : clipInline(image.range, viewports, docLen)
     if (!range) continue
-    push(out, { kind: 'image', range, image, standalone: image.standalone === true })
+    push(out, { kind: 'image', range, image, standalone: image.standalone === true, block })
   }
   for (const link of index.wikilinks) {
     const range = clipInline(link.range, viewports, docLen)
     if (!range) continue
     if (link.embed && isVaultImagePath(link.target)) {
+      const block = startsLine(source, link.range)
       const image: ImageRef = {
         range: link.range,
         url: link.target,
         alt: link.display,
         base: 'vault'
       }
-      push(out, { kind: 'image', range, image, standalone: link.standalone === true })
+      push(out, { kind: 'image', range: block ? imageBlockRange(source, range) : range, image, standalone: link.standalone === true, block })
       continue
     }
     push(out, { kind: 'wikilink', range, wikilink: link })
@@ -169,6 +174,26 @@ function clipBlock(
   const clipped = clipInline(range, viewports, docLen)
   if (!clipped) return null
   return expandToLineBlock(source, clipped)
+}
+
+// Keep the following newline outside the replacement. CM6 needs it to attach
+// the next line's heading/prose decoration to the next line rather than the widget.
+function imageBlockRange(source: string, range: SourceRange): SourceRange {
+  if (!aloneOnLine(source, range)) {
+    return { start: source.lastIndexOf('\n', range.start - 1) + 1, end: range.end }
+  }
+  const full = expandToLineBlock(source, range)
+  return { start: full.start, end: full.end > 0 && source[full.end - 1] === '\n' ? full.end - 1 : full.end }
+}
+
+function clipImageBlock(
+  source: string,
+  range: SourceRange,
+  viewports: readonly { from: number; to: number }[],
+  docLen: number
+): SourceRange | null {
+  const clipped = clipInline(range, viewports, docLen)
+  return clipped ? imageBlockRange(source, clipped) : null
 }
 
 function push(out: PlannedWidget[], widget: PlannedWidget): void {

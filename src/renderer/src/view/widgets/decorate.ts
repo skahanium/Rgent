@@ -18,7 +18,7 @@ export function decorationForWidget(
     case 'table':
       return Decoration.replace({ widget: new TableWidget(widget.table, host), block: true })
     case 'image':
-      return Decoration.replace({ widget: new ImageWidget(widget.image, host, widget.standalone) })
+      return Decoration.replace({ widget: new ImageWidget(widget.image, host, widget.standalone), block: widget.block })
     case 'math':
       return Decoration.replace({
         widget: new MathWidget(widget.math),
