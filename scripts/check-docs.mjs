@@ -59,6 +59,18 @@ const buildStage = stageOf(build)
 if (!agentsStage || !buildStage || agentsStage !== buildStage) {
   errors.push(`当前阶段不一致：AGENTS.md=${agentsStage ?? '缺失'}；docs/build.md=${buildStage ?? '缺失'}`)
 }
+if (buildStage) {
+  const stageName = buildStage.replace(/[。.!！\s]+$/u, '')
+  const sections = [...build.matchAll(/^##\s+(.+?)\s*$/gm)].map((match) => match[1])
+  if (!sections.includes(stageName)) errors.push(`docs/build.md: 缺少当前阶段节「## ${stageName}」`)
+  const order = build.match(/^## 依赖顺序\s*\n[\s\S]*?```text\s*\n([\s\S]*?)\n```/m)?.[1]
+  if (!order?.split('\n').some((line) => line.trim().replace(/^→\s*/, '').startsWith(stageName))) {
+    errors.push(`docs/build.md: 当前阶段「${stageName}」未列入依赖顺序代码块`)
+  }
+}
+const matrixSection = build.split(/^## 对象 × 阶段\s*$/m)[1]?.split(/^## /m)[0]
+const currentRows = matrixSection?.split('\n').filter((line) => line.startsWith('|') && line.includes('**当前**')) ?? []
+if (currentRows.length !== 1) errors.push(`docs/build.md: 对象矩阵须恰有一个「当前」行，实际 ${currentRows.length} 行`)
 if (errors.length > 0) {
   for (const error of errors) process.stderr.write(`${error}\n`)
   process.exitCode = 1
