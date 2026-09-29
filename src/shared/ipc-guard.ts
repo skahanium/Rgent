@@ -1,4 +1,4 @@
-import type { FlushDonePayload, NoteWriteRequest, PermissionTier, SetPermissionRequest } from './ipc.ts'
+import type { EntryCreateRequest, FlushDonePayload, NoteWriteRequest, PermissionTier, RelocationCommitRequest, RelocationPreviewRequest, SetPermissionRequest } from './ipc.ts'
 
 /**
  * 渲染进程传来的载荷一律当不可信：只在主进程这一层做形状与类型校验，
@@ -38,4 +38,28 @@ export function parseFlushDone(value: unknown): FlushDonePayload {
 
 export function parseNoteName(value: unknown): string | null {
   return asString(value)
+}
+
+export function parseEntryCreateRequest(value: unknown): EntryCreateRequest | null {
+  if (!value || typeof value !== 'object') return null
+  const item = value as Partial<EntryCreateRequest>
+  const name = asString(item.name)
+  const parent = asString(item.parent)
+  return name?.trim() && parent != null ? { name, parent } : null
+}
+
+export function parseRelocationPreviewRequest(value: unknown): RelocationPreviewRequest | null {
+  if (!value || typeof value !== 'object') return null
+  const item = value as Partial<RelocationPreviewRequest>
+  const source = asString(item.source)
+  const target = asString(item.target)
+  return (item.kind === 'note' || item.kind === 'folder') && source && target
+    ? { kind: item.kind, source, target } : null
+}
+
+export function parseRelocationCommitRequest(value: unknown): RelocationCommitRequest | null {
+  if (!value || typeof value !== 'object') return null
+  const item = value as Partial<RelocationCommitRequest>
+  const id = asString(item.id)
+  return id && typeof item.repairLinks === 'boolean' ? { id, repairLinks: item.repairLinks } : null
 }

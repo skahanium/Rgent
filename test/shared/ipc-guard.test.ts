@@ -5,6 +5,9 @@ import {
   parseFlushDone,
   parseNoteName,
   parseNoteWriteRequest,
+  parseEntryCreateRequest,
+  parseRelocationPreviewRequest,
+  parseRelocationCommitRequest,
   parseSetPermissionRequest
 } from '../../src/shared/ipc-guard.ts'
 
@@ -56,5 +59,15 @@ describe('ipc payload guards', () => {
     expect(parseNoteName('')).toBe('')
     expect(parseNoteName(7)).toBeNull()
     expect(parseNoteName(null)).toBeNull()
+  })
+
+  it('requires explicit typed requests for library structure changes', () => {
+    expect(parseEntryCreateRequest({ name: '计划', parent: '工作' })).toEqual({ name: '计划', parent: '工作' })
+    expect(parseEntryCreateRequest({ name: '计划', parent: 7 })).toBeNull()
+    expect(parseRelocationPreviewRequest({ kind: 'note', source: 'a.md', target: 'b.md' }))
+      .toEqual({ kind: 'note', source: 'a.md', target: 'b.md' })
+    expect(parseRelocationPreviewRequest({ kind: 'file', source: 'a.md', target: 'b.md' })).toBeNull()
+    expect(parseRelocationCommitRequest({ id: 'token', repairLinks: false })).toEqual({ id: 'token', repairLinks: false })
+    expect(parseRelocationCommitRequest({ id: 'token', repairLinks: 'yes' })).toBeNull()
   })
 })

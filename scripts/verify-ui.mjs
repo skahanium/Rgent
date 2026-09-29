@@ -61,21 +61,22 @@ function makePage(send, close) {
   send.onMessage = (raw) => {
     const message = JSON.parse(raw)
     if (message.method === 'Runtime.exceptionThrown') {
-      errors.push(message.params.exceptionDetails.exception?.description ?? 'unknown')
+      errors.push(message.params.exceptionDetails.exception?.description ?? JSON.stringify(message.params.exceptionDetails))
     }
-    const resolve = pending.get(message.id)
-    if (resolve) {
+    const settle = pending.get(message.id)
+    if (settle) {
       pending.delete(message.id)
-      resolve(message)
+      settle(message)
     }
   }
   return {
     errors,
     close,
     call: (method, params) =>
-      new Promise((resolve) => {
+      new Promise((resolve, reject) => {
         const mine = ++id
-        pending.set(mine, resolve)
+        const timer = setTimeout(() => { pending.delete(mine); reject(new Error(`CDP_TIMEOUT:${method}`)) }, 30_000)
+        pending.set(mine, (message) => { clearTimeout(timer); resolve(message) })
         send.send(JSON.stringify({ id: mine, method, params }))
       }),
     async eval(expression) {
@@ -897,7 +898,8 @@ async function main() {
     // 点进正文再敲一个字，制造脏稿。必须走 CDP 的真实输入：
     // 合成 MouseEvent 不会被 CM6 当成放光标（实测点不出脏稿）。
     const spot = JSON.parse(await page.eval(`(() => {
-      const line = [...document.querySelectorAll('.cm-line')].find((l) => l.innerText.startsWith('把上周'))
+      // The prompt block is intentionally locked. Edit the human paragraph instead.
+      const line = [...document.querySelectorAll('.cm-line')].find((l) => l.innerText.startsWith('人写的一段'))
       const box = line.getBoundingClientRect()
       return JSON.stringify({ x: Math.round(box.left + 24), y: Math.round(box.top + box.height / 2) })
     })()`))
@@ -1063,6 +1065,63 @@ async function main() {
       const b = await window.rgent.noteRead('Host B.md')
       return a.content.includes('· cancelled') && b.content.includes('· cancelled') && (await window.rgent.agentTasks()).length === 0
     })()`, 8000))
+
+    process.stdout.write('\n笔记库文件生命周期\n')
+    await page.eval(`document.querySelector('.folder-create')?.click()`)
+    check('库根新建文件夹入口可由键盘和鼠标使用', await waitFor(page, `!!document.querySelector('.modal input')`))
+    await page.eval(`(() => { const input = document.querySelector('.modal input'); input.value = '生命周期'; document.querySelector('.modal button[value=ok]')?.click() })()`)
+    check('新建文件夹进入真实文件树', await waitFor(page, `[...document.querySelectorAll('.tree-dir')].some((node) => node.textContent.includes('生命周期'))`, 8000))
+    mkdirSync(path.join(vault, '生命周期', '原'), { recursive: true })
+    writeFileSync(path.join(vault, '生命周期', '原.md'), '# 不应改写的正文\r\n')
+    writeFileSync(path.join(vault, '生命周期', '原', '图.png'), Buffer.from([1, 2, 3]))
+    writeFileSync(path.join(vault, '生命周期', '引用.md'), '见 [[生命周期/原]]。')
+    check('文件树显示待改名的笔记', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((node) => node.textContent.includes('原'))`, 8000))
+    await page.eval(`(() => { const node = [...document.querySelectorAll('.tree-note')].find((n) => n.textContent.includes('原')); node?.click(); node?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 220 })) })()`)
+    check('文件树右键提供改名和移动', await waitFor(page, `[...document.querySelectorAll('.tier-menu button')].some((n) => n.textContent === '改名') && [...document.querySelectorAll('.tier-menu button')].some((n) => n.textContent === '移动')`))
+    await page.eval(`(() => { [...document.querySelectorAll('.tier-menu button')].find((n) => n.textContent === '改名')?.click() })()`)
+    await waitFor(page, `!!document.querySelector('.modal input')`)
+    await page.eval(`(() => { document.querySelector('.modal input').value = '新'; document.querySelector('.modal button[value=ok]')?.click() })()`)
+    check('改名前出现附件与引用预览', await waitFor(page, `document.querySelector('.lifecycle-dialog')?.textContent.includes('生命周期/原 → 生命周期/新') && document.querySelectorAll('.lifecycle-dialog li').length === 2 && document.querySelector('.lifecycle-check')?.textContent.includes('1 篇')`, 8000))
+    await page.eval(`document.querySelector('.lifecycle-actions button:last-child')?.click()`)
+    check('提交后笔记、附件及引用一起更新', await waitFor(page, `!document.querySelector('.lifecycle-dialog') && [...document.querySelectorAll('.tree-note')].some((node) => node.textContent.includes('新'))`, 8000) &&
+      existsSync(path.join(vault, '生命周期', '新.md')) && existsSync(path.join(vault, '生命周期', '新', '图.png')) &&
+      readFileSync(path.join(vault, '生命周期', '新.md'), 'utf8') === '# 不应改写的正文\r\n' &&
+      readFileSync(path.join(vault, '生命周期', '引用.md'), 'utf8') === '见 [[生命周期/新]]。')
+    check('打开的 tab 跟随路径变化', await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '生命周期/新.md'`, 8000))
+    writeFileSync(path.join(vault, '生命周期', '脏.md'), '旧正文')
+    await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((node) => node.textContent.includes('脏'))`)
+    await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((node) => node.textContent.includes('脏'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
+    await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '生命周期/脏.md'`)
+    await page.call('Input.insertText', { text: '手写' })
+    const dirtyMove = await page.eval(`(async () => {
+      const prepared = await window.rgent.relocationPreview({ kind: 'note', source: '生命周期/脏.md', target: '生命周期/已存.md' })
+      return prepared.ok ? await window.rgent.relocationCommit({ id: prepared.preview.id, repairLinks: false }) : prepared
+    })()`)
+    check('结构提交先保存打开的草稿', dirtyMove.ok === true &&
+      readFileSync(path.join(vault, '生命周期', '已存.md'), 'utf8').includes('手写'))
+    writeFileSync(path.join(vault, '生命周期', '运行.md'), '')
+    await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((node) => node.textContent.includes('运行'))`)
+    await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((node) => node.textContent.includes('运行'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
+    await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '生命周期/运行.md'`)
+    await page.call('Input.insertText', { text: '/多任务停止' })
+    await page.key('Enter', 'Enter', 0, 13)
+    const beforeMoveTask = await waitFor(page, `(async () => (await window.rgent.agentTasks()).some((item) => item.relPath === '生命周期/运行.md'))()`, 5000)
+    const taskMove = beforeMoveTask ? await page.eval(`(async () => {
+      const prepared = await window.rgent.relocationPreview({ kind: 'note', source: '生命周期/运行.md', target: '生命周期/已停止.md' })
+      return prepared.ok ? await window.rgent.relocationCommit({ id: prepared.preview.id, repairLinks: false }) : prepared
+    })()`) : { ok: false }
+    const taskGone = await waitFor(page, `(async () => !(await window.rgent.agentTasks()).some((item) => item.relPath === '生命周期/运行.md'))()`)
+    const movedTaskSource = existsSync(path.join(vault, '生命周期', '已停止.md'))
+      ? readFileSync(path.join(vault, '生命周期', '已停止.md'), 'utf8') : ''
+    check('移动运行任务的笔记先停止并写入取消账本', taskMove.ok === true && taskGone && movedTaskSource.includes('· cancelled'),
+      JSON.stringify({ beforeMoveTask, taskMove, taskGone, moved: movedTaskSource.length > 0, cancelled: movedTaskSource.includes('· cancelled') }))
+    writeFileSync(path.join(vault, '生命周期', '过期.md'), '第一版')
+    const stale = await page.eval(`window.rgent.relocationPreview({ kind: 'note', source: '生命周期/过期.md', target: '生命周期/拒绝.md' })`)
+    writeFileSync(path.join(vault, '生命周期', '过期.md'), '外部第二版')
+    const staleResult = stale.ok ? await page.eval(`window.rgent.relocationCommit({ id: '${stale.preview.id}', repairLinks: false })`) : stale
+    check('预览后的外部修改使移动失败且保留原文', staleResult.ok === false && !existsSync(path.join(vault, '生命周期', '拒绝.md')) &&
+      readFileSync(path.join(vault, '生命周期', '过期.md'), 'utf8') === '外部第二版')
+    check('废纸篓验证门未通过前没有删除入口', (await page.eval(`!([...document.querySelectorAll('.tier-menu button')].some((n) => n.textContent.includes('删除')))`)) === true)
 
     process.stdout.write('\n收尾\n')
     check('整轮没有未捕获异常', page.errors.length === 0, page.errors.slice(0, 1).join(''))

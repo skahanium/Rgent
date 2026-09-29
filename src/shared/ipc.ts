@@ -6,6 +6,12 @@ export const IPC = {
   noteRead: 'note:read',
   noteWrite: 'note:write',
   noteCreate: 'note:create',
+  folderCreate: 'folder:create',
+  relocationPreview: 'note:relocation-preview',
+  relocationCommit: 'note:relocation-commit',
+  noteRelocated: 'note:relocated',
+  lifecycleFlushRequest: 'lifecycle:flush-request',
+  lifecycleFlushDone: 'lifecycle:flush-done',
   noteExternalChange: 'note:external-change',
   vaultLost: 'vault:lost',
   menuOpenVault: 'menu:open-vault',
@@ -93,6 +99,21 @@ export type PermissionState =
 export type SetPermissionRequest = { relPath: string; tier: PermissionTier }
 
 export type NoteSnapshot = { content: string; revision: string }
+export type EntryCreateRequest = { name: string; parent: string }
+export type RelocationPreviewRequest = { kind: 'note' | 'folder'; source: string; target: string }
+export type RelocationCommitRequest = { id: string; repairLinks: boolean }
+export type RelocationPreviewView = {
+  id: string
+  kind: 'note' | 'folder'
+  source: string
+  target: string
+  moves: { from: string; to: string; id: string }[]
+  linkChanges: { relPath: string; newPath: string; count: number }[]
+  permissionChanges: { from: string; to: string; tier: string }[]
+}
+export type RelocationPreviewResult = { ok: true; preview: RelocationPreviewView } | { ok: false; error: string }
+export type RelocationCommitResult = { ok: true; moved: { from: string; to: string }[]; unrepaired: string[] } | { ok: false; error: string }
+export type RelocationEvent = { moved: { from: string; to: string }[] }
 export type NoteWriteRequest = { relPath: string; content: string; expectedRevision: string }
 
 export type NotePayload = {
@@ -106,7 +127,7 @@ export type NoteWriteResult = {
   revision: string
 } | {
   ok: false
-  error: 'CONFLICT' | 'BAD_PATH' | 'NO_VAULT' | 'IO_ERROR'
+  error: 'CONFLICT' | 'BAD_PATH' | 'NO_VAULT' | 'NOTE_BUSY' | 'IO_ERROR'
 }
 
 export type FlushDonePayload = {

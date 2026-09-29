@@ -3,6 +3,7 @@ import { icon, iconForFile } from './icons.ts'
 import { noteTitle } from '../../shared/vault-rel.ts'
 
 export { collectNotePaths, collectRelPaths } from '../../shared/vault-rel.ts'
+export type TreeAction = 'new-note' | 'new-folder' | 'rename' | 'move'
 
 /**
  * 文件树。规则见围栏 docs/frontend.md §顶栏与侧栏：
@@ -18,12 +19,13 @@ export function renderTree(
   entries: TreeEntry[],
   activePath: string | null,
   onOpenNote: (relPath: string) => void,
-  onSetTier?: (relPath: string, tier: PermissionTier) => void
+  onSetTier?: (relPath: string, tier: PermissionTier) => void,
+  onAction?: (entry: TreeEntry, action: TreeAction) => void
 ): void {
   host.replaceChildren()
   const list = document.createElement('ul')
   list.className = 'tree-list'
-  for (const entry of entries) list.append(node(entry, activePath, onOpenNote, onSetTier))
+  for (const entry of entries) list.append(node(entry, activePath, onOpenNote, onSetTier, onAction))
   host.append(list)
 }
 
@@ -31,7 +33,8 @@ function node(
   entry: TreeEntry,
   activePath: string | null,
   onOpenNote: (relPath: string) => void,
-  onSetTier?: (relPath: string, tier: PermissionTier) => void
+  onSetTier?: (relPath: string, tier: PermissionTier) => void,
+  onAction?: (entry: TreeEntry, action: TreeAction) => void
 ): HTMLElement {
   const li = document.createElement('li')
   if (entry.kind === 'dir') {
@@ -45,18 +48,18 @@ function node(
     label.textContent = entry.name
     row.append(label)
     addBadge(row, entry.tier)
-    if (onSetTier) {
+    if (onSetTier || onAction) {
       row.addEventListener('contextmenu', (event) => {
         event.preventDefault()
         event.stopPropagation()
-        showTierMenu(event.clientX, event.clientY, entry.relPath, onSetTier)
+        showTreeMenu(event.clientX, event.clientY, entry, onSetTier, onAction)
       })
     }
 
     const nested = document.createElement('ul')
     nested.className = 'tree-list'
     nested.dataset.parent = entry.relPath
-    for (const child of entry.children ?? []) nested.append(node(child, activePath, onOpenNote, onSetTier))
+    for (const child of entry.children ?? []) nested.append(node(child, activePath, onOpenNote, onSetTier, onAction))
     row.addEventListener('click', () => {
       const open = row.getAttribute('aria-expanded') === 'true'
       row.setAttribute('aria-expanded', String(!open))
@@ -78,6 +81,11 @@ function node(
     addBadge(button, entry.tier)
     if (entry.relPath === activePath) button.setAttribute('aria-current', 'page')
     button.addEventListener('click', () => onOpenNote(entry.relPath))
+    if (onAction) button.addEventListener('contextmenu', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      showTreeMenu(event.clientX, event.clientY, entry, onSetTier, onAction)
+    })
     li.append(button)
     return li
   }
@@ -107,27 +115,39 @@ function addBadge(host: HTMLElement, tier: TreeEntry['tier']): void {
   host.append(badge)
 }
 
-let dismissTierMenu: (() => void) | null = null
+let dismissTreeMenu: (() => void) | null = null
 
-function showTierMenu(x: number, y: number, relPath: string, onSetTier: (relPath: string, tier: PermissionTier) => void): void {
-  dismissTierMenu?.()
+function showTreeMenu(
+  x: number, y: number, entry: TreeEntry,
+  onSetTier?: (relPath: string, tier: PermissionTier) => void,
+  onAction?: (entry: TreeEntry, action: TreeAction) => void
+): void {
+  dismissTreeMenu?.()
   const menu = document.createElement('div')
   menu.className = 'tier-menu'
   menu.setAttribute('role', 'menu')
-  for (const [tier, label] of [
-    ['reference', '可参考'],
-    ['follow', '必须遵循'],
-    ['forbidden', '禁止触碰']
-  ] as const) {
+  const add = (label: string, onClick: () => void): void => {
     const button = document.createElement('button')
     button.type = 'button'
     button.setAttribute('role', 'menuitem')
     button.textContent = label
     button.addEventListener('click', () => {
       dismiss()
-      onSetTier(relPath, tier)
+      onClick()
     })
     menu.append(button)
+  }
+  if (onAction) {
+    const actions = entry.kind === 'dir'
+      ? [['new-note', '在此新建笔记'], ['new-folder', '新建文件夹'], ['rename', '改名'], ['move', '移动']] as const
+      : [['rename', '改名'], ['move', '移动']] as const
+    for (const [action, label] of actions) add(label, () => onAction(entry, action))
+  }
+  if (entry.kind === 'dir' && onSetTier) {
+    if (onAction) menu.append(document.createElement('hr'))
+    for (const [tier, label] of [
+      ['reference', '可参考'], ['follow', '必须遵循'], ['forbidden', '禁止触碰']
+    ] as const) add(label, () => onSetTier(entry.relPath, tier))
   }
   menu.style.left = `${Math.min(x, window.innerWidth - 170)}px`
   menu.style.top = `${Math.min(y, window.innerHeight - 130)}px`
@@ -135,7 +155,7 @@ function showTierMenu(x: number, y: number, relPath: string, onSetTier: (relPath
     document.removeEventListener('click', dismiss, true)
     document.removeEventListener('keydown', onKey, true)
     menu.remove()
-    dismissTierMenu = null
+    dismissTreeMenu = null
   }
   const onKey = (event: KeyboardEvent): void => {
     if (event.key === 'Escape') dismiss()
@@ -143,7 +163,7 @@ function showTierMenu(x: number, y: number, relPath: string, onSetTier: (relPath
   document.addEventListener('click', dismiss, true)
   document.addEventListener('keydown', onKey, true)
   document.body.append(menu)
-  dismissTierMenu = dismiss
+  dismissTreeMenu = dismiss
   ;(menu.querySelector('button') as HTMLButtonElement | null)?.focus()
 }
 

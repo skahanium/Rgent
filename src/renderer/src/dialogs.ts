@@ -1,23 +1,28 @@
 import { openOverlay } from './overlay.ts'
 
 export function promptNewNote(): Promise<string | null> {
+  return promptText('新建笔记', '笔记名', '', '创建')
+}
+
+export function promptText(title: string, field: string, initial = '', confirm = '确定'): Promise<string | null> {
   return modal({
-    title: '新建笔记',
+    title,
     body: (root) => {
       const label = document.createElement('label')
-      label.textContent = '笔记名'
+      label.textContent = field
       label.setAttribute('for', 'new-note-name')
       const input = document.createElement('input')
       input.id = 'new-note-name'
       input.type = 'text'
       input.required = true
       input.autocomplete = 'off'
+      input.value = initial
       label.append(input)
       root.append(label)
       queueMicrotask(() => input.focus())
       return () => input.value
     },
-    confirm: '创建',
+    confirm,
     cancel: '取消'
   })
 }

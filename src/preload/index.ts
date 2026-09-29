@@ -25,7 +25,13 @@ import {
   type AgentStartRequest,
   type AgentStartResult,
   type AgentTaskView,
-  type AgentEvent
+  type AgentEvent,
+  type EntryCreateRequest,
+  type RelocationPreviewRequest,
+  type RelocationPreviewResult,
+  type RelocationCommitRequest,
+  type RelocationCommitResult,
+  type RelocationEvent
 } from '../shared/ipc.ts'
 
 const menuChannels = [IPC.menuOpenVault, IPC.menuNewNote, IPC.menuSave] as const
@@ -40,6 +46,12 @@ const api = {
   permissionsGet: (): Promise<PermissionState> => ipcRenderer.invoke(IPC.permissionsGet),
   permissionsSet: (request: SetPermissionRequest): Promise<PermissionState> => ipcRenderer.invoke(IPC.permissionsSet, request),
   noteCreate: (name: string): Promise<string> => ipcRenderer.invoke(IPC.noteCreate, name),
+  noteCreateAt: (request: EntryCreateRequest): Promise<string> => ipcRenderer.invoke(IPC.noteCreate, request),
+  folderCreate: (request: EntryCreateRequest): Promise<string> => ipcRenderer.invoke(IPC.folderCreate, request),
+  relocationPreview: (request: RelocationPreviewRequest): Promise<RelocationPreviewResult> =>
+    ipcRenderer.invoke(IPC.relocationPreview, request),
+  relocationCommit: (request: RelocationCommitRequest): Promise<RelocationCommitResult> =>
+    ipcRenderer.invoke(IPC.relocationCommit, request),
   backlinks: (relPath: string): Promise<BacklinkGroup[]> => ipcRenderer.invoke(IPC.backlinks, relPath),
   search: (query: string): Promise<SearchHit[]> => ipcRenderer.invoke(IPC.search, query),
   themeGet: (): Promise<ThemeMode> => ipcRenderer.invoke(IPC.themeGet),
@@ -60,6 +72,11 @@ const api = {
     subscribe(IPC.agentEvent, (payload) => handler(payload as AgentEvent)),
   onTreeChanged: (handler: () => void): (() => void) =>
     subscribe(IPC.treeChanged, () => handler()),
+  onNoteRelocated: (handler: (payload: RelocationEvent) => void): (() => void) =>
+    subscribe(IPC.noteRelocated, (payload) => handler(payload as RelocationEvent)),
+  onLifecycleFlushRequest: (handler: (id: string) => void): (() => void) =>
+    subscribe(IPC.lifecycleFlushRequest, (id) => { if (typeof id === 'string') handler(id) }),
+  lifecycleFlushDone: (id: string, ok: boolean): void => { ipcRenderer.send(IPC.lifecycleFlushDone, { id, ok }) },
   onNoteExternalChange: (handler: (payload: NotePayload) => void): (() => void) =>
     subscribe(IPC.noteExternalChange, (payload) => handler(payload as NotePayload)),
   onVaultLost: (handler: () => void): (() => void) => subscribe(IPC.vaultLost, () => handler()),

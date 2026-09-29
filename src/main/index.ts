@@ -1,10 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, safeStorage, session, shell } from 'electron'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
-import { asString, parseFlushDone, parseNoteName, parseNoteWriteRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
+import { asString, parseEntryCreateRequest, parseFlushDone, parseNoteName, parseNoteWriteRequest, parseRelocationCommitRequest, parseRelocationPreviewRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
 import { IPC } from '../shared/ipc.ts'
-import type { AgentStartRequest, AgentStartResult, LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
+import type { AgentStartRequest, AgentStartResult, LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { isReadingPreference } from '../shared/reading-preference.ts'
@@ -17,6 +18,7 @@ import { createModelConfigStore, type ModelConfigStore } from './model-config.ts
 import { AgentHost } from './agent-host.ts'
 import { modelTierFor } from './permissions.ts'
 import { streamModelText } from './model-stream.ts'
+import { VaultStructureGate } from './vault-mutation-queue.ts'
 
 protocol.registerSchemesAsPrivileged([
   { scheme: VAULT_MEDIA_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
@@ -41,6 +43,29 @@ let modelConfig: ModelConfigStore | null = null
 let modelConfigError: string | null = null
 let agentHost: AgentHost | null = null
 let cancellingForClose = false
+const lifecycleFlushes = new Map<string, (ok: boolean) => void>()
+const structureGate = new VaultStructureGate()
+
+function affectsStructure(relPath: string): boolean {
+  return !!vault?.root && structureGate.affects(vault.root, relPath)
+}
+
+function blocksStructureWrite(relPath: string): boolean {
+  return !!vault?.root && structureGate.blocksWrite(vault.root, relPath)
+}
+
+async function flushBeforeStructure(win: BrowserWindow): Promise<boolean> {
+  if (win.isDestroyed() || win.webContents.isDestroyed()) return false
+  const id = randomUUID()
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      lifecycleFlushes.delete(id)
+      resolve(false)
+    }, 120_000)
+    lifecycleFlushes.set(id, (ok) => { clearTimeout(timer); lifecycleFlushes.delete(id); resolve(ok) })
+    win.webContents.send(IPC.lifecycleFlushRequest, id)
+  })
+}
 
 function clearFlushTimer(): void {
   if (!flushTimer) return
@@ -294,6 +319,7 @@ function registerIpc(): void {
         !request.range || !Number.isSafeInteger(request.range.start) || !Number.isSafeInteger(request.range.end)) {
       return { ok: false, error: 'BAD_REQUEST' }
     }
+    if (affectsStructure(request.relPath)) return { ok: false, error: 'NOTE_BUSY' }
     try {
       const task = await agentHost.start(request as AgentStartRequest)
       void task.done.catch(() => {})
@@ -347,6 +373,7 @@ function registerIpc(): void {
     const request = parseNoteWriteRequest(value)
     if (!request) return { ok: false, error: 'BAD_PATH' }
     if (!vault) return { ok: false, error: 'NO_VAULT' }
+    if (blocksStructureWrite(request.relPath)) return { ok: false, error: 'NOTE_BUSY' }
     try {
       const revision = await vault.write(request.relPath, request.content, request.expectedRevision)
       return { ok: true, revision }
@@ -362,10 +389,68 @@ function registerIpc(): void {
     return vault.setPermission(request.relPath, request.tier)
   })
   ipcMain.handle(IPC.noteCreate, async (_event, name: unknown) => {
-    const noteName = parseNoteName(name)
-    if (!noteName) throw new Error('BAD_PATH')
+    const request = typeof name === 'string'
+      ? { name: parseNoteName(name), parent: '' }
+      : parseEntryCreateRequest(name)
+    if (!request?.name) throw new Error('BAD_PATH')
     if (!vault) throw new Error('NO_VAULT')
-    return vault.create(noteName)
+    return vault.create(request.name, request.parent)
+  })
+  ipcMain.handle(IPC.folderCreate, async (_event, value: unknown) => {
+    const request = parseEntryCreateRequest(value)
+    if (!request || !vault) throw new Error('BAD_PATH')
+    return vault.createFolder(request.name, request.parent)
+  })
+  ipcMain.handle(IPC.relocationPreview, async (_event, value: unknown): Promise<RelocationPreviewResult> => {
+    const request = parseRelocationPreviewRequest(value)
+    if (!request || !vault) return { ok: false, error: 'BAD_PATH' }
+    try {
+      if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
+      await agentHost?.whenLaunchesSettled()
+      const affected = agentHost?.active().filter((task) => task.root === vault?.root &&
+        (task.relPath === request.source ||
+          (request.kind === 'folder' && task.relPath.startsWith(`${request.source}/`)) ||
+          (request.kind === 'note' && task.relPath.startsWith(`${request.source.slice(0, -3)}/`)))) ?? []
+      for (const task of affected) await agentHost?.cancel(task.id, 'user')
+      if (vault.root && agentHost?.hasPending(vault.root)) throw new Error('PREVIOUS_TASK_UNSAVED')
+      if (!mainWindow || !(await flushBeforeStructure(mainWindow))) throw new Error('UNSAVED_DRAFT')
+      const preview = await vault.previewRelocation(request)
+      return { ok: true, preview: {
+        id: preview.id, kind: preview.kind, source: preview.source, target: preview.target,
+        moves: preview.moves,
+        linkChanges: preview.linkChanges.map(({ relPath, newPath, changes }) => ({ relPath, newPath, count: changes.length })),
+        permissionChanges: preview.permissionChanges
+      } }
+    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'PREVIEW_FAILED' } }
+  })
+  ipcMain.handle(IPC.relocationCommit, async (_event, value: unknown): Promise<RelocationCommitResult> => {
+    const request = parseRelocationCommitRequest(value)
+    const win = mainWindow
+    if (!request || !vault || !win || !vault.root) return { ok: false, error: 'BAD_REQUEST' }
+    const preview = vault.relocationPreviewById(request.id)
+    if (!preview) return { ok: false, error: 'STALE_PREVIEW' }
+    if (structureGate.isBusy()) return { ok: false, error: 'STRUCTURE_BUSY' }
+    structureGate.begin({
+      root: vault.root,
+      exact: [preview.source, ...(request.repairLinks ? preview.linkChanges.map((item) => item.relPath) : [])],
+      prefixes: preview.kind === 'folder' ? [preview.source] : [preview.source.slice(0, -3)]
+    })
+    try {
+      await agentHost?.whenLaunchesSettled()
+      const affected = agentHost?.active().filter((task) => task.root === vault?.root && affectsStructure(task.relPath)) ?? []
+      for (const task of affected) await agentHost?.cancel(task.id, 'user')
+      if (agentHost?.hasPending(vault.root)) throw new Error('PREVIOUS_TASK_UNSAVED')
+      if (!(await flushBeforeStructure(win))) throw new Error('UNSAVED_DRAFT')
+      structureGate.seal()
+      const outcome = await vault.commitRelocation(request.id, request.repairLinks)
+      return { ok: true, moved: outcome.moved.map(({ from, to }) => ({ from, to })), unrepaired: outcome.unrepaired }
+    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'COMMIT_FAILED' } }
+    finally { structureGate.finish() }
+  })
+  ipcMain.on(IPC.lifecycleFlushDone, (event, value: unknown) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || !value || typeof value !== 'object') return
+    const response = value as { id?: unknown; ok?: unknown }
+    if (typeof response.id === 'string') lifecycleFlushes.get(response.id)?.(response.ok === true)
   })
   ipcMain.handle(IPC.backlinks, async (_event, relPath: unknown) => {
     const pathInVault = asString(relPath)
@@ -398,7 +483,10 @@ app.whenReady().then(() => {
   agentHost = new AgentHost({
     root: () => vault?.root ?? null,
     read: (relPath) => vault!.read(relPath),
-    write: (relPath, content, revision) => vault!.write(relPath, content, revision),
+    write: (relPath, content, revision) => {
+      if (blocksStructureWrite(relPath)) throw new Error('NOTE_BUSY')
+      return vault!.write(relPath, content, revision)
+    },
     tier: modelTierFor,
     credential: () => {
       if (!modelConfig) throw new Error(modelConfigError ?? 'MODEL_CONFIG_UNAVAILABLE')

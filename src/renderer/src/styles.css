@@ -576,6 +576,9 @@ input:focus-visible,
   gap: 6px;
   padding: 10px 10px 6px;
 }
+.folder-create { justify-self: start; min-height: 30px; padding: 3px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); font: 0.75rem var(--font-ui); cursor: pointer; }
+.folder-create:hover { background: var(--state-hover); color: var(--text-heading); }
+.folder-create:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
 
 .tree-scroll {
   flex: 1;
@@ -1056,6 +1059,18 @@ input:focus-visible,
   gap: 8px;
   margin-top: 16px;
 }
+
+.lifecycle-dialog { width: min(620px, calc(100vw - 40px)); max-height: calc(100vh - 40px); overflow: auto; }
+.lifecycle-dialog h2 { margin: 0 0 12px; color: var(--text-heading); font-size: 1.1rem; }
+.lifecycle-dialog p, .lifecycle-dialog li { overflow-wrap: anywhere; line-height: 1.5; }
+.lifecycle-dialog ul { max-height: 26vh; overflow: auto; padding-left: 1.2rem; }
+.lifecycle-dialog select { width: 100%; min-height: 40px; padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-heading); background: var(--surface-overlay); }
+.lifecycle-check { display: flex; align-items: flex-start; gap: 9px; margin-top: 18px; }
+.lifecycle-check input { margin-top: 4px; accent-color: var(--accent-solid); }
+.lifecycle-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+.lifecycle-actions button { min-height: 38px; padding: 7px 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-heading); background: var(--surface-overlay); cursor: pointer; }
+.lifecycle-actions button:last-child { border-color: var(--accent-solid); color: var(--text-on-accent); background: var(--accent-solid); }
+.lifecycle-dialog :focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
 
 .md-heading, .cm-line:has(.md-heading-leading) { font-family: var(--heading-font-family); font-weight: 600; color: var(--text-heading); }
 .md-h1, .cm-line:has(.md-heading-leading.md-h1) { font-size: 2rem; font-weight: 400; }

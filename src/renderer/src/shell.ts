@@ -1,8 +1,8 @@
-import { IPC, type AgentEvent, type AgentTaskView, type NoteSnapshot, type PermissionState, type PermissionTier, type SearchHit, type TreeEntry, type VaultState } from '@shared'
+import { IPC, type AgentEvent, type AgentTaskView, type NoteSnapshot, type PermissionState, type PermissionTier, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
-import { promptNewNote } from './dialogs.ts'
+import { promptNewNote, promptText } from './dialogs.ts'
 import { promptConflict } from './conflict.ts'
 import { openOverlay } from './overlay.ts'
 import { createSearchOverlay } from './search-overlay.ts'
@@ -17,7 +17,7 @@ import { renderStatusbar, statusModel, wordsOf } from './statusbar.ts'
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
 import { slashAtCaret } from './slash.ts'
-import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.ts'
+import { renderTree, titleOf, collectNotePaths, collectRelPaths, type TreeAction } from './tree.ts'
 import type { Theme } from './theme.ts'
 
 const SAVE_MS = 800
@@ -35,6 +35,21 @@ const HOST_ERROR_MESSAGES: Record<string, string> = {
   CONFLICT: '笔记已变化，请先处理冲突。'
 }
 const hostErrorText = (error: string): string => HOST_ERROR_MESSAGES[error] ?? error
+const LIFECYCLE_ERRORS: Record<string, string> = {
+  STALE_PREVIEW: '文件或引用在预览后发生变化，请重新预览再提交。',
+  EEXIST: '目标位置已有同名文件或文件夹。',
+  PERMISSION_DOWNGRADE: '这次移动会使部分对象的 AI 权限意外降档，已阻止提交。',
+  PERMISSION_COLLISION: '目标位置的显式权限规则发生冲突，已阻止提交。',
+  PERMISSIONS_INVALID: '权限名单无法核验，请先修复库根的 .rgent-permissions。',
+  UNSAVED_DRAFT: '有草稿尚未保存，请先处理保存冲突。',
+  PREVIOUS_TASK_UNSAVED: '运行任务的内容尚未保存，请先处理再修改文件位置。',
+  LIFECYCLE_RECOVERY_REQUIRED: '文件操作中断且无法自动核对。恢复记录仍在库中；AI 访问已暂停，请人工检查。',
+  STRUCTURE_BUSY: '另一个文件位置操作正在进行，请稍后重试。'
+}
+const lifecycleErrorText = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error)
+  return LIFECYCLE_ERRORS[message] ?? message
+}
 
 export async function start(root: HTMLElement): Promise<void> {
   root.innerHTML = `
@@ -51,6 +66,7 @@ export async function start(root: HTMLElement): Promise<void> {
               <span class="search-open-label">搜索笔记</span>
               <kbd class="shortcut-hint"></kbd>
             </button>
+            <button type="button" class="folder-create" aria-label="在库根新建文件夹">新建文件夹</button>
           </div>
           <div class="tree-scroll"></div>
           <div class="tree-settings"><button type="button" class="settings-open" aria-label="设置" title="设置"><span class="settings-open-label">设置</span></button></div>
@@ -91,6 +107,7 @@ export async function start(root: HTMLElement): Promise<void> {
   const ledgerBody = root.querySelector('.ledger-body') as HTMLElement
   const ledgerClose = root.querySelector('.ledger-close') as HTMLButtonElement
   const searchOpen = root.querySelector('.search-open') as HTMLButtonElement
+  const folderCreate = root.querySelector('.folder-create') as HTMLButtonElement
   const settingsOpen = root.querySelector('.settings-open') as HTMLButtonElement
   const ledgerOpenButton = root.querySelector('.ledger-open') as HTMLButtonElement
   const shortcutHint = root.querySelector('.shortcut-hint') as HTMLElement
@@ -162,6 +179,7 @@ export async function start(root: HTMLElement): Promise<void> {
   })
   shortcutHint.textContent = shortcutLabel('k')
   searchOpen.addEventListener('click', () => { if (!conflictDecisionOpen) searchOverlay.open() })
+  folderCreate.addEventListener('click', () => { void createRootFolder() })
   settingsOpen.prepend(icon('settings'))
   settingsOpen.addEventListener('click', () => { if (!conflictDecisionOpen) settingsOverlay.open() })
 
@@ -220,6 +238,26 @@ export async function start(root: HTMLElement): Promise<void> {
   window.rgent.onFlushRequest(() => {
     void reportFlush(flushSave, (payload) => window.rgent.flushDone(payload))
   })
+  window.rgent.onLifecycleFlushRequest((id) => {
+    void flushSave().then((ok) => window.rgent.lifecycleFlushDone(id, ok), () => window.rgent.lifecycleFlushDone(id, false))
+  })
+  window.rgent.onNoteRelocated(({ moved }) => applyRelocation(moved))
+
+  function applyRelocation(moved: { from: string; to: string }[]): void {
+    const remap = (relPath: string): string => {
+      const match = moved.find((item) => relPath === item.from || relPath.startsWith(`${item.from}/`))
+      return match ? `${match.to}${relPath.slice(match.from.length)}` : relPath
+    }
+    for (const tab of tabs) tab.relPath = remap(tab.relPath)
+    if (active) active = remap(active)
+    const revisions = [...hostRevisions.entries()]
+    hostRevisions.clear()
+    for (const [relPath, revision] of revisions) hostRevisions.set(remap(relPath), revision)
+    syncEditorHost()
+    renderTabs()
+    paintTree()
+    void refreshMovedTabs()
+  }
   window.rgent.onNoteExternalChange(() => {
     // 别的笔记被外部改了，可能多了或少了指向当前这篇的链接。
     void refreshBacklinks()
@@ -515,9 +553,156 @@ export async function start(root: HTMLElement): Promise<void> {
   function paintTree(): void {
     renderTree(treeScroll, tree, active, (relPath) => {
       void openNote(relPath)
-    }, (relPath, tier) => { void changePermission(relPath, tier) })
+    }, (relPath, tier) => { void changePermission(relPath, tier) }, (entry, action) => { void handleTreeAction(entry, action) })
     permissionWarning.hidden = permissionState.status !== 'invalid'
     if (permissionState.status === 'invalid') permissionWarning.textContent = `AI 门禁暂停：${permissionState.error}。请检查库根 .rgent-permissions。`
+  }
+
+  async function refreshMovedTabs(): Promise<void> {
+    for (const tab of tabs) {
+      if (tab.dirty) continue
+      try {
+        const source = await window.rgent.noteRead(tab.relPath)
+        applySource(tab, source)
+        if (active === tab.relPath) {
+          const selection = editor.selectionRange()
+          editor.setText(tab.content, noteHost(), selection)
+        }
+      } catch { /* Tree refresh will retain an unresolved tab for explicit recovery. */ }
+    }
+    renderTabs()
+    renderOutline()
+    void refreshBacklinks()
+  }
+
+  function folderOptions(entries: TreeEntry[], depth = 0): { path: string; label: string }[] {
+    return entries.flatMap((entry) => entry.kind === 'dir'
+      ? [{ path: entry.relPath, label: `${'　'.repeat(depth)}${entry.name}` }, ...folderOptions(entry.children ?? [], depth + 1)]
+      : [])
+  }
+
+  function chooseDestination(source: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      let settled = false
+      const finish = (path: string | null): void => { if (!settled) { settled = true; resolve(path) } }
+      const overlay = openOverlay({ label: '选择目标文件夹', onClose: () => finish(null), initialFocus: () => select })
+      overlay.root.classList.add('lifecycle-dialog')
+      const heading = document.createElement('h2')
+      heading.textContent = '移动到'
+      const description = document.createElement('p')
+      description.textContent = source
+      const select = document.createElement('select')
+      select.setAttribute('aria-label', '目标文件夹')
+      for (const option of [{ path: '', label: '笔记库根目录' }, ...folderOptions(tree)]) {
+        if (option.path === source || option.path.startsWith(`${source}/`)) continue
+        const element = document.createElement('option')
+        element.value = option.path
+        element.textContent = option.label
+        select.append(element)
+      }
+      const actions = document.createElement('div')
+      actions.className = 'lifecycle-actions'
+      const cancel = document.createElement('button')
+      cancel.type = 'button'; cancel.textContent = '取消'; cancel.addEventListener('click', () => overlay.close())
+      const next = document.createElement('button')
+      next.type = 'button'; next.textContent = '查看预览'
+      next.addEventListener('click', () => { const value = select.value; overlay.close(); finish(value) })
+      actions.append(cancel, next)
+      overlay.root.append(heading, description, select, actions)
+    })
+  }
+
+  async function confirmRelocation(preview: RelocationPreviewView): Promise<{ repairLinks: boolean } | null> {
+    return new Promise((resolve) => {
+      let settled = false
+      const finish = (value: { repairLinks: boolean } | null): void => { if (!settled) { settled = true; resolve(value) } }
+      const overlay = openOverlay({ label: '核对文件变更', onClose: () => finish(null), initialFocus: () => cancel })
+      overlay.root.classList.add('lifecycle-dialog')
+      const heading = document.createElement('h2')
+      heading.textContent = '核对文件变更'
+      const intro = document.createElement('p')
+      intro.textContent = `${preview.source} → ${preview.target}`
+      const list = document.createElement('ul')
+      for (const move of preview.moves) {
+        const item = document.createElement('li')
+        item.textContent = `${move.from} → ${move.to}`
+        list.append(item)
+      }
+      const permissions = document.createElement('p')
+      permissions.textContent = preview.permissionChanges.length
+        ? `将同步迁移 ${preview.permissionChanges.length} 条显式权限规则。`
+        : '没有需要迁移的显式权限规则。'
+      const checkboxLabel = document.createElement('label')
+      checkboxLabel.className = 'lifecycle-check'
+      const checkbox = document.createElement('input')
+      checkbox.type = 'checkbox'
+      checkbox.checked = preview.linkChanges.length > 0
+      checkbox.disabled = preview.linkChanges.length === 0
+      checkboxLabel.append(checkbox, document.createTextNode(`修复 ${preview.linkChanges.length} 篇笔记中的全路径引用（逐篇核对修订值）`))
+      const actions = document.createElement('div')
+      actions.className = 'lifecycle-actions'
+      const cancel = document.createElement('button')
+      cancel.type = 'button'; cancel.textContent = '取消'; cancel.addEventListener('click', () => overlay.close())
+      const accept = document.createElement('button')
+      accept.type = 'button'; accept.textContent = '确认变更'
+      accept.addEventListener('click', () => { overlay.close(); finish({ repairLinks: checkbox.checked }) })
+      actions.append(cancel, accept)
+      overlay.root.append(heading, intro, list, permissions, checkboxLabel, actions)
+    })
+  }
+
+  async function handleTreeAction(entry: TreeEntry, action: TreeAction): Promise<void> {
+    if (entry.kind !== 'note' && entry.kind !== 'dir') return
+    try {
+      if (action === 'new-note' || action === 'new-folder') {
+        const name = await promptText(action === 'new-note' ? '新建笔记' : '新建文件夹', '名称', '', '创建')
+        if (!name) return
+        const parent = entry.relPath
+        const created = action === 'new-note'
+          ? await window.rgent.noteCreateAt({ name, parent })
+          : await window.rgent.folderCreate({ name, parent })
+        await refreshTree()
+        if (action === 'new-note') await openNote(created)
+        return
+      }
+      if (!(await flushSave())) { window.alert('有草稿尚未保存，请先处理保存冲突。'); return }
+      const source = entry.relPath
+      const parts = source.split('/')
+      const oldName = parts.pop() ?? ''
+      let parent = parts.join('/')
+      let name = oldName
+      if (action === 'rename') {
+        const entered = await promptText('改名', '新名称', entry.kind === 'note' ? titleOf(oldName) : oldName, '查看预览')
+        if (!entered) return
+        name = entry.kind === 'note' && !entered.toLowerCase().endsWith('.md') ? `${entered}.md` : entered
+      } else {
+        const selected = await chooseDestination(source)
+        if (selected === null) return
+        parent = selected
+      }
+      const target = parent ? `${parent}/${name}` : name
+      if (target === source) return
+      const outcome = await window.rgent.relocationPreview({ kind: entry.kind === 'note' ? 'note' : 'folder', source, target })
+      if (!outcome.ok) throw new Error(outcome.error)
+      const choice = await confirmRelocation(outcome.preview)
+      if (!choice) return
+      const result = await window.rgent.relocationCommit({ id: outcome.preview.id, repairLinks: choice.repairLinks })
+      if (!result.ok) throw new Error(result.error)
+      applyRelocation(result.moved)
+      await refreshTree()
+      if (result.unrepaired.length) window.alert(`文件已移动；以下引用因内容变化未修复：\n${result.unrepaired.join('\n')}`)
+    } catch (error) {
+      window.alert(lifecycleErrorText(error))
+    }
+  }
+
+  async function createRootFolder(): Promise<void> {
+    const name = await promptText('新建文件夹', '名称', '', '创建')
+    if (!name) return
+    try {
+      await window.rgent.folderCreate({ name, parent: '' })
+      await refreshTree()
+    } catch (error) { window.alert(error instanceof Error ? error.message : String(error)) }
   }
 
   async function changePermission(relPath: string, tier: PermissionTier): Promise<void> {
@@ -889,6 +1074,12 @@ export async function start(root: HTMLElement): Promise<void> {
       applySaved(tab, body, result.revision)
       void refreshBacklinks()
       return true
+    }
+    if (result.error === 'NOTE_BUSY') {
+      // A structural commit briefly seals this path after its explicit flush.
+      // Keep the draft dirty and try again when the move has settled.
+      scheduleSave()
+      return false
     }
     if (result.error === 'CONFLICT') {
       if (!hostRevisions.has(tab.relPath)) {
