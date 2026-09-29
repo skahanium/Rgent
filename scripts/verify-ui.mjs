@@ -275,7 +275,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     await sleep(160)
     nativeShot(mode)
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
-    await page.eval(`document.querySelector('.settings-open')?.click()`)
+    await page.eval(`(() => { const button = document.querySelector('.settings-open'); button?.focus(); button?.click() })()`)
     await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
     if (mode === 'day') await probe('设置浮层放大且仍悬浮于工作区', async () => {
       const geometry = JSON.parse(await page.eval(`(() => {
@@ -283,7 +283,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
         const title = document.querySelector('.settings-page-title').getBoundingClientRect()
         return JSON.stringify({ top: Math.round(panel.top), width: Math.round(panel.width), height: Math.round(panel.height), titleTop: Math.round(title.top - panel.top), titleLeft: Math.round(title.left - panel.left) })
       })()`))
-      return { ok: geometry.top >= 24 && geometry.top <= 55 && geometry.width >= 980 && geometry.width <= 1050 && geometry.height >= 680 && geometry.height < 800 && geometry.titleTop >= 70 && geometry.titleLeft >= 240, detail: JSON.stringify(geometry) }
+      return { ok: geometry.top >= 24 && geometry.top <= 55 && geometry.width >= 980 && geometry.width <= 1050 && geometry.height >= 680 && geometry.height < 800 && geometry.titleTop >= 35 && geometry.titleTop <= 70 && geometry.titleLeft >= 240, detail: JSON.stringify(geometry) }
     })
     check('设置遮罩柔焦且导航仅列出三页与同系图标', await page.eval(`(() => {
       const dialog = document.querySelector('.overlay-settings')
@@ -298,6 +298,13 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     nativeShot(`${mode}-settings`)
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
     await page.eval(`document.querySelector('.settings-main').scrollTop = document.querySelector('.settings-main').scrollHeight`)
+    check(`${mode}设置无顶部栏且内容在面板内滚动`, await page.eval(`(() => {
+      const dialog = document.querySelector('.overlay-settings')
+      const main = dialog.querySelector('.settings-main')
+      return !dialog.querySelector('.settings-header, .settings-close') &&
+        dialog.querySelector('.settings-nav-heading')?.textContent === '设置' &&
+        main.scrollTop > 0 && getComputedStyle(main).overflowY === 'auto'
+    })()`) === true)
     await shot(page, `reference-${mode}-settings-reading`)
     await page.eval(`document.querySelector('.settings-main').scrollTop = 0`)
     for (const name of ['模型', '运行']) {
@@ -306,8 +313,19 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       await shot(page, `reference-${mode}-settings-${name === '模型' ? 'model' : 'run'}`)
     }
     await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '界面'))?.click()`)
-    await page.eval(`document.querySelector('.settings-close')?.click()`)
-    await waitFor(page, `!document.querySelector('.overlay-settings')`)
+    if (mode === 'day') {
+      await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: 10, y: 10, button: 'left', clickCount: 1 })
+      await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 10, y: 10, button: 'left', clickCount: 1 })
+      check('设置面板外真实点击可关闭并返回原焦点', await waitFor(page, `!document.querySelector('.overlay-settings') && document.activeElement?.classList.contains('settings-open')`))
+    } else {
+      await page.eval(`document.querySelector('.settings-nav-current')?.focus()`)
+      await page.key('Escape', 'Escape', 0, 27)
+      check('设置面板按 Esc 可关闭并返回原焦点', await waitFor(page, `!document.querySelector('.overlay-settings') && document.activeElement?.classList.contains('settings-open')`))
+    }
+    if (await page.eval(`!!document.querySelector('.overlay-settings')`)) {
+      await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
+      await waitFor(page, `!document.querySelector('.overlay-settings')`)
+    }
     await page.eval(`document.querySelector('.tree-tools button')?.click()`)
     await waitFor(page, `!!document.querySelector('.overlay-search[open]')`)
     await shot(page, `reference-${mode}-search`)
@@ -332,6 +350,13 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     })()`) === true)
     await shot(page, `reference-${mode}-settings-narrow`)
     await page.eval(`document.querySelector('.settings-main').scrollTop = document.querySelector('.settings-main').scrollHeight`)
+    check(`${mode}窄窗设置仍可滚动且无顶部栏`, await page.eval(`(() => {
+      const dialog = document.querySelector('.overlay-settings')
+      const main = dialog.querySelector('.settings-main')
+      return !dialog.querySelector('.settings-header, .settings-close') &&
+        dialog.querySelector('.settings-nav-heading')?.textContent === '设置' &&
+        main.scrollTop > 0 && getComputedStyle(main).overflowY === 'auto'
+    })()`) === true)
     await shot(page, `reference-${mode}-settings-reading-narrow`)
     await page.eval(`document.querySelector('.settings-main').scrollTop = 0`)
     for (const name of ['模型', '运行']) {
@@ -339,7 +364,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       await waitFor(page, `document.querySelector('.settings-page-title')?.textContent === '${name}'`)
       await shot(page, `reference-${mode}-settings-${name === '模型' ? 'model' : 'run'}-narrow`)
     }
-    await page.eval(`document.querySelector('.settings-close')?.click()`)
+    await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
     await page.call('Emulation.clearDeviceMetricsOverride', {})
   }
   await page.eval(`([...document.querySelectorAll('.tree-note')].find((item) => item.innerText.includes('长文排版')))?.click()`)
@@ -527,7 +552,7 @@ async function main() {
         document.querySelector('.settings-choice input[value="system"]')?.click()
         await new Promise((resolve) => setTimeout(resolve, 160))
         const system = await window.rgent.themeGet()
-        dialog?.querySelector('.settings-close')?.click()
+        dialog?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
         return JSON.stringify({ modes, night, day, system })
       })()`))
       const closed = await waitFor(page, `!document.querySelector('.overlay-settings')`)
@@ -544,7 +569,7 @@ async function main() {
         size.dispatchEvent(new Event('input', { bubbles: true }))
         const preview = getComputedStyle(document.querySelector('.settings-reading-sample')).fontSize
         const workspaceBefore = getComputedStyle(document.querySelector('.cm-editor')).fontSize
-        document.querySelector('.settings-close')?.click()
+        document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
         await new Promise((resolve) => setTimeout(resolve, 120))
         document.querySelector('.settings-open')?.click()
         await new Promise((resolve) => setTimeout(resolve, 120))
@@ -556,7 +581,7 @@ async function main() {
         await new Promise((resolve) => setTimeout(resolve, 180))
         const saved = await window.rgent.readingGet()
         const workspaceAfter = getComputedStyle(document.querySelector('.cm-editor')).fontSize
-        document.querySelector('.settings-close')?.click()
+        document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
         await new Promise((resolve) => setTimeout(resolve, 120))
         document.querySelector('.ledger-open')?.click()
         const ledgerAfter = getComputedStyle(document.querySelector('.ledger-body')).fontSize
@@ -578,13 +603,13 @@ async function main() {
       check('800×560：设置面板完整留在窗口内', fits === true)
       await shot(page, 'day-settings-narrow')
       await page.call('Emulation.clearDeviceMetricsOverride', {})
-      await page.eval(`document.querySelector('.settings-close').click()`)
+      await page.eval(`document.querySelector('.overlay-settings').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
       await waitFor(page, `!document.querySelector('.overlay-settings')`)
       await page.eval(`window.rgent.themeSet('night')`)
       await page.eval(`document.querySelector('.settings-open').click()`)
       await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
       await shot(page, 'night-settings')
-      await page.eval(`document.querySelector('.settings-close').click()`)
+      await page.eval(`document.querySelector('.overlay-settings').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
       await waitFor(page, `!document.querySelector('.overlay-settings')`)
       await page.eval(`window.rgent.themeSet('system')`)
     }
@@ -1005,7 +1030,7 @@ async function main() {
     check('模型设置页只显示密钥状态，密码输入不回填', await waitFor(page, `document.querySelector('.settings-key-state')?.textContent === '密钥已保存' && document.querySelector('input[type=password]')?.value === ''`))
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '运行')?.click() })()`)
     check('运行设置页提供三档有限上限', await waitFor(page, `document.querySelectorAll('.settings-limit-group').length === 3`))
-    await page.eval(`document.querySelector('.settings-close')?.click()`)
+    await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
     writeFileSync(path.join(vault, 'Host 环路.md'), '')
     check('新笔记在目录中出现', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host 环路'))`, 8000))
     await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('Host 环路'))?.click(); document.querySelector('.cm-content')?.focus() })()`)

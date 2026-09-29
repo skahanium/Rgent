@@ -283,32 +283,6 @@ input:focus-visible,
   .overlay-search { transform: translateY(-48px); }
 }
 
-.settings-header {
-  position: absolute;
-  inset: 0 0 auto;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 64px;
-  padding: 0 20px 0 28px;
-  color: var(--text-heading);
-  font-size: 1.02rem;
-  border-bottom: 1px solid var(--border-subtle);
-  pointer-events: none;
-}
-
-.settings-close { pointer-events: auto; }
-
-.settings-close {
-  min-width: 32px;
-  min-height: 32px;
-  color: var(--text-muted);
-  font-size: 1.25rem;
-  line-height: 1;
-}
-.settings-close:hover { background: var(--state-hover); color: var(--text-heading); }
-
 .settings-layout {
   display: grid;
   grid-template-columns: 222px minmax(0, 1fr);
@@ -317,10 +291,11 @@ input:focus-visible,
 
 .settings-nav {
   overflow: auto;
-  padding: 88px 14px 24px;
+  padding: 32px 14px 24px;
   background: var(--surface-nav);
   border-right: 1px solid var(--border-subtle);
 }
+.settings-nav-heading { display: block; margin: 0 10px 32px; color: var(--text-heading); font-size: 1.02rem; font-weight: 650; }
 .settings-nav-group { margin: 0 10px 10px; color: var(--text-muted); font-size: 0.68rem; font-weight: 650; letter-spacing: 0.08em; }
 .settings-nav-group:not(:first-child) { margin-top: 28px; }
 
@@ -343,7 +318,7 @@ input:focus-visible,
 .settings-nav-item:hover { background: var(--state-hover); color: var(--text-heading); }
 .settings-nav button:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
 
-.settings-main { min-width: 0; overflow: auto; padding: 88px 48px 48px; }
+.settings-main { min-width: 0; overflow: auto; padding: 48px 48px 48px; }
 .settings-page-title { margin: 0 0 6px; color: var(--text-heading); font-size: 1.42rem; font-weight: 600; }
 .settings-page-title:focus-visible { outline: none; }
 .settings-intro { margin: 0 0 30px; color: var(--text-muted); font-size: 0.84rem; line-height: 1.55; }
@@ -432,8 +407,8 @@ input:focus-visible,
 @media (max-width: 820px) {
   :root { --editor-top-padding: 52px; }
   .settings-layout { grid-template-columns: 154px minmax(0, 1fr); }
-  .settings-main { padding: 78px 18px 28px; }
-  .settings-nav { padding: 78px 8px 20px; }
+  .settings-main { padding: 42px 18px 28px; }
+  .settings-nav { padding: 28px 8px 20px; }
   .settings-choices { gap: 8px; }
   .settings-choice { padding: 7px; }
   .settings-choice-preview { height: 78px; }

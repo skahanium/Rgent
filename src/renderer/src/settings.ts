@@ -69,24 +69,22 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     overlay = current
     const root = current.root
     root.classList.add('overlay-settings')
-
-    const header = document.createElement('div')
-    header.className = 'settings-header'
-    const heading = document.createElement('strong')
-    heading.textContent = '设置'
-    const dismiss = document.createElement('button')
-    dismiss.type = 'button'
-    dismiss.className = 'settings-close'
-    dismiss.setAttribute('aria-label', '关闭设置')
-    dismiss.textContent = '×'
-    dismiss.addEventListener('click', close)
-    header.append(heading, dismiss)
+    root.addEventListener('click', (event) => {
+      if (event.target !== root || event.detail === 0) return
+      const bounds = root.getBoundingClientRect()
+      if (event.clientX < bounds.left || event.clientX >= bounds.right ||
+          event.clientY < bounds.top || event.clientY >= bounds.bottom) close()
+    })
 
     const layout = document.createElement('div')
     layout.className = 'settings-layout'
     const nav = document.createElement('nav')
     nav.className = 'settings-nav'
     nav.setAttribute('aria-label', '设置页面')
+    const navHeading = document.createElement('strong')
+    navHeading.className = 'settings-nav-heading'
+    navHeading.textContent = '设置'
+    nav.append(navHeading)
     const navGroup = (name: string): void => {
       const label = document.createElement('p')
       label.className = 'settings-nav-group'
@@ -136,7 +134,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     readingSection.className = 'settings-reading'
     main.append(title, intro, group, readingSection)
     layout.append(nav, main)
-    root.append(header, layout)
+    root.append(layout)
     const themeNodes = [title, intro, group, readingSection]
     let openedPage: '界面' | '模型' | '运行' = '界面'
     let themeRequest = 0

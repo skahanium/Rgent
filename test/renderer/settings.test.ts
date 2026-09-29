@@ -25,6 +25,26 @@ afterEach(() => {
 })
 
 describe('settings interface page', () => {
+  it('has no top bar and closes only from backdrop or Escape', () => {
+    const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async (mode) => ({ ok: true, mode }) })
+    panel.open()
+    let dialog = document.querySelector<HTMLDialogElement>('.overlay-settings')!
+    expect(dialog.querySelector('.settings-header, .settings-close')).toBeNull()
+    expect(dialog.querySelector('.settings-nav-heading')?.textContent).toBe('设置')
+    vi.spyOn(dialog, 'getBoundingClientRect').mockReturnValue({ left: 100, top: 100, right: 700, bottom: 600 } as DOMRect)
+    dialog.querySelector('.settings-main')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(dialog.open).toBe(true)
+    dialog.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 150, clientY: 150 }))
+    expect(dialog.open).toBe(true)
+    dialog.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 20, clientY: 20 }))
+    expect(dialog.open).toBe(false)
+
+    panel.open()
+    dialog = document.querySelector<HTMLDialogElement>('.overlay-settings')!
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    expect(dialog.open).toBe(false)
+  })
+
   it('keeps the theme selection available when its initial read finishes after changing pages', async () => {
     let finishMode!: (mode: 'night') => void
     const mode = new Promise<'night'>((resolve) => { finishMode = resolve })
