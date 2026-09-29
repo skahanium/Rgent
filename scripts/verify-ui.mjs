@@ -976,6 +976,11 @@ async function main() {
       let body = ''
       request.on('data', (chunk) => { body += String(chunk) })
       request.on('end', () => {
+        if (body.includes('服务报错')) {
+          response.writeHead(503, { 'content-type': 'application/json' })
+          response.end(JSON.stringify({ error: { message: 'controlled service failure' } }))
+          return
+        }
         response.writeHead(200, { 'content-type': 'text/event-stream' })
         response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"受控回答第一句。"},"finish_reason":null}]}\n\n')
         const timer = setTimeout(() => {
@@ -983,7 +988,7 @@ async function main() {
           response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"第二句。"},"finish_reason":null}]}\n\n')
           response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n')
           response.end('data: [DONE]\n\n')
-        }, body.includes('多任务') ? 10000 : body.includes('快速完成') ? 0 : 1200)
+        }, body.includes('多任务') ? 10000 : body.includes('写回') ? 2500 : body.includes('快速完成') ? 0 : 1200)
         response.on('close', () => clearTimeout(timer))
       })
     })
@@ -1032,6 +1037,83 @@ async function main() {
       return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 && !document.querySelector('.status-task-stop')
     })()`, 8000)
     check('快速流结束后底栏不残留运行任务', quickFinished, quickFinished ? '' : await page.eval(`(async () => JSON.stringify({ note: (await window.rgent.noteRead('Host 快速.md')).content, tasks: await window.rgent.agentTasks(), status: document.querySelector('.status-left')?.innerText }))()`))
+    writeFileSync(path.join(vault, 'Host 服务报错.md'), '')
+    await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host 服务报错'))`)
+    await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('Host 服务报错'))?.click() })()`)
+    await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('Host 服务报错')`)
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    await page.call('Input.insertText', { text: '/服务报错' })
+    await page.key('Enter', 'Enter', 0, 13)
+    check('兼容服务错误流写入失败账本且不留下待处理回答', await waitFor(page, `(async () => {
+      const source = (await window.rgent.noteRead('Host 服务报错.md')).content
+      return source.includes('· failed') && source.includes('<!-- rgent:ledger-task:v1 id=') &&
+        !document.querySelector('.status-task-stop') && !document.querySelector('.status-pending-open')
+    })()`, 8000))
+
+    process.stdout.write('\nHost 写回恢复\n')
+    async function startRecoveryRun(name, prompt) {
+      const file = path.join(vault, `${name}.md`)
+      writeFileSync(file, '')
+      if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('${name}'))`, 8000)) throw new Error(`${name} 未进入目录`)
+      await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('${name}'))?.click() })()`)
+      if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('${name}')`)) throw new Error(`${name} 未打开`)
+      await page.eval(`document.querySelector('.cm-content')?.focus()`)
+      await page.call('Input.insertText', { text: `/${prompt}` })
+      await page.key('Enter', 'Enter', 0, 13)
+      if (!await waitFor(page, `document.querySelector('.status-task-stop') && (async () => (await window.rgent.noteRead('${name}.md')).content.includes('受控回答第一句。'))()`, 8000)) throw new Error(`${name} 首段未写回`)
+      return file
+    }
+    async function openRecovery() {
+      if (!await waitFor(page, `!!document.querySelector('.status-pending-open')`, 10000)) throw new Error('未显示待处理入口')
+      await page.eval(`document.querySelector('.status-pending-open')?.click()`)
+      if (!await waitFor(page, `!!document.querySelector('.pending-list[open]')`)) throw new Error('未显示待处理列表')
+      await page.eval(`document.querySelector('.pending-list .pending-row button')?.click()`)
+      if (!await waitFor(page, `!!document.querySelector('.pending-recovery[open]')`)) throw new Error('未显示回答预览')
+    }
+    const retryFile = await startRecoveryRun('Host 写回重试', '写回重试')
+    writeFileSync(retryFile, readFileSync(retryFile, 'utf8').replace('受控回答第一句。', '外部改过的 AI 块。'))
+    await openRecovery()
+    check('写回失败后工作窗口可查看并复制完整回答', await page.eval(`document.querySelector('.pending-recovery textarea')?.value === '受控回答第一句。第二句。'`))
+    writeFileSync(retryFile, readFileSync(retryFile, 'utf8').replace('外部改过的 AI 块。', '受控回答第一句。').replace('<!-- rgent:prompt:v1', '人补充的正文。\n\n<!-- rgent:prompt:v1'))
+    await page.eval(`document.querySelector('.pending-recovery [data-action="retry"]')?.click()`)
+    check('恢复原 AI 块后可重试写回，保留人的正文且账本只记一次', await waitFor(page, `(async () => {
+      const source = (await window.rgent.noteRead('Host 写回重试.md')).content
+      return source.includes('受控回答第一句。第二句。') && source.includes('人补充的正文。') &&
+        (source.match(/<!-- rgent:ledger-task:v1 id=/g) || []).length === 1 && !document.querySelector('.status-pending-open')
+    })()`, 8000))
+
+    const modelFile = await startRecoveryRun('Host 写回冲突', '写回冲突')
+    writeFileSync(modelFile, readFileSync(modelFile, 'utf8').replace('受控回答第一句。', '磁盘上的另一份回答。'))
+    await openRecovery()
+    await page.eval(`document.querySelector('.pending-recovery [data-action="compare"]')?.click()`)
+    check('外部改动 AI 块后展示两份只读正文', await waitFor(page, `document.querySelector('.conflict[open]')?.textContent.includes('磁盘上的另一份回答。') && document.querySelector('.conflict[open]')?.textContent.includes('受控回答第一句。第二句。')`))
+    writeFileSync(modelFile, readFileSync(modelFile, 'utf8').replace('<!-- rgent:prompt:v1', '预览后新增的人工正文。\n\n<!-- rgent:prompt:v1'))
+    await page.eval(`document.querySelector('.conflict [data-action="window"]')?.click()`)
+    check('预览后磁盘再变化会重新预览', await waitFor(page, `!!document.querySelector('.pending-recovery[open]')`, 8000))
+    await page.eval(`document.querySelector('.pending-recovery [data-action="compare"]')?.click()`)
+    if (!await waitFor(page, `!!document.querySelector('.conflict[open]')`)) throw new Error('第二次双稿预览未出现')
+    await page.eval(`document.querySelector('.conflict [data-action="window"]')?.click()`)
+    const modelAdopted = await waitFor(page, `(async () => {
+      const source = (await window.rgent.noteRead('Host 写回冲突.md')).content
+      return source.includes('受控回答第一句。第二句。') && !source.includes('磁盘上的另一份回答。') &&
+        source.includes('预览后新增的人工正文。') && (source.match(/<!-- rgent:ledger-task:v1 id=/g) || []).length === 1 &&
+        !document.querySelector('.status-pending-open')
+    })()`, 12000)
+    check('采用模型回答仅替换任务 AI 块并保留预览后的人工正文', modelAdopted, modelAdopted ? '' : await page.eval(`(async () => JSON.stringify({ source: (await window.rgent.noteRead('Host 写回冲突.md')).content, pending: await window.rgent.agentPending(), dialogs: [...document.querySelectorAll('dialog[open]')].map((d) => d.className), notice: document.querySelector('.status-host-notice')?.textContent }))()`))
+    if (!modelAdopted) throw new Error('模型回答采用未完成')
+
+    const missingFile = await startRecoveryRun('Host 写回丢标记', '写回丢标记')
+    writeFileSync(missingFile, readFileSync(missingFile, 'utf8').replace(/<!-- rgent:ai:v1 task-id=[^>]*-->/, '<!-- 外部删除了任务标记 -->'))
+    await openRecovery()
+    check('任务标记丢失时禁用覆盖，但回答仍可查看', await page.eval(`!!document.querySelector('.pending-recovery textarea')?.value.includes('第二句。') && !document.querySelector('.pending-recovery [data-action="compare"]')`))
+    await page.eval(`document.querySelector('.pending-recovery [data-action="disk"]')?.click()`)
+    check('保留磁盘稿不会覆盖人工修改，账本记录未采用回答一次', await waitFor(page, `(async () => {
+      const source = (await window.rgent.noteRead('Host 写回丢标记.md')).content
+      return source.includes('外部删除了任务标记') && source.includes('受控回答第一句。第二句。') &&
+        source.includes('用户选择保留磁盘稿') && (source.match(/<!-- rgent:ledger-task:v1 id=/g) || []).length === 1 &&
+        !document.querySelector('.status-pending-open')
+    })()`, 8000))
+
     writeFileSync(path.join(vault, 'Host A.md'), '')
     writeFileSync(path.join(vault, 'Host B.md'), '')
     check('两篇待运行笔记进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host A')) && [...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host B'))`, 8000))

@@ -1,4 +1,4 @@
-import { IPC, type AgentEvent, type AgentTaskView, type NoteSnapshot, type PermissionState, type PermissionTier, type SearchHit, type TreeEntry, type VaultState } from '@shared'
+import { IPC, type AgentEvent, type AgentPendingView, type AgentTaskView, type NoteSnapshot, type PermissionState, type PermissionTier, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
@@ -16,6 +16,7 @@ import { installShortcuts, shortcutLabel } from './shortcuts.ts'
 import { renderStatusbar, statusModel, wordsOf } from './statusbar.ts'
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
+import { promptPending } from './pending-recovery.ts'
 import { slashAtCaret } from './slash.ts'
 import { renderTree, titleOf, collectNotePaths, collectRelPaths } from './tree.ts'
 import type { Theme } from './theme.ts'
@@ -32,7 +33,8 @@ const HOST_ERROR_MESSAGES: Record<string, string> = {
   PREVIOUS_TASK_UNSAVED: '上一场生成内容尚未保存，请先处理保存失败。',
   MODEL_STEP_LIMIT: '已达到本场模型步骤上限。',
   MODEL_REQUEST_FAILED: '模型请求失败，请检查接口、密钥和网络。',
-  CONFLICT: '笔记已变化，请先处理冲突。'
+  CONFLICT: '笔记已变化，请先处理冲突。',
+  STALE_PREVIEW: '磁盘稿又发生变化，请重新核对两份内容。'
 }
 const hostErrorText = (error: string): string => HOST_ERROR_MESSAGES[error] ?? error
 
@@ -141,6 +143,7 @@ export async function start(root: HTMLElement): Promise<void> {
   let countedSource: string | null = null
   let countedWords = 0
   const activeTasks = new Map<string, AgentTaskView>()
+  const pendingTasks = new Map<string, AgentPendingView>()
   const endedTaskIds = new Set<string>()
   const hostRevisions = new Map<string, string>()
   let taskOverlay: ReturnType<typeof openOverlay> | null = null
@@ -245,6 +248,16 @@ export async function start(root: HTMLElement): Promise<void> {
     syncActiveLocks()
     updateStatus()
   }).catch(() => {})
+  void refreshPendingTasks()
+
+  async function refreshPendingTasks(): Promise<void> {
+    const epoch = vaultEpoch
+    const tasks = await window.rgent.agentPending().catch(() => null)
+    if (!tasks || epoch !== vaultEpoch) return
+    pendingTasks.clear()
+    for (const task of tasks) pendingTasks.set(task.id, task)
+    updateStatus()
+  }
 
   async function submitSlash(submission: { range: { start: number; end: number }; prompt: string }): Promise<void> {
     const tab = current()
@@ -281,6 +294,10 @@ export async function start(root: HTMLElement): Promise<void> {
 
   function onHostEvent(event: AgentEvent): void {
     if (event.persisted && event.revision) hostRevisions.set(event.relPath, event.revision)
+    if (event.pending) pendingTasks.set(event.id, {
+      id: event.id, relPath: event.relPath, answer: event.answer ?? '', reason: event.reason ?? '写盘失败'
+    })
+    else if (event.status !== 'running') pendingTasks.delete(event.id)
     if (event.status === 'running') {
       if (!endedTaskIds.has(event.id) && !activeTasks.has(event.id)) activeTasks.set(event.id, { id: event.id, relPath: event.relPath, startedAt: Date.now() })
     } else {
@@ -292,6 +309,7 @@ export async function start(root: HTMLElement): Promise<void> {
     syncActiveLocks()
     updateStatus()
     renderTaskOverlay()
+    if (event.pending) void refreshPendingTasks()
     if (!event.persisted) return
     const tab = tabs.find((item) => item.relPath === event.relPath)
     if (tab) void runExclusiveConflict(() => syncHostTab(tab, vaultEpoch))
@@ -399,6 +417,7 @@ export async function start(root: HTMLElement): Promise<void> {
     queueMicrotask(() => updateStatus())
     tabs.length = 0
     activeTasks.clear()
+    pendingTasks.clear()
     endedTaskIds.clear()
     hostRevisions.clear()
     syncActiveLocks()
@@ -762,6 +781,68 @@ export async function start(root: HTMLElement): Promise<void> {
         left.append(more)
       }
     }
+    if (pendingTasks.size && left) {
+      const pendingButton = document.createElement('button')
+      pendingButton.type = 'button'
+      pendingButton.className = 'status-pending-open'
+      pendingButton.textContent = `${pendingTasks.size} 份回答待处理`
+      pendingButton.addEventListener('click', openPendingList)
+      left.append(pendingButton)
+    }
+  }
+
+  function openPendingList(): void {
+    if (!pendingTasks.size) return
+    const overlay = openOverlay({ label: '未保存的生成回答', initialFocus: () => overlay.root.querySelector<HTMLElement>('button') })
+    overlay.root.classList.add('pending-list')
+    const title = document.createElement('h2')
+    title.textContent = '未保存的生成回答'
+    overlay.root.append(title)
+    for (const task of pendingTasks.values()) {
+      const row = document.createElement('div')
+      row.className = 'pending-row'
+      const label = document.createElement('span')
+      label.textContent = `${task.relPath} · ${hostErrorText(task.reason)}`
+      const open = document.createElement('button')
+      open.type = 'button'
+      open.textContent = '查看并处理'
+      open.addEventListener('click', () => {
+        overlay.close()
+        void runExclusiveConflict(() => handlePending(task.id)).catch((error) => {
+          hostNotice = `回答仍未处理：${error instanceof Error ? error.message : '未知错误'}`
+          updateStatus()
+        })
+      })
+      row.append(label, open)
+      overlay.root.append(row)
+    }
+  }
+
+  async function handlePending(id: string): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const result = await window.rgent.agentPendingPreview(id)
+      if (!result.ok) {
+        hostNotice = `无法查看未保存回答：${hostErrorText(result.error)}`
+        updateStatus()
+        return
+      }
+      const choice = await promptPending(result.preview)
+      if (choice === 'later') return
+      const resolved = await window.rgent.agentPendingResolve({
+        id, decision: choice,
+        ...(choice === 'retry' ? {} : { expectedRevision: result.preview.revision })
+      })
+      if (!resolved.ok && resolved.error === 'STALE_PREVIEW') continue
+      if (!resolved.ok) hostNotice = `回答仍未保存：${hostErrorText(resolved.error)}`
+      else hostNotice = choice === 'disk'
+        ? resolved.revision ? '已保留磁盘稿，并记录这次未采用的回答。' : '已保留磁盘稿；当前权限不允许写入账本。'
+        : '生成回答已保存。'
+      await refreshPendingTasks()
+      updateStatus()
+      return
+    }
+    hostNotice = '磁盘稿反复变化，未修改文件；请稍后重新处理。'
+    updateStatus()
   }
 
   function openTaskOverlay(): void {

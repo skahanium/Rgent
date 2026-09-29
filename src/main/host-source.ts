@@ -13,6 +13,8 @@ export interface AnswerWrite {
   answer: string
   /** Last answer successfully written by this task; rejects external edits to owned blocks. */
   expectedPreviousAnswer?: string
+  /** Recovery may accept edited content, but every previously written task block must still be identifiable. */
+  requiredExistingAnswer?: string
 }
 
 export interface LedgerChapterWrite {
@@ -71,11 +73,12 @@ export function markPrompt(source: string, write: PromptWrite): string {
   return source.slice(0, lineStart(source, start)) + marker + newline + cleaned + source.slice(end)
 }
 
-function locatedPrompt(source: string, taskId: string): { blockEnd: number; firstAnswer: number | null; answerEnd: number | null } {
+function locatedPrompt(source: string, taskId: string): { blockEnd: number; firstAnswer: number | null; answerEnd: number | null; answerBlocks: number } {
   const compiled = compile(source)
   if (compiled.stale) throw new Error('无法解析笔记')
-  const marker = compiled.index.markers.find((item) => item.identity === 'command' && markerTaskId(source, item.range) === taskId)
-  if (!marker) throw new Error('找不到这次任务的口令')
+  const matches = compiled.index.markers.filter((item) => item.identity === 'command' && markerTaskId(source, item.range) === taskId)
+  if (matches.length !== 1) throw new Error('找不到唯一的任务口令')
+  const marker = matches[0]!
   const blocks = compiled.index.blocks
   const promptAt = blocks.findIndex((block) => block.range.start > marker.range.end && block.identity === 'command')
   if (promptAt < 0) throw new Error('任务口令标记未关联正文块')
@@ -84,6 +87,7 @@ function locatedPrompt(source: string, taskId: string): { blockEnd: number; firs
   if (nextMarker) throw new Error('任务口令标记被覆盖')
   let firstAnswer: number | null = null
   let answerEnd: number | null = null
+  let answerBlocks = 0
   for (let at = promptAt + 1; at < blocks.length; at += 1) {
     const block = blocks[at]!
     const preceding = blocks[at - 1]!
@@ -93,8 +97,9 @@ function locatedPrompt(source: string, taskId: string): { blockEnd: number; firs
     if (between.length !== 1 || own?.identity !== 'ai' || markerTaskId(source, own.range) !== taskId) break
     if (firstAnswer == null) firstAnswer = lineStart(source, own.range.start)
     answerEnd = block.range.end
+    answerBlocks += 1
   }
-  return { blockEnd: prompt.range.end, firstAnswer, answerEnd }
+  return { blockEnd: prompt.range.end, firstAnswer, answerEnd, answerBlocks }
 }
 
 /** Replace only AI blocks tagged with this task ID in freshly read source. */
@@ -127,6 +132,11 @@ export function upsertAiAnswer(source: string, write: AnswerWrite): string {
   const part = partitionSource(source)
   const where = locatedPrompt(source, taskId)
   const newline = lineEnding(source)
+  if (write.requiredExistingAnswer !== undefined) {
+    const required = renderedAnswer(taskId, write.requiredExistingAnswer, newline)
+    const requiredBlocks = (required.match(/<!-- rgent:ai:v1 task-id=/g) ?? []).length
+    if (where.answerBlocks !== requiredBlocks) throw new Error('TASK_BLOCK_MISSING')
+  }
   if (write.expectedPreviousAnswer !== undefined) {
     const expected = renderedAnswer(taskId, write.expectedPreviousAnswer, newline)
     const actual = where.firstAnswer === null ? '' : source.slice(where.firstAnswer, where.answerEnd ?? where.firstAnswer)

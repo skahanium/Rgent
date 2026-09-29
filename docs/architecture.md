@@ -27,7 +27,7 @@ flowchart LR
 
 - **渲染进程：** 画布是 CodeMirror 6。文档是 Markdown 字符串。无 Node，不能直接碰盘。画布只消费编译结果和源码映射，自己不解析结构。
 - **主进程：** 打开库、读写文件、权限名单、索引、窗口。v0 的 `AgentHost` 先住在这里；是否迁移属工程选型，见 [施工对象](topics.md#多进程--并发)。
-- **AgentHost：** 一场 `/` 的运行环境。愿景 / 选型 / 路线见 [施工对象](topics.md#agent-核心框架)。Host 最小环是当前施工阶段；实际接线与验收状态看 [施工图](build.md#当前阶段)。
+- **AgentHost：** 一场 `/` 的运行环境。无工具最小环已在主进程接线，写回失败恢复是当前收口；实际验收状态看 [施工图](build.md#当前阶段)。愿景 / 选型 / 路线见 [施工对象](topics.md#agent-核心框架)。
 - **正文编译：** 共享一条管线（零 DOM、零 CM6）。注册插件 → 解析 → 索引 → 把源码映射交给画布。日后检索、反链、喂模型走同一份结果。细则见 [已拍板决定](decisions.md)。
 
 ## 正文管线
@@ -97,18 +97,18 @@ flowchart LR
 | 媒体不逃出库 | IO | `resolveInVault` 拒绝 `..` 与绝对路径；`rgent-vault:` 经 `SecureVaultFs.readBytes` 从固定库根句柄逐级相对读取，不向 `net.fetch` 传校验后的路径（`src/main/paths.ts`、`vault-protocol.ts`）。 |
 | 隐藏路径人写盘写不了 | IO | `writeNote` / `readNote` / `readVaultMedia` 拒绝含点号段的路径（`src/main/notes-fs.ts`、`src/main/paths.ts`）。文件树不列出点号名。权限名单落在库根 `.rgent-permissions`，与技能文件一样必须落在这类路径上。 |
 | 笔记路径与冲突写盘 | IO | 主进程 Node-API 模块（`native/**`）固定库根目录句柄，树、读写、索引、媒体、目录扫描统一走 `src/main/secure-fs.ts`，模块缺失不降级。macOS 逐级从库根相对打开并用 `O_NOFOLLOW_ANY` / `O_RESOLVE_BENEATH`；Windows 用 `NtCreateFile` 逐级相对打开、`OBJ_DONT_REPARSE` 拒绝重解析点。提交前核对修订值，临时文件建在目标父目录内再原子改名，冲突交给人选磁盘或窗口稿。**提交那一步必须锚回库根**：macOS 靠 `renameatx_np` + `RENAME_RESOLVE_BENEATH`；Windows 在提交前从库根重走一遍父目录（`OBJ_DONT_REPARSE`）并比对其文件身份，只把目标名解析在**核验过的那一个父句柄**上——这样父目录被外部整体搬出库外时提交会失败，而不是落到库外。已打开的子目录被搬出库外、不得改写库外原文的回归见 `test/main/path-race.test.ts`（两平台同一条）。两平台保证口径一致：判不出「仍在库内」就失败关闭，且到核对点为止的外部改动能被发现；核对点之后的替换属已知残余（不报冲突、不弹窗），见 [已拍板决定](decisions.md) §库、文件、窗口。Windows 句柄一律用最宽松共享模式——边界靠句柄相对解析成立，不靠拒绝别人的改名。目录变化以安全元数据扫描发现，不按旧路径建立监听。 |
-| 权限名单的失效状态 | 主进程 | 名单缺失是空名单；已有名单损坏、无效、无法读取或条目身份不稳是 `invalid`。人读写搜继续，树上提示修复，名单写入只接受经句柄核验的文件夹与三档值并原子替换。权限按文件系统实际路径组成归一，别名冲突与身份变化使 AI 失败关闭。`modelTierFor` 目前仅被测试调用；Host 未接线，尚无实际模型出口。Windows 侧别名与写盘已过 CI。 |
-| 人写盘 ≠ 模型写盘 | IPC | `noteWrite` 只给人的自动写盘与手动保存。`AgentHost` 不得复用这条通道；Host 阶段建立独立模型入口，并与同篇人的写入串行协调。 |
+| 权限名单的失效状态 | 主进程 | 名单缺失是空名单；已有名单损坏、无效、无法读取或条目身份不稳是 `invalid`。人读写搜继续，树上提示修复，名单写入只接受经句柄核验的文件夹与三档值并原子替换。权限按文件系统实际路径组成归一，别名冲突与身份变化使 AI 失败关闭。`AgentHost` 已在启动、每次模型请求及模型写入前调用 `modelTierFor`；恢复待处理回答也必须重新核验。 |
+| 人写盘 ≠ 模型写盘 | IPC | `noteWrite` 只给人的自动写盘与手动保存。`AgentHost` 已经通过主进程独立入口写回，同篇仍走修订值保护的串行文件写入。待处理回答的 IPC 只按任务 ID 查看与决策，不暴露任意文件写入口。 |
 | 索引不见账本 | 管线 / 索引 | `partitionSource` 切开锚点（`src/markdown/partition.ts`）。`compile` 和 `VaultIndex` 只吃 `body`。身份标记是机器语法，人搜的语料里把它等长填空格（偏移不变）——搜 `rgent` 不该搜到它，片段里也不该出现。 |
 | 画布不见账本 | 画布 | Tab 拆 `content`（正文）与 `ledger`（`src/renderer/src/tabs.ts`）。编辑器只 `setText(body)`。写盘 `composeSource`。账本回顾是临时只读面板，入口在笔记标题旁，关掉就走，不占右侧反链。 |
 | 人搜含禁区 | 索引 | `VaultIndex` 是全量语料，建索引时不按权限过滤。当前人搜是惰性全量 + 子串。模型检索尚未开工，未来在查询期过滤。 |
 | 退出不丢稿 | 壳 | 关窗先 `flushRequest`。保存失败时主进程原生对话框让人重试、继续编辑或明确放弃；**渲染进程活着但不应答**（超时，或计时器触发之后才崩）时也进同一个决策态，文案按「写盘失败 / 没有回应」区分——不能让流程停在 flushing，那会让窗口关不掉、`Cmd+Q` 也被挡住。关窗和 `Cmd+Q` 走同一状态流程，重复请求不重复弹框。`vault.dispose()` 在 `will-quit`，不在 `before-quit`（退出 flush 还要走 `noteWrite`）。流程测试见 `test/shared/flush.test.ts`。 |
-| 密钥不进库 | 主进程 | Host 最小环接 Electron `safeStorage`，密文只存应用数据目录；尚未接线。 |
+| 密钥不进库 | 主进程 | Host 最小环已接 Electron `safeStorage`，密文只存应用数据目录；配置读取只给非秘密字段及密钥保存状态。 |
 | 颜色只有一个来源 | 渲染进程 | 组件一律引用 [前端协议](frontend.md) §语义 token 的角色（`--surface-*`、`--text-*`、`--accent-*`、`--border-*`、`--state-*`、`--ai-*`、`--status-*`）；不在组件里写死色值，也不在 CM6 主题里写死（`src/renderer/src/view/editor.ts` 的主题走 token）。日夜两套值只写在 `src/renderer/src/styles.css` 的 `:root` 与 `[data-theme='night']` 两段里，token 取值用纯 hex，好让对比度测试直接解析。**已知例外**：主进程的窗口外观（`src/main/index.ts` 的启动底色与 Windows 标题栏覆盖层）读不到 CSS token，是同一批值的第二份拷贝，必须与 `--surface-nav` 同步（日 `#f5f6f8` / 夜 `#1d2933`）；改 token 时两处一起改。 |
 | 主题不碰文档 | 渲染进程 | 切主题或跟随系统只改 `document.documentElement.dataset.theme` 与 CM6 的 `darkTheme` facet，**不产生事务、不触发保存、不进撤销栈**（`src/renderer/src/theme.ts`）。 |
 | AI 前缀是显示层 | 画布 | 提问仅在块首行显示一枚 `>`，回答缩进由行装饰 / 类名产生（`src/renderer/src/view/editor.ts`），**不改写正文**；落盘仍走 `composeSource`，`composeSource` 往返必须逐字节不变。参考图里的前缀不是文件内容。 |
 | 浮层只有一个栈 | 渲染进程 | 同时最多一个模态浮层；打开时焦点进入浮层、关闭回到触发元素；模态期间焦点不落到底层，破坏性选项不是默认焦点。实现在 `src/renderer/src/overlay.ts`，搜索（`search-overlay.ts`）、冲突决策（`conflict.ts`）、选库共用它。 |
-| 冲突预览不是第二条写盘通道 | 渲染进程 | 冲突决策的并排双预览只读渲染（`src/renderer/src/conflict.ts` + `diff.ts`），仍然只有 `noteWrite` 一条写盘通道；通知只作复核信号，串行处理时重新读盘，选择后再次核对 revision，变化则重新展示（`note-reconcile.ts`）。「听窗口 / 听磁盘 / 继续编辑」复用既有分支，Esc 关闭按「继续编辑」结算。普通搜索不能顶掉冲突决策。 |
+| 冲突预览不是第二条写盘通道 | 渲染进程 | 冲突决策的并排双预览只读渲染（`src/renderer/src/conflict.ts` + `diff.ts`）；人的稿件选择走 `noteWrite`，Host 待处理回答走按任务 ID 限定的主进程恢复入口。两者都在选择后复核 revision，变化则重新展示。人的「听窗口 / 听磁盘 / 继续编辑」复用既有分支，Esc 关闭按「继续编辑」结算。普通搜索不能顶掉冲突决策。 |
 | 底栏数据只在渲染层算 | 渲染进程 | 行列与字数由编辑器的 doc、selection 推出（`src/renderer/src/statusbar.ts`），不经 IPC、不落盘；字数只计正文，不含账本与身份标记行。人搜仍用主进程原有索引实现，界面阶段不改索引。 |
 | 索引只按渲染层数据算 | 渲染进程 | 标题索引吃 `DocIndex.headings` 的 h1–h3（`src/renderer/src/outline.ts`），当前项由「光标在可视范围内则以光标为准，否则以视口起点为准」推出，不另存状态、不发 IPC。 |
 

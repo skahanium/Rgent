@@ -25,6 +25,10 @@ import {
   type AgentStartRequest,
   type AgentStartResult,
   type AgentTaskView,
+  type AgentPendingView,
+  type AgentPendingPreviewResult,
+  type AgentPendingResolveRequest,
+  type AgentPendingResult,
   type AgentEvent
 } from '../shared/ipc.ts'
 
@@ -56,6 +60,9 @@ const api = {
   agentStart: (request: AgentStartRequest): Promise<AgentStartResult> => ipcRenderer.invoke(IPC.agentStart, request),
   agentCancel: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC.agentCancel, id),
   agentTasks: (): Promise<AgentTaskView[]> => ipcRenderer.invoke(IPC.agentTasks),
+  agentPending: (): Promise<AgentPendingView[]> => ipcRenderer.invoke(IPC.agentPending),
+  agentPendingPreview: (id: string): Promise<AgentPendingPreviewResult> => ipcRenderer.invoke(IPC.agentPendingPreview, id),
+  agentPendingResolve: (request: AgentPendingResolveRequest): Promise<AgentPendingResult> => ipcRenderer.invoke(IPC.agentPendingResolve, request),
   onAgentEvent: (handler: (payload: AgentEvent) => void): (() => void) =>
     subscribe(IPC.agentEvent, (payload) => handler(payload as AgentEvent)),
   onTreeChanged: (handler: () => void): (() => void) =>

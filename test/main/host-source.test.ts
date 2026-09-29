@@ -117,4 +117,21 @@ describe('Host source projection', () => {
     const updated = upsertAiAnswer(partial, { taskId, answer: '完成。' })
     expect(updated).toContain('人写的后文。')
   })
+
+  it('rejects a duplicated task marker instead of guessing which prompt owns the answer', () => {
+    const source = markPrompt('/问\n', {
+      taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问'
+    })
+    const marker = '<!-- rgent:prompt:v1 task-id="task-123" -->'
+    expect(() => upsertAiAnswer(`${marker}\n${source}`, { taskId, answer: '回答' })).toThrow('找不到唯一的任务口令')
+  })
+
+  it('requires every previously written AI block for a recovery replacement', () => {
+    const marked = markPrompt('/问\n', { taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const written = upsertAiAnswer(marked, { taskId, answer: '第一段\n\n第二段' })
+    const missing = written.replace('<!-- rgent:ai:v1 task-id="task-123" -->\n第二段', '第二段')
+    expect(() => upsertAiAnswer(missing, {
+      taskId, answer: '新回答', requiredExistingAnswer: '第一段\n\n第二段'
+    })).toThrow('TASK_BLOCK_MISSING')
+  })
 })

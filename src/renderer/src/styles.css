@@ -888,11 +888,21 @@ input:focus-visible,
 
 .status-vault { max-width: 22ch; }
 .status-task, .status-host-notice { color: var(--accent-primary); max-width: 36ch; }
-.status-task-stop, .status-task-more { min-height: 22px; padding: 1px 7px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-body); cursor: pointer; font: inherit; }
-.status-task-stop:hover, .status-task-more:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
-.status-task-stop:focus-visible, .status-task-more:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
+.status-task-stop, .status-task-more, .status-pending-open { min-height: 22px; padding: 1px 7px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-body); cursor: pointer; font: inherit; }
+.status-task-stop:hover, .status-task-more:hover, .status-pending-open:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+.status-task-stop:focus-visible, .status-task-more:focus-visible, .status-pending-open:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
 .overlay-tasks { width: min(420px, calc(100vw - 40px)); }
 .overlay-tasks h2 { margin: 0 0 16px; font-size: 1rem; }
+.pending-list, .pending-recovery { width: min(680px, calc(100vw - 40px)); max-height: calc(100vh - 40px); overflow: auto; }
+.pending-list h2, .pending-recovery h2 { margin: 0 0 12px; font-size: 1.05rem; }
+.pending-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border-subtle); }
+.pending-row span { min-width: 0; overflow-wrap: anywhere; }
+.pending-row button, .pending-actions button { padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-body); cursor: pointer; }
+.pending-row button:focus-visible, .pending-actions button:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
+.pending-recovery p { color: var(--text-muted); line-height: 1.5; }
+.pending-recovery label { display: grid; gap: 6px; color: var(--text-heading); }
+.pending-recovery textarea { box-sizing: border-box; width: 100%; resize: vertical; padding: 9px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-canvas); color: var(--text-body); font: 0.9rem/1.5 var(--font-body); }
+.pending-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .task-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border-subtle); font-size: 0.82rem; }
 .task-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-row button { padding: 4px 9px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-heading); cursor: pointer; }

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { asString, parseFlushDone, parseNoteName, parseNoteWriteRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
 import { IPC } from '../shared/ipc.ts'
-import type { AgentStartRequest, AgentStartResult, LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
+import type { AgentPendingPreviewResult, AgentPendingResolveRequest, AgentPendingResult, AgentStartRequest, AgentStartResult, LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { isReadingPreference } from '../shared/reading-preference.ts'
@@ -282,6 +282,25 @@ function registerIpc(): void {
   })
   ipcMain.handle(IPC.agentTasks, (event) => trusted(event)
     ? agentHost?.active().map(({ id, relPath, startedAt }) => ({ id, relPath, startedAt })) ?? [] : [])
+  ipcMain.handle(IPC.agentPending, (event) => trusted(event) && vault?.root ? agentHost?.pendingViews(vault.root) ?? [] : [])
+  ipcMain.handle(IPC.agentPendingPreview, async (event, value: unknown): Promise<AgentPendingPreviewResult> => {
+    if (!trusted(event) || !agentHost || typeof value !== 'string' || value.length > 128) return { ok: false, error: 'BAD_REQUEST' }
+    try { return { ok: true, preview: await agentHost.pendingPreview(value) } }
+    catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'PREVIEW_FAILED' } }
+  })
+  ipcMain.handle(IPC.agentPendingResolve, async (event, value: unknown): Promise<AgentPendingResult> => {
+    if (!trusted(event) || !agentHost || !value || typeof value !== 'object') return { ok: false, error: 'BAD_REQUEST' }
+    const request = value as Partial<AgentPendingResolveRequest>
+    if (typeof request.id !== 'string' || request.id.length > 128 ||
+        !['retry', 'model', 'disk'].includes(String(request.decision)) ||
+        (request.expectedRevision !== undefined && typeof request.expectedRevision !== 'string')) {
+      return { ok: false, error: 'BAD_REQUEST' }
+    }
+    try {
+      const revision = await agentHost.resolvePending(request as AgentPendingResolveRequest)
+      return { ok: true, ...(revision ? { revision } : {}) }
+    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'WRITE_FAILED' } }
+  })
   ipcMain.handle(IPC.agentCancel, async (event, value: unknown) => {
     if (!trusted(event) || typeof value !== 'string' || value.length > 128) return false
     return Boolean(await agentHost?.cancel(value, 'user'))

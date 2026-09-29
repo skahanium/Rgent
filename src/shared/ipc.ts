@@ -30,6 +30,9 @@ export const IPC = {
   agentStart: 'agent:start',
   agentCancel: 'agent:cancel',
   agentTasks: 'agent:tasks',
+  agentPending: 'agent:pending',
+  agentPendingPreview: 'agent:pending-preview',
+  agentPendingResolve: 'agent:pending-resolve',
   agentEvent: 'agent:event'
 } as const
 
@@ -53,6 +56,20 @@ export type AgentStartRequest = {
 }
 export type AgentStartResult = { ok: true; id: string } | { ok: false; error: string }
 export type AgentTaskView = { id: string; relPath: string; startedAt: number }
+export type AgentPendingView = { id: string; relPath: string; answer: string; reason: string }
+export type AgentPendingPreview = AgentPendingView & {
+  revision: string
+  diskBody: string
+  modelBody: string | null
+}
+export type AgentPendingPreviewResult =
+  | { ok: true; preview: AgentPendingPreview }
+  | { ok: false; error: string }
+export type AgentPendingDecision = 'retry' | 'model' | 'disk'
+export type AgentPendingResolveRequest = { id: string; decision: AgentPendingDecision; expectedRevision?: string }
+export type AgentPendingResult =
+  | { ok: true; revision?: string }
+  | { ok: false; error: string }
 export type AgentEvent = {
   id: string
   relPath: string
@@ -61,6 +78,7 @@ export type AgentEvent = {
   reason?: string
   persisted?: boolean
   revision?: string
+  pending?: boolean
 }
 
 export type RemoteImageGetRequest = { url: string; allowHttp: boolean }

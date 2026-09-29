@@ -5,8 +5,14 @@ import { spawnSync } from 'node:child_process'
 
 const root = path.resolve(import.meta.dirname, '..')
 const nodeRoot = path.resolve(path.dirname(process.execPath), '..')
+const cachedHeaders = process.env.RGENT_NODE_HEADERS_DIR
 const args = ['rebuild']
-if (existsSync(path.join(nodeRoot, 'include', 'node', 'node_api.h'))) {
+if (cachedHeaders) {
+  if (!existsSync(path.join(cachedHeaders, 'include', 'node', 'node_api.h'))) {
+    throw new Error(`RGENT_NODE_HEADERS_DIR is missing Node headers: ${cachedHeaders}`)
+  }
+  args.push(`--nodedir=${path.resolve(cachedHeaders)}`)
+} else if (existsSync(path.join(nodeRoot, 'include', 'node', 'node_api.h'))) {
   args.push(`--nodedir=${nodeRoot}`)
 } else {
   args.push(`--devdir=${path.join(root, 'build', '.node-gyp')}`)

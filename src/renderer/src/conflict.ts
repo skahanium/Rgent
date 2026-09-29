@@ -6,7 +6,7 @@ import { openOverlay } from './overlay.ts'
  * 冲突决策：并排两份**可读**预览，同样的前后文，各自强调变化处，
  * 并写明各自会舍弃什么（围栏 decisions.md §库、文件、窗口）。
  *
- * 只读渲染：这里不写盘，仍然只有 noteWrite 一条通道。
+ * 只读渲染：这里不写盘。调用方分别走人的 noteWrite 或 Host 专用写入通道。
  */
 
 export type ConflictChoice = 'window' | 'disk' | 'continue'
@@ -17,6 +17,16 @@ export type ConflictInput = {
   windowText: string
   /** 磁盘上的正文。 */
   diskText: string
+  labels?: {
+    heading: string
+    description: string
+    window: string
+    disk: string
+    windowAction: string
+    diskAction: string
+    windowHint: string
+    diskHint: string
+  }
 }
 
 export function promptConflict(input: ConflictInput): Promise<ConflictChoice> {
@@ -38,15 +48,15 @@ export function promptConflict(input: ConflictInput): Promise<ConflictChoice> {
     const preview = diffPreview(input.windowText, input.diskText)
 
     const heading = document.createElement('h2')
-    heading.textContent = '稿不一样了'
+    heading.textContent = input.labels?.heading ?? '稿不一样了'
     const sub = document.createElement('p')
     sub.className = 'conflict-sub'
-    sub.textContent = `${input.title}：窗口里的稿和磁盘上这份文件都不一样了。下面并排显示，只强调不同的地方。`
+    sub.textContent = input.labels?.description ?? `${input.title}：窗口里的稿和磁盘上这份文件都不一样了。下面并排显示，只强调不同的地方。`
 
     const grid = document.createElement('div')
     grid.className = 'conflict-grid'
     // 表头：两栏各自标明是哪一份。
-    grid.append(cell('head', '窗口里还没保存的稿'), cell('head', '磁盘上这份文件'))
+    grid.append(cell('head', input.labels?.window ?? '窗口里还没保存的稿'), cell('head', input.labels?.disk ?? '磁盘上这份文件'))
 
     let hiddenRow: DiffRow | null = null
     if (preview.hidden > 0) hiddenRow = { kind: 'gap', lines: preview.hidden }
@@ -79,8 +89,8 @@ export function promptConflict(input: ConflictInput): Promise<ConflictChoice> {
     const panes = document.createElement('div')
     panes.className = 'conflict-actions'
     panes.append(
-      action('window', '听窗口', '采用左侧窗口稿写盘；右侧磁盘稿的修改会被丢弃。'),
-      action('disk', '听磁盘', '采用右侧磁盘稿；左侧窗口里未保存的修改会被丢弃。')
+      action('window', input.labels?.windowAction ?? '听窗口', input.labels?.windowHint ?? '采用左侧窗口稿写盘；右侧磁盘稿的修改会被丢弃。'),
+      action('disk', input.labels?.diskAction ?? '听磁盘', input.labels?.diskHint ?? '采用右侧磁盘稿；左侧窗口里未保存的修改会被丢弃。')
     )
     const continueAction = action('continue', '继续编辑', '两份都留着，什么都不写，等你决定。')
     continueAction.classList.add('conflict-continue')
