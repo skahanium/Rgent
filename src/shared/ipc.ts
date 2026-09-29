@@ -19,6 +19,8 @@ export const IPC = {
   permissionsSet: 'permissions:set',
   themeGet: 'theme:get',
   themeSet: 'theme:set',
+  readingGet: 'reading:get',
+  readingSet: 'reading:set',
   remoteImageGet: 'image:get',
   modelConfigGet: 'model-config:get',
   modelProfileSet: 'model-config:profile-set',
@@ -68,6 +70,8 @@ export type RemoteImageGetResult =
 
 export type ThemeMode = 'day' | 'night' | 'system'
 export type ThemeSetResult = { ok: true; mode: ThemeMode } | { ok: false; error: 'BAD_MODE' | 'IO_ERROR' }
+export type { ReadingPreference } from './reading-preference.ts'
+export type ReadingSetResult = { ok: true; reading: import('./reading-preference.ts').ReadingPreference } | { ok: false; error: 'BAD_READING' | 'IO_ERROR' }
 
 export type VaultState =
   | { status: 'needs-pick'; reason: 'first-run' | 'missing' }

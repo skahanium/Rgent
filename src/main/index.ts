@@ -4,9 +4,10 @@ import { fileURLToPath } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { asString, parseFlushDone, parseNoteName, parseNoteWriteRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
 import { IPC } from '../shared/ipc.ts'
-import type { AgentStartRequest, AgentStartResult, LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
+import type { AgentStartRequest, AgentStartResult, LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
-import { isThemeMode, loadThemePreference, saveThemePreference } from './theme-preference.ts'
+import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
+import { isReadingPreference } from '../shared/reading-preference.ts'
 import { attachVaultProtocol } from './vault-protocol.ts'
 import { RemoteImageService, REMOTE_IMAGE_SCHEME, remoteImageUrl } from './remote-image.ts'
 import { attachRemoteImageProtocol } from './remote-image-protocol.ts'
@@ -311,6 +312,14 @@ function registerIpc(): void {
     return result.ok ? { ok: true, src: remoteImageUrl(result.token) } : result
   })
   ipcMain.handle(IPC.themeGet, () => themeMode)
+  ipcMain.handle(IPC.readingGet, () => loadReadingPreference(app.getPath('userData')))
+  ipcMain.handle(IPC.readingSet, (_event, value: unknown): ReadingSetResult => {
+    if (!isReadingPreference(value)) return { ok: false, error: 'BAD_READING' }
+    try {
+      saveReadingPreference(app.getPath('userData'), value)
+      return { ok: true, reading: value as ReadingPreference }
+    } catch { return { ok: false, error: 'IO_ERROR' } }
+  })
   ipcMain.handle(IPC.themeSet, (_event, value: unknown): ThemeSetResult => {
     if (!isThemeMode(value)) return { ok: false, error: 'BAD_MODE' }
     try {

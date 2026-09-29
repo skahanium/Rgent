@@ -2,6 +2,7 @@ import { closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, w
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ThemeMode } from '../shared/ipc.ts'
+import { DEFAULT_READING_PREFERENCE, isReadingPreference, type ReadingPreference } from '../shared/reading-preference.ts'
 
 const FILE = 'theme.json'
 
@@ -22,12 +23,29 @@ export function loadThemePreference(userData: string): ThemeMode {
 
 export function saveThemePreference(userData: string, mode: ThemeMode): void {
   if (!isThemeMode(mode)) throw new Error('BAD_MODE')
+  saveAppearance(userData, { mode, reading: loadReadingPreference(userData) })
+}
+
+export function loadReadingPreference(userData: string): ReadingPreference {
+  try {
+    const value: unknown = JSON.parse(readFileSync(path.join(userData, FILE), 'utf8'))
+    if (value && typeof value === 'object' && 'reading' in value && isReadingPreference(value.reading)) return value.reading
+  } catch { /* Old or corrupt local preference: keep the existing default. */ }
+  return { ...DEFAULT_READING_PREFERENCE }
+}
+
+export function saveReadingPreference(userData: string, reading: ReadingPreference): void {
+  if (!isReadingPreference(reading)) throw new Error('BAD_READING')
+  saveAppearance(userData, { mode: loadThemePreference(userData), reading })
+}
+
+function saveAppearance(userData: string, value: { mode: ThemeMode; reading: ReadingPreference }): void {
   const target = path.join(userData, FILE)
   const temporary = path.join(userData, `.theme-${randomUUID()}.tmp`)
   let fd: number | null = null
   try {
     fd = openSync(temporary, 'wx', 0o600)
-    writeFileSync(fd, JSON.stringify({ mode }), 'utf8')
+    writeFileSync(fd, JSON.stringify(value), 'utf8')
     fsyncSync(fd)
     closeSync(fd)
     fd = null

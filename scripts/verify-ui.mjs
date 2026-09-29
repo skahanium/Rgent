@@ -268,18 +268,43 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
     await sleep(250)
     await shot(page, `reference-${mode}-workspace`)
+    // CDP's 1x emulation produces comparable renderer captures, but scales a
+    // Retina native window differently. Clear it before checking OS chrome.
+    await page.call('Emulation.clearDeviceMetricsOverride', {})
+    await sleep(160)
     nativeShot(mode)
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
     await page.eval(`document.querySelector('.settings-open')?.click()`)
     await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
-    if (mode === 'day') await probe('设置浮层的标题和比例接近参考图', async () => {
+    if (mode === 'day') await probe('设置浮层放大且仍悬浮于工作区', async () => {
       const geometry = JSON.parse(await page.eval(`(() => {
         const panel = document.querySelector('.overlay-settings').getBoundingClientRect()
         const title = document.querySelector('.settings-page-title').getBoundingClientRect()
         return JSON.stringify({ top: Math.round(panel.top), width: Math.round(panel.width), height: Math.round(panel.height), titleTop: Math.round(title.top - panel.top), titleLeft: Math.round(title.left - panel.left) })
       })()`))
-      return { ok: geometry.top >= 75 && geometry.top <= 130 && geometry.width >= 690 && geometry.width <= 730 && geometry.height >= 535 && geometry.titleTop <= 58 && geometry.titleLeft >= 230, detail: JSON.stringify(geometry) }
+      return { ok: geometry.top >= 24 && geometry.top <= 55 && geometry.width >= 980 && geometry.width <= 1050 && geometry.height >= 680 && geometry.height < 800 && geometry.titleTop >= 70 && geometry.titleLeft >= 240, detail: JSON.stringify(geometry) }
     })
+    check('设置遮罩柔焦且导航仅列出三页与同系图标', await page.eval(`(() => {
+      const dialog = document.querySelector('.overlay-settings')
+      const blur = getComputedStyle(dialog, '::backdrop').backdropFilter
+      const labels = [...dialog.querySelectorAll('.settings-nav button')].map((button) => button.textContent)
+      return blur.includes('blur(') && JSON.stringify(labels) === JSON.stringify(['界面','模型','运行']) && dialog.querySelectorAll('.settings-nav .icon').length === 3
+    })()`) === true)
+    check('阅读排版有真实中英样张和五项可调控件', await waitFor(page, `document.querySelector('.settings-reading-sample')?.textContent.includes('English') && document.querySelectorAll('.settings-reading-controls [data-setting]').length === 5`))
     await shot(page, `reference-${mode}-settings`)
+    await page.call('Emulation.clearDeviceMetricsOverride', {})
+    await sleep(160)
+    nativeShot(`${mode}-settings`)
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+    await page.eval(`document.querySelector('.settings-main').scrollTop = document.querySelector('.settings-main').scrollHeight`)
+    await shot(page, `reference-${mode}-settings-reading`)
+    await page.eval(`document.querySelector('.settings-main').scrollTop = 0`)
+    for (const name of ['模型', '运行']) {
+      await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '${name}'))?.click()`)
+      await waitFor(page, `document.querySelector('.settings-page-title')?.textContent === '${name}'`)
+      await shot(page, `reference-${mode}-settings-${name === '模型' ? 'model' : 'run'}`)
+    }
+    await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '界面'))?.click()`)
     await page.eval(`document.querySelector('.settings-close')?.click()`)
     await waitFor(page, `!document.querySelector('.overlay-settings')`)
     await page.eval(`document.querySelector('.tree-tools button')?.click()`)
@@ -297,6 +322,23 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
     await sleep(250)
     await shot(page, `reference-${mode}-narrow`)
+    await page.eval(`document.querySelector('.settings-open')?.click()`)
+    await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
+    check('窄窗设置面板保留外边距并由内部滚动', await page.eval(`(() => {
+      const dialog = document.querySelector('.overlay-settings').getBoundingClientRect()
+      const main = document.querySelector('.settings-main')
+      return dialog.left >= 18 && dialog.top >= 18 && dialog.right <= 782 && dialog.bottom <= 542 && main.scrollHeight > main.clientHeight && getComputedStyle(main).overflowY === 'auto'
+    })()`) === true)
+    await shot(page, `reference-${mode}-settings-narrow`)
+    await page.eval(`document.querySelector('.settings-main').scrollTop = document.querySelector('.settings-main').scrollHeight`)
+    await shot(page, `reference-${mode}-settings-reading-narrow`)
+    await page.eval(`document.querySelector('.settings-main').scrollTop = 0`)
+    for (const name of ['模型', '运行']) {
+      await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '${name}'))?.click()`)
+      await waitFor(page, `document.querySelector('.settings-page-title')?.textContent === '${name}'`)
+      await shot(page, `reference-${mode}-settings-${name === '模型' ? 'model' : 'run'}-narrow`)
+    }
+    await page.eval(`document.querySelector('.settings-close')?.click()`)
     await page.call('Emulation.clearDeviceMetricsOverride', {})
   }
   await page.eval(`([...document.querySelectorAll('.tree-note')].find((item) => item.innerText.includes('长文排版')))?.click()`)
@@ -373,6 +415,12 @@ async function main() {
     if (data) writeFileSync(path.join(shotDir, `${name}.png`), Buffer.from(data, 'base64'))
   }
   const nativeShot = (mode) => {
+    if (process.platform === 'darwin' && shotDir && process.env.RGENT_NATIVE_MAC_SCREENSHOT === '1') {
+      const destination = path.join(shotDir, `native-macos-${mode}.png`)
+      const result = spawnSync('screencapture', ['-x', destination], { encoding: 'utf8', timeout: 15000 })
+      check(`macOS ${mode} 原生桌面截图包含系统交通灯`, result.status === 0 && existsSync(destination), result.stderr?.trim().slice(0, 160) ?? '')
+      return
+    }
     if (process.platform !== 'win32' || !shotDir) return
     const destination = path.join(shotDir, `native-windows-${mode}.png`)
     const script = `
@@ -483,6 +531,41 @@ async function main() {
       })()`))
       const closed = await waitFor(page, `!document.querySelector('.overlay-settings')`)
       return { ok: state.modes.join(',') === 'day,night,system' && state.night.mode === 'night' && state.night.rendered === 'night' && state.day.mode === 'day' && state.day.rendered === 'day' && state.system === 'system' && closed, detail: JSON.stringify({ ...state, closed }) }
+    })
+    await probe('排版调节先在样张预览，关闭放弃，保存后应用并持久化', async () => {
+      const state = JSON.parse(await page.eval(`(async () => {
+        const before = await window.rgent.readingGet()
+        const noteBefore = (await window.rgent.noteRead('研究记录.md')).content
+        document.querySelector('.settings-open')?.click()
+        await new Promise((resolve) => setTimeout(resolve, 120))
+        const size = document.querySelector('[data-setting="fontSize"]')
+        size.value = String(before.fontSize + 1)
+        size.dispatchEvent(new Event('input', { bubbles: true }))
+        const preview = getComputedStyle(document.querySelector('.settings-reading-sample')).fontSize
+        const workspaceBefore = getComputedStyle(document.querySelector('.cm-editor')).fontSize
+        document.querySelector('.settings-close')?.click()
+        await new Promise((resolve) => setTimeout(resolve, 120))
+        document.querySelector('.settings-open')?.click()
+        await new Promise((resolve) => setTimeout(resolve, 120))
+        const restored = document.querySelector('[data-setting="fontSize"]').value
+        const control = document.querySelector('[data-setting="fontSize"]')
+        control.value = String(before.fontSize + 1)
+        control.dispatchEvent(new Event('input', { bubbles: true }))
+        document.querySelector('.settings-reading-save')?.click()
+        await new Promise((resolve) => setTimeout(resolve, 180))
+        const saved = await window.rgent.readingGet()
+        const workspaceAfter = getComputedStyle(document.querySelector('.cm-editor')).fontSize
+        document.querySelector('.settings-close')?.click()
+        await new Promise((resolve) => setTimeout(resolve, 120))
+        document.querySelector('.ledger-open')?.click()
+        const ledgerAfter = getComputedStyle(document.querySelector('.ledger-body')).fontSize
+        document.querySelector('.ledger-close')?.click()
+        const sourceUnchanged = (await window.rgent.noteRead('研究记录.md')).content === noteBefore
+        await window.rgent.readingSet(before)
+        document.documentElement.style.setProperty('--reading-font-size', before.fontSize + 'px')
+        return JSON.stringify({ before: before.fontSize, preview, workspaceBefore, restored, saved: saved.fontSize, workspaceAfter, ledgerAfter, sourceUnchanged })
+      })()`))
+      return { ok: state.preview === `${state.before + 1}px` && state.workspaceBefore === `${state.before}px` && state.restored === String(state.before) && state.saved === state.before + 1 && state.workspaceAfter === `${state.before + 1}px` && Math.abs(parseFloat(state.ledgerAfter) - (state.before + 1) * 0.9) < 0.2 && state.sourceUnchanged, detail: JSON.stringify(state) }
     })
     if (shotDir) {
       await page.eval(`window.rgent.themeSet('day')`)
@@ -939,13 +1022,16 @@ async function main() {
     await page.eval(`document.querySelector('.ledger-close')?.click()`)
     writeFileSync(path.join(vault, 'Host 快速.md'), '')
     await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((note) => note.innerText.includes('Host 快速'))`)
-    await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((note) => note.innerText.includes('Host 快速'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find((note) => note.innerText.includes('Host 快速'))?.click()`)
+    await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('Host 快速')`)
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
     await page.call('Input.insertText', { text: '/快速完成' })
     await page.key('Enter', 'Enter', 0, 13)
-    check('快速流结束后底栏不残留运行任务', await waitFor(page, `(async () => {
+    const quickFinished = await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead('Host 快速.md')
       return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 && !document.querySelector('.status-task-stop')
-    })()`, 8000))
+    })()`, 8000)
+    check('快速流结束后底栏不残留运行任务', quickFinished, quickFinished ? '' : await page.eval(`(async () => JSON.stringify({ note: (await window.rgent.noteRead('Host 快速.md')).content, tasks: await window.rgent.agentTasks(), status: document.querySelector('.status-left')?.innerText }))()`))
     writeFileSync(path.join(vault, 'Host A.md'), '')
     writeFileSync(path.join(vault, 'Host B.md'), '')
     check('两篇待运行笔记进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host A')) && [...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host B'))`, 8000))

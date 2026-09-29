@@ -127,6 +127,8 @@ export async function start(root: HTMLElement): Promise<void> {
   const settingsOverlay = createSettingsOverlay({
     getMode: () => window.rgent.themeGet(),
     setMode: (mode) => window.rgent.themeSet(mode),
+    getReading: () => window.rgent.readingGet(),
+    setReading: (reading) => window.rgent.readingSet(reading),
     getConfig: () => window.rgent.modelConfigGet(),
     setProfile: (request) => window.rgent.modelProfileSet(request),
     selectModel: (provider) => window.rgent.modelSelect(provider),

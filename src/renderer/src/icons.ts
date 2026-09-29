@@ -18,6 +18,9 @@ export type IconName =
   | 'plus'
   | 'settings'
   | 'close'
+  | 'appearance'
+  | 'model'
+  | 'run'
 
 const PATHS: Record<IconName, string[]> = {
   folder: ['M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 2h4.5A1.5 1.5 0 0 1 14 6.5v5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z'],
@@ -28,7 +31,10 @@ const PATHS: Record<IconName, string[]> = {
   file: ['M4 2h5l3 3v9H4z', 'M9 2v3h3'],
   plus: ['M8 3.5v9', 'M3.5 8h9'],
   settings: ['M8 2.5l1.1.6 1.2-.2.7 1 .9.6-.1 1.2.6 1.1-.6 1.1.1 1.2-.9.6-.7 1-1.2-.2-1.1.6-1.1-.6-1.2.2-.7-1-.9-.6.1-1.2-.6-1.1.6-1.1-.1-1.2.9-.6.7-1 1.2.2z', 'M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4'],
-  close: ['M4.5 4.5l7 7', 'M11.5 4.5l-7 7']
+  close: ['M4.5 4.5l7 7', 'M11.5 4.5l-7 7'],
+  appearance: ['M8 2v1.5', 'M8 12.5V14', 'M2 8h1.5', 'M12.5 8H14', 'M3.8 3.8l1.1 1.1', 'M11.1 11.1l1.1 1.1', 'M12.2 3.8l-1.1 1.1', 'M4.9 11.1l-1.1 1.1', 'M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6'],
+  model: ['M8 2.2l4.8 2.9v5.8L8 13.8l-4.8-2.9V5.1z', 'M3.2 5.1L8 8l4.8-2.9', 'M8 8v5.8'],
+  run: ['M5 3.4l7 4.6-7 4.6z']
 }
 
 export function icon(name: IconName, className = ''): SVGSVGElement {

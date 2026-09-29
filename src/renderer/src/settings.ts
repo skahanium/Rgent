@@ -1,9 +1,14 @@
-import type { LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ThemeMode, ThemeSetResult } from '../../shared/ipc.ts'
+import type { LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult } from '../../shared/ipc.ts'
+import { isReadingPreference, READING_FONTS } from '../../shared/reading-preference.ts'
 import { openOverlay, type Overlay } from './overlay.ts'
+import { applyReadingPreference } from './reading.ts'
+import { icon, type IconName } from './icons.ts'
 
 export type SettingsHandlers = {
   getMode: () => Promise<ThemeMode>
   setMode: (mode: ThemeMode) => Promise<ThemeSetResult>
+  getReading?: () => Promise<ReadingPreference>
+  setReading?: (reading: ReadingPreference) => Promise<ReadingSetResult>
   getConfig?: () => Promise<ModelConfigResult>
   setProfile?: (request: ModelProfileSetRequest) => Promise<ModelConfigResult>
   selectModel?: (provider: ModelProvider) => Promise<ModelConfigResult>
@@ -23,6 +28,13 @@ const CHOICES: Array<{ mode: ThemeMode; name: string; detail: string }> = [
   { mode: 'system', name: '跟随系统', detail: '随设备外观自动切换' }
 ]
 
+const FONT_NAMES: Record<(typeof READING_FONTS)[number], string> = {
+  literary: '典雅衬线', song: '宋体阅读', system: '系统无衬线', humanist: '人文无衬线'
+}
+const sameReading = (left: ReadingPreference, right: ReadingPreference): boolean =>
+  left.bodyFont === right.bodyFont && left.headingFont === right.headingFont &&
+  left.fontSize === right.fontSize && left.lineHeight === right.lineHeight && left.maxWidth === right.maxWidth
+
 const CONFIG_ERRORS: Record<string, string> = {
   BAD_MODEL_CONFIG: '本机模型配置文件损坏，请先修复；笔记仍可正常使用。',
   BAD_BASE_URL: '接口地址须为 HTTPS，或本机回环地址的 HTTP。',
@@ -40,6 +52,7 @@ const configErrorText = (error: string): string => CONFIG_ERRORS[error] ?? error
 export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverlay {
   let overlay: Overlay | null = null
   let request = 0
+  let readingSaveSerial = 0
 
   const close = (): void => overlay?.close()
   const open = (): void => {
@@ -74,12 +87,31 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     const nav = document.createElement('nav')
     nav.className = 'settings-nav'
     nav.setAttribute('aria-label', '设置页面')
-    const page = document.createElement('button')
-    page.type = 'button'
-    page.className = 'settings-nav-current'
-    page.textContent = '界面'
-    page.setAttribute('aria-current', 'page')
-    nav.append(page)
+    const navGroup = (name: string): void => {
+      const label = document.createElement('p')
+      label.className = 'settings-nav-group'
+      label.textContent = name
+      nav.append(label)
+    }
+    const navButtons = new Map<string, HTMLButtonElement>()
+    const addNav = (name: '界面' | '模型' | '运行', graphic: IconName): HTMLButtonElement => {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = name === '界面' ? 'settings-nav-current' : 'settings-nav-item'
+      if (name === '界面') button.setAttribute('aria-current', 'page')
+      button.append(icon(graphic), document.createTextNode(name))
+      nav.append(button)
+      navButtons.set(name, button)
+      button.addEventListener('click', () => setPage(name))
+      return button
+    }
+    navGroup('工作区')
+    addNav('界面', 'appearance')
+    if (handlers.getConfig && handlers.setProfile && handlers.selectModel && handlers.deleteKey && handlers.setLimits) {
+      navGroup('Agent')
+      addNav('模型', 'model')
+      addNav('运行', 'run')
+    }
     const main = document.createElement('section')
     main.className = 'settings-main'
     const title = document.createElement('h2')
@@ -100,13 +132,14 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     error.setAttribute('role', 'alert')
     error.hidden = true
     group.append(legend, choices, error)
-    main.append(title, intro, group)
+    const readingSection = document.createElement('section')
+    readingSection.className = 'settings-reading'
+    main.append(title, intro, group, readingSection)
     layout.append(nav, main)
     root.append(header, layout)
-
-    const themeNodes = [title, intro, group]
+    const themeNodes = [title, intro, group, readingSection]
     let openedPage: '界面' | '模型' | '运行' = '界面'
-    const navButtons = new Map<string, HTMLButtonElement>([['界面', page]])
+    let themeRequest = 0
     const setPage = (name: '界面' | '模型' | '运行'): void => {
       openedPage = name
       for (const [label, button] of navButtons) {
@@ -117,18 +150,6 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       if (name === '界面') main.replaceChildren(...themeNodes)
       else if (name === '模型') void renderModelPage()
       else void renderRunPage()
-    }
-    page.addEventListener('click', () => setPage('界面'))
-    if (handlers.getConfig && handlers.setProfile && handlers.selectModel && handlers.deleteKey && handlers.setLimits) {
-      for (const name of ['模型', '运行'] as const) {
-        const button = document.createElement('button')
-        button.type = 'button'
-        button.textContent = name
-        button.className = 'settings-nav-item'
-        button.addEventListener('click', () => setPage(name))
-        nav.append(button)
-        navButtons.set(name, button)
-      }
     }
 
     const pageFrame = (name: string, description: string): { body: HTMLElement; error: HTMLElement } => {
@@ -251,7 +272,13 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       })
       body.append(providerLabel)
       for (const input of [base, model, context, secret]) appendField(body, input)
-      body.append(keyState, selectedState, save, select, remove)
+      const state = document.createElement('div')
+      state.className = 'settings-model-state'
+      state.append(keyState, selectedState)
+      const actions = document.createElement('div')
+      actions.className = 'settings-actions'
+      actions.append(save, select, remove)
+      body.append(state, actions)
     }
 
     async function renderRunPage(): Promise<void> {
@@ -312,6 +339,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       const preview = document.createElement('span')
       preview.className = `settings-choice-preview settings-preview-${item.mode}`
       preview.setAttribute('aria-hidden', 'true')
+      preview.innerHTML = '<span class="settings-preview-bar"></span><span class="settings-preview-side"><i></i><i></i><i></i></span><span class="settings-preview-paper"><b></b><i></i><i></i><i></i></span>'
       const name = document.createElement('strong')
       name.textContent = item.name
       const detail = document.createElement('small')
@@ -322,32 +350,163 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       inputs.push(input)
       input.addEventListener('change', () => {
         if (!input.checked || busy || selected === item.mode) return
-        const mine = ++request
+        const mine = ++themeRequest
         busy = true
         paint()
         setError('')
         void handlers.setMode(item.mode).then((result) => {
-          if (!current.isOpen() || mine !== request) return
+          if (!current.isOpen() || mine !== themeRequest) return
           if (result.ok) selected = result.mode
           else setError(result.error === 'IO_ERROR' ? '主题设置保存失败，请重试。' : '无法使用这个主题选项。')
         }).catch(() => {
-          if (current.isOpen() && mine === request) setError('主题设置保存失败，请重试。')
+          if (current.isOpen() && mine === themeRequest) setError('主题设置保存失败，请重试。')
         }).finally(() => {
-          if (current.isOpen() && mine === request) {
+          if (current.isOpen() && mine === themeRequest) {
             busy = false
             paint()
           }
         })
       })
     }
-    const mine = ++request
+    const mine = ++themeRequest
     void handlers.getMode().then((mode) => {
-      if (!current.isOpen() || mine !== request) return
+      if (!current.isOpen() || mine !== themeRequest) return
       selected = mode
       paint()
     }).catch(() => {
-      if (current.isOpen() && mine === request) setError('暂时无法读取主题设置。')
+      if (current.isOpen() && mine === themeRequest) setError('暂时无法读取主题设置。')
     })
+
+    if (handlers.getReading && handlers.setReading) {
+      const heading = document.createElement('h3')
+      heading.textContent = '阅读排版'
+      const description = document.createElement('p')
+      description.className = 'settings-reading-intro'
+      description.textContent = '在样张里试好后再保存；适用于这台设备上的所有笔记。'
+      const sample = document.createElement('article')
+      sample.className = 'settings-reading-sample'
+      sample.setAttribute('aria-label', '笔记排版预览')
+      sample.innerHTML = '<span class="settings-sample-eyebrow">笔记样张 · 阅读预览</span><h4>自然生长</h4><p>好的想法不一定在写下时就已经完整。先留下一个清晰的落点，日后再回来，让新的线索与旧的经验相遇。</p><p>Writing is thinking in motion. 在中文与 English 之间，行距和字形应该保持安静、连贯。</p><p class="settings-sample-prompt">&gt; 能否把这个想法整理成两个可观察的行为？</p><p class="settings-sample-answer">可以。先记下离开笔记时的上下文，再观察重新打开后是否能够接着写。</p>'
+      const controls = document.createElement('div')
+      controls.className = 'settings-reading-controls'
+      const fontSelect = (key: 'bodyFont' | 'headingFont', labelText: string): HTMLSelectElement => {
+        const label = document.createElement('label')
+        label.className = 'settings-reading-control'
+        const name = document.createElement('span')
+        name.textContent = labelText
+        const select = document.createElement('select')
+        select.dataset.setting = key
+        for (const id of READING_FONTS) {
+          const option = document.createElement('option')
+          option.value = id
+          option.textContent = FONT_NAMES[id]
+          select.append(option)
+        }
+        label.append(name, select)
+        controls.append(label)
+        return select
+      }
+      const slider = (key: 'fontSize' | 'lineHeight' | 'maxWidth', labelText: string, min: string, max: string, step: string, suffix: string): HTMLInputElement => {
+        const label = document.createElement('label')
+        label.className = 'settings-reading-control'
+        const name = document.createElement('span')
+        const value = document.createElement('output')
+        name.textContent = labelText
+        const input = document.createElement('input')
+        input.type = 'range'
+        input.dataset.setting = key
+        input.min = min
+        input.max = max
+        input.step = step
+        input.addEventListener('input', () => { value.textContent = `${input.value}${suffix}` })
+        label.append(name, value, input)
+        controls.append(label)
+        return input
+      }
+      const bodyFont = fontSelect('bodyFont', '正文字体')
+      const headingFont = fontSelect('headingFont', '标题字体')
+      const fontSize = slider('fontSize', '正文字号', '15', '21', '1', ' px')
+      const lineHeight = slider('lineHeight', '行距', '1.4', '2', '0.05', '')
+      const maxWidth = slider('maxWidth', '最大阅读宽度', '640', '960', '40', ' px')
+      const allControls = [bodyFont, headingFont, fontSize, lineHeight, maxWidth]
+      allControls.forEach((control) => { control.disabled = true })
+      const save = document.createElement('button')
+      save.type = 'button'
+      save.className = 'settings-action settings-reading-save'
+      save.textContent = '保存阅读排版'
+      save.disabled = true
+      const saveError = document.createElement('p')
+      saveError.className = 'settings-error settings-reading-error'
+      saveError.setAttribute('role', 'alert')
+      saveError.hidden = true
+      const footer = document.createElement('div')
+      footer.className = 'settings-reading-footer'
+      footer.append(save, saveError)
+      readingSection.append(heading, description, sample, controls, footer)
+      let original: ReadingPreference | null = null
+      let draft: ReadingPreference | null = null
+      const paintDraft = (): void => {
+        if (!draft) return
+        applyReadingPreference(draft, sample)
+        sample.style.width = `${Math.round(draft.maxWidth / 960 * 100)}%`
+        bodyFont.value = draft.bodyFont
+        headingFont.value = draft.headingFont
+        fontSize.value = String(draft.fontSize)
+        lineHeight.value = String(draft.lineHeight)
+        maxWidth.value = String(draft.maxWidth)
+        for (const [input, suffix] of [[fontSize, ' px'], [lineHeight, ''], [maxWidth, ' px']] as const) {
+          const output = input.parentElement?.querySelector('output')
+          if (output) output.textContent = `${input.value}${suffix}`
+        }
+        save.disabled = !original || sameReading(draft, original)
+      }
+      const readControls = (): ReadingPreference => ({
+        bodyFont: bodyFont.value as ReadingPreference['bodyFont'],
+        headingFont: headingFont.value as ReadingPreference['headingFont'],
+        fontSize: Number(fontSize.value),
+        lineHeight: Number(lineHeight.value),
+        maxWidth: Number(maxWidth.value)
+      })
+      for (const control of allControls) {
+        const changed = (): void => {
+          const next = readControls()
+          if (!isReadingPreference(next)) return
+          draft = next
+          paintDraft()
+          showError(saveError, '')
+        }
+        control.addEventListener('input', changed)
+        control.addEventListener('change', changed)
+      }
+      save.addEventListener('click', () => {
+        if (!draft || !isReadingPreference(draft)) return
+        const submitted = { ...draft }
+        const serial = ++readingSaveSerial
+        save.disabled = true
+        void handlers.setReading!(submitted).then((result) => {
+          if (serial !== readingSaveSerial) return
+          if (!result.ok) {
+            if (current.isOpen()) showError(saveError, '阅读排版保存失败，工作区未更改。')
+            return
+          }
+          applyReadingPreference(result.reading)
+          if (!current.isOpen()) return
+          original = { ...result.reading }
+          draft = { ...result.reading }
+          paintDraft()
+          showError(saveError, '')
+        }).catch(() => {
+          if (current.isOpen()) showError(saveError, '阅读排版保存失败，工作区未更改。')
+        }).finally(() => { if (current.isOpen()) save.disabled = !draft || !original || sameReading(draft, original) })
+      })
+      void handlers.getReading().then((reading) => {
+        if (!current.isOpen() || !isReadingPreference(reading)) return
+        original = { ...reading }
+        draft = { ...reading }
+        allControls.forEach((control) => { control.disabled = false })
+        paintDraft()
+      }).catch(() => { if (current.isOpen()) showError(saveError, '暂时无法读取阅读排版。') })
+    }
   }
 
   return { open, close, isOpen: () => overlay?.isOpen() ?? false }

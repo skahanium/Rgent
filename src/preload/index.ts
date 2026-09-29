@@ -14,6 +14,8 @@ import {
   type SearchHit,
   type ThemeMode,
   type ThemeSetResult,
+  type ReadingPreference,
+  type ReadingSetResult,
   type TreeEntry,
   type VaultState,
   type ModelConfigResult,
@@ -42,6 +44,8 @@ const api = {
   search: (query: string): Promise<SearchHit[]> => ipcRenderer.invoke(IPC.search, query),
   themeGet: (): Promise<ThemeMode> => ipcRenderer.invoke(IPC.themeGet),
   themeSet: (mode: ThemeMode): Promise<ThemeSetResult> => ipcRenderer.invoke(IPC.themeSet, mode),
+  readingGet: (): Promise<ReadingPreference> => ipcRenderer.invoke(IPC.readingGet),
+  readingSet: (reading: ReadingPreference): Promise<ReadingSetResult> => ipcRenderer.invoke(IPC.readingSet, reading),
   remoteImageGet: (request: RemoteImageGetRequest): Promise<RemoteImageGetResult> =>
     ipcRenderer.invoke(IPC.remoteImageGet, request),
   modelConfigGet: (): Promise<ModelConfigResult> => ipcRenderer.invoke(IPC.modelConfigGet),

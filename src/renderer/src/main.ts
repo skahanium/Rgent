@@ -1,6 +1,7 @@
 import './styles.css'
 import { start } from './shell.ts'
 import { watchTheme } from './theme.ts'
+import { applyReadingPreference } from './reading.ts'
 
 const root = document.getElementById('app')
 if (!root) throw new Error('missing #app')
@@ -14,4 +15,8 @@ watchTheme((theme) => {
   window.dispatchEvent(new CustomEvent('rgent:theme', { detail: theme }))
 })
 
-void start(root)
+void (async () => {
+  try { applyReadingPreference(await window.rgent.readingGet()) }
+  catch { /* A broken local preference must not prevent notes from opening. */ }
+  await start(root)
+})()

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createSettingsOverlay } from '../../src/renderer/src/settings.ts'
+import { DEFAULT_READING_PREFERENCE } from '../../src/shared/reading-preference.ts'
 
 beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
@@ -18,9 +19,121 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.replaceChildren()
+  for (const key of ['--reading-font-family', '--heading-font-family', '--reading-font-size', '--reading-line-height', '--reading-max-width']) {
+    document.documentElement.style.removeProperty(key)
+  }
 })
 
 describe('settings interface page', () => {
+  it('keeps the theme selection available when its initial read finishes after changing pages', async () => {
+    let finishMode!: (mode: 'night') => void
+    const mode = new Promise<'night'>((resolve) => { finishMode = resolve })
+    const config = {
+      selected: 'custom' as const,
+      profiles: {
+        deepseek: { baseURL: 'https://api.deepseek.com', modelId: 'deepseek-chat', contextTokens: 64000, hasKey: false },
+        minimax: { baseURL: 'https://api.minimax.io/v1', modelId: 'MiniMax-M2.7', contextTokens: 204800, hasKey: false },
+        custom: { baseURL: 'http://127.0.0.1:5555/v1', modelId: 'test', contextTokens: 16000, hasKey: false }
+      },
+      limits: { none: { seconds: 180, steps: 4, tools: 0 }, local: { seconds: 300, steps: 12, tools: 24 }, network: { seconds: 600, steps: 20, tools: 40 } }
+    }
+    const panel = createSettingsOverlay({
+      getMode: () => mode, setMode: async (value) => ({ ok: true, mode: value }),
+      getConfig: async () => ({ ok: true, config }),
+      setProfile: async () => ({ ok: true, config }),
+      selectModel: async () => ({ ok: true, config }),
+      deleteKey: async () => ({ ok: true, config }),
+      setLimits: async () => ({ ok: true, config })
+    })
+    panel.open()
+    const nav = [...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')]
+    nav.find((button) => button.textContent === '模型')!.click()
+    finishMode('night')
+    await vi.waitFor(() => expect(document.querySelector('.settings-page-title')?.textContent).toBe('模型'))
+    nav.find((button) => button.textContent === '界面')!.click()
+    await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>('input[value="night"]')?.checked).toBe(true))
+    expect(document.querySelector<HTMLInputElement>('input[value="day"]')?.disabled).toBe(false)
+    panel.close()
+  })
+
+  it('previews reading typography locally, discards it on close, and applies only after save', async () => {
+    const saved = { ...DEFAULT_READING_PREFERENCE }
+    const setReading = vi.fn(async (reading) => ({ ok: true as const, reading }))
+    const panel = createSettingsOverlay({
+      getMode: async () => 'day', setMode: async (mode) => ({ ok: true, mode }),
+      getReading: async () => saved, setReading
+    })
+    panel.open()
+    await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>('[data-setting="bodyFont"]')?.value).toBe('literary'))
+    const bodyFont = document.querySelector<HTMLSelectElement>('[data-setting="bodyFont"]')!
+    bodyFont.value = 'humanist'
+    bodyFont.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(document.querySelector<HTMLElement>('.settings-reading-sample')?.style.getPropertyValue('--reading-font-family')).toContain('sans-serif')
+    expect(document.documentElement.style.getPropertyValue('--reading-font-family')).toBe('')
+    panel.close()
+    panel.open()
+    await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>('[data-setting="bodyFont"]')?.value).toBe('literary'))
+    const size = document.querySelector<HTMLInputElement>('[data-setting="fontSize"]')!
+    size.value = '19'
+    size.dispatchEvent(new Event('input', { bubbles: true }))
+    document.querySelector<HTMLButtonElement>('.settings-reading-save')?.click()
+    await vi.waitFor(() => expect(setReading).toHaveBeenCalledWith(expect.objectContaining({ fontSize: 19 })))
+    await vi.waitFor(() => expect(document.documentElement.style.getPropertyValue('--reading-font-size')).toBe('19px'))
+    panel.close()
+  })
+
+  it('keeps the workspace typography when saving reading preferences fails', async () => {
+    const panel = createSettingsOverlay({
+      getMode: async () => 'night', setMode: async (mode) => ({ ok: true, mode }),
+      getReading: async () => DEFAULT_READING_PREFERENCE,
+      setReading: async () => ({ ok: false, error: 'IO_ERROR' })
+    })
+    panel.open()
+    await vi.waitFor(() => expect(document.querySelector('[data-setting="lineHeight"]')).not.toBeNull())
+    const previous = document.documentElement.style.getPropertyValue('--reading-line-height')
+    const lineHeight = document.querySelector<HTMLInputElement>('[data-setting="lineHeight"]')!
+    lineHeight.value = '1.8'
+    lineHeight.dispatchEvent(new Event('input', { bubbles: true }))
+    document.querySelector<HTMLButtonElement>('.settings-reading-save')?.click()
+    await vi.waitFor(() => expect(document.querySelector<HTMLElement>('.settings-reading-error')?.textContent).toMatch(/保存失败/))
+    expect(document.documentElement.style.getPropertyValue('--reading-line-height')).toBe(previous)
+    panel.close()
+  })
+  it('recognizes an unchanged reading choice regardless of stored object key order', async () => {
+    const reversed = { maxWidth: 768, lineHeight: 1.65, fontSize: 17, headingFont: 'system' as const, bodyFont: 'literary' as const }
+    const panel = createSettingsOverlay({
+      getMode: async () => 'day', setMode: async (mode) => ({ ok: true, mode }),
+      getReading: async () => reversed,
+      setReading: async (reading) => ({ ok: true, reading })
+    })
+    panel.open()
+    await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>('[data-setting="fontSize"]')?.value).toBe('17'))
+    const size = document.querySelector<HTMLInputElement>('[data-setting="fontSize"]')!
+    size.value = '18'; size.dispatchEvent(new Event('input', { bubbles: true }))
+    size.value = '17'; size.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(document.querySelector<HTMLButtonElement>('.settings-reading-save')?.disabled).toBe(true)
+    panel.close()
+  })
+
+  it('applies an explicitly submitted preference even when the panel closes before saving finishes', async () => {
+    let finish!: (result: { ok: true; reading: typeof DEFAULT_READING_PREFERENCE }) => void
+    const pending = new Promise<{ ok: true; reading: typeof DEFAULT_READING_PREFERENCE }>((resolve) => { finish = resolve })
+    const panel = createSettingsOverlay({
+      getMode: async () => 'day', setMode: async (mode) => ({ ok: true, mode }),
+      getReading: async () => DEFAULT_READING_PREFERENCE,
+      setReading: async () => pending
+    })
+    panel.open()
+    await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>('[data-setting="fontSize"]')?.value).toBe('17'))
+    const size = document.querySelector<HTMLInputElement>('[data-setting="fontSize"]')!
+    size.value = '19'
+    size.dispatchEvent(new Event('input', { bubbles: true }))
+    document.querySelector<HTMLButtonElement>('.settings-reading-save')!.click()
+    panel.close()
+    expect(document.documentElement.style.getPropertyValue('--reading-font-size')).toBe('')
+    finish({ ok: true, reading: { ...DEFAULT_READING_PREFERENCE, fontSize: 19 } })
+    await vi.waitFor(() => expect(document.documentElement.style.getPropertyValue('--reading-font-size')).toBe('19px'))
+  })
   it('saves a model profile without displaying a stored secret, and edits finite run limits', async () => {
     const config = {
       selected: 'custom' as const,

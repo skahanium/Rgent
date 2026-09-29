@@ -395,11 +395,11 @@ const theme = EditorView.theme({
     height: '100%',
     backgroundColor: 'transparent',
     color: 'var(--text-body)',
-    fontSize: '17px'
+    fontSize: 'var(--reading-font-size)'
   },
   '.cm-scroller': {
-    fontFamily: 'var(--font-body)',
-    lineHeight: '1.65'
+    fontFamily: 'var(--reading-font-family)',
+    lineHeight: 'var(--reading-line-height)'
   },
   '.cm-content': {
     caretColor: 'var(--accent-focus)',
