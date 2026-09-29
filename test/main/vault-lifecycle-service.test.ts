@@ -67,6 +67,57 @@ describe('VaultLifecycle', () => {
     expect(await readFile(path.join(root, '引用.md'), 'utf8')).toBe('参见 [[归档/新篇]]。')
   })
 
+  it('repairs links inside the moved note and clears the recovery record', async () => {
+    const root = await vault()
+    await mkdir(path.join(root, '归档'))
+    await writeFile(path.join(root, '原篇.md'), '# 原文\n参见 [[原篇]]。')
+    const service = new VaultLifecycle(root)
+    const preview = await service.preview({ kind: 'note', source: '原篇.md', target: '归档/新篇.md' })
+    expect(preview.linkChanges.map((link) => link.relPath)).toEqual(['原篇.md'])
+    await service.commit(preview.id, { repairLinks: true })
+    expect(await readFile(path.join(root, '归档', '新篇.md'), 'utf8')).toBe('# 原文\n参见 [[归档/新篇]]。')
+    expect(JSON.parse(await readFile(path.join(root, '.rgent-lifecycle'), 'utf8')).active).toBeNull()
+  })
+
+  it('resumes after a moved note was atomically repaired but journal completion was interrupted', async () => {
+    const root = await vault()
+    await mkdir(path.join(root, '归档'))
+    await writeFile(path.join(root, '原篇.md'), '参见 [[原篇]]。')
+    const service = new VaultLifecycle(root)
+    const preview = await service.preview({ kind: 'note', source: '原篇.md', target: '归档/新篇.md' })
+    const fs = secureFsFor(root)
+    const originalReplace = fs.replace.bind(fs)
+    fs.replace = ((...args) => {
+      if (args[0] === '.rgent-lifecycle' && args[2]?.includes('"active":null')) throw new Error('SIMULATED_INTERRUPTION')
+      return originalReplace(...args)
+    }) as typeof fs.replace
+    try { await expect(service.commit(preview.id, { repairLinks: true })).rejects.toThrow('SIMULATED_INTERRUPTION') }
+    finally { fs.replace = originalReplace }
+    expect(await readFile(path.join(root, '归档', '新篇.md'), 'utf8')).toBe('参见 [[归档/新篇]]。')
+    expect(await readFile(path.join(root, '.rgent-lifecycle'), 'utf8')).not.toContain('参见')
+    expect((await service.recover())?.unrepaired).toEqual([])
+    expect(JSON.parse(await readFile(path.join(root, '.rgent-lifecycle'), 'utf8')).active).toBeNull()
+  })
+
+  it('rejects an external edit after a moved note was repaired', async () => {
+    const root = await vault()
+    await mkdir(path.join(root, '归档'))
+    await writeFile(path.join(root, '原篇.md'), '参见 [[原篇]]。')
+    const service = new VaultLifecycle(root)
+    const preview = await service.preview({ kind: 'note', source: '原篇.md', target: '归档/新篇.md' })
+    const fs = secureFsFor(root)
+    const originalReplace = fs.replace.bind(fs)
+    fs.replace = ((...args) => {
+      if (args[0] === '.rgent-lifecycle' && args[2]?.includes('"active":null')) throw new Error('SIMULATED_INTERRUPTION')
+      return originalReplace(...args)
+    }) as typeof fs.replace
+    try { await expect(service.commit(preview.id, { repairLinks: true })).rejects.toThrow('SIMULATED_INTERRUPTION') }
+    finally { fs.replace = originalReplace }
+    await writeFile(path.join(root, '归档', '新篇.md'), '外部修改')
+    await expect(service.recover()).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+    expect((await readFile(path.join(root, '.rgent-lifecycle'), 'utf8'))).toContain('"active":{')
+  })
+
   it('moves nested folder permissions and refuses a note escaping an inherited restriction', async () => {
     const root = await vault()
     await mkdir(path.join(root, '限制'))
@@ -207,5 +258,19 @@ describe('VaultLifecycle', () => {
     await writeFile(path.join(root, '.rgent-lifecycle'), '{"version":1,"active":{"kind":"move","intent":{"source":"../outside.md"}}}')
     const service = new VaultLifecycle(root)
     await expect(service.recover()).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+  })
+
+  it('does not execute a recovery record without a bound source fingerprint', async () => {
+    const root = await vault()
+    await writeFile(path.join(root, '原篇.md'), '正文')
+    const id = secureFsFor(root).resolve('原篇.md').at(-1)!.id
+    await writeFile(path.join(root, '.rgent-lifecycle'), JSON.stringify({ version: 1, active: {
+      kind: 'move', intent: { kind: 'note', source: '原篇.md', target: '新篇.md',
+        moves: [{ from: '原篇.md', to: '新篇.md', id }] },
+      linkRepairs: [], fingerprints: [], permissionBefore: null, permissionAfter: null, repairLinks: false
+    } }))
+    const service = new VaultLifecycle(root)
+    await expect(service.recover()).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+    expect(await readFile(path.join(root, '原篇.md'), 'utf8')).toBe('正文')
   })
 })

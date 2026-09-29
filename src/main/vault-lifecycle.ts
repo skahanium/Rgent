@@ -22,7 +22,7 @@ export type RelocationPreview = {
   linkChanges: LinkChange[]
   permissionChanges: { from: string; to: string; tier: string }[]
 }
-type Fingerprint = { relPath: string; id: string; kind: string; hash?: string }
+type Fingerprint = { relPath: string; id: string; kind: string; hash?: string; repairedHash?: string }
 type PendingMove = {
   kind: 'move'
   intent: Pick<RelocationPreview, 'kind' | 'source' | 'target' | 'moves'>
@@ -144,11 +144,18 @@ export class VaultLifecycle {
           JSON.stringify(fresh.linkChanges) !== JSON.stringify(prepared.view.linkChanges)) throw new Error('STALE_PREVIEW')
       const journal = this.loadJournal()
       if (journal.active) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      const fingerprints = prepared.fingerprints.map((item) => {
+        const link = options.repairLinks ? prepared.view.linkChanges.find((change) => change.relPath === item.relPath) : undefined
+        if (!link) return item
+        const source = secureFsFor(this.root).readText(item.relPath)
+        if (revisionOf(source) !== link.expectedRevision) throw new Error('STALE_PREVIEW')
+        return { ...item, repairedHash: hash(Buffer.from(applyChanges(source, link.changes))) }
+      })
       const active: PendingMove = {
         kind: 'move',
         intent: { kind: prepared.view.kind, source: prepared.view.source, target: prepared.view.target, moves: prepared.view.moves },
         linkRepairs: prepared.view.linkChanges.map(({ relPath, newPath, expectedRevision }) => ({ relPath, newPath, expectedRevision })),
-        fingerprints: prepared.fingerprints,
+        fingerprints,
         permissionBefore: prepared.permissionBefore, permissionAfter: prepared.permissionAfter,
         repairLinks: options.repairLinks
       }
@@ -168,20 +175,31 @@ export class VaultLifecycle {
 
   private async recoverMove(active: PendingMove): Promise<{ moved: RelocationMove[]; unrepaired: string[] }> {
     const fs = secureFsFor(this.root)
+    const matchesRecordedState = (item: Fingerprint, path: string): boolean => {
+      const current = fs.resolve(path).at(-1)
+      if (!current || current.kind !== item.kind) return false
+      if (!item.hash) return current.id === item.id
+      const currentHash = hash(fs.readBytes(path))
+      if (current.id === item.id) return currentHash === item.hash || currentHash === item.repairedHash
+      // Atomic link repair replaces the moved note's inode. Its exact new bytes
+      // were sealed in the journal before the structural move began.
+      return path === mapped(item.relPath, active.intent.moves) && currentHash === item.repairedHash
+    }
     for (const item of active.fingerprints) {
       const relocated = mapped(item.relPath, active.intent.moves)
       const path = this.idOrNull(item.relPath) === item.id ? item.relPath : relocated
       try {
-        const current = fs.resolve(path).at(-1)
-        if (!current || current.id !== item.id || current.kind !== item.kind ||
-            (item.hash && hash(fs.readBytes(path)) !== item.hash)) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+        if (!matchesRecordedState(item, path)) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
       } catch { throw new Error('LIFECYCLE_RECOVERY_REQUIRED') }
     }
     for (const move of active.intent.moves) {
       const atSource = this.idOrNull(move.from)
       const atTarget = this.idOrNull(move.to)
       if (atSource === move.id && atTarget === null) fs.move(move.from, move.to, move.id)
-      else if (atSource !== null || atTarget !== move.id) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      else if (atSource !== null || (atTarget !== move.id &&
+        !active.fingerprints.some((item) => item.relPath === move.from && matchesRecordedState(item, move.to)))) {
+        throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      }
     }
     // A native rename can race an external replacement after its last path check.
     // Check once before touching policy, and again before clearing recovery state.
@@ -189,9 +207,7 @@ export class VaultLifecycle {
       for (const item of active.fingerprints) {
         const relocated = mapped(item.relPath, active.intent.moves)
         try {
-          const current = fs.resolve(relocated).at(-1)
-          if (!current || current.id !== item.id || current.kind !== item.kind ||
-              (item.hash && hash(fs.readBytes(relocated)) !== item.hash)) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+          if (!matchesRecordedState(item, relocated)) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
         } catch { throw new Error('LIFECYCLE_RECOVERY_REQUIRED') }
       }
       if (active.intent.moves.some((move) => this.idOrNull(move.from) === move.id)) {
@@ -283,6 +299,8 @@ function validPending(value: unknown): value is PendingMove {
   if (item.kind !== 'move' || !intent || (intent.kind !== 'note' && intent.kind !== 'folder') ||
       typeof intent.source !== 'string' || !validPath(intent.source) ||
       typeof intent.target !== 'string' || !validPath(intent.target) ||
+      intent.source === intent.target ||
+      (intent.kind === 'folder' && samePathOrChild(intent.target, intent.source)) ||
       !Array.isArray(intent.moves) || intent.moves.length < 1 || intent.moves.length > 2 ||
       intent.moves[0]?.from !== intent.source || intent.moves[0]?.to !== intent.target ||
       (intent.kind === 'folder' && intent.moves.length !== 1) ||
@@ -294,11 +312,19 @@ function validPending(value: unknown): value is PendingMove {
   if (!Array.isArray(item.fingerprints) || !item.fingerprints.every((part) => part &&
       validPath(part.relPath) && typeof part.id === 'string' &&
       (part.kind === 'dir' || part.kind === 'file') &&
-      (part.hash === undefined || typeof part.hash === 'string'))) return false
+      (part.kind === 'file' ? typeof part.hash === 'string' && /^[a-f0-9]{64}$/.test(part.hash) : part.hash === undefined) &&
+      (part.repairedHash === undefined || (part.kind === 'file' && /^[a-f0-9]{64}$/.test(part.repairedHash))))) return false
+  const fingerprints = item.fingerprints as Fingerprint[]
+  if (new Set(fingerprints.map((part) => part.relPath)).size !== fingerprints.length ||
+      !intent.moves.every((move, index) => fingerprints.some((part) => part.relPath === move.from &&
+        part.id === move.id && part.kind === (index === 0 && intent.kind === 'note' ? 'file' : 'dir')))) return false
   if (!Array.isArray(item.linkRepairs) || !item.linkRepairs.every((link) => link &&
       validPath(link.relPath) && validPath(link.newPath) && isNotePath(link.relPath) &&
       isNotePath(link.newPath) && link.newPath === mapped(link.relPath, intent.moves) &&
       typeof link.expectedRevision === 'string' && /^[a-f0-9]{64}$/.test(link.expectedRevision))) return false
+  if (fingerprints.some((part) => part.repairedHash &&
+      (!item.repairLinks || mapped(part.relPath, intent.moves) === part.relPath ||
+        !item.linkRepairs?.some((link) => link.relPath === part.relPath)))) return false
   return (item.permissionBefore === null || typeof item.permissionBefore === 'string') &&
     (item.permissionAfter === null || typeof item.permissionAfter === 'string') &&
     typeof item.repairLinks === 'boolean'
