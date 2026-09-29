@@ -523,7 +523,7 @@ void Create(VaultHandle* root, const std::string& relative_file) {
   if (!FlushFileBuffers(file.get())) WinError("FLUSH");
 }
 
-void CreateDirectory(VaultHandle* root, const std::string& relative_dir) {
+void CreateVaultDirectory(VaultHandle* root, const std::string& relative_dir) {
   const auto parts = Parts(relative_dir);
   auto destination = WalkDirectories(root, parts, parts.size() - 1);
   (void)destination;

@@ -345,7 +345,7 @@ void Create(VaultHandle* root, const std::string& relative_file) {
   CheckOpen(file.value);
 }
 
-void CreateDirectory(VaultHandle* root, const std::string& relative_dir) {
+void CreateVaultDirectory(VaultHandle* root, const std::string& relative_dir) {
   const auto parts = Parts(relative_dir);
   Fd root_fd = DupRoot(root);
   // The final rename is root-relative and rejects links in every component.

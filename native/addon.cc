@@ -194,7 +194,7 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
     napi_value args[2];
     Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
     if (argc != 2) throw std::runtime_error("BAD_ARGS");
-    rgent::CreateDirectory(Root(env, args[0]), String(env, args[1]));
+    rgent::CreateVaultDirectory(Root(env, args[0]), String(env, args[1]));
     napi_value result;
     Check(env, napi_get_undefined(env, &result));
     return result;
