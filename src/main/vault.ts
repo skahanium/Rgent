@@ -2,7 +2,9 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { dialog, type BrowserWindow } from 'electron'
 import type { BacklinkGroup, NotePayload, NoteSnapshot, PermissionEntry, PermissionState, PermissionTier, SearchHit, TreeEntry, VaultState } from '../shared/ipc.ts'
-import { createNote, listVaultTree, parseStoredVault, readNoteSnapshot, serializeStoredVault, writeNote } from './notes-fs.ts'
+import { createFolder, createNote, listVaultTree, parseStoredVault, readNoteSnapshot, serializeStoredVault, writeNote } from './notes-fs.ts'
+import { VaultMutationQueue } from './vault-mutation-queue.ts'
+import { VaultLifecycle, type RelocationPreview, type RelocationRequest, type RelocationMove } from './vault-lifecycle.ts'
 import { isOwnEcho, type RecentWrite } from './echo.ts'
 import { isNotePath } from './paths.ts'
 import { effectivePermissionEntries, loadPermissions, setPermission as savePermission, tierFor } from './permissions.ts'
@@ -11,6 +13,10 @@ import { VaultIndex } from './vault-index.ts'
 import { watchVault } from './watch.ts'
 
 export class VaultSession {
+  private readonly mutations = new VaultMutationQueue()
+  private lifecycle: VaultLifecycle | null = null
+  private lifecycleReady: Promise<void> = Promise.resolve()
+  private lifecycleError: Error | null = null
   root: string | null = null
   private stopWatch: (() => void) | null = null
   private lastWrites = new Map<string, RecentWrite>()
@@ -56,6 +62,7 @@ export class VaultSession {
     if (!isUsableDir(chosen)) return { status: 'needs-pick', reason: 'missing' }
     const previous = this.root
     if (previous && previous !== chosen) await this.beforeChange(previous)
+    await this.mutations.idle()
     writeFileSync(this.stateFile(), serializeStoredVault(chosen), 'utf8')
     this.attach(chosen)
     return {
@@ -89,7 +96,11 @@ export class VaultSession {
 
   async setPermission(relPath: string, tier: PermissionTier): Promise<PermissionState> {
     if (!this.root) throw new Error('NO_VAULT')
-    const state = await savePermission(this.root, relPath, tier)
+    const root = this.root
+    const state = await this.mutations.run(async () => {
+      if (this.root !== root) throw new Error('VAULT_CHANGED')
+      return savePermission(root, relPath, tier)
+    })
     this.emit('tree:changed')
     return state
   }
@@ -101,17 +112,57 @@ export class VaultSession {
 
   async write(relPath: string, content: string, expectedRevision: string): Promise<string> {
     if (!this.root) throw new Error('NO_VAULT')
-    const revision = await writeNote(this.root, relPath, content, expectedRevision)
+    const root = this.root
+    const revision = await this.mutations.run(async () => {
+      if (this.root !== root) throw new Error('VAULT_CHANGED')
+      return writeNote(root, relPath, content, expectedRevision)
+    })
     this.lastWrites.set(relPath, { revision, at: Date.now() })
     this.index.markDirty()
     return revision
   }
 
-  async create(name: string): Promise<string> {
+  async create(name: string, parent = ''): Promise<string> {
     if (!this.root) throw new Error('NO_VAULT')
-    const relPath = await createNote(this.root, name)
+    const root = this.root
+    const relPath = await this.mutations.run(async () => {
+      if (this.root !== root) throw new Error('VAULT_CHANGED')
+      return createNote(root, name, parent)
+    })
     this.index.markDirty()
     return relPath
+  }
+
+  async createFolder(name: string, parent = ''): Promise<string> {
+    if (!this.root) throw new Error('NO_VAULT')
+    const root = this.root
+    const relPath = await this.mutations.run(async () => {
+      if (this.root !== root) throw new Error('VAULT_CHANGED')
+      return createFolder(root, name, parent)
+    })
+    this.index.markDirty()
+    this.emit('tree:changed')
+    return relPath
+  }
+
+  async previewRelocation(request: RelocationRequest): Promise<RelocationPreview> {
+    await this.lifecycleReady
+    if (this.lifecycleError) throw this.lifecycleError
+    if (!this.lifecycle) throw new Error('NO_VAULT')
+    return this.lifecycle.preview(request)
+  }
+
+  relocationPreviewById(id: string): RelocationPreview | null { return this.lifecycle?.peek(id) ?? null }
+
+  async commitRelocation(id: string, repairLinks: boolean): Promise<{ moved: RelocationMove[]; unrepaired: string[] }> {
+    await this.lifecycleReady
+    if (this.lifecycleError) throw this.lifecycleError
+    if (!this.lifecycle) throw new Error('NO_VAULT')
+    const result = await this.lifecycle.commit(id, { repairLinks })
+    this.index.markDirty()
+    this.emit('note:relocated', { moved: result.moved })
+    this.emit('tree:changed')
+    return result
   }
 
   async backlinks(relPath: string): Promise<BacklinkGroup[]> {
@@ -132,6 +183,8 @@ export class VaultSession {
     this.changedNotes.clear()
     if (this.root) closeSecureFs(this.root)
     this.root = null
+    this.lifecycle = null
+    this.lifecycleError = null
     this.index.reset()
   }
 
@@ -139,6 +192,13 @@ export class VaultSession {
     this.stopWatch?.()
     if (this.root) closeSecureFs(this.root)
     this.root = path.resolve(root)
+    this.lifecycle = new VaultLifecycle(this.root, this.mutations)
+    this.lifecycleError = null
+    this.lifecycleReady = this.lifecycle.recover().then((result) => {
+      if (result) { this.index.markDirty(); this.emit('note:relocated', { moved: result.moved }); this.emit('tree:changed') }
+    }).catch((error: unknown) => {
+      this.lifecycleError = error instanceof Error ? error : new Error('LIFECYCLE_RECOVERY_REQUIRED')
+    })
     // 换库必须清索引，否则新库会看到旧库的反链。
     this.index.reset()
     this.stopWatch = watchVault(this.root, (relPath) => this.onFsEvent(relPath))

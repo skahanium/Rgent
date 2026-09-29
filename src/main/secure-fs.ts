@@ -14,6 +14,8 @@ type NativeBinding = {
   read(root: unknown, relPath: string): Buffer
   replace(root: unknown, relPath: string, expected: Buffer | null, content: Buffer): void
   create(root: unknown, relPath: string): void
+  createDirectory(root: unknown, relPath: string): void
+  move(root: unknown, source: string, target: string, expectedId: string): void
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -51,6 +53,14 @@ export class SecureVaultFs {
 
   create(relPath: string): void {
     binding.create(this.handle, relPath)
+  }
+
+  createDirectory(relPath: string): void {
+    binding.createDirectory(this.handle, relPath)
+  }
+
+  move(source: string, target: string, expectedId: string): void {
+    binding.move(this.handle, source, target, expectedId)
   }
 
   close(): void {

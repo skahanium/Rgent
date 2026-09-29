@@ -47,6 +47,7 @@ export function tierFor(relPath: string, entries: readonly PermissionEntry[]): P
 /** 未来每个模型出口在使用内容或工具前调用；不缓存，也不降级为默认档。 */
 export async function modelTierFor(root: string, relPath: string): Promise<Exclude<PermissionTier, 'forbidden'>> {
   if (!validRelPath(relPath)) throw new Error('BAD_PATH')
+  requireStableLifecycle(root)
   const state = await loadPermissions(root)
   if (state.status === 'invalid') throw new Error('PERMISSIONS_INVALID')
   const fs = secureFsFor(root)
@@ -67,7 +68,24 @@ export async function modelTierFor(root: string, relPath: string): Promise<Exclu
   if (!sameComponents(target, fs.resolve(relPath))) throw new Error('PERMISSIONS_INVALID')
   const tier = tierFor(canonical, effectivePermissionEntries(root, state.entries))
   if (tier === 'forbidden') throw new Error('FORBIDDEN')
+  requireStableLifecycle(root)
   return tier
+}
+
+function requireStableLifecycle(root: string): void {
+  let raw: string
+  try { raw = secureFsFor(root).readText('.rgent-lifecycle') }
+  catch (error) {
+    if (error instanceof Error && error.message === 'ENOENT') return
+    throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+  }
+  try {
+    const state: unknown = JSON.parse(raw)
+    if (!state || typeof state !== 'object' || (state as { version?: unknown }).version !== 1 ||
+        !('active' in state) || (state as { active: unknown }).active !== null) {
+      throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+    }
+  } catch { throw new Error('LIFECYCLE_RECOVERY_REQUIRED') }
 }
 
 export async function loadPermissions(root: string): Promise<PermissionState> {

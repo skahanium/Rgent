@@ -114,16 +114,39 @@ async function writeNoteNow(root: string, relPath: string, content: string, expe
   return revisionOf(content)
 }
 
-export async function createNote(root: string, name: string): Promise<string> {
+function verifiedParent(root: string, parent: string): void {
+  if (!parent) return
+  mustResolve(root, parent)
+  const resolved = secureFsFor(root).resolve(parent)
+  if (resolved.at(-1)?.kind !== 'dir') throw new VaultPathError('目标不是文件夹')
+}
+
+export async function createNote(root: string, name: string, parent = ''): Promise<string> {
   const fileName = sanitizeNoteName(name)
-  mustResolve(root, fileName)
+  verifiedParent(root, parent)
+  const relPath = parent ? `${parent}/${fileName}` : fileName
+  mustResolve(root, relPath)
   try {
-    secureFsFor(root).create(fileName)
+    secureFsFor(root).create(relPath)
   } catch (err) {
     if (err instanceof Error && err.message === 'EEXIST') throw new VaultPathError('已有同名笔记')
     throw err
   }
-  return fileName
+  return relPath
+}
+
+export async function createFolder(root: string, name: string, parent = ''): Promise<string> {
+  verifiedParent(root, parent)
+  const folderName = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/^\.+/u, '_') || '未命名文件夹'
+  const relPath = parent ? `${parent}/${folderName}` : folderName
+  mustResolve(root, relPath)
+  try {
+    secureFsFor(root).createDirectory(relPath)
+  } catch (err) {
+    if (err instanceof Error && err.message === 'EEXIST') throw new VaultPathError('已有同名文件夹')
+    throw err
+  }
+  return relPath
 }
 
 export type StoredVault = { path: string }

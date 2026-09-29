@@ -188,6 +188,32 @@ napi_value Create(napi_env env, napi_callback_info info) {
   });
 }
 
+napi_value CreateDirectory(napi_env env, napi_callback_info info) {
+  return Invoke(env, [&] {
+    size_t argc = 2;
+    napi_value args[2];
+    Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+    if (argc != 2) throw std::runtime_error("BAD_ARGS");
+    rgent::CreateDirectory(Root(env, args[0]), String(env, args[1]));
+    napi_value result;
+    Check(env, napi_get_undefined(env, &result));
+    return result;
+  });
+}
+
+napi_value Move(napi_env env, napi_callback_info info) {
+  return Invoke(env, [&] {
+    size_t argc = 4;
+    napi_value args[4];
+    Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+    if (argc != 4) throw std::runtime_error("BAD_ARGS");
+    rgent::Move(Root(env, args[0]), String(env, args[1]), String(env, args[2]), String(env, args[3]));
+    napi_value result;
+    Check(env, napi_get_undefined(env, &result));
+    return result;
+  });
+}
+
 napi_value Init(napi_env env, napi_value exports) {
   const napi_property_descriptor properties[] = {
     {"openRoot", nullptr, OpenRoot, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -196,7 +222,9 @@ napi_value Init(napi_env env, napi_value exports) {
     {"resolve", nullptr, Resolve, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"read", nullptr, Read, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"replace", nullptr, Replace, nullptr, nullptr, nullptr, napi_default, nullptr},
-    {"create", nullptr, Create, nullptr, nullptr, nullptr, napi_default, nullptr}
+    {"create", nullptr, Create, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"createDirectory", nullptr, CreateDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"move", nullptr, Move, nullptr, nullptr, nullptr, napi_default, nullptr}
   };
   Check(env, napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties));
   return exports;

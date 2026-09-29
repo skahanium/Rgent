@@ -35,6 +35,7 @@ constexpr ULONG kOpen = 1;
 constexpr ULONG kCreate = 2;
 constexpr ULONG kSynchronous = 0x20;
 constexpr ULONG kNonDirectory = 0x40;
+constexpr ULONG kDirectoryFile = 0x1;
 constexpr ULONG kOpenReparsePoint = 0x00200000;
 constexpr DWORD kRenameReplace = 0x1;
 constexpr DWORD kRenamePosix = 0x2;
@@ -520,6 +521,66 @@ void Create(VaultHandle* root, const std::string& relative_file) {
                         kCreate, kNonDirectory, kShareAll);
   RequireKind(file.get(), "file");
   if (!FlushFileBuffers(file.get())) WinError("FLUSH");
+}
+
+void CreateDirectory(VaultHandle* root, const std::string& relative_dir) {
+  const auto parts = Parts(relative_dir);
+  auto destination = WalkDirectories(root, parts, parts.size() - 1);
+  (void)destination;
+  UniqueHandle temporary;
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    try {
+      temporary = OpenChild(RootHandle(root), TemporaryName(),
+                            kDirectoryAccess | DELETE, kCreate, kDirectoryFile, kShareAll);
+      break;
+    } catch (const std::runtime_error& error) {
+      if (std::string(error.what()) != "EEXIST") throw;
+    }
+  }
+  if (!temporary.valid()) Fail("TEMP_COLLISION");
+  bool moved = false;
+  try {
+    auto fresh = WalkDirectories(root, parts, parts.size() - 1);
+    if (OpenMaybe(fresh.current, parts.back(), FILE_READ_ATTRIBUTES | SYNCHRONIZE, 0, kShareAll).valid())
+      Fail("EEXIST");
+    RenameOpenedFile(temporary.get(), fresh.current, parts.back(), false);
+    moved = true;
+  } catch (...) {
+    if (!moved) {
+      try { DeleteOpenedFile(temporary.get()); } catch (...) { /* Preserve the original error. */ }
+    }
+    throw;
+  }
+}
+
+void Move(VaultHandle* root, const std::string& source, const std::string& target,
+          const std::string& expected_id) {
+  const auto source_parts = Parts(source);
+  const auto target_parts = Parts(target);
+  if (source == target) Fail("BAD_PATH");
+  auto source_parent = WalkDirectories(root, source_parts, source_parts.size() - 1);
+  auto item = OpenChild(source_parent.current, source_parts.back(),
+                        DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                        kOpen, 0, kShareAll);
+  if (Kind(item.get()) == "link") Fail("UNSAFE_PATH");
+  if (IdString(Identity(item.get())) != expected_id) Fail("PATH_CHANGED");
+  auto target_parent = WalkDirectories(root, target_parts, target_parts.size() - 1);
+  if (OpenMaybe(target_parent.current, target_parts.back(), FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                0, kShareAll).valid()) Fail("EEXIST");
+  auto fresh_source = WalkDirectories(root, source_parts, source_parts.size() - 1);
+  auto fresh_item = OpenChild(fresh_source.current, source_parts.back(),
+                              FILE_READ_ATTRIBUTES | SYNCHRONIZE, kOpen, 0, kShareAll);
+  if (Kind(fresh_item.get()) == "link" || IdString(Identity(fresh_item.get())) != expected_id)
+    Fail("PATH_CHANGED");
+  auto fresh_target = WalkDirectories(root, target_parts, target_parts.size() - 1);
+  const auto old_parent_id = Identity(target_parent.current);
+  const auto new_parent_id = Identity(fresh_target.current);
+  if (old_parent_id.VolumeSerialNumber != new_parent_id.VolumeSerialNumber ||
+      !SameId(old_parent_id.FileId, new_parent_id.FileId)) Fail("PATH_CHANGED");
+  if (OpenMaybe(fresh_target.current, target_parts.back(), FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                0, kShareAll).valid()) Fail("EEXIST");
+  RenameOpenedFile(item.get(), fresh_target.current, target_parts.back(), false);
+  if (Resolve(root, target).back().id != expected_id) Fail("PATH_CHANGED");
 }
 
 } // namespace rgent

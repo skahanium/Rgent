@@ -37,6 +37,13 @@ describe('permission policy', () => {
     expect((await loadPermissions(root)).status).toBe('invalid')
   })
 
+  it('blocks model access while a structural operation has an unfinished journal', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-policy-'))
+    await writeFile(path.join(root, 'a.md'), 'text')
+    await writeFile(path.join(root, '.rgent-lifecycle'), '{"version":1,"active":{"kind":"move"}}')
+    await expect(modelTierFor(root, 'a.md')).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+  })
+
   it('uses the most specific direct rule and applies note rules to same-name attachments', () => {
     const entries = [
       { relPath: '工作', tier: 'forbidden' as const },

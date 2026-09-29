@@ -47,11 +47,15 @@ const SYSTEM_RULES = [
 export class AgentHost {
   private readonly tasks = new AgentTasks()
   private readonly launching = new Set<string>()
+  private readonly launchWaiters = new Set<() => void>()
   private readonly pending = new Map<string, { root: string; relPath: string; source: Parameters<typeof appendLedgerChapter>[1]; persisted: { answer: string } }>()
 
   constructor(private readonly deps: HostDependencies) {}
 
   active() { return this.tasks.active() }
+  async whenLaunchesSettled(): Promise<void> {
+    while (this.launching.size) await new Promise<void>((resolve) => this.launchWaiters.add(resolve))
+  }
   hasPending(root?: string): boolean { return [...this.pending.values()].some((item) => !root || item.root === root) }
   discardPending(root?: string): void {
     for (const [id, item] of this.pending) if (!root || item.root === root) this.pending.delete(id)
@@ -181,6 +185,10 @@ export class AgentHost {
       return result
     } finally {
       this.launching.delete(key)
+      if (this.launching.size === 0) {
+        for (const notify of this.launchWaiters) notify()
+        this.launchWaiters.clear()
+      }
     }
   }
 

@@ -37,5 +37,8 @@ std::string ReadBytes(VaultHandle* root, const std::string& relative_file);
 void Replace(VaultHandle* root, const std::string& relative_file,
              const std::optional<std::string>& expected, const std::string& content);
 void Create(VaultHandle* root, const std::string& relative_file);
+void CreateDirectory(VaultHandle* root, const std::string& relative_dir);
+void Move(VaultHandle* root, const std::string& source, const std::string& target,
+          const std::string& expected_id);
 
 } // namespace rgent

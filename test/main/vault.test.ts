@@ -2,7 +2,7 @@ import { chmod, stat, symlink, mkdtemp, mkdir, readFile, writeFile } from 'node:
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { createNote, listVaultTree, parseStoredVault, readNote, readNoteSnapshot, serializeStoredVault, writeNote } from '../../src/main/notes-fs.ts'
+import { createFolder, createNote, listVaultTree, parseStoredVault, readNote, readNoteSnapshot, serializeStoredVault, writeNote } from '../../src/main/notes-fs.ts'
 import { isVaultImagePath, readVaultMedia, resolveInVault, sanitizeNoteName, vaultMediaPath } from '../../src/main/paths.ts'
 import { collectNotePaths, collectRelPaths } from '../../src/renderer/src/tree.ts'
 import { joinVaultRel, parseVaultMediaUrl, vaultMediaUrl } from '../../src/shared/vault-rel.ts'
@@ -117,6 +117,15 @@ describe('notes-fs', () => {
     await writeNote(root, rel, '', revision)
     expect(await readNote(root, rel)).toBe('')
     await expect(createNote(root, '初稿')).rejects.toThrow(/同名/)
+  })
+
+  it('creates notes and folders under an existing directory', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    await mkdir(path.join(root, '工作'))
+    expect(await createNote(root, '计划', '工作')).toBe('工作/计划.md')
+    expect(await createFolder(root, '资料', '工作')).toBe('工作/资料')
+    expect((await listVaultTree(root))[0]?.children?.map((entry) => entry.name)).toEqual(['资料', '计划.md'])
+    await expect(createNote(root, '越界', '../外部')).rejects.toThrow()
   })
 
   it('keeps the note mode and leaves no temporary file behind when replacing', async () => {

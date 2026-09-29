@@ -345,6 +345,66 @@ void Create(VaultHandle* root, const std::string& relative_file) {
   CheckOpen(file.value);
 }
 
+void CreateDirectory(VaultHandle* root, const std::string& relative_dir) {
+  const auto parts = Parts(relative_dir);
+  Fd root_fd = DupRoot(root);
+  // The final rename is root-relative and rejects links in every component.
+  // Staging under the pinned root avoids mkdirat on a parent moved outside it.
+  Fd parent = Dir(root, parts, parts.size() - 1);
+  (void)parent;
+  std::string temporary;
+  bool made = false;
+  for (int attempt = 0; attempt < 10; ++attempt) {
+    temporary = TemporaryName();
+    if (mkdirat(root_fd.value, temporary.c_str(), 0700) == 0) { made = true; break; }
+    if (errno != EEXIST) Fail("IO_ERROR");
+  }
+  if (!made) Fail("TEMP_COLLISION");
+  try {
+#ifdef __APPLE__
+    if (renameatx_np(root_fd.value, temporary.c_str(), root_fd.value,
+                     relative_dir.c_str(), RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH | RENAME_EXCL) != 0) {
+      if (errno == EEXIST) Fail("EEXIST");
+      Fail("IO_ERROR");
+    }
+#else
+    Fail("UNSUPPORTED_PLATFORM");
+#endif
+  } catch (...) {
+    (void)unlinkat(root_fd.value, temporary.c_str(), AT_REMOVEDIR);
+    throw;
+  }
+  (void)fsync(root_fd.value);
+}
+
+void Move(VaultHandle* root, const std::string& source, const std::string& target,
+          const std::string& expected_id) {
+  const auto source_parts = Parts(source);
+  const auto target_parts = Parts(target);
+  if (source == target) Fail("BAD_PATH");
+  const auto before = Resolve(root, source);
+  if (before.back().id != expected_id) Fail("PATH_CHANGED");
+  Fd source_parent = Dir(root, source_parts, source_parts.size() - 1);
+  Fd target_parent = Dir(root, target_parts, target_parts.size() - 1);
+  Fd root_fd = DupRoot(root);
+  if (Resolve(root, source).back().id != expected_id) Fail("PATH_CHANGED");
+#ifdef __APPLE__
+  if (renameatx_np(root_fd.value, source.c_str(), root_fd.value, target.c_str(),
+                   RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH | RENAME_EXCL) != 0) {
+    if (errno == EEXIST) Fail("EEXIST");
+    if (errno == ELOOP || errno == ENOTDIR) Fail("UNSAFE_PATH");
+    Fail("IO_ERROR");
+  }
+  // The source pathname may have changed after the final preflight. A successful
+  // rename is not proof that the object named by expected_id was moved.
+  if (Resolve(root, target).back().id != expected_id) Fail("PATH_CHANGED");
+#else
+  Fail("UNSUPPORTED_PLATFORM");
+#endif
+  (void)fsync(source_parent.value);
+  (void)fsync(target_parent.value);
+}
+
 } // namespace rgent
 
 #endif
