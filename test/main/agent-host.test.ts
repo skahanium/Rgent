@@ -5,7 +5,7 @@ import { partitionSource } from '../../src/markdown/partition.ts'
 function harness(stream: (signal: AbortSignal, prompt: string) => AsyncIterable<string>, initial = '前言\n\n/写个回答\n\n后文\n') {
   let content = initial
   let revision = 1
-  let policy: 'reference' | 'forbidden' = 'reference'
+  let policy: 'reference' | 'forbidden' | 'invalid' = 'reference'
   let failLedgerOnce = false
   const events: unknown[] = []
   const host = new AgentHost({
@@ -21,7 +21,11 @@ function harness(stream: (signal: AbortSignal, prompt: string) => AsyncIterable<
       revision += 1
       return String(revision)
     },
-    tier: async () => { if (policy === 'forbidden') throw new Error('FORBIDDEN'); return 'reference' },
+    tier: async () => {
+      if (policy === 'forbidden') throw new Error('FORBIDDEN')
+      if (policy === 'invalid') throw new Error('PERMISSIONS_INVALID')
+      return 'reference'
+    },
     credential: () => ({ provider: 'custom', baseURL: 'http://127.0.0.1:1234/v1', modelId: 'test', contextTokens: 10000, apiKey: 'secret' }),
     limits: () => ({ seconds: 30, steps: 4, tools: 0 }),
     stream: (input, signal) => stream(signal, input.prompt),
@@ -237,6 +241,24 @@ describe('Host minimal loop', () => {
     await app.host.resolvePending({ id: task.id, decision: 'disk', expectedRevision: preview.revision })
     expect(app.source()).toBe(before)
     expect(app.host.hasPending()).toBe(false)
+  })
+
+  it('keeps the unwritten answer when permission state cannot be verified', async () => {
+    const app = harness(async function* () { yield '回答' })
+    app.failLedgerOnce()
+    const source = app.source()
+    const start = source.indexOf('/')
+    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    await expect(task.done).rejects.toThrow('IO_ERROR')
+    app.setPolicy('invalid')
+    const preview = await app.host.pendingPreview(task.id)
+    const before = app.source()
+    await expect(app.host.resolvePending({ id: task.id, decision: 'disk', expectedRevision: preview.revision })).rejects.toThrow('PERMISSIONS_INVALID')
+    expect(app.source()).toBe(before)
+    expect(app.host.pendingViews()).toEqual([{ id: task.id, relPath: 'a.md', answer: '回答', reason: 'IO_ERROR' }])
+    app.setPolicy('reference')
+    await app.host.resolvePending({ id: task.id, decision: 'retry' })
+    expect(app.source().match(/<!-- rgent:ledger-task:v1/g)).toHaveLength(1)
   })
 
   it('does not start a later task in a note with an unsaved prior answer', async () => {

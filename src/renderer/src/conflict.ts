@@ -108,8 +108,8 @@ export function promptConflict(input: ConflictInput): Promise<ConflictChoice> {
       note.className = 'conflict-note'
       note.textContent = hint
       button.addEventListener('click', () => {
-        overlay.close()
         finish(value)
+        overlay.close()
       })
       wrapper.append(button, note)
       return wrapper

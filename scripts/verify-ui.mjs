@@ -1086,20 +1086,21 @@ async function main() {
     writeFileSync(modelFile, readFileSync(modelFile, 'utf8').replace('受控回答第一句。', '磁盘上的另一份回答。'))
     await openRecovery()
     await page.eval(`document.querySelector('.pending-recovery [data-action="compare"]')?.click()`)
-    check('外部改动 AI 块后展示两份只读正文', await waitFor(page, `document.querySelector('.conflict[open]')?.textContent.includes('磁盘上的另一份回答。') && document.querySelector('.conflict[open]')?.textContent.includes('受控回答第一句。第二句。')`))
+    check('外部改动 AI 块后展示两份只读正文', await waitFor(page, `document.querySelector('.conflict[open]')?.textContent.includes('选择这次生成回答的去留') && document.querySelector('.conflict[open]')?.textContent.includes('磁盘上的另一份回答。') && document.querySelector('.conflict[open]')?.textContent.includes('受控回答第一句。第二句。')`))
     writeFileSync(modelFile, readFileSync(modelFile, 'utf8').replace('<!-- rgent:prompt:v1', '预览后新增的人工正文。\n\n<!-- rgent:prompt:v1'))
-    await page.eval(`document.querySelector('.conflict [data-action="window"]')?.click()`)
+    await page.eval(`document.querySelector('.conflict[open] [data-action="window"]')?.click()`)
     check('预览后磁盘再变化会重新预览', await waitFor(page, `!!document.querySelector('.pending-recovery[open]')`, 8000))
     await page.eval(`document.querySelector('.pending-recovery [data-action="compare"]')?.click()`)
-    if (!await waitFor(page, `!!document.querySelector('.conflict[open]')`)) throw new Error('第二次双稿预览未出现')
-    await page.eval(`document.querySelector('.conflict [data-action="window"]')?.click()`)
+    if (!await waitFor(page, `document.querySelector('.conflict[open]')?.textContent.includes('选择这次生成回答的去留')`)) throw new Error('第二次双稿预览未出现')
+    // The first dialog can remain in the DOM until its asynchronous close event.
+    await page.eval(`document.querySelector('.conflict[open] [data-action="window"]')?.click()`)
     const modelAdopted = await waitFor(page, `(async () => {
       const source = (await window.rgent.noteRead('Host 写回冲突.md')).content
       return source.includes('受控回答第一句。第二句。') && !source.includes('磁盘上的另一份回答。') &&
         source.includes('预览后新增的人工正文。') && (source.match(/<!-- rgent:ledger-task:v1 id=/g) || []).length === 1 &&
         !document.querySelector('.status-pending-open')
     })()`, 12000)
-    check('采用模型回答仅替换任务 AI 块并保留预览后的人工正文', modelAdopted, modelAdopted ? '' : await page.eval(`(async () => JSON.stringify({ source: (await window.rgent.noteRead('Host 写回冲突.md')).content, pending: await window.rgent.agentPending(), dialogs: [...document.querySelectorAll('dialog[open]')].map((d) => d.className), notice: document.querySelector('.status-host-notice')?.textContent }))()`))
+    check('采用模型回答仅替换任务 AI 块并保留预览后的人工正文', modelAdopted, modelAdopted ? '' : await page.eval(`(async () => JSON.stringify({ source: (await window.rgent.noteRead('Host 写回冲突.md')).content, pending: await window.rgent.agentPending(), dialogs: [...document.querySelectorAll('dialog[open]')].map((d) => ({ className: d.className, heading: d.querySelector('h2')?.textContent, buttons: [...d.querySelectorAll('button')].map((b) => b.textContent) })), notice: document.querySelector('.status-host-notice')?.textContent, dirty: document.querySelector('.tab[aria-selected="true"]')?.closest('.tab-wrap')?.className }))()`))
     if (!modelAdopted) throw new Error('模型回答采用未完成')
 
     const missingFile = await startRecoveryRun('Host 写回丢标记', '写回丢标记')

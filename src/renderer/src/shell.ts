@@ -144,6 +144,7 @@ export async function start(root: HTMLElement): Promise<void> {
   let countedWords = 0
   const activeTasks = new Map<string, AgentTaskView>()
   const pendingTasks = new Map<string, AgentPendingView>()
+  let pendingRefresh = 0
   const endedTaskIds = new Set<string>()
   const hostRevisions = new Map<string, string>()
   let taskOverlay: ReturnType<typeof openOverlay> | null = null
@@ -252,8 +253,9 @@ export async function start(root: HTMLElement): Promise<void> {
 
   async function refreshPendingTasks(): Promise<void> {
     const epoch = vaultEpoch
+    const refresh = ++pendingRefresh
     const tasks = await window.rgent.agentPending().catch(() => null)
-    if (!tasks || epoch !== vaultEpoch) return
+    if (!tasks || epoch !== vaultEpoch || refresh !== pendingRefresh) return
     pendingTasks.clear()
     for (const task of tasks) pendingTasks.set(task.id, task)
     updateStatus()

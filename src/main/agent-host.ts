@@ -107,7 +107,9 @@ export class AgentHost {
       // A revoked policy forbids another model write. The explicit keep-disk choice
       // can still release the in-memory answer without touching the file.
       try { await this.requirePermission(item.root, item.relPath) }
-      catch {
+      catch (error) {
+        if (this.deps.root() !== item.root) throw new Error('VAULT_CHANGED')
+        if (!(error instanceof Error) || !['FORBIDDEN', 'NOTE_NOT_REFERENCE'].includes(error.message)) throw error
         this.pending.delete(request.id)
         return null
       }
@@ -115,7 +117,7 @@ export class AgentHost {
         ...item.source, status: 'failed',
         reason: '用户选择保留磁盘稿；生成回答未写入正文。'
       })
-      const revision = next === current.content ? current.revision : await this.deps.write(item.relPath, next, current.revision)
+      const revision = next === current.content ? current.revision : await this.writePending(item, next, current.revision)
       this.pending.delete(request.id)
       this.emitResolved(request.id, item, revision, 'failed')
       return revision
@@ -131,7 +133,7 @@ export class AgentHost {
       ...item.source,
       reason: [item.source.reason, '用户确认采用模型回答。'].filter(Boolean).join(' ')
     })
-    const revision = next === current.content ? current.revision : await this.deps.write(item.relPath, next, current.revision)
+    const revision = next === current.content ? current.revision : await this.writePending(item, next, current.revision)
     this.pending.delete(request.id)
     this.emitResolved(request.id, item, revision)
     return revision
@@ -141,6 +143,13 @@ export class AgentHost {
     if (!item) throw new Error('PENDING_NOT_FOUND')
     if (this.deps.root() !== item.root) throw new Error('VAULT_CHANGED')
     return item
+  }
+  private async writePending(item: PendingTask, content: string, expectedRevision: string): Promise<string> {
+    try { return await this.deps.write(item.relPath, content, expectedRevision) }
+    catch (error) {
+      item.failure = error instanceof Error ? error.message : 'WRITE_FAILED'
+      throw error
+    }
   }
   private emitResolved(id: string, item: PendingTask, revision: string, status?: HostEvent['status']): void {
     this.deps.emit({ id, root: item.root, relPath: item.relPath,
@@ -153,7 +162,12 @@ export class AgentHost {
   async retryPending(root?: string): Promise<void> {
     for (const [id, item] of [...this.pending]) {
       if (root && item.root !== root) continue
-      const revision = await this.finishWrite(item.root, item.relPath, item.source, item.persisted)
+      let revision: string
+      try { revision = await this.finishWrite(item.root, item.relPath, item.source, item.persisted) }
+      catch (error) {
+        item.failure = error instanceof Error ? error.message : 'WRITE_FAILED'
+        throw error
+      }
       this.pending.delete(id)
       this.emitResolved(id, item, revision)
     }
