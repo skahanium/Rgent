@@ -4,6 +4,7 @@ import { buildHostContext, type ContextChapter, type ContextSummary } from './ho
 import { appendLedgerChapter, markPrompt, upsertAiAnswer } from './host-source.ts'
 import type { ModelCredential, RunLimits } from './model-config.ts'
 import type { SourceRange } from '../markdown/types.ts'
+import type { ObjectBinding } from '../shared/ipc.ts'
 import { compile, parseMarker } from '../markdown/index.ts'
 
 export type HostEvent = {
@@ -15,9 +16,12 @@ export type HostEvent = {
   reason?: string
   persisted?: boolean
   revision?: string
+  sessionId?: string
+  objectVersion?: string
 }
 
-export type HostStart = {
+export type HostStart = Partial<ObjectBinding> & {
+  expectedRevision?: string
   relPath: string
   range: SourceRange
   expectedText: string
@@ -26,9 +30,11 @@ export type HostStart = {
 
 export type HostDependencies = {
   root: () => string | null
-  read: (relPath: string) => Promise<{ content: string; revision: string }>
+  session?: () => string | null
+  acceptsObject?: (relPath: string, expected: string, current: string) => boolean
+  read: (relPath: string) => Promise<{ content: string; revision: string; sessionId?: string; objectVersion?: string }>
   /** This is a main-process-only path, never the renderer noteWrite IPC. */
-  write: (relPath: string, content: string, expectedRevision: string) => Promise<string>
+  write: (relPath: string, content: string, expectedRevision: string, binding?: ObjectBinding) => Promise<string | (ObjectBinding & { revision: string })>
   tier: (root: string, relPath: string) => Promise<'reference' | 'follow'>
   credential: () => ModelCredential
   limits: () => RunLimits
@@ -50,9 +56,15 @@ export class AgentHost {
   private readonly launchWaiters = new Set<() => void>()
   private readonly pending = new Map<string, { root: string; relPath: string; source: Parameters<typeof appendLedgerChapter>[1]; persisted: { answer: string } }>()
 
+  private readonly bindings = new Map<string, ObjectBinding & { originalVersion: string }>()
+
   constructor(private readonly deps: HostDependencies) {}
 
   active() { return this.tasks.active() }
+  bindingFor(root: string, relPath: string): ObjectBinding | null {
+    const b = this.bindings.get(`${root}\0${relPath}`)
+    return b ? {sessionId:b.sessionId,objectVersion:b.objectVersion} : null
+  }
   async whenLaunchesSettled(): Promise<void> {
     while (this.launching.size) await new Promise<void>((resolve) => this.launchWaiters.add(resolve))
   }
@@ -69,8 +81,40 @@ export class AgentHost {
       if (root && item.root !== root) continue
       const revision = await this.finishWrite(item.root, item.relPath, item.source, item.persisted)
       this.pending.delete(id)
-      this.deps.emit({ id, root: item.root, relPath: item.relPath, status: item.source.status === 'completed' ? 'completed' : 'cancelled', answer: item.source.answer, persisted: true, revision })
+      this.deps.emit({ ...this.bindings.get(`${item.root}\0${item.relPath}`), id, root: item.root, relPath: item.relPath, status: item.source.status === 'completed' ? 'completed' : 'cancelled', answer: item.source.answer, persisted: true, revision })
     }
+  }
+  pendingChapters(root: string, relPath: string, sessionId: string, objectVersion: string): Parameters<typeof appendLedgerChapter>[1][] {
+    const binding = this.bindings.get(`${root}\0${relPath}`)
+    if (binding && (binding.sessionId !== sessionId || objectVersion !== binding.originalVersion && !this.matchesObject(relPath, objectVersion, binding.objectVersion))) return []
+    return [...this.pending.values()].filter(item => item.root === root && item.relPath === relPath).map(item => ({ ...item.source }))
+  }
+  acknowledgeCopied(root: string, relPath: string, chapters: Parameters<typeof appendLedgerChapter>[1][]): void {
+    for (const chapter of chapters) {
+      const item = this.pending.get(chapter.taskId)
+      if (item?.root === root && item.relPath === relPath && JSON.stringify(item.source) === JSON.stringify(chapter)) this.pending.delete(chapter.taskId)
+    }
+  }
+  private matchesObject(relPath: string, expected: string, current: string): boolean {
+    return expected === current || Boolean(this.deps.acceptsObject?.(relPath, expected, current))
+  }
+  private async readBound(root: string, relPath: string) {
+    const binding = this.bindings.get(`${root}\0${relPath}`)
+    if (binding && this.deps.session?.() !== binding.sessionId) throw new Error('VAULT_CHANGED')
+    const current = await this.deps.read(relPath)
+    if (this.deps.root() !== root || (binding && current.sessionId !== binding.sessionId)) throw new Error('VAULT_CHANGED')
+    if (binding && (!current.objectVersion || !this.matchesObject(relPath, binding.objectVersion, current.objectVersion))) throw new Error('NOTE_REPLACED')
+    if (binding && current.objectVersion) binding.objectVersion = current.objectVersion
+    return current
+  }
+  private async writeBound(root: string, relPath: string, content: string, revision: string): Promise<string> {
+    const binding = this.bindings.get(`${root}\0${relPath}`)
+    if (binding && this.deps.session?.() !== binding.sessionId) throw new Error('VAULT_CHANGED')
+    const result = await this.deps.write(relPath, content, revision, binding)
+    if (typeof result === 'string') return result
+    if (binding && result.sessionId !== binding.sessionId) throw new Error('VAULT_CHANGED')
+    if (binding) binding.objectVersion = result.objectVersion
+    return result.revision
   }
   cancel(id: string, reason: StopReason = 'user') { return this.tasks.cancel(id, reason) }
   cancelAll(reason: StopReason, root?: string) { return this.tasks.cancelAll(reason, root) }
@@ -86,12 +130,17 @@ export class AgentHost {
       throw new Error('PREVIOUS_TASK_UNSAVED')
     }
     this.launching.add(key)
+    this.bindings.delete(key)
     try {
       await this.requirePermission(root, input.relPath)
       const credential = this.deps.credential()
       const limits = this.deps.limits()
       const original = await this.deps.read(input.relPath)
       if (this.deps.root() !== root) throw new Error('VAULT_CHANGED')
+      if (input.sessionId !== undefined && original.sessionId !== input.sessionId) throw new Error('VAULT_CHANGED')
+      if (input.objectVersion !== undefined && (!original.objectVersion || !this.matchesObject(input.relPath, input.objectVersion, original.objectVersion))) throw new Error('NOTE_REPLACED')
+      if (input.expectedRevision !== undefined && original.revision !== input.expectedRevision) throw new Error('CONFLICT')
+      if (original.sessionId && original.objectVersion) this.bindings.set(key, { sessionId: original.sessionId, objectVersion: original.objectVersion, originalVersion: input.objectVersion ?? original.objectVersion })
       const id = randomUUID()
       const marked = markPrompt(original.content, { ...input, taskId: id })
       const submitted = promptBlock(marked, id)
@@ -101,8 +150,8 @@ export class AgentHost {
       const initial = buildHostContext({ source: marked, prompt: input.promptText, placement, inputBudgetTokens: budget, countTokens: byteCount })
       if (initial.status === 'too-large') throw new Error(initial.reason)
       await this.requirePermission(root, input.relPath)
-      const markedRevision = await this.deps.write(input.relPath, marked, original.revision)
-      this.deps.emit({ id, root, relPath: input.relPath, status: 'running', answer: '', persisted: true, revision: markedRevision })
+      const markedRevision = await this.writeBound(root, input.relPath, marked, original.revision)
+      this.deps.emit({ ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running', answer: '', persisted: true, revision: markedRevision })
 
       const startedAt = new Date().toISOString()
       let answer = ''
@@ -110,7 +159,7 @@ export class AgentHost {
       let steps = 0
       let lastCheckpoint = 0
       const snapshot = (status: HostEvent['status'], reason?: string, revision?: string): void => {
-        this.deps.emit({ id, root, relPath: input.relPath, status, answer, reason, persisted: revision !== undefined, revision })
+        this.deps.emit({ ...this.bindings.get(key), id, root, relPath: input.relPath, status, answer, reason, persisted: revision !== undefined, revision })
       }
       const checkpoint = async (): Promise<void> => {
         const revision = await this.mutateNote(root, input.relPath, (source) => upsertAiAnswer(source, { taskId: id, answer, expectedPreviousAnswer: persisted.answer }))
@@ -126,7 +175,7 @@ export class AgentHost {
           if (signal.aborted) return
           await this.requirePermission(root, input.relPath)
           if (this.deps.root() !== root) throw new Error('VAULT_CHANGED')
-          source = (await this.deps.read(input.relPath)).content
+          source = (await this.readBound(root, input.relPath)).content
           const currentPrompt = promptBlock(source, id)
           if (currentPrompt.text !== submitted.text) throw new Error('任务口令已被外部修改')
           const currentPlacement = currentPrompt.position
@@ -137,10 +186,11 @@ export class AgentHost {
             for (const batch of summaryBatches(plan.chapters, budget - 512)) {
               if (signal.aborted) return
               await this.requirePermission(root, input.relPath)
-              if ((await this.deps.read(input.relPath)).content !== source) { summary = undefined; continue contextLoop }
+              if ((await this.readBound(root, input.relPath)).content !== source) { summary = undefined; continue contextLoop }
               // Reading is asynchronous; a permission change during that read
               // must be observed before any old source reaches the provider.
               await this.requirePermission(root, input.relPath)
+              if ((await this.readBound(root,input.relPath)).content !== source) { summary = undefined; continue contextLoop }
               if (++steps > limits.steps) throw new Error('MODEL_STEP_LIMIT')
               let text = ''
               for await (const chunk of safeModelStream(() => this.deps.stream({ ...credential, system: SYSTEM_RULES, prompt: `请仅摘要下列旧账本，标明来源 ID；不补写未知细节，摘要不超过 400 字：\n${batch}`, maxOutputTokens: Math.min(512, this.outputBudget(credential.contextTokens)) }, signal), signal, credential.apiKey)) {
@@ -158,8 +208,9 @@ export class AgentHost {
           const omitted = plan.omitted.bodyBlockNumbers.length || plan.omitted.ledgerChapterIds.length
             ? `\n省略：正文块 ${plan.omitted.bodyBlockNumbers.join(', ') || '无'}；账本章 ${plan.omitted.ledgerChapterIds.join(', ') || '无'}。` : ''
           const prompt = `${plan.content}${omitted}`
-          if ((await this.deps.read(input.relPath)).content !== source) { summary = undefined; continue }
+          if ((await this.readBound(root, input.relPath)).content !== source) { summary = undefined; continue }
           await this.requirePermission(root, input.relPath)
+          if ((await this.readBound(root,input.relPath)).content !== source) { summary = undefined; continue }
           for await (const chunk of safeModelStream(() => this.deps.stream({ ...credential, system: SYSTEM_RULES, prompt, maxOutputTokens: this.outputBudget(credential.contextTokens) }, signal), signal, credential.apiKey)) {
             // The redactor may release already-received safe text when aborting.
             if (signal.aborted) { answer += chunk; break }
@@ -207,18 +258,22 @@ export class AgentHost {
 
   private async requirePermission(root: string, relPath: string): Promise<void> {
     if (this.deps.root() !== root) throw new Error('VAULT_CHANGED')
+    const binding = this.bindings.get(`${root}\0${relPath}`)
+    if (binding && this.deps.session?.() !== binding.sessionId) throw new Error('VAULT_CHANGED')
     const tier = await this.deps.tier(root, relPath)
+    if (this.deps.root() !== root || (binding && this.deps.session?.() !== binding.sessionId)) throw new Error('VAULT_CHANGED')
     if (tier !== 'reference') throw new Error('NOTE_NOT_REFERENCE')
   }
 
   private async mutateNote(root: string, relPath: string, change: (source: string) => string): Promise<string> {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       await this.requirePermission(root, relPath)
-      const current = await this.deps.read(relPath)
+      const current = await this.readBound(root, relPath)
+      await this.requirePermission(root, relPath)
       const next = change(current.content)
       if (next === current.content) return current.revision
       try {
-        return await this.deps.write(relPath, next, current.revision)
+        return await this.writeBound(root, relPath, next, current.revision)
       } catch (error) {
         if (!(error instanceof Error) || error.message !== 'CONFLICT') throw error
       }

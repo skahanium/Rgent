@@ -45,7 +45,7 @@ export async function reconcileNote(tab: Tab, deps: ReconcileDeps): Promise<Reco
       return 'error'
     }
     if (!deps.isCurrent()) return 'stale'
-    if (latest.revision !== disk.revision) continue
+    if (latest.revision !== disk.revision || latest.objectVersion !== disk.objectVersion) continue
     if (choice === 'disk') {
       deps.applyDisk(latest)
       return 'disk'
@@ -57,7 +57,9 @@ export async function reconcileNote(tab: Tab, deps: ReconcileDeps): Promise<Reco
       result = await deps.write({
         relPath: tab.relPath,
         content: composeSource(body, ledger),
-        expectedRevision: latest.revision
+        expectedRevision: latest.revision,
+        sessionId: latest.sessionId,
+        objectVersion: latest.objectVersion
       })
     } catch {
       return 'error'
@@ -67,6 +69,8 @@ export async function reconcileNote(tab: Tab, deps: ReconcileDeps): Promise<Reco
       if (result.error === 'CONFLICT') continue
       return 'error'
     }
+    tab.sessionId = result.sessionId
+    tab.objectVersion = result.objectVersion
     deps.applySaved(body, ledger, result.revision)
     return 'saved'
   }

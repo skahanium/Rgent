@@ -1540,3 +1540,23 @@ input:focus-visible,
 .ledger-body td, .ledger-body th { border: 1px solid var(--border-subtle); padding: 6px 8px; }
 .md-source-fallback { white-space: pre-wrap; }
 .md-source-fallback::before { content: '阅读呈现失败，以下是当前原文'; display: block; color: var(--status-error); font: 0.8rem var(--font-ui); }
+
+/* Object availability belongs to this draft, independent of tree refresh. */
+.note-unavailable {
+  position: absolute;
+  z-index: 5;
+  inset: auto 1rem 1rem;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .6rem;
+  padding: .75rem 1rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: .5rem;
+  background: var(--surface-overlay);
+  box-shadow: 0 2px 10px #0002;
+  font: .8rem var(--font-ui);
+}
+.note-unavailable[hidden] { display: none; }
+.note-unavailable > span { flex: 1 1 14rem; }
+.save-copy-preview { max-width: min(34rem, calc(100vw - 2rem)); }

@@ -1,7 +1,7 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, safeStorage, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, safeStorage, shell } from 'electron'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { asString, parseEntryCreateRequest, parseFlushDone, parseLifecycleRetryRequest, parseNoteName, parseNoteWriteRequest, parseRelocationCommitRequest, parseRelocationPreviewRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
 import { IPC } from '../shared/ipc.ts'
@@ -10,6 +10,7 @@ import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { isReadingPreference } from '../shared/reading-preference.ts'
 import { attachVaultProtocol } from './vault-protocol.ts'
+import { verifyImageSource } from './image-source.ts'
 import { RemoteImageService, REMOTE_IMAGE_SCHEME, remoteImageUrl } from './remote-image.ts'
 import { attachRemoteImageProtocol } from './remote-image-protocol.ts'
 import { VAULT_MEDIA_SCHEME } from '../shared/vault-rel.ts'
@@ -19,6 +20,7 @@ import { AgentHost } from './agent-host.ts'
 import { modelTierFor } from './permissions.ts'
 import { streamModelText } from './model-stream.ts'
 import { VaultStructureGate } from './vault-mutation-queue.ts'
+import { isTrustedIpcSender } from './ipc-sender.ts'
 
 protocol.registerSchemesAsPrivileged([
   { scheme: VAULT_MEDIA_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
@@ -26,6 +28,9 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 const here = path.dirname(fileURLToPath(import.meta.url))
+const rendererDevelopmentUrl = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined
+const rendererEntryUrl = rendererDevelopmentUrl ? new URL(rendererDevelopmentUrl).href
+  : pathToFileURL(path.join(here, '../renderer/index.html')).href
 
 /** 退出前给渲染进程留的写盘窗口。渲染进程没回应也不能把它卡死在这里。 */
 const FLUSH_GRACE_MS = 1000
@@ -43,6 +48,7 @@ let modelConfig: ModelConfigStore | null = null
 let modelConfigError: string | null = null
 let agentHost: AgentHost | null = null
 let cancellingForClose = false
+const imageControllers = new Map<AbortController, {vault: VaultSession; binding: string; request: import('../shared/ipc.ts').RemoteImageGetRequest}>()
 const lifecycleFlushes = new Map<string, (ok: boolean) => void>()
 const structureGate = new VaultStructureGate()
 const lifecycleErrorCodes = new Set(['BAD_PATH', 'BAD_REQUEST', 'NO_VAULT', 'VAULT_CHANGED', 'STALE_PREVIEW',
@@ -58,7 +64,7 @@ function blocksStructureWrite(relPath: string): boolean {
   return !!vault?.root && structureGate.blocksWrite(vault.root, relPath)
 }
 
-async function flushBeforeStructure(win: BrowserWindow): Promise<boolean> {
+async function flushBeforeStructure(win: BrowserWindow, cleanUnavailablePaths: readonly string[] = []): Promise<boolean> {
   if (win.isDestroyed() || win.webContents.isDestroyed()) return false
   const id = randomUUID()
   return new Promise<boolean>((resolve) => {
@@ -67,7 +73,7 @@ async function flushBeforeStructure(win: BrowserWindow): Promise<boolean> {
       resolve(false)
     }, 120_000)
     lifecycleFlushes.set(id, (ok) => { clearTimeout(timer); lifecycleFlushes.delete(id); resolve(ok) })
-    win.webContents.send(IPC.lifecycleFlushRequest, id)
+    win.webContents.send(IPC.lifecycleFlushRequest, id, cleanUnavailablePaths)
   })
 }
 
@@ -78,6 +84,23 @@ function clearFlushTimer(): void {
 }
 
 function send(channel: string, payload?: unknown): void {
+  if (channel === IPC.treeChanged || channel === IPC.noteExternalChange || channel === IPC.vaultLost) {
+    for (const [controller, active] of imageControllers) {
+      const c = active.request.context!
+      void active.vault.read(c.noteRelPath).then(snapshot => {
+        const proof = verifyImageSource(snapshot,active.request)
+        if (!proof.ok || proof.binding!==active.binding || active.vault.sessionId()!==c.sessionId) controller.abort()
+      }).catch(()=>controller.abort())
+    }
+    const current = vault; const token = current?.sessionId()
+    for (const task of agentHost?.active() ?? []) {
+      if (!current || task.root !== current.root) continue
+      const binding = agentHost?.bindingFor(task.root,task.relPath)
+      if (binding) void current.noteStatus(task.relPath,binding).then(state => {
+        if(current.sessionId()===token && state.status!=='ready') void agentHost?.cancel(task.id,'user').catch(()=>{})
+      }).catch(()=>{})
+    }
+  }
   const target = mainWindow
   if (!target || target.isDestroyed()) return
   target.webContents.send(channel, payload)
@@ -236,7 +259,7 @@ function createWindow(): void {
     }
   })
 
-  const rendererUrl = process.env.ELECTRON_RENDERER_URL
+  const rendererUrl = rendererDevelopmentUrl
   if (rendererUrl) {
     void mainWindow.loadURL(rendererUrl)
   } else {
@@ -276,14 +299,25 @@ function buildMenu(): void {
 }
 
 function registerIpc(): void {
-  const trusted = (event: Electron.IpcMainInvokeEvent): boolean =>
-    Boolean(mainWindow && event.sender === mainWindow.webContents)
+  const trusted = (event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean =>
+    isTrustedIpcSender(event, mainWindow, rendererEntryUrl)
+  const registerTrustedHandle = (channel: string, listener: Parameters<typeof ipcMain.handle>[1]): void => {
+    ipcMain.handle(channel, (event, ...args) => {
+      if (!trusted(event)) throw new Error('BAD_SENDER')
+      return listener(event, ...args)
+    })
+  }
+  const registerTrustedOn = (channel: string, listener: Parameters<typeof ipcMain.on>[1]): void => {
+    ipcMain.on(channel, (event, ...args) => {
+      if (trusted(event)) listener(event, ...args)
+    })
+  }
   const configResult = (): ModelConfigResult => modelConfig
     ? { ok: true, config: modelConfig.getPublic() }
     : { ok: false, error: modelConfigError ?? 'MODEL_CONFIG_UNAVAILABLE' }
-  ipcMain.handle(IPC.modelConfigGet, (event): ModelConfigResult =>
+  registerTrustedHandle(IPC.modelConfigGet, (event): ModelConfigResult =>
     trusted(event) ? configResult() : { ok: false, error: 'BAD_SENDER' })
-  ipcMain.handle(IPC.modelProfileSet, (event, value: unknown): ModelConfigResult => {
+  registerTrustedHandle(IPC.modelProfileSet, (event, value: unknown): ModelConfigResult => {
     if (!trusted(event) || !modelConfig) return { ok: false, error: 'MODEL_CONFIG_UNAVAILABLE' }
     const request = value as Partial<ModelProfileSetRequest> | null
     if (!request || typeof request !== 'object' || !request.fields || typeof request.fields !== 'object' ||
@@ -293,33 +327,34 @@ function registerIpc(): void {
       return configResult()
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
   })
-  ipcMain.handle(IPC.modelSelect, (event, value: unknown): ModelConfigResult => {
+  registerTrustedHandle(IPC.modelSelect, (event, value: unknown): ModelConfigResult => {
     if (!trusted(event) || !modelConfig) return { ok: false, error: 'MODEL_CONFIG_UNAVAILABLE' }
     try { modelConfig.select(value as ModelProvider); return configResult() }
     catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
   })
-  ipcMain.handle(IPC.modelKeyDelete, (event, value: unknown): ModelConfigResult => {
+  registerTrustedHandle(IPC.modelKeyDelete, (event, value: unknown): ModelConfigResult => {
     if (!trusted(event) || !modelConfig) return { ok: false, error: 'MODEL_CONFIG_UNAVAILABLE' }
     try { modelConfig.deleteKey(value as ModelProvider); return configResult() }
     catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
   })
-  ipcMain.handle(IPC.modelLimitsSet, (event, value: unknown): ModelConfigResult => {
+  registerTrustedHandle(IPC.modelLimitsSet, (event, value: unknown): ModelConfigResult => {
     if (!trusted(event) || !modelConfig || !value || typeof value !== 'object') return { ok: false, error: 'BAD_REQUEST' }
     const request = value as Partial<ModelLimitsSetRequest>
     try { modelConfig.updateLimits(request.tier as LimitTier, request.limits!); return configResult() }
     catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
   })
-  ipcMain.handle(IPC.agentTasks, (event) => trusted(event)
+  registerTrustedHandle(IPC.agentTasks, (event) => trusted(event)
     ? agentHost?.active().map(({ id, relPath, startedAt }) => ({ id, relPath, startedAt })) ?? [] : [])
-  ipcMain.handle(IPC.agentCancel, async (event, value: unknown) => {
+  registerTrustedHandle(IPC.agentCancel, async (event, value: unknown) => {
     if (!trusted(event) || typeof value !== 'string' || value.length > 128) return false
     return Boolean(await agentHost?.cancel(value, 'user'))
   })
-  ipcMain.handle(IPC.agentStart, async (event, value: unknown): Promise<AgentStartResult> => {
+  registerTrustedHandle(IPC.agentStart, async (event, value: unknown): Promise<AgentStartResult> => {
     if (!trusted(event) || !agentHost || !value || typeof value !== 'object') return { ok: false, error: 'BAD_REQUEST' }
     const request = value as Partial<AgentStartRequest>
     if (typeof request.relPath !== 'string' || typeof request.expectedText !== 'string' ||
         typeof request.promptText !== 'string' || request.promptText.length > 20000 ||
+        typeof request.sessionId !== 'string' || typeof request.objectVersion !== 'string' || typeof request.expectedRevision !== 'string' ||
         !request.range || !Number.isSafeInteger(request.range.start) || !Number.isSafeInteger(request.range.end)) {
       return { ok: false, error: 'BAD_REQUEST' }
     }
@@ -330,27 +365,51 @@ function registerIpc(): void {
       return { ok: true, id: task.id }
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'AGENT_START_FAILED' } }
   })
-  ipcMain.handle(IPC.remoteImageGet, async (event, value: unknown): Promise<RemoteImageGetResult> => {
-    if (!mainWindow || event.sender !== mainWindow.webContents || !remoteImages ||
-        !value || typeof value !== 'object' ||
-        typeof (value as { url?: unknown }).url !== 'string' ||
-        typeof (value as { allowHttp?: unknown }).allowHttp !== 'boolean') {
-      return { ok: false, error: 'INVALID_URL' }
-    }
-    const request = value as { url: string; allowHttp: boolean }
-    const result = await remoteImages.load(request.url, request.allowHttp)
-    return result.ok ? { ok: true, src: remoteImageUrl(result.token) } : result
+  registerTrustedHandle(IPC.remoteImageGet, async (_event, value: unknown): Promise<RemoteImageGetResult> => {
+    if (!remoteImages || !vault || !value || typeof value !== 'object') return { ok: false, error: 'NOT_ALLOWED' }
+    const request = value as import('../shared/ipc.ts').RemoteImageGetRequest
+    const c = request.context
+    if (typeof request.url !== 'string' || !c || typeof c.noteRelPath !== 'string' ||
+        typeof c.sessionId !== 'string' || typeof c.objectVersion !== 'string' || typeof c.revision !== 'string' ||
+        (c.draftBody !== undefined && (typeof c.draftBody !== 'string' || c.draftBody.length > 16 * 1024 * 1024)) ||
+        (request.continuation !== undefined && typeof request.continuation !== 'string')) return { ok: false, error: 'NOT_ALLOWED' }
+    try {
+      const token = vault.captureSession()
+      if (c.sessionId !== token) return { ok: false, error: 'NOT_ALLOWED' }
+      const snapshot = await vault.read(c.noteRelPath)
+      const proof = verifyImageSource(snapshot, request)
+      if (!proof.ok) return { ok: false, error: 'NOT_ALLOWED' }
+      const controller = new AbortController()
+      const currentVault = vault
+      imageControllers.set(controller,{vault:currentVault,binding:proof.binding,request})
+      let result: Awaited<ReturnType<RemoteImageService['load']>>
+      try {
+        result = await remoteImages.load(request.url, { mode: request.mode, allowHttp: request.allowHttp === true,
+          continuation: request.continuation, binding: proof.binding, signal: controller.signal,
+          validate: async () => {
+            try {
+              currentVault.assertSession(token)
+              const checked = verifyImageSource(await currentVault.read(c.noteRelPath),request)
+              return checked.ok && checked.binding===proof.binding
+            } catch { return false }
+          } })
+      } finally { imageControllers.delete(controller) }
+      currentVault.assertSession(token)
+      const current = await currentVault.read(c.noteRelPath)
+      if (!verifyImageSource(current, request).ok) return { ok: false, error: 'NOT_ALLOWED' }
+      return result.ok ? { ok: true, src: remoteImageUrl(result.token) } : result
+    } catch { return { ok: false, error: 'NOT_ALLOWED' } }
   })
-  ipcMain.handle(IPC.themeGet, () => themeMode)
-  ipcMain.handle(IPC.readingGet, () => loadReadingPreference(app.getPath('userData')))
-  ipcMain.handle(IPC.readingSet, (_event, value: unknown): ReadingSetResult => {
+  registerTrustedHandle(IPC.themeGet, () => themeMode)
+  registerTrustedHandle(IPC.readingGet, () => loadReadingPreference(app.getPath('userData')))
+  registerTrustedHandle(IPC.readingSet, (_event, value: unknown): ReadingSetResult => {
     if (!isReadingPreference(value)) return { ok: false, error: 'BAD_READING' }
     try {
       saveReadingPreference(app.getPath('userData'), value)
       return { ok: true, reading: value as ReadingPreference }
     } catch { return { ok: false, error: 'IO_ERROR' } }
   })
-  ipcMain.handle(IPC.themeSet, (_event, value: unknown): ThemeSetResult => {
+  registerTrustedHandle(IPC.themeSet, (_event, value: unknown): ThemeSetResult => {
     if (!isThemeMode(value)) return { ok: false, error: 'BAD_MODE' }
     try {
       saveThemePreference(app.getPath('userData'), value)
@@ -361,39 +420,102 @@ function registerIpc(): void {
       return { ok: false, error: 'IO_ERROR' }
     }
   })
-  ipcMain.handle(IPC.vaultGet, () => vault?.currentState() ?? { status: 'needs-pick', reason: 'first-run' })
-  ipcMain.handle(IPC.vaultPick, async () => {
+  registerTrustedHandle(IPC.vaultGet, () => vault?.currentState() ?? { status: 'needs-pick', reason: 'first-run' })
+  registerTrustedHandle(IPC.vaultPick, async () => {
     if (!vault) return { status: 'needs-pick', reason: 'first-run' }
     if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
+    for(const controller of imageControllers.keys()) controller.abort()
     return vault.pick(mainWindow)
   })
-  ipcMain.handle(IPC.treeList, async () => vault?.tree() ?? [])
-  ipcMain.handle(IPC.noteRead, async (_event, relPath: unknown) => {
+  registerTrustedHandle(IPC.treeList, async () => vault?.tree() ?? [])
+  registerTrustedHandle(IPC.noteRead, async (_event, relPath: unknown) => {
     const pathInVault = asString(relPath)
     if (!pathInVault) throw new Error('BAD_PATH')
     if (!vault) throw new Error('NO_VAULT')
     return vault.read(pathInVault)
   })
-  ipcMain.handle(IPC.noteWrite, async (_event, value: unknown) => {
+  registerTrustedHandle(IPC.noteWrite, async (_event, value: unknown) => {
     const request = parseNoteWriteRequest(value)
     if (!request) return { ok: false, error: 'BAD_PATH' }
     if (!vault) return { ok: false, error: 'NO_VAULT' }
     if (blocksStructureWrite(request.relPath)) return { ok: false, error: 'NOTE_BUSY' }
     try {
-      const revision = await vault.write(request.relPath, request.content, request.expectedRevision)
-      return { ok: true, revision }
+      const result = await vault.write(request.relPath, request.content, request.expectedRevision, request)
+      return { ok: true, ...result }
     } catch (err) {
-      return { ok: false, error: err instanceof Error && err.message === 'CONFLICT' ? 'CONFLICT' : 'IO_ERROR' }
+      return { ok: false, error: err instanceof Error && ['CONFLICT', 'NOTE_MISSING', 'NOTE_REPLACED', 'NOTE_UNREADABLE', 'VAULT_CHANGED'].includes(err.message) ? err.message : 'IO_ERROR' }
     }
   })
-  ipcMain.handle(IPC.permissionsGet, async () => vault?.permissions() ?? { status: 'invalid', error: '未选择库' })
-  ipcMain.handle(IPC.permissionsSet, async (_event, value: unknown) => {
+  const parseBinding = (value: unknown): import('../shared/ipc.ts').NoteInspectRequest | null => {
+    if (!value || typeof value !== 'object') return null
+    const r = value as import('../shared/ipc.ts').NoteInspectRequest
+    return typeof r.relPath === 'string' && typeof r.sessionId === 'string' && typeof r.objectVersion === 'string' ? r : null
+  }
+  registerTrustedHandle(IPC.noteInspect, async (_event, value: unknown) => {
+    const r = parseBinding(value)
+    if (!r || !vault) throw new Error('BAD_REQUEST')
+    const state = await vault.noteStatus(r.relPath, r)
+    if (state.status !== 'ready') {
+      for (const task of agentHost?.active().filter(t => t.root === vault!.root && t.relPath === r.relPath) ?? []) {
+        await agentHost?.cancel(task.id, 'user').catch(() => {})
+      }
+      vault.assertSession(r.sessionId)
+    }
+    return state
+  })
+  registerTrustedHandle(IPC.noteAbandon, async (_event, value: unknown) => {
+    const r = parseBinding(value)
+    if (!r || !vault) return false
+    vault.assertSession(r.sessionId)
+    if ((await vault.noteStatus(r.relPath, r)).status === 'ready') return false
+    const root = vault.root!
+    for (const task of agentHost?.active().filter(t => t.root === root && t.relPath === r.relPath) ?? []) await agentHost?.cancel(task.id, 'user').catch(() => {})
+    vault.assertSession(r.sessionId)
+    const chapters = agentHost?.pendingChapters(root, r.relPath, r.sessionId, r.objectVersion) ?? []
+    agentHost?.acknowledgeCopied(root, r.relPath, chapters)
+    return true
+  })
+  registerTrustedHandle(IPC.noteSaveCopyPreview, async (_event, value: unknown) => {
+    if (!value || typeof value !== 'object' || !vault || structureGate.isBusy()) return { ok: false, error: 'BAD_REQUEST' }
+    const r = value as import('../shared/ipc.ts').SaveCopyPreviewRequest
+    if (![r.source,r.target,r.body,r.draftVersion,r.sessionId,r.objectVersion].every(v => typeof v === 'string') || r.body.length > 16*1024*1024) return { ok:false,error:'BAD_REQUEST' }
+    try {
+      const current = vault; const root = current.root!
+      current.assertSession(r.sessionId)
+      await agentHost?.whenLaunchesSettled()
+      for (const task of agentHost?.active().filter(t=>t.root===root && t.relPath===r.source) ?? []) await agentHost?.cancel(task.id, 'user').catch(()=>{})
+      current.assertSession(r.sessionId)
+      const chapters = agentHost?.pendingChapters(root,r.source,r.sessionId,r.objectVersion) ?? []
+      const preview = await current.previewSaveCopy(r,chapters)
+
+      return {ok:true,preview}
+    } catch(error) { return {ok:false,error:error instanceof Error ? error.message : 'IO_ERROR'} }
+  })
+  registerTrustedHandle(IPC.noteSaveCopyCommit, async (_event,value:unknown) => {
+    if (!value || typeof value !== 'object' || !vault || structureGate.isBusy()) return {ok:false,error:'BAD_REQUEST'}
+    const r = value as import('../shared/ipc.ts').SaveCopyCommitRequest
+    if (![r.id,r.sessionId,r.draftVersion,r.body].every(v=>typeof v==='string') || r.body.length>16*1024*1024) return {ok:false,error:'BAD_REQUEST'}
+    const prepared = vault.saveCopyRequestById(r.id)
+    const c = prepared ? {relPath:prepared.source,sessionId:prepared.sessionId,objectVersion:prepared.objectVersion} : null
+    if (!c || c.sessionId !== r.sessionId) return {ok:false,error:'STALE_PREVIEW'}
+    try {
+      const current=vault; const root=current.root!
+      current.assertSession(r.sessionId)
+      const chapters=agentHost?.pendingChapters(root,c.relPath,c.sessionId,c.objectVersion) ?? []
+      const result=await current.commitSaveCopy(r,chapters)
+      current.assertSession(r.sessionId)
+      agentHost?.acknowledgeCopied(root,c.relPath,chapters)
+      return {ok:true,...result}
+    } catch(error) { return {ok:false,error:error instanceof Error ? error.message : 'IO_ERROR'} }
+  })
+  registerTrustedHandle(IPC.permissionsGet, async () => vault?.permissions() ?? { status: 'invalid', error: '未选择库' })
+  registerTrustedHandle(IPC.permissionsSet, async (_event, value: unknown) => {
     const request = parseSetPermissionRequest(value)
     if (!request) throw new Error('BAD_PERMISSION')
     if (!vault) throw new Error('NO_VAULT')
     return vault.setPermission(request.relPath, request.tier)
   })
-  ipcMain.handle(IPC.noteCreate, async (_event, name: unknown) => {
+  registerTrustedHandle(IPC.noteCreate, async (_event, name: unknown) => {
     const request = typeof name === 'string'
       ? { name: parseNoteName(name), parent: '' }
       : parseEntryCreateRequest(name)
@@ -401,12 +523,12 @@ function registerIpc(): void {
     if (!vault) throw new Error('NO_VAULT')
     return vault.create(request.name, request.parent)
   })
-  ipcMain.handle(IPC.folderCreate, async (_event, value: unknown) => {
+  registerTrustedHandle(IPC.folderCreate, async (_event, value: unknown) => {
     const request = parseEntryCreateRequest(value)
     if (!request || !vault) throw new Error('BAD_PATH')
     return vault.createFolder(request.name, request.parent)
   })
-  ipcMain.handle(IPC.relocationPreview, async (event, value: unknown): Promise<RelocationPreviewResult> => {
+  registerTrustedHandle(IPC.relocationPreview, async (event, value: unknown): Promise<RelocationPreviewResult> => {
     const request = parseRelocationPreviewRequest(value)
     const currentVault = vault
     if (!trusted(event) || !request || !currentVault) return { ok: false, error: 'BAD_PATH' }
@@ -434,7 +556,7 @@ function registerIpc(): void {
       } }
     } catch (error) { return { ok: false, error: lifecycleError(error, 'PREVIEW_FAILED') } }
   })
-  ipcMain.handle(IPC.relocationCommit, async (event, value: unknown): Promise<RelocationCommitResult> => {
+  registerTrustedHandle(IPC.relocationCommit, async (event, value: unknown): Promise<RelocationCommitResult> => {
     const request = parseRelocationCommitRequest(value)
     const win = mainWindow
     const currentVault = vault
@@ -467,11 +589,11 @@ function registerIpc(): void {
     } catch (error) { return { ok: false, error: lifecycleError(error, 'COMMIT_FAILED') } }
     finally { structureGate.finish() }
   })
-  ipcMain.handle(IPC.lifecycleStatus, async (event) => {
+  registerTrustedHandle(IPC.lifecycleStatus, async (event) => {
     if (!trusted(event) || !vault) throw new Error('NO_VAULT')
     return vault.lifecycleStatus()
   })
-  ipcMain.handle(IPC.lifecycleRetry, async (event, value: unknown): Promise<LifecycleRetryResult> => {
+  registerTrustedHandle(IPC.lifecycleRetry, async (event, value: unknown): Promise<LifecycleRetryResult> => {
     const request = parseLifecycleRetryRequest(value)
     const currentVault = vault
     const win = mainWindow
@@ -493,7 +615,9 @@ function registerIpc(): void {
       if (agentHost?.pendingPaths(root).some((relPath) => structureGate.affects(root, relPath))) {
         throw new Error('PREVIOUS_TASK_UNSAVED')
       }
-      if (!(await flushBeforeStructure(win))) throw new Error('UNSAVED_DRAFT')
+      // A journal-bound clean tab may still point to an already moved object.
+      // Only recovery can exempt these paths; dirty drafts never qualify.
+      if (!(await flushBeforeStructure(win, scope.relPaths))) throw new Error('UNSAVED_DRAFT')
       currentVault.assertSession(request.sessionId)
       structureGate.seal()
       const outcome = await currentVault.lifecycleRetry(request)
@@ -505,22 +629,22 @@ function registerIpc(): void {
     } catch (error) { return { ok: false, error: lifecycleError(error, 'LIFECYCLE_RECOVERY_REQUIRED') } }
     finally { if (entered) structureGate.finish() }
   })
-  ipcMain.on(IPC.lifecycleFlushDone, (event, value: unknown) => {
+  registerTrustedOn(IPC.lifecycleFlushDone, (event, value: unknown) => {
     if (!mainWindow || event.sender !== mainWindow.webContents || !value || typeof value !== 'object') return
     const response = value as { id?: unknown; ok?: unknown }
     if (typeof response.id === 'string') lifecycleFlushes.get(response.id)?.(response.ok === true)
   })
-  ipcMain.handle(IPC.backlinks, async (_event, relPath: unknown) => {
+  registerTrustedHandle(IPC.backlinks, async (_event, relPath: unknown) => {
     const pathInVault = asString(relPath)
     if (!pathInVault) return []
     return vault?.backlinks(pathInVault) ?? []
   })
-  ipcMain.handle(IPC.search, async (_event, query: unknown) => {
+  registerTrustedHandle(IPC.search, async (_event, query: unknown) => {
     const text = asString(query)
     if (text == null) return []
     return vault?.search(text) ?? []
   })
-  ipcMain.on(IPC.flushDone, (event, payload: unknown) => {
+  registerTrustedOn(IPC.flushDone, (event, payload: unknown) => {
     const win = mainWindow
     if (!win || event.sender !== win.webContents) return
     runCloseAction(closeFlow.flushed(parseFlushDone(payload).ok), win)
@@ -542,10 +666,13 @@ app.whenReady().then(() => {
   vault.restore()
   agentHost = new AgentHost({
     root: () => vault?.root ?? null,
+    session: () => vault?.sessionId() ?? null,
+    acceptsObject: (relPath, expected, current) => vault?.acceptsObject(relPath, expected, current) ?? false,
     read: (relPath) => vault!.read(relPath),
-    write: (relPath, content, revision) => {
+    write: (relPath, content, revision, binding) => {
       if (blocksStructureWrite(relPath)) throw new Error('NOTE_BUSY')
-      return vault!.write(relPath, content, revision)
+      if (!binding) throw new Error('OBJECT_BINDING_REQUIRED')
+      return vault!.write(relPath, content, revision, binding)
     },
     tier: modelTierFor,
     credential: () => {
@@ -559,12 +686,11 @@ app.whenReady().then(() => {
     },
     stream: (input, signal) => streamModelText({ ...input, signal }),
     emit: ({ root, ...event }) => {
-      if (vault?.root === root) send(IPC.agentEvent, event)
+      if (vault?.root === root && event.sessionId === vault.sessionId()) send(IPC.agentEvent, event)
     }
   })
   attachVaultProtocol(() => vault)
-  const imageSession = session.fromPartition('rgent-remote-images')
-  remoteImages = new RemoteImageService((url, init) => imageSession.fetch(url, init))
+  remoteImages = new RemoteImageService()
   attachRemoteImageProtocol(remoteImages)
   registerIpc()
   buildMenu()

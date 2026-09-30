@@ -23,8 +23,10 @@ describe('ipc payload guards', () => {
   })
 
   it('rejects a note write unless the path, content and revision are all strings', () => {
-    const good = { relPath: 'a.md', content: '正文', expectedRevision: 'rev' }
+    const good = { relPath: 'a.md', content: '正文', expectedRevision: 'rev', sessionId: 's', objectVersion: 'o' }
     expect(parseNoteWriteRequest(good)).toEqual(good)
+    expect(parseNoteWriteRequest({ ...good, sessionId: undefined })).toBeNull()
+    expect(parseNoteWriteRequest({ ...good, objectVersion: '' })).toBeNull()
     // 清空一篇笔记是合法的：content 允许空串。
     expect(parseNoteWriteRequest({ ...good, content: '' })).toEqual({ ...good, content: '' })
     expect(parseNoteWriteRequest({ ...good, relPath: '' })).toBeNull()

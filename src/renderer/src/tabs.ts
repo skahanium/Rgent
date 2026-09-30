@@ -1,3 +1,4 @@
+import type { NoteAvailability } from '../../shared/ipc.ts'
 import { composeSource } from '../../markdown/partition.ts'
 
 export type Tab = {
@@ -11,6 +12,9 @@ export type Tab = {
   /** 上次读盘或成功写盘的整文件修订值。 */
   revision: string
   dirty: boolean
+  sessionId?: string
+  objectVersion?: string
+  availability?: NoteAvailability
   /** Editor selection kept per open tab; document bytes remain the only persisted content. */
   selection?: { anchor: number; head: number }
 }
@@ -26,6 +30,11 @@ export type PendingWrite = {
 
 export function diskOf(tab: Pick<Tab, 'content' | 'ledger'>, body = tab.content): string {
   return composeSource(body, tab.ledger)
+}
+
+/** Recovery may exempt only clean paths supplied by the verified main-process journal. */
+export function hasUnavailableDraft(tabs: readonly Tab[], cleanRecoveryPaths: readonly string[] = []): boolean {
+  return tabs.some(tab => !!tab.availability && (tab.dirty || !cleanRecoveryPaths.includes(tab.relPath)))
 }
 
 /**

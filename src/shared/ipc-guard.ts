@@ -20,8 +20,10 @@ export function parseNoteWriteRequest(value: unknown): NoteWriteRequest | null {
   const content = asString(request?.content)
   const expectedRevision = asString(request?.expectedRevision)
   // content 允许空串（清空一篇笔记是合法操作），路径与修订值不许空。
-  if (!relPath || content == null || !expectedRevision) return null
-  return { relPath, content, expectedRevision }
+  const sessionId = asString(request?.sessionId)
+  const objectVersion = asString(request?.objectVersion)
+  if (!relPath || content == null || !expectedRevision || !sessionId || !objectVersion) return null
+  return { relPath, content, expectedRevision, sessionId, objectVersion }
 }
 
 export function parseSetPermissionRequest(value: unknown): SetPermissionRequest | null {

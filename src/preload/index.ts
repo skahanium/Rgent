@@ -34,6 +34,8 @@ import {
   type RelocationEvent,
   type LifecycleStatus,
   type LifecycleRetryRequest,
+  type NoteInspectRequest, type NoteInspectResult,
+  type SaveCopyPreviewRequest, type SaveCopyCommitRequest, type SaveCopyPreviewResult, type SaveCopyCommitResult,
   type LifecycleRetryResult
 } from '../shared/ipc.ts'
 
@@ -44,8 +46,12 @@ const api = {
   vaultPick: (): Promise<VaultState> => ipcRenderer.invoke(IPC.vaultPick),
   treeList: (): Promise<TreeEntry[]> => ipcRenderer.invoke(IPC.treeList),
   noteRead: (relPath: string): Promise<NoteSnapshot> => ipcRenderer.invoke(IPC.noteRead, relPath),
+  noteInspect: (request: NoteInspectRequest): Promise<NoteInspectResult> => ipcRenderer.invoke(IPC.noteInspect, request),
+  noteAbandon: (request: NoteInspectRequest): Promise<boolean> => ipcRenderer.invoke(IPC.noteAbandon, request),
   noteWrite: (request: NoteWriteRequest): Promise<NoteWriteResult> =>
     ipcRenderer.invoke(IPC.noteWrite, request),
+  noteSaveCopyPreview: (request: SaveCopyPreviewRequest): Promise<SaveCopyPreviewResult> => ipcRenderer.invoke(IPC.noteSaveCopyPreview, request),
+  noteSaveCopyCommit: (request: SaveCopyCommitRequest): Promise<SaveCopyCommitResult> => ipcRenderer.invoke(IPC.noteSaveCopyCommit, request),
   permissionsGet: (): Promise<PermissionState> => ipcRenderer.invoke(IPC.permissionsGet),
   permissionsSet: (request: SetPermissionRequest): Promise<PermissionState> => ipcRenderer.invoke(IPC.permissionsSet, request),
   noteCreate: (name: string): Promise<string> => ipcRenderer.invoke(IPC.noteCreate, name),
@@ -80,8 +86,10 @@ const api = {
     subscribe(IPC.treeChanged, () => handler()),
   onNoteRelocated: (handler: (payload: RelocationEvent) => void): (() => void) =>
     subscribe(IPC.noteRelocated, (payload) => handler(payload as RelocationEvent)),
-  onLifecycleFlushRequest: (handler: (id: string) => void): (() => void) =>
-    subscribe(IPC.lifecycleFlushRequest, (id) => { if (typeof id === 'string') handler(id) }),
+  onLifecycleFlushRequest: (handler: (id: string, cleanUnavailablePaths: readonly string[]) => void): (() => void) =>
+    subscribe(IPC.lifecycleFlushRequest, (id, paths) => {
+      if (typeof id === 'string' && Array.isArray(paths) && paths.every(path => typeof path === 'string')) handler(id, paths)
+    }),
   lifecycleFlushDone: (id: string, ok: boolean): void => { ipcRenderer.send(IPC.lifecycleFlushDone, { id, ok }) },
   onNoteExternalChange: (handler: (payload: NotePayload) => void): (() => void) =>
     subscribe(IPC.noteExternalChange, (payload) => handler(payload as NotePayload)),

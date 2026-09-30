@@ -5,7 +5,7 @@ import type { Tab } from '../../src/renderer/src/tabs.ts'
 
 function fixture() {
   const tab: Tab = { relPath: '甲.md', content: '窗口', saved: '原文', ledger: null, revision: 'r0', dirty: true }
-  let disk: NoteSnapshot = { content: '磁盘一', revision: 'r1' }
+  let disk: NoteSnapshot = { content: '磁盘一', revision: 'r1', sessionId: 's', objectVersion: 'o' }
   let current = true
   const shown: string[] = []
   const writes: NoteWriteRequest[] = []
@@ -21,8 +21,8 @@ function fixture() {
     write: async (request: NoteWriteRequest): Promise<NoteWriteResult> => {
       writes.push(request)
       if (request.expectedRevision !== disk.revision) return { ok: false, error: 'CONFLICT' }
-      disk = { content: request.content, revision: 'saved' }
-      return { ok: true, revision: 'saved' }
+      disk = { content: request.content, revision: 'saved', sessionId: 's', objectVersion: 'o' }
+      return { ok: true, revision: 'saved', sessionId: 's', objectVersion: 'o' }
     },
     applyDisk: (snapshot: NoteSnapshot) => {
       tab.content = snapshot.content
@@ -44,7 +44,7 @@ function fixture() {
 describe('reconcileNote', () => {
   it('reads the latest disk version when a queued notification is processed', async () => {
     const item = fixture()
-    item.setDisk({ content: '磁盘二', revision: 'r2' })
+    item.setDisk({ content: '磁盘二', revision: 'r2', sessionId: 's', objectVersion: 'o' })
     item.choices.push('disk')
     expect(await reconcileNote(item.tab, item.deps)).toBe('disk')
     expect(item.shown).toEqual(['磁盘二'])
@@ -57,7 +57,7 @@ describe('reconcileNote', () => {
     const choose = item.deps.choose
     item.deps.choose = async (windowText, diskText) => {
       const choice = await choose(windowText, diskText)
-      if (item.shown.length === 1) item.setDisk({ content: '磁盘二', revision: 'r2' })
+      if (item.shown.length === 1) item.setDisk({ content: '磁盘二', revision: 'r2', sessionId: 's', objectVersion: 'o' })
       return choice
     }
     expect(await reconcileNote(item.tab, item.deps)).toBe('disk')
@@ -69,7 +69,7 @@ describe('reconcileNote', () => {
     const item = fixture()
     item.choices.push('window')
     expect(await reconcileNote(item.tab, item.deps)).toBe('saved')
-    expect(item.writes).toEqual([{ relPath: '甲.md', content: '窗口', expectedRevision: 'r1' }])
+    expect(item.writes).toEqual([{ relPath: '甲.md', content: '窗口', expectedRevision: 'r1', sessionId: 's', objectVersion: 'o' }])
     expect(item.tab).toMatchObject({ content: '窗口', revision: 'saved', dirty: false })
   })
 
@@ -88,14 +88,14 @@ describe('reconcileNote', () => {
     const write = item.deps.write
     item.deps.write = async (request) => {
       if (attempts++ === 0) {
-        item.setDisk({ content: '磁盘二', revision: 'r2' })
+        item.setDisk({ content: '磁盘二', revision: 'r2', sessionId: 's', objectVersion: 'o' })
         return { ok: false, error: 'CONFLICT' }
       }
       return write(request)
     }
     expect(await reconcileNote(item.tab, item.deps)).toBe('saved')
     expect(item.shown).toEqual(['磁盘一', '磁盘二'])
-    expect(item.writes).toEqual([{ relPath: '甲.md', content: '窗口', expectedRevision: 'r2' }])
+    expect(item.writes).toEqual([{ relPath: '甲.md', content: '窗口', expectedRevision: 'r2', sessionId: 's', objectVersion: 'o' }])
   })
 
   it('ignores a notification after its tab or vault is replaced', async () => {

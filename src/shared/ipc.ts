@@ -4,8 +4,12 @@ export const IPC = {
   treeList: 'tree:list',
   treeChanged: 'tree:changed',
   noteRead: 'note:read',
+  noteInspect: 'note:inspect',
+  noteAbandon: 'note:abandon',
   noteWrite: 'note:write',
   noteCreate: 'note:create',
+  noteSaveCopyPreview: 'note:save-copy-preview',
+  noteSaveCopyCommit: 'note:save-copy-commit',
   folderCreate: 'folder:create',
   relocationPreview: 'note:relocation-preview',
   relocationCommit: 'note:relocation-commit',
@@ -53,7 +57,9 @@ export type PublicModelConfig = {
 export type ModelConfigResult = { ok: true; config: PublicModelConfig } | { ok: false; error: string }
 export type ModelProfileSetRequest = { provider: ModelProvider; fields: ModelProfileFields; newKey?: string }
 export type ModelLimitsSetRequest = { tier: LimitTier; limits: RunLimits }
-export type AgentStartRequest = {
+export type ObjectBinding = { sessionId: string; objectVersion: string }
+export type AgentStartRequest = ObjectBinding & {
+  expectedRevision: string
   relPath: string
   range: { start: number; end: number }
   expectedText: string
@@ -69,12 +75,32 @@ export type AgentEvent = {
   reason?: string
   persisted?: boolean
   revision?: string
+  sessionId?: string
+  objectVersion?: string
 }
 
-export type RemoteImageGetRequest = { url: string; allowHttp: boolean }
+export type ImageContext = {
+  noteRelPath: string
+  region: 'body' | 'ledger'
+  start: number
+  end: number
+  sessionId?: string
+  revision?: string
+  objectVersion?: string
+  /** Only explicit loads may use a changed window draft. */
+  draftBody?: string
+}
+export type RemoteImageGetRequest = {
+  url: string
+  mode: 'auto' | 'explicit'
+  allowHttp?: boolean
+  continuation?: string
+  context?: ImageContext
+}
 export type RemoteImageGetResult =
   | { ok: true; src: string }
-  | { ok: false; error: 'INVALID_URL' | 'HTTP_CONFIRM' | 'NOT_IMAGE' | 'TOO_LARGE' | 'UNAVAILABLE' | 'BUSY' }
+  | { ok: false; error: 'HTTP_CONFIRM' | 'REDIRECT_CONFIRM'; url: string; continuation: string }
+  | { ok: false; error: 'INVALID_URL' | 'NOT_ALLOWED' | 'NOT_IMAGE' | 'TOO_LARGE' | 'UNAVAILABLE' | 'BUSY' }
 
 export type ThemeMode = 'day' | 'night' | 'system'
 export type ThemeSetResult = { ok: true; mode: ThemeMode } | { ok: false; error: 'BAD_MODE' | 'IO_ERROR' }
@@ -100,7 +126,25 @@ export type PermissionState =
   | { status: 'invalid'; error: string }
 export type SetPermissionRequest = { relPath: string; tier: PermissionTier }
 
-export type NoteSnapshot = { content: string; revision: string }
+export type NoteSnapshot = { content: string; revision: string; objectVersion: string; sessionId: string }
+export type SaveCopyPreviewRequest = ObjectBinding & {
+  source: string
+  body: string
+  draftVersion: string
+  target: string
+}
+export type SaveCopyPreviewView = {
+  id: string
+  sessionId: string
+  source: string
+  target: string
+  draftVersion: string
+  pendingTaskIds: string[]
+  warning: string
+}
+export type SaveCopyCommitRequest = { sessionId: string; id: string; draftVersion: string; body: string }
+export type SaveCopyPreviewResult = { ok: true; preview: SaveCopyPreviewView } | { ok: false; error: string }
+export type SaveCopyCommitResult = { ok: true; relPath: string; snapshot: NoteSnapshot; taskIds: string[] } | { ok: false; error: string }
 export type EntryCreateRequest = { name: string; parent: string }
 export type RelocationPreviewRequest = { kind: 'note' | 'folder'; source: string; target: string }
 export type RelocationCommitRequest = { id: string; repairLinks: boolean }
@@ -134,21 +178,24 @@ export type LifecycleRetryResult = {
   /** 文件恢复已完成，但无关任务的生成内容仍待保存。 */
   hostPending: boolean
 } | { ok: false; error: string }
-export type NoteWriteRequest = { relPath: string; content: string; expectedRevision: string }
+export type NoteWriteRequest = ObjectBinding & { relPath: string; content: string; expectedRevision: string }
 
-export type NotePayload = {
-  sessionId?: string
-  relPath: string
-  content: string
-  revision: string
-}
+export type NoteInspectRequest = ObjectBinding & { relPath: string }
+export type NoteInspectResult = { status: 'ready'; snapshot: NoteSnapshot } | { status: 'missing' | 'replaced' | 'unreadable'; sessionId: string; relPath: string; objectVersion: string }
+export type NoteAvailability = 'missing' | 'replaced' | 'unavailable'
+export type NotePayload = { sessionId: string; relPath: string } & (
+  { state?: 'changed'; content: string; revision: string; objectVersion: string }
+  | { state: NoteAvailability; reason?: string; objectVersion?: string }
+)
 
 export type NoteWriteResult = {
   ok: true
   revision: string
+  objectVersion: string
+  sessionId: string
 } | {
   ok: false
-  error: 'CONFLICT' | 'BAD_PATH' | 'NO_VAULT' | 'NOTE_BUSY' | 'IO_ERROR'
+  error: 'CONFLICT' | 'BAD_PATH' | 'NO_VAULT' | 'NOTE_BUSY' | 'IO_ERROR' | 'NOTE_MISSING' | 'NOTE_REPLACED' | 'NOTE_UNREADABLE' | 'VAULT_CHANGED'
 }
 
 export type FlushDonePayload = {

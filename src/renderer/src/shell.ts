@@ -7,9 +7,9 @@ import { promptConflict } from './conflict.ts'
 import { openOverlay } from './overlay.ts'
 import { createSearchOverlay } from './search-overlay.ts'
 import { createSettingsOverlay } from './settings.ts'
-import { applySaved, pendingWrites, type Tab } from './tabs.ts'
+import { applySaved, pendingWrites, hasUnavailableDraft, type Tab } from './tabs.ts'
 import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
-import { renderReadOnlyMarkdown } from './view/read-only.ts'
+import { renderReadOnlyMarkdown, disposeReadOnlyImages } from './view/read-only.ts'
 import { icon } from './icons.ts'
 import { outlineLabel, outlineMarks } from './outline.ts'
 import { installShortcuts, shortcutLabel } from './shortcuts.ts'
@@ -17,7 +17,7 @@ import { renderStatusbar, statusModel, wordsOf } from './statusbar.ts'
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
 import { slashAtCaret } from './slash.ts'
-import { renderTree, titleOf, collectNotePaths, collectRelPaths, type TreeAction } from './tree.ts'
+import { renderTree, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
 import type { Theme } from './theme.ts'
 
 const SAVE_MS = 800
@@ -36,6 +36,10 @@ const HOST_ERROR_MESSAGES: Record<string, string> = {
 }
 const hostErrorText = (error: string): string => HOST_ERROR_MESSAGES[error] ?? error
 const LIFECYCLE_ERRORS: Record<string, string> = {
+  COPY_PARENT_CHANGED: '新文件已创建，但目标目录身份无法确认。请检查目标；窗口稿和待保存任务已保留，请勿重试覆盖。',
+  COPY_VERIFY_FAILED: '新文件发布后的内容或身份无法确认。请检查目标；窗口稿和待保存任务已保留。',
+  SOURCE_AVAILABLE: '原对象已能核验，请重新查看当前笔记后处理保存。',
+  LEDGER_BASIS_UNAVAILABLE: '无法核对原账本依据，窗口稿仍保留，另存未提交。',
   STALE_PREVIEW: '文件或引用在预览后发生变化，请重新预览再提交。',
   STALE_RECOVERY: '恢复记录已变化，请重新查看状态再重试。',
   VAULT_CHANGED: '笔记库已切换，本次操作已停止。',
@@ -84,6 +88,7 @@ export async function start(root: HTMLElement): Promise<void> {
             </div>
             <div class="ledger-body"></div>
           </div>
+          <div class="note-unavailable" role="status" hidden><span></span><button type="button" class="note-save-copy">另存为新笔记</button><button type="button" class="note-discard">明确舍弃并关页</button></div>
           <div class="editor-host"></div>
           <nav class="outline" aria-label="标题索引" hidden></nav>
           <div class="outline-tooltip" hidden></div>
@@ -102,6 +107,9 @@ export async function start(root: HTMLElement): Promise<void> {
   const lifecycleWarning = root.querySelector('.lifecycle-warning') as HTMLButtonElement
   const statusEl = root.querySelector('.status') as HTMLElement
   const tabsEl = root.querySelector('.tabs') as HTMLElement
+  const unavailableEl = root.querySelector('.note-unavailable') as HTMLElement
+  const copyButton = root.querySelector('.note-save-copy') as HTMLButtonElement
+  const discardButton = root.querySelector('.note-discard') as HTMLButtonElement
   const editorHostEl = root.querySelector('.editor-host') as HTMLElement
   const emptyEl = root.querySelector('.empty') as HTMLElement
   const outlineEl = root.querySelector('.outline') as HTMLElement
@@ -178,7 +186,7 @@ export async function start(root: HTMLElement): Promise<void> {
     tab.dirty = text !== tab.saved
     renderTabs()
     updateStatus()
-    scheduleSave()
+    if (!tab.availability) scheduleSave()
   })
 
   installShortcuts({
@@ -226,6 +234,8 @@ export async function start(root: HTMLElement): Promise<void> {
     treeToggle.setAttribute('aria-expanded', String(open))
   })
 
+  copyButton.addEventListener('click', () => { void saveMissingCopy() })
+  discardButton.addEventListener('click', () => { void discardMissing() })
   ledgerOpenButton.addEventListener('click', () => toggleLedger())
   ledgerClose.addEventListener('click', () => closeLedger(true))
 
@@ -239,7 +249,7 @@ export async function start(root: HTMLElement): Promise<void> {
     void flushSave()
   })
   window.rgent.onTreeChanged(() => {
-    void refreshLifecycle().then(() => refreshTree())
+    void refreshLifecycle().then(() => refreshTree()).then(() => checkOpenNotes())
   })
   window.rgent.onVaultLost(() => {
     void showPicker(true)
@@ -247,8 +257,10 @@ export async function start(root: HTMLElement): Promise<void> {
   window.rgent.onFlushRequest(() => {
     void reportFlush(flushSave, (payload) => window.rgent.flushDone(payload))
   })
-  window.rgent.onLifecycleFlushRequest((id) => {
-    void flushSave().then((ok) => window.rgent.lifecycleFlushDone(id, ok), () => window.rgent.lifecycleFlushDone(id, false))
+  window.rgent.onLifecycleFlushRequest((id, cleanUnavailablePaths) => {
+    const flush = cleanUnavailablePaths.length
+      ? Promise.resolve(saveInFlight).then(() => performFlushSave(cleanUnavailablePaths)) : flushSave()
+    void flush.then((ok) => window.rgent.lifecycleFlushDone(id, ok), () => window.rgent.lifecycleFlushDone(id, false))
   })
   window.rgent.onNoteRelocated(({ moved, sessionId }) => {
     if (sessionId && sessionId !== vaultSession) return
@@ -302,6 +314,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const tab = current()
     if (!tab) return
     const draft = editor.getText()
+    if (tab.availability || !tab.sessionId || !tab.objectVersion) return
     if (activeTasks.size && [...activeTasks.values()].some((task) => task.relPath === tab.relPath)) {
       hostNotice = '这篇笔记已有正在运行的任务。'
       updateStatus()
@@ -318,7 +331,8 @@ export async function start(root: HTMLElement): Promise<void> {
       relPath: tab.relPath,
       range: submission.range,
       expectedText: draft.slice(submission.range.start, submission.range.end),
-      promptText: submission.prompt
+      promptText: submission.prompt,
+      sessionId: tab.sessionId, objectVersion: tab.objectVersion, expectedRevision: tab.revision
     })
     if (!result.ok) {
       hostNotice = `无法开始：${hostErrorText(result.error)}`
@@ -332,6 +346,7 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   function onHostEvent(event: AgentEvent): void {
+    if (event.sessionId && event.sessionId !== vaultSession) return
     if (event.persisted && event.revision) hostRevisions.set(event.relPath, event.revision)
     if (event.status === 'running') {
       if (!endedTaskIds.has(event.id) && !activeTasks.has(event.id)) activeTasks.set(event.id, { id: event.id, relPath: event.relPath, startedAt: Date.now() })
@@ -357,7 +372,7 @@ export async function start(root: HTMLElement): Promise<void> {
 
   async function syncHostTab(tab: Tab, epoch: number): Promise<'merged' | ReconcileResult> {
     if (epoch !== vaultEpoch || !tabs.includes(tab)) return 'stale'
-    const snapshot = await window.rgent.noteRead(tab.relPath)
+    const snapshot = await readBoundTab(tab)
     if (epoch !== vaultEpoch || !tabs.includes(tab)) return 'stale'
     if (snapshot.revision === tab.revision) return 'unchanged'
     // Only a revision reported by Host may be merged automatically. External
@@ -373,6 +388,8 @@ export async function start(root: HTMLElement): Promise<void> {
     tab.saved = part.body
     tab.ledger = part.ledger
     tab.revision = snapshot.revision
+    tab.objectVersion = snapshot.objectVersion
+    tab.sessionId = snapshot.sessionId
     tab.dirty = merged !== part.body
     if (active === tab.relPath) editor.applyExternalText(merged)
     if (tab.dirty) scheduleSave()
@@ -389,7 +406,7 @@ export async function start(root: HTMLElement): Promise<void> {
   function reconcileTab(tab: Tab, epoch = vaultEpoch): Promise<ReconcileResult> {
     return reconcileNote(tab, {
       isCurrent: () => vaultEpoch === epoch && tabs.includes(tab),
-      read: () => window.rgent.noteRead(tab.relPath),
+      read: () => readBoundTab(tab),
       draft: () => tab.relPath === active ? editor.getText() : tab.content,
       choose: async (windowBody, diskBody) => {
         conflictDecisionOpen = true
@@ -564,12 +581,9 @@ export async function start(root: HTMLElement): Promise<void> {
       tree = []
       permissionState = { status: 'invalid', error: '无法读取权限名单' }
     }
-    const present = collectNotePaths(tree)
-    for (const tab of [...tabs]) {
-      if (!present.has(tab.relPath) && !tab.dirty && recoveryState?.status !== 'pending') {
-        await closeTab(tab.relPath, { save: false })
-      }
-    }
+    // A tree listing cannot prove that a missing object is safe to discard.
+    // Retain even clean tabs and their verified ledger until object inspection
+    // offers explicit recovery/save-copy or the person discards the draft.
     paintTree()
     syncEditorHost()
   }
@@ -622,7 +636,7 @@ export async function start(root: HTMLElement): Promise<void> {
       try {
         const relPath = tab.relPath
         const revision = tab.revision
-        const source = await window.rgent.noteRead(relPath)
+        const source = await readBoundTab(tab)
         if (epoch !== vaultEpoch) return
         if (!tabs.includes(tab) || tab.relPath !== relPath || tab.revision !== revision || tab.dirty) continue
         applySource(tab, source)
@@ -788,9 +802,18 @@ export async function start(root: HTMLElement): Promise<void> {
 
   function noteHost(): NoteHost {
     const present = collectRelPaths(tree)
+    const tab = current()
     return {
       noteRelPath: active ?? '',
+      imageEpoch: tab ? `${tab.sessionId}/${tab.objectVersion}/${tab.revision}` : '',
       vaultHas: (relPath) => present.has(relPath),
+      imageContext: (range, region = 'body') => tab ? {
+        noteRelPath: tab.relPath, region,
+        start: range.start + (region === 'ledger' ? partitionSource(composeSource(tab.content,tab.ledger)).body.length : 0),
+        end: range.end + (region === 'ledger' ? partitionSource(composeSource(tab.content,tab.ledger)).body.length : 0),
+        sessionId: tab.sessionId, objectVersion: tab.objectVersion, revision: tab.revision,
+        ...(tab.dirty ? { draftBody: tab.relPath === active ? editor.getText() : tab.content } : {})
+      } : undefined,
       remoteImageGet: (request) => window.rgent.remoteImageGet(request),
       openNote: (relPath) => {
         void openNote(relPath)
@@ -808,8 +831,10 @@ export async function start(root: HTMLElement): Promise<void> {
       activate(relPath)
       return
     }
+    const epoch = vaultEpoch
     try {
       const source = await window.rgent.noteRead(relPath)
+      if (epoch !== vaultEpoch || source.sessionId !== vaultSession) return
       const part = partitionSource(source.content)
       tabs.push({
         relPath,
@@ -817,6 +842,7 @@ export async function start(root: HTMLElement): Promise<void> {
         ledger: part.ledger,
         saved: part.body,
         revision: source.revision,
+        objectVersion: source.objectVersion, sessionId: source.sessionId,
         dirty: false
       })
       activate(relPath)
@@ -968,6 +994,7 @@ export async function start(root: HTMLElement): Promise<void> {
 
   /** 底栏：行列、字数、库名。字数只算正文，标记行不算。 */
   function updateStatus(): void {
+    paintUnavailable()
     const tab = current()
     const info = tab ? editor.selectionInfo() : null
     if (tab && (tab.relPath !== countedPath || tab.content !== countedSource)) {
@@ -1057,7 +1084,7 @@ export async function start(root: HTMLElement): Promise<void> {
     ledgerOpen = true
     ledgerTitle.textContent = `${titleOf(tab.relPath.split('/').pop() ?? tab.relPath)} · 账本回顾`
     // 账本是同文件的旁路原文，只读展示；Host 按任务追加的章节也走同一视图。
-    const ledgerSource = tab.ledger?.replace(/^<!-- rgent:ledger:v1 -->\s*\r?\n?/, '') ?? ''
+    const ledgerSource = tab.ledger ?? ''
     if (ledgerSource.trim()) renderReadOnlyMarkdown(ledgerBody, ledgerSource, noteHost())
     else ledgerBody.textContent = '这篇笔记还没有账本。完成一次生成任务后，可在这里回顾。'
     ledgerEl.hidden = false
@@ -1067,6 +1094,7 @@ export async function start(root: HTMLElement): Promise<void> {
   function closeLedger(restoreFocus = false): void {
     if (!ledgerOpen) return
     ledgerOpen = false
+    disposeReadOnlyImages(ledgerBody)
     ledgerEl.hidden = true
     renderTabs()
     if (restoreFocus) ledgerOpenButton.focus()
@@ -1075,6 +1103,7 @@ export async function start(root: HTMLElement): Promise<void> {
   async function closeTab(relPath: string, opts: { save?: boolean } = {}): Promise<void> {
     const tab = tabs.find((item) => item.relPath === relPath)
     if (!tab) return
+    if (opts.save !== false && tab.availability) { hostNotice='请先另存，或明确舍弃这份窗口稿。'; updateStatus(); return }
     if (opts.save !== false && tab.dirty && (!(await writeTab(tab)) || tab.dirty)) return
     const index = tabs.findIndex((item) => item.relPath === relPath)
     tabs.splice(index, 1)
@@ -1108,19 +1137,19 @@ export async function start(root: HTMLElement): Promise<void> {
     })
   }
 
-  async function performFlushSave(): Promise<boolean> {
+  async function performFlushSave(cleanUnavailablePaths: readonly string[] = []): Promise<boolean> {
     if (saveTimer != null) {
       window.clearTimeout(saveTimer)
       saveTimer = null
     }
-    let ok = true
+    let ok = !hasUnavailableDraft(tabs, cleanUnavailablePaths)
     let wrote = false
     for (let pass = 0; pass < 3; pass += 1) {
       const writes = pendingWrites(tabs, active, editor.getText())
       if (writes.length === 0) break
       for (const write of writes) {
         const tab = tabs.find((item) => item.relPath === write.relPath)
-        if (!tab) continue
+        if (!tab || tab.availability) continue
         wrote = true
         if (!(await writeTab(tab, write.body))) ok = false
       }
@@ -1133,15 +1162,26 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   async function writeTab(tab: Tab, body = tab.relPath === active ? editor.getText() : tab.content, attempt = 0): Promise<boolean> {
+    if (tab.availability || !tab.sessionId || !tab.objectVersion || tab.sessionId !== vaultSession) return false
+    const epoch = vaultEpoch
     const result = await window.rgent.noteWrite({
+      sessionId: tab.sessionId, objectVersion: tab.objectVersion,
       relPath: tab.relPath,
       content: composeSource(body, tab.ledger),
       expectedRevision: tab.revision
     })
+    if (epoch !== vaultEpoch || !tabs.includes(tab)) return false
     if (result.ok) {
+      tab.objectVersion = result.objectVersion
+      tab.sessionId = result.sessionId
       applySaved(tab, body, result.revision)
+      syncEditorHost()
       void refreshBacklinks()
       return true
+    }
+    if (['NOTE_MISSING','NOTE_REPLACED','NOTE_UNREADABLE'].includes(result.error)) {
+      markUnavailable(tab, result.error === 'NOTE_MISSING' ? 'missing' : result.error === 'NOTE_REPLACED' ? 'replaced' : 'unavailable')
+      return false
     }
     if (result.error === 'NOTE_BUSY') {
       // A structural commit briefly seals this path after its explicit flush.
@@ -1163,7 +1203,97 @@ export async function start(root: HTMLElement): Promise<void> {
       if (outcome === 'merged') return !tab.dirty
       return outcome === 'disk' || outcome === 'saved' || outcome === 'unchanged'
     }
+    // A generic write failure may hide an external removal or replacement.
+    // Inspect ownership without applying disk text over the retained draft.
+    try { await readBoundTab(tab) } catch { /* readBoundTab retains and marks the draft */ }
     return false
+  }
+
+  function paintUnavailable(): void {
+    const tab = current()
+    unavailableEl.hidden = !tab?.availability
+    const label = unavailableEl.querySelector('span')!
+    label.textContent = tab?.availability === 'missing' ? '文件已消失，窗口稿已保留；原路径不会重建。' : tab?.availability === 'replaced' ? '同名文件已被替换，窗口稿仍属于原对象。' : '暂时无法核验文件；自动保存和生成已暂停。'
+  }
+  function markUnavailable(tab: Tab, state: import('../../shared/ipc.ts').NoteAvailability): void {
+    tab.availability = state
+    if (tab.relPath === active) tab.content = editor.getText()
+    // Do not throw away the last verified ledger or transfer the old draft to a replacement.
+    renderTabs(); updateStatus()
+  }
+  async function readBoundTab(tab: Tab): Promise<NoteSnapshot> {
+    const epoch = vaultEpoch
+    if (!tab.sessionId || !tab.objectVersion || tab.sessionId !== vaultSession) throw new Error('VAULT_CHANGED')
+    const state = await window.rgent.noteInspect({ relPath: tab.relPath, sessionId: tab.sessionId, objectVersion: tab.objectVersion })
+    if (epoch !== vaultEpoch || !tabs.includes(tab)) throw new Error('VAULT_CHANGED')
+    if (state.status !== 'ready') {
+      markUnavailable(tab, state.status === 'unreadable' ? 'unavailable' : state.status)
+      throw new Error('NOTE_UNAVAILABLE')
+    }
+    delete tab.availability
+    return state.snapshot
+  }
+  async function checkOpenNotes(): Promise<void> {
+    const epoch = vaultEpoch
+    for (const tab of [...tabs]) {
+      if (epoch !== vaultEpoch) return
+      await runExclusiveConflict(async () => {
+        try { await reconcileTab(tab,epoch) } catch { /* preserve the draft on unreadable object */ }
+      })
+    }
+  }
+  async function saveMissingCopy(): Promise<void> {
+    const tab = current(); const epoch = vaultEpoch
+    if (!tab?.availability || !tab.sessionId || !tab.objectVersion) return
+    const source = tab.relPath
+    const parts = source.split('/'); const oldName = parts.pop()!.replace(/\.md$/i,'')
+    let parent = parts.join('/')
+    if (parent && !collectRelPaths(tree).has(parent)) {
+      const selected = await chooseDestination(source)
+      if (selected === null || epoch !== vaultEpoch) return
+      parent = selected
+    }
+    const name = await promptText('另存为新笔记','新名称',`${oldName}-保留稿`,'查看预览')
+    if (!name || epoch !== vaultEpoch) return
+    const target = `${parent ? parent + '/' : ''}${name.toLowerCase().endsWith('.md') ? name : name+'.md'}`
+    const body = tab.relPath === active ? editor.getText() : tab.content
+    const draftVersion = crypto.randomUUID()
+    try {
+      const result = await window.rgent.noteSaveCopyPreview({ sessionId:tab.sessionId, objectVersion:tab.objectVersion,
+        source, target, body, draftVersion })
+      if (epoch !== vaultEpoch || !tabs.includes(tab)) return
+      if (!result.ok) throw new Error(result.error)
+      const accepted = await new Promise<boolean>(resolve => {
+        let answer=false
+        const panel=openOverlay({label:'确认另存',onClose:()=>resolve(answer)})
+        panel.root.classList.add('save-copy-preview')
+        const title=document.createElement('h2'); title.textContent='另存为新笔记'
+        const description=document.createElement('p'); description.textContent=`${source} → ${result.preview.target}`
+        const note=document.createElement('p'); note.textContent=result.preview.warning
+        const tasks=document.createElement('p'); tasks.textContent=result.preview.pendingTaskIds.length ? `将以原任务 ID 保留 ${result.preview.pendingTaskIds.length} 份未落盘完整回答到新笔记账本；任务不重启。` : '最后核验的原账本将一并保留。'
+        const cancel=document.createElement('button'); cancel.textContent='取消'; cancel.onclick=()=>panel.close()
+        const save=document.createElement('button'); save.className='save-copy-confirm'; save.textContent='确认另存'; save.onclick=()=>{answer=true;panel.close()}
+        panel.root.append(title,description,note,tasks,cancel,save)
+      })
+      if (!accepted || epoch !== vaultEpoch || !tabs.includes(tab)) return
+      const currentBody = tab.relPath === active ? editor.getText() : tab.content
+      const saved=await window.rgent.noteSaveCopyCommit({id:result.preview.id,sessionId:tab.sessionId,draftVersion,body:currentBody})
+      if (epoch !== vaultEpoch || !tabs.includes(tab)) return
+      if (!saved.ok) throw new Error(saved.error)
+      const selection=tab.selection
+      applySource(tab,saved.snapshot); tab.relPath=saved.relPath
+      hostRevisions.delete(source)
+      for(const id of saved.taskIds) { activeTasks.delete(id); endedTaskIds.add(id) }
+      if(active===source) { active=saved.relPath; editor.setText(tab.content,noteHost(),selection) }
+      closeLedger(); syncActiveLocks(); renderTabs(); updateStatus(); await refreshTree()
+    } catch(error) { if(epoch===vaultEpoch) window.alert(lifecycleErrorText(error)) }
+  }
+  async function discardMissing(): Promise<void> {
+    const tab=current(); const epoch=vaultEpoch
+    if(!tab?.availability || !tab.sessionId || !tab.objectVersion) return
+    if(!window.confirm('明确舍弃这篇原对象的窗口稿及尚未落盘的生成内容？磁盘同名文件不会改动。')) return
+    const ok=await window.rgent.noteAbandon({relPath:tab.relPath,sessionId:tab.sessionId,objectVersion:tab.objectVersion})
+    if(ok && epoch===vaultEpoch) await closeTab(tab.relPath,{save:false})
   }
 
   function applySource(tab: Tab, source: NoteSnapshot): void {
@@ -1172,6 +1302,9 @@ export async function start(root: HTMLElement): Promise<void> {
     tab.ledger = part.ledger
     tab.saved = part.body
     tab.revision = source.revision
+    tab.sessionId = source.sessionId
+    tab.objectVersion = source.objectVersion
+    delete tab.availability
     tab.dirty = false
   }
 

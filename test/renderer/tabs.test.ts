@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { LEDGER_ANCHOR } from '../../src/markdown/partition.ts'
-import { applySaved, diskOf, pendingWrites, type Tab } from '../../src/renderer/src/tabs.ts'
+import { applySaved, diskOf, pendingWrites, hasUnavailableDraft, type Tab } from '../../src/renderer/src/tabs.ts'
 
 function tab(relPath: string, over: Partial<Tab> = {}): Tab {
   return {
@@ -15,6 +15,13 @@ function tab(relPath: string, over: Partial<Tab> = {}): Tab {
 }
 
 describe('tab writes', () => {
+  it('allows recovery only for journal-scoped clean unavailable tabs, never dirty or unrelated drafts', () => {
+    const clean = tab('moved.md', { availability: 'missing' })
+    expect(hasUnavailableDraft([clean])).toBe(true)
+    expect(hasUnavailableDraft([clean], ['moved.md'])).toBe(false)
+    expect(hasUnavailableDraft([{ ...clean, dirty: true }], ['moved.md'])).toBe(true)
+    expect(hasUnavailableDraft([clean, tab('other.md', { availability: 'replaced' })], ['moved.md'])).toBe(true)
+  })
   it('writes every dirty tab, not just the one on screen', () => {
     const tabs = [
       tab('a.md', { content: 'a 改过', dirty: true }),

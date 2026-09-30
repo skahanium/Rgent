@@ -1,7 +1,8 @@
-import { chmod, stat, symlink, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, stat, symlink, mkdtemp, mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { dialog } from 'electron'
 import { VaultSession } from '../../src/main/vault.ts'
 import { VaultLifecycle } from '../../src/main/vault-lifecycle.ts'
 import { watchVault } from '../../src/main/watch.ts'
@@ -30,6 +31,82 @@ describe('VaultSession isolation', () => {
     }
     return { session, emit, attach, first, second }
   }
+
+  it('binds reads to the current session and rejects same-byte external replacements', async () => {
+    const { session, attach, first } = await setup()
+    try {
+      await attach(first)
+      const initial = await session.read('原篇.md')
+      expect(initial.sessionId).toBe(session.captureSession())
+      await rename(path.join(first, '原篇.md'), path.join(first, 'held.md'))
+      await writeFile(path.join(first, '原篇.md'), initial.content)
+      await expect(session.write('原篇.md', 'overwrite', initial.revision, initial)).rejects.toThrow('NOTE_REPLACED')
+      expect(await readFile(path.join(first, '原篇.md'), 'utf8')).toBe(initial.content)
+    } finally { session.dispose() }
+  })
+
+  it('accepts only application-proven atomic-save successors and keeps the original snapshot', async () => {
+    const { session, attach, first } = await setup()
+    try {
+      await attach(first)
+      const initial = await session.read('原篇.md')
+      const saved = await session.write('原篇.md', 'new body', initial.revision, initial)
+      expect(saved.objectVersion).not.toBe(initial.objectVersion)
+      expect(session.acceptsObject('原篇.md', initial.objectVersion, saved.objectVersion)).toBe(true)
+      expect(session.latestFor('原篇.md', initial.objectVersion)?.content).toBe('new body')
+      await attach(first)
+      await expect(session.write('原篇.md', 'old session', saved.revision, initial)).rejects.toThrow('VAULT_CHANGED')
+    } finally { session.dispose() }
+  })
+
+  it('reports missing watched notes without recreating their files', async () => {
+    const { session, emit, attach, first } = await setup()
+    try {
+      await attach(first)
+      const initial = await session.read('原篇.md')
+      await unlink(path.join(first, '原篇.md'))
+      const callback = vi.mocked(watchVault).mock.calls.at(-1)![1]
+      callback('原篇.md')
+      await new Promise((resolve) => setTimeout(resolve, 110))
+      expect(emit).toHaveBeenCalledWith('note:external-change', expect.objectContaining({ relPath: '原篇.md', sessionId: initial.sessionId, state: 'missing', objectVersion: initial.objectVersion }))
+      await expect(session.write('原篇.md', 'draft', initial.revision, initial)).rejects.toThrow('NOTE_MISSING')
+    } finally { session.dispose() }
+  })
+
+  it('retains unresolved original snapshots and refuses a third unrelated object binding', async () => {
+    const { session, attach, first } = await setup()
+    try {
+      await attach(first)
+      const initial = await session.read('原篇.md')
+      await rename(path.join(first, '原篇.md'), path.join(first, 'held-1.md'))
+      await writeFile(path.join(first, '原篇.md'), 'second')
+      const second = await session.read('原篇.md')
+      await rename(path.join(first, '原篇.md'), path.join(first, 'held-2.md'))
+      await writeFile(path.join(first, '原篇.md'), 'third')
+      await expect(session.read('原篇.md')).rejects.toThrow('OBJECT_BINDING_LIMIT')
+      expect(session.latestFor('原篇.md', initial.objectVersion)?.content).toBe(initial.content)
+      expect(session.latestFor('原篇.md', second.objectVersion)?.content).toBe('second')
+    } finally { session.dispose() }
+  })
+
+  it('continues only native-confirmed object successors from structural link repairs', async () => {
+    const { session, attach, first } = await setup()
+    try {
+      await writeFile(path.join(first, '原篇.md'), '[[原篇]]')
+      await writeFile(path.join(first, 'refs.md'), '[[原篇]]')
+      await attach(first)
+      const original = await session.read('原篇.md')
+      const refs = await session.read('refs.md')
+      const preview = await session.previewRelocation({ kind: 'note', source: '原篇.md', target: '新篇.md' })
+      await session.commitRelocation(preview.id, true)
+      const moved = await session.read('新篇.md')
+      const repaired = await session.read('refs.md')
+      expect(session.acceptsObject('新篇.md', original.objectVersion, moved.objectVersion)).toBe(true)
+      expect(session.acceptsObject('refs.md', refs.objectVersion, repaired.objectVersion)).toBe(true)
+      expect(session.latestFor('新篇.md', original.objectVersion)?.content).toBe('[[新篇]]')
+      await expect(session.write('refs.md', 'human edit', repaired.revision, refs)).resolves.toMatchObject({ sessionId: refs.sessionId })
+    } finally { session.dispose() }
+  })
 
   it('rejects a preview waiting for recovery when the vault changes', async () => {
     let finish!: (value: null) => void
@@ -77,10 +154,26 @@ describe('VaultSession isolation', () => {
     } finally { session.dispose() }
   })
 
+  it('drains the previous session before selecting the same library again', async () => {
+    const userData = await mkdtemp(path.join(os.tmpdir(), 'rgent-session-'))
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    await writeFile(path.join(userData, 'vault.json'), serializeStoredVault(root))
+    const drain = vi.fn(async () => {})
+    const session = new VaultSession(userData, vi.fn(), drain)
+    try {
+      session.restore()
+      const originalSession = session.captureSession()
+      vi.mocked(dialog.showOpenDialog).mockResolvedValueOnce({ canceled: false, filePaths: [root] })
+      await session.pick(null)
+      expect(drain).toHaveBeenCalledWith(root)
+      expect(session.captureSession()).not.toBe(originalSession)
+    } finally { session.dispose() }
+  })
+
   it('discards a delayed note notification from the previous vault', async () => {
     const { session, emit, attach, first, second } = await setup()
-    let finish!: (value: { content: string; revision: string }) => void
-    const pending = new Promise<{ content: string; revision: string }>((resolve) => { finish = resolve })
+    let finish!: (value: { content: string; revision: string; objectVersion: string }) => void
+    const pending = new Promise<{ content: string; revision: string; objectVersion: string }>((resolve) => { finish = resolve })
     try {
       await attach(first)
       vi.spyOn(notesFs, 'readNoteSnapshot').mockReturnValueOnce(pending)
@@ -89,7 +182,7 @@ describe('VaultSession isolation', () => {
       await new Promise((resolve) => setTimeout(resolve, 100))
       await attach(second)
       emit.mockClear()
-      finish({ content: 'first secret', revision: 'old' })
+      finish({ content: 'first secret', revision: 'old', objectVersion: 'old-object' })
       await Promise.resolve()
       await Promise.resolve()
       expect(emit).not.toHaveBeenCalled()
