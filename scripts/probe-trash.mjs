@@ -63,7 +63,8 @@ try {
     const source = join(repo, 'test/native/trash_win.cc')
     const buildFile = join(scratch, 'compile.cmd')
     await writeFile(buildFile, `@echo off\r\ncall ${quote(vcvars)} >nul\r\nif errorlevel 1 exit /b 1\r\ncl /nologo /EHsc /std:c++20 /W4 /DUNICODE /D_UNICODE ${quote(source)} /Fe:${quote(binary)} /Fo:${quote(join(scratch, 'trash-probe.obj'))} /link ole32.lib shell32.lib uuid.lib bcrypt.lib\r\n`)
-    report.compiler = await run(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', `"${buildFile}"`], 60_000)
+    // Fixed basename in our scratch cwd avoids Node/cmd.exe double-quoting absolute paths.
+    report.compiler = await run(process.env.ComSpec ?? 'cmd.exe', ['/d', '/c', 'compile.cmd'], 60_000)
     modes = ['ordinary', 'initial-file-replace', 'queued-file-replace', 'predelete-file-replace',
       'initial-parent-move', 'queued-parent-move', 'predelete-parent-move',
       'initial-junction', 'queued-junction', 'predelete-junction',
@@ -73,14 +74,18 @@ try {
     throw new Error(`No native trash probe for ${process.platform}`)
   }
   await save()
-  if (report.compiler.exitCode !== 0 || report.compiler.timedOut) throw new Error('Native probe compilation failed')
+  if (report.compiler.exitCode !== 0 || report.compiler.timedOut) {
+    console.error(report.compiler.stdout.slice(-4_000), report.compiler.stderr.slice(-4_000))
+    throw new Error('Native probe compilation failed')
+  }
   for (const mode of modes) {
     const execution = await run(binary, [mode], 45_000)
     let evidence = null, parseError = ''
     try { evidence = JSON.parse(execution.stdout.trim()) } catch (error) { parseError = error.message }
     const ok = execution.exitCode === 0 && !execution.timedOut && evidence?.mode === mode
       && evidence?.experimentComplete === true && evidence?.fixtureReclaimed === true
-      && evidence?.systemPutBackVerified === false
+      && evidence?.ownedFixtureObjectsAccounted === true && evidence?.residualFixture === ''
+      && !evidence?.probeError && !evidence?.cleanupError && evidence?.systemPutBackVerified === false
     report.scenarios.push({ mode, ok, evidence, parseError, execution })
     await save()
     console.log(`${mode}: ${ok ? 'evidence collected; own fixture reclaimed' : 'incomplete or cleanup failed'}`)

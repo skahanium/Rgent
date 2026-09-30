@@ -59,8 +59,13 @@ int main(int argc, char **argv) {
       NSString *note = [parent stringByAppendingPathComponent:@"note.md"];
       NSString *token = [NSString stringWithFormat:@"%@ original fixture\n", NSUUID.UUID.UUIDString];
       File(note, token);
-      NSMutableDictionary *owned = [NSMutableDictionary dictionary];
-      NSDictionary *expected = Object(note); owned[expected[@"identity"]] = expected[@"sha256"];
+      NSMutableDictionary *owned = [NSMutableDictionary dictionary], *ownedPaths = [NSMutableDictionary dictionary];
+      NSDictionary *(^own)(NSString *) = ^NSDictionary *(NSString *path) {
+        NSDictionary *object = Object(path);
+        if ([object[@"identity"] isEqual:@"missing"] || [object[@"sha256"] isEqual:@"missing"]) @throw @"fixture identity or content unavailable";
+        owned[object[@"identity"]] = object[@"sha256"]; ownedPaths[object[@"identity"]] = path; return object;
+      };
+      NSDictionary *expected = own(note);
       pinned = open(note.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW);
       if (pinned < 0) @throw @"pin failed";
       NSMutableArray<NSURL *> *urls = [NSMutableArray arrayWithObject:[NSURL fileURLWithPath:note]];
@@ -68,8 +73,8 @@ int main(int argc, char **argv) {
       NSString *expectedPath = note;
       if ([mode isEqual:@"file-replace"]) {
         expectedPath = [parent stringByAppendingPathComponent:@"parked.md"];
-        Move(note, expectedPath); File(note, [token stringByAppendingString:@"replacement\n"]);
-        owned[Identity(note)] = Hash(note);
+        Move(note, expectedPath); ownedPaths[expected[@"identity"]] = expectedPath;
+        File(note, [token stringByAppendingString:@"replacement\n"]); own(note);
       } else if ([mode isEqual:@"parent-swap"] || [mode isEqual:@"parent-link"] || [mode isEqual:@"reference-outside"]) {
         if ([mode isEqual:@"reference-outside"]) {
           NSURL *ref = urls[0].fileReferenceURL;
@@ -78,18 +83,19 @@ int main(int argc, char **argv) {
         }
         NSString *parked = [outside stringByAppendingPathComponent:@"original-parent"];
         Move(parent, parked); expectedPath = [parked stringByAppendingPathComponent:@"note.md"];
+        ownedPaths[expected[@"identity"]] = expectedPath;
         if ([mode isEqual:@"parent-swap"]) {
-          Dir(parent); File(note, [token stringByAppendingString:@"replacement parent\n"]); owned[Identity(note)] = Hash(note);
+          Dir(parent); File(note, [token stringByAppendingString:@"replacement parent\n"]); own(note);
         } else if ([mode isEqual:@"parent-link"]) {
           NSString *trap = [outside stringByAppendingPathComponent:@"trap"];
           Dir(trap); NSString *sentinel = [trap stringByAppendingPathComponent:@"note.md"];
-          File(sentinel, [token stringByAppendingString:@"outside sentinel\n"]); owned[Identity(sentinel)] = Hash(sentinel);
+          File(sentinel, [token stringByAppendingString:@"outside sentinel\n"]); own(sentinel);
           if (symlink(trap.fileSystemRepresentation, parent.fileSystemRepresentation)) @throw @"symlink failed";
         }
       } else if ([mode isEqual:@"same-name"]) {
         NSString *second = [vault stringByAppendingPathComponent:@"other/note.md"];
         Dir(second.stringByDeletingLastPathComponent); File(second, [token stringByAppendingString:@"second\n"]);
-        NSDictionary *object = Object(second); owned[object[@"identity"]] = object[@"sha256"];
+        NSDictionary *object = own(second);
         [urls addObject:[NSURL fileURLWithPath:second]]; [expectations addObject:object];
       } else if ([mode isEqual:@"partial"]) {
         [urls addObject:[NSURL fileURLWithPath:[vault stringByAppendingPathComponent:@"missing.md"]]];
@@ -129,13 +135,20 @@ int main(int argc, char **argv) {
         if (trash) {
           NSString *reclaimed = [base stringByAppendingPathComponent:[NSString stringWithFormat:@"reclaimed-%lu", (unsigned long)i]];
           if (!ours || rename(trash.path.fileSystemRepresentation, reclaimed.fileSystemRepresentation) || ![Object(reclaimed) isEqual:actual]) cleanup = NO;
-          else row[@"reclaimed"] = @YES;
+          else { row[@"reclaimed"] = @YES; ownedPaths[actual[@"identity"]] = reclaimed; }
         } else if (![wanted[@"identity"] isEqual:@"missing"]) {
           // A failed recycle may be observed, but losing a file without an exact receipt is incomplete evidence.
           if (!originalExists || ![Identity(expectedPath) isEqual:expected[@"identity"]]) complete = NO;
         }
         [rows addObject:row];
       }
+      BOOL accounted = YES;
+      for (NSString *identity in owned) {
+        NSDictionary *actual = Object(ownedPaths[identity]);
+        if (![actual[@"identity"] isEqual:identity] || ![actual[@"sha256"] isEqual:owned[identity]]) accounted = NO;
+      }
+      if (!accounted) { complete = NO; cleanup = NO; result[@"probeError"] = @"A fixture object has no verified surviving path or reclaimed receipt"; }
+      result[@"ownedFixtureObjectsAccounted"] = @(accounted);
       close(pinned); pinned = -1;
       result[@"items"] = rows; result[@"experimentComplete"] = @(complete);
       struct stat rootAfter;
@@ -146,7 +159,10 @@ int main(int argc, char **argv) {
         if (removeError) result[@"cleanupError"] = removeError.localizedDescription;
       }
       result[@"fixtureReclaimed"] = @(cleanup); result[@"residualFixture"] = cleanup ? @"" : base;
-    } @catch (id exception) { result[@"probeError"] = [exception description]; }
+    } @catch (id exception) {
+      result[@"probeError"] = [exception description]; result[@"experimentComplete"] = @NO;
+      result[@"fixtureReclaimed"] = @NO; result[@"residualFixture"] = base;
+    }
     if (pinned >= 0) close(pinned);
     NSData *json = [NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
     puts([[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding].UTF8String);

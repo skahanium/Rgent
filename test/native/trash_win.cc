@@ -155,8 +155,9 @@ int wmain(int argc,wchar_t **argv) {
   if (argc!=2 || std::find(modes.begin(),modes.end(),argv[1])==modes.end()) return 2;
   std::wstring mode=argv[1]; HRESULT init=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED); if (FAILED(init)) { std::cout<<"{\"probeError\":\"STA initialization failed\",\"experimentComplete\":false,\"fixtureReclaimed\":false}\n"; return 1; }
   fs::path base; std::vector<Row> rows; std::map<std::string,std::string> owned;
+  std::map<std::string,fs::path> ownedPaths;
   std::string error,rootId; HRESULT perform=E_PENDING,abortHr=E_PENDING; BOOL aborted=TRUE;
-  bool cleanup=false,complete=false,injected=false,injectionBlocked=false; DWORD injectionError=0;
+  bool cleanup=false,complete=false,accounted=false,injected=false,injectionBlocked=false; DWORD injectionError=0;
   Handle leaf,parentPin,identityPin;
   try {
     wchar_t temp[MAX_PATH+1]; Check(GetTempPathW(MAX_PATH,temp)>0,"temp directory");
@@ -171,11 +172,15 @@ int wmain(int argc,wchar_t **argv) {
     fs::path vault=base/L"vault",outside=base/L"outside",parent=vault/L"parent",note=parent/L"note.md",expectedPath=note;
     fs::create_directories(parent); fs::create_directory(outside); fs::create_directory(base/L"recovered");
     std::string token=Utf8(name)+" original fixture\n"; File(note,token);
-    Row first; first.source=note; first.expected=Read(note); rows.push_back(first); owned[first.expected.id]=first.expected.hash;
+    auto own=[&](const fs::path &path) {
+      auto object=Read(path); Check(object.id!="missing" && object.hash!="missing","fixture identity and content");
+      owned[object.id]=object.hash; ownedPaths[object.id]=path; return object;
+    };
+    Row first; first.source=note; first.expected=own(note); rows.push_back(first);
     identityPin.h=CreateFileW(note.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr); Check(identityPin.h!=INVALID_HANDLE_VALUE,"identity pin");
     if (mode==L"same-name" || mode==L"partial") {
       fs::path second=vault/L"other"/L"note.md"; fs::create_directory(second.parent_path()); File(second,token+"second\n");
-      Row r; r.source=second; r.expected=Read(second); rows.push_back(r); owned[r.expected.id]=r.expected.hash;
+      Row r; r.source=second; r.expected=own(second); rows.push_back(r);
     }
     if (mode==L"leaf-pin") { leaf.h=CreateFileW(note.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr); Check(leaf.h!=INVALID_HANDLE_VALUE,"leaf deny-delete pin"); }
     if (mode==L"parent-pin-replace") { parentPin.h=CreateFileW(parent.c_str(),0,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr); Check(parentPin.h!=INVALID_HANDLE_VALUE,"parent deny-delete pin"); }
@@ -185,15 +190,16 @@ int wmain(int argc,wchar_t **argv) {
       if (mode.find(L"file-replace")!=std::wstring::npos || mode==L"parent-pin-replace") {
         fs::path parked=parent/L"parked.md";
         if (!MoveFileExW(note.c_str(),parked.c_str(),0)) { injectionBlocked=true; injectionError=GetLastError(); return; }
-        expectedPath=parked; File(note,token+"replacement\n"); owned[Read(note).id]=Read(note).hash;
+        expectedPath=parked; ownedPaths[rows[0].expected.id]=expectedPath;
+        File(note,token+"replacement\n"); own(note);
       } else {
         fs::path parked=outside/L"original-parent";
         if (!MoveFileExW(parent.c_str(),parked.c_str(),0)) { injectionBlocked=true; injectionError=GetLastError(); return; }
-        expectedPath=parked/L"note.md";
+        expectedPath=parked/L"note.md"; ownedPaths[rows[0].expected.id]=expectedPath;
         if (mode.find(L"junction")!=std::wstring::npos) {
-          fs::path trap=outside/L"trap"; fs::create_directory(trap); File(trap/L"note.md",token+"outside sentinel\n"); owned[Read(trap/L"note.md").id]=Read(trap/L"note.md").hash;
+          fs::path trap=outside/L"trap"; fs::create_directory(trap); File(trap/L"note.md",token+"outside sentinel\n"); own(trap/L"note.md");
           Junction(parent,trap);
-        } else { fs::create_directory(parent); File(note,token+"replacement parent\n"); owned[Read(note).id]=Read(note).hash; }
+        } else { fs::create_directory(parent); File(note,token+"replacement parent\n"); own(note); }
       }
     };
     Check(Read(note)==rows[0].expected && InVault(note,vault),"initial fixture precheck");
@@ -232,6 +238,7 @@ int wmain(int argc,wchar_t **argv) {
         if (SUCCEEDED(r.restore)) { r.restore=restore->PerformOperations(); r.restoreAbortedHr=restore->GetAnyOperationsAborted(&r.restoreAborted); }
         r.reclaimed=SUCCEEDED(r.restore) && SUCCEEDED(r.restoreAbortedHr) && !r.restoreAborted && Read(base/L"recovered"/recovered)==r.actual;
         if (!r.reclaimed) cleanup=false;
+        else ownedPaths[r.actual.id]=base/L"recovered"/recovered;
       } else {
         // No exact receipt plus a missing intended/replacement fixture cannot be reported as completed evidence.
         bool expectedSurvives=Read(i==0?expectedPath:r.source)==r.expected;
@@ -239,6 +246,11 @@ int wmain(int argc,wchar_t **argv) {
         if (r.postCalled && SUCCEEDED(r.post)) { complete=false; cleanup=false; }
       }
     }
+    // Every created file, including a replacement/sentinel, must still be present or
+    // have been reclaimed through its exact receipt. Missing callbacks are not proof.
+    accounted=true;
+    for (const auto &[id,hash]:owned) if (!(Read(ownedPaths.at(id))==Object{id,hash})) accounted=false;
+    if (!accounted) { complete=false; cleanup=false; error="A fixture object has no verified surviving path or reclaimed receipt"; }
     // Cancelled/blocked outcomes are evidence only if operation callbacks were actually exercised.
     if (rows.empty() || (!rows[0].pre && mode!=L"leaf-pin")) complete=false;
     if (mode==L"ordinary" && (!rows[0].receipt || !rows[0].owned)) complete=false;
@@ -251,12 +263,12 @@ int wmain(int argc,wchar_t **argv) {
       if (cleanup && a!=INVALID_FILE_ATTRIBUTES && (a&FILE_ATTRIBUTE_REPARSE_POINT)) cleanup=RemoveDirectoryW(parent.c_str())!=FALSE;
       if (cleanup) { std::error_code ec; fs::remove_all(base,ec); cleanup=!ec && !fs::exists(base); }
     }
-  } catch (const std::exception &e) { error=e.what(); }
+  } catch (const std::exception &e) { error=e.what(); complete=false; cleanup=false; accounted=false; }
   leaf.close(); parentPin.close(); identityPin.close();
   std::ostringstream out;
   out<<"{\"schemaVersion\":1,\"platform\":\"Windows\",\"mode\":"<<Q(Utf8(mode))<<",\"fixtureRoot\":"<<Q(Utf8(base.native()))<<",\"completed\":"<<B(perform!=E_PENDING)<<",\"experimentComplete\":"<<B(complete)<<",\"performHRESULT\":"<<(long)perform<<",\"getAnyOperationsAbortedHRESULT\":"<<(long)abortHr<<",\"anyOperationsAborted\":"<<B(aborted!=FALSE)<<",\"injected\":"<<B(injected)<<",\"injectionBlocked\":"<<B(injectionBlocked)<<",\"injectionWin32Error\":"<<injectionError<<",\"probeError\":"<<Q(error)<<",\"fixtureReclaimed\":"<<B(cleanup)<<",\"residualFixture\":"<<Q(cleanup?"":Utf8(base.native()))<<",\"systemPutBackVerified\":false,\"cleanupKind\":\"exact-Shell-receipt-MoveItem-to-fixture\",\"items\":[";
   for (size_t i=0;i<rows.size();i++) { auto &r=rows[i]; if (i) out<<','; out<<"{\"source\":"<<Q(Utf8(r.source.native()))<<",\"expected\":"<<Json(r.expected)<<",\"actual\":"<<Json(r.actual)<<",\"queuedHRESULT\":"<<(long)r.queued<<",\"preDeleteCalled\":"<<B(r.pre)<<",\"preDeleteHRESULT\":"<<(long)r.preResult<<",\"finalPrecheckPassed\":"<<B(r.finalCheck)<<",\"postDeleteCalled\":"<<B(r.postCalled)<<",\"postDeleteHRESULT\":"<<(long)r.post<<",\"receipt\":"<<Q(r.receiptName)<<",\"receiptPath\":"<<Q(Utf8(r.receiptPath.native()))<<",\"expectedIdentityAndHash\":"<<B(r.actual==r.expected)<<",\"ownedFixture\":"<<B(r.owned)<<",\"originalExists\":"<<B(r.sourceExists)<<",\"reclaimed\":"<<B(r.reclaimed)<<",\"reclaimHRESULT\":"<<(long)r.restore<<",\"reclaimAbortedHRESULT\":"<<(long)r.restoreAbortedHr<<",\"reclaimAborted\":"<<B(r.restoreAborted!=FALSE)<<'}'; }
-  out<<"]}"; std::cout<<out.str()<<std::endl;
+  out<<"],\"ownedFixtureObjectsAccounted\":"<<B(accounted)<<"}"; std::cout<<out.str()<<std::endl;
   for (auto &r:rows) r.receipt.Reset();
   CoUninitialize(); return complete && cleanup ? 0 : 1;
 }
