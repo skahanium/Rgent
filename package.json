@@ -8,7 +8,7 @@
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "node scripts/build-native.mjs && electron-vite dev",
+    "dev": "node scripts/build-native.mjs && node scripts/dev.mjs",
     "build": "node scripts/build-native.mjs && electron-vite build",
     "preview": "electron-vite preview",
     "test": "node scripts/build-native.mjs && tsc --noEmit && vitest run",
