@@ -1515,7 +1515,14 @@ async function main() {
         sleep(3000).then(() => { if (child.exitCode == null) child.kill('SIGKILL') })
       ])
     }
-    rmSync(workdir, { recursive: true, force: true })
+    // Windows 退出后句柄可能还握着临时目录一两秒（EPERM）。临时目录是运行卫生，
+    // 不是验收项：重试几次，仍不行只告警，不让它把整轮结果改成失败。
+    let cleaned = false
+    for (let attempt = 0; attempt < 5 && !cleaned; attempt += 1) {
+      try { rmSync(workdir, { recursive: true, force: true }); cleaned = true }
+      catch { await sleep(400) }
+    }
+    if (!cleaned) process.stdout.write(`  ! 临时目录未能删除（${workdir}），不影响本轮检查结论\n`)
     if (hostServer) await new Promise((resolve) => hostServer.close(resolve))
   }
 
