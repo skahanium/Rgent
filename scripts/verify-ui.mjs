@@ -413,6 +413,101 @@ async function captureVisualBaseline(page, shot, nativeShot) {
   check('同内容日夜截图无运行时异常', page.errors.length === 0, page.errors.slice(0, 1).join(''))
 }
 
+/** 同一临时库中走原文编辑、Host、移动、消失与明确另存，不注入生产绕过。 */
+async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
+  process.stdout.write('\n原文字节与对象边界\n')
+  const name = '原文坐标.md'
+  const movedName = '原文已移.md'
+  const copyName = '原文另存.md'
+  const url = 'http://93.184.216.34/source.png'
+  const image = `![来源图](${url})`
+  const ai = `<!-- rgent:ai:v1 -->\r\n${image} ## 图片标题\r\nAI原文。`
+  const body = `\ufeff# 原文坐标\r\n\r\n原文字节。\n\n${ai}\n\n/快速完成\r\n`
+  const ledger = '<!-- rgent:ledger:v1 -->\r\n## 原账本\r\n不改历史。\n'
+  const original = body + ledger
+  writeFileSync(path.join(vault, name), original)
+  const appeared = await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((node) => node.textContent.includes('原文坐标'))`)
+  check('混合换行夹具进入同一库', appeared)
+  if (!appeared) return
+  await page.eval(`[...document.querySelectorAll('.tree-note')].find((node) => node.textContent.includes('原文坐标'))?.click()`)
+  const opened = await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(name)}`)
+  check('BOM 混合换行笔记可在真实窗口打开', opened)
+  if (!opened) return
+  const projected = body.replace(/\r\n?|\n/g, '\n')
+  check('画布LF投影、图片标题与磁盘原文字节各自正确', await page.eval(`(() => {
+    const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+    return view?.state.doc.toString() === ${JSON.stringify(projected)} &&
+      document.querySelector('.cm-line.md-h1')?.textContent.includes('原文坐标') &&
+      [...document.querySelectorAll('.outline-mark')].some((node) => node.getAttribute('aria-label')?.includes('图片标题')) &&
+      !!document.querySelector('.md-image-slot button')
+  })()`) === true && readFileSync(path.join(vault, name), 'utf8') === original)
+  await probe('图片出口核验使用原文范围并拒绝AI自动加载及错位范围', async () => {
+    const proof = await page.eval(`(async () => {
+      const note = await window.rgent.noteRead(${JSON.stringify(name)})
+      const start = note.content.indexOf(${JSON.stringify(image)})
+      const context = { noteRelPath: ${JSON.stringify(name)}, region: 'body', start, end: start + ${image.length},
+        sessionId: note.sessionId, objectVersion: note.objectVersion, revision: note.revision }
+      const base = { url: ${JSON.stringify(url)}, context }
+      const auto = await window.rgent.remoteImageGet({ ...base, mode: 'auto' })
+      const explicit = await window.rgent.remoteImageGet({ ...base, mode: 'explicit' })
+      const wrong = await window.rgent.remoteImageGet({ ...base, mode: 'explicit', context: { ...context, start: start - 2, end: context.end - 2 } })
+      const unbound = await window.rgent.remoteImageGet({ url: ${JSON.stringify(url)}, mode: 'explicit' })
+      return { auto: auto.error, explicit: explicit.error, wrong: wrong.error, unbound: unbound.error }
+    })()`)
+    return { ok: proof.auto === 'NOT_ALLOWED' && proof.explicit === 'HTTP_CONFIRM' && proof.wrong === 'NOT_ALLOWED' && proof.unbound === 'NOT_ALLOWED', detail: JSON.stringify(proof) }
+  })
+  const editAt = projected.indexOf('原文字节。') + '原文字节。'.length
+  await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ changes: { from: ${editAt}, insert: '改' }, selection: { anchor: ${editAt + 1} }, userEvent: 'input.type' }); view.focus() })()`)
+  await page.key('s', 'KeyS', modifier, 83)
+  const edited = original.replace('原文字节。', '原文字节。改')
+  check('编辑保存只增加输入字符，BOM与所有原换行保留', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(edited)})()`))
+  await page.key('z', 'KeyZ', modifier, 90)
+  await page.key('s', 'KeyS', modifier, 83)
+  check('真实键盘撤销恢复原文完整字节', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(original)})()`))
+  await page.key(process.platform === 'darwin' ? 'Z' : 'y', process.platform === 'darwin' ? 'KeyZ' : 'KeyY', process.platform === 'darwin' ? modifier | 8 : modifier, process.platform === 'darwin' ? 90 : 89)
+  await page.key('s', 'KeyS', modifier, 83)
+  check('真实键盘重做保持混合换行与BOM', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(edited)})()`))
+  await page.key('z', 'KeyZ', modifier, 90)
+  await page.key('s', 'KeyS', modifier, 83)
+  await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(original)})()`)
+  // 移动按钮用原文单位；图片后的标题和尾文必须与标记一并搬走。
+  await page.eval(`(() => { const marker = document.querySelector('.rgent-marker-ai'); marker?.querySelector('.rgent-marker-more-toggle')?.click(); [...(marker?.querySelectorAll('button') ?? [])].find((button) => button.textContent === '上移一段')?.click() })()`)
+  await page.key('s', 'KeyS', modifier, 83)
+  const swapped = original.replace(`原文字节。\n\n${ai}`, `${ai}\n\n原文字节。`)
+  check('身份块搬移保留图、尾文、分隔与账本字节', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(swapped)})()`))
+  await page.key('z', 'KeyZ', modifier, 90)
+  await page.key('s', 'KeyS', modifier, 83)
+  await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(original)})()`)
+  await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; const at = view.state.doc.toString().indexOf('/快速完成') + '/快速完成'.length; view.dispatch({ selection: { anchor: at } }); view.focus() })()`)
+  await page.key('Enter', 'Enter', 0, 13)
+  const completed = await waitFor(page, `(async () => { const note = await window.rgent.noteRead(${JSON.stringify(name)}); return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 })()`)
+  check('混合换行口令按原文落点生成且旧账本保留', completed && readFileSync(path.join(vault, name), 'utf8').includes(ledger))
+  const beforeMove = readFileSync(path.join(vault, name), 'utf8')
+  const moved = await page.eval(`(async () => { const preview = await window.rgent.relocationPreview({ kind: 'note', source: ${JSON.stringify(name)}, target: ${JSON.stringify(movedName)} }); return preview.ok ? window.rgent.relocationCommit({ id: preview.preview.id, repairLinks: false }) : preview })()`)
+  check('生成后结构移动延续原文字节与tab绑定', moved.ok && await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(movedName)}`) && readFileSync(path.join(vault, movedName), 'utf8') === beforeMove)
+  if (!moved.ok) return
+  rmSync(path.join(vault, movedName))
+  const missing = await waitFor(page, `!!document.querySelector('.note-unavailable:not([hidden]) .note-save-copy')`)
+  check('外部消失后保留草稿并展示明确另存入口', missing)
+  await shot(page, 'note-missing-retained')
+  await page.key('s', 'KeyS', modifier, 83)
+  check('消失后的保存不会重新创建旧路径', !existsSync(path.join(vault, movedName)))
+  if (!missing) return
+  await page.eval(`document.querySelector('.note-save-copy')?.click()`)
+  const dialog = await waitFor(page, `!!document.querySelector('dialog[open] input')`)
+  check('另存目标须由人输入并确认', dialog)
+  if (!dialog) return
+  await page.eval(`(() => { const dialog = document.querySelector('dialog[open]'); const input = dialog.querySelector('input'); input.value = ${JSON.stringify(copyName)}; input.dispatchEvent(new Event('input', { bubbles: true })); dialog.querySelector('button[value=ok]')?.click() })()`)
+  const preview = await waitFor(page, `!!document.querySelector('.save-copy-preview .save-copy-confirm')`)
+  check('另存预览展示目标后由明确确认提交', preview)
+  await shot(page, 'note-save-copy-preview')
+  if (!preview) return
+  await page.eval(`document.querySelector('.save-copy-preview .save-copy-confirm').click()`)
+  check('明确另存创建新文件并保持旧路径消失与历史字节', await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(copyName)}`) &&
+    !existsSync(path.join(vault, movedName)) && existsSync(path.join(vault, copyName)) && readFileSync(path.join(vault, copyName), 'utf8') === beforeMove)
+  await shot(page, 'note-save-copy-complete')
+}
+
 async function main() {
   const port = await availablePort()
   const electron = require('electron')
@@ -1059,6 +1154,7 @@ async function main() {
       return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 && !document.querySelector('.status-task-stop')
     })()`, 8000)
     check('快速流结束后底栏不残留运行任务', quickFinished, quickFinished ? '' : await page.eval(`(async () => JSON.stringify({ note: (await window.rgent.noteRead('Host 快速.md')).content, tasks: await window.rgent.agentTasks(), status: document.querySelector('.status-left')?.innerText }))()`))
+    await verifyRawSourceLifecycle(page, vault, modifier, shot)
     writeFileSync(path.join(vault, 'Host A.md'), '')
     writeFileSync(path.join(vault, 'Host B.md'), '')
     check('两篇待运行笔记进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host A')) && [...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host B'))`, 8000))
@@ -1100,8 +1196,8 @@ async function main() {
     writeFileSync(path.join(vault, '生命周期', '原.md'), '# 不应改写的正文\r\n')
     writeFileSync(path.join(vault, '生命周期', '原', '图.png'), Buffer.from([1, 2, 3]))
     writeFileSync(path.join(vault, '生命周期', '引用.md'), '见 [[生命周期/原]]。')
-    check('文件树显示待改名的笔记', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((node) => node.textContent.includes('原'))`, 8000))
-    await page.eval(`(() => { const node = [...document.querySelectorAll('.tree-note')].find((n) => n.textContent.includes('原')); node?.click(); node?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 220 })) })()`)
+    check('文件树显示待改名的笔记', await waitFor(page, `[...document.querySelectorAll('[data-parent="生命周期"] .tree-note')].some((node) => node.querySelector('.tree-label')?.textContent === '原')`, 8000))
+    await page.eval(`(() => { const node = [...document.querySelectorAll('[data-parent="生命周期"] .tree-note')].find((n) => n.querySelector('.tree-label')?.textContent === '原'); node?.click(); node?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 220 })) })()`)
     check('文件树右键提供改名和移动', await waitFor(page, `[...document.querySelectorAll('.tier-menu button')].some((n) => n.textContent === '改名') && [...document.querySelectorAll('.tier-menu button')].some((n) => n.textContent === '移动')`))
     await page.eval(`(() => { [...document.querySelectorAll('.tier-menu button')].find((n) => n.textContent === '改名')?.click() })()`)
     await waitFor(page, `!!document.querySelector('.modal input')`)
@@ -1180,8 +1276,12 @@ async function main() {
         fingerprints: parts, permissionBefore: policy, permissionAfter: policy, linkRepairs: [], repairLinks: false } }) + '\n'
       const unrelatedPrompt = '/多任务恢复'
       writeFileSync(path.join(vault, '生命周期', '无关生成.md'), unrelatedPrompt)
-      const unrelatedTask = await page.eval(`window.rgent.agentStart(${JSON.stringify({ relPath: '生命周期/无关生成.md',
-        range: { start: 0, end: unrelatedPrompt.length }, expectedText: unrelatedPrompt, promptText: '多任务恢复' })})`)
+      const unrelatedTask = await page.eval(`(async () => {
+        const note = await window.rgent.noteRead('生命周期/无关生成.md')
+        return window.rgent.agentStart({ ...${JSON.stringify({ relPath: '生命周期/无关生成.md',
+          range: { start: 0, end: unrelatedPrompt.length }, expectedText: unrelatedPrompt, promptText: '多任务恢复' })},
+          expectedRevision: note.revision, sessionId: note.sessionId, objectVersion: note.objectVersion })
+      })()`)
       check('恢复竞态夹具中的无关任务开始并已产生回答', unrelatedTask.ok && await waitFor(page,
         `(async () => (await window.rgent.noteRead('生命周期/无关生成.md')).content.includes('受控回答第一句。'))()`))
       writeFileSync(path.join(vault, '.rgent-lifecycle'), journal)
