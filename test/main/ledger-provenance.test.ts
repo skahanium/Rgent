@@ -25,7 +25,7 @@ describe('historical task provenance', () => {
     const before = '正文\r\n<!-- rgent:ledger:v1 -->\r\n## 旧章\r\n原样\r\n'
     const after = appendLedgerChapter(before, { taskId: 'new', startedAt: 'now', status: 'completed', prompt: '问', answer: encodeLedgerProvenance(record), provenance: record })
     expect(after.startsWith(before)).toBe(true)
-    expect(after).toContain('read_library：ok')
+    expect(after).toContain('读库：ok')
     expect(after).toContain('&lt;!-- rgent:ledger-sources')
     expect(ledgerProvenance(after).status).toBe('valid')
     expect(appendLedgerChapter(after, { taskId: 'new', startedAt: 'later', status: 'failed', prompt: '问', answer: '其他', provenance: record })).toBe(after)

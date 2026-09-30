@@ -1,6 +1,7 @@
 import type { BacklinkGroup, BacklinkRef, SearchHit, TreeEntry } from '../shared/ipc.ts'
 import { ROOT_GROUP } from '../shared/ipc.ts'
 import { collectNotePaths, noteTitle } from '../shared/vault-rel.ts'
+import type { SourceRange } from '../markdown/types.ts'
 import { compile, type MarkerRef } from '../markdown/index.ts'
 import { readNote } from './notes-fs.ts'
 
@@ -24,7 +25,7 @@ type IndexedNote = {
 /**
  * 全库索引，住主进程（架构：主进程管索引）。
  *
- * 这是人的全量索引，含禁止触碰。将来模型检索是同一份语料上的另一套可见范围，
+ * 这是人的全量索引，含禁止触碰。模型仅载入本场批准对象，并复用下面的纯匹配器，
  * 不得在建索引时把禁区抹掉（围栏 §检索与联网）。
  *
  * 重建是惰性全量的：变脏后等下一次查询才重扫。查询由人的动作触发（切笔记、搜一次），
@@ -73,35 +74,7 @@ export class VaultIndex {
 
   async search(query: string): Promise<SearchHit[]> {
     await this.ready()
-    const needle = query.trim().toLowerCase()
-    if (!needle) return []
-
-    const hits: SearchHit[] = []
-    for (const note of this.notes.values()) {
-      const titleHit = note.title.toLowerCase().includes(needle)
-      const body = note.body.toLowerCase()
-      const positions = matchPositions(body, needle)
-      if (!titleHit && positions.length === 0) continue
-      const first = positions[0]
-      const detail = first == null ? emptySnippet() : makeSnippet(note.body, first, needle.length)
-      hits.push({
-        relPath: note.relPath,
-        title: note.title,
-        folder: note.folder,
-        titleHit,
-        count: positions.length,
-        ...detail
-      })
-    }
-
-    return hits
-      .sort(
-        (a, b) =>
-          Number(b.titleHit) - Number(a.titleHit) ||
-          b.count - a.count ||
-          a.relPath.localeCompare(b.relPath, 'zh')
-      )
-      .slice(0, MAX_RESULTS)
+    return searchDocuments(this.notes.values(), query)
   }
 
   private async ready(): Promise<void> {
@@ -170,12 +143,45 @@ export class VaultIndex {
   }
 }
 
+/** Pure matcher shared by human search and already-scoped task documents. */
+export function searchDocuments(notes: Iterable<Pick<IndexedNote, 'relPath' | 'folder' | 'title' | 'body'>>, query: string, limit = MAX_RESULTS): SearchHit[] {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return []
+
+  const hits: SearchHit[] = []
+  for (const note of notes) {
+    const titleHit = note.title.toLowerCase().includes(needle)
+    const body = note.body.toLowerCase()
+    const positions = matchPositions(body, needle)
+    if (!titleHit && positions.length === 0) continue
+    const first = positions[0]
+    const detail = first == null ? emptySnippet() : makeSnippet(note.body, first, needle.length)
+    hits.push({
+      relPath: note.relPath,
+      title: note.title,
+      folder: note.folder,
+      titleHit,
+      count: positions.length,
+      ...detail
+    })
+  }
+
+  return hits
+    .sort(
+      (a, b) =>
+        Number(b.titleHit) - Number(a.titleHit) ||
+        b.count - a.count ||
+        a.relPath.localeCompare(b.relPath, 'zh')
+    )
+    .slice(0, limit)
+}
+
 function isNoteTarget(target: string): boolean {
   return target.toLowerCase().endsWith('.md')
 }
 
 /** 把身份标记的位置换成等长空格：机器语法不进人的搜索语料，偏移也不动。 */
-function blankMarkers(body: string, markers: readonly MarkerRef[]): string {
+export function blankMarkers(body: string, markers: readonly MarkerRef[]): string {
   if (markers.length === 0) return body
   const parts: string[] = []
   let at = 0
@@ -190,7 +196,7 @@ function blankMarkers(body: string, markers: readonly MarkerRef[]): string {
   return parts.join('')
 }
 
-function folderOf(relPath: string): string {
+export function folderOf(relPath: string): string {
   const parts = relPath.split('/')
   parts.pop()
   return parts.length > 0 ? parts.join('/') : ROOT_GROUP
@@ -226,8 +232,7 @@ function makeSnippet(
   at: number,
   length: number
 ): { snippet: string; matchStart: number; matchLength: number } {
-  const start = Math.max(0, at - SNIPPET_PAD)
-  const end = Math.min(body.length, at + length + SNIPPET_PAD)
+  const { start, end } = snippetRange(body, at, length)
   const leading = start > 0 ? '…' : ''
   const trailing = end < body.length ? '…' : ''
   const middle = body.slice(start, end).replaceAll('\n', ' ')
@@ -236,4 +241,18 @@ function makeSnippet(
     matchStart: leading.length + (at - start),
     matchLength: length
   }
+}
+
+/** The same original offsets used by snippets and task provenance; never split UTF-16 pairs. */
+function snippetRange(body: string, at: number, length: number): SourceRange {
+  let start = Math.max(0, at - SNIPPET_PAD)
+  let end = Math.min(body.length, at + length + SNIPPET_PAD)
+  if (start > 0 && /[\uDC00-\uDFFF]/.test(body[start] ?? '') && /[\uD800-\uDBFF]/.test(body[start - 1] ?? '')) start--
+  if (end < body.length && /[\uD800-\uDBFF]/.test(body[end - 1] ?? '') && /[\uDC00-\uDFFF]/.test(body[end] ?? '')) end++
+  return { start, end }
+}
+export function searchSnippetRange(body: string, query: string): SourceRange | null {
+  const needle = query.trim().toLowerCase()
+  const at = needle ? body.toLowerCase().indexOf(needle) : -1
+  return at < 0 ? null : snippetRange(body, at, needle.length)
 }

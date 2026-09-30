@@ -23,8 +23,8 @@ export interface TaskGrant {
   readonly sources: readonly Readonly<AuthorizedSource>[]
   readonly credential: Readonly<ModelCredential>
   readonly limits: Readonly<RunLimits>
-  assertLive(action: AuthorizationAction, path?: string): Promise<void>
-  validateSources(): Promise<void>
+  assertLive(action: AuthorizationAction, path?: string, signal?: AbortSignal): Promise<void>
+  validateSources(signal?: AbortSignal): Promise<void>
   assertWriteTarget(path: string): void
   acknowledgeOrigin(snapshot: NoteSnapshot): void
   revoke(): void
@@ -132,29 +132,35 @@ class LiveGrant implements TaskGrant {
     if(snapshot.sessionId!==this.sessionId)throw Error('VAULT_CHANGED')
     this.originProof={...this.originProof,objectVersion:snapshot.objectVersion,revision:snapshot.revision,fingerprint:digest(snapshot.content)}
   }
-  async assertLive(action:AuthorizationAction,path?:string):Promise<void>{
+  async assertLive(action:AuthorizationAction,path?:string,signal?:AbortSignal):Promise<void>{
     if(!this.live)throw Error('AUTHORIZATION_REVOKED')
     if(!['read','model','write'].includes(action))throw Error('ACTION_NOT_ALLOWED')
     if(action==='write')this.assertWriteTarget(path??'')
     if(action==='read' && !this.sources.some(s=>s.relPath===path))throw Error('OUTSIDE_TASK_SCOPE')
-    await this.validateSources()
+    await this.validateSources(signal)
   }
-  async validateSources():Promise<void>{
-    if(!this.live)throw Error('AUTHORIZATION_REVOKED')
+  async validateSources(signal?:AbortSignal):Promise<void>{
+    const check = () => {
+      if (!this.live || this.deps.ownerValid?.(this.owner) === false) throw Error('AUTHORIZATION_REVOKED')
+      if (signal?.aborted) throw Error('TASK_CANCELLED')
+      if (this.deps.root() !== this.root || this.deps.session() !== this.sessionId) throw Error('VAULT_CHANGED')
+    }
+    check()
     try {
-      if(this.deps.ownerValid?.(this.owner)===false)throw Error('AUTHORIZATION_REVOKED')
-      if(this.deps.root()!==this.root || this.deps.session()!==this.sessionId)throw Error('VAULT_CHANGED')
       for (const source of this.sources) {
         let verified = false
         for (let attempt = 0; attempt < 8; attempt++) {
+          check()
           const proof = source.relPath === this.origin ? this.originProof : source
           const tier = await this.deps.tier(this.root, proof.relPath)
+          check()
           if (tier !== proof.tier) throw Error('SOURCE_PERMISSION_CHANGED')
           const current = await this.deps.read(proof.relPath)
+          check()
           const after = await this.deps.tier(this.root, proof.relPath)
+          check()
           if (after !== proof.tier) throw Error('SOURCE_PERMISSION_CHANGED')
-          if (this.deps.ownerValid?.(this.owner) === false) throw Error('AUTHORIZATION_REVOKED')
-          if (this.deps.root() !== this.root || this.deps.session() !== this.sessionId || current.sessionId !== this.sessionId) throw Error('VAULT_CHANGED')
+          if (current.sessionId !== this.sessionId) throw Error('VAULT_CHANGED')
           // Only a successful Host write receipt may replace this proof. A concurrent
           // verification must restart from it, rather than revoke a legitimate own save.
           if (source.relPath === this.origin && proof !== this.originProof) continue
@@ -166,6 +172,6 @@ class LiveGrant implements TaskGrant {
         if (!verified) throw Error('SOURCE_BUSY')
       }
     }catch(error){this.live=false;throw error}
-    if(!this.live)throw Error('AUTHORIZATION_REVOKED')
+    check()
   }
 }

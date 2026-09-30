@@ -2,18 +2,19 @@ import { describe, expect, it } from 'vitest'
 import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
 
 function setup() {
-  let onRead: ((path: string) => void) | undefined
+  let onRead: ((path: string) => void | Promise<void>) | undefined
+  let onTier: ((path: string) => void) | undefined
   let session = 'session-a'; let model = 'm'; let key = 'private'; let denied = ''
   const records = new Map([['a.md',{content:'/问\n', revision:'r-a',sessionId:session,objectVersion:'o-a'}],['dir/b.md',{content:'# B\n正文',revision:'r-b',sessionId:session,objectVersion:'o-b'}]])
   const registry = new TaskAuthorizationRegistry({ root:()=>'/vault',session:()=>session,
     tree:async()=>[{name:'a.md',relPath:'a.md',kind:'note'},{name:'dir',relPath:'dir',kind:'dir',children:[{name:'b.md',relPath:'dir/b.md',kind:'note'}]}],
-    read:async path=>{ onRead?.(path); const item=records.get(path); if(!item)throw Error('ENOENT'); return {...item} },
-    tier:async (_root,path)=>{ if(path===denied)throw Error('FORBIDDEN');return path==='dir/b.md'?'follow':'reference' },
+    read:async path=>{ await onRead?.(path); const item=records.get(path); if(!item)throw Error('ENOENT'); return {...item} },
+    tier:async (_root,path)=>{ onTier?.(path); if(path===denied)throw Error('FORBIDDEN');return path==='dir/b.md'?'follow':'reference' },
     acceptsObject:()=>false,
     configuration:()=>({credential:{provider:'custom',baseURL:'https://model.example/v1',modelId:model,contextTokens:16000,apiKey:key},limits:{seconds:180,steps:4,tools:0}})
   })
   const request={relPath:'a.md',sessionId:session,objectVersion:'o-a',expectedRevision:'r-a',range:{start:0,end:2},expectedText:'/问',promptText:'问',references:['dir']}
-  return {registry,request,records,onRead:(hook:(path:string)=>void)=>{onRead=hook},session:(x:string)=>{session=x},model:(x:string)=>{model=x},key:(x:string)=>{key=x},deny:(x:string)=>{denied=x}}
+  return {registry,request,records,onRead:(hook:(path:string)=>void | Promise<void>)=>{onRead=hook},onTier:(hook:(path:string)=>void)=>{onTier=hook},session:(x:string)=>{session=x},model:(x:string)=>{model=x},key:(x:string)=>{key=x},deny:(x:string)=>{denied=x}}
 }
 
 describe('single task authorization',()=>{
@@ -84,4 +85,23 @@ it('retries an origin proof updated by an acknowledged own write during verifica
     }
   })
   await expect(grant.assertLive('model')).resolves.toBeUndefined()
+})
+
+
+it.each(['revoke', 'abort'] as const)('does not start another source operation after %s while origin read is stalled', async mode => {
+  const app = setup(); const preview = await app.registry.preview('a', app.request)
+  const grant = await app.registry.consume('a', { ...app.request, previewId: preview.id })
+  let release!: () => void; let reached!: () => void
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  const reading = new Promise<void>(resolve => { reached = resolve })
+  const operations: string[] = []
+  app.onRead(async path => { operations.push(`read:${path}`); if (path === 'a.md') { reached(); await blocked } })
+  app.onTier(path => { operations.push(`tier:${path}`) })
+  const controller = new AbortController()
+  const validation = grant.validateSources(controller.signal)
+  await reading
+  if (mode === 'revoke') grant.revoke(); else controller.abort()
+  release()
+  await expect(validation).rejects.toThrow(mode === 'revoke' ? 'AUTHORIZATION_REVOKED' : 'TASK_CANCELLED')
+  expect(operations).toEqual(['tier:a.md', 'read:a.md'])
 })

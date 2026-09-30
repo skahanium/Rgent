@@ -167,7 +167,7 @@ export function appendLedgerChapter(source: string, write: LedgerChapterWrite): 
     '',
     '### 工具摘要',
     '',
-    write.provenance?.tools.length ? write.provenance.tools.map(tool => `${escapedModelText(tool.name)}：${escapedModelText(tool.outcome)}`).join('；') : '无工具',
+    write.provenance?.tools.length ? write.provenance.tools.map(tool => `${escapedModelText(tool.name === 'read_library' ? '读库' : tool.name === 'search_library' ? '搜库' : tool.name)}：${escapedModelText(tool.outcome)}`).join('；') : '无工具',
     ...(write.provenance ? ['', `模型：${escapedModelText(write.provenance.model.provider)} / ${escapedModelText(write.provenance.model.modelId)}（${escapedModelText(write.provenance.model.endpointHost)}）`, `授权范围：${escapedModelText(write.provenance.scope.join('、'))}`, `实际读取来源：${escapedModelText(write.provenance.sources.map(source => source.relPath).join('、')) || '仅发起篇'}`, `模型消息引用来源：${escapedModelText((write.provenance.sentSources ?? write.provenance.sources.map(source => source.relPath)).join('、')) || '仅发起篇'}`] : []),
     ...(write.reason ? ['', `中止原因：${escapedModelText(write.reason)}`] : []),
     ''

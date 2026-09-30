@@ -1,6 +1,7 @@
-import { ledgerChapters } from './host-context.ts'
+import { ledgerChapters, type ContextChapter } from './host-context.ts'
 import { createHash } from 'node:crypto'
 import { compile } from '../markdown/index.ts'
+import type { CompileResult } from '../markdown/types.ts'
 import { isNotePath, hasHiddenSegment } from './paths.ts'
 
 export type LedgerSource = { relPath: string; objectVersion: string; bodyHash: string }
@@ -19,7 +20,7 @@ const bounded = (v: unknown, max = 256): v is string => typeof v === 'string' &&
 function fields(v: unknown, names: string[]): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === names.sort().join(',')
 }
-function notePath(v: unknown): v is string { return bounded(v, 2048) && isNotePath(v) && !hasHiddenSegment(v) && !/[:\\]/.test(v) && v.split('/').every(segment => segment.length > 0 && segment !== '..' && segment !== '.') }
+function notePath(v: unknown): v is string { return bounded(v, 4096) && isNotePath(v) && !hasHiddenSegment(v) && !/[:\\]/.test(v) && v.split('/').every(segment => segment.length > 0 && segment !== '..' && segment !== '.') }
 function valid(v: unknown): v is LedgerProvenance {
   if (!fields(v, ['version', 'model', 'scope', 'sources', 'tools', ...(v && typeof v === 'object' && 'sentSources' in v ? ['sentSources'] : [])]) || v.version !== 1) return false
   if (!fields(v.model, ['provider', 'modelId', 'endpointHost']) || !bounded(v.model.provider) || !bounded(v.model.modelId) || !bounded(v.model.endpointHost, 512)) return false
@@ -30,9 +31,8 @@ function valid(v: unknown): v is LedgerProvenance {
   if (v.sentSources !== undefined && (!Array.isArray(v.sentSources) || v.sentSources.length > 256 || !v.sentSources.every(path => v.sources instanceof Array && v.sources.some(s => s.relPath === path)) || new Set(v.sentSources).size !== v.sentSources.length)) return false
   return Array.isArray(v.tools) && v.tools.length <= 512 && v.tools.every(t => fields(t, ['name', 'outcome']) && bounded(t.name) && bounded(t.outcome, 1024))
 }
-export function bodyFingerprint(source: string): string {
-  const parsed = compile(source)
-  if (parsed.stale) throw new Error('SOURCE_PARSE_FAILED')
+export function bodyFingerprint(source: string, parsed: CompileResult = compile(source)): string {
+  if (parsed.source !== source || parsed.stale) throw new Error('SOURCE_PARSE_FAILED')
   return createHash('sha256').update(parsed.partition.body).digest('hex')
 }
 export function encodeLedgerProvenance(record: LedgerProvenance): string {
@@ -62,13 +62,12 @@ export async function validateLedgerProvenance(chapter: string, validate: (sourc
   return true
 }
 
-export async function historicalContextPolicy(source: string, validate: (dependency: LedgerSource) => Promise<boolean>): Promise<{
+export async function historicalContextPolicy(source: string, validate: (dependency: LedgerSource) => Promise<boolean>, parsed: CompileResult = compile(source), chapters: ContextChapter[] = ledgerChapters(parsed.partition.ledger)): Promise<{
   allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[]; dependencies: LedgerSource[]
 }> {
-  const parsed = compile(source)
-  if (parsed.stale) throw new Error('SOURCE_PARSE_FAILED')
+  if (parsed.source !== source || parsed.stale) throw new Error('SOURCE_PARSE_FAILED')
   const result = { allowedLedgerChapterIds: [] as string[], excludedAiTaskIds: [] as string[], dependencies: [] as LedgerSource[] }
-  for (const chapter of ledgerChapters(parsed.partition.ledger)) {
+  for (const chapter of chapters) {
     if (!(await validateLedgerProvenance(chapter.text, validate))) {
       result.excludedAiTaskIds.push(chapter.taskId ?? '*')
       continue
