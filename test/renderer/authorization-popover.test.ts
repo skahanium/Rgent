@@ -59,6 +59,16 @@ it('single-note default focus confirms with the next Enter and does not override
   expect(send).toHaveBeenCalledTimes(1)
 })
 
+it('translates a machine failure code instead of showing it raw',async()=>{
+  const popup=openAuthorizationPopover({anchor:{left:100,top:100,bottom:120},origin:'a.md',entries:[],
+    preview:async()=>({ok:false as const,error:'STALE_AUTHORIZATION'}),send:async()=>({ok:true as const,id:'task'})})
+  const status=popup.root.querySelector('.authorization-status')!
+  await vi.waitFor(()=>expect(status.textContent).toContain('无法准备'))
+  expect(status.textContent).toContain('重新核对')
+  expect(status.textContent).not.toContain('STALE_AUTHORIZATION')
+  popup.close()
+})
+
 it('initial confirmation focus does not scroll the recipient and origin out of view', async()=>{
   const focus=vi.spyOn(HTMLElement.prototype,'focus')
   const popup=openAuthorizationPopover({anchor:{left:100,top:100,bottom:120},origin:'a.md',entries:[],preview:async()=>({ok:true as const,preview}),send:async()=>({ok:true as const,id:'task'})})
