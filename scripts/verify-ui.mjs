@@ -10,7 +10,7 @@
  * 最后给总账；有失败就退出码 1。
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, renameSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
@@ -506,6 +506,21 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
   check('明确另存创建新文件并保持旧路径消失与历史字节', await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(copyName)}`) &&
     !existsSync(path.join(vault, movedName)) && existsSync(path.join(vault, copyName)) && readFileSync(path.join(vault, copyName), 'utf8') === beforeMove)
   await shot(page, 'note-save-copy-complete')
+  const copied = readFileSync(path.join(vault, copyName), 'utf8')
+  await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; const at = view.state.doc.length; view.dispatch({ changes: { from: at, insert: '\\n\\n\\x60\\x60\\x60js\\nunfinished' }, selection: { anchor: at + 8 }, userEvent: 'input.type' }); view.focus() })()`)
+  await page.key('s', 'KeyS', modifier, 83)
+  check('未闭合正文不会吞入账本或写坏磁盘，窗口保留错误提示', await waitFor(page, `document.querySelector('.status-host-notice')?.textContent.includes('账本边界')`) && readFileSync(path.join(vault, copyName), 'utf8') === copied)
+  await page.key('z', 'KeyZ', modifier, 90)
+  await page.key('s', 'KeyS', modifier, 83)
+  const gone = vault + '-temporarily-moved'
+  renameSync(vault, gone)
+  try {
+    check('整库消失时干净tab、窗口正文及账本仍保留', await waitFor(page, `!!document.querySelector('.note-unavailable:not([hidden]) .note-recheck') && document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(copyName)}`))
+    check('整库消失后当前会话拒绝沿旧句柄读取', await page.eval(`window.rgent.noteRead(${JSON.stringify(copyName)}).then(() => false, () => true)`))
+    await shot(page, 'vault-missing-retained')
+  } finally { renameSync(gone, vault) }
+  await page.eval(`document.querySelector('.note-recheck')?.click()`)
+  check('原库恢复后重新核验原对象，正文和账本字节保持', await waitFor(page, `document.querySelector('.note-unavailable')?.hidden === true`) && readFileSync(path.join(vault, copyName), 'utf8') === copied)
 }
 
 async function main() {

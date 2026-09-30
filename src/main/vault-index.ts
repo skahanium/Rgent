@@ -140,13 +140,16 @@ export class VaultIndex {
         byTarget.set(target, sources)
       }
     }
+    if (this.getRoot() !== root) { this.dirty = true; return }
     this.notes = notes
     this.byTarget = byTarget
   }
 
   private async readOne(root: string, relPath: string): Promise<IndexedNote | null> {
     try {
+      if (this.getRoot() !== root) return null
       const source = await readNote(root, relPath)
+      if (this.getRoot() !== root) return null
       const parsed = compile(source)
       if (parsed.stale) return null
       const { index, partition } = parsed

@@ -6,14 +6,31 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { secureFsFor } from '../../src/main/secure-fs.ts'
 import { VaultSession } from '../../src/main/vault.ts'
 import { serializeStoredVault } from '../../src/main/notes-fs.ts'
-import { partitionSource } from '../../src/markdown/partition.ts'
+import { composeSource, partitionSource } from '../../src/markdown/partition.ts'
 import type { LedgerChapterWrite } from '../../src/main/host-source.ts'
 vi.mock('electron', () => ({ dialog: { showOpenDialog: vi.fn() } }))
-vi.mock('../../src/main/watch.ts', () => ({ watchVault: vi.fn(() => () => {}) }))
+vi.mock('../../src/main/watch.ts', async importOriginal => ({ ...await importOriginal<typeof import('../../src/main/watch.ts')>(), watchVault: vi.fn(() => () => {}) }))
 const cleanup: { session: VaultSession; base: string }[] = []
 afterEach(async () => { for (const item of cleanup.splice(0)) { item.session.dispose(); await rm(item.base, { recursive: true, force: true }) } })
 const original = 'old body\r\n<!-- rgent:ledger:v1 -->\r\nexisting ledger bytes\r\n'
 const chapter: LedgerChapterWrite = { taskId: 'task-1', startedAt: 'now', status: 'failed', prompt: 'p', answer: 'pending answer' }
+it.each(['```js\na', '<!-- unfinished', '<div>\ntext', '<div>complete</div>'])('refuses a draft that would absorb the verified ledger: %s', async body => {
+  const { session, root, request } = await setup()
+  await expect(session.previewSaveCopy({ ...request, body })).rejects.toThrow('LEDGER_BOUNDARY_INVALID')
+  await expect(readFile(path.join(root, 'copy.md'))).rejects.toMatchObject({ code: 'ENOENT' })
+})
+it.each(['```js\na', '<!-- unfinished', '<div>\ntext', '<div>complete</div>'])('refuses an ordinary write that would absorb existing ledger: %s', async body => {
+  const { session, root, snapshot } = await setup(false)
+  await expect(session.write('source.md', composeSource(body, partitionSource(original).ledger), snapshot.revision, snapshot)).rejects.toThrow('LEDGER_BOUNDARY_INVALID')
+  expect(await readFile(path.join(root, 'source.md'), 'utf8')).toBe(original)
+})
+it('saves a corrected draft without rewriting the verified ledger or its CRLF bytes', async () => {
+  const { session, root, snapshot } = await setup(false)
+  const content = composeSource('```js\r\na\r\n```\r\n\r\n<div>complete</div>\r\n\r\n', partitionSource(original).ledger)
+  await session.write('source.md', content, snapshot.revision, snapshot)
+  expect(await readFile(path.join(root, 'source.md'), 'utf8')).toBe(content)
+  expect(partitionSource(content).ledger).toBe(partitionSource(original).ledger)
+})
 async function setup(remove = true) {
   const base = await mkdtemp(path.join(os.tmpdir(), 'rgent-savecopy-'))
   const root = path.join(base, 'vault'); await mkdir(root)

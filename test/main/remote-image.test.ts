@@ -20,7 +20,7 @@ describe('remote image boundary', () => {
     expect(deps.resolve).toHaveBeenCalledTimes(1)
     expect(deps.request).toHaveBeenCalledWith(new URL('https://images.example/p?id=1%2F2'),publicAddress,expect.any(AbortSignal))
   })
-  it.each(['127.0.0.1','10.1.2.3','169.254.1.1','100.64.1.1','192.0.2.1','::1','fe80::1','fc00::1','::ffff:127.0.0.1','::ffff:a00:1'])('rejects all candidates if any answer is nonpublic: %s',async address => {
+  it.each(['127.0.0.1','10.1.2.3','169.254.1.1','100.64.1.1','192.0.2.1','::1','fe80::1','fc00::1','::ffff:127.0.0.1','::ffff:a00:1', 'fec0::1', '64:ff9b:1::a00:1', '100:0:0:1::1', '3fff::1', '5f00::1', '2001:2::1'])('rejects all candidates if any answer is nonpublic: %s',async address => {
     const deps=dependencies(); deps.resolve.mockResolvedValue([publicAddress,{address,family:address.includes(':')?6:4}] as never)
     expect(await new RemoteImageService(deps).load('https://images.example/a')).toEqual({ok:false,error:'INVALID_URL'})
     expect(deps.request).not.toHaveBeenCalled()

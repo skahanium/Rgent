@@ -195,7 +195,7 @@ export type NoteWriteResult = {
   sessionId: string
 } | {
   ok: false
-  error: 'CONFLICT' | 'BAD_PATH' | 'NO_VAULT' | 'NOTE_BUSY' | 'IO_ERROR' | 'NOTE_MISSING' | 'NOTE_REPLACED' | 'NOTE_UNREADABLE' | 'VAULT_CHANGED'
+  error: 'CONFLICT' | 'BAD_PATH' | 'NO_VAULT' | 'NOTE_BUSY' | 'IO_ERROR' | 'NOTE_MISSING' | 'NOTE_REPLACED' | 'NOTE_UNREADABLE' | 'VAULT_CHANGED' | 'LEDGER_BOUNDARY_INVALID'
 }
 
 export type FlushDonePayload = {

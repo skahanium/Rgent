@@ -25,6 +25,15 @@ function collect(root: string, pollMs: number = POLL): { seen: Array<string | nu
 }
 
 describe('watchVault', () => {
+  it.each([false, true])('notifies when the root is moved without any member change (replacement=%s)', async replacement => {
+    const root = await vault(); const gone = root + '-gone'
+    const { seen, stop } = collect(root)
+    try {
+      await rename(root, gone)
+      if (replacement) await mkdir(root)
+      await waitFor(() => seen.includes(null))
+    } finally { stop(); closeSecureFs(root); await rm(root, { recursive: true, force: true }); await rm(gone, { recursive: true, force: true }) }
+  })
   it('reports an added file by its vault-relative path', async () => {
     const root = await vault()
     const { seen, stop } = collect(root)

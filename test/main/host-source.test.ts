@@ -5,6 +5,9 @@ import { appendLedgerChapter, markPrompt, upsertAiAnswer } from '../../src/main/
 const taskId = 'task-123'
 
 describe('Host source projection', () => {
+  it.each(['```js\na', '<!-- unfinished', '<div>\ntext', '<div>complete</div>'])('refuses first ledger publication inside an unfinished or unseparated block: %s', source => {
+    expect(() => appendLedgerChapter(source, { taskId, startedAt: 'now', status: 'failed', prompt: 'p', answer: 'retained answer' })).toThrow('LEDGER_BOUNDARY_INVALID')
+  })
   it('marks only the selected top-level prompt and preserves surrounding bytes', () => {
     const source = '上文。\r\n\r\n/整理这段。\r\n\r\n下文。\r\n'
     const start = source.indexOf('/整理')

@@ -66,3 +66,10 @@ export function composeSource(body: string, ledger: string | null): string {
   }
   return `${body}${ledger}`
 }
+
+/** Writing must never make verified ledger bytes part of editable body. */
+export function assertLedgerPreserved(source: string, ledger: string | null): void {
+  if (ledger !== null && !partitionSource(source).ledger?.startsWith(ledger)) {
+    throw new Error('LEDGER_BOUNDARY_INVALID')
+  }
+}

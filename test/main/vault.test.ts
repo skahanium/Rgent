@@ -1,4 +1,4 @@
-import { chmod, stat, symlink, mkdtemp, mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises'
+import { chmod, stat, symlink, mkdtemp, mkdir, readFile, writeFile, rename, unlink, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -13,10 +13,49 @@ import { collectNotePaths, collectRelPaths } from '../../src/renderer/src/tree.t
 import { joinVaultRel, parseVaultMediaUrl, vaultMediaUrl } from '../../src/shared/vault-rel.ts'
 
 vi.mock('electron', () => ({ dialog: { showOpenDialog: vi.fn() } }))
-vi.mock('../../src/main/watch.ts', () => ({ watchVault: vi.fn(() => () => {}) }))
+vi.mock('../../src/main/watch.ts', async importOriginal => ({ ...await importOriginal<typeof import('../../src/main/watch.ts')>(), watchVault: vi.fn(() => () => {}) }))
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('VaultSession isolation', () => {
+  it('restarts watching if a read detects a lost root before the polling callback', async () => {
+    const { session, attach, first } = await setup(); const gone = first + '-read-gap'
+    try {
+      await attach(first)
+      const original = await session.read('原篇.md')
+      const watched = vi.mocked(watchVault).mock.calls.length
+      await rename(first, gone)
+      expect((await session.noteStatus('原篇.md', original)).status).not.toBe('ready')
+      await rename(gone, first)
+      expect((await session.noteStatus('原篇.md', original)).status).toBe('ready')
+      expect(vi.mocked(watchVault).mock.calls.length).toBe(watched + 1)
+    } finally { session.dispose() }
+  })
+  it('retains verified objects and session when the library disappears, and rechecks restoration', async () => {
+    const { session, emit, attach, first } = await setup()
+    const gone = first + '-gone'
+    try {
+      await attach(first)
+      const original = await session.read('原篇.md')
+      await rename(first, gone)
+      vi.mocked(watchVault).mock.calls.at(-1)![1](null)
+      expect(emit).toHaveBeenCalledWith('vault:lost')
+      expect(session.sessionId()).toBe(original.sessionId)
+      expect(session.latestFor('原篇.md', original.objectVersion)?.content).toBe(original.content)
+      expect((await session.noteStatus('原篇.md', original)).status).not.toBe('ready')
+      await mkdir(first)
+      await writeFile(path.join(first, '原篇.md'), 'unrelated root')
+      await expect(session.tree()).rejects.toThrow('NOTE_UNREADABLE')
+      await expect(session.permissions()).rejects.toThrow('NOTE_UNREADABLE')
+      await expect(session.search('unrelated')).rejects.toThrow('NOTE_UNREADABLE')
+      await expect(session.create('accidental')).rejects.toThrow('NOTE_UNREADABLE')
+      await expect(session.createFolder('accidental')).rejects.toThrow('NOTE_UNREADABLE')
+      await expect(session.setPermission('原篇.md', 'forbidden')).rejects.toThrow('NOTE_UNREADABLE')
+      expect((await session.noteStatus('原篇.md', original)).status).not.toBe('ready')
+      await rm(first, { recursive: true })
+      await rename(gone, first)
+      expect((await session.noteStatus('原篇.md', original)).status).toBe('ready')
+    } finally { session.dispose() }
+  })
   async function setup() {
     const userData = await mkdtemp(path.join(os.tmpdir(), 'rgent-session-'))
     const first = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))

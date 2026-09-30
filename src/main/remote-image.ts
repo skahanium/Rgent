@@ -136,11 +136,21 @@ export class RemoteImageService {
     }
   }
 }
+// Ordinary globally routed IPv6 only. ipaddr's "unicast" also includes
+// site-local, local-use translation, unallocated and newer special prefixes.
+// IANA: https://www.iana.org/assignments/iana-ipv6-special-registry
+const IPV6_GLOBAL = ipaddr.parseCIDR('2000::/3') as [ipaddr.IPv6, number]
+const IPV6_SPECIAL = ['2001::/23', '3fff::/20'].map(prefix => ipaddr.parseCIDR(prefix) as [ipaddr.IPv6, number])
 function publicAddress(address: string): boolean {
   try {
     let parsed = ipaddr.parse(address)
     if (parsed.kind() === 'ipv6' && (parsed as ipaddr.IPv6).isIPv4MappedAddress()) parsed = (parsed as ipaddr.IPv6).toIPv4Address()
-    return parsed.range() === 'unicast'
+    if (parsed.range() !== 'unicast') return false
+    if (parsed.kind() === 'ipv6') {
+      const v6 = parsed as ipaddr.IPv6
+      return v6.match(IPV6_GLOBAL) && !IPV6_SPECIAL.some(prefix => v6.match(prefix))
+    }
+    return true
   } catch { return false }
 }
 function remoteUrl(raw: string): URL | null {

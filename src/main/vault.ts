@@ -11,8 +11,8 @@ import { hasHiddenSegment, isNotePath, resolveInVault } from './paths.ts'
 import { effectivePermissionEntries, loadPermissions, setPermission as savePermission, tierFor } from './permissions.ts'
 import { closeSecureFs, secureFsFor } from './secure-fs.ts'
 import { VaultIndex } from './vault-index.ts'
-import { watchVault } from './watch.ts'
-import { composeSource, partitionSource } from '../markdown/partition.ts'
+import { vaultRootIdentity, watchVault } from './watch.ts'
+import { assertLedgerPreserved, composeSource, partitionSource } from '../markdown/partition.ts'
 import { appendLedgerChapter, type LedgerChapterWrite } from './host-source.ts'
 
 export class VaultSession {
@@ -22,6 +22,8 @@ export class VaultSession {
   private lifecycleError: Error | null = null
   private token: string | null = null
   root: string | null = null
+  private rootIdentity: string | null = null
+  private rootUnavailable = false
   private stopWatch: (() => void) | null = null
   private lastWrites = new Map<string, RecentWrite & { objectVersion: string }>()
   private readonly verified = new Map<string, Map<string, NoteSnapshot>>()
@@ -34,7 +36,7 @@ export class VaultSession {
   private debounce: NodeJS.Timeout | null = null
   private changedNotes = new Set<string>()
   private index = new VaultIndex(
-    () => this.root,
+    () => this.root ? this.requireUsableRoot() : null,
     () => this.tree()
   )
 
@@ -85,8 +87,8 @@ export class VaultSession {
   }
 
   currentState(): VaultState {
-    if (this.root && isUsableDir(this.root)) {
-      return { status: 'ready', rootName: path.basename(this.root), sessionId: this.captureSession() }
+    if (this.hasUsableRoot()) {
+      return { status: 'ready', rootName: path.basename(this.root!), sessionId: this.captureSession() }
     }
     const stored = parseStoredVault(this.readStateFile())
     if (!stored) return { status: 'needs-pick', reason: 'first-run' }
@@ -94,25 +96,29 @@ export class VaultSession {
   }
 
   async tree(): Promise<TreeEntry[]> {
-    if (!this.root) throw new Error('NO_VAULT')
-    const entries = await listVaultTree(this.root)
-    const policy = await loadPermissions(this.root)
-    if (policy.status === 'ready') markTiers(entries, effectivePermissionEntries(this.root, policy.entries))
+    const token = this.captureSession(); const root = this.requireUsableRoot()
+    const entries = await listVaultTree(root)
+    this.assertSession(token); this.requireUsableRoot()
+    const policy = await loadPermissions(root)
+    this.assertSession(token); this.requireUsableRoot()
+    if (policy.status === 'ready') markTiers(entries, effectivePermissionEntries(root, policy.entries))
     return entries
   }
 
   async permissions(): Promise<PermissionState> {
-    if (!this.root) throw new Error('NO_VAULT')
-    return loadPermissions(this.root)
+    const token = this.captureSession(); const root = this.requireUsableRoot()
+    const result = await loadPermissions(root)
+    this.assertSession(token); this.requireUsableRoot()
+    return result
   }
 
   async setPermission(relPath: string, tier: PermissionTier): Promise<PermissionState> {
-    if (!this.root) throw new Error('NO_VAULT')
-    const root = this.root
+    const token = this.captureSession(); const root = this.requireUsableRoot()
     const state = await this.mutations.run(async () => {
-      if (this.root !== root) throw new Error('VAULT_CHANGED')
+      this.assertSession(token); this.requireUsableRoot()
       return savePermission(root, relPath, tier)
     })
+    this.assertSession(token); this.requireUsableRoot()
     this.emit('tree:changed')
     return state
   }
@@ -121,9 +127,13 @@ export class VaultSession {
     const token = this.captureSession()
     const root = this.root!
     try {
+      this.requireUsableRoot()
       const snapshot = { ...await readNoteSnapshot(root, relPath), sessionId: token }
       this.assertSession(token)
+      this.requireUsableRoot()
       this.remember(relPath, snapshot)
+      this.rootUnavailable = false
+      if (!this.stopWatch) this.stopWatch = watchVault(root, rel => { if (this.token === token) this.onFsEvent(rel) })
       return snapshot
     } catch (error) {
       this.assertSession(token)
@@ -180,9 +190,13 @@ export class VaultSession {
     return this.mutations.run(async () => {
       this.assertSession(token)
       try {
+        this.requireUsableRoot()
         const current = await readNoteSnapshot(root, relPath)
         this.assertSession(token)
+        this.requireUsableRoot()
         if (binding && !this.acceptsObject(relPath, binding.objectVersion, current.objectVersion)) throw new Error('NOTE_REPLACED')
+        if (current.revision !== expectedRevision) throw new Error('CONFLICT')
+        assertLedgerPreserved(content, partitionSource(current.content).ledger)
         const links = this.successors.get(relPath) ?? new Map<string, string>()
         if (!links.has(current.objectVersion) && links.size >= 8192) throw new Error('OBJECT_BINDING_LIMIT')
         this.requireSnapshotCapacity(relPath, 'pending-save', content, current.objectVersion)
@@ -192,7 +206,7 @@ export class VaultSession {
         return binding ? { ...saved, sessionId: token } : saved.revision
       } catch (error) {
         this.assertSession(token)
-        if (error instanceof Error && ['CONFLICT', 'NOTE_REPLACED'].includes(error.message)) throw error
+        if (error instanceof Error && ['CONFLICT', 'NOTE_REPLACED', 'LEDGER_BOUNDARY_INVALID'].includes(error.message)) throw error
         throw noteReadError(error)
       }
     })
@@ -270,6 +284,7 @@ export class VaultSession {
       this.assertSession(request.sessionId)
       const parentIdentity = this.copyTargetIdentity(request.target)
       let content = composeSource(request.body, partitionSource(basis.content).ledger)
+      assertLedgerPreserved(content, partitionSource(basis.content).ledger)
       for (const chapter of chapters) content = appendLedgerChapter(content, chapter)
       const view: SaveCopyPreviewView = { id: randomUUID(), sessionId: request.sessionId, source: request.source,
         target: request.target, draftVersion: request.draftVersion, pendingTaskIds: chapters.map((chapter) => chapter.taskId),
@@ -330,6 +345,7 @@ export class VaultSession {
   }
 
   private requireStableStructure(): void {
+    this.requireUsableRoot()
     if (this.lifecycleError || this.lifecycle?.status().status !== 'ready') throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
   }
 
@@ -342,7 +358,7 @@ export class VaultSession {
   }
 
   private copyParentIdentity(target: string): string {
-    const fs = secureFsFor(this.root!)
+    const fs = secureFsFor(this.requireUsableRoot())
     const parent = target.split('/').slice(0, -1).join('/')
     const components = parent ? fs.resolve(parent) : []
     if (parent && components.at(-1)?.kind !== 'dir') throw new Error('BAD_PATH')
@@ -357,30 +373,30 @@ export class VaultSession {
 
   private copyTargetIdentity(target: string): string {
     const identity = this.copyParentIdentity(target)
-    const fs = secureFsFor(this.root!)
+    const fs = secureFsFor(this.requireUsableRoot())
     try { fs.resolve(target); throw new Error('EEXIST') }
     catch (error) { if (!(error instanceof Error && error.message === 'ENOENT')) throw error }
     return identity
   }
 
   async create(name: string, parent = ''): Promise<string> {
-    if (!this.root) throw new Error('NO_VAULT')
-    const root = this.root
+    const token = this.captureSession(); const root = this.requireUsableRoot()
     const relPath = await this.mutations.run(async () => {
-      if (this.root !== root) throw new Error('VAULT_CHANGED')
+      this.assertSession(token); this.requireUsableRoot()
       return createNote(root, name, parent)
     })
+    this.assertSession(token); this.requireUsableRoot()
     this.index.markDirty()
     return relPath
   }
 
   async createFolder(name: string, parent = ''): Promise<string> {
-    if (!this.root) throw new Error('NO_VAULT')
-    const root = this.root
+    const token = this.captureSession(); const root = this.requireUsableRoot()
     const relPath = await this.mutations.run(async () => {
-      if (this.root !== root) throw new Error('VAULT_CHANGED')
+      this.assertSession(token); this.requireUsableRoot()
       return createFolder(root, name, parent)
     })
+    this.assertSession(token); this.requireUsableRoot()
     this.index.markDirty()
     this.emit('tree:changed')
     return relPath
@@ -475,12 +491,18 @@ export class VaultSession {
 
   async backlinks(relPath: string): Promise<BacklinkGroup[]> {
     if (!this.root) return []
-    return this.index.backlinks(relPath)
+    const token = this.captureSession(); this.requireUsableRoot()
+    const result = await this.index.backlinks(relPath)
+    this.assertSession(token); this.requireUsableRoot()
+    return result
   }
 
   async search(query: string): Promise<SearchHit[]> {
     if (!this.root) return []
-    return this.index.search(query)
+    const token = this.captureSession(); this.requireUsableRoot()
+    const result = await this.index.search(query)
+    this.assertSession(token); this.requireUsableRoot()
+    return result
   }
 
   dispose(): void {
@@ -495,6 +517,8 @@ export class VaultSession {
     this.copyPreviews.clear()
     if (this.root) closeSecureFs(this.root)
     this.root = null
+    this.rootIdentity = null
+    this.rootUnavailable = false
     this.lifecycle = null
     this.token = null
     this.lifecycleError = null
@@ -513,10 +537,12 @@ export class VaultSession {
     this.copyPreviews.clear()
     if (this.root) closeSecureFs(this.root)
     this.root = path.resolve(root)
+    this.rootIdentity = vaultRootIdentity(this.root)
+    this.rootUnavailable = false
     const token = randomUUID()
     this.token = token
-    this.lifecycle = new VaultLifecycle(this.root, this.mutations, token, () => this.assertSession(token), (write) => {
-      this.assertSession(token)
+    this.lifecycle = new VaultLifecycle(this.root, this.mutations, token, () => { this.assertSession(token); this.requireUsableRoot() }, (write) => {
+      this.assertSession(token); this.requireUsableRoot()
       this.recordCommittedWrite(write)
     })
     this.lifecycleError = null
@@ -533,9 +559,8 @@ export class VaultSession {
   }
 
   private onFsEvent(relPath: string | null): void {
-    if (this.root && !isUsableDir(this.root)) {
-      this.dispose()
-      this.emit('vault:lost')
+    if (this.root && !this.hasUsableRoot()) {
+      this.suspendRoot()
       return
     }
     this.index.markDirty()
@@ -552,6 +577,33 @@ export class VaultSession {
     }, 80)
   }
 
+  private hasUsableRoot(): boolean {
+    try { return !!this.root && vaultRootIdentity(this.root) === this.rootIdentity } catch { return false }
+  }
+
+  requireUsableRoot(): string {
+    if (!this.root) throw new Error('NO_VAULT')
+    if (!this.hasUsableRoot()) {
+      this.suspendRoot()
+      throw new Error('NOTE_UNREADABLE')
+    }
+    return this.root
+  }
+
+  private suspendRoot(): void {
+    // Retain drafts and their verified basis, but never keep a watcher pointing
+    // to a closed or moved handle. One notification also prevents re-entrancy.
+    const notify = !this.rootUnavailable
+    this.rootUnavailable = true
+    this.stopWatch?.(); this.stopWatch = null
+    if (this.debounce) clearTimeout(this.debounce)
+    this.debounce = null
+    this.changedNotes.clear(); this.copyPreviews.clear()
+    if (this.root) closeSecureFs(this.root)
+    this.index.reset()
+    if (notify) this.emit('vault:lost')
+  }
+
   private async emitNoteChange(relPath: string): Promise<void> {
     if (!this.root) return
     const token = this.token
@@ -561,8 +613,10 @@ export class VaultSession {
     const recent = this.lastWrites.get(relPath)
     const previous = this.latestObjects.get(relPath)
     try {
+      this.requireUsableRoot()
       const snapshot = { ...await readNoteSnapshot(root, relPath), sessionId: token! }
       if (this.token !== token) return
+      this.requireUsableRoot()
       this.remember(relPath, snapshot)
       if (previous && !this.acceptsObject(relPath, previous, snapshot.objectVersion)) {
         this.emit('note:external-change', { relPath, sessionId: token!, state: 'replaced', objectVersion: previous })

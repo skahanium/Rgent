@@ -40,6 +40,7 @@ const LIFECYCLE_ERRORS: Record<string, string> = {
   COPY_VERIFY_FAILED: '新文件发布后的内容或身份无法确认。请检查目标；窗口稿和待保存任务已保留。',
   SOURCE_AVAILABLE: '原对象已能核验，请重新查看当前笔记后处理保存。',
   LEDGER_BASIS_UNAVAILABLE: '无法核对原账本依据，窗口稿仍保留，另存未提交。',
+  LEDGER_BOUNDARY_INVALID: '正文语法遮住了账本边界，尚未保存。请闭合代码块或注释，并在 HTML 块后保留空行；窗口稿和原账本仍保留。',
   STALE_PREVIEW: '文件或引用在预览后发生变化，请重新预览再提交。',
   STALE_RECOVERY: '恢复记录已变化，请重新查看状态再重试。',
   VAULT_CHANGED: '笔记库已切换，本次操作已停止。',
@@ -57,6 +58,7 @@ const lifecycleErrorText = (error: unknown): string => {
   const message = error instanceof Error ? error.message : String(error)
   return LIFECYCLE_ERRORS[message] ?? message
 }
+const ROOT_UNAVAILABLE_NOTICE = '笔记库暂时无法读取，窗口稿和账本已保留。恢复原库后重新核验；换库前须处理或明确舍弃。'
 
 export async function start(root: HTMLElement): Promise<void> {
   root.innerHTML = `
@@ -88,7 +90,7 @@ export async function start(root: HTMLElement): Promise<void> {
             </div>
             <div class="ledger-body"></div>
           </div>
-          <div class="note-unavailable" role="status" hidden><span></span><button type="button" class="note-save-copy">另存为新笔记</button><button type="button" class="note-discard">明确舍弃并关页</button></div>
+          <div class="note-unavailable" role="status" hidden><span></span><button type="button" class="note-recheck">重新核验</button><button type="button" class="note-save-copy">另存为新笔记</button><button type="button" class="note-discard">明确舍弃并关页</button></div>
           <div class="editor-host"></div>
           <nav class="outline" aria-label="标题索引" hidden></nav>
           <div class="outline-tooltip" hidden></div>
@@ -236,6 +238,10 @@ export async function start(root: HTMLElement): Promise<void> {
 
   copyButton.addEventListener('click', () => { void saveMissingCopy() })
   discardButton.addEventListener('click', () => { void discardMissing() })
+  root.querySelector('.note-recheck')!.addEventListener('click', () => { void checkOpenNotes().then(() => {
+    if (tabs.every(tab => !tab.availability) && hostNotice === ROOT_UNAVAILABLE_NOTICE) hostNotice = ''
+    renderTabs(); updateStatus(); void refreshTree()
+  }) })
   ledgerOpenButton.addEventListener('click', () => toggleLedger())
   ledgerClose.addEventListener('click', () => closeLedger(true))
 
@@ -438,6 +444,13 @@ export async function start(root: HTMLElement): Promise<void> {
   async function applyState(state: VaultState): Promise<void> {
     if (state.status === 'needs-pick' || state.vaultChanged) vaultEpoch += 1
     if (state.status === 'needs-pick') {
+      if (tabs.length) {
+        for (const tab of tabs) markUnavailable(tab, 'unavailable')
+        hostNotice = ROOT_UNAVAILABLE_NOTICE
+        closeVaultPicker()
+        updateStatus()
+        return
+      }
       vaultSession = null
       const ok = await flushSave()
       if (!ok && tabs.some((tab) => tab.dirty)) {
@@ -510,7 +523,7 @@ export async function start(root: HTMLElement): Promise<void> {
 
   async function chooseVault(): Promise<void> {
     const current = await window.rgent.vaultGet()
-    if (current.status === 'ready') {
+    if (current.status === 'ready' || tabs.length) {
       const ok = await flushSave()
       if (!ok) {
         window.alert('写盘失败，先处理后再换库。')
@@ -1175,6 +1188,7 @@ export async function start(root: HTMLElement): Promise<void> {
       tab.objectVersion = result.objectVersion
       tab.sessionId = result.sessionId
       applySaved(tab, body, result.revision)
+      if (hostNotice === LIFECYCLE_ERRORS.LEDGER_BOUNDARY_INVALID) { hostNotice = ''; updateStatus() }
       syncEditorHost()
       void refreshBacklinks()
       return true
@@ -1187,6 +1201,11 @@ export async function start(root: HTMLElement): Promise<void> {
       // A structural commit briefly seals this path after its explicit flush.
       // Keep the draft dirty and try again when the move has settled.
       scheduleSave()
+      return false
+    }
+    if (result.error === 'LEDGER_BOUNDARY_INVALID') {
+      hostNotice = lifecycleErrorText(result.error)
+      updateStatus()
       return false
     }
     if (result.error === 'CONFLICT') {

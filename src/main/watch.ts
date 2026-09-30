@@ -1,5 +1,13 @@
 import { isHiddenName } from './paths.ts'
 import { secureFsFor } from './secure-fs.ts'
+import { statSync } from 'node:fs'
+
+/** Root-path liveness check supplements, never replaces, native object checks. */
+export function vaultRootIdentity(root: string): string {
+  const info = statSync(root, { bigint: true })
+  if (!info.isDirectory()) throw new Error('NOTE_UNREADABLE')
+  return `${info.dev}:${info.ino}`
+}
 
 export type WatchHandler = (relPath: string | null) => void
 
@@ -8,7 +16,9 @@ const POLL_MS = 1000
 /** 元数据轮询只经固定在所选库上的目录句柄。`pollMs` 只为测试留口，生产用默认值。 */
 export function watchVault(root: string, onChange: WatchHandler, pollMs: number = POLL_MS): () => void {
   const fs = secureFsFor(root)
+  const rootIdentity = vaultRootIdentity(root)
   const scan = (): Map<string, string> => {
+    if (vaultRootIdentity(root) !== rootIdentity) throw new Error('NOTE_REPLACED')
     const snapshot = new Map<string, string>()
     const visit = (dir: string): void => {
       for (const entry of fs.list(dir)) {

@@ -8,8 +8,8 @@ export function attachVaultProtocol(getVault: () => VaultSession | null): void {
   protocol.handle(VAULT_MEDIA_SCHEME, (request) => {
     const rel = parseVaultMediaUrl(request.url)
     if (!rel) return new Response('', { status: 400 })
-    const root = getVault()?.root
-    if (!root) return new Response('', { status: 404 })
+    let root: string
+    try { root = getVault()!.requireUsableRoot() } catch { return new Response('', { status: 404 }) }
     const resolved = readVaultMedia(root, rel)
     if ('error' in resolved) return new Response('', { status: resolved.error })
     return new Response(new Uint8Array(resolved.bytes), {

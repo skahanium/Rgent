@@ -443,7 +443,7 @@ function registerIpc(): void {
       const result = await vault.write(request.relPath, request.content, request.expectedRevision, request)
       return { ok: true, ...result }
     } catch (err) {
-      return { ok: false, error: err instanceof Error && ['CONFLICT', 'NOTE_MISSING', 'NOTE_REPLACED', 'NOTE_UNREADABLE', 'VAULT_CHANGED'].includes(err.message) ? err.message : 'IO_ERROR' }
+      return { ok: false, error: err instanceof Error && ['CONFLICT', 'NOTE_MISSING', 'NOTE_REPLACED', 'NOTE_UNREADABLE', 'VAULT_CHANGED', 'LEDGER_BOUNDARY_INVALID'].includes(err.message) ? err.message : 'IO_ERROR' }
     }
   })
   const parseBinding = (value: unknown): import('../shared/ipc.ts').NoteInspectRequest | null => {
@@ -665,7 +665,7 @@ app.whenReady().then(() => {
   })
   vault.restore()
   agentHost = new AgentHost({
-    root: () => vault?.root ?? null,
+    root: () => { try { return vault?.requireUsableRoot() ?? null } catch { return null } },
     session: () => vault?.sessionId() ?? null,
     acceptsObject: (relPath, expected, current) => vault?.acceptsObject(relPath, expected, current) ?? false,
     read: (relPath) => vault!.read(relPath),

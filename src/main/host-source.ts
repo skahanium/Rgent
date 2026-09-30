@@ -1,5 +1,6 @@
 import { compile, compileFragment, composeSource, markerLine, parseMarker, partitionSource } from '../markdown/index.ts'
 import type { SourceRange } from '../markdown/types.ts'
+import { assertLedgerPreserved, LEDGER_ANCHOR } from '../markdown/partition.ts'
 
 export interface PromptWrite {
   taskId: string
@@ -168,6 +169,7 @@ export function appendLedgerChapter(source: string, write: LedgerChapterWrite): 
     ''
   ]
   const chapter = lines.join('\n').replace(/\n/g, newline)
-  if (part.ledger) return part.body + part.ledger + boundary + chapter
-  return part.body + prelude + boundary + chapter
+  const result = part.ledger ? part.body + part.ledger + boundary + chapter : part.body + prelude + boundary + chapter
+  assertLedgerPreserved(result, part.ledger ?? LEDGER_ANCHOR)
+  return result
 }
