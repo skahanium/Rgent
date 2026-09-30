@@ -83,13 +83,19 @@ static ComPtr<IShellItem> Item(const fs::path &p) {
   ComPtr<IShellItem> i; HRESULT hr=SHCreateItemFromParsingName(p.c_str(),nullptr,IID_PPV_ARGS(&i));
   if (FAILED(hr)) throw std::runtime_error("ShellItem: "+std::to_string(hr)); return i;
 }
-static bool InVault(const fs::path &p,const fs::path &vault) {
-  // Check every directory, not merely a lexical prefix. This is a diagnostic precheck, not an atomic guarantee.
-  auto relative=p.lexically_relative(vault);
-  if (relative.empty() || relative.native().starts_with(L"..")) return false;
-  fs::path current=vault;
-  for (auto &part:relative.parent_path()) { current/=part; DWORD a=GetFileAttributesW(current.c_str()); if (a==INVALID_FILE_ATTRIBUTES || (a&FILE_ATTRIBUTE_REPARSE_POINT)) return false; }
-  return true;
+static bool InVault(const fs::path &p,const std::string &vaultIdentity) {
+  // Shell expands 8.3 paths. Compare ancestor identities instead of string prefixes,
+  // rejecting every reparse ancestor. This diagnostic is still not an atomic guarantee.
+  auto current=p.parent_path();
+  while (!current.empty()) {
+    Handle dir(CreateFileW(current.c_str(),0,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    if (dir.h==INVALID_HANDLE_VALUE || !GetFileInformationByHandleEx(dir.h,FileAttributeTagInfo,&tag,sizeof(tag))
+      || !(tag.FileAttributes&FILE_ATTRIBUTE_DIRECTORY) || (tag.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+    if (Id(dir.h)==vaultIdentity) return true;
+    auto parent=current.parent_path(); if (parent==current) return false; current=parent;
+  }
+  return false;
 }
 static void Junction(const fs::path &link,const fs::path &target) {
   // Only points to a sibling under this process's unique fixture root. No external targets.
@@ -108,7 +114,8 @@ static void Junction(const fs::path &link,const fs::path &target) {
 struct Row {
   fs::path source, receiptPath; Object expected,actual; ComPtr<IShellItem> receipt;
   HRESULT queued=E_PENDING,post=E_PENDING,preResult=E_PENDING;
-  bool pre=false,postCalled=false,finalCheck=false,owned=false,reclaimed=false,sourceExists=false,manifestFailed=false;
+  bool pre=false,postCalled=false,finalCheck=false,preIdentity=false,preInVault=false,owned=false,reclaimed=false,sourceExists=false,manifestFailed=false;
+  fs::path prePath;
   std::string receiptName; HRESULT restore=E_PENDING,restoreAbortedHr=E_PENDING; BOOL restoreAborted=TRUE;
 };
 class Sink final : public IFileOperationProgressSink {
@@ -171,6 +178,8 @@ int wmain(int argc,wchar_t **argv) {
     if (FAILED(SHQueryRecycleBinW(volume,&bin))) throw std::runtime_error("Recycle Bin unavailable on fixture volume; no fallback");
     fs::path vault=base/L"vault",outside=base/L"outside",parent=vault/L"parent",note=parent/L"note.md",expectedPath=note;
     fs::create_directories(parent); fs::create_directory(outside); fs::create_directory(base/L"recovered");
+    Handle vaultPin(CreateFileW(vault.c_str(),0,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
+    Check(vaultPin.h!=INVALID_HANDLE_VALUE,"vault fixture handle"); const auto vaultIdentity=Id(vaultPin.h); Check(vaultIdentity!="missing","vault fixture identity");
     std::string token=Utf8(name)+" original fixture\n"; File(note,token);
     auto own=[&](const fs::path &path) {
       auto object=Read(path); Check(object.id!="missing" && object.hash!="missing","fixture identity and content");
@@ -178,6 +187,9 @@ int wmain(int argc,wchar_t **argv) {
     };
     Row first; first.source=note; first.expected=own(note); rows.push_back(first);
     identityPin.h=CreateFileW(note.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr); Check(identityPin.h!=INVALID_HANDLE_VALUE,"identity pin");
+    // An open child can prevent MoveFileEx(directory) even with FILE_SHARE_DELETE.
+    // Do not let our diagnostic pin suppress the parent/junction race we intend to test.
+    if (mode.find(L"parent-move")!=std::wstring::npos || mode.find(L"junction")!=std::wstring::npos) identityPin.close();
     if (mode==L"same-name" || mode==L"partial") {
       fs::path second=vault/L"other"/L"note.md"; fs::create_directory(second.parent_path()); File(second,token+"second\n");
       Row r; r.source=second; r.expected=own(second); rows.push_back(r);
@@ -202,13 +214,15 @@ int wmain(int argc,wchar_t **argv) {
         } else { fs::create_directory(parent); File(note,token+"replacement parent\n"); own(note); }
       }
     };
-    Check(Read(note)==rows[0].expected && InVault(note,vault),"initial fixture precheck");
+    Check(Read(note)==rows[0].expected && InVault(note,vaultIdentity),"initial fixture precheck");
     if (mode.starts_with(L"initial-")) inject();
     auto operation=Operation(flags); std::vector<ComPtr<IShellItem>> sources; std::vector<ComPtr<IFileOperationProgressSink>> sinks;
     for (size_t i=0;i<rows.size();i++) {
       sources.push_back(Item(rows[i].source));
       ComPtr<IFileOperationProgressSink> sink; sink.Attach(new Sink(rows,i,base/L"receipts.jsonl",[&](size_t index,IShellItem *item) {
-        rows[index].finalCheck=Read(ItemPath(item))==rows[index].expected && InVault(ItemPath(item),vault);
+        auto &row=rows[index]; row.prePath=ItemPath(item);
+        row.preIdentity=Read(row.prePath)==row.expected; row.preInVault=InVault(row.prePath,vaultIdentity);
+        row.finalCheck=row.preIdentity && row.preInVault;
         if (mode==L"partial" && index==1) return E_ABORT;
         if ((mode.starts_with(L"predelete-") || mode==L"parent-pin-replace") && index==0) {
           if (!rows[index].finalCheck) return E_ABORT;
@@ -254,7 +268,7 @@ int wmain(int argc,wchar_t **argv) {
     // Cancelled/blocked outcomes are evidence only if operation callbacks were actually exercised.
     if (rows.empty() || (!rows[0].pre && mode!=L"leaf-pin")) complete=false;
     if (mode==L"ordinary" && (!rows[0].receipt || !rows[0].owned)) complete=false;
-    operation.Reset(); sources.clear(); sinks.clear(); for (auto &r:rows) r.receipt.Reset();
+    operation.Reset(); sources.clear(); sinks.clear(); for (auto &r:rows) r.receipt.Reset(); vaultPin.close();
     if (cleanup) {
       Handle root(CreateFileW(base.c_str(),0,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
       cleanup=Id(root.h)==rootId; root.close();
@@ -268,6 +282,8 @@ int wmain(int argc,wchar_t **argv) {
   std::ostringstream out;
   out<<"{\"schemaVersion\":1,\"platform\":\"Windows\",\"mode\":"<<Q(Utf8(mode))<<",\"fixtureRoot\":"<<Q(Utf8(base.native()))<<",\"completed\":"<<B(perform!=E_PENDING)<<",\"experimentComplete\":"<<B(complete)<<",\"performHRESULT\":"<<(long)perform<<",\"getAnyOperationsAbortedHRESULT\":"<<(long)abortHr<<",\"anyOperationsAborted\":"<<B(aborted!=FALSE)<<",\"injected\":"<<B(injected)<<",\"injectionBlocked\":"<<B(injectionBlocked)<<",\"injectionWin32Error\":"<<injectionError<<",\"probeError\":"<<Q(error)<<",\"fixtureReclaimed\":"<<B(cleanup)<<",\"residualFixture\":"<<Q(cleanup?"":Utf8(base.native()))<<",\"systemPutBackVerified\":false,\"cleanupKind\":\"exact-Shell-receipt-MoveItem-to-fixture\",\"items\":[";
   for (size_t i=0;i<rows.size();i++) { auto &r=rows[i]; if (i) out<<','; out<<"{\"source\":"<<Q(Utf8(r.source.native()))<<",\"expected\":"<<Json(r.expected)<<",\"actual\":"<<Json(r.actual)<<",\"queuedHRESULT\":"<<(long)r.queued<<",\"preDeleteCalled\":"<<B(r.pre)<<",\"preDeleteHRESULT\":"<<(long)r.preResult<<",\"finalPrecheckPassed\":"<<B(r.finalCheck)<<",\"postDeleteCalled\":"<<B(r.postCalled)<<",\"postDeleteHRESULT\":"<<(long)r.post<<",\"receipt\":"<<Q(r.receiptName)<<",\"receiptPath\":"<<Q(Utf8(r.receiptPath.native()))<<",\"expectedIdentityAndHash\":"<<B(r.actual==r.expected)<<",\"ownedFixture\":"<<B(r.owned)<<",\"originalExists\":"<<B(r.sourceExists)<<",\"reclaimed\":"<<B(r.reclaimed)<<",\"reclaimHRESULT\":"<<(long)r.restore<<",\"reclaimAbortedHRESULT\":"<<(long)r.restoreAbortedHr<<",\"reclaimAborted\":"<<B(r.restoreAborted!=FALSE)<<'}'; }
+  out<<"],\"prechecks\":[";
+  for (size_t i=0;i<rows.size();i++) { const auto &r=rows[i]; if (i) out<<','; out<<"{\"path\":"<<Q(Utf8(r.prePath.native()))<<",\"identityAndHash\":"<<B(r.preIdentity)<<",\"inVault\":"<<B(r.preInVault)<<'}'; }
   out<<"],\"ownedFixtureObjectsAccounted\":"<<B(accounted)<<"}"; std::cout<<out.str()<<std::endl;
   for (auto &r:rows) r.receipt.Reset();
   CoUninitialize(); return complete && cleanup ? 0 : 1;
