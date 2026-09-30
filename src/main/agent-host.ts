@@ -94,13 +94,22 @@ export class AgentHost {
   discardPending(root?: string): void {
     for (const [id, item] of this.pending) if (!root || item.root === root) this.pending.delete(id)
   }
-  async retryPending(root?: string): Promise<void> {
+  async retryPending(root?: string, relPath?: string): Promise<void> {
+    // 逐项尝试：一篇永久失败不能挡住其他篇的补存。全部试过之后仍抛第一个错误，
+    // 调用方继续用 hasPending() 判断是否还有未落盘内容。
+    let failure: unknown
     for (const [id, item] of [...this.pending]) {
       if (root && item.root !== root) continue
-      const revision = await this.finishWrite(item.root, item.relPath, item.source, item.persisted)
-      this.pending.delete(id)
-      this.deps.emit({ ...this.bindings.get(`${item.root}\0${item.relPath}`), id, root: item.root, relPath: item.relPath, status: item.source.status === 'limit' ? 'failed' : item.source.status, reason: item.source.reason, answer: item.source.answer, persisted: true, revision })
+      if (relPath && item.relPath !== relPath) continue
+      try {
+        const revision = await this.finishWrite(item.root, item.relPath, item.source, item.persisted)
+        this.pending.delete(id)
+        this.deps.emit({ ...this.bindings.get(`${item.root}\0${item.relPath}`), id, root: item.root, relPath: item.relPath, status: item.source.status === 'limit' ? 'failed' : item.source.status, reason: item.source.reason, answer: item.source.answer, persisted: true, revision })
+      } catch (error) {
+        failure ??= error
+      }
     }
+    if (failure) throw failure
   }
   pendingChapters(root: string, relPath: string, sessionId: string, objectVersion: string): Parameters<typeof appendLedgerChapter>[1][] {
     const binding = this.bindings.get(`${root}\0${relPath}`)

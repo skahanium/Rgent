@@ -448,6 +448,11 @@ function registerIpc(): void {
     if (blocksStructureWrite(request.relPath)) return { ok: false, error: 'NOTE_BUSY' }
     try {
       const result = await vault.write(request.relPath, request.content, request.expectedRevision, request)
+      // 人自己修好语法并成功保存后，给这篇之前写入失败的生成内容一次补存机会。
+      const root = vault.root
+      if (root && agentHost?.pendingPaths(root).includes(request.relPath)) {
+        void agentHost.retryPending(root, request.relPath).catch(() => { /* 仍未落盘：保留待保存内容 */ })
+      }
       return { ok: true, ...result }
     } catch (err) {
       return { ok: false, error: err instanceof Error && ['CONFLICT', 'NOTE_MISSING', 'NOTE_REPLACED', 'NOTE_UNREADABLE', 'VAULT_CHANGED', 'LEDGER_BOUNDARY_INVALID'].includes(err.message) ? err.message : 'IO_ERROR' }

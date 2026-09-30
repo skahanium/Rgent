@@ -277,4 +277,62 @@ describe('Host minimal loop', () => {
     expect(app.source()).toContain('外部修改')
     expect(app.source()).not.toContain('第二段')
   })
+
+  it('retries every pending note even when one of them keeps failing', async () => {
+    const seed = '前言\n\n/写个回答\n\n后文\n'
+    const notes = new Map<string, { content: string; revision: number }>([
+      ['a.md', { content: seed, revision: 1 }],
+      ['b.md', { content: seed, revision: 1 }]
+    ])
+    const forbidden = new Set<string>()
+    let failNextLedger = false
+    const host = new AgentHost({
+      root: () => '/vault',
+      read: async (relPath) => ({ content: notes.get(relPath)!.content, revision: String(notes.get(relPath)!.revision) }),
+      write: async (relPath, next, expected) => {
+        const note = notes.get(relPath)!
+        if (expected !== String(note.revision)) throw new Error('CONFLICT')
+        if (failNextLedger && next.includes('<!-- rgent:ledger-task:v1')) {
+          failNextLedger = false
+          throw new Error('IO_ERROR')
+        }
+        assertLedgerPreserved(next, partitionSource(note.content).ledger)
+        note.content = next
+        note.revision += 1
+        return String(note.revision)
+      },
+      tier: async (_root, relPath) => {
+        if (forbidden.has(relPath)) throw new Error('FORBIDDEN')
+        return 'reference'
+      },
+      credential: () => ({ provider: 'custom', baseURL: 'http://127.0.0.1:1234/v1', modelId: 'test', contextTokens: 10000, apiKey: 'secret' }),
+      limits: () => ({ seconds: 30, steps: 4, tools: 0 }),
+      stream: () => (async function* () { yield '最终答案' })(),
+      emit: () => {}
+    })
+    const startFor = async (relPath: string) => {
+      const content = notes.get(relPath)!.content
+      const at = content.indexOf('/写个回答')
+      return host.start({ relPath, range: { start: at, end: at + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    }
+    failNextLedger = true
+    await expect((await startFor('a.md')).done).rejects.toThrow('IO_ERROR')
+    failNextLedger = true
+    await expect((await startFor('b.md')).done).rejects.toThrow('IO_ERROR')
+    expect(host.pendingPaths('/vault').sort()).toEqual(['a.md', 'b.md'])
+
+    // a.md 变成不可写：它失败，但不能挡住 b.md 的补存。
+    forbidden.add('a.md')
+    await expect(host.retryPending('/vault')).rejects.toThrow('FORBIDDEN')
+    expect(host.pendingPaths('/vault')).toEqual(['a.md'])
+    expect(notes.get('b.md')!.content).toContain('最终答案')
+    expect(notes.get('b.md')!.content).toContain('<!-- rgent:ledger-task:v1')
+    expect(partitionSource(notes.get('a.md')!.content).ledger).toBeNull()
+
+    // 按篇过滤只补指定篇；恢复权限后逐篇补完。
+    forbidden.delete('a.md')
+    await host.retryPending('/vault', 'a.md')
+    expect(host.hasPending('/vault')).toBe(false)
+    expect(partitionSource(notes.get('a.md')!.content).ledger).toContain('最终答案')
+  })
 })
