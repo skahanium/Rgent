@@ -1,6 +1,7 @@
 import type { AgentAuthorizationPreview, AgentAuthorizationResult, AgentStartResult, TreeEntry } from '@shared'
 import { openOverlay, type Overlay } from './overlay.ts'
 import { icon } from './icons.ts'
+import { hostErrorText } from './host-errors.ts'
 export type AuthorizationPopoverOptions = {
   anchor:{left:number;top:number;bottom:number}
   origin:string
@@ -48,7 +49,7 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
     try{
       const result=await options.preview([...selected])
       if(current!==generation || !panel.isOpen()){if(result.ok)void options.discard?.(result.preview.id);return}
-      if(!result.ok){recipient.textContent='接收方尚未核验';status.textContent=`无法准备：${result.error}`;return}
+      if(!result.ok){recipient.textContent='接收方尚未核验';status.textContent=`无法准备：${hostErrorText(result.error)}`;return}
       prepared=result.preview
       const title=document.createElement('p');title.textContent='本场固定对象：';manifest.append(title)
       const paths=document.createElement('ul');for(const source of prepared.sources){const item=document.createElement('li');item.textContent=source.relPath;paths.append(item)}manifest.append(paths)
@@ -69,7 +70,7 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
       const result=await options.send(displayed)
       if(!panel.isOpen())return
       if(result.ok){panel.close();return}
-      status.textContent=`未发送：${result.error}`
+      status.textContent=`未发送：${hostErrorText(result.error)}`
       await refresh()
       if(prepared)status.textContent='范围与接收方已重新核对。请查看并再次确认；刚才没有启动任务。'
 

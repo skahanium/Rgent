@@ -1,20 +1,26 @@
 /**
- * Host 任务失败时给人看的文案。
+ * 任务启动、授权与 Host 运行失败时给人看的文案。
  *
- * 机读错误码与中文说明分开：`agent:event` 只带码，界面在这里翻译。
+ * 机读错误码与中文说明分开：IPC 与 `agent:event` 只带码，界面在这里翻译。
  * 新增可上报的错误码时，把它加进 `HOST_ERROR_CODES`——`host-errors.test.ts`
- * 会强制每个码都有说明，避免状态栏直接显示内部码。
+ * 会强制每个码都有说明，避免状态栏或授权浮层直接显示内部码。
  */
 export const HOST_ERROR_CODES = [
   'NO_API_KEY',
   'ENCRYPTION_UNAVAILABLE',
   'KEY_DECRYPT_FAILED',
   'PERMISSIONS_INVALID',
+  'MODEL_CONFIG_UNAVAILABLE',
   'FORBIDDEN',
   'TOOLS_UNAVAILABLE',
   'OUTSIDE_TASK_SCOPE',
   'AUTHORIZATION_REVOKED',
   'ACTION_NOT_ALLOWED',
+  'BAD_REQUEST',
+  'INVALID_AUTHORIZATION',
+  'STALE_AUTHORIZATION',
+  'AUTHORIZATION_SCOPE_TOO_LARGE',
+  'UNSAVED_DRAFT',
   'SOURCE_CHANGED',
   'SOURCE_REPLACED',
   'SOURCE_PERMISSION_CHANGED',
@@ -32,9 +38,22 @@ export const HOST_ERROR_CODES = [
   'NOTE_NOT_REFERENCE',
   'NOTE_BUSY',
   'NOTE_REPLACED',
+  'NOTE_MISSING',
   'NOTE_UNREADABLE',
   'PREVIOUS_TASK_UNSAVED',
   'OBJECT_BINDING_REQUIRED',
+  'OBJECT_BINDING_LIMIT',
+  'PATH_CHANGED',
+  'BAD_PATH',
+  'BAD_LIMIT',
+  'TASK_ID_BUSY',
+  'STRUCTURE_BUSY',
+  'OTHER_TASK_RUNNING',
+  'LIFECYCLE_RECOVERY_REQUIRED',
+  'AI_BLOCK_CHANGED',
+  'TASK_CANCELLED',
+  'INVALID_LEDGER_PROVENANCE',
+  'LEDGER_PROVENANCE_LIMIT',
   'LEDGER_BOUNDARY_INVALID',
   'HISTORICAL_SOURCE_CONFLICT',
   'CONFLICT',
@@ -78,8 +97,34 @@ const MESSAGES: Record<string, string> = {
   CONFLICT: '笔记已变化，请先处理冲突。',
   VAULT_CHANGED: '笔记库已切换，本场已停止。',
   NO_VAULT: '当前没有打开的笔记库。',
-  IO_ERROR: '写盘失败，生成内容已保留待保存。'
+  IO_ERROR: '写盘失败，生成内容已保留待保存。',
+  MODEL_CONFIG_UNAVAILABLE: '模型配置不可用，请在设置的「模型」页检查。',
+  BAD_REQUEST: '请求不合法，本场未开始。',
+  INVALID_AUTHORIZATION: '本场授权无效或已过期，请重新发起。',
+  STALE_AUTHORIZATION: '本场范围或对象在确认后发生变化，请重新核对再发送。',
+  AUTHORIZATION_SCOPE_TOO_LARGE: '本场参考范围超出对象上限，请减少参考笔记或目录。',
+  UNSAVED_DRAFT: '还有窗口稿没保存，先保存再发起本场。',
+  NOTE_MISSING: '这篇笔记已不存在，本场已停止。',
+  OBJECT_BINDING_LIMIT: '这篇笔记的对象绑定已达上限，本场已停止。',
+  PATH_CHANGED: '路径在核对期间发生变化，本场已停止。',
+  BAD_PATH: '路径不合法，本场未开始。',
+  BAD_LIMIT: '运行上限无效，请在设置的「运行」页重新保存。',
+  TASK_ID_BUSY: '任务标识冲突，请重新发起本场。',
+  STRUCTURE_BUSY: '文件操作正在进行，本场未开始。',
+  OTHER_TASK_RUNNING: '还有别的任务在运行，本场未开始。',
+  LIFECYCLE_RECOVERY_REQUIRED: '文件操作恢复未完成，本场已停止；先处理恢复状态再发起。',
+  AI_BLOCK_CHANGED: '未采纳的回答被外部修改，本场已停止，不再覆盖它。',
+  TASK_CANCELLED: '本场已停止。',
+  INVALID_LEDGER_PROVENANCE: '来源记录无法通过校验，本场已停止，回答仍保留。',
+  LEDGER_PROVENANCE_LIMIT: '来源记录超出上限，本场已停止，回答仍保留。'
 }
+
+/**
+ * 未登记且**不该**登记的码，避免以后误加：
+ * - `UNKNOWN_TOOL`／`INVALID_TOOL_ARGUMENTS`／`INVALID_TOOL_CURSOR`：回给模型的工具错误，不成为任务失败原因；
+ * - `BAD_SENDER`：IPC 调用方校验，渲染层只看到 invoke 失败，浮层给固定文案；
+ * - `COPY_*`／`SOURCE_AVAILABLE`／`STALE_PREVIEW`／`LEDGER_BASIS_UNAVAILABLE`／`BAD_BODY`／`BAD_PERMISSION`／`EEXIST`：另存与生命周期通道，由 `shell.ts` 的 `LIFECYCLE_ERRORS` 翻译。
+ */
 
 /** 未收录的码原样返回：计划层已经给出中文原因，不再二次翻译。 */
 export const hostErrorText = (error: string): string => MESSAGES[error] ?? error
