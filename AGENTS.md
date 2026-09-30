@@ -48,7 +48,7 @@
 ```bash
 pnpm test
 pnpm docs:check
-pnpm ui:check   # 界面改动；需要先 pnpm build。CI 的 macOS 与 Windows 两腿都会跑
+pnpm ui:check   # 界面改动；需要先 pnpm build。代码 CI 的 macOS 与 Windows 两腿都会跑
 ```
 
-`pnpm test` 先构建库读写的原生模块（需要系统 C++ 工具链与 Python 3），再跑类型检查与测试。改壳或 preload 时还要 `pnpm build` 并确认窗口能起。改界面壳、样式或渲染层时跑 `pnpm ui:check`（真实窗口 + CDP）；`RGENT_UI_VISUAL_ONLY=1 pnpm ui:check` 另用固定展示笔记生成可比截图。两项已在 CI 双平台运行，但 CDP 截图不包含原生窗口控制件。换阶段按 [施工守则](docs/handbook.md) 的四步走：改 [施工图](docs/build.md) 的「当前」与本文的「当前阶段」；`pnpm docs:check` 会核对两处名称、当前阶段节、依赖顺序及矩阵当前行。
+`pnpm test` 先构建库读写的原生模块（需要系统 C++ 工具链与 Python 3），再跑类型检查与测试。改壳或 preload 时还要 `pnpm build` 并确认窗口能起。改界面壳、样式或渲染层时跑 `pnpm ui:check`（真实窗口 + CDP）；`RGENT_UI_VISUAL_ONLY=1 pnpm ui:check` 另用固定展示笔记生成可比截图。CI 按[变更分层](docs/handbook.md#ci-分层)：纯文档只做轻检查，代码保留双平台构建、测试和功能窗口，视觉样张与废纸篓探针按需运行，手动 `full` 做完整阶段验收；汇总状态为 `CI gate`。文档 CI 绿灯不代称产品双平台已验，CDP 截图不包含原生窗口控制件。换阶段按 [施工守则](docs/handbook.md) 的四步走：改 [施工图](docs/build.md) 的「当前」与本文的「当前阶段」；`pnpm docs:check` 会核对两处名称、当前阶段节、依赖顺序及矩阵当前行。

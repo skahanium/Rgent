@@ -2,15 +2,102 @@ name: Verify
 
 on:
   push:
+    branches: ['**']
   pull_request:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'full：完整阶段验收；standard：代码与功能窗口；trash：独立废纸篓实验'
+        type: choice
+        options: [full, standard, trash]
+        default: full
 
+permissions:
+  contents: read
+  pull-requests: read
+
+# 不设工作流级自动取消：正在回收夹具的探针必须能收尾。
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: verify-plan-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    outputs:
+      runtime: ${{ steps.scope.outputs.runtime }}
+      visual: ${{ steps.scope.outputs.visual }}
+      trash: ${{ steps.scope.outputs.trash }}
+      docsTests: ${{ steps.scope.outputs.docsTests }}
+      duplicate: ${{ steps.duplicate.outputs.duplicate }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - run: node --test test/scripts/ci-scope.test.mjs
+      - id: scope
+        run: node scripts/ci-scope.mjs
+      # push 保留所有分支；同一 SHA 已有 PR 时只保留 PR 的完整门禁。
+      # 默认分支始终验，API 失败回到正常验，避免不确定时漏验。
+      - id: duplicate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let duplicate = false;
+            if (context.eventName === 'push' && !context.payload.deleted
+                && context.ref !== `refs/heads/${context.payload.repository.default_branch}`) {
+              try {
+                const branch = context.ref.replace(/^refs\/heads\//, '');
+                const { data } = await github.rest.pulls.list({
+                  ...context.repo, state: 'open', head: `${context.repo.owner}:${branch}`, per_page: 100
+                });
+                duplicate = data.some(pr => pr.head.sha === context.sha
+                  && pr.head.repo?.full_name === context.payload.repository.full_name);
+              } catch (error) {
+                core.warning(`无法确认重复 PR，保留 push 门禁：${error.message}`);
+              }
+            }
+            core.setOutput('duplicate', String(duplicate));
+
+  docs:
+    needs: plan
+    if: needs.plan.outputs.duplicate != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: verify-docs-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      # 纯文档无安装、无原生编译；检查器改动才装依赖跑现有定向用例。
+      - run: node scripts/check-docs.mjs
+      - uses: pnpm/action-setup@v4
+        if: needs.plan.outputs.docsTests == 'true'
+        with:
+          version: 12.4.1
+      - run: pnpm install --frozen-lockfile
+        if: needs.plan.outputs.docsTests == 'true'
+      - run: pnpm exec vitest run test/scripts/check-docs.test.ts
+        if: needs.plan.outputs.docsTests == 'true'
+
   verify:
+    needs: plan
+    if: needs.plan.outputs.duplicate != 'true' && needs.plan.outputs.runtime == 'true'
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    concurrency:
+      group: verify-code-${{ github.event_name }}-${{ github.ref }}-${{ matrix.os }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -21,47 +108,73 @@ jobs:
           node-version: '26'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm docs:check
-      # 先构建再做测试：测试失败时后面的步骤会被跳过，而「构建产物存在、preload 语法、
-      # 原生模块能被 Electron 装载」必须每腿都真正执行，否则原生侧回归会被红测试掩盖。
+      # 先构建、查 preload 与原生装载，再测试；测试红不能掩盖构建证据。
       - run: pnpm build
       - run: node -e "if (!require('node:fs').existsSync('out/main/index.js')) process.exit(1)"
       - run: node --check out/preload/index.cjs
       - run: node scripts/check-native.mjs
       - run: pnpm test
-      # 界面验收：真实窗口 + CDP（日夜、两种窗口尺寸、键盘往返、账本隔离、
-      # 冲突双栏、显示层不改文件等）。复用上面 pnpm build 的产物，不重复构建。
-      # 放在最后：这条红了也不影响「构建产物存在、preload 语法、原生模块可装载」的既有保证。
-      # 超时兜底：脚本自己对「CDP 起没起来」有 30 秒上限，但窗口起来后卡住没有兜底。
       - run: pnpm ui:check
         timeout-minutes: 5
         env:
           RGENT_UI_SCREENSHOTS: ${{ runner.temp }}/ui-shots
-      # 同一份固定展示笔记，在两种主题和两种尺寸下留可对照截图。
+      # 业务代码保留功能窗口；界面、壳、依赖与未知路径才重复采固定视觉样张。
       - run: pnpm ui:check
+        if: needs.plan.outputs.visual == 'true'
         timeout-minutes: 5
         env:
           RGENT_UI_VISUAL_ONLY: '1'
           RGENT_UI_SCREENSHOTS: ${{ runner.temp }}/ui-shots
-      # 独立临时夹具验证废纸篓候选；不编进生产模块，不接删除 IPC。
-      # 反例是有效证据，缺回执或夹具无法取回才失败。原位恢复仍需人核对。
-      # 无论界面／测试成败都采证，且探针不遮蔽已有代码门的执行。
-      - run: node scripts/probe-trash.mjs
-        if: always()
-        timeout-minutes: 8
-        env:
-          RGENT_TRASH_REPORT: ${{ runner.temp }}/trash-probe/report.json
-      # 截图是给「对照四张参考图」用的材料：两平台、日夜、窄窗、搜索、阅读态各一张。
-      # 失败时也上传——排查「窗口起不来」时这几张往往是最直接的证据。
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ui-shots-${{ matrix.os }}
           path: ${{ runner.temp }}/ui-shots
           if-no-files-found: ignore
+
+  trash:
+    needs: plan
+    if: needs.plan.outputs.duplicate != 'true' && needs.plan.outputs.trash == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    concurrency:
+      group: verify-trash-${{ github.event_name }}-${{ github.ref }}-${{ matrix.os }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      # 不依赖产品构建或测试结果，探针仅处理自建临时库。
+      - run: node scripts/probe-trash.mjs
+        timeout-minutes: 8
+        env:
+          RGENT_TRASH_REPORT: ${{ runner.temp }}/trash-probe/report.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: trash-probe-${{ matrix.os }}
           path: ${{ runner.temp }}/trash-probe
           if-no-files-found: ignore
+
+  gate:
+    name: CI gate
+    needs: [plan, docs, verify, trash]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: verify-gate-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - run: node scripts/ci-scope.mjs summary
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
