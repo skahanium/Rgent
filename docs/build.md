@@ -23,12 +23,15 @@
 
 ### 9 月 30 日安全与恢复收口
 
-- 先前的本地提交已推送；HEAD `0367ad7` 的 [CI 36648239921](https://github.com/skahanium/Rgent/actions/runs/36648239921) macOS、Windows 两腿成功，包含原生模块装载／路径测试、全量测试及构建后的两种自动化窗口检查。这是既有移动操作的自动化证据；本轮新改动仍须重新验收。
+- 先前的本地提交已推送；提交 `0367ad7` 的 [CI 36648239921](https://github.com/skahanium/Rgent/actions/runs/36648239921) macOS、Windows 两腿成功，包含原生模块装载／路径测试、全量测试及构建后的两种自动化窗口检查。这是既有移动操作的自动化证据；本轮结果另列下方，不混用。
 - 本轮补库会话绑定、完整子树复核、可查看的中断状态及绑定记录修订值的安全重试；错误或成员变化保留记录和 AI 失败关闭，不能强制销账。
 - 新结构提交与本库无关运行任务互斥；已有恢复记录只允许未相关的 Host 待保存内容留在内存，恢复后按原门禁补存，受影响内容未保存仍阻止。失败／成功重试的焦点、状态入口隐藏后的返回位置和迟到读盘响应均须定向核对。
-- [原生废纸篓探针](../scripts/probe-trash.mjs)只处理专用临时库，不编入生产模块。macOS 本机七场均取得回执并取回夹具；[NSWorkspace.recycle](https://developer.apple.com/documentation/appkit/nsworkspace/recycle%28_%3Acompletionhandler%3A%29?language=objc) 的路径 URL 在预检后替换文件／父目录／链接时回收替身，文件引用 URL 能追随移到库外的原对象。两种候选均未证明「核验对象、实际对象及固定库根一致」。取回夹具**不代表系统“放回原处”验收**。Windows 的 [IFileOperation](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ifileoperation)十四场由独立 CI 步骤采证，原生实测及两平台人工恢复核对须分别记录；未取证不记通过。
+- [原生废纸篓探针](../scripts/probe-trash.mjs)只处理专用临时库，不编入生产模块。macOS 本机与 CI 七场均完成采证；[NSWorkspace.recycle](https://developer.apple.com/documentation/appkit/nsworkspace/recycle%28_%3Acompletionhandler%3A%29?language=objc) 的路径 URL 在预检后替换文件／父目录／链接时回收替身，文件引用 URL 能追随移到库外的原对象。两种候选均未证明「核验对象、实际对象及固定库根一致」。
+- Windows 的 [IFileOperation](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ifileoperation)十四场已在 CI 执行；文件／父目录／junction 在排队后或 `PreDeleteItem` 成功核验后被替换，实际回收对象仍可成为替身。父目录的拒绝删除共享句柄不阻止子文件替换；文件自身拒绝删除共享则使回收失败，不能把锁住对象等同可用安全回收。普通、同名及逐项失败的回执均已核对；只按精确回执取回自己的对象，所有自建文件的身份和哈希均核对后才清理夹具。**两平台候选安全门均未通过**；取回夹具不代表系统“放回原处”或原名、原目录元数据已验收。
 - 恢复兼容使用原 v1 记录；ASCII 大小写别名须有唯一记录对象、目标身份和字节、原父路径与完整权限映射证据。歧义、非 ASCII 别名缺乏证据或损坏记录均保留，不自动推断迁移。
-- 本机本轮 `docs:check`、`pnpm test`（47 文件，387 通过／2 条件跳过）、`pnpm build`、构建后 `ui:check`（98 项）通过；已人工看恢复进度窄窗及损坏记录截图，并检查默认焦点、失败／成功重试与关闭返回。远端双平台新结果待核，不把本机截图当 Windows 或用户视觉确认。
+- 本机本轮 `docs:check`、`pnpm test`（47 文件，387 通过／2 条件跳过）、`pnpm build`、构建后 `ui:check`（98 项）通过；另跑固定展示笔记及原生 macOS 截图检查（32 项），未重复改视觉。
+- 本轮提交 `12f2e1e` 的 [CI 36658675837](https://github.com/skahanium/Rgent/actions/runs/36658675837) macOS、Windows 两腿成功，含构建、原生模块装载／路径测试、全量测试、两种构建窗口检查及独立探针。早先 Windows 探针的编译脚本引号和短路径比较错误已修正；最终报告核对了全部七／十四场及夹具回收，不把先前未执行的场景记为已验。
+- 人工已核对两平台的恢复进度窄窗和损坏记录画面、macOS 日夜原生窗口截图及 Windows CI 的日夜原生控制区截图；焦点和键盘行为另由真实窗口断言覆盖。Windows 原生控制件点击、两平台系统“放回原处”及原权限回放尚无人工完成证据。前端冻结与用户视觉确认状态不变。
 - 删除生产入口和 IPC 保持关闭，阶段保持「当前」。跨卷、网络盘、文件提供者等未证明场景不支持；不以绿灯或探针清理成功替代对象身份、库根约束和原位恢复证明。
 
 ## 依赖顺序
