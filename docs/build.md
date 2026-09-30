@@ -273,7 +273,9 @@ Host 接管单步模型事件、工具名与参数校验、顺序执行、模型
 
 分支 `fix/tool-stage-hardening` 的 PR [CI 36727088963](https://github.com/skahanium/Rgent/actions/runs/36727088963)（提交 `4ec51e3`）已核：macOS 61 文件、690 通过／2 条件跳过，功能窗口 144 项与固定样张 28 项零失败；Windows 首次尝试在 `test/main/path-race.test.ts` 两个原生换链用例上各 5 秒超时（该文件当次 27.4s，上一轮 Windows 腿同一文件为 2.3s），重跑该腿通过（2.5s、61 文件、688 通过／4 条件跳过），`CI gate` 最终 success。首次失败如实保留，未改动那两个用例。同分支 push 命中「同一提交已有开放 PR」的去重路径：只跑分类与汇总，`docs`／`verify`／`trash` 全 skipped 且 `CI gate` success——该路径首次现场运行，此前只记录为未运行场景。
 
-自查补漏后的最终提交 `7b5cf3e` 的 PR [CI 36731908663](https://github.com/skahanium/Rgent/actions/runs/36731908663)：`docs`、macOS 与 Windows 两腿、`CI gate` 全 success，废纸篓按分类 skipped。中间提交 `a4774e8` 的运行被同分支新推送按并发规则取消（`verify` 两腿 cancelled、`CI gate` failure）：汇总门没有把取消当通过，这条 fail-closed 行为也因此现场验到；该次不作为验收证据。
+自查补漏后的提交 `7b5cf3e` 的 PR [CI 36731908663](https://github.com/skahanium/Rgent/actions/runs/36731908663)：`docs`、macOS 与 Windows 两腿、`CI gate` 全 success，废纸篓按分类 skipped。其后的 `01247f0` 一轮 Windows 腿在**功能窗口 144 项零失败**之后，因验收脚本删临时目录报 EPERM 把 `VISUAL_ONLY` 的 32 项全绿改判成失败——已改为重试后仅告警，见上表。
+
+最终提交 `c2fa091` 的 PR [CI 36734156052](https://github.com/skahanium/Rgent/actions/runs/36734156052) 已核：`docs`、macOS（711 通过／2 条件跳过、功能窗口 144 项、固定样张 28 项零失败）、Windows（709 通过／4 条件跳过、功能窗口 144 项、固定样张 32 项零失败）、`CI gate` 全 success，废纸篓按分类 skipped。中间提交 `a4774e8` 的运行被同分支新推送按并发规则取消（`verify` 两腿 cancelled、`CI gate` failure）：汇总门没有把取消当通过，这条 fail-closed 行为也因此现场验到；该次不作为验收证据。
 
 已知未测：授权范围上限（256 篇）下，每次工具调用与模型步都要重核全部来源，尚无延迟预算或实测；提升上限前先测。
 
