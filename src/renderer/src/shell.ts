@@ -522,7 +522,7 @@ export async function start(root: HTMLElement): Promise<void> {
       const state = await window.rgent.vaultPick()
       await applyState(state)
     } catch (error) {
-      hostNotice = error instanceof Error ? error.message : '换库失败，请先保存当前生成内容。'
+      hostNotice = error instanceof Error ? hostErrorText(error.message) : '换库失败，请先保存当前生成内容。'
       updateStatus()
     }
   }
@@ -785,7 +785,7 @@ export async function start(root: HTMLElement): Promise<void> {
     try {
       await window.rgent.folderCreate({ name, parent: '' })
       await refreshTree()
-    } catch (error) { window.alert(error instanceof Error ? error.message : String(error)) }
+    } catch (error) { window.alert(lifecycleErrorText(error)) }
   }
 
   async function changePermission(relPath: string, tier: PermissionTier): Promise<void> {
@@ -797,7 +797,7 @@ export async function start(root: HTMLElement): Promise<void> {
       permissionState = await window.rgent.permissionsSet({ relPath, tier })
       await refreshTree()
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error))
+      window.alert(lifecycleErrorText(error))
     }
   }
 
@@ -1329,7 +1329,7 @@ export async function start(root: HTMLElement): Promise<void> {
       await refreshTree()
       await openNote(relPath)
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : String(err))
+      window.alert(lifecycleErrorText(err))
     }
   }
 }
