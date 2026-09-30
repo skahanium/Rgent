@@ -59,14 +59,14 @@ function shift(range: SourceRange, delta: number): SourceRange {
 
 /** A picture at the start of a source line acts as a figure in Rgent's reading projection. */
 export function startsLine(source: string, range: SourceRange): boolean {
-  const before = source.lastIndexOf('\n', range.start - 1) + 1
+  const before = Math.max(source.lastIndexOf('\n', range.start - 1), source.lastIndexOf('\r', range.start - 1)) + 1
   return source.slice(before, range.start).trim() === ''
 }
 
 /** A picture can occupy a source line even when CommonMark keeps adjacent lines in one paragraph. */
 export function aloneOnLine(source: string, range: SourceRange): boolean {
-  const next = source.indexOf('\n', range.end)
-  const after = next < 0 ? source.length : next
+  const next = source.slice(range.end).search(/[\r\n]/)
+  const after = next < 0 ? source.length : range.end + next
   return startsLine(source, range) && source.slice(range.end, after).trim() === ''
 }
 
@@ -74,9 +74,13 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
   const index = emptyIndex()
 
   for (const child of tree.children) {
-    const range = rangeFromNode(source, child)
+    const original = (child.data as Record<string, unknown> | undefined)?.rgentSourceBlock as { type: string; range: SourceRange } | undefined
+    const range = original?.range ?? rangeFromNode(source, child)
     if (!range) continue
-    const block: BlockRef = { type: child.type, range: shift(range, bodyOffset) }
+    const shifted = shift(range, bodyOffset)
+    const previous = index.blocks.at(-1)
+    if (previous?.range.start === shifted.start && previous.range.end === shifted.end) continue
+    const block: BlockRef = { type: original?.type ?? child.type, range: shifted }
     const identity = identityOf(child)
     if (identity) block.identity = identity.identity
     index.blocks.push(block)
@@ -100,7 +104,7 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
     index.tables.push({ range: shift(range, bodyOffset), header, rows: body, node, source })
   })
 
-  visit(tree, 'image', (node, _index, parent) => {
+  for (const topLevel of tree.children) visit(topLevel, 'image', (node, _index, parent) => {
     const range = rangeFromNode(source, node)
     if (!range) return
     const image: ImageRef = {
@@ -108,6 +112,7 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
       url: node.url,
       alt: node.alt ?? '',
       base: 'note',
+      source: identityOf(topLevel) ? 'ai' : 'human',
       standalone: startsLine(source, range) || (parent?.type === 'paragraph' && parent.children.length === 1)
     }
     index.images.push(image)

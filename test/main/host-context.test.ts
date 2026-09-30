@@ -121,3 +121,13 @@ describe('Host context assembly', () => {
     expect(plan.content).toContain('落点：正文块 3')
   })
 })
+
+
+it('keeps CR-only ledger chapters with raw body placement', () => {
+  const source = '前文\r\r落点\r<!-- rgent:ledger:v1 -->\r## 历史\r不能丢的历史\r'
+  const plan = buildHostContext({ source, prompt: '问', placement: source.indexOf('落点'), inputBudgetTokens: 1000, countTokens })
+  expect(plan.status).toBe('ready')
+  if (plan.status !== 'ready') return
+  expect(plan.content).toContain('不能丢的历史')
+  expect(plan.content).toContain('落点：正文块 1 之后、正文块 2 之前')
+})

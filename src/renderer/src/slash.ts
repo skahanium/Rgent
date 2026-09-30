@@ -1,14 +1,15 @@
 /** Slash is only a command at the start of an empty Markdown paragraph. */
 export function canStartSlash(source: string, position: number): boolean {
   if (!Number.isInteger(position) || position < 0 || position > source.length) return false
-  const lineStart = source.lastIndexOf('\n', position - 1) + 1
-  const lineEndAt = source.indexOf('\n', position)
-  const lineEnd = lineEndAt < 0 ? source.length : lineEndAt
+  const prefix = source.startsWith('\ufeff') ? 1 : 0
+  const lineStart = Math.max(prefix, Math.max(source.lastIndexOf('\n', position - 1), source.lastIndexOf('\r', position - 1)) + 1)
+  const nextBreak = source.slice(position).search(/[\r\n]/)
+  const lineEnd = nextBreak < 0 ? source.length : position + nextBreak
   if (position !== lineStart || source.slice(lineStart, lineEnd).length !== 0) return false
-  if (lineStart === 0) return true
-  const previousEnd = lineStart - 1
-  const previousStart = source.lastIndexOf('\n', previousEnd - 1) + 1
-  return source.slice(previousStart, previousEnd).trim().length === 0
+  if (source[position] === '\n' && source[position - 1] === '\r') return false
+  if (lineStart === prefix) return true
+  const preceding = source.slice(0, lineStart).split(/\r\n|\r|\n/)
+  return (preceding.at(-2) ?? '').trim().length === 0
 }
 
 export type SlashSubmission = { range: { start: number; end: number }; prompt: string }
@@ -16,7 +17,7 @@ export type SlashSubmission = { range: { start: number; end: number }; prompt: s
 export function submittedSlash(source: string, start: number, end: number): SlashSubmission | null {
   if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > source.length) return null
   const text = source.slice(start, end)
-  if (!text.startsWith('/') || text.slice(1).trim().length === 0 || /\r?\n[ \t]*\r?\n/.test(text)) return null
+  if (!text.startsWith('/') || text.slice(1).trim().length === 0 || /\n[ \t]*\n/.test(text.replace(/\r\n|\r/g, '\n'))) return null
   return { range: { start, end }, prompt: text.slice(1) }
 }
 
@@ -24,11 +25,14 @@ export function submittedSlash(source: string, start: number, end: number): Slas
 export function slashAtCaret(source: string, caret: number): SlashSubmission | null {
   if (!Number.isInteger(caret) || caret < 0 || caret > source.length) return null
   const before = source.slice(0, caret)
-  const blank = Math.max(before.lastIndexOf('\n\n'), before.lastIndexOf('\r\n\r\n'))
-  const start = blank < 0 ? 0 : blank + (before.slice(blank).startsWith('\r\n\r\n') ? 4 : 2)
+  let start = source.startsWith('\ufeff') ? 1 : 0, lineStart = start
+  for (const newline of before.matchAll(/\r\n|\r|\n/g)) {
+    const after = newline.index + newline[0].length
+    if (before.slice(lineStart, newline.index).trim().length === 0) start = after
+    lineStart = after
+  }
   if (!source.startsWith('/', start)) return null
-  if (start > 0 && !/\r?\n\r?\n$/u.test(source.slice(0, start))) return null
   const after = source.slice(caret)
-  if (after && !after.startsWith('\n') && !after.startsWith('\r\n')) return null
+  if (after && !/^[\r\n]/.test(after)) return null
   return submittedSlash(source, start, caret)
 }

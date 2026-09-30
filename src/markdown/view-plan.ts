@@ -38,10 +38,10 @@ export type PlannedWidget =
 export function expandToLineBlock(source: string, range: SourceRange): SourceRange {
   let start = Math.max(0, range.start)
   let end = Math.min(source.length, range.end)
-  while (start > 0 && source[start - 1] !== '\n') start -= 1
+  while (start > 0 && source[start - 1] !== '\n' && source[start - 1] !== '\r') start -= 1
   if (end < source.length) {
-    while (end < source.length && source[end] !== '\n') end += 1
-    if (end < source.length && source[end] === '\n') end += 1
+    while (end < source.length && source[end] !== '\n' && source[end] !== '\r') end += 1
+    if (end < source.length) end += source.startsWith('\r\n', end) ? 2 : 1
   }
   return { start, end }
 }
@@ -108,7 +108,8 @@ export function planWidgets(
         range: link.range,
         url: link.target,
         alt: link.display,
-        base: 'vault'
+        base: 'vault',
+        source: index.blocks.find(block => block.range.start <= link.range.start && block.range.end >= link.range.end)?.identity ? 'ai' : 'human'
       }
       push(out, { kind: 'image', range: block ? imageBlockRange(source, range) : range, image, standalone: link.standalone === true, block })
       continue

@@ -1,5 +1,6 @@
 import { WidgetType, type EditorView } from '@codemirror/view'
 import type { PlannedWidget } from '@markdown'
+import { rawEditSpec } from '../source.ts'
 
 type MarkerPlan = Extract<PlannedWidget, { kind: 'marker' }>
 
@@ -14,12 +15,15 @@ export class MarkerWidget extends WidgetType {
   }
 
   eq(other: MarkerWidget): boolean {
+    const sameEdit = (a: MarkerPlan['accept'], b: MarkerPlan['accept']): boolean =>
+      a === b || (a !== null && b !== null && a.from === b.from && a.to === b.to && a.insert === b.insert)
     return other.plan.range.start === this.plan.range.start
+      && other.plan.range.end === this.plan.range.end
       && other.plan.marker.identity === this.plan.marker.identity
-      && other.plan.accept?.from === this.plan.accept?.from
-      && other.plan.discard?.insert === this.plan.discard?.insert
-      && other.plan.moveUp !== null === (this.plan.moveUp !== null)
-      && other.plan.moveDown !== null === (this.plan.moveDown !== null)
+      && sameEdit(other.plan.accept, this.plan.accept)
+      && sameEdit(other.plan.discard, this.plan.discard)
+      && sameEdit(other.plan.moveUp, this.plan.moveUp)
+      && sameEdit(other.plan.moveDown, this.plan.moveDown)
   }
 
   toDOM(view: EditorView): HTMLElement {
@@ -115,7 +119,7 @@ export class MarkerWidget extends WidgetType {
       event.preventDefault()
       event.stopPropagation()
       view.dispatch({
-        changes: { from: edit.from, to: edit.to, insert: edit.insert },
+        ...rawEditSpec(view.state, edit),
         // 认领成我们自己的动作：身份锁定那道闸默认拦下所有改文档的事务。
         userEvent: 'rgent.markerAction'
       })

@@ -1,10 +1,11 @@
-import { fromMarkdown } from 'mdast-util-from-markdown'
+import { parseSource } from './parse-source.ts'
 import type { Root, RootContent } from 'mdast'
 import { visit } from 'unist-util-visit'
 import { DEFAULT_STAGES, type CompileOptions, type CompileResult, type Partition, type StageFlags } from './types.ts'
 import { partitionSource } from './partition.ts'
 import { extensionsFor } from './stages/registry.ts'
 import { buildIndex, emptyIndex } from './doc-index.ts'
+import { IDENTITY_DATA_KEY, identityOf } from './syntax/identity.ts'
 
 /**
  * Imported notes sometimes put a leading Markdown image and prose (or `##`)
@@ -31,19 +32,24 @@ function splitLeadingFigures(
       output.push(child)
       continue
     }
-    const lineStart = source.lastIndexOf('\n', start - 1) + 1
-    const lineEndIndex = source.indexOf('\n', end)
-    const lineEnd = lineEndIndex < 0 ? source.length : lineEndIndex
+    const lineStart = Math.max(source.lastIndexOf('\n', start - 1), source.lastIndexOf('\r', start - 1)) + 1
+    const lineEndIndex = source.slice(end).search(/[\r\n]/)
+    const lineEnd = lineEndIndex < 0 ? source.length : end + lineEndIndex
     const tailStart = end + (source.slice(end, lineEnd).match(/^[ \t]*/)?.[0].length ?? 0)
     if (source.slice(lineStart, start).trim() || tailStart >= lineEnd) {
       output.push(child)
       continue
     }
 
-    output.push({ type: 'paragraph', children: [image], position: image.position })
+    // 阅读投影可以拆图与正文；采纳、丢弃和移动仍只操作原来的完整块。
+    const data = {
+      ...child.data,
+      rgentSourceBlock: { type: child.type, range: { start: child.position!.start.offset!, end: paragraphEnd } }
+    }
+    output.push({ type: 'paragraph', children: [image], position: image.position, data })
     const suffix = parseTail(source.slice(tailStart, paragraphEnd))
-    const firstLine = source.slice(0, tailStart).split('\n').length
-    const firstColumn = tailStart - source.lastIndexOf('\n', tailStart - 1)
+    const firstLine = source.slice(0, tailStart).split(/\r\n?|\n/).length
+    const firstColumn = tailStart - Math.max(source.lastIndexOf('\n', tailStart - 1), source.lastIndexOf('\r', tailStart - 1))
     visit(suffix, (node) => {
       if (!node.position) return
       for (const point of [node.position.start, node.position.end]) {
@@ -52,6 +58,10 @@ function splitLeadingFigures(
         point.line += firstLine - 1
       }
     })
+    const identity = identityOf(child)
+    for (const node of suffix.children) {
+      node.data = { ...node.data, ...data, ...(identity ? { [IDENTITY_DATA_KEY]: identity } : {}) }
+    }
     output.push(...suffix.children)
   }
   tree.children = output
@@ -66,14 +76,11 @@ export function recoverCompile(
   source: string,
   stages: StageFlags,
   error: string,
-  prev?: CompileResult
+  _prev?: CompileResult
 ): CompileResult {
-  if (prev && !prev.stale) {
-    return { ...prev, source, stale: true, error }
-  }
   return {
     source,
-    partition: partitionSource(source),
+    partition: { body: source, ledger: null, bodyOffset: 0 },
     tree: { type: 'root', children: [] } satisfies Root,
     index: emptyIndex(),
     stages,
@@ -82,19 +89,25 @@ export function recoverCompile(
   }
 }
 
-function compilePart(source: string, partition: Partition, options: CompileOptions): CompileResult {
+function compilePart(source: string, options: CompileOptions, fragment = false): CompileResult {
   const stages = mergeStages(options.stages)
   try {
     const { micromark, mdast, transforms } = extensionsFor(stages)
-    let tree = fromMarkdown(partition.body, {
+    let tree = parseSource(source, {
       extensions: micromark as never,
       mdastExtensions: mdast as never
     })
+    const partition: Partition = fragment
+      ? { body: source, ledger: null, bodyOffset: 0 }
+      : partitionSource(source, stages.frontmatter ? tree : undefined)
+    if (partition.ledger != null) {
+      tree.children = tree.children.filter((child) => (child.position?.end.offset ?? Infinity) <= partition.body.length)
+    }
     for (const transform of transforms) {
       tree = transform(tree)
     }
     tree = splitLeadingFigures(tree, partition.body, (tail) => {
-      let fragment = fromMarkdown(tail, {
+      let fragment = parseSource(tail, {
         extensions: micromark as never,
         mdastExtensions: mdast as never
       })
@@ -116,10 +129,10 @@ function compilePart(source: string, partition: Partition, options: CompileOptio
 }
 
 export function compile(source: string, options: CompileOptions = {}): CompileResult {
-  return compilePart(source, partitionSource(source), options)
+  return compilePart(source, options)
 }
 
 /** Read-only fragments such as ledger text use the same parser without another partition. */
 export function compileFragment(source: string, options: CompileOptions = {}): CompileResult {
-  return compilePart(source, { body: source, ledger: null, bodyOffset: 0 }, options)
+  return compilePart(source, options, true)
 }

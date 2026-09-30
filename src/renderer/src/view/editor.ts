@@ -16,7 +16,7 @@ import {
   type PresentationPlan,
   type EditChange
 } from '@markdown'
-import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
+import { defaultKeymap, history, historyKeymap, isolateHistory } from '@codemirror/commands'
 import { Compartment, EditorState, Facet, StateField, Transaction, type Range } from '@codemirror/state'
 import {
   Decoration,
@@ -25,11 +25,13 @@ import {
   keymap,
   WidgetType
 } from '@codemirror/view'
+import { SourceProjection, normalizeSource, sourceOf, rawSourceField, rawSourceHistory, setRawSource } from './source.ts'
 import { emptyNoteHost, type NoteHost } from './host.ts'
 import { decorationForWidget } from './widgets/decorate.ts'
 import { renderSafeHtmlFragment } from './safe-html.ts'
 import { renderReadOnlyNode } from './read-only.ts'
 import { joinVaultRel } from '../../../shared/vault-rel.ts'
+import type { Root } from 'mdast'
 import type { PresentationBlock, PresentationSyntax } from '../../../markdown/presentation.ts'
 
 class SyntaxMarkerWidget extends WidgetType {
@@ -68,7 +70,7 @@ class PresentationBlockWidget extends WidgetType {
       element.addEventListener('mousedown', (event) => {
         event.preventDefault()
         event.stopPropagation()
-        view.dispatch({ selection: { anchor: Math.min(this.block.range.start + 1, this.block.range.end) } })
+        view.dispatch({ selection: { anchor: sourceOf(view.state).toView(Math.min(this.block.range.start + 1, this.block.range.end)) } })
         view.focus()
       })
       return element
@@ -147,11 +149,13 @@ type MarkdownState = {
   editing: boolean
 }
 
-function computeState(source: string, host: NoteHost, dark: boolean, selection: { from: number; to: number }, editing: boolean, previous?: CompileResult): MarkdownState {
+function computeState(projection: SourceProjection, host: NoteHost, dark: boolean, selection: { from: number; to: number }, editing: boolean, previous?: CompileResult): MarkdownState {
+  const source = projection.raw
+  const rawSelection = { from: projection.toRaw(selection.from), to: projection.toRaw(selection.to) }
   try {
     const result = compile(source, previous ? { prev: previous } : {})
     const presentation = result.stale ? planPresentation(null, source) : planPresentation(result.tree, result.partition.body)
-    return { result, presentation, decorations: decorationsFor(result, presentation, source, host, dark, selection, editing), editing }
+    return { result, presentation, decorations: decorationsFor(result, presentation, projection, host, dark, rawSelection, editing), editing }
   } catch (err) {
     const result = recoverCompile(
       source,
@@ -161,7 +165,7 @@ function computeState(source: string, host: NoteHost, dark: boolean, selection: 
     )
     try {
       const presentation = planPresentation(null, source)
-      return { result, presentation, decorations: decorationsFor(result, presentation, source, host, dark, selection, editing), editing }
+      return { result, presentation, decorations: decorationsFor(result, presentation, projection, host, dark, rawSelection, editing), editing }
     } catch {
       return { result, presentation: planPresentation(null, source), decorations: Decoration.none, editing }
     }
@@ -179,21 +183,22 @@ export const markdownField = StateField.define<MarkdownState>({
   // 「Cyclic dependency between fields and/or facets」，代价是整个界面渲染不出来。
   // 上一代结果由 update 的 value 参数直接带过来。
   create: (state) =>
-    computeState(state.doc.toString(), state.facet(noteHostFacet), state.facet(themeFacet), state.selection.main, false),
+    computeState(sourceOf(state), state.facet(noteHostFacet), state.facet(themeFacet), state.selection.main, false),
   update: (value, tr) => {
     const hostChanged = tr.startState.facet(noteHostFacet) !== tr.state.facet(noteHostFacet)
     const themeChanged = tr.startState.facet(themeFacet) !== tr.state.facet(themeFacet)
-    if (!tr.docChanged && !hostChanged && !themeChanged && !tr.selection) return value
+    const sourceChanged = sourceOf(tr.startState) !== sourceOf(tr.state)
+    if (!sourceChanged && !hostChanged && !themeChanged && !tr.selection) return value
     const editing = tr.isUserEvent('rgent.setText') ? false : value.editing || Boolean(tr.selection) || (tr.docChanged && !tr.isUserEvent('rgent'))
-    if (!tr.docChanged && !hostChanged && !themeChanged) {
+    if (!sourceChanged && !hostChanged && !themeChanged) {
       return {
         ...value,
         editing,
-        decorations: decorationsFor(value.result, value.presentation, tr.state.doc.toString(), tr.state.facet(noteHostFacet), tr.state.facet(themeFacet), tr.state.selection.main, editing)
+        decorations: decorationsFor(value.result, value.presentation, sourceOf(tr.state), tr.state.facet(noteHostFacet), tr.state.facet(themeFacet), { from: sourceOf(tr.state).toRaw(tr.state.selection.main.from), to: sourceOf(tr.state).toRaw(tr.state.selection.main.to) }, editing)
       }
     }
     return computeState(
-      tr.state.doc.toString(),
+      sourceOf(tr.state),
       tr.state.facet(noteHostFacet),
       tr.state.facet(themeFacet),
       tr.state.selection.main,
@@ -201,22 +206,29 @@ export const markdownField = StateField.define<MarkdownState>({
       value.result
     )
   },
-  provide: (field) => EditorView.decorations.from(field, (value) => value.decorations)
+  provide: (field) => [rawSourceField, rawSourceHistory, EditorView.decorations.from(field, (value) => value.decorations)]
 })
 
 function decorationsFor(
   result: CompileResult,
   presentation: PresentationPlan,
-  source: string,
+  projection: SourceProjection,
   host: NoteHost,
   dark: boolean,
   selection: { from: number; to: number },
   editing: boolean
 ): DecorationSet {
+  const source = projection.raw
+  const at = (position: number): number => projection.toView(position)
   const decos: Range<Decoration>[] = []
   const docLen = source.length
   if (result.stale) return Decoration.none
-  const active = editing ? result.index.blocks.filter((block) =>
+  // 阅读投影块与原文编辑单位不同：进入图片后的文字不应把图片也切成源码。
+  const projectedBlocks = (result.tree as Root).children.flatMap((node) => {
+    const start = node.position?.start.offset, end = node.position?.end.offset
+    return start == null || end == null ? [] : [{ range: { start, end } }]
+  })
+  const active = editing ? projectedBlocks.filter((block) =>
     selection.from === selection.to
       ? block.range.start <= selection.from && selection.from < block.range.end
       : rangesOverlap(block.range, { start: selection.from, end: selection.to })
@@ -242,7 +254,7 @@ function decorationsFor(
     if (widget.range.start < 0 || widget.range.end > docLen || widget.range.end <= widget.range.start) continue
     if (isActive(widget.range)) continue
     try {
-      decos.push(decorationForWidget(widget, host, dark).range(widget.range.start, widget.range.end))
+      decos.push(decorationForWidget(widget, host, dark).range(at(widget.range.start), at(widget.range.end)))
     } catch {
       continue
     }
@@ -253,7 +265,7 @@ function decorationsFor(
     const range = expandToLineBlock(source, block.range)
     if (range.end <= range.start || range.end > docLen) continue
     try {
-      decos.push(Decoration.replace({ widget: new PresentationBlockWidget(block), block: true, rgentBlock: block.kind }).range(range.start, range.end))
+      decos.push(Decoration.replace({ widget: new PresentationBlockWidget(block), block: true, rgentBlock: block.kind }).range(at(range.start), at(range.end)))
     } catch {
       continue
     }
@@ -276,15 +288,18 @@ function decorationsFor(
     if (block.identity === 'command') addLine(line, 'rgent-block-command-first')
     for (;;) {
       addLine(line, className)
-      const next = source.indexOf('\n', line)
-      if (next < 0 || next + 1 > block.range.end) break
-      line = next + 1
+      const offset = source.slice(line).search(/[\r\n]/)
+      if (offset < 0) break
+      const next = line + offset
+      const after = next + (source.startsWith('\r\n', next) ? 2 : 1)
+      if (after > block.range.end) break
+      line = after
     }
   }
 
   for (const [pos, classes] of lineClasses) {
     try {
-      decos.push(Decoration.line({ class: classes.join(' ') }).range(pos))
+      decos.push(Decoration.line({ class: classes.join(' ') }).range(at(pos)))
     } catch {
       continue
     }
@@ -303,7 +318,7 @@ function decorationsFor(
       const link = mark.className === 'md-link'
         ? presentation.links.find((item) => item.range.start === start && item.range.end === end)
         : undefined
-      decos.push(Decoration.mark({ class: mark.className, ...(link ? { attributes: { 'data-md-url': link.url } } : {}) }).range(start, end))
+      decos.push(Decoration.mark({ class: mark.className, ...(link ? { attributes: { 'data-md-url': link.url } } : {}) }).range(at(start), at(end)))
     } catch {
       continue
     }
@@ -315,8 +330,8 @@ function decorationsFor(
     const end = clamp(syntax.range.end, 0, docLen)
     if (end <= start) continue
     try {
-      if (syntax.kind === 'hide') decos.push(Decoration.replace({ rgentSyntax: 'hide' }).range(start, end))
-      else decos.push(Decoration.replace({ widget: new SyntaxMarkerWidget(syntax), rgentSyntax: syntax.kind }).range(start, end))
+      if (syntax.kind === 'hide') decos.push(Decoration.replace({ rgentSyntax: 'hide' }).range(at(start), at(end)))
+      else decos.push(Decoration.replace({ widget: new SyntaxMarkerWidget(syntax), rgentSyntax: syntax.kind }).range(at(start), at(end)))
     } catch {
       continue
     }
@@ -357,10 +372,11 @@ export const identityLock = EditorState.transactionFilter.of((tr) => {
   const result = tr.startState.field(markdownField).result
   if (result.stale) return []
   const index = result.index
-  const changes = changesOf(tr)
+  const projection = sourceOf(tr.startState)
+  const changes = changesOf(tr).map((change) => ({ ...change, from: projection.toRaw(change.from), to: projection.toRaw(change.to) }))
   const activeIds = tr.startState.facet(activeTaskIdsFacet)
   if (activeIds.size) {
-    const source = tr.startState.doc.toString()
+    const source = projection.raw
     for (const unit of identityUnits(index)) {
       if (!unit.marker) continue
       const taskId = parseMarker(source.slice(unit.marker.range.start, unit.marker.range.end))?.attrs['task-id']
@@ -370,16 +386,16 @@ export const identityLock = EditorState.transactionFilter.of((tr) => {
       if (changes.some((change) => change.from <= end && change.to >= start)) return []
     }
   }
-  const plan = planIdentityEdit(tr.startState.doc.toString(), changes, index)
+  const plan = planIdentityEdit(projection.raw, changes, index)
   if (plan.blocked) return []
   if (!plan.changes) return tr
   // 补过断段符的插入点要让光标一起右移，否则下一键会插在断段符之前。
   // 注意这里是「原位置 + 前面补过的断段符个数」，不是那个个数本身。
   const shifted = (position: number): number =>
-    position + plan.prefixed.filter((at) => at <= position).length
+    position + plan.prefixed.filter((at) => projection.toView(at) <= position).length
   const selection = tr.selection ?? tr.startState.selection
   return {
-    changes: plan.changes,
+    changes: plan.changes.map((change) => ({ ...change, from: projection.toView(change.from), to: projection.toView(change.to), insert: normalizeSource(change.insert ?? '') })),
     selection: {
       anchor: shifted(selection.main.anchor),
       head: shifted(selection.main.head)
@@ -457,17 +473,14 @@ export function mountEditor(
 ): EditorHost {
   let applying = false
   const warning = document.createElement('div')
-  warning.className = 'md-render-warning'
-  warning.setAttribute('role', 'status')
+  warning.className = 'md-render-warning md-parse-error'
+  warning.setAttribute('role', 'alert')
   warning.hidden = true
   parent.append(warning)
   const hostCompartment = new Compartment()
   // 撤销历史按笔记隔离：整篇替换若留在历史里，切 tab 之后按撤销会把上一篇的文本
   // 填进当前篇（随后还会被自动保存写盘）——实测过。
   const historyCompartment = new Compartment()
-  // CM6 默认把 CRLF 规范化成 LF。每篇采用自己的原文换行符，避免只改一个字
-  // 就把整篇的换行全部改写；与 tab 的撤销历史一起切换。
-  const lineBreakCompartment = new Compartment()
   // 主题：CM6 自带的默认样式跟 darkTheme 走，装饰跟 themeFacet 走。
   const themeCompartment = new Compartment()
   const activeTaskCompartment = new Compartment()
@@ -476,7 +489,15 @@ export function mountEditor(
     doc: '',
     extensions: [
       historyCompartment.of(history()),
-      lineBreakCompartment.of(EditorState.lineSeparator.of('\n')),
+      EditorState.transactionExtender.of((tr) => {
+        if (!tr.docChanged) return null
+        const old = sourceOf(tr.startState)
+        let separatorChanged = false
+        tr.changes.iterChanges((from, to, _fromB, _toB, inserted) => {
+          if (/\n/.test(inserted.toString()) || /[\r\n]/.test(old.raw.slice(old.toRaw(from), old.toRaw(to)))) separatorChanged = true
+        })
+        return separatorChanged ? { annotations: isolateHistory.of('full') } : null
+      }),
       // Mod-s 不在这里：保存的键位统一由 shortcuts.ts 定义，免得两处都能触发。
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorView.lineWrapping,
@@ -509,11 +530,11 @@ export function mountEditor(
         const result = update.state.field(markdownField).result
         warning.hidden = !result.stale
         warning.textContent = result.stale ? `阅读呈现失败，以下是当前原文：${result.error ?? '解析错误'}` : ''
-        if (update.docChanged || update.selectionSet || update.viewportChanged) {
+        if (update.docChanged || update.selectionSet || update.viewportChanged || sourceOf(update.startState) !== sourceOf(update.state)) {
           for (const listener of stateListeners) listener()
         }
         if (applying || !update.docChanged) return
-        onChange(update.state.doc.toString())
+        onChange(sourceOf(update.state).raw)
       })
     ]
   })
@@ -521,22 +542,23 @@ export function mountEditor(
   const view = new EditorView({ state, parent })
   return {
     view,
-    getText: () => view.state.doc.toString(),
+    getText: () => sourceOf(view.state).raw,
     setText: (text, host, selection) => {
+      const projection = new SourceProjection(text)
       applying = true
       view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: text },
+        changes: { from: 0, to: view.state.doc.length, insert: projection.text },
         // 换一篇笔记 = 换一份撤销历史 + 光标回到篇首；不归零的话上一篇的行列会被
         // 映射进新篇（实测：切过去停在「第 7 行」）。
         selection: {
-          anchor: clamp(selection?.anchor ?? 0, 0, text.length),
-          head: clamp(selection?.head ?? selection?.anchor ?? 0, 0, text.length)
+          anchor: projection.toView(selection?.anchor ?? 0),
+          head: projection.toView(selection?.head ?? selection?.anchor ?? 0)
         },
         effects: [
           historyCompartment.reconfigure(history()),
-          lineBreakCompartment.reconfigure(EditorState.lineSeparator.of(text.includes('\r\n') ? '\r\n' : text.includes('\r') ? '\r' : '\n')),
+          setRawSource.of(text),
           ...(host ? [hostCompartment.reconfigure(noteHostFacet.of(host))] : []),
-          EditorView.scrollIntoView(clamp(selection?.head ?? 0, 0, text.length), { y: selection?.head ? 'center' : 'start' })
+          EditorView.scrollIntoView(projection.toView(selection?.head ?? 0), { y: selection?.head ? 'center' : 'start' })
         ],
         annotations: Transaction.addToHistory.of(false),
         userEvent: 'rgent.setText'
@@ -544,20 +566,22 @@ export function mountEditor(
       applying = false
     },
     applyExternalText: (text) => {
+      if (sourceOf(view.state).raw === text) return
       const old = view.state.doc.toString()
-      if (old === text) return
+      const projected = normalizeSource(text)
       let from = 0
-      while (from < old.length && from < text.length && old[from] === text[from]) from += 1
+      while (from < old.length && from < projected.length && old[from] === projected[from]) from += 1
       let oldEnd = old.length
-      let newEnd = text.length
-      while (oldEnd > from && newEnd > from && old[oldEnd - 1] === text[newEnd - 1]) {
+      let newEnd = projected.length
+      while (oldEnd > from && newEnd > from && old[oldEnd - 1] === projected[newEnd - 1]) {
         oldEnd -= 1
         newEnd -= 1
       }
       applying = true
       try {
         view.dispatch({
-          changes: { from, to: oldEnd, insert: text.slice(from, newEnd) },
+          changes: { from, to: oldEnd, insert: projected.slice(from, newEnd) },
+          effects: setRawSource.of(text),
           annotations: Transaction.addToHistory.of(false),
           userEvent: 'rgent.host'
         })
@@ -585,7 +609,7 @@ export function mountEditor(
       const line = view.state.doc.lineAt(head)
       return { line: line.number, column: head - line.from + 1 }
     },
-    selectionRange: () => ({ anchor: view.state.selection.main.anchor, head: view.state.selection.main.head }),
+    selectionRange: () => ({ anchor: sourceOf(view.state).toRaw(view.state.selection.main.anchor), head: sourceOf(view.state).toRaw(view.state.selection.main.head) }),
     headings: () => {
       const result = view.state.field(markdownField).result
       return result.stale ? [] : result.index.headings.filter((heading) => heading.depth <= 3)
@@ -595,17 +619,18 @@ export function mountEditor(
       return result.stale ? [] : result.index.markers
     },
     viewport: () => ({
-      from: view.visibleRanges[0]?.from ?? 0,
-      to: view.visibleRanges[view.visibleRanges.length - 1]?.to ?? view.state.doc.length
+      from: sourceOf(view.state).toRaw(view.visibleRanges[0]?.from ?? 0),
+      to: sourceOf(view.state).toRaw(view.visibleRanges[view.visibleRanges.length - 1]?.to ?? view.state.doc.length)
     }),
     caret: () => {
       const head = view.state.selection.main.head
       const [first] = view.visibleRanges
       if (!first) return null
       const last = view.visibleRanges[view.visibleRanges.length - 1]!
-      return head >= first.from && head <= last.to ? head : null
+      return head >= first.from && head <= last.to ? sourceOf(view.state).toRaw(head) : null
     },
     scrollTo: (position) => {
+      position = sourceOf(view.state).toView(position)
       view.dispatch({
         selection: { anchor: position },
         effects: EditorView.scrollIntoView(position, { y: 'start' })

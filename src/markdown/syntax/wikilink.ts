@@ -65,8 +65,10 @@ export function wikilinkFromMarkdown(): unknown {
         const inner = (embed ? raw.slice(3) : raw.slice(2)).replace(/\]\]$/, '')
         node.embed = embed
         node.value = inner
-        node.target = wikiTarget(inner)
-        node.display = wikiDisplay(inner)
+        const separator = inner.indexOf('|')
+        const target = separator < 0 ? inner : inner.slice(0, separator)
+        node.target = wikiTarget(target)
+        node.display = separator < 0 ? wikiDisplay(target) : inner.slice(separator + 1)
         this.exit(token)
       }
     }

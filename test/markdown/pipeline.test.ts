@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ALL_STAGES,
   compile,
+  compileFragment,
   composeSource,
   expandToLineBlock,
   inViewport,
@@ -106,12 +107,13 @@ describe('pipeline', () => {
     expect(inViewport(table.range, table.range.end, table.range.end + 10)).toBe(false)
   })
 
-  it('keeps the last good index when compile recovery kicks in', () => {
+  it('does not attach a previous index or partition to changed source on recovery', () => {
     const prev = compile(fixture)
     const recovered = recoverCompile('new source', prev.stages, 'boom', prev)
     expect(recovered.stale).toBe(true)
     expect(recovered.source).toBe('new source')
-    expect(recovered.index.tables).toEqual(prev.index.tables)
+    expect(recovered.index.tables).toEqual([])
+    expect(recovered.partition).toEqual({ body: 'new source', ledger: null, bodyOffset: 0 })
     expect(recoverCompile('x', prev.stages, 'boom').index.tables).toEqual([])
   })
 
@@ -406,3 +408,103 @@ function collectTs(dir: string): string[] {
   }
   return out
 }
+
+
+describe('source integrity regressions', () => {
+  const anchor = '<!-- rgent:ledger:v1 -->'
+  it.each([
+    `\`\`\`md\n${anchor}\n\`\`\`\n正文`,
+    `    ${anchor}\n正文`,
+    `> ${anchor}\n正文`,
+    `- ${anchor}\n正文`,
+    `---\nexample: |\n  ${anchor}\n---\n正文`,
+    `<!-- example\n${anchor}\n-->\n正文`
+  ])('ignores anchors inside Markdown containers: %s', (source) => {
+    expect(partitionSource(source).ledger).toBeNull()
+    expect(compile(source).partition.body).toBe(source)
+  })
+
+  it('keeps the last real anchor before a quoted fenced example', () => {
+    const body = '正文\r\n'
+    const ledger = `${anchor}\r\n\n旧章\n\n\`\`\`\n${anchor}\n\`\`\`\n`
+    expect(partitionSource(body + ledger)).toEqual({ body, ledger, bodyOffset: 0 })
+    expect(compile(body + ledger).partition).toEqual({ body, ledger, bodyOffset: 0 })
+  })
+
+  it('preserves the identity and original offsets of split figures and their prose', () => {
+    const source = '<!-- rgent:ai:v1 -->\r\n![图](https://example.com/a.png) ## 标题\r\n正文'
+    const result = compile(source)
+    expect(result.index.blocks.map((block) => block.identity)).toEqual(['ai'])
+    expect(result.index.blocks[0]!.range).toEqual({ start: source.indexOf('!['), end: source.length })
+    expect(result.index.images[0]!.source).toBe('ai')
+    expect(result.index.headings[0]?.range.start).toBe(source.indexOf('## 标题'))
+    expect(source.slice(result.index.images[0]!.range.start, result.index.images[0]!.range.end)).toBe('![图](https://example.com/a.png)')
+  })
+
+  it('separates wikilink aliases from file targets without losing alias text', () => {
+    const result = compile('[[目录/文件.md|显示标题]] ![[图.png|图片说明]]')
+    expect(result.index.wikilinks.map(({ target, display }) => ({ target, display }))).toEqual([
+      { target: '目录/文件.md', display: '显示标题' },
+      { target: '图.png', display: '图片说明' }
+    ])
+  })
+})
+
+
+it('keeps image provenance under nested prompt and AI containers', () => {
+  const source = '<!-- rgent:prompt:v1 -->\n- ![prompt](a.png)\n\n<!-- rgent:ai:v1 -->\n> ![answer](b.png)\n\n![human](c.png)'
+  expect(compile(source).index.images.map((image) => image.source)).toEqual(['ai', 'ai', 'human'])
+})
+
+
+it('keeps ledger detection stable when the rendering frontmatter stage is disabled', () => {
+  const source = '---\nexample: |\n<!-- rgent:ledger:v1 -->\n---\n正文'
+  expect(partitionSource(source).ledger).toBeNull()
+  expect(compile(source, { stages: { frontmatter: false } }).partition.ledger).toBeNull()
+})
+
+
+it('uses the same grammar for standalone partitions and compiled math blocks', () => {
+  const source = '$$\n<!-- rgent:ledger:v1 -->\n$$\n'
+  expect(partitionSource(source).ledger).toBeNull()
+  expect(compile(source).partition).toEqual(partitionSource(source))
+})
+
+it('partitions CR-only ledger anchors and composes with the neighbouring separator', () => {
+  const body = '正文\r'
+  const ledger = '<!-- rgent:ledger:v1 -->\r旧章\r'
+  expect(partitionSource(body + ledger)).toEqual({ body, ledger, bodyOffset: 0 })
+  expect(compile(body + ledger).partition).toEqual({ body, ledger, bodyOffset: 0 })
+  expect(composeSource(body, ledger)).toBe(body + ledger)
+  expect(composeSource('首行\r\n末行', ledger)).toBe('首行\r\n末行\r\n' + ledger)
+})
+
+it('retains CR-only figure source positions and image provenance', () => {
+  const source = '前文\r\r<!-- rgent:ai:v1 -->\r![图](a.png) ## 图题\r后文'
+  const result = compile(source)
+  expect(result.index.images[0]!.standalone).toBe(true)
+  expect(result.index.images[0]!.source).toBe('ai')
+  expect(result.index.headings[0]!.range.start).toBe(source.indexOf('## 图题'))
+  expect(result.index.blocks.at(-1)!.range.end).toBe(source.length)
+})
+
+
+it('keeps BOM-prefixed AST coordinates and ledger boundaries in the original source', () => {
+  const source = '\ufeff# 标题\r\n\r\n<!-- rgent:ai:v1 -->\r\n![图](https://example.com/a.png) ## 尾题\r\n尾文\r\n<!-- rgent:ledger:v1 -->\n历史'
+  const result = compile(source)
+  expect(result.partition.body).toBe(source.slice(0, source.indexOf('<!-- rgent:ledger:')))
+  expect(partitionSource(source)).toEqual(result.partition)
+  expect(result.index.headings[0]!.range.start).toBe(1)
+  expect(result.index.markers[0]!.range.start).toBe(source.indexOf('<!-- rgent:ai:'))
+  expect(result.index.images[0]!.range.start).toBe(source.indexOf('![图]'))
+  expect(result.index.images[0]!.source).toBe('ai')
+  const tree = result.tree as import('mdast').Root
+  expect(tree.children[0]!.position!.start).toEqual({ offset: 1, line: 1, column: 2 })
+  expect(compileFragment('\ufeff# 片段').index.headings[0]!.range).toEqual({ start: 1, end: 5 })
+})
+it('round-trips a BOM immediately followed by the ledger anchor', () => {
+  const source = '\ufeff<!-- rgent:ledger:v1 -->\r\n旧章'
+  const part = partitionSource(source)
+  expect(part.body).toBe('\ufeff')
+  expect(composeSource(part.body, part.ledger)).toBe(source)
+})

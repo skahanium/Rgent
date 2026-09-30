@@ -58,6 +58,8 @@ export interface ImageRef {
   base: 'note' | 'vault'
   /** Derived from the same mdast paragraph, including paragraphs inside list items. */
   standalone?: boolean
+  /** From the enclosing original block, retained across reading projections. */
+  source?: 'human' | 'adopted' | 'ai'
 }
 
 export interface HeadingRef {

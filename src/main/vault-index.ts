@@ -147,7 +147,9 @@ export class VaultIndex {
   private async readOne(root: string, relPath: string): Promise<IndexedNote | null> {
     try {
       const source = await readNote(root, relPath)
-      const { index, partition } = compile(source)
+      const parsed = compile(source)
+      if (parsed.stale) return null
+      const { index, partition } = parsed
       const targets = index.wikilinks.filter((link) => isNoteTarget(link.target)).map((link) => link.target)
       return {
         relPath,

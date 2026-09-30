@@ -30,11 +30,12 @@ function taskKey(taskId: string): string {
 }
 
 function lineEnding(source: string): string {
-  return source.includes('\r\n') ? '\r\n' : '\n'
+  return source.match(/\r\n|\r|\n/)?.[0] ?? '\n'
 }
 
 function lineStart(source: string, pos: number): number {
-  return source.lastIndexOf('\n', pos - 1) + 1
+  const start = Math.max(source.lastIndexOf('\n', pos - 1), source.lastIndexOf('\r', pos - 1)) + 1
+  return start === 0 && source.startsWith('\ufeff') ? 1 : start
 }
 
 function markerTaskId(source: string, range: SourceRange): string | null {
@@ -42,8 +43,8 @@ function markerTaskId(source: string, range: SourceRange): string | null {
 }
 
 function escapedModelText(text: string): string {
-  return text.replace(/(^|\n)([ \t]*)<!--\s*rgent:[^\r\n]*?-->/g, (whole, before: string, spaces: string) =>
-    before + spaces + whole.slice(before.length + spaces.length).replace('<!--', '&lt;!--').replace('-->', '--&gt;'))
+  // 累积流每次重投影：即使还没有 rgent 名称或闭合符，也不能让注释吞进后文。
+  return text.replaceAll('<!--', '&lt;!--').replaceAll('-->', '--&gt;')
 }
 
 /** Mark one existing top-level prompt paragraph. The editor's trigger slash is removed here. */
@@ -99,7 +100,7 @@ function locatedPrompt(source: string, taskId: string): { blockEnd: number; firs
 
 /** Replace only AI blocks tagged with this task ID in freshly read source. */
 function renderedAnswer(taskId: string, input: string, newline: string): string {
-  let answer = escapedModelText(input.replace(/\r\n/g, '\n'))
+  let answer = escapedModelText(input.replace(/\r\n|\r/g, '\n'))
   let parsed = compileFragment(answer)
   if (parsed.stale) throw new Error('无法解析模型回答')
   const last = parsed.index.blocks.at(-1)
@@ -146,7 +147,7 @@ export function appendLedgerChapter(source: string, write: LedgerChapterWrite): 
   const part = partitionSource(source)
   if (part.ledger && new RegExp(`^<!-- rgent:ledger-task:v1 id="${taskId}" -->\\r?$`, 'm').test(part.ledger)) return source
   const newline = lineEnding(source)
-  const prelude = part.ledger ?? `${part.body.endsWith('\n') || !part.body ? '' : newline}<!-- rgent:ledger:v1 -->${newline}`
+  const prelude = part.ledger ?? `${/[\r\n]$/.test(part.body) || !part.body ? '' : newline}<!-- rgent:ledger:v1 -->${newline}`
   const boundary = prelude.endsWith(newline + newline) ? '' : prelude.endsWith(newline) ? newline : newline + newline
   const lines = [
     `<!-- rgent:ledger-task:v1 id="${taskId}" -->`,
@@ -154,11 +155,11 @@ export function appendLedgerChapter(source: string, write: LedgerChapterWrite): 
     '',
     '### 口令',
     '',
-    escapedModelText(write.prompt).replace(/\r\n/g, '\n'),
+    escapedModelText(write.prompt).replace(/\r\n|\r/g, '\n'),
     '',
     '### 回答',
     '',
-    escapedModelText(write.answer).replace(/\r\n/g, '\n') || '（无输出）',
+    escapedModelText(write.answer).replace(/\r\n|\r/g, '\n') || '（无输出）',
     '',
     '### 工具摘要',
     '',

@@ -13,18 +13,21 @@ export type TextEdit = { from: number; to: number; insert: string }
 
 export function lineStartOf(source: string, pos: number): number {
   const at = Math.max(0, Math.min(source.length, pos))
-  const found = source.lastIndexOf('\n', at - 1)
+  const found = Math.max(source.lastIndexOf('\n', at - 1), source.lastIndexOf('\r', at - 1))
   return found < 0 ? 0 : found + 1
 }
 
 function lineEndOf(source: string, pos: number): number {
-  const found = source.indexOf('\n', pos)
-  return found < 0 ? source.length : found + 1
+  const offset = source.slice(pos).search(/[\r\n]/)
+  if (offset < 0) return source.length
+  const found = pos + offset
+  return found + (source.startsWith('\r\n', found) ? 2 : 1)
 }
 
 /** 标记所在的整行（含换行），画布拿它换掉这一行。 */
 export function markerLineBlock(source: string, marker: SourceRange): SourceRange {
-  return { start: lineStartOf(source, marker.start), end: lineEndOf(source, marker.end) }
+  const start = lineStartOf(source, marker.start)
+  return { start: start === 0 && source.startsWith('\ufeff') ? 1 : start, end: lineEndOf(source, marker.end) }
 }
 
 
@@ -49,17 +52,26 @@ export function discardMarkedBlock(source: string, marker: MarkerRef, block: Sou
   const line = markerLineBlock(source, marker.range)
   if (block.end < line.end) return null
   let to = block.end
-  while (to < source.length && source[to] === '\n') to += 1
+  while (to < source.length) {
+    if (source.startsWith('\r\n', to)) to += 2
+    else if (source[to] === '\n' || source[to] === '\r') to += 1
+    else break
+  }
   let from = line.start
   if (to >= source.length) {
-    // 块在文件末尾：把前面的空行也收掉，只留一个换行收尾。
-    while (from > 0 && source[from - 1] === '\n') from -= 1
-    return { from, to, insert: from === 0 ? '' : '\n' }
+    let ending = ''
+    while (from > 0 && /[\r\n]/.test(source[from - 1]!)) {
+      const length = source[from - 1] === '\n' && from >= 2 && source[from - 2] === '\r' ? 2 : 1
+      ending = source.slice(from - length, from)
+      from -= length
+    }
+    return { from, to, insert: from === 0 ? '' : ending }
   }
-  if (from === 0) return { from, to, insert: '' }
-  const beforeIsNewline = source[from - 1] === '\n'
-  const beforeIsBlank = beforeIsNewline && from >= 2 && source[from - 2] === '\n'
-  return { from, to, insert: beforeIsBlank ? '' : beforeIsNewline ? '\n' : '\n\n' }
+  if (from === 0 || (from === 1 && source.startsWith('\ufeff'))) return { from, to, insert: '' }
+  const beforeEnding = source.endsWith('\r\n', from) ? '\r\n' : /[\r\n]/.test(source[from - 1] ?? '') ? source[from - 1]! : ''
+  const beforeIsBlank = beforeEnding && /[\r\n]/.test(source[from - beforeEnding.length - 1] ?? '')
+  const nearbyEnding = beforeEnding || (source.includes('\r\n', from) ? '\r\n' : '\n')
+  return { from, to, insert: beforeIsBlank ? '' : beforeEnding ? nearbyEnding : nearbyEnding.repeat(2) }
 }
 
 /** 一个「搬家单位」= 一个顶层块，加上紧挨在它前面的那枚标记（如果有）。 */
@@ -92,23 +104,24 @@ export function identityUnits(index: DocIndex): IdentityUnit[] {
 }
 
 function unitStart(source: string, unit: IdentityUnit): number {
-  return unit.marker ? markerLineBlock(source, unit.marker.range).start : lineStartOf(source, unit.block.start)
+  const start = unit.marker ? markerLineBlock(source, unit.marker.range).start : lineStartOf(source, unit.block.start)
+  return start === 0 && source.startsWith('\ufeff') ? 1 : start
 }
 
 function unitText(source: string, unit: IdentityUnit): string {
   return source.slice(unitStart(source, unit), unit.block.end)
 }
 
-/** 把相邻两个单位换个位置：两边的文本整段调换，中间固定收成一个空行。 */
+/** 相邻单位整段交换；它们之间的分隔字节原样保留。 */
 export function swapUnits(source: string, units: readonly IdentityUnit[], first: number, second: number): TextEdit | null {
   const left = units[first]
   const right = units[second]
-  if (!left || !right || first === second) return null
+  if (!left || !right || Math.abs(first - second) !== 1) return null
   const [a, b] = first < second ? [left, right] : [right, left]
   return {
     from: unitStart(source, a),
     to: b.block.end,
-    insert: `${unitText(source, b)}\n\n${unitText(source, a)}`
+    insert: unitText(source, b) + source.slice(a.block.end, unitStart(source, b)) + unitText(source, a)
   }
 }
 

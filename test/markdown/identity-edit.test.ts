@@ -126,3 +126,44 @@ describe('move', () => {
     expect(units.map((unit) => unit.marker?.identity ?? 'none')).toEqual(['command', 'ai'])
   })
 })
+
+
+describe('newline integrity', () => {
+  it('moves adjacent blocks while preserving the exact mixed newline separator', () => {
+    const gap = '\r\n \t\r\n\n'
+    const source = `甲${gap}${AI}\r\n乙\n\n尾部\r\n`
+    const index = compile(source).index
+    expect(apply(source, moveUnit(source, index, index.blocks[1]!.range.start, 'up'))).toBe(`${AI}\r\n乙${gap}甲\n\n尾部\r\n`)
+  })
+  it('discards a final CRLF block without leaving a dangling CR or changing preceding lines', () => {
+    const source = `首行\n正文\r\n\r\n${AI}\r\n乙\r\n`
+    const index = compile(source).index
+    expect(apply(source, discardMarkedBlock(source, onlyMarker(source), index.blocks[1]!.range))).toBe('首行\n正文\r\n')
+  })
+  it('accepts a CRLF marker without rewriting mixed surrounding bytes', () => {
+    const source = `首行\n\n${AI}\r\n乙\r\n\n尾部\n`
+    expect(apply(source, acceptMarker(source, onlyMarker(source)))).toBe('首行\n\n乙\r\n\n尾部\n')
+  })
+})
+
+
+it('keeps an original marked image-and-prose paragraph as one editable unit', () => {
+  const source = `人的前文\n\n${AI}\r\n![图](a.png) ## 图的标题\r\n仍为AI的原文\n\n人的后文\n`
+  const index = compile(source).index
+  const units = identityUnits(index)
+  expect(units).toHaveLength(3)
+  expect(source.slice(units[1]!.block.start, units[1]!.block.end)).toBe('![图](a.png) ## 图的标题\r\n仍为AI的原文')
+  const after = apply(source, discardMarkedBlock(source, onlyMarker(source), units[1]!.block))
+  expect(after).toBe('人的前文\n\n人的后文\n')
+  expect(compile(after).index.blocks.every((block) => !block.identity)).toBe(true)
+})
+
+
+it('preserves the BOM when accepting, discarding or moving the first marked block', () => {
+  const source = `\ufeff${AI}\r\n回答\r\n\r\n后文\n`
+  const index = compile(source).index
+  const marker = index.markers[0]!
+  expect(apply(source, acceptMarker(source, marker))).toBe('\ufeff回答\r\n\r\n后文\n')
+  expect(apply(source, discardMarkedBlock(source, marker, index.blocks[0]!.range))).toBe('\ufeff后文\n')
+  expect(apply(source, moveUnit(source, index, index.blocks[0]!.range.start, 'down'))).toBe(`\ufeff后文\r\n\r\n${AI}\r\n回答\n`)
+})

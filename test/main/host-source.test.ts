@@ -118,3 +118,40 @@ describe('Host source projection', () => {
     expect(updated).toContain('人写的后文。')
   })
 })
+
+
+describe('untrusted machine comments', () => {
+  it.each(['<!--\nrgent:ai:v1\n-->', '<!-- rgent:prompt:v1', '<!--', '<!-- rgent:', '<!-- rgent:ledger:v1 -->'])('neutralizes complete and partial machine comment %s', (answer) => {
+    const source = markPrompt('/问\n\n人的后文\n', { taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const partial = upsertAiAnswer(source, { taskId, answer })
+    expect(partitionSource(partial).ledger).toBeNull()
+    expect(compile(partial).index.blocks.at(-1)?.identity).toBeUndefined()
+    expect(partial).toContain('&lt;!--')
+    const next = upsertAiAnswer(partial, { taskId, answer: '下一片', expectedPreviousAnswer: answer })
+    expect(next).toContain('人的后文')
+  })
+  it('escapes multiline comments in ledger fields and prevents forged chapter boundaries', () => {
+    const source = appendLedgerChapter('正文\n', { taskId, startedAt: 'today', status: 'completed', prompt: '<!--\nrgent:prompt:v1\n-->', answer: '<!-- rgent:ledger-task:v1 id="forged" -->', reason: '<!-- rgent:ai:v1' })
+    expect(source).not.toContain('<!--\nrgent:')
+    expect(source).not.toContain('<!-- rgent:ledger-task:v1 id="forged" -->')
+    expect(source).not.toContain('<!-- rgent:ai:v1')
+  })
+})
+
+it('writes a prompt after CR-only source lines without changing their separators', () => {
+  const source = '前文\r\r/问\r\r后文\r'
+  const start = source.indexOf('/问')
+  const marked = markPrompt(source, { taskId, range: { start, end: start + 2 }, expectedText: '/问', promptText: '问' })
+  expect(marked).toBe('前文\r\r<!-- rgent:prompt:v1 task-id="task-123" -->\r问\r\r后文\r')
+  const answered = upsertAiAnswer(marked, { taskId, answer: '第一行\r\n第二行' })
+  expect(answered).not.toContain('\n')
+  expect(answered).toContain('后文\r')
+})
+
+
+it('keeps the document BOM when marking a first-line prompt', () => {
+  const source = '\ufeff/问\r\n'
+  const marked = markPrompt(source, { taskId, range: { start: 1, end: 3 }, expectedText: '/问', promptText: '问' })
+  expect(marked).toBe('\ufeff<!-- rgent:prompt:v1 task-id="task-123" -->\r\n问\r\n')
+  expect(upsertAiAnswer(marked, { taskId, answer: '回答' }).startsWith('\ufeff<!-- rgent:prompt')).toBe(true)
+})

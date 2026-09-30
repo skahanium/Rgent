@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { compile, compileFragment, partitionSource } from '../markdown/index.ts'
+import { compile, compileFragment } from '../markdown/index.ts'
 import type { BlockRef } from '../markdown/types.ts'
 
 export interface ContextChapter {
@@ -49,12 +49,12 @@ function sourceBlock(body: string, block: BlockRef, number: number): Section {
 
 function ledgerChapters(ledger: string | null): ContextChapter[] {
   if (!ledger) return []
-  const firstNewline = ledger.indexOf('\n')
-  const content = firstNewline < 0 ? '' : ledger.slice(firstNewline + 1)
+  const firstNewline = /\r\n|\r|\n/.exec(ledger)
+  const content = firstNewline ? ledger.slice(firstNewline.index + firstNewline[0].length) : ''
   if (!content.trim()) return []
   const parsed = compileFragment(content)
   if (parsed.stale) throw new Error('无法解析账本')
-  const taskStarts = [...content.matchAll(/^<!-- rgent:ledger-task:v1 id="[A-Za-z0-9_-]+" -->\r?$/gm)]
+  const taskStarts = [...content.matchAll(/^<!-- rgent:ledger-task:v1 id="[A-Za-z0-9_-]+" -->(?=\r|\n|$)/gm)]
     .map((match) => match.index)
   const starts = taskStarts.length > 0
     ? [...taskStarts]
@@ -75,10 +75,10 @@ export function buildHostContext(input: HostContextInput): HostContextPlan {
   if (!Number.isSafeInteger(inputBudgetTokens) || inputBudgetTokens <= 0 || !prompt.trim()) {
     return { status: 'too-large', reason: '上下文预算或口令无效' }
   }
-  const part = partitionSource(source)
-  if (placement < 0 || placement > part.body.length) return { status: 'too-large', reason: '落点已失效' }
   const parsed = compile(source)
   if (parsed.stale) return { status: 'too-large', reason: '无法解析笔记正文' }
+  const part = parsed.partition
+  if (placement < 0 || placement > part.body.length) return { status: 'too-large', reason: '落点已失效' }
   const blocks = parsed.index.blocks
   const chapters = ledgerChapters(part.ledger)
   const found = blocks.findIndex((block) => block.range.end >= placement)

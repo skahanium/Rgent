@@ -1,4 +1,7 @@
-import type { Partition } from './types.ts'
+import { parseSource } from './parse-source.ts'
+import type { Root } from 'mdast'
+import { DEFAULT_STAGES, type Partition } from './types.ts'
+import { extensionsFor } from './stages/registry.ts'
 
 /**
  * 账本锚点。账本写在同一文件最末尾，正文永远在前。
@@ -6,18 +9,26 @@ import type { Partition } from './types.ts'
  */
 export const LEDGER_ANCHOR = '<!-- rgent:ledger:v1 -->'
 
-/**
- * 返回账本起始偏移（锚点那一行的行首）。没有锚点返回 -1。
- *
- * 只认整行（行尾空白可有）。取最后一次命中：正文里引用锚点、文末还有真账本时，
- * 不会把中间那段正文切进账本。正文里单独一整行锚点、后面没有第二次，就会切开——这是选定行为。
- */
-export function findLedgerStart(source: string): number {
-  let lineStart = 0
+/** 只认顶层、独立整行的 v1 注释；复用调用方已经解析的树。 */
+export function findLedgerStart(source: string, parsed?: Root): number {
+  if (!source.includes(LEDGER_ANCHOR)) return -1
+  let tree = parsed
+  if (!tree) {
+    const { micromark, mdast } = extensionsFor(DEFAULT_STAGES)
+    tree = parseSource(source, { extensions: micromark as never, mdastExtensions: mdast as never })
+  }
   let found = -1
-  for (const line of source.split('\n')) {
-    if (line.trimEnd() === LEDGER_ANCHOR) found = lineStart
-    lineStart += line.length + 1
+  for (const child of tree.children) {
+    if (child.type !== 'html' || child.value.trimEnd() !== LEDGER_ANCHOR) continue
+    const start = child.position?.start.offset
+    const end = child.position?.end.offset
+    if (start == null || end == null) continue
+    const lineStart = Math.max(source.lastIndexOf('\n', start - 1), source.lastIndexOf('\r', start - 1)) + 1
+    const contentStart = lineStart === 0 && source.startsWith('\ufeff') ? 1 : lineStart
+    const nextBreak = source.slice(end).search(/[\r\n]/)
+    const lineEnd = nextBreak < 0 ? source.length : end + nextBreak
+    // 不把缩进、同一行的其他内容或容器里的例子认成机器边界。
+    if (source.slice(contentStart, lineEnd).trimEnd() === LEDGER_ANCHOR) found = contentStart
   }
   return found
 }
@@ -26,8 +37,8 @@ export function findLedgerStart(source: string): number {
  * 正文是账本锚点之前的部分，所以正文永远是文件前缀，位置不需要位移。
  * 没有锚点时保持恒等：全文即正文。
  */
-export function partitionSource(source: string): Partition {
-  const start = findLedgerStart(source)
+export function partitionSource(source: string, parsed?: Root): Partition {
+  const start = findLedgerStart(source, parsed)
   if (start < 0) return { body: source, ledger: null, bodyOffset: 0 }
   return { body: source.slice(0, start), ledger: source.slice(start), bodyOffset: 0 }
 }
@@ -49,6 +60,9 @@ export function preferDiskLedger(diskLedger: string | null, tabLedger: string | 
  */
 export function composeSource(body: string, ledger: string | null): string {
   if (ledger == null) return body
-  if (body.length > 0 && !body.endsWith('\n')) return `${body}\n${ledger}`
+  if (body.length > 0 && body !== '\ufeff' && !/[\r\n]$/.test(body)) {
+    const newline = body.match(/\r\n|\r|\n/g)?.at(-1) ?? ledger.match(/\r\n|\r|\n/)?.[0] ?? '\n'
+    return body + newline + ledger
+  }
   return `${body}${ledger}`
 }

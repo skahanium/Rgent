@@ -35,7 +35,7 @@ function pushSyntax(out: PresentationPlan, start: number, end: number, kind: Pre
 }
 
 function followsFigureOnLine(source: string, at: number): boolean {
-  const start = source.lastIndexOf('\n', at - 1) + 1
+  const start = Math.max(source.lastIndexOf('\n', at - 1), source.lastIndexOf('\r', at - 1)) + 1
   return source.slice(start, at).includes('![')
 }
 
@@ -107,14 +107,15 @@ export function planPresentation(tree: unknown, source: string): PresentationPla
     if (!whole) return
     let start = whole.start
     while (start < whole.end) {
-      const end = Math.min(whole.end, source.indexOf('\n', start) < 0 ? whole.end : source.indexOf('\n', start))
+      const offset = source.slice(start).search(/[\r\n]/)
+      const end = offset < 0 ? whole.end : Math.min(whole.end, start + offset)
       const raw = source.slice(start, end)
       const marker = raw.match(/^\s*> ?/)
       if (marker) {
         addLine(start, 'md-quote')
         pushSyntax(out, start, start + marker[0].length, 'hide')
       }
-      start = end + 1
+      start = end + (source.startsWith('\r\n', end) ? 2 : 1)
     }
   })
 
@@ -139,9 +140,10 @@ export function planPresentation(tree: unknown, source: string): PresentationPla
       let at = whole.start
       while (at < whole.end) {
         addLine(at, 'md-prose')
-        const next = source.indexOf('\n', at)
-        if (next < 0 || next >= whole.end) break
-        at = next + 1
+        const offset = source.slice(at).search(/[\r\n]/)
+        if (offset < 0 || at + offset >= whole.end) break
+        const next = at + offset
+        at = next + (source.startsWith('\r\n', next) ? 2 : 1)
       }
     }
     if (!node.children.some((child) => child.type === 'html')) return

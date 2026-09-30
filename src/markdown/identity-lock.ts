@@ -89,9 +89,10 @@ function boundaryInsertions(source: string, changes: readonly EditChange[], inde
   const risks = new Set<number>()
   for (const block of index.blocks) {
     if (block.identity !== 'ai') continue
-    const lineEnd = source.indexOf('\n', block.range.end)
-    if (lineEnd < 0) continue
-    risks.add(lineEnd + 1)
+    const offset = source.slice(block.range.end).search(/[\r\n]/)
+    if (offset < 0) continue
+    const lineEnd = block.range.end + offset
+    risks.add(lineEnd + (source.startsWith('\r\n', lineEnd) ? 2 : 1))
   }
   if (risks.size === 0) return []
   const prefixed: number[] = []

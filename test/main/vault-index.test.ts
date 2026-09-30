@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { ALL_STAGES } from '../../src/markdown/index.ts'
 import { listVaultTree } from '../../src/main/notes-fs.ts'
 import { ROOT_GROUP, VaultIndex } from '../../src/main/vault-index.ts'
 
@@ -221,4 +222,15 @@ describe('vault index lifecycle', () => {
     await hits
     expect((await links).flatMap((group) => group.notes.map((item) => item.title))).toEqual(['b'])
   })
+})
+
+
+it('does not index ledger text when Markdown compilation fails', async () => {
+  const root = await vault()
+  await note(root, '失败.md', '正文\n<!-- rgent:ledger:v1 -->\n仅账本机密\n')
+  const stage = ALL_STAGES.find((item) => item.id === 'identity')!
+  const transform = stage.transform
+  stage.transform = () => { throw new Error('parse failed') }
+  try { expect(await indexFor(root).search('仅账本机密')).toEqual([]) }
+  finally { stage.transform = transform }
 })
