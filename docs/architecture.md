@@ -25,7 +25,7 @@ flowchart LR
 
 - **渲染进程：** 画布是 CodeMirror 6。文档是 Markdown 字符串。无 Node，不能直接碰盘。画布只消费编译结果和源码映射，自己不解析结构。
 - **主进程：** 打开库、读写文件、权限名单、索引、窗口。当前可信无工具 `AgentHost` 住在这里，性能迁移仍属工程选型；可执行第三方的安全隔离另有 [开放前置](topics.md#沙箱与任务授权)，不能由性能达标省略。
-- **AgentHost：** 一场 `/` 的无工具运行环境。愿景 / 选型 / 路线见 [施工对象](topics.md#agent-核心框架)。最小环已接线；当前施工是人的库内文件生命周期，AI 工具仍未开放。
+- **AgentHost：** 一场 `/` 的无工具运行环境。愿景 / 选型 / 路线见 [施工对象](topics.md#agent-核心框架)。最小环已接线；当前施工是人的库内文件操作基础，AI 工具仍未开放。
 - **尚未接线：** 单场范围授权、统一资源代理、第三方执行隔离、MCP 客户端、AI 文件工具、长期记忆和多连接供应商管理不在上图中。未来的数据流先在 [施工图](build.md) 排依赖并通过相应门禁，再更新这里的强制点。
 - **正文编译：** 共享一条管线（零 DOM、零 CM6）。注册插件 → 解析 → 索引 → 把源码映射交给画布。日后检索、反链、喂模型走同一份结果。细则见 [已拍板决定](decisions.md)。
 
@@ -43,7 +43,7 @@ flowchart LR
 
 - 结构只在这一条管线里解析。不要在画布、检索、Agent 里再各写一套。
 - 语法扩展走插件，不改宿主。v0 插件含 GFM、frontmatter、公式、callout、wikilink、mermaid。callout 用 mdast 变换，不是第二套解析。
-- 写盘永远是编辑器里的字符串。管线先 `partitionSource`，只编译正文。
+- 写盘永远是原文字符串。画布内部采用 LF 行结构，`view/source.ts` 保存原始换行并在编辑／源码偏移间映射；撤销、重做与身份操作不整篇归一化。`compile` 一次解析原文后复用树识别顶层独立 v1 账本锚点，只把正文节点交给呈现和索引；代码、引用、列表及 YAML 中的示例不构成边界。
 
 ## 库内布局
 
@@ -96,6 +96,8 @@ flowchart LR
 
 ## 沙箱边界的现状
 
+本轮仅开放既有文件基础与出口收口：原文／编辑坐标适配、权限一致快照、同一次原生读取的内容与对象版本、消失笔记另存、统一 IPC 调用方及受控图片连接。新增对象版本用于现有读写核验，不是单场授权令牌；统一资源代理和第三方隔离仍未开。完成证据须在施工图逐项登记。
+
 本节区分实际边界与未来规划，不给未接线能力添加强制点。
 
 | 已有边界 | 代码证据与范围 |
@@ -103,9 +105,11 @@ flowchart LR
 | renderer 隔离 | `src/main/index.ts` 的 `sandbox`、`contextIsolation` 与关闭 Node；preload 白名单及渲染层 CSP。保护界面进程，不约束主进程中的 Host。 |
 | 无工具 Host | `src/main/index.ts` 注入受控 `read`、独立 `write`、权限复核、配置与流；`src/main/agent-host.ts` 不提供工具。主进程仍持有系统权限，没有可执行第三方沙箱。 |
 | 文件与出口的现有边界 | 固定库根 `SecureVaultFs`、库内队列、会话及修订核验、秘密留主进程；模型文本与远程图片分别走既有通道。不能据此宣称未来工具已共用完整授权服务。 |
-| 尚未成立的边界 | 任务授权令牌／撤销、来源与目标范围、统一工具资源代理、OS 级第三方隔离和子进程限额均未接线。合同见 [沙箱与单场任务授权](decisions.md#沙箱与单场任务授权未来合同当前未开放)，方案与验收见 [施工对象](topics.md#沙箱与任务授权)。 |
+| 尚未成立的边界 | 任务读写范围／撤销、选定模型接收方核对、外部发送批准、统一工具资源代理、远端 MCP 和 OS 级本机第三方隔离及子进程限额均未接线。合同见 [沙箱与单场任务授权](decisions.md#沙箱与单场任务授权未来合同当前未开放)，方案与验收见 [施工对象](topics.md#沙箱与任务授权)。 |
 
 现有删除安全门失败、文件替换残余竞态与中断恢复义务继续成立；未来进程隔离不能把这些缺口自动标成通过。规划目标图只放在施工对象，实际数据流仍以上方总览为准。
+
+当前阶段按人的文件操作基础收口；废纸篓删除与恢复核验已拆为独立未开能力，原生探针和失败证据不因此改变。新确认的默认读取范围、发送批准及远端只读 MCP 优先规则属于未来合同，不是现有通道已实施这些检查的证明；外部文件消失后的防重建和来源失效也须定向核验，不能以阶段名称代证。
 
 ## 强制点
 
@@ -116,7 +120,11 @@ flowchart LR
 | 画布装饰只从 StateField 出 | 渲染进程 | 编译结果与装饰由一个 `StateField` 提供（`src/renderer/src/view/editor.ts`），**不能**由 `ViewPlugin` 提供：CM6 禁止插件产生块装饰，表格 / callout / mermaid / 块级公式会抛 `RangeError`，异常再被上层的 `catch` 吞掉，表现成「含表格的笔记点不开、界面毫无提示」。另：块级替换会吞掉紧随其后的行装饰，所以身份标记的 chip 用行内替换。改这里时窗口要各起一次含表格与含标记的笔记。 |
 | 未采纳的 AI 块不能改字 | 渲染进程 | 判定是纯函数（`src/markdown/identity-lock.ts`）：锁住标记与 AI 块的范围，字面上的改动一律挡，整段删掉（采纳 / 丢弃）放行；整块删掉时把标记行一起删；在锁定块**下面那行**打字时先补一个断段符并右移光标（Markdown 相邻两行同段，不补的话用户刚打的字会被并进 AI 块、然后被自己锁住）。画布用 `EditorState.transactionFilter` **默认拦下所有改文档的事务**，只放行带 `rgent` 前缀 userEvent 的自家动作——只认 `input` / `delete` 会被移行、拖动搬字、Ctrl-T 换位整批绕过。**不许**用整篇只读冒充。切 tab 的整篇替换要换一份撤销历史（`history` 装进 Compartment 重新配置），否则撤销会跨笔记把上一篇的文本填进当前篇。状态级测试见 `test/renderer/identity-guard.test.ts`（不需要 DOM）。 |
 | 渲染进程不碰盘 | 壳 | `contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`（`src/main/index.ts`）。preload 只经 `contextBridge` 暴露白名单（`src/preload/index.ts`）。sandbox 下 preload 必须打成 `out/preload/index.cjs`（`electron.vite.config.ts`）。 |
-| IPC 是唯一通道 | 壳 | 通道名和载荷类型在 `src/shared/ipc.ts`。渲染进程不得再开通道。 |
+| IPC 是唯一通道 | 壳 | 通道名和载荷类型在 `src/shared/ipc.ts`；preload 不提供通用 invoke/send。主进程所有 handle/on 经统一包装核验当前窗口、当前主 frame 与精确应用入口（`ipc-sender.ts`）；子 frame、旧窗口或导航后的页面失败关闭。调用方可信不代替参数、会话、对象与业务门禁。 |
+| 原文与编辑偏移 | 画布／管线 | `view/source.ts` 保留 BOM、LF／CRLF／CR 与未修改部分的字节；公开编辑器接口使用原文偏移，CM 装饰与事务最终映射为规范行偏移。历史 effect 保留被删除的换行，外部更新不进入人的撤销历史；身份操作直接用原文 edit plan。 |
+| 内容与对象同读 | 原生／主进程 | `readSnapshot` 从同一次已打开对象取字节与身份；人的保存与 Host 写回同时带库会话、预期对象和修订。只有原生成功写入回执能建立应用保存的身份后继链；同字节替换也不自动续接。macOS 最后身份复核至改名并非原子 identity CAS，受控测试覆盖与残余窗口须分开记录。 |
+| 文件消失保稿 | 主进程／画布 | 单篇提示、树批量变化及写入失败均重核绑定对象；消失、替换或不可读暂停原路径自动保存和任务。最后核验账本与未落盘 Host 全文保留；另存预览绑定草稿、来源依据、待存章节与目标父身份，独占发布后复读方可解除对应内容。正文依据仅在内存有限保留，不是磁盘历史备份。 |
+| 图片来源与实际出口 | 主进程 | `image-source.ts` 以同一语法树核验区域、范围、URL、身份和对象版本；不信渲染层身份标签。人的／已采纳 HTTPS 正文可自动，AI 与账本逐图点击，未知草稿只允许明确加载。`remote-image-transport.ts` 使用 Node 直连与固定 lookup，`ipaddr.js@2.2.0` 核所有 DNS 答案及逐跳公网地址；原主机名留给 TLS，禁凭据／Cookie／Referrer。排队和 DNS 完成后连接前重核来源，续接绑定来源摘要与原总预算，换库或失效后不建立下一次连接；已经合法发送的数据不能撤回。 |
 | 不随便开页 | 壳 | `setWindowOpenHandler` 一律 deny。`will-navigate` 一律 `preventDefault`；`http(s)` 走系统浏览器（`src/main/index.ts`）。 |
 | CSP | 壳 | `src/renderer/index.html`：`default-src 'self'`；图允许 `data:`、`rgent-vault:` 与仅返回验明图片字节的 `rgent-image:`。外链地址由主进程受控图片请求获取，渲染层没有 HTTP/HTTPS 通用出口。 |
 | 媒体不逃出库 | IO | `resolveInVault` 拒绝 `..` 与绝对路径；`rgent-vault:` 经 `SecureVaultFs.readBytes` 从固定库根句柄逐级相对读取，不向 `net.fetch` 传校验后的路径（`src/main/paths.ts`、`vault-protocol.ts`）。 |

@@ -59,7 +59,7 @@ describe('docs stage invariants', () => {
   it('rejects a current stage without its own section', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const changed = source.replace(/^## 笔记库文件生命周期.*$/m, '### 笔记库文件生命周期')
+    const changed = source.replace(/^## 笔记库文件操作基础.*$/m, '### 笔记库文件操作基础')
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
@@ -71,7 +71,7 @@ describe('docs stage invariants', () => {
     const { build, run } = fixture()
     // Exercise the same CRLF checkout Git produces on Windows.
     const source = readFileSync(build, 'utf8').replace(/\r?\n/g, '\r\n')
-    const changed = source.replace(/^  → 笔记库文件生命周期[^\r\n]*(?:\r?\n|$)/m, '')
+    const changed = source.replace(/^  → 笔记库文件操作基础[^\r\n]*(?:\r?\n|$)/m, '')
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
