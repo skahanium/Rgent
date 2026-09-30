@@ -5,6 +5,7 @@ import { appendLedgerChapter, markPrompt, upsertAiAnswer } from './host-source.t
 import type { ModelCredential, RunLimits } from './model-config.ts'
 import type { SourceRange } from '../markdown/types.ts'
 import type { ObjectBinding } from '../shared/ipc.ts'
+import type { TaskGrant } from './task-authorization.ts'
 import { compile, parseMarker } from '../markdown/index.ts'
 
 export type HostEvent = {
@@ -22,6 +23,8 @@ export type HostEvent = {
 
 export type HostStart = Partial<ObjectBinding> & {
   expectedRevision?: string
+  previewId?: string
+  authorizationOwner?: string
   relPath: string
   range: SourceRange
   expectedText: string
@@ -30,6 +33,7 @@ export type HostStart = Partial<ObjectBinding> & {
 
 export type HostDependencies = {
   root: () => string | null
+  authorize?: (input: HostStart) => Promise<TaskGrant>
   session?: () => string | null
   acceptsObject?: (relPath: string, expected: string, current: string) => boolean
   read: (relPath: string) => Promise<{ content: string; revision: string; sessionId?: string; objectVersion?: string }>
@@ -52,6 +56,7 @@ const SYSTEM_RULES = [
 /** Owns one model run from permission check to final same-note ledger entry. */
 export class AgentHost {
   private readonly tasks = new AgentTasks()
+  private readonly grants = new Map<string, TaskGrant>()
   private readonly launching = new Set<string>()
   private readonly launchWaiters = new Set<() => void>()
   private readonly pending = new Map<string, { root: string; relPath: string; source: Parameters<typeof appendLedgerChapter>[1]; persisted: { answer: string } }>()
@@ -110,14 +115,24 @@ export class AgentHost {
   private async writeBound(root: string, relPath: string, content: string, revision: string): Promise<string> {
     const binding = this.bindings.get(`${root}\0${relPath}`)
     if (binding && this.deps.session?.() !== binding.sessionId) throw new Error('VAULT_CHANGED')
+    const grant = this.grants.get(`${root}\0${relPath}`)
+    grant?.assertWriteTarget(relPath)
     const result = await this.deps.write(relPath, content, revision, binding)
     if (typeof result === 'string') return result
     if (binding && result.sessionId !== binding.sessionId) throw new Error('VAULT_CHANGED')
     if (binding) binding.objectVersion = result.objectVersion
+    grant?.acknowledgeOrigin({ ...result, content })
     return result.revision
   }
-  cancel(id: string, reason: StopReason = 'user') { return this.tasks.cancel(id, reason) }
-  cancelAll(reason: StopReason, root?: string) { return this.tasks.cancelAll(reason, root) }
+  cancel(id: string, reason: StopReason = 'user') {
+    const task=this.active().find(task=>task.id===id)
+    if(task)this.grants.get(`${task.root}\0${task.relPath}`)?.revoke()
+    return this.tasks.cancel(id, reason)
+  }
+  cancelAll(reason: StopReason, root?: string) {
+    for(const task of this.active())if(!root || task.root===root)this.grants.get(`${task.root}\0${task.relPath}`)?.revoke()
+    return this.tasks.cancelAll(reason, root)
+  }
 
   async start(input: HostStart): Promise<{ id: string; done: Promise<TaskResult> }> {
     const root = this.deps.root()
@@ -131,10 +146,18 @@ export class AgentHost {
     }
     this.launching.add(key)
     this.bindings.delete(key)
+    let grant:TaskGrant|undefined
+    let launched=false
     try {
       await this.requirePermission(root, input.relPath)
-      const credential = this.deps.credential()
-      const limits = this.deps.limits()
+      grant = await this.deps.authorize?.(input)
+      if(grant){
+        if(grant.root!==root || grant.origin!==input.relPath)throw Error('OUTSIDE_TASK_SCOPE')
+        this.grants.set(key,grant)
+        await grant.assertLive('read',input.relPath)
+      }
+      const credential = grant?.credential ?? this.deps.credential()
+      const limits = grant?.limits ?? this.deps.limits()
       const original = await this.deps.read(input.relPath)
       if (this.deps.root() !== root) throw new Error('VAULT_CHANGED')
       if (input.sessionId !== undefined && original.sessionId !== input.sessionId) throw new Error('VAULT_CHANGED')
@@ -150,6 +173,7 @@ export class AgentHost {
       const initial = buildHostContext({ source: marked, prompt: input.promptText, placement, inputBudgetTokens: budget, countTokens: byteCount })
       if (initial.status === 'too-large') throw new Error(initial.reason)
       await this.requirePermission(root, input.relPath)
+      await grant?.assertLive('write',input.relPath)
       const markedRevision = await this.writeBound(root, input.relPath, marked, original.revision)
       this.deps.emit({ ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running', answer: '', persisted: true, revision: markedRevision })
 
@@ -173,6 +197,7 @@ export class AgentHost {
         let source = marked
         contextLoop: while (true) {
           if (signal.aborted) return
+          await grant?.assertLive('read',input.relPath)
           await this.requirePermission(root, input.relPath)
           if (this.deps.root() !== root) throw new Error('VAULT_CHANGED')
           source = (await this.readBound(root, input.relPath)).content
@@ -193,9 +218,11 @@ export class AgentHost {
               if ((await this.readBound(root,input.relPath)).content !== source) { summary = undefined; continue contextLoop }
               if (++steps > limits.steps) throw new Error('MODEL_STEP_LIMIT')
               let text = ''
+              await grant?.assertLive('model')
               for await (const chunk of safeModelStream(() => this.deps.stream({ ...credential, system: SYSTEM_RULES, prompt: `请仅摘要下列旧账本，标明来源 ID；不补写未知细节，摘要不超过 400 字：\n${batch}`, maxOutputTokens: Math.min(512, this.outputBudget(credential.contextTokens)) }, signal), signal, credential.apiKey)) {
                 if (signal.aborted) return
                 await this.requirePermission(root, input.relPath)
+                await grant?.assertLive('model')
                 text += chunk
               }
               if (!text.trim()) throw new Error('旧账本摘要为空，无法核对来源')
@@ -211,10 +238,12 @@ export class AgentHost {
           if ((await this.readBound(root, input.relPath)).content !== source) { summary = undefined; continue }
           await this.requirePermission(root, input.relPath)
           if ((await this.readBound(root,input.relPath)).content !== source) { summary = undefined; continue }
+          await grant?.assertLive('model')
           for await (const chunk of safeModelStream(() => this.deps.stream({ ...credential, system: SYSTEM_RULES, prompt, maxOutputTokens: this.outputBudget(credential.contextTokens) }, signal), signal, credential.apiKey)) {
             // The redactor may release already-received safe text when aborting.
             if (signal.aborted) { answer += chunk; break }
             await this.requirePermission(root, input.relPath)
+            await grant?.assertLive('model')
             answer += chunk
             snapshot('running')
             if (Date.now() - lastCheckpoint > 750) await checkpoint()
@@ -223,10 +252,12 @@ export class AgentHost {
           return
         }
       }, async (status, reason) => {
+        grant?.revoke()
         // Finalize even on cancellation; no generated bytes are lost if a late write conflicts.
         const finalSource = {
           taskId: id, startedAt, status, prompt: input.promptText, answer,
-          ...(reason ? { reason: String(reason) } : {})
+          ...(reason ? { reason: String(reason) } : {}),
+          ...(grant?{provenance:{version:1 as const,model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant.sources.map(s=>s.relPath),sources:[],tools:[]}}:{})
         }
         try {
           const revision = await this.finishWrite(root, input.relPath, finalSource, persisted)
@@ -235,10 +266,14 @@ export class AgentHost {
           this.pending.set(id, { root, relPath: input.relPath, source: finalSource, persisted })
           snapshot('failed', error instanceof Error ? error.message : 'WRITE_FAILED')
           throw error
+        } finally {
+          if(this.grants.get(key)===grant)this.grants.delete(key)
         }
       })
+      launched=true
       return result
     } finally {
+      if(!launched){grant?.revoke();if(this.grants.get(key)===grant)this.grants.delete(key)}
       this.launching.delete(key)
       if (this.launching.size === 0) {
         for (const notify of this.launchWaiters) notify()
@@ -265,8 +300,9 @@ export class AgentHost {
     if (tier !== 'reference') throw new Error('NOTE_NOT_REFERENCE')
   }
 
-  private async mutateNote(root: string, relPath: string, change: (source: string) => string): Promise<string> {
+  private async mutateNote(root: string, relPath: string, change: (source: string) => string, trustedFinalization = false): Promise<string> {
     for (let attempt = 0; attempt < 4; attempt += 1) {
+      if(!trustedFinalization)await this.grants.get(`${root}\0${relPath}`)?.assertLive('write',relPath)
       await this.requirePermission(root, relPath)
       const current = await this.readBound(root, relPath)
       await this.requirePermission(root, relPath)
@@ -283,10 +319,10 @@ export class AgentHost {
 
   private async finishWrite(root: string, relPath: string, finalSource: Parameters<typeof appendLedgerChapter>[1], persisted: { answer: string }): Promise<string> {
     if (finalSource.answer) {
-      await this.mutateNote(root, relPath, (source) => upsertAiAnswer(source, { taskId: finalSource.taskId, answer: finalSource.answer, expectedPreviousAnswer: persisted.answer }))
+      await this.mutateNote(root, relPath, (source) => upsertAiAnswer(source, { taskId: finalSource.taskId, answer: finalSource.answer, expectedPreviousAnswer: persisted.answer }), true)
       persisted.answer = finalSource.answer
     }
-    return this.mutateNote(root, relPath, (source) => appendLedgerChapter(source, finalSource))
+    return this.mutateNote(root, relPath, (source) => appendLedgerChapter(source, finalSource), true)
   }
 }
 
@@ -340,10 +376,10 @@ async function* abortableStream(stream: AsyncIterable<string>, signal: AbortSign
     }
   } finally {
     signal.removeEventListener('abort', onAbort)
-    if (signal.aborted) {
-      try { void iterator.return?.().catch(() => {}) }
-      catch { /* Cancellation must not wait for a non-cooperative provider. */ }
-    }
+    // Consumer failure can close this generator before the task controller is aborted.
+    // Always release transport, without waiting for a non-cooperative iterator.
+    try { void iterator.return?.().catch(() => {}) }
+    catch { /* Transport cleanup cannot delay trusted finalization. */ }
   }
 }
 

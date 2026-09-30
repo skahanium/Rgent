@@ -60,3 +60,10 @@ describe('Agent task ownership', () => {
     }
   })
 })
+it('aborts an in-flight provider on runner failure while preserving failed cause',async()=>{
+  const tasks=new AgentTasks();let signal!:AbortSignal
+  const task=tasks.start({root:'/vault',relPath:'a.md',seconds:30},async current=>{signal=current;throw Error('SOURCE_CHANGED')})
+  expect(await task.done).toEqual({status:'failed',reason:'SOURCE_CHANGED'})
+  expect(signal.aborted).toBe(true)
+  expect(signal.reason).toBe('SOURCE_CHANGED')
+})

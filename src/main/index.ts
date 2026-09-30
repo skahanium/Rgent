@@ -16,6 +16,7 @@ import { attachRemoteImageProtocol } from './remote-image-protocol.ts'
 import { VAULT_MEDIA_SCHEME } from '../shared/vault-rel.ts'
 import { VaultSession } from './vault.ts'
 import { createModelConfigStore, type ModelConfigStore } from './model-config.ts'
+import { TaskAuthorizationRegistry, isAuthorizationCommand } from './task-authorization.ts'
 import { AgentHost } from './agent-host.ts'
 import { modelTierFor } from './permissions.ts'
 import { streamModelText } from './model-stream.ts'
@@ -47,6 +48,7 @@ let remoteImages: RemoteImageService | null = null
 let modelConfig: ModelConfigStore | null = null
 let modelConfigError: string | null = null
 let agentHost: AgentHost | null = null
+let authorizations: TaskAuthorizationRegistry | null = null
 let cancellingForClose = false
 const imageControllers = new Map<AbortController, {vault: VaultSession; binding: string; request: import('../shared/ipc.ts').RemoteImageGetRequest}>()
 const lifecycleFlushes = new Map<string, (ok: boolean) => void>()
@@ -343,6 +345,16 @@ function registerIpc(): void {
     try { modelConfig.updateLimits(request.tier as LimitTier, request.limits!); return configResult() }
     catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
   })
+  registerTrustedHandle(IPC.agentAuthorizationPreview, async (event, value: unknown): Promise<import('../shared/ipc.ts').AgentAuthorizationResult> => {
+    if(!authorizations || !isAuthorizationCommand(value))return {ok:false,error:'BAD_REQUEST'}
+    const request=value as import('../shared/ipc.ts').AgentAuthorizationRequest
+    if(structureGate.isBusy())return {ok:false,error:'NOTE_BUSY'}
+    try {return {ok:true,preview:await authorizations.preview(`${event.sender.id}:${event.senderFrame!.routingId}`,request)}}
+    catch(error){return {ok:false,error:error instanceof Error?error.message:'AUTHORIZATION_FAILED'}}
+  })
+  registerTrustedHandle(IPC.agentAuthorizationDiscard, (event, id:unknown) => {
+    if(typeof id==='string' && id.length<=128)authorizations?.discard(`${event.sender.id}:${event.senderFrame!.routingId}`,id)
+  })
   registerTrustedHandle(IPC.agentTasks, (event) => trusted(event)
     ? agentHost?.active().map(({ id, relPath, startedAt }) => ({ id, relPath, startedAt })) ?? [] : [])
   registerTrustedHandle(IPC.agentCancel, async (event, value: unknown) => {
@@ -352,7 +364,7 @@ function registerIpc(): void {
   registerTrustedHandle(IPC.agentStart, async (event, value: unknown): Promise<AgentStartResult> => {
     if (!trusted(event) || !agentHost || !value || typeof value !== 'object') return { ok: false, error: 'BAD_REQUEST' }
     const request = value as Partial<AgentStartRequest>
-    if (typeof request.relPath !== 'string' || typeof request.expectedText !== 'string' ||
+    if (typeof request.previewId !== 'string' || request.previewId.length > 128 || typeof request.relPath !== 'string' || typeof request.expectedText !== 'string' ||
         typeof request.promptText !== 'string' || request.promptText.length > 20000 ||
         typeof request.sessionId !== 'string' || typeof request.objectVersion !== 'string' || typeof request.expectedRevision !== 'string' ||
         !request.range || !Number.isSafeInteger(request.range.start) || !Number.isSafeInteger(request.range.end)) {
@@ -360,7 +372,7 @@ function registerIpc(): void {
     }
     if (structureGate.isBusy()) return { ok: false, error: 'NOTE_BUSY' }
     try {
-      const task = await agentHost.start(request as AgentStartRequest)
+      const task = await agentHost.start({...request as AgentStartRequest, authorizationOwner:`${event.sender.id}:${event.senderFrame!.routingId}`})
       void task.done.catch(() => {})
       return { ok: true, id: task.id }
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'AGENT_START_FAILED' } }
@@ -664,7 +676,24 @@ app.whenReady().then(() => {
     if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
   })
   vault.restore()
+  authorizations = new TaskAuthorizationRegistry({
+    root:()=>{try{return vault?.requireUsableRoot()??null}catch{return null}},
+    session:()=>vault?.sessionId()??null,
+    tree:()=>vault!.tree(),read:relPath=>vault!.read(relPath),tier:modelTierFor,
+    acceptsObject:(relPath,expected,current)=>vault?.acceptsObject(relPath,expected,current)??false,
+    ownerValid:owner=>!!mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed() &&
+      mainWindow.webContents.getURL()===rendererEntryUrl && owner===`${mainWindow.webContents.id}:${mainWindow.webContents.mainFrame.routingId}`,
+    configuration:()=>{
+      if(!modelConfig)throw Error(modelConfigError??'MODEL_CONFIG_UNAVAILABLE')
+      const config=modelConfig.getPublic()
+      return {credential:modelConfig.credential(config.selected),limits:config.limits.none}
+    }
+  })
   agentHost = new AgentHost({
+    authorize:input=>{
+      if(!authorizations || !input.authorizationOwner || !input.previewId || !isAuthorizationCommand(input))throw Error('INVALID_AUTHORIZATION')
+      return authorizations.consume((input as import('./agent-host.ts').HostStart).authorizationOwner!,input as AgentStartRequest)
+    },
     root: () => { try { return vault?.requireUsableRoot() ?? null } catch { return null } },
     session: () => vault?.sessionId() ?? null,
     acceptsObject: (relPath, expected, current) => vault?.acceptsObject(relPath, expected, current) ?? false,

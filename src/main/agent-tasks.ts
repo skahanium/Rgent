@@ -52,6 +52,8 @@ export class AgentTasks {
         result = controller.signal.aborted
           ? { status: 'cancelled', reason: task.stopReason ?? 'user' }
           : { status: 'failed', reason: error instanceof Error ? error.message : 'UNKNOWN' }
+        // Determine the failure first: aborting transport must not rewrite it as user cancellation.
+        if (!controller.signal.aborted) controller.abort(result.reason)
       }
       try {
         await finalize(result.status, result.reason)

@@ -39,6 +39,8 @@ export const IPC = {
   modelSelect: 'model-config:select',
   modelKeyDelete: 'model-config:key-delete',
   modelLimitsSet: 'model-config:limits-set',
+  agentAuthorizationPreview: 'agent:authorization-preview',
+  agentAuthorizationDiscard: 'agent:authorization-discard',
   agentStart: 'agent:start',
   agentCancel: 'agent:cancel',
   agentTasks: 'agent:tasks',
@@ -58,13 +60,21 @@ export type ModelConfigResult = { ok: true; config: PublicModelConfig } | { ok: 
 export type ModelProfileSetRequest = { provider: ModelProvider; fields: ModelProfileFields; newKey?: string }
 export type ModelLimitsSetRequest = { tier: LimitTier; limits: RunLimits }
 export type ObjectBinding = { sessionId: string; objectVersion: string }
-export type AgentStartRequest = ObjectBinding & {
+export type AgentCommandRequest = ObjectBinding & {
   expectedRevision: string
   relPath: string
   range: { start: number; end: number }
   expectedText: string
   promptText: string
 }
+export type AgentAuthorizationRequest = AgentCommandRequest & { references: string[] }
+export type AuthorizedSource = ObjectBinding & { sourceId: string; relPath: string; title: string; revision: string; fingerprint: string; tier: 'reference' | 'follow' }
+export type AgentAuthorizationPreview = {
+  id: string; sessionId: string; origin: string; sources: AuthorizedSource[]
+  recipient: { modelId: string; host: string; provider: ModelProvider }
+}
+export type AgentAuthorizationResult = { ok: true; preview: AgentAuthorizationPreview } | { ok: false; error: string }
+export type AgentStartRequest = AgentCommandRequest & { previewId: string }
 export type AgentStartResult = { ok: true; id: string } | { ok: false; error: string }
 export type AgentTaskView = { id: string; relPath: string; startedAt: number }
 export type AgentEvent = {

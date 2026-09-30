@@ -101,6 +101,34 @@ function makePage(send, close) {
   }
 }
 
+/** First Enter prepares and displays authorization; only the second confirms. */
+async function confirmSlashAuthorization(page, inspect = false) {
+  await page.key('Enter', 'Enter', 0, 13)
+  const ready = await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)
+  check('本场授权准备就绪后才可确认', ready)
+  if (!ready) return false
+  if (inspect) {
+    check('首次回车只展示本篇范围与实际模型接收方', await page.eval(`(async () => {
+      const popup=document.querySelector('.overlay-authorization');
+      return (await window.rgent.agentTasks()).length===0 && popup.querySelector('.authorization-recipient').textContent.includes('127.0.0.1:') &&
+        popup.querySelectorAll('.authorization-manifest li').length===1 && popup.querySelector('.authorization-disclosure').textContent.includes('发送')
+    })()`))
+    check('口令旁授权浮层具有真实轮廓、可见位置及内部焦点', await page.eval(`(() => {
+      const popup=document.querySelector('.overlay-authorization');const r=popup.getBoundingClientRect();const style=getComputedStyle(popup);
+      return r.width>=300 && r.width<=450 && r.left>=0 && r.top>=0 && r.right<=innerWidth+1 && r.bottom<=innerHeight+1 &&
+        style.position==='fixed' && parseFloat(style.borderTopWidth)>0 && popup.contains(document.activeElement)
+    })()`))
+    await page.eval(`document.querySelector('.overlay-authorization').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',isComposing:true,bubbles:true,cancelable:true}))`)
+    check('输入法组合回车不启动模型任务', await page.eval(`(async () => (await window.rgent.agentTasks()).length===0 && !!document.querySelector('.overlay-authorization[open]'))()`))
+    await page.key('Escape','Escape',0,27)
+    check('取消授权保留原始口令且焦点回到正文', await waitFor(page, `!document.querySelector('.overlay-authorization[open]') && document.querySelector('.cm-content')?.textContent.includes('/请写两句话') && document.querySelector('.cm-editor')?.contains(document.activeElement)`))
+    await page.key('Enter','Enter',0,13)
+    if(!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`))return false
+  }
+  await page.key('Enter', 'Enter', 0, 13)
+  return true
+}
+
 async function availablePort() {
   const server = createServer()
   await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve))
@@ -479,7 +507,7 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
   await page.key('s', 'KeyS', modifier, 83)
   await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(original)})()`)
   await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; const at = view.state.doc.toString().indexOf('/快速完成') + '/快速完成'.length; view.dispatch({ selection: { anchor: at } }); view.focus() })()`)
-  await page.key('Enter', 'Enter', 0, 13)
+  await confirmSlashAuthorization(page)
   const completed = await waitFor(page, `(async () => { const note = await window.rgent.noteRead(${JSON.stringify(name)}); return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 })()`)
   check('混合换行口令按原文落点生成且旧账本保留', completed && readFileSync(path.join(vault, name), 'utf8').includes(ledger))
   const beforeMove = readFileSync(path.join(vault, name), 'utf8')
@@ -1147,7 +1175,7 @@ async function main() {
     await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('Host 环路')`)
     await page.call('Input.insertText', { text: '/请写两句话' })
     check('空段内输入的口令留在编辑器', await waitFor(page, `document.querySelector('.cm-content')?.textContent.includes('/请写两句话')`))
-    await page.key('Enter', 'Enter', 0, 13)
+    await confirmSlashAuthorization(page, true)
     const running = await waitFor(page, `!!document.querySelector('.status-task-stop')`, 4000)
     check('回车后底栏出现当前篇停止入口', running, running ? '' : await page.eval(`(async () => JSON.stringify({ status: document.querySelector('.status-left')?.innerText, note: (await window.rgent.noteRead('Host 环路.md')).content, editor: document.querySelector('.cm-content')?.textContent }))()`))
     check('回答与账本写回同一篇，回答为未采纳块', await waitFor(page, `(async () => {
@@ -1163,7 +1191,7 @@ async function main() {
     await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('Host 快速')`)
     await page.eval(`document.querySelector('.cm-content')?.focus()`)
     await page.call('Input.insertText', { text: '/快速完成' })
-    await page.key('Enter', 'Enter', 0, 13)
+    await confirmSlashAuthorization(page)
     const quickFinished = await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead('Host 快速.md')
       return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 && !document.querySelector('.status-task-stop')
@@ -1177,7 +1205,7 @@ async function main() {
       await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('${name}'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
       await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('${name}')`)
       await page.call('Input.insertText', { text: '/多任务测试' })
-      await page.key('Enter', 'Enter', 0, 13)
+      await confirmSlashAuthorization(page)
       await waitFor(page, `document.querySelector('.status-left')?.innerText.includes('生成中')`)
     }
     check('异篇并行时底栏显示任务数量', await waitFor(page, `document.querySelector('.status-task-more')?.textContent.includes('2 项')`))
@@ -1240,7 +1268,7 @@ async function main() {
     await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((node) => node.textContent.includes('运行'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
     await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '生命周期/运行.md'`)
     await page.call('Input.insertText', { text: '/多任务停止' })
-    await page.key('Enter', 'Enter', 0, 13)
+    await confirmSlashAuthorization(page)
     const beforeMoveTask = await waitFor(page, `(async () => (await window.rgent.agentTasks()).some((item) => item.relPath === '生命周期/运行.md'))()`, 5000)
     writeFileSync(path.join(vault, '生命周期', '不相关.md'), '保持不动')
     const unrelatedMove = await page.eval(`(async () => {
@@ -1293,10 +1321,12 @@ async function main() {
       writeFileSync(path.join(vault, '生命周期', '无关生成.md'), unrelatedPrompt)
       const unrelatedTask = await page.eval(`(async () => {
         const note = await window.rgent.noteRead('生命周期/无关生成.md')
-        return window.rgent.agentStart({ ...${JSON.stringify({ relPath: '生命周期/无关生成.md',
+        const request={ ...${JSON.stringify({ relPath: '生命周期/无关生成.md',
           range: { start: 0, end: unrelatedPrompt.length }, expectedText: unrelatedPrompt, promptText: '多任务恢复' })},
-          expectedRevision: note.revision, sessionId: note.sessionId, objectVersion: note.objectVersion })
-      })()`)
+          expectedRevision: note.revision, sessionId: note.sessionId, objectVersion: note.objectVersion }
+        const authorization=await window.rgent.agentAuthorizationPreview({...request,references:[]})
+        return authorization.ok ? window.rgent.agentStart({...request,previewId:authorization.preview.id}) : authorization
+      })()` )
       check('恢复竞态夹具中的无关任务开始并已产生回答', unrelatedTask.ok && await waitFor(page,
         `(async () => (await window.rgent.noteRead('生命周期/无关生成.md')).content.includes('受控回答第一句。'))()`))
       writeFileSync(path.join(vault, '.rgent-lifecycle'), journal)

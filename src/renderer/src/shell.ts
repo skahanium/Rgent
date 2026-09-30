@@ -16,6 +16,7 @@ import { installShortcuts, shortcutLabel } from './shortcuts.ts'
 import { renderStatusbar, statusModel, wordsOf } from './statusbar.ts'
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
+import { openAuthorizationPopover } from './authorization-popover.ts'
 import { slashAtCaret } from './slash.ts'
 import { renderTree, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
 import type { Theme } from './theme.ts'
@@ -180,6 +181,7 @@ export async function start(root: HTMLElement): Promise<void> {
   const hostRevisions = new Map<string, string>()
   let taskOverlay: ReturnType<typeof openOverlay> | null = null
   let hostNotice = ''
+  let authorizationPopover: ReturnType<typeof openAuthorizationPopover> | null = null
 
   const editor: EditorHost = mountEditor(editorHostEl, (text) => {
     const tab = current()
@@ -218,7 +220,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const selection = editor.selectionRange()
     if (selection.anchor !== selection.head) return
     const submission = slashAtCaret(editor.getText(), selection.head)
-    if (!submission) return
+    if (!submission || conflictDecisionOpen || document.querySelector('dialog[open]')) return
     event.preventDefault()
     void submitSlash(submission)
   }, { capture: true })
@@ -317,38 +319,37 @@ export async function start(root: HTMLElement): Promise<void> {
   }).catch(() => {})
 
   async function submitSlash(submission: { range: { start: number; end: number }; prompt: string }): Promise<void> {
-    const tab = current()
-    if (!tab) return
-    const draft = editor.getText()
-    if (tab.availability || !tab.sessionId || !tab.objectVersion) return
-    if (activeTasks.size && [...activeTasks.values()].some((task) => task.relPath === tab.relPath)) {
-      hostNotice = '这篇笔记已有正在运行的任务。'
-      updateStatus()
-      return
-    }
-    hostNotice = ''
-    if (tab.dirty && (!(await writeTab(tab, draft)) || tab.dirty)) {
-      hostNotice = '先保存当前笔记，才能发送口令。'
-      updateStatus()
-      return
-    }
-    if (!tabs.includes(tab) || editor.getText() !== draft || tab.content !== draft) return
-    const result = await window.rgent.agentStart({
-      relPath: tab.relPath,
-      range: submission.range,
-      expectedText: draft.slice(submission.range.start, submission.range.end),
-      promptText: submission.prompt,
-      sessionId: tab.sessionId, objectVersion: tab.objectVersion, expectedRevision: tab.revision
+    const tab=current();if(!tab || authorizationPopover || conflictDecisionOpen)return
+    if(tab.availability || !tab.sessionId || !tab.objectVersion)return
+    if([...activeTasks.values()].some(task=>task.relPath===tab.relPath)){hostNotice='这篇笔记已有正在运行的任务。';updateStatus();return}
+    if(!await flushSave()){hostNotice='先保存所有窗口稿，才能准备本场范围。';updateStatus();return}
+    if(current()!==tab || !tabs.includes(tab))return
+    const draft=editor.getText()
+    if(draft.slice(submission.range.start,submission.range.end)!==`/${submission.prompt}`)return
+    const request=()=>({relPath:tab.relPath,range:submission.range,expectedText:draft.slice(submission.range.start,submission.range.end),promptText:submission.prompt,
+      sessionId:tab.sessionId!,objectVersion:tab.objectVersion!,expectedRevision:tab.revision})
+    let displayedRequest:ReturnType<typeof request>|null=null
+    const coords=editor.view.coordsAtPos(editor.view.state.selection.main.head)??editor.view.dom.getBoundingClientRect()
+    authorizationPopover=openAuthorizationPopover({discard:id=>window.rgent.agentAuthorizationDiscard(id),origin:tab.relPath,entries:tree,anchor:coords,
+      returnFocus:()=>editor.view.contentDOM,
+      onClose:()=>{authorizationPopover=null},
+      preview:async references=>{
+        if(current()!==tab || !tabs.includes(tab) || editor.getText()!==draft)return {ok:false,error:'STALE_AUTHORIZATION'}
+        if(!await flushSave())return {ok:false,error:'UNSAVED_DRAFT'}
+        displayedRequest=request()
+        return window.rgent.agentAuthorizationPreview({...displayedRequest,references})
+      },
+      send:async preview=>{
+        if(!displayedRequest || current()!==tab || !tabs.includes(tab) || editor.getText()!==draft)return {ok:false,error:'STALE_AUTHORIZATION'}
+        if(!await flushSave())return {ok:false,error:'UNSAVED_DRAFT'}
+        const result=await window.rgent.agentStart({...displayedRequest,previewId:preview.id})
+        if(!result.ok)return result
+        if(!endedTaskIds.has(result.id))activeTasks.set(result.id,{id:result.id,relPath:tab.relPath,startedAt:Date.now()})
+        hostNotice='';syncActiveLocks();updateStatus()
+        void runExclusiveConflict(()=>syncHostTab(tab,vaultEpoch))
+        return result
+      }
     })
-    if (!result.ok) {
-      hostNotice = `无法开始：${hostErrorText(result.error)}`
-      updateStatus()
-      return
-    }
-    if (!endedTaskIds.has(result.id)) activeTasks.set(result.id, { id: result.id, relPath: tab.relPath, startedAt: Date.now() })
-    syncActiveLocks()
-    updateStatus()
-    void runExclusiveConflict(() => syncHostTab(tab, vaultEpoch))
   }
 
   function onHostEvent(event: AgentEvent): void {
