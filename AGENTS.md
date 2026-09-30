@@ -6,6 +6,7 @@
 
 1. 本文
 2. [docs/build.md](docs/build.md) 的「当前阶段」
+   - 跨能力工作先核对该篇的[依赖与交接表](docs/build.md#跨能力交接)；未来合同不等于当前施工授权
 3. 工程题（Agent 栈、检索、隔离）看 [docs/topics.md](docs/topics.md)，不要把那里的未开项写成代码
 4. 动到壳、索引、账本、路径时：[docs/architecture.md](docs/architecture.md) 的强制点
 5. 前端工作读 [docs/frontend.md](docs/frontend.md)；当前未开放的界面仍按硬停处理

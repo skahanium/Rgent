@@ -57,4 +57,37 @@ describe('docs stage invariants', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('对象矩阵')
   })
+
+  it('rejects a matrix status outside the three phase states', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    const changed = source.replace(/(\| 界面改造 \|[^\n]*?)\*\*已交\*\*/, '$1**冻结**')
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('阶段状态')
+  })
+
+  it('rejects a handoff stage missing from the dependency graph', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    const changed = source.replace('| 库内人工记忆 | 文件身份', '| 未列入依赖图的记忆阶段 | 文件身份')
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('交接表阶段')
+  })
+
+  it('does not accept a handoff stage that is only a prefix of a graph node', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    const changed = source.replace('| Host 最小环 | 身份标记', '| Host | 身份标记')
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('交接表阶段')
+  })
 })
