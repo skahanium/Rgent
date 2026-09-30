@@ -46,7 +46,8 @@ export class VaultIndex {
     this.notes.clear()
     this.byTarget.clear()
     this.dirty = true
-    this.rebuilding = null
+    // 不清 rebuilding：清掉会让在飞重建的收尾注销**新**重建的注册，查询就可能
+    // 在索引装好之前提前返回。dirty 已经足够要求重扫；同一时刻只留一个在飞重建。
   }
 
   markDirty(): void {
@@ -86,10 +87,13 @@ export class VaultIndex {
         await this.rebuilding
         continue
       }
-      this.rebuilding = this.rebuild().finally(() => {
-        this.rebuilding = null
+      const attempt = this.rebuild()
+      // 只有仍登记着自己的那次重建才能清注册位：库失效时的在飞重建不得注销后继者。
+      const tracked: Promise<void> = attempt.finally(() => {
+        if (this.rebuilding === tracked) this.rebuilding = null
       })
-      await this.rebuilding
+      this.rebuilding = tracked
+      await tracked
     }
   }
 
