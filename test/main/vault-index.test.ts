@@ -234,3 +234,39 @@ it('does not index ledger text when Markdown compilation fails', async () => {
   try { expect(await indexFor(root).search('仅账本机密')).toEqual([]) }
   finally { stage.transform = transform }
 })
+
+describe('vault index rebuild registration', () => {
+  function deferred() { let resolve!: () => void; const promise = new Promise<void>((r) => { resolve = r }); return { promise, resolve } }
+  it('never returns an unbuilt index while a suspended rebuild is being cleaned up', async () => {
+    const root = await vault()
+    await note(root, '笔记.md', '正文\n')
+    const firstList = deferred()
+    const secondList = deferred()
+    let calls = 0
+    let suspended = false
+    const index = new VaultIndex(
+      () => {
+        if (suspended) throw new Error('NOTE_UNREADABLE')
+        return root
+      },
+      async () => {
+        const call = ++calls
+        if (call === 1) await firstList.promise
+        if (call === 2) await secondList.promise
+        return [{ name: '笔记.md', relPath: '笔记.md', kind: 'note' as const }]
+      }
+    )
+    const first = index.search('笔记')          // P1：挂在下一次目录列举上
+    await Promise.resolve()
+    index.reset()                                // 库失效：suspendRoot()
+    const second = index.search('笔记').catch(() => null)  // 单飞：它继承在飞重建的失败
+    suspended = true                             // 此时原库才真正不可读
+    firstList.resolve()                          // P1 结束，且以库不可读收场
+    await first.catch(() => undefined)
+    suspended = false                            // 原库恢复
+    const third = index.search('笔记')           // 第三个查询：必须等当前世代装好
+    secondList.resolve()
+    expect((await third).map((hit) => hit.relPath)).toEqual(['笔记.md'])
+    await second
+  })
+})
