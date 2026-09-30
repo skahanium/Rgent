@@ -43,6 +43,14 @@ jobs:
         env:
           RGENT_UI_VISUAL_ONLY: '1'
           RGENT_UI_SCREENSHOTS: ${{ runner.temp }}/ui-shots
+      # 独立临时夹具验证废纸篓候选；不编进生产模块，不接删除 IPC。
+      # 反例是有效证据，缺回执或夹具无法取回才失败。原位恢复仍需人核对。
+      # 无论界面／测试成败都采证，且探针不遮蔽已有代码门的执行。
+      - run: node scripts/probe-trash.mjs
+        if: always()
+        timeout-minutes: 8
+        env:
+          RGENT_TRASH_REPORT: ${{ runner.temp }}/trash-probe/report.json
       # 截图是给「对照四张参考图」用的材料：两平台、日夜、窄窗、搜索、阅读态各一张。
       # 失败时也上传——排查「窗口起不来」时这几张往往是最直接的证据。
       - uses: actions/upload-artifact@v4
@@ -50,4 +58,10 @@ jobs:
         with:
           name: ui-shots-${{ matrix.os }}
           path: ${{ runner.temp }}/ui-shots
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trash-probe-${{ matrix.os }}
+          path: ${{ runner.temp }}/trash-probe
           if-no-files-found: ignore
