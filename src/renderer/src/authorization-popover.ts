@@ -55,12 +55,15 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
       recipient.textContent=`模型：${prepared.recipient.modelId} · 接口主机：${prepared.recipient.host}`
       status.textContent=`已核对 ${prepared.sources.length} 篇笔记；其他篇账本、附件不在本场范围。`
       send.disabled=false
-      if(document.activeElement===panel.root)send.focus()
+      if(document.activeElement===panel.root)send.focus({preventScroll:true})
     }catch{if(current===generation && panel.isOpen())status.textContent='准备失败，请取消后重试。'}
   }
   async function submit():Promise<void>{
     if(!prepared || submitting || send.disabled)return
-    submitting=true;send.disabled=true;fieldset.disabled=true
+    submitting=true
+    // Disabled focused controls can send focus to body; retain the confirmation context.
+    panel.root.focus({preventScroll:true})
+    send.disabled=true;fieldset.disabled=true
     const displayed=prepared
     try{
       const result=await options.send(displayed)

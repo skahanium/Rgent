@@ -10,6 +10,7 @@ type Running = ActiveTask & {
   controller: AbortController
   done: Promise<TaskResult>
   stopReason?: StopReason
+  failureReason?: string
 }
 
 /** Owns task lifetime; one task per note, while different notes may run concurrently. */
@@ -46,11 +47,11 @@ export class AgentTasks {
       try {
         await run(controller.signal)
         result = controller.signal.aborted
-          ? { status: 'cancelled', reason: task.stopReason ?? 'user' }
+          ? task.failureReason ? { status: 'failed', reason: task.failureReason } : { status: 'cancelled', reason: task.stopReason ?? 'user' }
           : { status: 'completed' }
       } catch (error) {
         result = controller.signal.aborted
-          ? { status: 'cancelled', reason: task.stopReason ?? 'user' }
+          ? task.failureReason ? { status: 'failed', reason: task.failureReason } : { status: 'cancelled', reason: task.stopReason ?? 'user' }
           : { status: 'failed', reason: error instanceof Error ? error.message : 'UNKNOWN' }
         // Determine the failure first: aborting transport must not rewrite it as user cancellation.
         if (!controller.signal.aborted) controller.abort(result.reason)
@@ -71,6 +72,16 @@ export class AgentTasks {
     if (!task) return null
     if (!task.controller.signal.aborted) {
       task.stopReason = reason
+      task.controller.abort(reason)
+    }
+    return task.done
+  }
+
+  async fail(id: string, reason: string): Promise<TaskResult | null> {
+    const task = this.running.get(id)
+    if (!task) return null
+    if (!task.controller.signal.aborted) {
+      task.failureReason = reason
       task.controller.abort(reason)
     }
     return task.done

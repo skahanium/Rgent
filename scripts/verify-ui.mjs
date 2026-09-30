@@ -129,6 +129,60 @@ async function confirmSlashAuthorization(page, inspect = false) {
   return true
 }
 
+/** Three approved notes exercise actual Host tools through the controlled model server. */
+async function verifyScopedHost(page, vault, shot, requests) {
+  writeFileSync(path.join(vault, '工具发起.md'), '')
+  writeFileSync(path.join(vault, '工具参考.md'), '# 参考原文\n\n工具线索：受控正文证据。\n')
+  writeFileSync(path.join(vault, '工具其他.md'), '扫描可见，但没有查询命中。\n')
+  check('三篇工具夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter(n=>/工具发起|工具参考|工具其他/.test(n.innerText)).length===3`))
+  await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.innerText.includes('工具发起'))?.click()`)
+  await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('工具发起')`)
+  await page.eval(`document.querySelector('.cm-content')?.focus()`)
+  await page.call('Input.insertText', { text: '/工具查证' })
+  const choose = async () => {
+    await page.key('Enter', 'Enter', 0, 13)
+    if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)) return false
+    check('新场工具授权默认仅发起篇', await page.eval(`document.querySelectorAll('.authorization-manifest li').length===1 && [...document.querySelectorAll('.authorization-choices input')].every(input=>!input.checked)`))
+    // HTMLElement.click() does not focus a checkbox. A refresh disables the initially
+    // focused send button, so native mouse clicks must establish focus before refresh.
+    for (const [at, name] of ['工具参考.md', '工具其他.md'].entries()) {
+      const point = await page.eval(`(() => { const input=[...document.querySelectorAll('.authorization-choices input')].find(input=>input.value===${JSON.stringify(name)}); if(!input || input.disabled)return null;input.scrollIntoView({block:'nearest'});const r=input.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2} })()`)
+      if (!point) return false
+      await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+      await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+      if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===${at+2} && !!document.querySelector('.authorization-send:not(:disabled)')`)) return false
+    }
+    return true
+  }
+  await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+  check('两篇额外参考逐场核对进入固定清单', await choose())
+  await shot(page, 'auth-scope-1200')
+  await page.key('Escape', 'Escape', 0, 27)
+  check('取消工具范围授权保留口令并归还焦点', await waitFor(page, `!document.querySelector('.overlay-authorization[open]') && document.querySelector('.cm-content')?.textContent.includes('/工具查证') && document.querySelector('.cm-editor')?.contains(document.activeElement)`))
+  await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
+  check('窄窗重新准备三篇范围', await choose())
+  check('窄窗范围、主机和内部焦点可辨', await page.eval(`(() => { const popup=document.querySelector('.overlay-authorization');const r=popup.getBoundingClientRect();return r.left>=0 && r.top>=0 && r.right<=innerWidth+1 && r.bottom<=innerHeight+1 && popup.contains(document.activeElement) && popup.querySelector('.authorization-recipient').textContent.includes('127.0.0.1:') })()`), await page.eval(`(() => {const popup=document.querySelector('.overlay-authorization');const r=popup.getBoundingClientRect();return JSON.stringify({bounds:{left:r.left,top:r.top,right:r.right,bottom:r.bottom},viewport:{width:innerWidth,height:innerHeight},focus:document.activeElement?.outerHTML.slice(0,150),recipient:popup.querySelector('.authorization-recipient').textContent})})()`))
+  await shot(page, 'auth-scope-800')
+  writeFileSync(path.join(vault, '工具参考.md'), '# 参考原文\n\n工具线索：受控正文证据。来源复核。\n')
+  await page.key('Enter', 'Enter', 0, 13)
+  const refreshed = await waitFor(page, `document.querySelector('.authorization-status')?.textContent.includes('再次确认') && !!document.querySelector('.authorization-send:not(:disabled)') && document.querySelector('.overlay-authorization').contains(document.activeElement)`)
+  check('参考原文变化后重新展示清单，第一次确认未发模型请求', refreshed && requests.length === 0 && await page.eval(`(async ()=>(await window.rgent.agentTasks()).length===0)()`), await page.eval(`(async ()=>JSON.stringify({status:document.querySelector('.authorization-status')?.textContent,focus:document.activeElement?.outerHTML.slice(0,150),tasks:await window.rgent.agentTasks()}))()`))
+  if (!refreshed) throw Error('授权刷新后未恢复可确认焦点；停止依赖链验收。')
+  await page.key('Enter', 'Enter', 0, 13)
+  check('工具链运行底栏显示实际模型步且保留停止入口', await waitFor(page, `document.querySelector('.status-task')?.textContent.includes('模型第 3 步') && !!document.querySelector('.status-task-stop')`))
+  const done = await waitFor(page, `(async () => {const note=await window.rgent.noteRead('工具发起.md');return note.content.includes('工具查证完成：已核对参考原文。') && (await window.rgent.agentTasks()).length===0})()`)
+  check('真实搜库、读库、回答三步写回本篇', done && requests.length === 3 && requests.every(request=>request.tools?.length===2))
+  check('首步只发送来源清单，后续请求携带实际命中及原文', requests.length === 3 && !JSON.stringify(requests[0]).includes('受控正文证据') && JSON.stringify(requests[1]).includes('受控正文证据') && JSON.stringify(requests[2]).includes('来源复核'))
+  check('工具输出和隐藏推理不落正文', await page.eval(`(async () => { const note=await window.rgent.noteRead('工具发起.md');const body=note.content.split('<!-- rgent:ledger:v1 -->')[0];return !body.includes('受控正文证据') && !body.includes('隐藏工具推理') })()`))
+  await page.eval(`document.querySelector('.ledger-open')?.click()`)
+  check('同篇账本回顾工具及读取、模型引用来源', await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return text.includes('工具摘要') && (text.includes('search_library')||text.includes('搜库')) && (text.includes('read_library')||text.includes('读库')) && text.includes('实际读取来源：工具其他.md、工具参考.md') && text.includes('模型消息引用来源：工具参考.md')})()`))
+  await shot(page, 'tool-ledger-800')
+  await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+  await shot(page, 'tool-ledger-1200')
+  await page.eval(`document.querySelector('.ledger-close')?.click()`)
+  await page.call('Emulation.clearDeviceMetricsOverride', {})
+}
+
 async function availablePort() {
   const server = createServer()
   await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve))
@@ -1136,11 +1190,31 @@ async function main() {
       return { ok: samples.length === 5 && samples.every((sample) => sample.bytes > 18_000 && sample.open < 5000 && sample.scroll < 1000) && maxInput < 250, detail: JSON.stringify(samples) }
     })
 
+    const toolLoopRequests = []
     process.stdout.write('\nHost 最小环\n')
     hostServer = createHttpServer((request, response) => {
       let body = ''
       request.on('data', (chunk) => { body += String(chunk) })
       request.on('end', () => {
+        const decoded = JSON.parse(body)
+        if (body.includes('工具查证') && decoded.tools?.length === 2) {
+          toolLoopRequests.push(decoded)
+          response.writeHead(200, { 'content-type': 'text/event-stream' })
+          const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'tools-ui', object: 'chat.completion.chunk', created: 1, model: 'test', choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
+          const results = decoded.messages.filter(message => message.role === 'tool')
+          if (!results.length) {
+            emit({ tool_calls: [{ index: 0, id: 'ui-search', type: 'function', function: { name: 'search_library', arguments: '{"query":"工具' } }] })
+            emit({ tool_calls: [{ index: 0, function: { arguments: '线索"}' } }] }); emit({}, 'tool_calls'); response.end('data: [DONE]\n\n')
+          } else if (results.length === 1) {
+            const result = JSON.parse(results[0].content)
+            const sourceId = result.items.find(item => item.relPath === '工具参考.md')?.sourceId
+            emit({ tool_calls: [{ index: 0, id: 'ui-read', type: 'function', function: { name: 'read_library', arguments: JSON.stringify({ sourceId }) } }] }); emit({}, 'tool_calls'); response.end('data: [DONE]\n\n')
+          } else {
+            const timer = setTimeout(() => { if (response.destroyed) return; emit({ reasoning_content: '隐藏工具推理' }); emit({ content: '工具查证完成：已核对参考原文。' }); emit({}, 'stop'); response.end('data: [DONE]\n\n') }, 1200)
+            response.on('close', () => clearTimeout(timer))
+          }
+          return
+        }
         response.writeHead(200, { 'content-type': 'text/event-stream' })
         response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"受控回答第一句。"},"finish_reason":null}]}\n\n')
         const timer = setTimeout(() => {
@@ -1197,38 +1271,45 @@ async function main() {
       return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 && !document.querySelector('.status-task-stop')
     })()`, 8000)
     check('快速流结束后底栏不残留运行任务', quickFinished, quickFinished ? '' : await page.eval(`(async () => JSON.stringify({ note: (await window.rgent.noteRead('Host 快速.md')).content, tasks: await window.rgent.agentTasks(), status: document.querySelector('.status-left')?.innerText }))()`))
+    await verifyScopedHost(page, vault, shot, toolLoopRequests)
     await verifyRawSourceLifecycle(page, vault, modifier, shot)
     writeFileSync(path.join(vault, 'Host A.md'), '')
     writeFileSync(path.join(vault, 'Host B.md'), '')
     check('两篇待运行笔记进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host A')) && [...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host B'))`, 8000))
-    for (const name of ['Host A', 'Host B']) {
-      await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('${name}'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
-      await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('${name}')`)
-      await page.call('Input.insertText', { text: '/多任务测试' })
-      await confirmSlashAuthorization(page)
-      await waitFor(page, `document.querySelector('.status-left')?.innerText.includes('生成中')`)
+    const parallelCheck = async (name, expression, timeout = 4000) => {
+      const ok = await waitFor(page, expression, timeout)
+      const detail = ok ? '' : await page.eval(`(async () => JSON.stringify({ tasks:await window.rgent.agentTasks(), status:document.querySelector('.status-left')?.innerText, activeTab:document.querySelector('.tab[aria-selected=true]')?.innerText, popup:document.querySelector('dialog[open]')?.className, notes:await Promise.all(['Host A.md','Host B.md'].map(async path=>({path,content:(await window.rgent.noteRead(path)).content}))) }))()`)
+      check(name, ok, detail)
+      if (!ok) throw new Error(`并行任务前置条件失败：${name}；停止后续依赖断言。`)
     }
-    check('异篇并行时底栏显示任务数量', await waitFor(page, `document.querySelector('.status-task-more')?.textContent.includes('2 项')`))
+    for (const [at, name] of ['Host A', 'Host B'].entries()) {
+      await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('${name}'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
+      await parallelCheck(`${name} 进入当前 tab`, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('${name}')`)
+      await page.call('Input.insertText', { text: '/多任务测试' })
+      if (!await confirmSlashAuthorization(page)) throw new Error(`${name} 的本场授权准备失败；停止并行依赖断言。`)
+      await parallelCheck(`${name} 启动后任务归属及数量正确`, `(async () => { const tasks=await window.rgent.agentTasks();return tasks.length===${at+1} && ${JSON.stringify(['Host A.md','Host B.md'].slice(0,at+1))}.every(path=>tasks.some(task=>task.relPath===path)) })()`)
+    }
+    await parallelCheck('异篇并行时底栏显示任务数量', `(async ()=>(await window.rgent.agentTasks()).length===2 && document.querySelector('.status-task-more')?.textContent.includes('2 项'))()`)
     await page.eval(`(() => { [...document.querySelectorAll('.tab-wrap')].find((tab) => tab.textContent.includes('Host A'))?.querySelector('.tab-close')?.click() })()`)
-    check('关闭 A 的 tab 不取消其生成', await waitFor(page, `(async () =>
+    await parallelCheck('关闭 A 的 tab 不取消其生成', `(async () =>
       ![...document.querySelectorAll('.tab-wrap')].some((tab) => tab.textContent.includes('Host A')) &&
       (await window.rgent.agentTasks()).length === 2
-    )()`))
+    )()`)
     await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((note) => note.innerText.includes('Host A'))?.click() })()`)
-    check('重开 A 可回到正在生成的原篇', await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('Host A') && (async () => (await window.rgent.agentTasks()).length === 2)()`))
+    await parallelCheck('重开 A 可回到正在生成的原篇', `(async () => document.querySelector('.tab[aria-selected=true]')?.innerText.includes('Host A') && (await window.rgent.agentTasks()).length === 2)()`)
     await page.eval(`(() => { [...document.querySelectorAll('.tab-wrap')].find((tab) => tab.textContent.includes('Host B'))?.querySelector('.tab')?.click() })()`)
     await page.eval(`document.querySelector('.status-task-more')?.click()`)
-    check('任务浮层逐篇给出停止按钮', await waitFor(page, `document.querySelectorAll('.overlay-tasks .task-row').length === 2`))
+    await parallelCheck('任务浮层逐篇给出停止按钮', `document.querySelectorAll('.overlay-tasks .task-row').length === 2`)
     await page.eval(`(() => { [...document.querySelectorAll('.overlay-tasks .task-row')].find((n) => n.textContent.includes('Host A'))?.querySelector('button')?.click() })()`)
-    check('停止 A 后 B 仍可继续运行', await waitFor(page, `document.querySelector('.status-task')?.textContent.includes('Host B')`))
+    await parallelCheck('停止 A 后 B 仍可继续运行', `(async () => {const tasks=await window.rgent.agentTasks();return tasks.length===1 && tasks[0].relPath==='Host B.md' && document.querySelector('.status-task')?.textContent.includes('Host B')})()`)
     await page.key('Escape', 'Escape', 0, 27)
     await page.eval(`document.querySelector('.cm-content')?.focus()`)
     await page.key('Escape', 'Escape', 0, 27)
-    check('Esc 停止当前 B，两个任务均写入取消账本', await waitFor(page, `(async () => {
+    await parallelCheck('Esc 停止当前 B，两个任务均写入取消账本', `(async () => {
       const a = await window.rgent.noteRead('Host A.md')
       const b = await window.rgent.noteRead('Host B.md')
       return a.content.includes('· cancelled') && b.content.includes('· cancelled') && (await window.rgent.agentTasks()).length === 0
-    })()`, 8000))
+    })()`, 8000)
 
     process.stdout.write('\n笔记库文件生命周期\n')
     await page.eval(`document.querySelector('.folder-create')?.click()`)
@@ -1357,16 +1438,24 @@ async function main() {
         existsSync(path.join(vault, '生命周期', '已恢复', '附件.png')) &&
         JSON.parse(readFileSync(path.join(vault, '.rgent-lifecycle'), 'utf8')).active === null &&
         (!policy || readFileSync(path.join(vault, '.rgent-permissions'), 'utf8') === policy))
-      check('恢复后补存无关任务的回答与一章账本', await waitFor(page, `(async () => {
+      const unrelatedSaved = await waitFor(page, `(async () => {
         const source = (await window.rgent.noteRead('生命周期/无关生成.md')).content
-        return source.includes('受控回答第一句。') && (source.match(/· cancelled/g) || []).length === 1 && (await window.rgent.agentTasks()).length === 0
-      })()`))
+        const [body,ledger] = source.split('<!-- rgent:ledger:v1 -->')
+        const chapters = [...(ledger||'').matchAll(/^<!-- rgent:ledger-task:v1 id="([^"\\r\\n]+)"(?: sources="v1")? -->\\r?$/gm)]
+        const chapter = chapters.length===1 ? ledger.slice(chapters[0].index) : ''
+        const status = /^## [^\\r\\n]+ · (cancelled|failed)\\r?$/m.exec(chapter)?.[1]
+        const stopped = status==='cancelled' || status==='failed' && /^中止原因：LIFECYCLE_RECOVERY_REQUIRED\\r?$/m.test(chapter)
+        return body.includes('受控回答第一句。') && chapter.includes('受控回答第一句。') && chapters.length===1 && chapters[0][1]===${JSON.stringify(unrelatedTask.id)} && stopped && (await window.rgent.agentTasks()).length===0
+      })()`)
+      check('恢复后补存无关任务的回答与一章账本', unrelatedSaved, unrelatedSaved ? '' : await page.eval(`(async () => JSON.stringify({taskId:${JSON.stringify(unrelatedTask.id)},tasks:await window.rgent.agentTasks(),source:(await window.rgent.noteRead('生命周期/无关生成.md')).content}))()`))
+      const recoveredUnrelatedSource = await page.eval(`(async ()=>(await window.rgent.noteRead('生命周期/无关生成.md')).content)()`)
+
       check('成功重试后焦点转到浮层关闭按钮', await page.eval(`document.querySelector('.lifecycle-recovery').contains(document.activeElement) && document.activeElement.textContent === '关闭'`))
       await page.key('Escape', 'Escape', 0, 27)
       check('重试后 tab、文件树与状态一起更新', await waitFor(page, `document.querySelector('.lifecycle-warning').hidden && document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '生命周期/已恢复.md'`))
       check('状态入口隐藏后关闭浮层回到可见工作区控件', await waitFor(page, `document.activeElement?.classList.contains('tree-toggle')`))
       const duplicate = await page.eval(`window.rgent.lifecycleRetry(${JSON.stringify({ sessionId: status.sessionId, revision: status.revision })})`)
-      check('重复恢复提交因修订过期而拒绝', !duplicate.ok && duplicate.error === 'STALE_RECOVERY')
+      check('重复恢复提交因修订过期而拒绝且任务账本保持幂等', !duplicate.ok && duplicate.error === 'STALE_RECOVERY' && recoveredUnrelatedSource === await page.eval(`(async ()=>(await window.rgent.noteRead('生命周期/无关生成.md')).content)()`))
       const damaged = '{"version":1,"active":"broken"}'
       writeFileSync(path.join(vault, '.rgent-lifecycle'), damaged)
       await waitFor(page, `!document.querySelector('.lifecycle-warning').hidden`)

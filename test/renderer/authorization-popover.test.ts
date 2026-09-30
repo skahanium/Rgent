@@ -58,3 +58,27 @@ it('single-note default focus confirms with the next Enter and does not override
   cancel.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))
   expect(send).toHaveBeenCalledTimes(1)
 })
+
+it('initial confirmation focus does not scroll the recipient and origin out of view', async()=>{
+  const focus=vi.spyOn(HTMLElement.prototype,'focus')
+  const popup=openAuthorizationPopover({anchor:{left:100,top:100,bottom:120},origin:'a.md',entries:[],preview:async()=>({ok:true as const,preview}),send:async()=>({ok:true as const,id:'task'})})
+  await vi.waitFor(()=>expect(document.activeElement).toBe(popup.root.querySelector('.authorization-send')))
+  const at=focus.mock.contexts.findIndex((node,i)=>node===popup.root.querySelector('.authorization-send') && focus.mock.calls[i]?.[0]?.preventScroll)
+  expect(at).toBeGreaterThanOrEqual(0)
+  focus.mockRestore()
+})
+
+it('keeps focus inside while submitting a selected range and after stale reconfirmation',async()=>{
+  let finish!: (value:any)=>void
+  const send=vi.fn(()=>new Promise<any>(resolve=>finish=resolve))
+  const popup=openAuthorizationPopover({anchor:{left:100,top:100,bottom:120},origin:'a.md',entries:[{kind:'note',relPath:'b.md',name:'b'}],preview:async()=>({ok:true as const,preview}),send})
+  await vi.waitFor(()=>expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  const input=popup.root.querySelector<HTMLInputElement>('.authorization-choices input')!
+  input.focus()
+  input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))
+  expect(document.activeElement).toBe(popup.root)
+  finish({ok:false,error:'STALE_AUTHORIZATION'})
+  await vi.waitFor(()=>expect(popup.root.querySelector('.authorization-status')!.textContent).toContain('再次确认'))
+  expect(document.activeElement).toBe(popup.root.querySelector('.authorization-send'))
+  popup.close()
+})

@@ -76,7 +76,7 @@ export type AgentAuthorizationPreview = {
 export type AgentAuthorizationResult = { ok: true; preview: AgentAuthorizationPreview } | { ok: false; error: string }
 export type AgentStartRequest = AgentCommandRequest & { previewId: string }
 export type AgentStartResult = { ok: true; id: string } | { ok: false; error: string }
-export type AgentTaskView = { id: string; relPath: string; startedAt: number }
+export type AgentTaskView = { id: string; relPath: string; startedAt: number; activity?: string }
 export type AgentEvent = {
   id: string
   relPath: string
@@ -87,6 +87,7 @@ export type AgentEvent = {
   revision?: string
   sessionId?: string
   objectVersion?: string
+  activity?: string
 }
 
 export type ImageContext = {

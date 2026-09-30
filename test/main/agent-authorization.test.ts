@@ -1,4 +1,5 @@
 import { expect, it } from 'vitest'
+import { createScopedAgentTools } from '../../src/main/scoped-agent-tools.ts'
 import { AgentHost } from '../../src/main/agent-host.ts'
 import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
 import type { AgentStartRequest, NoteSnapshot } from '../../src/shared/ipc.ts'
@@ -8,11 +9,13 @@ function fixture(stream:(signal:AbortSignal)=>AsyncIterable<string>) {
   let calls=0;let revision=1;let denied=''
   const tier=async(_root:string,path:string)=>{if(path===denied)throw Error('FORBIDDEN');return 'reference' as const}
   const registry=new TaskAuthorizationRegistry({root:()=>'/vault',session:()=> 'session',tree:async()=>Object.keys(source).map(relPath=>({name:relPath,relPath,kind:'note' as const})),
-    read:async p=>({...source[p]!}),tier,acceptsObject:()=>false,configuration:()=>({credential:{provider:'custom',baseURL:'https://models.example/v1',modelId:'fixed',contextTokens:12000,apiKey:'secret'},limits:{seconds:30,steps:4,tools:0}})})
+    read:async p=>({...source[p]!}),tier,acceptsObject:()=>false,configuration:()=>({credential:{provider:'custom',baseURL:'https://models.example/v1',modelId:'fixed',contextTokens:12000,apiKey:'secret'},limits:{seconds:30,steps:4,tools:4}})})
   const host=new AgentHost({root:()=>'/vault',session:()=> 'session',authorize:input=>registry.consume(input.authorizationOwner!,input as AgentStartRequest),
     tier,read:async p=>({...source[p]!}),write:async(p,content,expected)=>{if(expected!==source[p]!.revision)throw Error('CONFLICT');source[p]={...source[p]!,content,revision:String(++revision)};return {...source[p]!}},
     credential:()=>{throw Error('snapshot must be used')},limits:()=>{throw Error('snapshot must be used')},
-    stream:(_input,signal)=>{calls++;return stream(signal)},emit:()=>{}})
+    stream:(_input,signal)=>{calls++;return stream(signal)},
+    streamStep:async function*(_input,signal){calls++;for await(const text of stream(signal))yield {type:'text',text};yield {type:'finish',reason:'stop'}},
+    createReadOnlyTools:(grant,id)=>createScopedAgentTools(grant,id,{read:async p=>({...source[p]!}),tier,acceptsObject:()=>false}),emit:()=>{}})
   const request={relPath:'a.md',sessionId:'session',objectVersion:'a',expectedRevision:'1',range:{start:0,end:2},expectedText:'/问',promptText:'问',references:['b.md']}
   return {host,registry,request,source,calls:()=>calls,deny:(p:string)=>{denied=p}}
 }

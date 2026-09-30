@@ -28,10 +28,19 @@ const HOST_ERROR_MESSAGES: Record<string, string> = {
   KEY_DECRYPT_FAILED: '已保存的模型密钥无法解密，请在设置中替换。',
   PERMISSIONS_INVALID: '权限名单无法核对，请先修复库根名单。',
   FORBIDDEN: '这篇笔记禁止 AI 触碰。',
+  TOOLS_UNAVAILABLE: '本场读库与搜库工具不可用，请重新发起。',
+  SOURCE_CHANGED: '参考来源已变化，本场已停止，回答已保留。',
+  SOURCE_REPLACED: '参考来源对象已替换，本场已停止。',
+  SOURCE_PERMISSION_CHANGED: '参考来源权限已变化，本场已停止。',
+  MODEL_PROTOCOL_ERROR: '模型返回的工具协议无效，本场已停止。',
+  TOOL_CALL_LIMIT: '本场工具次数已达上限。',
+  MODEL_STEP_LIMIT: '本场模型步数已达上限。',
+  MODEL_CONTEXT_LIMIT: '本场上下文已达上限。',
+  MODEL_OUTPUT_LIMIT: '本场生成内容已达上限。',
+  TOOL_ARGUMENT_LIMIT: '模型工具参数已超出上限。',
   NOTE_NOT_REFERENCE: '这篇笔记当前不允许发起 AI 任务。',
   NOTE_BUSY: '这篇笔记已有正在运行的任务。',
   PREVIOUS_TASK_UNSAVED: '上一场生成内容尚未保存，请先处理保存失败。',
-  MODEL_STEP_LIMIT: '已达到本场模型步骤上限。',
   MODEL_REQUEST_FAILED: '模型请求失败，请检查接口、密钥和网络。',
   CONFLICT: '笔记已变化，请先处理冲突。'
 }
@@ -356,7 +365,7 @@ export async function start(root: HTMLElement): Promise<void> {
     if (event.sessionId && event.sessionId !== vaultSession) return
     if (event.persisted && event.revision) hostRevisions.set(event.relPath, event.revision)
     if (event.status === 'running') {
-      if (!endedTaskIds.has(event.id) && !activeTasks.has(event.id)) activeTasks.set(event.id, { id: event.id, relPath: event.relPath, startedAt: Date.now() })
+      if (!endedTaskIds.has(event.id)) activeTasks.set(event.id, { id: event.id, relPath: event.relPath, startedAt: activeTasks.get(event.id)?.startedAt ?? Date.now(), activity: event.activity })
     } else {
       endedTaskIds.add(event.id)
       activeTasks.delete(event.id)
@@ -1039,7 +1048,7 @@ export async function start(root: HTMLElement): Promise<void> {
         const task = [...activeTasks.values()][0]!
         const label = document.createElement('span')
         label.className = 'status-item status-task'
-        label.textContent = `${titleOf(task.relPath.split('/').pop() ?? task.relPath)} · 生成中`
+        label.textContent = `${titleOf(task.relPath.split('/').pop() ?? task.relPath)} · ${task.activity || '生成中'}`
         const stop = document.createElement('button')
         stop.type = 'button'
         stop.className = 'status-task-stop'
@@ -1076,7 +1085,7 @@ export async function start(root: HTMLElement): Promise<void> {
       const row = document.createElement('div')
       row.className = 'task-row'
       const name = document.createElement('span')
-      name.textContent = task.relPath
+      name.textContent = `${task.relPath} · ${task.activity || '生成中'}`
       const stop = document.createElement('button')
       stop.type = 'button'
       stop.textContent = '停止'

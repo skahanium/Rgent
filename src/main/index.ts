@@ -17,9 +17,10 @@ import { VAULT_MEDIA_SCHEME } from '../shared/vault-rel.ts'
 import { VaultSession } from './vault.ts'
 import { createModelConfigStore, type ModelConfigStore } from './model-config.ts'
 import { TaskAuthorizationRegistry, isAuthorizationCommand } from './task-authorization.ts'
+import { createScopedAgentTools } from './scoped-agent-tools.ts'
 import { AgentHost } from './agent-host.ts'
 import { modelTierFor } from './permissions.ts'
-import { streamModelText } from './model-stream.ts'
+import { streamModelText, streamModelStep } from './model-stream.ts'
 import { VaultStructureGate } from './vault-mutation-queue.ts'
 import { isTrustedIpcSender } from './ipc-sender.ts'
 
@@ -95,13 +96,7 @@ function send(channel: string, payload?: unknown): void {
       }).catch(()=>controller.abort())
     }
     const current = vault; const token = current?.sessionId()
-    for (const task of agentHost?.active() ?? []) {
-      if (!current || task.root !== current.root) continue
-      const binding = agentHost?.bindingFor(task.root,task.relPath)
-      if (binding) void current.noteStatus(task.relPath,binding).then(state => {
-        if(current.sessionId()===token && state.status!=='ready') void agentHost?.cancel(task.id,'user').catch(()=>{})
-      }).catch(()=>{})
-    }
+    if (current?.root && token) void agentHost?.recheckSources(current.root, token).catch(() => {})
   }
   const target = mainWindow
   if (!target || target.isDestroyed()) return
@@ -586,8 +581,8 @@ function registerIpc(): void {
     try {
       await agentHost?.whenLaunchesSettled()
       currentVault.assertSession(token)
-      const affected = agentHost?.active().filter((task) => task.root === root && structureGate.affects(root, task.relPath)) ?? []
-      if (agentHost?.active().some((task) => task.root === root && !structureGate.affects(root, task.relPath))) {
+      const affected = agentHost?.active().filter((task) => task.root === root && agentHost!.scopePaths(task.id).some(path => structureGate.affects(root, path))) ?? []
+      if (agentHost?.active().some((task) => task.root === root && !agentHost!.scopePaths(task.id).some(path => structureGate.affects(root, path)))) {
         throw new Error('OTHER_TASK_RUNNING')
       }
       for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
@@ -683,10 +678,10 @@ app.whenReady().then(() => {
     acceptsObject:(relPath,expected,current)=>vault?.acceptsObject(relPath,expected,current)??false,
     ownerValid:owner=>!!mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed() &&
       mainWindow.webContents.getURL()===rendererEntryUrl && owner===`${mainWindow.webContents.id}:${mainWindow.webContents.mainFrame.routingId}`,
-    configuration:()=>{
+    configuration:extraReferences=>{
       if(!modelConfig)throw Error(modelConfigError??'MODEL_CONFIG_UNAVAILABLE')
       const config=modelConfig.getPublic()
-      return {credential:modelConfig.credential(config.selected),limits:config.limits.none}
+      return {credential:modelConfig.credential(config.selected),limits:extraReferences ? config.limits.local : config.limits.none}
     }
   })
   agentHost = new AgentHost({
@@ -714,6 +709,11 @@ app.whenReady().then(() => {
       return modelConfig.getPublic().limits.none
     },
     stream: (input, signal) => streamModelText({ ...input, signal }),
+    streamStep: (input, signal) => streamModelStep({ ...input, signal }),
+    createReadOnlyTools: (grant, taskId) => createScopedAgentTools(grant, taskId, {
+      read: relPath => vault!.read(relPath), tier: modelTierFor,
+      acceptsObject: (relPath, expected, current) => vault?.acceptsObject(relPath, expected, current) ?? false
+    }),
     emit: ({ root, ...event }) => {
       if (vault?.root === root && event.sessionId === vault.sessionId()) send(IPC.agentEvent, event)
     }
