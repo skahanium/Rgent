@@ -1,14 +1,17 @@
 import { WidgetType } from '@codemirror/view'
 import type { CalloutRef } from '@markdown'
-import { renderReadOnlyNode } from '../read-only.ts'
+import type { NoteHost } from '../host.ts'
+import { renderReadOnlyNode, disposeReadOnlyImages } from '../read-only.ts'
 
 export class CalloutWidget extends WidgetType {
-  constructor(readonly callout: CalloutRef) {
+  constructor(readonly callout: CalloutRef, readonly host?: NoteHost) {
     super()
   }
 
   eq(other: CalloutWidget): boolean {
-    return this.callout.range.start === other.callout.range.start
+    return this.host === other.host
+      && this.host?.imageEpoch === other.host?.imageEpoch
+      && this.callout.range.start === other.callout.range.start
       && this.callout.range.end === other.callout.range.end
       && this.callout.source?.slice(this.callout.range.start, this.callout.range.end) === other.callout.source?.slice(other.callout.range.start, other.callout.range.end)
       && this.callout.kind === other.callout.kind
@@ -17,6 +20,11 @@ export class CalloutWidget extends WidgetType {
   }
 
   toDOM(): HTMLElement {
+    if (this.callout.node) {
+      const el = renderReadOnlyNode(this.callout.node, this.callout.source ?? '', this.host) as HTMLElement
+      el.setAttribute('role', 'note')
+      return el
+    }
     const el = document.createElement('aside')
     el.className = `md-callout md-callout-${this.callout.kind}`
     el.setAttribute('role', 'note')
@@ -24,8 +32,7 @@ export class CalloutWidget extends WidgetType {
     title.className = 'md-callout-title'
     title.textContent = this.callout.title
     el.append(title)
-    if (this.callout.node) el.append(...this.callout.node.children.map((child) => renderReadOnlyNode(child, this.callout.source ?? '')))
-    else if (this.callout.body.trim()) {
+    if (this.callout.body.trim()) {
       const body = document.createElement('p')
       body.className = 'md-callout-body'
       body.textContent = this.callout.body
@@ -33,6 +40,8 @@ export class CalloutWidget extends WidgetType {
     }
     return el
   }
+
+  destroy(dom: HTMLElement): void { disposeReadOnlyImages(dom) }
 
   ignoreEvent(): boolean {
     return true

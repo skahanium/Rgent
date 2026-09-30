@@ -1,7 +1,7 @@
 import { WidgetType } from '@codemirror/view'
 import type { TableRef } from '@markdown'
 import type { NoteHost } from '../host.ts'
-import { renderReadOnlyNode } from '../read-only.ts'
+import { renderReadOnlyNode, disposeReadOnlyImages } from '../read-only.ts'
 
 export class TableWidget extends WidgetType {
   constructor(readonly table: TableRef, readonly host?: NoteHost) {
@@ -12,38 +12,37 @@ export class TableWidget extends WidgetType {
     return this.table.range.start === other.table.range.start
       && this.table.range.end === other.table.range.end
       && this.host === other.host
+      && this.host?.imageEpoch === other.host?.imageEpoch
       && this.table.source?.slice(this.table.range.start, this.table.range.end) === other.table.source?.slice(other.table.range.start, other.table.range.end)
       && JSON.stringify(this.table.header) === JSON.stringify(other.table.header)
       && JSON.stringify(this.table.rows) === JSON.stringify(other.table.rows)
   }
 
   toDOM(): HTMLElement {
+    if (this.table.node) {
+      const table = renderReadOnlyNode(this.table.node, this.table.source ?? '', this.host) as HTMLElement
+      table.classList.add('md-table')
+      table.setAttribute('aria-label', '表格')
+      return table
+    }
     const table = document.createElement('table')
     table.className = 'md-table'
     table.setAttribute('aria-label', '表格')
     const thead = document.createElement('thead')
     const headRow = document.createElement('tr')
-    for (const [index, cell] of this.table.header.entries()) {
+    for (const cell of this.table.header) {
       const th = document.createElement('th')
-      const alignment = this.table.node?.align?.[index]
-      if (alignment) th.style.textAlign = alignment
-      const ast = this.table.node?.children[0]?.children[index]
-      if (ast) th.append(...ast.children.map((child) => renderReadOnlyNode(child, this.table.source ?? '', this.host)))
-      else th.textContent = cell
+      th.textContent = cell
       headRow.append(th)
     }
     thead.append(headRow)
     table.append(thead)
     const tbody = document.createElement('tbody')
-    for (const [rowIndex, row] of this.table.rows.entries()) {
+    for (const row of this.table.rows) {
       const tr = document.createElement('tr')
-      for (const [cellIndex, cell] of row.entries()) {
+      for (const cell of row) {
         const td = document.createElement('td')
-        const alignment = this.table.node?.align?.[cellIndex]
-        if (alignment) td.style.textAlign = alignment
-        const ast = this.table.node?.children[rowIndex + 1]?.children[cellIndex]
-        if (ast) td.append(...ast.children.map((child) => renderReadOnlyNode(child, this.table.source ?? '', this.host)))
-        else td.textContent = cell
+        td.textContent = cell
         tr.append(td)
       }
       tbody.append(tr)
@@ -51,6 +50,8 @@ export class TableWidget extends WidgetType {
     table.append(tbody)
     return table
   }
+
+  destroy(dom: HTMLElement): void { disposeReadOnlyImages(dom) }
 
   ignoreEvent(): boolean {
     return true

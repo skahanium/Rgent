@@ -26,6 +26,7 @@
     "@codemirror/view": "^6.43.13",
     "ai": "^7.0.118",
     "dompurify": "^3.4.16",
+    "ipaddr.js": "2.2.0",
     "katex": "^0.18.9",
     "mdast-util-from-markdown": "^2.0.3",
     "mdast-util-frontmatter": "^2.0.1",

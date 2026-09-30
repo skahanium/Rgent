@@ -1,11 +1,11 @@
-import { compileFragment } from '@markdown'
+import { compileFragment, type ImageRef } from '@markdown'
 import type { Nodes, Root } from 'mdast'
-import { joinVaultRel, vaultMediaUrl } from '../../../shared/vault-rel.ts'
+import { joinVaultRel } from '../../../shared/vault-rel.ts'
 import type { NoteHost } from './host.ts'
 import { renderSafeHtmlFragment } from './safe-html.ts'
 import { MathWidget } from './widgets/math.ts'
 import { MermaidWidget } from './widgets/mermaid.ts'
-import { createImageElement } from './widgets/image.ts'
+import { createImageElement, createVaultImageElement, disposeImageElement } from './widgets/image.ts'
 
 type ExtendedNode = Nodes & { children?: Nodes[]; value?: string; label?: string; title?: string; url?: string; lang?: string; depth?: number; ordered?: boolean; start?: number; checked?: boolean | null; align?: Array<'left' | 'right' | 'center' | null>; kind?: string; target?: string; display?: string }
 
@@ -19,13 +19,14 @@ function safeHref(raw: string): string | null {
 function text(value: string): Text { return document.createTextNode(value) }
 
 export function renderReadOnlyNode(node: Nodes, source: string, host?: NoteHost): Node {
-  return render(node as ExtendedNode, source, host)
+  const result = compileFragment(source)
+  return render(node as ExtendedNode, source, host, false, 'body', result.index.images)
 }
 
-function render(node: ExtendedNode, source: string, host?: NoteHost, standaloneImage = false): Node {
+function render(node: ExtendedNode, source: string, host?: NoteHost, standaloneImage = false, region: 'body' | 'ledger' = 'body', images: ImageRef[] = []): Node {
   const children = (): Node[] => (node.children ?? []).map((child) =>
     render(child as ExtendedNode, source, host,
-      node.type === 'paragraph' && node.children?.length === 1 && child.type === 'image'))
+      node.type === 'paragraph' && node.children?.length === 1 && child.type === 'image', region, images))
   const element = (name: string, className?: string): HTMLElement => {
     const el = document.createElement(name)
     if (className) el.className = className
@@ -45,13 +46,34 @@ function render(node: ExtendedNode, source: string, host?: NoteHost, standaloneI
       // mdast keeps opening/closing inline HTML as separate nodes. Join only this
       // paragraph's already-parsed children, then let DOMPurify parse and filter
       // the HTML as a single fragment. Markdown siblings come from the same AST.
+      const replacements = new Map<string, Node>()
       const raw = node.children.map((child) => {
         if (child.type === 'html') return child.value
-        const holder = document.createElement('span')
-        holder.append(render(child as ExtendedNode, source, host))
-        return holder.innerHTML
+        const token = `rgent-inline-${crypto.randomUUID()}`
+        replacements.set(token, render(child as ExtendedNode, source, host, false, region, images))
+        return token
       }).join('')
-      paragraph.append(renderSafeHtmlFragment(raw))
+      const fragment = renderSafeHtmlFragment(raw)
+      const walker = document.createTreeWalker(fragment, NodeFilter.SHOW_TEXT)
+      const textNodes: Text[] = []
+      while (walker.nextNode()) textNodes.push(walker.currentNode as Text)
+      for (const original of textNodes) {
+        let remaining = original.data
+        const pieces: Node[] = []
+        while (remaining) {
+          let nearest: { token: string; at: number; node: Node } | undefined
+          for (const [token, node] of replacements) {
+            const at = remaining.indexOf(token)
+            if (at >= 0 && (!nearest || at < nearest.at)) nearest = { token, at, node }
+          }
+          if (!nearest) { pieces.push(text(remaining)); break }
+          if (nearest.at > 0) pieces.push(text(remaining.slice(0, nearest.at)))
+          pieces.push(nearest.node)
+          remaining = remaining.slice(nearest.at + nearest.token.length)
+        }
+        original.replaceWith(...pieces)
+      }
+      paragraph.append(fragment)
       return paragraph
     }
     case 'heading': return element(`h${Math.min(6, Math.max(1, node.depth ?? 1))}`)
@@ -98,14 +120,20 @@ function render(node: ExtendedNode, source: string, host?: NoteHost, standaloneI
       return link
     }
     case 'image': {
+      const range = { start: node.position?.start.offset ?? -1, end: node.position?.end.offset ?? -1 }
+      const original = images.find(image => image.range.start === range.start && image.range.end === range.end && image.url === node.url)
+      const imageSource = region === 'ledger' ? 'ledger' : original?.source
       if (/^https?:\/\//i.test(node.url ?? '')) {
-        return createImageElement(node.alt ?? '', node.url ?? '', standaloneImage, host?.remoteImageGet)
+        return createImageElement(node.alt ?? '', node.url ?? '', standaloneImage, host?.remoteImageGet, undefined, {
+          source: imageSource,
+          getContext: () => host?.imageContext?.(range, region) ?? (host ? {noteRelPath: host.noteRelPath, region, ...range} : undefined)
+        })
       }
       const image = document.createElement('img')
       image.alt = node.alt ?? ''
       const rel = host && joinVaultRel(host.noteRelPath, node.url ?? '')
-      if (rel && host?.vaultHas(rel)) image.src = vaultMediaUrl(rel)
-      else image.dataset.unavailable = node.url ?? ''
+      if (rel && host?.vaultHas(rel)) return createVaultImageElement(node.alt ?? '', rel, standaloneImage, imageSource)
+      image.dataset.unavailable = node.url ?? ''
       return image
     }
     case 'table': {
@@ -166,9 +194,15 @@ function render(node: ExtendedNode, source: string, host?: NoteHost, standaloneI
   }
 }
 
+export function disposeReadOnlyImages(root: HTMLElement): void {
+  if (root.classList.contains('md-image-slot')) disposeImageElement(root)
+  for (const image of root.querySelectorAll<HTMLElement>('.md-image-slot')) disposeImageElement(image)
+}
+
 /** Read-only projection of the same mdast pipeline used by editable notes. */
 export function renderReadOnlyMarkdown(host: HTMLElement, source: string, noteHost?: NoteHost): void {
   const result = compileFragment(source)
+  disposeReadOnlyImages(host)
   host.replaceChildren()
   if (result.stale) {
     host.classList.add('md-source-fallback')
@@ -178,8 +212,9 @@ export function renderReadOnlyMarkdown(host: HTMLElement, source: string, noteHo
   }
   host.classList.remove('md-source-fallback')
   host.removeAttribute('data-render-error')
-  try { host.append(render(result.tree as Root, source, noteHost)) }
+  try { host.append(render(result.tree as Root, source, noteHost, false, 'ledger', result.index.images)) }
   catch (error) {
+    disposeReadOnlyImages(host)
     host.replaceChildren(text(source))
     host.classList.add('md-source-fallback')
     host.setAttribute('data-render-error', error instanceof Error ? error.message : String(error))

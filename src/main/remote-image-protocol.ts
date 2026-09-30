@@ -9,7 +9,8 @@ export function attachRemoteImageProtocol(service: RemoteImageService): void {
     const image = service.read(token)
     if (!image) return new Response('', { status: 404 })
     return new Response(new Uint8Array(image.bytes), {
-      headers: { 'content-type': image.mime, 'x-content-type-options': 'nosniff', 'cache-control': 'no-store' }
+      headers: { 'content-type': image.mime, 'x-content-type-options': 'nosniff', 'cache-control': 'no-store',
+        'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'" }
     })
   })
 }

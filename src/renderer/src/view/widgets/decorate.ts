@@ -25,7 +25,7 @@ export function decorationForWidget(
         block: widget.math.block
       })
     case 'callout':
-      return Decoration.replace({ widget: new CalloutWidget(widget.callout), block: true })
+      return Decoration.replace({ widget: new CalloutWidget(widget.callout, host), block: true })
     case 'wikilink':
       return Decoration.replace({ widget: new WikilinkWidget(widget.wikilink, host) })
     case 'mermaid':
