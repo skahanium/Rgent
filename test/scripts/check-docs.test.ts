@@ -12,6 +12,11 @@ function fixture(): { root: string; build: string; run: () => { status: number |
   cpSync(path.join(process.cwd(), 'docs'), path.join(root, 'docs'), { recursive: true })
   mkdirSync(path.join(root, 'scripts'))
   cpSync(path.join(process.cwd(), 'scripts/check-docs.mjs'), path.join(root, 'scripts/check-docs.mjs'))
+  cpSync(path.join(process.cwd(), 'scripts/probe-trash.mjs'), path.join(root, 'scripts/probe-trash.mjs'))
+  mkdirSync(path.join(root, 'test/native'), { recursive: true })
+  for (const name of ['trash_mac.mm', 'trash_win.cc']) {
+    cpSync(path.join(process.cwd(), 'test/native', name), path.join(root, 'test/native', name))
+  }
   return {
     root,
     build: path.join(root, 'docs/build.md'),
@@ -24,6 +29,33 @@ function fixture(): { root: string; build: string; run: () => { status: number |
 afterEach(() => { for (const root of fixtures.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('docs stage invariants', () => {
+  it('preserves headings after inline fence examples and before real fenced blocks', () => {
+    const { root, run } = fixture()
+    const vision = path.join(root, 'docs/vision.md')
+    const source = readFileSync(vision, 'utf8')
+    const regression = [
+      '', '行内示例：` ```example `。', '', '## 回归测试可见标题', '',
+      '```mermaid', 'flowchart LR', '  A --> B', '```', ''
+    ].join('\r\n')
+    writeFileSync(vision, source.replace(/\r?\n/g, '\r\n') + regression)
+    const map = path.join(root, 'docs/README.md')
+    writeFileSync(map, readFileSync(map, 'utf8') + '\n[回归入口](vision.md#回归测试可见标题)\n')
+    const result = run()
+    expect(result.stderr).toBe('')
+    expect(result.status).toBe(0)
+  })
+
+  it('rejects links to headings inside real fenced code', () => {
+    const { root, run } = fixture()
+    const vision = path.join(root, 'docs/vision.md')
+    writeFileSync(vision, readFileSync(vision, 'utf8') + '\n```markdown\n## 围栏内测试标题\n```\n')
+    const map = path.join(root, 'docs/README.md')
+    writeFileSync(map, readFileSync(map, 'utf8') + '\n[无效入口](vision.md#围栏内测试标题)\n')
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('锚点不存在：vision.md#围栏内测试标题')
+  })
+
   it('rejects a current stage without its own section', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')

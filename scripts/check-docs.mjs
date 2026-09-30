@@ -9,10 +9,15 @@ const files = ['AGENTS.md', 'README.md', 'CONTRIBUTING.md', ...[
 ].map((name) => `docs/${name}`)]
 const errors = []
 
+/** 只消费独占行的围栏；行内代码中的三个反引号不是围栏起点。兼容 CRLF。 */
+function stripFencedCode(source) {
+  return source.replace(/^ {0,3}```[^\r\n]*\r?\n[\s\S]*?^ {0,3}```[ \t]*\r?$/gm, '')
+}
+
 /** GitHub 风格的标题锚点：小写、去标点、空白转连字符。中文保留原字。 */
 function anchorsOf(source) {
   const anchors = new Set()
-  const withoutCode = source.replace(/```[\s\S]*?```/g, '')
+  const withoutCode = stripFencedCode(source)
   for (const match of withoutCode.matchAll(/^#{1,6}\s+(.+?)\s*$/gm)) {
     const text = match[1]
       .replace(/`[^`]*`/g, '')
@@ -31,7 +36,7 @@ function anchorsOf(source) {
 
 for (const file of files) {
   const source = readFileSync(path.join(root, file), 'utf8')
-  const withoutCode = source.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '')
+  const withoutCode = stripFencedCode(source).replace(/`[^`\n]*`/g, '')
   for (const match of withoutCode.matchAll(/!?\[[^\]\n]*\]\(([^)]+)\)/g)) {
     const raw = match[1].trim().replace(/^<|>$/g, '')
     const [target, hash] = raw.split('#')
