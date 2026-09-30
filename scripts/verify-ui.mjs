@@ -41,6 +41,14 @@ async function probe(name, run) {
   }
 }
 
+/**
+ * 一个阶段内部抛错也只记一条失败，后面的独立阶段照常跑，总账不会因为中断而丢。
+ * 阶段体不重排缩进：这次只加包裹，减少无关改动。
+ */
+function stageFailed(name, error) {
+  check(`${name}：阶段中断`, false, error instanceof Error ? error.message.slice(0, 160) : String(error))
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -110,15 +118,16 @@ async function confirmSlashAuthorization(page, inspect = false) {
   if (inspect) {
     check('首次回车只展示本篇范围与实际模型接收方', await page.eval(`(async () => {
       const popup=document.querySelector('.overlay-authorization');
+      if(!popup)return false;
       return (await window.rgent.agentTasks()).length===0 && popup.querySelector('.authorization-recipient').textContent.includes('127.0.0.1:') &&
         popup.querySelectorAll('.authorization-manifest li').length===1 && popup.querySelector('.authorization-disclosure').textContent.includes('发送')
     })()`))
     check('口令旁授权浮层具有真实轮廓、可见位置及内部焦点', await page.eval(`(() => {
-      const popup=document.querySelector('.overlay-authorization');const r=popup.getBoundingClientRect();const style=getComputedStyle(popup);
+      const popup=document.querySelector('.overlay-authorization');if(!popup)return false;const r=popup.getBoundingClientRect();const style=getComputedStyle(popup);
       return r.width>=300 && r.width<=450 && r.left>=0 && r.top>=0 && r.right<=innerWidth+1 && r.bottom<=innerHeight+1 &&
         style.position==='fixed' && parseFloat(style.borderTopWidth)>0 && popup.contains(document.activeElement)
     })()`))
-    await page.eval(`document.querySelector('.overlay-authorization').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',isComposing:true,bubbles:true,cancelable:true}))`)
+    await page.eval(`document.querySelector('.overlay-authorization')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',isComposing:true,bubbles:true,cancelable:true}))`)
     check('输入法组合回车不启动模型任务', await page.eval(`(async () => (await window.rgent.agentTasks()).length===0 && !!document.querySelector('.overlay-authorization[open]'))()`))
     await page.key('Escape','Escape',0,27)
     check('取消授权保留原始口令且焦点回到正文', await waitFor(page, `!document.querySelector('.overlay-authorization[open]') && document.querySelector('.cm-content')?.textContent.includes('/请写两句话') && document.querySelector('.cm-editor')?.contains(document.activeElement)`))
@@ -161,7 +170,7 @@ async function verifyScopedHost(page, vault, shot, requests) {
   check('取消工具范围授权保留口令并归还焦点', await waitFor(page, `!document.querySelector('.overlay-authorization[open]') && document.querySelector('.cm-content')?.textContent.includes('/工具查证') && document.querySelector('.cm-editor')?.contains(document.activeElement)`))
   await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
   check('窄窗重新准备三篇范围', await choose())
-  check('窄窗范围、主机和内部焦点可辨', await page.eval(`(() => { const popup=document.querySelector('.overlay-authorization');const r=popup.getBoundingClientRect();return r.left>=0 && r.top>=0 && r.right<=innerWidth+1 && r.bottom<=innerHeight+1 && popup.contains(document.activeElement) && popup.querySelector('.authorization-recipient').textContent.includes('127.0.0.1:') })()`), await page.eval(`(() => {const popup=document.querySelector('.overlay-authorization');const r=popup.getBoundingClientRect();return JSON.stringify({bounds:{left:r.left,top:r.top,right:r.right,bottom:r.bottom},viewport:{width:innerWidth,height:innerHeight},focus:document.activeElement?.outerHTML.slice(0,150),recipient:popup.querySelector('.authorization-recipient').textContent})})()`))
+  check('窄窗范围、主机和内部焦点可辨', await page.eval(`(() => { const popup=document.querySelector('.overlay-authorization');if(!popup)return false;const r=popup.getBoundingClientRect();return r.left>=0 && r.top>=0 && r.right<=innerWidth+1 && r.bottom<=innerHeight+1 && popup.contains(document.activeElement) && popup.querySelector('.authorization-recipient').textContent.includes('127.0.0.1:') })()`), await page.eval(`(() => {const popup=document.querySelector('.overlay-authorization');if(!popup)return 'no-popup';const r=popup.getBoundingClientRect();return JSON.stringify({bounds:{left:r.left,top:r.top,right:r.right,bottom:r.bottom},viewport:{width:innerWidth,height:innerHeight},focus:document.activeElement?.outerHTML.slice(0,150),recipient:popup.querySelector('.authorization-recipient').textContent})})()`))
   await shot(page, 'auth-scope-800')
   writeFileSync(path.join(vault, '工具参考.md'), '# 参考原文\n\n工具线索：受控正文证据。来源复核。\n')
   await page.key('Enter', 'Enter', 0, 13)
@@ -667,7 +676,9 @@ async function main() {
   let hostServer = null
   const child = spawn(
     electron,
-    ['.', `--user-data-dir=${profile}`, '--no-sandbox', '--disable-gpu', `--remote-debugging-port=${port}`],
+    ['.', `--user-data-dir=${profile}`, '--no-sandbox', '--disable-gpu',
+      // 窗口被别的应用挡住时 Chromium 会降频定时器，页内轮询会假超时。
+      '--disable-renderer-backgrounding', '--disable-background-timer-throttling', `--remote-debugging-port=${port}`],
     { cwd: root, env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }, stdio: ['ignore', 'ignore', 'pipe'] }
   )
   child.on('error', (error) => { startupError = error.message })
@@ -696,7 +707,11 @@ async function main() {
       return
     }
 
+    // 阶段各自成块后，跨阶段共用的变量提在这里。
+    let marked = ''
+    const toolLoopRequests = []
     process.stdout.write('\n外壳与主题\n')
+    try {
     await waitFor(page, `document.querySelectorAll('.tree-row').length > 0`)
     check('本机主题偏好在窗口首帧生效', (await page.eval(`document.documentElement.dataset.theme === 'night' && getComputedStyle(document.documentElement).colorScheme === 'dark' && window.rgent.themeGet().then((mode) => mode === 'night')`)) === true)
     check('窗口起来了，库里三篇都在', (await page.eval(`document.querySelectorAll('.tree-note').length`)) === 3)
@@ -887,7 +902,9 @@ async function main() {
     check('减少动态效果：过渡归零', motion === '0s', motion)
     check('减少动态效果不影响主题', (await page.eval(`document.documentElement.dataset.theme`)) === 'night')
 
+    } catch (error) { stageFailed('外壳与主题', error) }
     process.stdout.write('\n窄窗与长内容\n')
+    try {
     await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
     await sleep(500)
     const narrow = await page.eval(`(() => {
@@ -916,7 +933,9 @@ async function main() {
     await page.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] })
     await sleep(300)
 
+    } catch (error) { stageFailed('窄窗与长内容', error) }
     process.stdout.write('\n键盘可达\n')
+    try {
     await page.eval(`document.querySelector('.tree-note').focus()`)
     check('搜索浮层：快捷键打开且焦点在输入框', await (async () => {
       await page.key('k', 'KeyK', modifier, 75)
@@ -1022,7 +1041,9 @@ async function main() {
       return { ok: before === after && /第 [3-9] 行/.test(after), detail: `${before} → ${after}` }
     })
 
+    } catch (error) { stageFailed('键盘可达', error) }
     process.stdout.write('\nMarkdown 阅读管线\n')
+    try {
     const syntaxNote = [
       '---', 'title: 混合样例', '---', '',
       '### **混合标题**', '',
@@ -1078,9 +1099,11 @@ async function main() {
       return { ok: saved !== syntaxNote && saved.replace('X', '') === syntaxNote && !/(?<!\r)\n/.test(saved), detail: `原长 ${syntaxNote.length}，保存长 ${saved.length}，CRLF ${saved.includes('\r\n')}` }
     })
 
+    } catch (error) { stageFailed('Markdown 阅读管线', error) }
     process.stdout.write('\n画布呈现\n')
+    try {
     // 外部写入带标记的正文：宿主会把它当外部改动收进来，然后重开这一篇。
-    const marked = ['人写的一段。', '', '<!-- rgent:prompt:v1 -->', '把上周的会议整理成周报。', '保留关键决定。', '', '<!-- rgent:ai:v1 -->', '好，这是周报。', ''].join('\n')
+    marked = ['人写的一段。', '', '<!-- rgent:prompt:v1 -->', '把上周的会议整理成周报。', '保留关键决定。', '', '<!-- rgent:ai:v1 -->', '好，这是周报。', ''].join('\n')
     writeFileSync(path.join(vault, '研究记录.md'), marked)
     // 上一段把长文留成了当前 tab，这里显式切回带标记的那一篇。
     await page.eval(`(async () => {
@@ -1111,7 +1134,9 @@ async function main() {
     )
     await probe('显示层不改文件', async () => readFileSync(path.join(vault, '研究记录.md'), 'utf8') === before)
 
+    } catch (error) { stageFailed('画布呈现', error) }
     process.stdout.write('\n冲突双预览\n')
+    try {
     // 点进正文再敲一个字，制造脏稿。必须走 CDP 的真实输入：
     // 合成 MouseEvent 不会被 CM6 当成放光标（实测点不出脏稿）。
     const spot = JSON.parse(await page.eval(`(() => {
@@ -1151,7 +1176,9 @@ async function main() {
       (await page.eval(`document.querySelectorAll('.conflict-emph').length > 0`)) === true
     )
 
+    } catch (error) { stageFailed('冲突双预览', error) }
     process.stdout.write('\n长文响应\n')
+    try {
     await page.eval(`document.querySelector('.conflict [data-action="disk"]')?.click()`)
     await page.call('Emulation.clearDeviceMetricsOverride', {})
     for (let i = 1; i <= 5; i += 1) {
@@ -1161,20 +1188,22 @@ async function main() {
     await probe('五篇长文的打开、输入与滚动都有可记录的响应', async () => {
       const rows = await waitFor(page, `document.querySelectorAll('.tree-note').length >= 8`)
       if (!rows) return false
-      const samples = JSON.parse(await page.eval(`(async () => {
-        const out = []
-        for (let i = 1; i <= 5; i++) {
-          const row = [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('长文样例' + i))
-          if (!row) break
+      const samples = []
+      for (let i = 1; i <= 5; i += 1) {
+        // 每篇一次 CDP 调用：单次 Runtime.evaluate 的 30s 上限不再被五篇一起吃掉。
+        const sample = await page.eval(`(async () => {
+          const name = '长文样例${i}'
+          const row = [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes(name))
+          if (!row) return null
           const start = performance.now()
           row.click()
           for (let tick = 0; tick < 120; tick++) {
-            if (document.querySelector('.tab[aria-selected="true"]')?.innerText.includes('长文样例' + i) && document.querySelector('.cm-content')?.innerText.includes('第 0 段')) break
+            if (document.querySelector('.tab[aria-selected="true"]')?.innerText.includes(name) && document.querySelector('.cm-content')?.innerText.includes('第 0 段')) break
             await new Promise((resolve) => setTimeout(resolve, 25))
           }
           const open = performance.now() - start
           const view = document.querySelector('.cm-content')?.cmTile?.root?.view
-          if (!view) break
+          if (!view) return null
           const inputStart = performance.now()
           view.dispatch({ changes: { from: view.state.doc.length, insert: '测' } })
           const input = performance.now() - inputStart
@@ -1182,16 +1211,18 @@ async function main() {
           view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
           const scroll = performance.now() - scrollStart
-          out.push({ bytes: view.state.doc.length, open: Math.round(open), input: Math.round(input), scroll: Math.round(scroll) })
-        }
-        return JSON.stringify(out)
-      })()`))
+          return { bytes: view.state.doc.length, open: Math.round(open), input: Math.round(input), scroll: Math.round(scroll) }
+        })()`)
+        if (!sample) break
+        samples.push(sample)
+      }
       const maxInput = Math.max(...samples.map((sample) => sample.input))
       return { ok: samples.length === 5 && samples.every((sample) => sample.bytes > 18_000 && sample.open < 5000 && sample.scroll < 1000) && maxInput < 250, detail: JSON.stringify(samples) }
     })
 
-    const toolLoopRequests = []
+    } catch (error) { stageFailed('长文响应', error) }
     process.stdout.write('\nHost 最小环\n')
+    try {
     hostServer = createHttpServer((request, response) => {
       let body = ''
       request.on('data', (chunk) => { body += String(chunk) })
@@ -1311,7 +1342,9 @@ async function main() {
       return a.content.includes('· cancelled') && b.content.includes('· cancelled') && (await window.rgent.agentTasks()).length === 0
     })()`, 8000)
 
+    } catch (error) { stageFailed('Host 最小环', error) }
     process.stdout.write('\n笔记库文件生命周期\n')
+    try {
     await page.eval(`document.querySelector('.folder-create')?.click()`)
     check('库根新建文件夹入口可由键盘和鼠标使用', await waitFor(page, `!!document.querySelector('.modal input')`))
     await page.eval(`(() => { const input = document.querySelector('.modal input'); input.value = '生命周期'; document.querySelector('.modal button[value=ok]')?.click() })()`)
@@ -1376,7 +1409,9 @@ async function main() {
       readFileSync(path.join(vault, '生命周期', '过期.md'), 'utf8') === '外部第二版')
     check('废纸篓验证门未通过前没有删除入口', (await page.eval(`!([...document.querySelectorAll('.tier-menu button')].some((n) => n.textContent.includes('删除')))`)) === true)
 
+    } catch (error) { stageFailed('笔记库文件生命周期', error) }
     process.stdout.write('\n文件操作恢复状态\n')
+    try {
     const native = require(path.join(root, 'out', 'main', 'rgent_fs.node'))
     const handle = native.openRoot(vault)
     const hash = (bytes) => require('node:crypto').createHash('sha256').update(bytes).digest('hex')
@@ -1466,9 +1501,12 @@ async function main() {
       await page.key('Escape', 'Escape', 0, 27)
     } finally { native.closeRoot(handle) }
 
+    } catch (error) { stageFailed('文件操作恢复状态', error) }
     process.stdout.write('\n收尾\n')
+    try {
     check('整轮没有未捕获异常', page.errors.length === 0, page.errors.slice(0, 1).join(''))
 
+    } catch (error) { stageFailed('收尾', error) }
   } finally {
     if (child.exitCode == null) {
       child.kill()
@@ -1487,5 +1525,7 @@ async function main() {
 
 main().catch((error) => {
   process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
+  // 启动或收尾阶段抛错也必须给出总账，不能只剩一段堆栈。
+  process.stdout.write(`\n共 ${results.length} 条，失败 ${failures + 1} 条。\n`)
   process.exitCode = 1
 })
