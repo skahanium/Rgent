@@ -109,3 +109,12 @@ it('propagates cancellation while checking a historical dependency',async()=>{
  let release!:()=>void;let reached!:()=>void;const entered=new Promise<void>(r=>{reached=r});const blocked=new Promise<void>(r=>{release=r});f.hook(async path=>{if(path==='b.md'){reached();await blocked}})
  const c=new AbortController();const checking=f.tools.contextPolicy(source,c.signal);await entered;c.abort();await expect(checking).rejects.toThrow('TASK_CANCELLED');release()
 })
+
+it('rejects a read cursor reused as a list page', async () => {
+  const f = await fixture('x'.repeat(12000))
+  const sourceId = f.grant.sources[1]!.sourceId
+  const page: any = await f.tools.execute('read_library', { sourceId }, signal())
+  expect(page.nextCursor).toBeTruthy()
+  // read_library 不带 sourceId 会落到列表续页；游标 kind 不同，必须拒绝。
+  await expect(f.tools.execute('read_library', { cursor: page.nextCursor }, signal())).rejects.toThrow('INVALID_TOOL_CURSOR')
+})

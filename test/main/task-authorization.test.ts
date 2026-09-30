@@ -1,20 +1,22 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
+import type { NoteSnapshot, TreeEntry } from '../../src/shared/ipc.ts'
 
 function setup() {
   let onRead: ((path: string) => void | Promise<void>) | undefined
   let onTier: ((path: string) => void) | undefined
   let session = 'session-a'; let model = 'm'; let key = 'private'; let denied = ''
   const records = new Map([['a.md',{content:'/问\n', revision:'r-a',sessionId:session,objectVersion:'o-a'}],['dir/b.md',{content:'# B\n正文',revision:'r-b',sessionId:session,objectVersion:'o-b'}]])
-  const registry = new TaskAuthorizationRegistry({ root:()=>'/vault',session:()=>session,
-    tree:async()=>[{name:'a.md',relPath:'a.md',kind:'note'},{name:'dir',relPath:'dir',kind:'dir',children:[{name:'b.md',relPath:'dir/b.md',kind:'note'}]}],
-    read:async path=>{ await onRead?.(path); const item=records.get(path); if(!item)throw Error('ENOENT'); return {...item} },
-    tier:async (_root,path)=>{ onTier?.(path); if(path===denied)throw Error('FORBIDDEN');return path==='dir/b.md'?'follow':'reference' },
+  const deps = { root:()=>'/vault',session:()=>session,
+    tree:async():Promise<TreeEntry[]>=>[{name:'a.md',relPath:'a.md',kind:'note'},{name:'pic.png',relPath:'pic.png',kind:'file'},{name:'dir',relPath:'dir',kind:'dir',children:[{name:'b.md',relPath:'dir/b.md',kind:'note'}]}],
+    read:async (path:string)=>{ await onRead?.(path); const item=records.get(path); if(!item)throw Error('ENOENT'); return {...item} },
+    tier:async (_root:string,path:string)=>{ onTier?.(path); if(path===denied)throw Error('FORBIDDEN');return path==='dir/b.md'?'follow':'reference' },
     acceptsObject:()=>false,
-    configuration:()=>({credential:{provider:'custom',baseURL:'https://model.example/v1',modelId:model,contextTokens:16000,apiKey:key},limits:{seconds:180,steps:4,tools:0}})
-  })
+    configuration:()=>({credential:{provider:'custom' as const,baseURL:'https://model.example/v1',modelId:model,contextTokens:16000,apiKey:key},limits:{seconds:180,steps:4,tools:0}})
+  }
+  const registry = new TaskAuthorizationRegistry(deps)
   const request={relPath:'a.md',sessionId:session,objectVersion:'o-a',expectedRevision:'r-a',range:{start:0,end:2},expectedText:'/问',promptText:'问',references:['dir']}
-  return {registry,request,records,onRead:(hook:(path:string)=>void | Promise<void>)=>{onRead=hook},onTier:(hook:(path:string)=>void)=>{onTier=hook},session:(x:string)=>{session=x},model:(x:string)=>{model=x},key:(x:string)=>{key=x},deny:(x:string)=>{denied=x}}
+  return {registry,deps,request,records,onRead:(hook:(path:string)=>void | Promise<void>)=>{onRead=hook},onTier:(hook:(path:string)=>void)=>{onTier=hook},session:(x:string)=>{session=x},model:(x:string)=>{model=x},key:(x:string)=>{key=x},deny:(x:string)=>{denied=x}}
 }
 
 describe('single task authorization',()=>{
@@ -104,4 +106,68 @@ it.each(['revoke', 'abort'] as const)('does not start another source operation a
   release()
   await expect(validation).rejects.toThrow(mode === 'revoke' ? 'AUTHORIZATION_REVOKED' : 'TASK_CANCELLED')
   expect(operations).toEqual(['tier:a.md', 'read:a.md'])
+})
+
+it('expires a prepared preview instead of letting it be consumed later', async () => {
+  vi.useFakeTimers()
+  try {
+    const app = setup()
+    const preview = await app.registry.preview('a', app.request)
+    vi.setSystemTime(Date.now() + 6 * 60 * 1000)
+    await expect(app.registry.consume('a', { ...app.request, previewId: preview.id })).rejects.toThrow('INVALID_AUTHORIZATION')
+  } finally { vi.useRealTimers() }
+})
+
+it('revokes a live grant once the calling window stops being valid', async () => {
+  const app = setup()
+  let valid = true
+  const registry = new TaskAuthorizationRegistry({ ...app.deps, ownerValid: () => valid })
+  const preview = await registry.preview('a', app.request)
+  const grant = await registry.consume('a', { ...app.request, previewId: preview.id })
+  valid = false
+  await expect(grant.assertLive('model')).rejects.toThrow('AUTHORIZATION_REVOKED')
+})
+
+it.each(['../x.md', '.hidden.md', 'a\\b.md', '/abs.md', 'dir/../a.md'])('refuses a reference that is not a plain vault path: %s', async (reference) => {
+  const app = setup()
+  await expect(app.registry.preview('a', { ...app.request, references: [reference] })).rejects.toThrow('BAD_REQUEST')
+})
+
+it('refuses an attachment reference and a directory expansion beyond the object cap', async () => {
+  const app = setup()
+  await expect(app.registry.preview('a', { ...app.request, references: ['pic.png'] })).rejects.toThrow('OUTSIDE_TASK_SCOPE')
+
+  const notes = new Map<string, NoteSnapshot>([['a.md', { content: '/问\n', revision: 'ra', sessionId: 's', objectVersion: 'oa' }]])
+  const children: TreeEntry[] = []
+  for (let at = 0; at < 257; at += 1) {
+    const relPath = `big/n${at}.md`
+    notes.set(relPath, { content: '正文', revision: `r${at}`, sessionId: 's', objectVersion: `o${at}` })
+    children.push({ name: `n${at}.md`, relPath, kind: 'note' })
+  }
+  const registry = new TaskAuthorizationRegistry({
+    root: () => '/vault', session: () => 's',
+    tree: async (): Promise<TreeEntry[]> => [{ name: 'a.md', relPath: 'a.md', kind: 'note' }, { name: 'big', relPath: 'big', kind: 'dir', children }],
+    read: async (path) => ({ ...notes.get(path)! }),
+    tier: async (_root, path) => (path === 'a.md' ? 'reference' : 'follow'),
+    acceptsObject: () => false,
+    configuration: () => ({ credential: { provider: 'custom', baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 16000, apiKey: 'k' }, limits: { seconds: 180, steps: 4, tools: 0 } })
+  })
+  await expect(registry.preview('a', { relPath: 'a.md', sessionId: 's', objectVersion: 'oa', expectedRevision: 'ra', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', references: ['big'] }))
+    .rejects.toThrow('AUTHORIZATION_SCOPE_TOO_LARGE')
+})
+
+it('fails closed with SOURCE_BUSY when the origin proof is replaced during every check', async () => {
+  const app = setup()
+  const preview = await app.registry.preview('a', app.request)
+  const grant = await app.registry.consume('a', { ...app.request, previewId: preview.id })
+  let writes = 0
+  app.onRead((path) => {
+    if (path !== 'a.md') return
+    writes += 1
+    const updated = { content: `受控写回 ${writes}`, revision: `own-${writes}`, sessionId: 'session-a', objectVersion: 'o-a' }
+    app.records.set(path, updated)
+    grant.acknowledgeOrigin(updated)
+  })
+  await expect(grant.assertLive('model')).rejects.toThrow('SOURCE_BUSY')
+  await expect(grant.assertLive('model')).rejects.toThrow('AUTHORIZATION_REVOKED')
 })

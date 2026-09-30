@@ -172,14 +172,17 @@ export class AgentHost {
         try {
           await awaiting(this.checkpoints.get(key) ?? Promise.resolve(), signal)
           const grant = this.grants.get(key)
-          if (this.deps.root() === null && (!sessionId || this.deps.session?.() === undefined || this.deps.session?.() === sessionId)) throw Error('VAULT_CHANGED')
-          if (this.deps.root() !== root || sessionId && grant?.sessionId !== sessionId || !this.active().some(t => t.id === task.id)) return
+          // 未注入 session 的宿主（测试与内嵌用法）视为会话未变。
+          const sessionUnchanged = !sessionId || this.deps.session === undefined || this.deps.session() === sessionId
+          if (this.deps.root() === null && sessionUnchanged) throw Error('VAULT_CHANGED')
+          if (this.deps.root() !== root || (sessionId && grant?.sessionId !== sessionId) || !this.active().some(t => t.id === task.id)) return
           await awaiting(grant?.validateSources(signal) ?? Promise.resolve(), signal)
           await awaiting(this.scoped.get(key)?.assertCurrent(signal) ?? Promise.resolve(), signal)
           await awaiting(this.requirePermission(root, task.relPath), signal)
           await awaiting(this.readBound(root, task.relPath), signal)
         } catch (error) {
-          if ((this.deps.root() === root || this.deps.root() === null) && (!sessionId || this.deps.session?.() === undefined || this.deps.session?.() === sessionId) && this.active().some(t => t.id === task.id)) {
+          const sessionUnchanged = !sessionId || this.deps.session === undefined || this.deps.session() === sessionId
+          if ((this.deps.root() === root || (this.deps.root() === null && sessionUnchanged)) && this.active().some(t => t.id === task.id)) {
             void this.tasks.fail(task.id, error instanceof Error ? error.message : 'SOURCE_CHANGED').catch(() => {})
           }
         }
@@ -381,7 +384,7 @@ export class AgentHost {
               try { value = await wait(scoped!.execute(call.name, call.input, signal)) }
               catch (error) {
                 const reason = error instanceof Error ? error.message : 'TOOL_FAILED'
-                if (!['UNKNOWN_TOOL', 'INVALID_TOOL_ARGUMENTS', 'OUTSIDE_TASK_SCOPE', 'INVALID_TOOL_CURSOR'].includes(reason)) throw error
+                if (!['UNKNOWN_TOOL', 'INVALID_TOOL_ARGUMENTS', 'OUTSIDE_TASK_SCOPE', 'INVALID_TOOL_CURSOR', 'SOURCE_METADATA_TOO_LARGE'].includes(reason)) throw error
                 failure = reason
                 reportedByTool = true
               }

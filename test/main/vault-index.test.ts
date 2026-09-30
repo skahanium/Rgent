@@ -225,6 +225,14 @@ describe('vault index lifecycle', () => {
 })
 
 
+it('still indexes notes marked forbidden: the human index is never filtered by permissions', async () => {
+  const root = await vault()
+  await note(root, '工作/秘密.md', '# 秘密\n\n禁区内文。\n')
+  await writeFile(path.join(root, '.rgent-permissions'), JSON.stringify({ '工作': 'forbidden' }), 'utf8')
+  const hits = await indexFor(root).search('禁区内文')
+  expect(hits.map((hit) => hit.relPath)).toEqual(['工作/秘密.md'])
+})
+
 it('does not index ledger text when Markdown compilation fails', async () => {
   const root = await vault()
   await note(root, '失败.md', '正文\n<!-- rgent:ledger:v1 -->\n仅账本机密\n')

@@ -16,6 +16,19 @@ describe('Host context assembly', () => {
     expect(plan.refs.some((ref) => ref.kind === 'ledger')).toBe(true)
   })
 
+  it('treats a missing chapter policy as the single-note default and an explicit empty list as deny-all', () => {
+    const source = '开头。\n\n落点。\n<!-- rgent:ledger:v1 -->\n## 旧章\n曾经说过。\n'
+    const base = { source, prompt: '问', placement: source.indexOf('落点'), inputBudgetTokens: 1000, countTokens }
+    const open = buildHostContext(base)
+    expect(open.status).toBe('ready')
+    if (open.status === 'ready') expect(open.content).toContain('曾经说过')
+    const denied = buildHostContext({ ...base, allowedLedgerChapterIds: [] })
+    expect(denied.status).toBe('ready')
+    if (denied.status !== 'ready') return
+    expect(denied.content).not.toContain('曾经说过')
+    expect(denied.omitted.ledgerChapterIds).toHaveLength(1)
+  })
+
   it('requests a temporary sourced summary for older ledger chapters before dropping body', () => {
     const source = `开头。\n\n落点。\n\n中间正文。\n<!-- rgent:ledger:v1 -->\n## 旧章\n${'历史'.repeat(200)}\n## 新章\n最近一句。\n`
     const plan = buildHostContext({ source, prompt: '问', placement: source.indexOf('落点'), inputBudgetTokens: 130, countTokens })
