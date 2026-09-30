@@ -92,6 +92,17 @@ describe('docs stage invariants', () => {
     expect(result.stderr).toContain('对象矩阵')
   })
 
+  it('rejects a current matrix row whose object is not in the dependency order', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    const changed = source.replace(/^\|([^|\n]+)\|([^\n]*\*\*当前\*\*)/m, '| 不存在的对象 |$2')
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('「当前」行')
+  })
+
   it('rejects a matrix status outside the three phase states', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')

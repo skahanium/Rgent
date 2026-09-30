@@ -80,6 +80,12 @@ if (buildStage) {
 const matrixSection = build.split(/^## 对象 × 阶段\s*$/m)[1]?.split(/^## /m)[0]
 const currentRows = matrixSection?.split('\n').filter((line) => line.startsWith('|') && line.includes('**当前**')) ?? []
 if (currentRows.length !== 1) errors.push(`docs/build.md: 对象矩阵须恰有一个「当前」行，实际 ${currentRows.length} 行`)
+// 矩阵按代码地盘切，行名不必都是阶段名；但「当前」那一行必须能在依赖顺序里找到，
+// 否则当前阶段会指向一个路标里不存在的对象。
+const currentObject = currentRows[0]?.split('|')[1]?.trim()
+if (currentObject && !inOrder(currentObject)) {
+  errors.push(`docs/build.md: 对象矩阵「当前」行「${currentObject}」未列入依赖顺序代码块`)
+}
 const matrixRows = matrixSection?.split(/\r?\n/).filter((line) => /^\|[^-]/.test(line)).slice(1) ?? []
 if (matrixRows.length === 0) errors.push('docs/build.md: 对象矩阵缺少阶段状态行')
 for (const row of matrixRows) {
