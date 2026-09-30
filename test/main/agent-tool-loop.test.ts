@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { AgentHost, type HostDependencies } from '../../src/main/agent-host.ts'
 import type { ModelStepEvent } from '../../src/main/model-stream.ts'
-import type { TaskGrant } from '../../src/main/task-authorization.ts'
+import { TaskAuthorizationRegistry, type TaskGrant } from '../../src/main/task-authorization.ts'
+import { createScopedAgentTools } from '../../src/main/scoped-agent-tools.ts'
 import { ledgerProvenance } from '../../src/main/ledger-provenance.ts'
+import type { AgentStartRequest } from '../../src/shared/ipc.ts'
 
 function deferred<T = void>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => { resolve = r }); return { promise, resolve } }
 function appFor(steps: ModelStepEvent[][], options: { tools?: number; modelSteps?: number } = {}) {
@@ -37,6 +39,56 @@ function appFor(steps: ModelStepEvent[][], options: { tools?: number; modelSteps
 }
 const call = (id: string, name = 'search_library', input: unknown = { query: 'needle' }): ModelStepEvent => ({ type: 'tool-call', id, name, input })
 const finish = (reason = 'tool-calls'): ModelStepEvent => ({ type: 'finish', reason })
+
+describe('Host loop over the real grant and tools', () => {
+  it('never lets an out-of-scope note reach the model', async () => {
+    const records = new Map<string, { content: string; revision: string; sessionId: string; objectVersion: string }>([
+      ['a.md', { content: '/问\n', revision: 'ra', sessionId: 's', objectVersion: 'oa' }],
+      ['b.md', { content: '# 参考\n\nneedle 正文\n', revision: 'rb', sessionId: 's', objectVersion: 'ob' }],
+      ['outside.md', { content: 'needle OUTSIDE_SECRET\n', revision: 'rc', sessionId: 's', objectVersion: 'oc' }]
+    ])
+    const readNote = async (path: string) => { const item = records.get(path); if (!item) throw Error('ENOENT'); return { ...item } }
+    const tier = async (_root: string, path: string) => (path === 'a.md' ? 'reference' as const : 'follow' as const)
+    const registry = new TaskAuthorizationRegistry({
+      root: () => '/vault', session: () => 's',
+      tree: async () => [...records.keys()].map((relPath) => ({ name: relPath, relPath, kind: 'note' as const })),
+      read: readNote, tier, acceptsObject: () => false,
+      configuration: () => ({ credential: { provider: 'custom', baseURL: 'http://127.0.0.1:1/v1', modelId: 'm', contextTokens: 20000, apiKey: 'k' }, limits: { seconds: 30, steps: 4, tools: 6 } })
+    })
+    const request = { relPath: 'a.md', sessionId: 's', objectVersion: 'oa', expectedRevision: 'ra', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', references: ['b.md'] }
+    const preview = await registry.preview('owner', request)
+    let revision = 1
+    const sent: unknown[][] = []
+    const steps: ModelStepEvent[][] = [
+      [{ type: 'tool-call', id: 'x', name: 'search_library', input: { query: 'needle' } }, { type: 'finish', reason: 'tool-calls' }],
+      [{ type: 'text', text: '完成' }, { type: 'finish', reason: 'stop' }]
+    ]
+    let call = 0
+    const host = new AgentHost({
+      root: () => '/vault', session: () => 's',
+      authorize: (input) => registry.consume(input.authorizationOwner!, input as unknown as AgentStartRequest),
+      read: readNote,
+      write: async (path, next) => {
+        const nextRevision = `r${++revision}`
+        records.set(path, { ...records.get(path)!, content: next, revision: nextRevision })
+        return { sessionId: 's', objectVersion: 'oa', revision: nextRevision }
+      },
+      tier,
+      credential: () => ({ provider: 'custom', baseURL: 'http://127.0.0.1:1/v1', modelId: 'm', contextTokens: 20000, apiKey: 'k' }),
+      limits: () => ({ seconds: 30, steps: 4, tools: 6 }),
+      stream: async function* () { throw Error('LEGACY_FALLBACK') },
+      streamStep: async function* (input) { sent.push(structuredClone(input.messages)); for (const part of steps[call++] ?? []) yield part },
+      createReadOnlyTools: (grant, taskId) => createScopedAgentTools(grant, taskId, { read: readNote, tier, acceptsObject: () => false }),
+      emit: () => {}
+    })
+    const task = await host.start({ ...request, previewId: preview.id, authorizationOwner: 'owner' })
+    expect(await task.done).toEqual({ status: 'completed' })
+    const transcript = JSON.stringify(sent)
+    expect(transcript).toContain('needle 正文')
+    expect(transcript).not.toContain('OUTSIDE_SECRET')
+    expect(records.get('a.md')!.content).toContain('完成')
+  })
+})
 
 describe('Host manual read-only loop', () => {
   it('executes tools in order and sends results only in the next model request', async () => {

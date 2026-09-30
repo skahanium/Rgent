@@ -247,6 +247,8 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
         if (label === 'unknown') throw Error('UNKNOWN_TOOL')
         const request = args(input, name === 'search_library' ? ['query'] : [], name === 'search_library' ? ['cursor'] : ['sourceId', 'cursor'])
         await check(signal)
+        // read_library 不带 sourceId 时是列表续页：列表分页只有 nextCursor，没有第二个工具名。
+        // cursor 的 kind 校验保证两种游标不能互相复用，所以这个别名不扩大范围。
         const result = name === 'search_library' ? await search(request, signal) : request.sourceId ? await read(request, signal) : await list(request, signal)
         outcome = 'ok'; return result
       } finally { const key = `${label}\0${outcome}`; outcomes.set(key, (outcomes.get(key) ?? 0) + 1) }

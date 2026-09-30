@@ -9,6 +9,10 @@ describe('historical task provenance', () => {
     expect(ledgerProvenance(encodeLedgerProvenance(record))).toEqual({ status: 'valid', record })
     expect(ledgerProvenance('## 旧章\n无工具')).toEqual({ status: 'legacy' })
   })
+  it('treats a chapter that carries the sources marker without a record as invalid, not legacy', () => {
+    expect(ledgerProvenance('<!-- rgent:ledger-task:v1 id="t1" sources="v1" -->\n## 章\n正文')).toEqual({ status: 'invalid' })
+    expect(ledgerProvenance('<!-- rgent:ledger-task:v1 id="t1" -->\n## 章\n正文')).toEqual({ status: 'legacy' })
+  })
   it('fails closed for malformed, unsupported or duplicated new records', () => {
     for (const text of ['<!-- rgent:ledger-sources:v1 data="bad" -->', '<!-- rgent:ledger-sources:v2 -->', encodeLedgerProvenance(record) + '\n' + encodeLedgerProvenance(record)]) expect(ledgerProvenance(text).status).toBe('invalid')
     expect(() => encodeLedgerProvenance({ ...record, sources: [{ ...record.sources[0]!, relPath: '../B.md' }] })).toThrow()

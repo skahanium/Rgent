@@ -80,7 +80,10 @@ export class TaskAuthorizationRegistry {
       if(tier!==latestTier)throw Error('STALE_AUTHORIZATION')
       this.checkSession(root,session)
       if(snapshot.sessionId!==session)throw Error('VAULT_CHANGED')
-      if(path===request.relPath && (snapshot.revision!==request.expectedRevision || !this.deps.acceptsObject(path,request.objectVersion,snapshot.objectVersion) && request.objectVersion!==snapshot.objectVersion))throw Error('STALE_AUTHORIZATION')
+      // 发起篇必须仍是同一个修订；对象版本只接受同一血脉或原值。
+      const originStale = snapshot.revision!==request.expectedRevision
+        || (request.objectVersion!==snapshot.objectVersion && !this.deps.acceptsObject(path,request.objectVersion,snapshot.objectVersion))
+      if(path===request.relPath && originStale)throw Error('STALE_AUTHORIZATION')
       if(path===request.relPath && snapshot.content.slice(request.range.start,request.range.end)!==request.expectedText)throw Error('STALE_AUTHORIZATION')
       sources.push({sourceId:randomUUID(),relPath:path,title:noteTitle(path),sessionId:session!,objectVersion:snapshot.objectVersion,revision:snapshot.revision,fingerprint:digest(snapshot.content),tier})
     }

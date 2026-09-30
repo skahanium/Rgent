@@ -92,6 +92,7 @@ export function buildHostContext(input: HostContextInput): HostContextPlan {
     if (input.excludedAiTaskIds?.includes('*') || taskId && input.excludedAiTaskIds?.includes(taskId)) excludedBlocks.add(at)
   })
   const allChapters = ledgerChapters(part.ledger)
+  // 缺省＝不过滤（没有跨篇策略的单篇路径，账本本来就只有本篇）；显式给数组＝只放行列出的章。
   const chapters = input.allowedLedgerChapterIds ? allChapters.filter(chapter => input.allowedLedgerChapterIds!.includes(chapter.sourceId)) : allChapters
   const deniedChapterIds = allChapters.filter(chapter => !chapters.includes(chapter)).map(chapter => chapter.sourceId)
   const found = blocks.findIndex((block) => block.range.end >= placement)
