@@ -144,16 +144,26 @@ class LiveGrant implements TaskGrant {
     try {
       if(this.deps.ownerValid?.(this.owner)===false)throw Error('AUTHORIZATION_REVOKED')
       if(this.deps.root()!==this.root || this.deps.session()!==this.sessionId)throw Error('VAULT_CHANGED')
-      for(const source of this.sources){
-        const proof=source.relPath===this.origin?this.originProof:source
-        const tier=await this.deps.tier(this.root,proof.relPath)
-        if(tier!==proof.tier)throw Error('SOURCE_PERMISSION_CHANGED')
-        const current=await this.deps.read(proof.relPath)
-        await this.deps.tier(this.root,proof.relPath).then(after=>{if(after!==proof.tier)throw Error('SOURCE_PERMISSION_CHANGED')})
-        if(this.deps.ownerValid?.(this.owner)===false)throw Error('AUTHORIZATION_REVOKED')
-      if(this.deps.root()!==this.root || this.deps.session()!==this.sessionId || current.sessionId!==this.sessionId)throw Error('VAULT_CHANGED')
-        if(current.objectVersion!==proof.objectVersion && !this.deps.acceptsObject(proof.relPath,proof.objectVersion,current.objectVersion))throw Error('SOURCE_REPLACED')
-        if(current.revision!==proof.revision || digest(current.content)!==proof.fingerprint)throw Error('SOURCE_CHANGED')
+      for (const source of this.sources) {
+        let verified = false
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const proof = source.relPath === this.origin ? this.originProof : source
+          const tier = await this.deps.tier(this.root, proof.relPath)
+          if (tier !== proof.tier) throw Error('SOURCE_PERMISSION_CHANGED')
+          const current = await this.deps.read(proof.relPath)
+          const after = await this.deps.tier(this.root, proof.relPath)
+          if (after !== proof.tier) throw Error('SOURCE_PERMISSION_CHANGED')
+          if (this.deps.ownerValid?.(this.owner) === false) throw Error('AUTHORIZATION_REVOKED')
+          if (this.deps.root() !== this.root || this.deps.session() !== this.sessionId || current.sessionId !== this.sessionId) throw Error('VAULT_CHANGED')
+          // Only a successful Host write receipt may replace this proof. A concurrent
+          // verification must restart from it, rather than revoke a legitimate own save.
+          if (source.relPath === this.origin && proof !== this.originProof) continue
+          if (current.objectVersion !== proof.objectVersion && !this.deps.acceptsObject(proof.relPath, proof.objectVersion, current.objectVersion)) throw Error('SOURCE_REPLACED')
+          if (current.revision !== proof.revision || digest(current.content) !== proof.fingerprint) throw Error('SOURCE_CHANGED')
+          verified = true
+          break
+        }
+        if (!verified) throw Error('SOURCE_BUSY')
       }
     }catch(error){this.live=false;throw error}
     if(!this.live)throw Error('AUTHORIZATION_REVOKED')

@@ -56,11 +56,11 @@ describe('docs stage invariants', () => {
     expect(result.stderr).toContain('锚点不存在：vision.md#围栏内测试标题')
   })
 
-  it('rejects a current stage without its own section', () => {
+  it.each(['\n', '\r\n'])('rejects a current stage without its own section (%j)', (newline) => {
     const { build, run } = fixture()
-    const source = readFileSync(build, 'utf8')
+    const source = readFileSync(build, 'utf8').replace(/\r?\n/g, newline)
     const stage = source.match(/^## 当前阶段\s*\n+\*\*([^*]+)\*\*/m)![1]!.replace(/[。.!！\s]+$/u, '')
-    const changed = source.replace(`## ${stage}\n`, `### ${stage}\n`)
+    const changed = source.split('\n').map(line => line.replace(/\r$/, '') === `## ${stage}` ? `#${line}` : line).join('\n')
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
