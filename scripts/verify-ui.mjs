@@ -1131,6 +1131,14 @@ async function main() {
     await page.call('Input.insertText', { text: '/多任务停止' })
     await page.key('Enter', 'Enter', 0, 13)
     const beforeMoveTask = await waitFor(page, `(async () => (await window.rgent.agentTasks()).some((item) => item.relPath === '生命周期/运行.md'))()`, 5000)
+    writeFileSync(path.join(vault, '生命周期', '不相关.md'), '保持不动')
+    const unrelatedMove = await page.eval(`(async () => {
+      const prepared = await window.rgent.relocationPreview({ kind: 'note', source: '生命周期/不相关.md', target: '生命周期/不应移动.md' })
+      return prepared.ok ? await window.rgent.relocationCommit({ id: prepared.preview.id, repairLinks: false }) : prepared
+    })()`)
+    check('其他笔记生成期间拒绝结构提交且不取消其任务', !unrelatedMove.ok && unrelatedMove.error === 'OTHER_TASK_RUNNING' &&
+      existsSync(path.join(vault, '生命周期', '不相关.md')) && !existsSync(path.join(vault, '生命周期', '不应移动.md')) &&
+      await page.eval(`(async () => (await window.rgent.agentTasks()).some((item) => item.relPath === '生命周期/运行.md'))()`))
     const taskMove = beforeMoveTask ? await page.eval(`(async () => {
       const prepared = await window.rgent.relocationPreview({ kind: 'note', source: '生命周期/运行.md', target: '生命周期/已停止.md' })
       return prepared.ok ? await window.rgent.relocationCommit({ id: prepared.preview.id, repairLinks: false }) : prepared
@@ -1147,6 +1155,82 @@ async function main() {
     check('预览后的外部修改使移动失败且保留原文', staleResult.ok === false && !existsSync(path.join(vault, '生命周期', '拒绝.md')) &&
       readFileSync(path.join(vault, '生命周期', '过期.md'), 'utf8') === '外部第二版')
     check('废纸篓验证门未通过前没有删除入口', (await page.eval(`!([...document.querySelectorAll('.tier-menu button')].some((n) => n.textContent.includes('删除')))`)) === true)
+
+    process.stdout.write('\n文件操作恢复状态\n')
+    const native = require(path.join(root, 'out', 'main', 'rgent_fs.node'))
+    const handle = native.openRoot(vault)
+    const hash = (bytes) => require('node:crypto').createHash('sha256').update(bytes).digest('hex')
+    const fingerprint = (relPath) => {
+      const leaf = native.resolve(handle, relPath).at(-1)
+      return { relPath, id: leaf.id, kind: leaf.kind, ...(leaf.kind === 'file' ? { hash: hash(native.read(handle, relPath)) } : {}) }
+    }
+    try {
+      mkdirSync(path.join(vault, '生命周期', '复原'))
+      writeFileSync(path.join(vault, '生命周期', '复原.md'), '不应泄露到状态接口的正文\r\n')
+      writeFileSync(path.join(vault, '生命周期', '复原', '附件.png'), Buffer.from([7, 8, 9]))
+      await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((node) => node.textContent.includes('复原'))`)
+      await page.eval(`[...document.querySelectorAll('.tree-note')].find((node) => node.textContent.includes('复原'))?.click()`)
+      await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '生命周期/复原.md'`)
+      const parts = ['生命周期', '生命周期/复原.md', '生命周期/复原', '生命周期/复原/附件.png'].map(fingerprint)
+      const moves = [{ from: '生命周期/复原.md', to: '生命周期/已恢复.md', id: parts[1].id },
+        { from: '生命周期/复原', to: '生命周期/已恢复', id: parts[2].id }]
+      const policy = existsSync(path.join(vault, '.rgent-permissions')) ? readFileSync(path.join(vault, '.rgent-permissions'), 'utf8') : null
+      const journal = JSON.stringify({ version: 1, active: { kind: 'move',
+        intent: { kind: 'note', source: moves[0].from, target: moves[0].to, moves },
+        fingerprints: parts, permissionBefore: policy, permissionAfter: policy, linkRepairs: [], repairLinks: false } }) + '\n'
+      const unrelatedPrompt = '/多任务恢复'
+      writeFileSync(path.join(vault, '生命周期', '无关生成.md'), unrelatedPrompt)
+      const unrelatedTask = await page.eval(`window.rgent.agentStart(${JSON.stringify({ relPath: '生命周期/无关生成.md',
+        range: { start: 0, end: unrelatedPrompt.length }, expectedText: unrelatedPrompt, promptText: '多任务恢复' })})`)
+      check('恢复竞态夹具中的无关任务开始并已产生回答', unrelatedTask.ok && await waitFor(page,
+        `(async () => (await window.rgent.noteRead('生命周期/无关生成.md')).content.includes('受控回答第一句。'))()`))
+      writeFileSync(path.join(vault, '.rgent-lifecycle'), journal)
+      native.move(handle, moves[0].from, moves[0].to, moves[0].id)
+      check('中断操作出现可访问的状态入口', await waitFor(page, `!document.querySelector('.lifecycle-warning').hidden`))
+      await page.eval(`document.querySelector('.lifecycle-warning').focus(); document.querySelector('.lifecycle-warning').click()`)
+      check('恢复浮层展示已移动与待移动，关闭为默认焦点', await waitFor(page, `document.querySelector('.lifecycle-recovery')?.textContent.includes('已移动') && document.querySelector('.lifecycle-recovery')?.textContent.includes('待移动') && document.activeElement?.textContent === '关闭'`))
+      const status = await page.eval(`window.rgent.lifecycleStatus()`)
+      check('恢复状态不泄露正文、记录原文或绝对路径', status.status === 'pending' && typeof status.revision === 'string' &&
+        !JSON.stringify(status).includes('不应泄露') && !JSON.stringify(status).includes(vault) && !JSON.stringify(status).includes('permissionBefore'))
+      await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
+      check('窄窗恢复浮层在窗口内且内容可滚动', await page.eval(`(() => { const d = document.querySelector('.lifecycle-recovery'); const r = d.getBoundingClientRect(); return r.left >= 18 && r.right <= 782 && r.top >= 18 && r.bottom <= 542 && getComputedStyle(d).overflowY === 'auto' })()`))
+      await shot(page, 'lifecycle-recovery-narrow')
+      await page.key('Escape', 'Escape', 0, 27)
+      check('恢复浮层关闭后焦点返回状态入口', await waitFor(page, `!document.querySelector('.lifecycle-recovery') && document.activeElement?.classList.contains('lifecycle-warning')`))
+      await page.call('Emulation.clearDeviceMetricsOverride', {})
+      writeFileSync(path.join(vault, '生命周期', '复原', '外部新增.txt'), '仅此临时夹具')
+      await page.eval(`document.querySelector('.lifecycle-warning').click()`)
+      await waitFor(page, `document.querySelector('.lifecycle-recovery')?.textContent.includes('无法核验')`)
+      await page.eval(`document.querySelector('.lifecycle-retry').focus(); document.querySelector('.lifecycle-retry').click()`)
+      check('成员变化拒绝重试并保留记录与附件原位', await waitFor(page, `document.querySelector('.lifecycle-recovery [role=status]')?.textContent.includes('恢复记录')`) &&
+        readFileSync(path.join(vault, '.rgent-lifecycle'), 'utf8') === journal && existsSync(path.join(vault, '生命周期', '复原', '附件.png')))
+      check('失败重试后键盘焦点仍在恢复浮层', await page.eval(`document.querySelector('.lifecycle-recovery').contains(document.activeElement)`))
+      rmSync(path.join(vault, '生命周期', '复原', '外部新增.txt'))
+      await page.eval(`document.querySelector('.lifecycle-retry').click()`)
+      check('安全重试续跑附件且正文与权限保持不变', await waitFor(page, `document.querySelector('.lifecycle-recovery [role=status]')?.textContent === '文件操作已完成。'`) &&
+        readFileSync(path.join(vault, '生命周期', '已恢复.md'), 'utf8') === '不应泄露到状态接口的正文\r\n' &&
+        existsSync(path.join(vault, '生命周期', '已恢复', '附件.png')) &&
+        JSON.parse(readFileSync(path.join(vault, '.rgent-lifecycle'), 'utf8')).active === null &&
+        (!policy || readFileSync(path.join(vault, '.rgent-permissions'), 'utf8') === policy))
+      check('恢复后补存无关任务的回答与一章账本', await waitFor(page, `(async () => {
+        const source = (await window.rgent.noteRead('生命周期/无关生成.md')).content
+        return source.includes('受控回答第一句。') && (source.match(/· cancelled/g) || []).length === 1 && (await window.rgent.agentTasks()).length === 0
+      })()`))
+      check('成功重试后焦点转到浮层关闭按钮', await page.eval(`document.querySelector('.lifecycle-recovery').contains(document.activeElement) && document.activeElement.textContent === '关闭'`))
+      await page.key('Escape', 'Escape', 0, 27)
+      check('重试后 tab、文件树与状态一起更新', await waitFor(page, `document.querySelector('.lifecycle-warning').hidden && document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '生命周期/已恢复.md'`))
+      check('状态入口隐藏后关闭浮层回到可见工作区控件', await waitFor(page, `document.activeElement?.classList.contains('tree-toggle')`))
+      const duplicate = await page.eval(`window.rgent.lifecycleRetry(${JSON.stringify({ sessionId: status.sessionId, revision: status.revision })})`)
+      check('重复恢复提交因修订过期而拒绝', !duplicate.ok && duplicate.error === 'STALE_RECOVERY')
+      const damaged = '{"version":1,"active":"broken"}'
+      writeFileSync(path.join(vault, '.rgent-lifecycle'), damaged)
+      await waitFor(page, `!document.querySelector('.lifecycle-warning').hidden`)
+      await page.eval(`document.querySelector('.lifecycle-warning').click()`)
+      check('损坏记录显错且没有强制清除入口', await waitFor(page, `document.querySelector('.lifecycle-recovery')?.textContent.includes('损坏') && !document.querySelector('.lifecycle-retry')`) &&
+        readFileSync(path.join(vault, '.rgent-lifecycle'), 'utf8') === damaged)
+      await shot(page, 'lifecycle-record-invalid')
+      await page.key('Escape', 'Escape', 0, 27)
+    } finally { native.closeRoot(handle) }
 
     process.stdout.write('\n收尾\n')
     check('整轮没有未捕获异常', page.errors.length === 0, page.errors.slice(0, 1).join(''))

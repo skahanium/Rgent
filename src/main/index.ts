@@ -3,9 +3,9 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
-import { asString, parseEntryCreateRequest, parseFlushDone, parseNoteName, parseNoteWriteRequest, parseRelocationCommitRequest, parseRelocationPreviewRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
+import { asString, parseEntryCreateRequest, parseFlushDone, parseLifecycleRetryRequest, parseNoteName, parseNoteWriteRequest, parseRelocationCommitRequest, parseRelocationPreviewRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
 import { IPC } from '../shared/ipc.ts'
-import type { AgentStartRequest, AgentStartResult, LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
+import type { AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { isReadingPreference } from '../shared/reading-preference.ts'
@@ -45,9 +45,13 @@ let agentHost: AgentHost | null = null
 let cancellingForClose = false
 const lifecycleFlushes = new Map<string, (ok: boolean) => void>()
 const structureGate = new VaultStructureGate()
+const lifecycleErrorCodes = new Set(['BAD_PATH', 'BAD_REQUEST', 'NO_VAULT', 'VAULT_CHANGED', 'STALE_PREVIEW',
+  'STALE_RECOVERY', 'EEXIST', 'ENOENT', 'PATH_CHANGED', 'UNSAFE_PATH', 'PERMISSION_DOWNGRADE',
+  'PERMISSION_COLLISION', 'PERMISSIONS_INVALID', 'UNSAVED_DRAFT', 'PREVIOUS_TASK_UNSAVED',
+  'LIFECYCLE_RECOVERY_REQUIRED', 'STRUCTURE_BUSY', 'OTHER_TASK_RUNNING', 'ATTACHMENT_COLLISION', 'LINK_SCAN_FAILED'])
 
-function affectsStructure(relPath: string): boolean {
-  return !!vault?.root && structureGate.affects(vault.root, relPath)
+function lifecycleError(error: unknown, fallback: string): string {
+  return error instanceof Error && lifecycleErrorCodes.has(error.message) ? error.message : fallback
 }
 
 function blocksStructureWrite(relPath: string): boolean {
@@ -319,7 +323,7 @@ function registerIpc(): void {
         !request.range || !Number.isSafeInteger(request.range.start) || !Number.isSafeInteger(request.range.end)) {
       return { ok: false, error: 'BAD_REQUEST' }
     }
-    if (affectsStructure(request.relPath)) return { ok: false, error: 'NOTE_BUSY' }
+    if (structureGate.isBusy()) return { ok: false, error: 'NOTE_BUSY' }
     try {
       const task = await agentHost.start(request as AgentStartRequest)
       void task.done.catch(() => {})
@@ -360,6 +364,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.vaultGet, () => vault?.currentState() ?? { status: 'needs-pick', reason: 'first-run' })
   ipcMain.handle(IPC.vaultPick, async () => {
     if (!vault) return { status: 'needs-pick', reason: 'first-run' }
+    if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
     return vault.pick(mainWindow)
   })
   ipcMain.handle(IPC.treeList, async () => vault?.tree() ?? [])
@@ -401,51 +406,104 @@ function registerIpc(): void {
     if (!request || !vault) throw new Error('BAD_PATH')
     return vault.createFolder(request.name, request.parent)
   })
-  ipcMain.handle(IPC.relocationPreview, async (_event, value: unknown): Promise<RelocationPreviewResult> => {
+  ipcMain.handle(IPC.relocationPreview, async (event, value: unknown): Promise<RelocationPreviewResult> => {
     const request = parseRelocationPreviewRequest(value)
-    if (!request || !vault) return { ok: false, error: 'BAD_PATH' }
+    const currentVault = vault
+    if (!trusted(event) || !request || !currentVault) return { ok: false, error: 'BAD_PATH' }
     try {
+      const token = currentVault.captureSession()
+      const root = currentVault.root!
       if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
       await agentHost?.whenLaunchesSettled()
-      const affected = agentHost?.active().filter((task) => task.root === vault?.root &&
+      currentVault.assertSession(token)
+      const affected = agentHost?.active().filter((task) => task.root === root &&
         (task.relPath === request.source ||
           (request.kind === 'folder' && task.relPath.startsWith(`${request.source}/`)) ||
           (request.kind === 'note' && task.relPath.startsWith(`${request.source.slice(0, -3)}/`)))) ?? []
-      for (const task of affected) await agentHost?.cancel(task.id, 'user')
-      if (vault.root && agentHost?.hasPending(vault.root)) throw new Error('PREVIOUS_TASK_UNSAVED')
+      for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
+      if (agentHost?.hasPending(root)) throw new Error('PREVIOUS_TASK_UNSAVED')
       if (!mainWindow || !(await flushBeforeStructure(mainWindow))) throw new Error('UNSAVED_DRAFT')
-      const preview = await vault.previewRelocation(request)
+      currentVault.assertSession(token)
+      const preview = await currentVault.previewRelocation(request, token)
+      currentVault.assertSession(token)
       return { ok: true, preview: {
-        id: preview.id, kind: preview.kind, source: preview.source, target: preview.target,
+        id: preview.id, sessionId: preview.sessionId, kind: preview.kind, source: preview.source, target: preview.target,
         moves: preview.moves,
         linkChanges: preview.linkChanges.map(({ relPath, newPath, changes }) => ({ relPath, newPath, count: changes.length })),
         permissionChanges: preview.permissionChanges
       } }
-    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'PREVIEW_FAILED' } }
+    } catch (error) { return { ok: false, error: lifecycleError(error, 'PREVIEW_FAILED') } }
   })
-  ipcMain.handle(IPC.relocationCommit, async (_event, value: unknown): Promise<RelocationCommitResult> => {
+  ipcMain.handle(IPC.relocationCommit, async (event, value: unknown): Promise<RelocationCommitResult> => {
     const request = parseRelocationCommitRequest(value)
     const win = mainWindow
-    if (!request || !vault || !win || !vault.root) return { ok: false, error: 'BAD_REQUEST' }
-    const preview = vault.relocationPreviewById(request.id)
+    const currentVault = vault
+    if (!trusted(event) || !request || !currentVault || !win || !currentVault.root) return { ok: false, error: 'BAD_REQUEST' }
+    const token = currentVault.captureSession()
+    const root = currentVault.root
+    const preview = currentVault.relocationPreviewById(request.id)
     if (!preview) return { ok: false, error: 'STALE_PREVIEW' }
     if (structureGate.isBusy()) return { ok: false, error: 'STRUCTURE_BUSY' }
     structureGate.begin({
-      root: vault.root,
+      root,
       exact: [preview.source, ...(request.repairLinks ? preview.linkChanges.map((item) => item.relPath) : [])],
       prefixes: preview.kind === 'folder' ? [preview.source] : [preview.source.slice(0, -3)]
     })
     try {
       await agentHost?.whenLaunchesSettled()
-      const affected = agentHost?.active().filter((task) => task.root === vault?.root && affectsStructure(task.relPath)) ?? []
-      for (const task of affected) await agentHost?.cancel(task.id, 'user')
-      if (agentHost?.hasPending(vault.root)) throw new Error('PREVIOUS_TASK_UNSAVED')
+      currentVault.assertSession(token)
+      const affected = agentHost?.active().filter((task) => task.root === root && structureGate.affects(root, task.relPath)) ?? []
+      if (agentHost?.active().some((task) => task.root === root && !structureGate.affects(root, task.relPath))) {
+        throw new Error('OTHER_TASK_RUNNING')
+      }
+      for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
+      if (agentHost?.hasPending(root)) throw new Error('PREVIOUS_TASK_UNSAVED')
       if (!(await flushBeforeStructure(win))) throw new Error('UNSAVED_DRAFT')
+      currentVault.assertSession(token)
       structureGate.seal()
-      const outcome = await vault.commitRelocation(request.id, request.repairLinks)
+      const outcome = await currentVault.commitRelocation(request.id, request.repairLinks, token)
+      currentVault.assertSession(token)
       return { ok: true, moved: outcome.moved.map(({ from, to }) => ({ from, to })), unrepaired: outcome.unrepaired }
-    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'COMMIT_FAILED' } }
+    } catch (error) { return { ok: false, error: lifecycleError(error, 'COMMIT_FAILED') } }
     finally { structureGate.finish() }
+  })
+  ipcMain.handle(IPC.lifecycleStatus, async (event) => {
+    if (!trusted(event) || !vault) throw new Error('NO_VAULT')
+    return vault.lifecycleStatus()
+  })
+  ipcMain.handle(IPC.lifecycleRetry, async (event, value: unknown): Promise<LifecycleRetryResult> => {
+    const request = parseLifecycleRetryRequest(value)
+    const currentVault = vault
+    const win = mainWindow
+    if (!trusted(event) || !request || !currentVault || !win) return { ok: false, error: 'BAD_REQUEST' }
+    if (structureGate.isBusy()) return { ok: false, error: 'STRUCTURE_BUSY' }
+    let entered = false
+    try {
+      currentVault.assertSession(request.sessionId)
+      const root = currentVault.root!
+      const scope = currentVault.lifecycleRecoveryScope(request)
+      structureGate.begin({ root, exact: scope.relPaths, prefixes: scope.moved.flatMap((move) => [move.from, move.to]) })
+      entered = true
+      await agentHost?.whenLaunchesSettled()
+      currentVault.assertSession(request.sessionId)
+      // An active recovery record already fails all model requests closed.
+      // Stop streams; keep unrelated unsaved output in Host memory until policy is stable again.
+      try { await agentHost?.cancelAll('user', root) } catch { /* pending paths are checked below */ }
+      currentVault.assertSession(request.sessionId)
+      if (agentHost?.pendingPaths(root).some((relPath) => structureGate.affects(root, relPath))) {
+        throw new Error('PREVIOUS_TASK_UNSAVED')
+      }
+      if (!(await flushBeforeStructure(win))) throw new Error('UNSAVED_DRAFT')
+      currentVault.assertSession(request.sessionId)
+      structureGate.seal()
+      const outcome = await currentVault.lifecycleRetry(request)
+      currentVault.assertSession(request.sessionId)
+      try { await agentHost?.retryPending(root) } catch { /* retain output; structural recovery succeeded */ }
+      currentVault.assertSession(request.sessionId)
+      return { ok: true, moved: outcome.moved.map(({ from, to }) => ({ from, to })), unrepaired: outcome.unrepaired,
+        hostPending: agentHost?.hasPending(root) ?? false }
+    } catch (error) { return { ok: false, error: lifecycleError(error, 'LIFECYCLE_RECOVERY_REQUIRED') } }
+    finally { if (entered) structureGate.finish() }
   })
   ipcMain.on(IPC.lifecycleFlushDone, (event, value: unknown) => {
     if (!mainWindow || event.sender !== mainWindow.webContents || !value || typeof value !== 'object') return
@@ -475,9 +533,11 @@ app.whenReady().then(() => {
   try { modelConfig = createModelConfigStore(app.getPath('userData'), safeStorage) }
   catch (error) { modelConfigError = error instanceof Error ? error.message : 'MODEL_CONFIG_UNAVAILABLE' }
   vault = new VaultSession(app.getPath('userData'), send, async (previous) => {
+    if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
     try { await agentHost?.cancelAll('vault-change', previous) } catch { /* pending retry below */ }
     await agentHost?.retryPending(previous)
     if (agentHost?.hasPending(previous)) throw new Error('生成内容尚未保存，不能换库')
+    if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
   })
   vault.restore()
   agentHost = new AgentHost({

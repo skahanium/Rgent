@@ -1036,6 +1036,11 @@ input:focus-visible,
 }
 
 .lifecycle-dialog { width: min(620px, calc(100vw - 40px)); max-height: calc(100vh - 40px); overflow: auto; }
+.lifecycle-warning:not([hidden]) { flex: 0 1 auto; max-width: 220px; margin: 0 12px; padding: 5px 9px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-heading); background: var(--surface-overlay); font: inherit; font-size: .75rem; cursor: pointer; }
+.lifecycle-warning:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
+.lifecycle-recovery [role='status'] { color: var(--text-muted); }
+.lifecycle-progress [data-state='blocked'] { color: var(--status-error); }
+.lifecycle-actions button:disabled { cursor: wait; opacity: .65; }
 .lifecycle-dialog h2 { margin: 0 0 12px; color: var(--text-heading); font-size: 1.1rem; }
 .lifecycle-dialog p, .lifecycle-dialog li { overflow-wrap: anywhere; line-height: 1.5; }
 .lifecycle-dialog ul { max-height: 26vh; overflow: auto; padding-left: 1.2rem; }

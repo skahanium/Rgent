@@ -57,6 +57,10 @@ export class AgentHost {
     while (this.launching.size) await new Promise<void>((resolve) => this.launchWaiters.add(resolve))
   }
   hasPending(root?: string): boolean { return [...this.pending.values()].some((item) => !root || item.root === root) }
+  /** Internal recovery coordination only; no generated content leaves the Host. */
+  pendingPaths(root: string): string[] {
+    return [...new Set([...this.pending.values()].filter((item) => item.root === root).map((item) => item.relPath))]
+  }
   discardPending(root?: string): void {
     for (const [id, item] of this.pending) if (!root || item.root === root) this.pending.delete(id)
   }

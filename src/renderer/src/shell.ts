@@ -1,8 +1,8 @@
-import { IPC, type AgentEvent, type AgentTaskView, type NoteSnapshot, type PermissionState, type PermissionTier, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
+import { IPC, type AgentEvent, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
-import { promptNewNote, promptText } from './dialogs.ts'
+import { openLifecycleStatus, promptNewNote, promptText } from './dialogs.ts'
 import { promptConflict } from './conflict.ts'
 import { openOverlay } from './overlay.ts'
 import { createSearchOverlay } from './search-overlay.ts'
@@ -37,6 +37,9 @@ const HOST_ERROR_MESSAGES: Record<string, string> = {
 const hostErrorText = (error: string): string => HOST_ERROR_MESSAGES[error] ?? error
 const LIFECYCLE_ERRORS: Record<string, string> = {
   STALE_PREVIEW: '文件或引用在预览后发生变化，请重新预览再提交。',
+  STALE_RECOVERY: '恢复记录已变化，请重新查看状态再重试。',
+  VAULT_CHANGED: '笔记库已切换，本次操作已停止。',
+  OTHER_TASK_RUNNING: '本库还有其他笔记的运行任务，请先停止并保存其生成内容，再进行文件操作。',
   EEXIST: '目标位置已有同名文件或文件夹。',
   PERMISSION_DOWNGRADE: '这次移动会使部分对象的 AI 权限意外降档，已阻止提交。',
   PERMISSION_COLLISION: '目标位置的显式权限规则发生冲突，已阻止提交。',
@@ -58,6 +61,7 @@ export async function start(root: HTMLElement): Promise<void> {
         <button type="button" class="tree-toggle" aria-controls="tree-panel" aria-expanded="false" aria-label="目录"></button>
         <div class="tabs" role="tablist" aria-label="打开中的笔记"></div>
         <span class="permission-warning" role="alert" hidden></span>
+        <button type="button" class="lifecycle-warning" hidden>文件操作待核验 · 查看</button>
       </header>
       <div class="body">
         <aside id="tree-panel" class="tree-panel is-collapsed" aria-label="笔记目录">
@@ -95,6 +99,7 @@ export async function start(root: HTMLElement): Promise<void> {
   const treeScroll = root.querySelector('.tree-scroll') as HTMLElement
   const treeToggle = root.querySelector('.tree-toggle') as HTMLButtonElement
   const permissionWarning = root.querySelector('.permission-warning') as HTMLElement
+  const lifecycleWarning = root.querySelector('.lifecycle-warning') as HTMLButtonElement
   const statusEl = root.querySelector('.status') as HTMLElement
   const tabsEl = root.querySelector('.tabs') as HTMLElement
   const editorHostEl = root.querySelector('.editor-host') as HTMLElement
@@ -131,6 +136,9 @@ export async function start(root: HTMLElement): Promise<void> {
   }
   let backlinkToken = 0
   let vaultEpoch = 0
+  let vaultSession: string | null = null
+  let recoveryState: LifecycleStatus | null = null
+  let recoveryOverlay: ReturnType<typeof openLifecycleStatus> | null = null
   let conflictDecisionOpen = false
   let permissionState: PermissionState = { status: 'ready', entries: [] }
   let vaultNameText: string | null = null
@@ -182,6 +190,7 @@ export async function start(root: HTMLElement): Promise<void> {
   folderCreate.addEventListener('click', () => { void createRootFolder() })
   settingsOpen.prepend(icon('settings'))
   settingsOpen.addEventListener('click', () => { if (!conflictDecisionOpen) settingsOverlay.open() })
+  lifecycleWarning.addEventListener('click', () => { if (!conflictDecisionOpen) void showRecoveryStatus() })
 
   editor.onStateChange(() => {
     const tab = current()
@@ -230,7 +239,7 @@ export async function start(root: HTMLElement): Promise<void> {
     void flushSave()
   })
   window.rgent.onTreeChanged(() => {
-    void refreshTree()
+    void refreshLifecycle().then(() => refreshTree())
   })
   window.rgent.onVaultLost(() => {
     void showPicker(true)
@@ -241,7 +250,11 @@ export async function start(root: HTMLElement): Promise<void> {
   window.rgent.onLifecycleFlushRequest((id) => {
     void flushSave().then((ok) => window.rgent.lifecycleFlushDone(id, ok), () => window.rgent.lifecycleFlushDone(id, false))
   })
-  window.rgent.onNoteRelocated(({ moved }) => applyRelocation(moved))
+  window.rgent.onNoteRelocated(({ moved, sessionId }) => {
+    if (sessionId && sessionId !== vaultSession) return
+    applyRelocation(moved)
+    void refreshLifecycle()
+  })
 
   function applyRelocation(moved: { from: string; to: string }[]): void {
     const remap = (relPath: string): string => {
@@ -263,6 +276,7 @@ export async function start(root: HTMLElement): Promise<void> {
     void refreshBacklinks()
   })
   window.rgent.onNoteExternalChange((payload) => {
+    if (payload.sessionId && payload.sessionId !== vaultSession) return
     const tab = tabs.find((item) => item.relPath === payload.relPath)
     if (!tab) return
     const epoch = vaultEpoch
@@ -407,6 +421,7 @@ export async function start(root: HTMLElement): Promise<void> {
   async function applyState(state: VaultState): Promise<void> {
     if (state.status === 'needs-pick' || state.vaultChanged) vaultEpoch += 1
     if (state.status === 'needs-pick') {
+      vaultSession = null
       const ok = await flushSave()
       if (!ok && tabs.some((tab) => tab.dirty)) {
         vaultNameText = null
@@ -421,18 +436,24 @@ export async function start(root: HTMLElement): Promise<void> {
       return
     }
     closeVaultPicker()
+    const sessionChanged = !!vaultSession && !!state.sessionId && vaultSession !== state.sessionId
+    vaultSession = state.sessionId ?? null
     vaultNameText = state.rootName
     updateStatus()
-    if (state.vaultChanged) {
+    if (state.vaultChanged || sessionChanged) {
       // chooseVault flushed the old vault before vaultPick switched the root.
       // Never send an old tab's path through noteWrite after the new root is active.
       resetSession()
     }
+    await refreshLifecycle()
     await refreshTree()
   }
 
   function resetSession(): void {
     vaultEpoch += 1
+    recoveryState = null
+    recoveryOverlay?.close(); recoveryOverlay = null
+    lifecycleWarning.hidden = true
     // 底栏跟着库与 tab 走，重置之后统一刷一次。
     queueMicrotask(() => updateStatus())
     tabs.length = 0
@@ -532,22 +553,58 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   async function refreshTree(): Promise<void> {
+    const epoch = vaultEpoch
     try {
       const [nextTree, nextPermissions] = await Promise.all([window.rgent.treeList(), window.rgent.permissionsGet()])
+      if (epoch !== vaultEpoch) return
       tree = nextTree
       permissionState = nextPermissions
     } catch {
+      if (epoch !== vaultEpoch) return
       tree = []
       permissionState = { status: 'invalid', error: '无法读取权限名单' }
     }
     const present = collectNotePaths(tree)
     for (const tab of [...tabs]) {
-      if (!present.has(tab.relPath) && !tab.dirty) {
+      if (!present.has(tab.relPath) && !tab.dirty && recoveryState?.status !== 'pending') {
         await closeTab(tab.relPath, { save: false })
       }
     }
     paintTree()
     syncEditorHost()
+  }
+
+  async function refreshLifecycle(): Promise<LifecycleStatus | null> {
+    const epoch = vaultEpoch
+    try {
+      const status = await window.rgent.lifecycleStatus()
+      if (epoch !== vaultEpoch || (vaultSession && status.sessionId !== vaultSession)) return null
+      recoveryState = status
+      lifecycleWarning.hidden = status.status === 'ready'
+      lifecycleWarning.textContent = status.status === 'invalid' ? '恢复记录无法核验 · 查看' : '文件操作待核验 · 查看'
+      return status
+    } catch { return null }
+  }
+
+  async function showRecoveryStatus(): Promise<void> {
+    const status = await refreshLifecycle()
+    if (!status || conflictDecisionOpen) return
+    recoveryOverlay?.close()
+    const epoch = vaultEpoch
+    recoveryOverlay = openLifecycleStatus(status, async (request) => {
+      const result = await window.rgent.lifecycleRetry(request)
+      if (epoch !== vaultEpoch) throw new Error('VAULT_CHANGED')
+      const next = await refreshLifecycle()
+      if (!next) throw new Error('VAULT_CHANGED')
+      if (result.ok) {
+        await refreshMovedTabs()
+        await refreshTree()
+      }
+      return { status: next, message: result.ok
+        ? [result.unrepaired.length ? `移动已完成；以下引用未修复：${result.unrepaired.join('、')}` : '文件操作已完成。',
+          result.hostPending ? '仍有生成内容等待保存，内容已保留；退出或换库前须处理。' : ''].filter(Boolean).join(' ')
+        : lifecycleErrorText(result.error) }
+    }, () => treeToggle)
   }
 
   function paintTree(): void {
@@ -559,10 +616,15 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   async function refreshMovedTabs(): Promise<void> {
-    for (const tab of tabs) {
+    const epoch = vaultEpoch
+    for (const tab of [...tabs]) {
       if (tab.dirty) continue
       try {
-        const source = await window.rgent.noteRead(tab.relPath)
+        const relPath = tab.relPath
+        const revision = tab.revision
+        const source = await window.rgent.noteRead(relPath)
+        if (epoch !== vaultEpoch) return
+        if (!tabs.includes(tab) || tab.relPath !== relPath || tab.revision !== revision || tab.dirty) continue
         applySource(tab, source)
         if (active === tab.relPath) {
           const selection = editor.selectionRange()
@@ -653,14 +715,16 @@ export async function start(root: HTMLElement): Promise<void> {
 
   async function handleTreeAction(entry: TreeEntry, action: TreeAction): Promise<void> {
     if (entry.kind !== 'note' && entry.kind !== 'dir') return
+    const epoch = vaultEpoch
     try {
       if (action === 'new-note' || action === 'new-folder') {
         const name = await promptText(action === 'new-note' ? '新建笔记' : '新建文件夹', '名称', '', '创建')
-        if (!name) return
+        if (!name || epoch !== vaultEpoch) return
         const parent = entry.relPath
         const created = action === 'new-note'
           ? await window.rgent.noteCreateAt({ name, parent })
           : await window.rgent.folderCreate({ name, parent })
+        if (epoch !== vaultEpoch) return
         await refreshTree()
         if (action === 'new-note') await openNote(created)
         return
@@ -681,19 +745,23 @@ export async function start(root: HTMLElement): Promise<void> {
         parent = selected
       }
       const target = parent ? `${parent}/${name}` : name
-      if (target === source) return
+      if (target === source || epoch !== vaultEpoch) return
       const outcome = await window.rgent.relocationPreview({ kind: entry.kind === 'note' ? 'note' : 'folder', source, target })
+      if (epoch !== vaultEpoch) return
       if (!outcome.ok) throw new Error(outcome.error)
+      if (vaultSession && outcome.preview.sessionId !== vaultSession) return
       const choice = await confirmRelocation(outcome.preview)
-      if (!choice) return
+      if (!choice || epoch !== vaultEpoch) return
       const result = await window.rgent.relocationCommit({ id: outcome.preview.id, repairLinks: choice.repairLinks })
+      if (epoch !== vaultEpoch) return
       if (!result.ok) throw new Error(result.error)
       applyRelocation(result.moved)
       await refreshTree()
       if (result.unrepaired.length) window.alert(`文件已移动；以下引用因内容变化未修复：\n${result.unrepaired.join('\n')}`)
     } catch (error) {
-      window.alert(lifecycleErrorText(error))
+      if (epoch === vaultEpoch) window.alert(lifecycleErrorText(error))
     }
+    finally { if (epoch === vaultEpoch) void refreshLifecycle() }
   }
 
   async function createRootFolder(): Promise<void> {

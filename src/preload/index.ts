@@ -31,7 +31,10 @@ import {
   type RelocationPreviewResult,
   type RelocationCommitRequest,
   type RelocationCommitResult,
-  type RelocationEvent
+  type RelocationEvent,
+  type LifecycleStatus,
+  type LifecycleRetryRequest,
+  type LifecycleRetryResult
 } from '../shared/ipc.ts'
 
 const menuChannels = [IPC.menuOpenVault, IPC.menuNewNote, IPC.menuSave] as const
@@ -52,6 +55,9 @@ const api = {
     ipcRenderer.invoke(IPC.relocationPreview, request),
   relocationCommit: (request: RelocationCommitRequest): Promise<RelocationCommitResult> =>
     ipcRenderer.invoke(IPC.relocationCommit, request),
+  lifecycleStatus: (): Promise<LifecycleStatus> => ipcRenderer.invoke(IPC.lifecycleStatus),
+  lifecycleRetry: (request: LifecycleRetryRequest): Promise<LifecycleRetryResult> =>
+    ipcRenderer.invoke(IPC.lifecycleRetry, request),
   backlinks: (relPath: string): Promise<BacklinkGroup[]> => ipcRenderer.invoke(IPC.backlinks, relPath),
   search: (query: string): Promise<SearchHit[]> => ipcRenderer.invoke(IPC.search, query),
   themeGet: (): Promise<ThemeMode> => ipcRenderer.invoke(IPC.themeGet),

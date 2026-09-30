@@ -36,6 +36,7 @@
 - 渲染进程不碰盘、不内嵌厂商 SDK、不自己连 MCP
 - 密钥不进仓库、不进笔记库。Host 阶段用 Electron `safeStorage` 加密后把密文存应用数据目录；尚未接线时不要明文占位
 - 改壳 / preload / sandbox：`pnpm test` 必须过，且 `pnpm build` 后窗口能起来（preload 为 `out/preload/index.cjs`）
+- 生命周期中断记录只可按会话、修订、对象身份和完整子树核验后续跑；不设强制完成或清空入口。废纸篓候选仅在专用临时库实验，探针不得作为生产删除接口，也不得清空用户废纸篓。
 
 ## 验证
 

@@ -8,6 +8,7 @@ import {
   parseEntryCreateRequest,
   parseRelocationPreviewRequest,
   parseRelocationCommitRequest,
+  parseLifecycleRetryRequest,
   parseSetPermissionRequest
 } from '../../src/shared/ipc-guard.ts'
 
@@ -69,5 +70,14 @@ describe('ipc payload guards', () => {
     expect(parseRelocationPreviewRequest({ kind: 'file', source: 'a.md', target: 'b.md' })).toBeNull()
     expect(parseRelocationCommitRequest({ id: 'token', repairLinks: false })).toEqual({ id: 'token', repairLinks: false })
     expect(parseRelocationCommitRequest({ id: 'token', repairLinks: 'yes' })).toBeNull()
+  })
+
+  it('binds recovery retries to a bounded session and exact record revision', () => {
+    const request = { sessionId: 'session-123', revision: 'a'.repeat(64) }
+    expect(parseLifecycleRetryRequest(request)).toEqual(request)
+    for (const invalid of [null, {}, { ...request, sessionId: '' }, { ...request, sessionId: 'x'.repeat(129) },
+      { ...request, revision: 'old' }, { ...request, revision: 1 }, { ...request, sessionId: '../vault' }]) {
+      expect(parseLifecycleRetryRequest(invalid)).toBeNull()
+    }
   })
 })

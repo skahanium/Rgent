@@ -7,6 +7,7 @@ function harness(stream: (signal: AbortSignal, prompt: string) => AsyncIterable<
   let revision = 1
   let policy: 'reference' | 'forbidden' = 'reference'
   let failLedgerOnce = false
+  let lifecycleLocked = false
   const events: unknown[] = []
   const host = new AgentHost({
     root: () => '/vault',
@@ -21,16 +22,57 @@ function harness(stream: (signal: AbortSignal, prompt: string) => AsyncIterable<
       revision += 1
       return String(revision)
     },
-    tier: async () => { if (policy === 'forbidden') throw new Error('FORBIDDEN'); return 'reference' },
+    tier: async () => {
+      if (lifecycleLocked) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      if (policy === 'forbidden') throw new Error('FORBIDDEN')
+      return 'reference'
+    },
     credential: () => ({ provider: 'custom', baseURL: 'http://127.0.0.1:1234/v1', modelId: 'test', contextTokens: 10000, apiKey: 'secret' }),
     limits: () => ({ seconds: 30, steps: 4, tools: 0 }),
     stream: (input, signal) => stream(signal, input.prompt),
     emit: (event) => { events.push(event) }
   })
-  return { host, source: () => content, events, setPolicy: (value: typeof policy) => { policy = value }, failLedgerOnce: () => { failLedgerOnce = true }, externalEdit: (change: (source: string) => string) => { content = change(content); revision += 1 } }
+  return { host, source: () => content, events, setPolicy: (value: typeof policy) => { policy = value }, setLifecycleLock: (value: boolean) => { lifecycleLocked = value }, failLedgerOnce: () => { failLedgerOnce = true }, externalEdit: (change: (source: string) => string) => { content = change(content); revision += 1 } }
 }
 
 describe('Host minimal loop', () => {
+  it('keeps generated output pending behind a lifecycle lock and saves one ledger after recovery', async () => {
+    let lock = () => {}
+    const app = harness(async function* () {
+      yield '锁前已生成'
+      yield '与待保存续段'
+      lock()
+      yield '锁后不得读取'
+    })
+    lock = () => app.setLifecycleLock(true)
+    const source = app.source()
+    const start = source.indexOf('/')
+    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    await expect(task.done).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+    expect(app.host.pendingPaths('/vault')).toEqual(['a.md'])
+    expect(app.host.pendingPaths('/other-vault')).toEqual([])
+    expect(partitionSource(app.source()).body).toContain('锁前已生成')
+    expect(partitionSource(app.source()).body).not.toContain('与待保存续段')
+    expect(JSON.stringify(app.events)).toContain('与待保存续段')
+    expect(partitionSource(app.source()).ledger).toBeNull()
+    expect(JSON.stringify(app.events)).not.toContain('锁后不得读取')
+    const beforeRetry = app.source()
+    await app.host.retryPending('/other-vault')
+    expect(app.source()).toBe(beforeRetry)
+    expect(app.host.pendingPaths('/vault')).toEqual(['a.md'])
+    await expect(app.host.retryPending('/vault')).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+    expect(app.host.pendingPaths('/vault')).toEqual(['a.md'])
+    app.setLifecycleLock(false)
+    await app.host.retryPending('/vault')
+    expect(app.host.pendingPaths('/vault')).toEqual([])
+    expect(app.host.hasPending('/vault')).toBe(false)
+    const saved = app.source()
+    expect(partitionSource(saved).body).toContain('锁前已生成与待保存续段')
+    expect(partitionSource(saved).ledger).toContain('锁前已生成与待保存续段')
+    expect(saved.match(/<!-- rgent:ledger-task:v1/g)).toHaveLength(1)
+    await app.host.retryPending('/vault')
+    expect(app.source()).toBe(saved)
+  })
   it('writes the prompt and streamed answer into the original note, then appends one ledger chapter', async () => {
     const app = harness(async function* () { yield '第一段。\n\n'; yield '## 第二段' })
     const source = app.source()

@@ -1,11 +1,101 @@
 import { chmod, stat, symlink, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { VaultSession } from '../../src/main/vault.ts'
+import { VaultLifecycle } from '../../src/main/vault-lifecycle.ts'
+import { watchVault } from '../../src/main/watch.ts'
+import * as notesFs from '../../src/main/notes-fs.ts'
 import { createFolder, createNote, listVaultTree, parseStoredVault, readNote, readNoteSnapshot, serializeStoredVault, writeNote } from '../../src/main/notes-fs.ts'
 import { isVaultImagePath, readVaultMedia, resolveInVault, sanitizeNoteName, vaultMediaPath } from '../../src/main/paths.ts'
 import { collectNotePaths, collectRelPaths } from '../../src/renderer/src/tree.ts'
 import { joinVaultRel, parseVaultMediaUrl, vaultMediaUrl } from '../../src/shared/vault-rel.ts'
+
+vi.mock('electron', () => ({ dialog: { showOpenDialog: vi.fn() } }))
+vi.mock('../../src/main/watch.ts', () => ({ watchVault: vi.fn(() => () => {}) }))
+afterEach(() => { vi.restoreAllMocks() })
+
+describe('VaultSession isolation', () => {
+  async function setup() {
+    const userData = await mkdtemp(path.join(os.tmpdir(), 'rgent-session-'))
+    const first = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    const second = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+    await writeFile(path.join(first, '原篇.md'), 'first')
+    await writeFile(path.join(second, '原篇.md'), 'second')
+    const emit = vi.fn()
+    const session = new VaultSession(userData, emit)
+    const attach = async (root: string) => {
+      await writeFile(path.join(userData, 'vault.json'), serializeStoredVault(root))
+      return session.restore()
+    }
+    return { session, emit, attach, first, second }
+  }
+
+  it('rejects a preview waiting for recovery when the vault changes', async () => {
+    let finish!: (value: null) => void
+    const pending = new Promise<null>((resolve) => { finish = resolve })
+    vi.spyOn(VaultLifecycle.prototype, 'recover').mockReturnValueOnce(pending).mockResolvedValue(null)
+    const { session, attach, first, second } = await setup()
+    try {
+      await attach(first)
+      const preview = session.previewRelocation({ kind: 'note', source: '原篇.md', target: '新篇.md' })
+      await attach(second)
+      finish(null)
+      await expect(preview).rejects.toThrow('VAULT_CHANGED')
+      expect(await readFile(path.join(second, '原篇.md'), 'utf8')).toBe('second')
+    } finally { session.dispose() }
+  })
+
+  it.each(['success', 'failure'])('ignores late recovery %s from a previous vault', async (outcome) => {
+    let finish!: (value: { moved: []; unrepaired: [] } | null) => void
+    let fail!: (error: Error) => void
+    const pending = new Promise<{ moved: []; unrepaired: [] } | null>((resolve, reject) => { finish = resolve; fail = reject })
+    vi.spyOn(VaultLifecycle.prototype, 'recover').mockReturnValueOnce(pending).mockResolvedValue(null)
+    const { session, emit, attach, first, second } = await setup()
+    try {
+      await attach(first)
+      await attach(second)
+      emit.mockClear()
+      if (outcome === 'success') finish({ moved: [], unrepaired: [] })
+      else fail(new Error('OLD_RECOVERY_FAILURE'))
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(emit).not.toHaveBeenCalled()
+      expect((await session.previewRelocation({ kind: 'note', source: '原篇.md', target: '新篇.md' })).source).toBe('原篇.md')
+    } finally { session.dispose() }
+  })
+
+  it('binds status and retries to the session even when reopening the same vault', async () => {
+    const { session, attach, first } = await setup()
+    try {
+      await attach(first)
+      const token = session.captureSession()
+      expect((await session.lifecycleStatus()).sessionId).toBe(token)
+      await attach(first)
+      expect(() => session.assertSession(token)).toThrow('VAULT_CHANGED')
+      await expect(session.lifecycleRetry({ sessionId: token, revision: 'old' })).rejects.toThrow('VAULT_CHANGED')
+    } finally { session.dispose() }
+  })
+
+  it('discards a delayed note notification from the previous vault', async () => {
+    const { session, emit, attach, first, second } = await setup()
+    let finish!: (value: { content: string; revision: string }) => void
+    const pending = new Promise<{ content: string; revision: string }>((resolve) => { finish = resolve })
+    try {
+      await attach(first)
+      vi.spyOn(notesFs, 'readNoteSnapshot').mockReturnValueOnce(pending)
+      const callback = vi.mocked(watchVault).mock.calls.at(-1)![1]
+      callback('原篇.md')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      await attach(second)
+      emit.mockClear()
+      finish({ content: 'first secret', revision: 'old' })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(emit).not.toHaveBeenCalled()
+    } finally { session.dispose() }
+  })
+})
 
 describe('vault paths', () => {
   it('keeps paths inside the vault root', () => {

@@ -1,4 +1,70 @@
-import { openOverlay } from './overlay.ts'
+import { openOverlay, type Overlay } from './overlay.ts'
+import type { LifecycleRetryRequest, LifecycleStatus } from '../../shared/ipc.ts'
+
+const recoveryReasons = {
+  'journal-invalid': '恢复记录损坏，原记录已保留。请人工检查库根的 .rgent-lifecycle。',
+  'journal-unreadable': '恢复记录无法读取，原记录已保留。请检查访问权限。',
+  'object-changed': '部分对象、内容或目录成员发生变化，尚不能安全续跑。',
+  'policy-changed': '权限名单与操作记录不一致，尚不能安全续跑。',
+  'recovery-required': '操作尚未完成。重新核验身份、内容和权限后才能续跑。'
+} as const
+
+export function openLifecycleStatus(initial: LifecycleStatus,
+  retry: (request: LifecycleRetryRequest) => Promise<{ status: LifecycleStatus; message?: string }>,
+  fallbackFocus?: () => HTMLElement | null): Overlay {
+  const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  const overlay = openOverlay({ label: '文件操作恢复状态', initialFocus: () => close,
+    returnFocus: () => trigger?.isConnected && !trigger.closest('[hidden]') ? trigger : fallbackFocus?.() ?? null })
+  overlay.root.classList.add('lifecycle-dialog', 'lifecycle-recovery')
+  const heading = document.createElement('h2'); heading.textContent = '文件操作恢复状态'
+  const description = document.createElement('p')
+  const operation = document.createElement('p')
+  const list = document.createElement('ul'); list.className = 'lifecycle-progress'
+  const notice = document.createElement('p'); notice.setAttribute('role', 'status')
+  const actions = document.createElement('div'); actions.className = 'lifecycle-actions'
+  const close = document.createElement('button'); close.type = 'button'; close.textContent = '关闭'
+  close.addEventListener('click', () => overlay.close())
+  const again = document.createElement('button'); again.type = 'button'; again.className = 'lifecycle-retry'; again.textContent = '核验并重试'
+  actions.append(close)
+  overlay.root.append(heading, description, operation, list, notice, actions)
+  let current = initial
+  function render(status: LifecycleStatus): void {
+    current = status
+    description.textContent = status.status === 'ready' ? '没有未完成的文件操作。' : recoveryReasons[status.reason ?? 'recovery-required']
+    operation.textContent = status.operation ? `${status.operation.kind === 'note' ? '笔记' : '文件夹'}：${status.operation.source} → ${status.operation.target}` : ''
+    list.replaceChildren(...status.items.map((item) => {
+      const row = document.createElement('li')
+      row.dataset.state = item.state
+      row.textContent = `${{ source: '待移动', moved: '已移动', blocked: '无法核验' }[item.state]} · ${item.from} → ${item.to}`
+      return row
+    }))
+    if (status.status === 'pending' && status.revision) {
+      if (!again.isConnected) actions.append(again)
+    } else {
+      if (document.activeElement === again) close.focus()
+      again.remove()
+    }
+  }
+  again.addEventListener('click', () => {
+    if (!current.revision || again.disabled) return
+    const wasFocused = document.activeElement === again
+    again.disabled = true
+    notice.textContent = '正在核验并保存…'
+    void retry({ sessionId: current.sessionId, revision: current.revision }).then((result) => {
+      if (!overlay.isOpen()) return
+      render(result.status)
+      notice.textContent = result.message ?? (result.status.status === 'ready' ? '文件操作已完成。' : '恢复记录仍保留。')
+    }).catch(() => { if (overlay.isOpen()) notice.textContent = '无法完成重试。恢复记录仍保留，请重新查看状态。' })
+      .finally(() => {
+        again.disabled = false
+        if (overlay.isOpen() && wasFocused && (document.activeElement === document.body || document.activeElement === overlay.root)) {
+          (again.isConnected ? again : close).focus()
+        }
+      })
+  })
+  render(initial)
+  return overlay
+}
 
 export function promptNewNote(): Promise<string | null> {
   return promptText('新建笔记', '笔记名', '', '创建')

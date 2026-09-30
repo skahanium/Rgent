@@ -1,4 +1,4 @@
-import type { EntryCreateRequest, FlushDonePayload, NoteWriteRequest, PermissionTier, RelocationCommitRequest, RelocationPreviewRequest, SetPermissionRequest } from './ipc.ts'
+import type { EntryCreateRequest, FlushDonePayload, LifecycleRetryRequest, NoteWriteRequest, PermissionTier, RelocationCommitRequest, RelocationPreviewRequest, SetPermissionRequest } from './ipc.ts'
 
 /**
  * 渲染进程传来的载荷一律当不可信：只在主进程这一层做形状与类型校验，
@@ -62,4 +62,12 @@ export function parseRelocationCommitRequest(value: unknown): RelocationCommitRe
   const item = value as Partial<RelocationCommitRequest>
   const id = asString(item.id)
   return id && typeof item.repairLinks === 'boolean' ? { id, repairLinks: item.repairLinks } : null
+}
+
+export function parseLifecycleRetryRequest(value: unknown): LifecycleRetryRequest | null {
+  if (!value || typeof value !== 'object') return null
+  const item = value as Partial<LifecycleRetryRequest>
+  return typeof item.sessionId === 'string' && /^[a-zA-Z0-9-]{1,128}$/.test(item.sessionId) &&
+    typeof item.revision === 'string' && /^[a-f0-9]{64}$/.test(item.revision)
+    ? { sessionId: item.sessionId, revision: item.revision } : null
 }

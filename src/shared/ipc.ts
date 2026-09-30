@@ -12,6 +12,8 @@ export const IPC = {
   noteRelocated: 'note:relocated',
   lifecycleFlushRequest: 'lifecycle:flush-request',
   lifecycleFlushDone: 'lifecycle:flush-done',
+  lifecycleStatus: 'lifecycle:status',
+  lifecycleRetry: 'lifecycle:retry',
   noteExternalChange: 'note:external-change',
   vaultLost: 'vault:lost',
   menuOpenVault: 'menu:open-vault',
@@ -81,7 +83,7 @@ export type ReadingSetResult = { ok: true; reading: import('./reading-preference
 
 export type VaultState =
   | { status: 'needs-pick'; reason: 'first-run' | 'missing' }
-  | { status: 'ready'; rootName: string; vaultChanged?: boolean }
+  | { status: 'ready'; rootName: string; vaultChanged?: boolean; sessionId?: string }
 
 export type TreeEntry = {
   name: string
@@ -104,6 +106,7 @@ export type RelocationPreviewRequest = { kind: 'note' | 'folder'; source: string
 export type RelocationCommitRequest = { id: string; repairLinks: boolean }
 export type RelocationPreviewView = {
   id: string
+  sessionId: string
   kind: 'note' | 'folder'
   source: string
   target: string
@@ -113,10 +116,28 @@ export type RelocationPreviewView = {
 }
 export type RelocationPreviewResult = { ok: true; preview: RelocationPreviewView } | { ok: false; error: string }
 export type RelocationCommitResult = { ok: true; moved: { from: string; to: string }[]; unrepaired: string[] } | { ok: false; error: string }
-export type RelocationEvent = { moved: { from: string; to: string }[] }
+export type RelocationEvent = { moved: { from: string; to: string }[]; sessionId?: string }
+export type LifecycleReason = 'journal-invalid' | 'journal-unreadable' | 'object-changed' | 'policy-changed' | 'recovery-required'
+export type LifecycleStatus = {
+  sessionId: string
+  status: 'ready' | 'pending' | 'invalid'
+  revision: string | null
+  operation?: { kind: 'note' | 'folder'; source: string; target: string }
+  items: { from: string; to: string; state: 'source' | 'moved' | 'blocked' }[]
+  reason?: LifecycleReason
+}
+export type LifecycleRetryRequest = { sessionId: string; revision: string }
+export type LifecycleRetryResult = {
+  ok: true
+  moved: { from: string; to: string }[]
+  unrepaired: string[]
+  /** 文件恢复已完成，但无关任务的生成内容仍待保存。 */
+  hostPending: boolean
+} | { ok: false; error: string }
 export type NoteWriteRequest = { relPath: string; content: string; expectedRevision: string }
 
 export type NotePayload = {
+  sessionId?: string
   relPath: string
   content: string
   revision: string

@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { dialog, type BrowserWindow } from 'electron'
-import type { BacklinkGroup, NotePayload, NoteSnapshot, PermissionEntry, PermissionState, PermissionTier, SearchHit, TreeEntry, VaultState } from '../shared/ipc.ts'
+import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, PermissionEntry, PermissionState, PermissionTier, SearchHit, TreeEntry, VaultState } from '../shared/ipc.ts'
 import { createFolder, createNote, listVaultTree, parseStoredVault, readNoteSnapshot, serializeStoredVault, writeNote } from './notes-fs.ts'
 import { VaultMutationQueue } from './vault-mutation-queue.ts'
 import { VaultLifecycle, type RelocationPreview, type RelocationRequest, type RelocationMove } from './vault-lifecycle.ts'
@@ -17,6 +18,7 @@ export class VaultSession {
   private lifecycle: VaultLifecycle | null = null
   private lifecycleReady: Promise<void> = Promise.resolve()
   private lifecycleError: Error | null = null
+  private token: string | null = null
   root: string | null = null
   private stopWatch: (() => void) | null = null
   private lastWrites = new Map<string, RecentWrite>()
@@ -42,7 +44,7 @@ export class VaultSession {
     if (!stored) return { status: 'needs-pick', reason: 'first-run' }
     if (!isUsableDir(stored.path)) return { status: 'needs-pick', reason: 'missing' }
     this.attach(stored.path)
-    return { status: 'ready', rootName: path.basename(stored.path) }
+    return { status: 'ready', rootName: path.basename(stored.path), sessionId: this.captureSession() }
   }
 
   async pick(win: BrowserWindow | null): Promise<VaultState> {
@@ -68,13 +70,14 @@ export class VaultSession {
     return {
       status: 'ready',
       rootName: path.basename(chosen),
+      sessionId: this.captureSession(),
       vaultChanged: previous !== chosen
     }
   }
 
   currentState(): VaultState {
     if (this.root && isUsableDir(this.root)) {
-      return { status: 'ready', rootName: path.basename(this.root) }
+      return { status: 'ready', rootName: path.basename(this.root), sessionId: this.captureSession() }
     }
     const stored = parseStoredVault(this.readStateFile())
     if (!stored) return { status: 'needs-pick', reason: 'first-run' }
@@ -145,24 +148,82 @@ export class VaultSession {
     return relPath
   }
 
-  async previewRelocation(request: RelocationRequest): Promise<RelocationPreview> {
-    await this.lifecycleReady
+  sessionId(): string | null { return this.token }
+
+  captureSession(): string {
+    if (!this.root || !this.token) throw new Error('NO_VAULT')
+    return this.token
+  }
+
+  assertSession(token: string): void {
+    if (this.token !== token || !this.root) throw new Error('VAULT_CHANGED')
+  }
+
+  async previewRelocation(request: RelocationRequest, token = this.captureSession()): Promise<RelocationPreview> {
+    this.assertSession(token)
+    const lifecycle = this.lifecycle
+    const ready = this.lifecycleReady
+    await ready
+    this.assertSession(token)
     if (this.lifecycleError) throw this.lifecycleError
-    if (!this.lifecycle) throw new Error('NO_VAULT')
-    return this.lifecycle.preview(request)
+    if (!lifecycle) throw new Error('NO_VAULT')
+    const result = await lifecycle.preview(request)
+    this.assertSession(token)
+    return result
   }
 
   relocationPreviewById(id: string): RelocationPreview | null { return this.lifecycle?.peek(id) ?? null }
 
-  async commitRelocation(id: string, repairLinks: boolean): Promise<{ moved: RelocationMove[]; unrepaired: string[] }> {
-    await this.lifecycleReady
+  async commitRelocation(id: string, repairLinks: boolean, token = this.captureSession()): Promise<{ moved: RelocationMove[]; unrepaired: string[] }> {
+    this.assertSession(token)
+    const lifecycle = this.lifecycle
+    const ready = this.lifecycleReady
+    await ready
+    this.assertSession(token)
     if (this.lifecycleError) throw this.lifecycleError
-    if (!this.lifecycle) throw new Error('NO_VAULT')
-    const result = await this.lifecycle.commit(id, { repairLinks })
-    this.index.markDirty()
-    this.emit('note:relocated', { moved: result.moved })
-    this.emit('tree:changed')
+    if (!lifecycle) throw new Error('NO_VAULT')
+    const result = await lifecycle.commit(id, { repairLinks })
+    this.assertSession(token)
+    this.emitRelocation(result)
     return result
+  }
+
+  async lifecycleStatus(): Promise<LifecycleStatus> {
+    const token = this.captureSession()
+    const lifecycle = this.lifecycle!
+    await this.lifecycleReady
+    this.assertSession(token)
+    return lifecycle.status()
+  }
+
+  lifecycleRecoveryScope(request: LifecycleRetryRequest): { moved: RelocationMove[]; relPaths: string[] } {
+    this.assertSession(request.sessionId)
+    if (!this.lifecycle) throw new Error('NO_VAULT')
+    return this.lifecycle.recoveryScope(request.revision)
+  }
+
+  async lifecycleRetry(request: LifecycleRetryRequest): Promise<{ moved: RelocationMove[]; unrepaired: string[] }> {
+    this.assertSession(request.sessionId)
+    const lifecycle = this.lifecycle!
+    await this.lifecycleReady
+    this.assertSession(request.sessionId)
+    try {
+      const result = await lifecycle.retry(request.revision)
+      this.assertSession(request.sessionId)
+      this.lifecycleError = null
+      this.emitRelocation(result)
+      return result
+    } catch (error) {
+      this.assertSession(request.sessionId)
+      if (lifecycle.status().status !== 'ready') this.lifecycleError = new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      throw error
+    }
+  }
+
+  private emitRelocation(result: { moved: RelocationMove[]; unrepaired: string[] }): void {
+    this.index.markDirty()
+    this.emit('note:relocated', { moved: result.moved, sessionId: this.captureSession() })
+    this.emit('tree:changed')
   }
 
   async backlinks(relPath: string): Promise<BacklinkGroup[]> {
@@ -184,24 +245,33 @@ export class VaultSession {
     if (this.root) closeSecureFs(this.root)
     this.root = null
     this.lifecycle = null
+    this.token = null
     this.lifecycleError = null
     this.index.reset()
   }
 
   private attach(root: string): void {
     this.stopWatch?.()
+    if (this.debounce) clearTimeout(this.debounce)
+    this.debounce = null
+    this.changedNotes.clear()
+    this.lastWrites.clear()
     if (this.root) closeSecureFs(this.root)
     this.root = path.resolve(root)
-    this.lifecycle = new VaultLifecycle(this.root, this.mutations)
+    const token = randomUUID()
+    this.token = token
+    this.lifecycle = new VaultLifecycle(this.root, this.mutations, token, () => this.assertSession(token))
     this.lifecycleError = null
     this.lifecycleReady = this.lifecycle.recover().then((result) => {
-      if (result) { this.index.markDirty(); this.emit('note:relocated', { moved: result.moved }); this.emit('tree:changed') }
+      if (this.token !== token) return
+      if (result) this.emitRelocation(result)
     }).catch((error: unknown) => {
+      if (this.token !== token) return
       this.lifecycleError = error instanceof Error ? error : new Error('LIFECYCLE_RECOVERY_REQUIRED')
     })
     // 换库必须清索引，否则新库会看到旧库的反链。
     this.index.reset()
-    this.stopWatch = watchVault(this.root, (relPath) => this.onFsEvent(relPath))
+    this.stopWatch = watchVault(this.root, (relPath) => { if (this.token === token) this.onFsEvent(relPath) })
   }
 
   private onFsEvent(relPath: string | null): void {
@@ -213,7 +283,9 @@ export class VaultSession {
     this.index.markDirty()
     if (relPath && isNotePath(relPath)) this.changedNotes.add(relPath)
     if (this.debounce) clearTimeout(this.debounce)
+    const token = this.token
     this.debounce = setTimeout(() => {
+      if (this.token !== token) return
       this.emit('tree:changed')
       const notes = this.changedNotes
       this.changedNotes = new Set()
@@ -223,13 +295,16 @@ export class VaultSession {
 
   private async emitNoteChange(relPath: string): Promise<void> {
     if (!this.root) return
+    const token = this.token
+    const root = this.root
     // 先取回声记录，再读盘。读盘有一次 await，顺序反了就会拿「新落盘的记录」
     // 去比「读到的旧内容」，把自家存盘误报成外部改动，让画布把稿回退一版。
     const recent = this.lastWrites.get(relPath)
     try {
-      const { content, revision } = await readNoteSnapshot(this.root, relPath)
+      const { content, revision } = await readNoteSnapshot(root, relPath)
+      if (this.token !== token) return
       if (isOwnEcho(recent, revision, Date.now())) return
-      const payload: NotePayload = { relPath, content, revision }
+      const payload: NotePayload = { relPath, content, revision, sessionId: token! }
       this.emit('note:external-change', payload)
     } catch {
       /* deleted notes refresh via tree:changed */
