@@ -59,7 +59,8 @@ describe('docs stage invariants', () => {
   it('rejects a current stage without its own section', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const changed = source.replace(/^## 笔记库文件操作基础.*$/m, '### 笔记库文件操作基础')
+    const stage = source.match(/^## 当前阶段\s*\n+\*\*([^*]+)\*\*/m)![1]!.replace(/[。.!！\s]+$/u, '')
+    const changed = source.replace(`## ${stage}\n`, `### ${stage}\n`)
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
@@ -71,7 +72,8 @@ describe('docs stage invariants', () => {
     const { build, run } = fixture()
     // Exercise the same CRLF checkout Git produces on Windows.
     const source = readFileSync(build, 'utf8').replace(/\r?\n/g, '\r\n')
-    const changed = source.replace(/^  → 笔记库文件操作基础[^\r\n]*(?:\r?\n|$)/m, '')
+    const stage = source.match(/^## 当前阶段\s*\n+\*\*([^*]+)\*\*/m)![1]!.replace(/[。.!！\s]+$/u, '')
+    const changed = source.split('\r\n').filter(line => !line.trim().startsWith(`→ ${stage}`)).join('\r\n')
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
@@ -82,7 +84,7 @@ describe('docs stage invariants', () => {
   it('rejects a stage switch without exactly one current matrix row', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const changed = source.replace(/(\| 库与文件 \|[^\n]*)\*\*当前\*\*/, '$1**已交**')
+    const changed = source.replace(/(\|[^\n]+)\*\*当前\*\*/, '$1**已交**')
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
