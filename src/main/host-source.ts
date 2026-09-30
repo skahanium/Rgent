@@ -75,6 +75,21 @@ export function markPrompt(source: string, write: PromptWrite): string {
   return source.slice(0, lineStart(source, start)) + marker + newline + cleaned + source.slice(end)
 }
 
+/** 尾部 HTML 块与后文之间只能由空行分隔；这段空白属于本任务的答案范围。 */
+function endOfBlankLines(source: string, from: number): number {
+  let end = from
+  for (;;) {
+    const match = /^[ \t]*(?:\r\n|\r|\n)/.exec(source.slice(end))
+    if (!match) return end
+    end += match[0].length
+  }
+}
+
+/** Host 自己插入的块尾空白不算外部改写；它只是模型块与后文之间的分隔。 */
+function withoutTrailingBlankLines(text: string): string {
+  return text.replace(/(?:[ \t]*(?:\r\n|\r|\n))+$/, '')
+}
+
 function locatedPrompt(source: string, taskId: string): { blockEnd: number; firstAnswer: number | null; answerEnd: number | null } {
   const compiled = compile(source)
   if (compiled.stale) throw new Error('无法解析笔记')
@@ -88,6 +103,7 @@ function locatedPrompt(source: string, taskId: string): { blockEnd: number; firs
   if (nextMarker) throw new Error('任务口令标记被覆盖')
   let firstAnswer: number | null = null
   let answerEnd: number | null = null
+  let lastAnswerType: string | null = null
   for (let at = promptAt + 1; at < blocks.length; at += 1) {
     const block = blocks[at]!
     const preceding = blocks[at - 1]!
@@ -97,7 +113,10 @@ function locatedPrompt(source: string, taskId: string): { blockEnd: number; firs
     if (between.length !== 1 || own?.identity !== 'ai' || markerTaskId(source, own.range) !== taskId) break
     if (firstAnswer == null) firstAnswer = lineStart(source, own.range.start)
     answerEnd = block.range.end
+    lastAnswerType = block.type
   }
+  // HTML 块以空行结束：分隔空行是 Host 自己补的，必须跟着答案范围一起被替换。
+  if (answerEnd !== null && lastAnswerType === 'html') answerEnd = endOfBlankLines(source, answerEnd)
   return { blockEnd: prompt.range.end, firstAnswer, answerEnd }
 }
 
@@ -121,9 +140,13 @@ function renderedAnswer(taskId: string, input: string, newline: string): string 
       }
     }
   }
-  return parsed.index.blocks.map((block) =>
+  const rendered = parsed.index.blocks.map((block) =>
     `${markerLine('ai', { 'task-id': taskId })}${newline}${answer.slice(block.range.start, block.range.end).replace(/\n/g, newline)}`
   ).join(newline + newline)
+  // CommonMark 的 HTML 块以空行结束，不以闭合标签结束：紧贴其后的账本锚点或人写段落
+  // 都会并进同一个块（`</table>` 结尾也一样）。这里补出分隔空行，让边界重新成立。
+  // 人的写盘仍由 assertLedgerPreserved 拒绝，不在这里替他补。
+  return parsed.index.blocks.at(-1)?.type === 'html' ? rendered + newline + newline : rendered
 }
 
 export function upsertAiAnswer(source: string, write: AnswerWrite): string {
@@ -134,7 +157,7 @@ export function upsertAiAnswer(source: string, write: AnswerWrite): string {
   if (write.expectedPreviousAnswer !== undefined) {
     const expected = renderedAnswer(taskId, write.expectedPreviousAnswer, newline)
     const actual = where.firstAnswer === null ? '' : source.slice(where.firstAnswer, where.answerEnd ?? where.firstAnswer)
-    if (actual !== expected) throw new Error('AI_BLOCK_CHANGED')
+    if (withoutTrailingBlankLines(actual) !== withoutTrailingBlankLines(expected)) throw new Error('AI_BLOCK_CHANGED')
   }
   const rendered = renderedAnswer(taskId, write.answer, newline)
   const start = where.firstAnswer ?? where.blockEnd

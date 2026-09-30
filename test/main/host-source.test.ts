@@ -122,6 +122,58 @@ describe('Host source projection', () => {
   })
 })
 
+describe('HTML answer blocks never swallow the ledger boundary', () => {
+  // 真实稳态的落盘形状：AI 块与账本锚点之间只有一个换行（appendLedgerChapter 的 prelude）。
+  // 这正是 HTML 块吞掉锚点的输入；空行版本测不出这个问题。
+  const steadyState = (newline: string): string => {
+    const marked = markPrompt(`/问${newline}`, { taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const answered = upsertAiAnswer(marked, { taskId, answer: '旧回答' })
+    return appendLedgerChapter(answered, { taskId, startedAt: 'prev', status: 'completed', prompt: '问', answer: '旧回答' })
+  }
+  // CommonMark 的 HTML 块以空行结束，不以闭合标签结束；闭合的 `</table>` 也一样。
+  const answers = ['正文\n\n<div>\n未闭合', '正文\n\n<table>\n<tr><td>x</table>', '正文\n\n<details>\n<summary>s']
+
+  it.each(answers)('keeps the existing ledger byte-for-byte and stays byte-stable across checkpoints: %s', (answer) => {
+    const base = steadyState('\n')
+    const ledger = partitionSource(base).ledger
+    expect(ledger).not.toBeNull()
+    const first = upsertAiAnswer(base, { taskId, answer, expectedPreviousAnswer: '旧回答' })
+    expect(partitionSource(first).ledger).toBe(ledger)
+    const next = `${answer}·续`
+    const second = upsertAiAnswer(first, { taskId, answer: next, expectedPreviousAnswer: answer })
+    expect(second).toContain('·续')
+    // 第三个 checkpoint 必须逐字节等于第二个：Host 自己补的分隔空行不能被反复累积。
+    expect(upsertAiAnswer(second, { taskId, answer: next, expectedPreviousAnswer: next })).toBe(second)
+  })
+
+  it.each(answers)('keeps a following human paragraph out of the AI block: %s', (answer) => {
+    const source = markPrompt('/问\n\n人写的后文。\n', { taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const partial = upsertAiAnswer(source, { taskId, answer })
+    expect(compile(partial).index.blocks.at(-1)?.identity).toBeUndefined()
+    expect(partitionSource(partial).body).toContain('人写的后文。')
+  })
+
+  it('publishes the first ledger chapter after an HTML answer instead of refusing the write', () => {
+    const answer = '正文\n\n<div>\n未闭合'
+    const marked = markPrompt('/问\n', { taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const answered = upsertAiAnswer(marked, { taskId, answer })
+    const final = appendLedgerChapter(answered, { taskId, startedAt: 'now', status: 'completed', prompt: '问', answer })
+    expect(partitionSource(final).ledger).not.toBeNull()
+    expect(partitionSource(final).body).toContain('未闭合')
+    expect(final).toContain('<!-- rgent:ledger-task:v1 id="task-123" -->')
+  })
+
+  it('uses the source line ending when separating a CRLF HTML answer', () => {
+    const base = steadyState('\r\n')
+    const ledger = partitionSource(base).ledger
+    expect(ledger).not.toBeNull()
+    const result = upsertAiAnswer(base, { taskId, answer: '正文\n\n<div>\n未闭合', expectedPreviousAnswer: '旧回答' })
+    expect(partitionSource(result).ledger).toBe(ledger)
+    expect(partitionSource(result).body).toContain('未闭合\r\n\r\n')
+    expect(partitionSource(result).body).not.toContain('\n\n')
+  })
+})
+
 
 describe('untrusted machine comments', () => {
   it.each(['<!--\nrgent:ai:v1\n-->', '<!-- rgent:prompt:v1', '<!--', '<!-- rgent:', '<!-- rgent:ledger:v1 -->'])('neutralizes complete and partial machine comment %s', (answer) => {

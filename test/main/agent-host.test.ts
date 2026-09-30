@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { AgentHost } from '../../src/main/agent-host.ts'
-import { partitionSource } from '../../src/markdown/partition.ts'
+import { assertLedgerPreserved, partitionSource } from '../../src/markdown/partition.ts'
+import { appendLedgerChapter, markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
+
+/** 稳态正文：已有一章账本，正文尾部留一个新口令段。与真实落盘形状一致。 */
+function withExistingLedger(): { source: string; range: { start: number; end: number } } {
+  let source = markPrompt('/写个回答\n', { taskId: 't0', range: { start: 0, end: 5 }, expectedText: '/写个回答', promptText: '写个回答' })
+  source = upsertAiAnswer(source, { taskId: 't0', answer: '旧回答' })
+  source = appendLedgerChapter(source, { taskId: 't0', startedAt: 'prev', status: 'completed', prompt: '写个回答', answer: '旧回答' })
+  const part = partitionSource(source)
+  const prefix = part.body.endsWith('\n\n') ? part.body : part.body.endsWith('\n') ? `${part.body}\n` : `${part.body}\n\n`
+  const body = `${prefix}/写个回答\n`
+  const range = { start: prefix.length, end: prefix.length + '/写个回答'.length }
+  return { source: body + (part.ledger ?? ''), range }
+}
 
 function harness(stream: (signal: AbortSignal, prompt: string) => AsyncIterable<string>, initial = '前言\n\n/写个回答\n\n后文\n') {
   let content = initial
@@ -18,6 +31,8 @@ function harness(stream: (signal: AbortSignal, prompt: string) => AsyncIterable<
         failLedgerOnce = false
         throw new Error('IO_ERROR')
       }
+      // 与 VaultSession.write 同一条账本边界断言：Host 写回也必须保住原账本前缀。
+      assertLedgerPreserved(next, partitionSource(content).ledger)
       content = next
       revision += 1
       return String(revision)
@@ -87,6 +102,22 @@ describe('Host minimal loop', () => {
     expect(part.body).toContain('后文')
     expect(part.ledger).toContain('第一段。')
     expect(part.ledger).toContain('写个回答')
+  })
+
+  it('completes and appends the ledger when the model answer ends in an open HTML block', async () => {
+    const seeded = withExistingLedger()
+    const app = harness(async function* () { yield '表格：\n\n<table>\n<tr><td>被截断的行' }, seeded.source)
+    const before = partitionSource(seeded.source).ledger
+    expect(before).not.toBeNull()
+    const task = await app.host.start({ relPath: 'a.md', range: seeded.range, expectedText: '/写个回答', promptText: '写个回答' })
+    expect(await task.done).toEqual({ status: 'completed' })
+    expect(app.host.hasPending('/vault')).toBe(false)
+    const part = partitionSource(app.source())
+    // 原账本逐字节保留；题型回答落进正文而未吞掉边界。
+    expect(part.ledger?.startsWith(before!)).toBe(true)
+    expect(part.body).toContain('被截断的行')
+    expect(part.ledger).toContain('被截断的行')
+    expect(app.source().match(/<!-- rgent:ledger-task:v1/g)).toHaveLength(2)
   })
 
   it('refuses model access when the note is forbidden, without changing bytes', async () => {
