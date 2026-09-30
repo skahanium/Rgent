@@ -17,34 +17,12 @@ import { renderStatusbar, statusModel, wordsOf } from './statusbar.ts'
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
 import { openAuthorizationPopover } from './authorization-popover.ts'
+import { hostErrorText } from './host-errors.ts'
 import { slashAtCaret } from './slash.ts'
 import { renderTree, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
 import type { Theme } from './theme.ts'
 
 const SAVE_MS = 800
-const HOST_ERROR_MESSAGES: Record<string, string> = {
-  NO_API_KEY: '请先在设置的「模型」页保存当前供应商的密钥。',
-  ENCRYPTION_UNAVAILABLE: '系统密钥保护当前不可用。',
-  KEY_DECRYPT_FAILED: '已保存的模型密钥无法解密，请在设置中替换。',
-  PERMISSIONS_INVALID: '权限名单无法核对，请先修复库根名单。',
-  FORBIDDEN: '这篇笔记禁止 AI 触碰。',
-  TOOLS_UNAVAILABLE: '本场读库与搜库工具不可用，请重新发起。',
-  SOURCE_CHANGED: '参考来源已变化，本场已停止，回答已保留。',
-  SOURCE_REPLACED: '参考来源对象已替换，本场已停止。',
-  SOURCE_PERMISSION_CHANGED: '参考来源权限已变化，本场已停止。',
-  MODEL_PROTOCOL_ERROR: '模型返回的工具协议无效，本场已停止。',
-  TOOL_CALL_LIMIT: '本场工具次数已达上限。',
-  MODEL_STEP_LIMIT: '本场模型步数已达上限。',
-  MODEL_CONTEXT_LIMIT: '本场上下文已达上限。',
-  MODEL_OUTPUT_LIMIT: '本场生成内容已达上限。',
-  TOOL_ARGUMENT_LIMIT: '模型工具参数已超出上限。',
-  NOTE_NOT_REFERENCE: '这篇笔记当前不允许发起 AI 任务。',
-  NOTE_BUSY: '这篇笔记已有正在运行的任务。',
-  PREVIOUS_TASK_UNSAVED: '上一场生成内容尚未保存，请先处理保存失败。',
-  MODEL_REQUEST_FAILED: '模型请求失败，请检查接口、密钥和网络。',
-  CONFLICT: '笔记已变化，请先处理冲突。'
-}
-const hostErrorText = (error: string): string => HOST_ERROR_MESSAGES[error] ?? error
 const LIFECYCLE_ERRORS: Record<string, string> = {
   COPY_PARENT_CHANGED: '新文件已创建，但目标目录身份无法确认。请检查目标；窗口稿和待保存任务已保留，请勿重试覆盖。',
   COPY_VERIFY_FAILED: '新文件发布后的内容或身份无法确认。请检查目标；窗口稿和待保存任务已保留。',
