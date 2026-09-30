@@ -81,7 +81,8 @@ jobs:
         if: needs.plan.outputs.docsTests == 'true'
         with:
           version: 12.4.1
-      - run: pnpm install --frozen-lockfile
+      # binding.gyp 会触发隐式 node-gyp install；Linux 只跑文档用例，不构建产品。
+      - run: pnpm install --frozen-lockfile --ignore-scripts
         if: needs.plan.outputs.docsTests == 'true'
       - run: pnpm exec vitest run test/scripts/check-docs.test.ts
         if: needs.plan.outputs.docsTests == 'true'

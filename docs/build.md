@@ -507,3 +507,5 @@ export function tierFor(relPath: string, entries: readonly PermissionEntry[]): P
 Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界见 [施工对象](topics.md#agent-核心框架)；无工具的最小环已在当前阶段接线，后续工具仍未开工。
 
 相关：[文档地图](README.md) · [已拍板决定](decisions.md) · [架构](architecture.md) · [施工对象](topics.md) · [施工守则](handbook.md)
+
+本轮授权包首次 CI 的 Linux 文档作业在依赖安装时触发 `binding.gyp` 隐式原生构建，尚未执行检查器用例即失败；已将该作业安装改为 `--ignore-scripts`，macOS／Windows 产品门仍按原构建路径执行。此项不是新增 Linux 产品支持，后续对应 CI 结果单独核实。
