@@ -33,9 +33,12 @@ VaultHandle* OpenRoot(const std::string& absolute_path);
 void CloseRoot(VaultHandle* root);
 std::vector<Entry> List(VaultHandle* root, const std::string& relative_dir);
 std::vector<Component> Resolve(VaultHandle* root, const std::string& relative_path);
+struct ReadSnapshotResult { std::string bytes; std::string object_version; };
+ReadSnapshotResult ReadSnapshot(VaultHandle* root, const std::string& relative_file);
 std::string ReadBytes(VaultHandle* root, const std::string& relative_file);
-void Replace(VaultHandle* root, const std::string& relative_file,
-             const std::optional<std::string>& expected, const std::string& content);
+std::string Replace(VaultHandle* root, const std::string& relative_file,
+             const std::optional<std::string>& expected, const std::string& content,
+             const std::optional<std::string>& expected_id = std::nullopt);
 void Create(VaultHandle* root, const std::string& relative_file);
 void CreateVaultDirectory(VaultHandle* root, const std::string& relative_dir);
 void Move(VaultHandle* root, const std::string& source, const std::string& target,

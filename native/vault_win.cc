@@ -448,17 +448,29 @@ std::vector<Component> Resolve(VaultHandle* root, const std::string& relative_pa
   return result;
 }
 
-std::string ReadBytes(VaultHandle* root, const std::string& relative_file) {
+ReadSnapshotResult ReadSnapshot(VaultHandle* root, const std::string& relative_file) {
   const auto parts = Parts(relative_file);
   auto chain = WalkDirectories(root, parts, parts.size() - 1);
   auto leaf = OpenChild(chain.current, parts.back(), FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
                         kOpen, kNonDirectory, kShareAll);
   RequireKind(leaf.get(), "file");
-  return ReadAll(leaf.get());
+  const auto identity = IdString(Identity(leaf.get()));
+  auto bytes = ReadAll(leaf.get());
+  auto fresh = WalkDirectories(root, parts, parts.size() - 1);
+  auto current = OpenChild(fresh.current, parts.back(), FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                           kOpen, kNonDirectory, kShareAll);
+  RequireKind(current.get(), "file");
+  if (IdString(Identity(current.get())) != identity) Fail("PATH_CHANGED");
+  return {std::move(bytes), identity};
 }
 
-void Replace(VaultHandle* root, const std::string& relative_file,
-             const std::optional<std::string>& expected, const std::string& content) {
+std::string ReadBytes(VaultHandle* root, const std::string& relative_file) {
+  return ReadSnapshot(root, relative_file).bytes;
+}
+
+std::string Replace(VaultHandle* root, const std::string& relative_file,
+             const std::optional<std::string>& expected, const std::string& content,
+             const std::optional<std::string>& expected_id) {
   const auto parts = Parts(relative_file);
   auto chain = WalkDirectories(root, parts, parts.size() - 1);
   // 从父句柄按名重开目标并核修订值：与 macOS 的 ExpectExisting 同一条，
@@ -469,6 +481,7 @@ void Replace(VaultHandle* root, const std::string& relative_file,
                             kNonDirectory, kShareAll);
     if (!target.valid()) return !expected.has_value();
     RequireKind(target.get(), "file");
+    if (expected_id && IdString(Identity(target.get())) != *expected_id) Fail("PATH_CHANGED");
     return expected.has_value() && ReadAll(target.get()) == *expected;
   };
   if (!check_target()) Fail("CONFLICT");
@@ -504,8 +517,17 @@ void Replace(VaultHandle* root, const std::string& relative_file,
       Fail("UNSAFE_PATH");
     // 目标名解析在**刚核验过的那个父句柄**上，而不是 nullptr：这样即使核验之后
     // 父目录再被换掉，改名也不会被引到别的目录去。
+    // This remains a precheck, not atomic identity-CAS. External renames after
+    // the final identity/root check are a residual window; verify our result.
     RenameOpenedFile(temporary.get(), fresh.current, parts.back(), expected.has_value());
     renamed = true;
+    auto committed = WalkDirectories(root, parts, parts.size() - 1);
+    auto current = OpenChild(committed.current, parts.back(), FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                             kOpen, kNonDirectory, kShareAll);
+    RequireKind(current.get(), "file");
+    const auto identity = IdString(Identity(temporary.get()));
+    if (IdString(Identity(current.get())) != identity) Fail("PATH_CHANGED");
+    return identity;
   } catch (...) {
     if (!renamed) {
       try { DeleteOpenedFile(temporary.get()); } catch (...) { /* Preserve the original error. */ }

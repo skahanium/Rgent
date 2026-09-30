@@ -72,12 +72,24 @@ export function revisionOf(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex')
 }
 
-export async function readNoteSnapshot(root: string, relPath: string): Promise<{ content: string; revision: string }> {
-  const content = await readNote(root, relPath)
-  return { content, revision: revisionOf(content) }
+export type NoteVersion = { revision: string; objectVersion: string }
+
+export async function readNoteSnapshot(root: string, relPath: string): Promise<NoteVersion & { content: string }> {
+  if (!isNotePath(relPath)) throw new VaultPathError('不是笔记')
+  mustResolve(root, relPath)
+  try {
+    const snapshot = secureFsFor(root).readSnapshot(relPath)
+    const content = snapshot.bytes.toString('utf8')
+    return { content, revision: revisionOf(content), objectVersion: snapshot.objectVersion }
+  } catch (error) {
+    if (error instanceof Error && error.message === 'UNSAFE_PATH') throw new VaultPathError('不能读写符号链接笔记')
+    throw error
+  }
 }
 
-export async function writeNote(root: string, relPath: string, content: string, expectedRevision: string): Promise<string> {
+export function writeNote(root: string, relPath: string, content: string, expectedRevision: string): Promise<string>
+export function writeNote(root: string, relPath: string, content: string, expectedRevision: string, expectedObjectVersion: string): Promise<NoteVersion>
+export async function writeNote(root: string, relPath: string, content: string, expectedRevision: string, expectedObjectVersion?: string): Promise<string | NoteVersion> {
   if (!isNotePath(relPath)) throw new VaultPathError('不是笔记')
   mustResolve(root, relPath)
   let key: string
@@ -87,7 +99,10 @@ export async function writeNote(root: string, relPath: string, content: string, 
     if (error instanceof Error && error.message === 'UNSAFE_PATH') throw new VaultPathError('不能读写符号链接笔记')
     throw error
   }
-  return serializedWrite(key, async () => writeNoteNow(root, relPath, content, expectedRevision))
+  return serializedWrite(key, async () => {
+    const saved = await writeNoteNow(root, relPath, content, expectedRevision, expectedObjectVersion)
+    return expectedObjectVersion === undefined ? saved.revision : saved
+  })
 }
 
 const writes = new Map<string, Promise<void>>()
@@ -106,12 +121,14 @@ async function serializedWrite<T>(key: string, work: () => Promise<T>): Promise<
   }
 }
 
-async function writeNoteNow(root: string, relPath: string, content: string, expectedRevision: string): Promise<string> {
+async function writeNoteNow(root: string, relPath: string, content: string, expectedRevision: string, expectedObjectVersion?: string): Promise<NoteVersion> {
   const fs = secureFsFor(root)
-  const original = fs.readText(relPath)
+  const snapshot = fs.readSnapshot(relPath)
+  if (expectedObjectVersion !== undefined && snapshot.objectVersion !== expectedObjectVersion) throw new VaultPathError('PATH_CHANGED')
+  const original = snapshot.bytes.toString('utf8')
   if (revisionOf(original) !== expectedRevision) throw new VaultPathError('CONFLICT')
-  fs.replace(relPath, original, content)
-  return revisionOf(content)
+  const objectVersion = fs.replace(relPath, original, content, expectedObjectVersion ?? snapshot.objectVersion)
+  return { revision: revisionOf(content), objectVersion }
 }
 
 function verifiedParent(root: string, parent: string): void {

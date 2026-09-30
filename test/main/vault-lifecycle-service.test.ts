@@ -576,3 +576,93 @@ describe('VaultLifecycle', () => {
     expect(await readFile(path.join(root, '原篇.md'), 'utf8')).toBe('正文')
   })
 })
+
+it('does not migrate old parsed permissions together with newer raw bytes', async () => {
+  const root = await vault()
+  await mkdir(path.join(root, 'source'))
+  await writeFile(path.join(root, 'source', 'a.md'), 'body')
+  const before = '{"source":"forbidden"}'
+  const after = '{"source":"follow"}'
+  await writeFile(path.join(root, '.rgent-permissions'), before)
+  const fs = secureFsFor(root)
+  const read = fs.readText.bind(fs)
+  const snapshot = fs.readSnapshot?.bind(fs)
+  // Simulate an external writer immediately after the permission bytes were read.
+  const mutate = (relPath: string): void => { if (relPath === '.rgent-permissions') writeFileSync(path.join(root, relPath), after) }
+  fs.readText = (relPath) => { const result = read(relPath); mutate(relPath); return result }
+  if (snapshot) fs.readSnapshot = (relPath) => { const result = snapshot(relPath); mutate(relPath); return result }
+  const service = new VaultLifecycle(root)
+  try {
+    const preview = await service.preview({ kind: 'folder', source: 'source', target: 'target' })
+    await expect(service.commit(preview.id, { repairLinks: false })).rejects.toThrow('STALE_PREVIEW')
+    expect(fs.resolve('source').at(-1)?.kind).toBe('dir')
+  } finally { fs.readText = read; if (snapshot) fs.readSnapshot = snapshot }
+})
+
+it('blocks loss of a note rule inherited through actual attachment folder spelling', async (context) => {
+  const root = await vault()
+  await writeFile(path.join(root, 'Note.md'), 'body')
+  await mkdir(path.join(root, 'note'))
+  await writeFile(path.join(root, 'note', 'pic.png'), 'image')
+  const fs = secureFsFor(root)
+  try { if (fs.resolve('Note').at(-1)?.id !== fs.resolve('note').at(-1)?.id) context.skip() } catch { context.skip() }
+  await writeFile(path.join(root, '.rgent-permissions'), '{"Note.md":"forbidden"}')
+  await expect(new VaultLifecycle(root).preview({ kind: 'folder', source: 'note', target: 'elsewhere' })).rejects.toThrow('PERMISSION_DOWNGRADE')
+})
+
+it('preserves attachment alias restrictions when their entire parent moves', async (context) => {
+  const root = await vault()
+  await mkdir(path.join(root, 'source', 'note'), { recursive: true })
+  await writeFile(path.join(root, 'source', 'Note.md'), 'body')
+  await writeFile(path.join(root, 'source', 'note', 'pic.png'), 'image')
+  const fs = secureFsFor(root)
+  try { if (fs.resolve('source/Note').at(-1)?.id !== fs.resolve('source/note').at(-1)?.id) context.skip() } catch { context.skip() }
+  await writeFile(path.join(root, '.rgent-permissions'), '{"source/Note.md":"forbidden"}')
+  const service = new VaultLifecycle(root)
+  const preview = await service.preview({ kind: 'folder', source: 'source', target: 'target' })
+  await service.commit(preview.id, { repairLinks: false })
+  const { modelTierFor } = await import('../../src/main/permissions.ts')
+  await expect(modelTierFor(root, 'target/note/pic.png')).rejects.toThrow('FORBIDDEN')
+})
+
+it('repairs only the wikilink target while preserving target whitespace and display bytes', async () => {
+  const root = await vault()
+  await writeFile(path.join(root, 'Old.md'), 'body')
+  await writeFile(path.join(root, 'refs.md'), '[[  Old.md  | Old label ]]\r\n![[ Old |alias]]\r\n')
+  const service = new VaultLifecycle(root)
+  const preview = await service.preview({ kind: 'note', source: 'Old.md', target: 'New.md' })
+  await service.commit(preview.id, { repairLinks: true })
+  expect(await readFile(path.join(root, 'refs.md'), 'utf8')).toBe('[[  New.md  | Old label ]]\r\n![[ New |alias]]\r\n')
+})
+
+it('rejects an identical-byte replacement of a link repair source after preview', async () => {
+  const root = await vault()
+  await writeFile(path.join(root, 'Old.md'), 'body')
+  await writeFile(path.join(root, 'refs.md'), '[[Old]]')
+  const service = new VaultLifecycle(root)
+  const preview = await service.preview({ kind: 'note', source: 'Old.md', target: 'New.md' })
+  await rename(path.join(root, 'refs.md'), path.join(root, 'held.txt'))
+  await writeFile(path.join(root, 'refs.md'), '[[Old]]')
+  await expect(service.commit(preview.id, { repairLinks: true })).rejects.toThrow('STALE_PREVIEW')
+  expect(secureFsFor(root).resolve('Old.md').at(-1)?.kind).toBe('file')
+})
+
+it.each([false, true])('reports structural save identities only after native success (fail=%s)', async (fail) => {
+  const root = await vault()
+  await writeFile(path.join(root, 'Old.md'), 'body')
+  await writeFile(path.join(root, 'refs.md'), '[[Old]]')
+  const fs = secureFsFor(root)
+  const before = fs.readSnapshot('refs.md')
+  const receipts: import('../../src/main/vault-lifecycle.ts').CommittedNoteWrite[] = []
+  const service = new VaultLifecycle(root, new VaultMutationQueue(), 'session', () => {}, receipt => receipts.push(receipt))
+  const preview = await service.preview({ kind: 'note', source: 'Old.md', target: 'New.md' })
+  const replace = fs.replace.bind(fs)
+  fs.replace = ((...args) => { if (fail && args[0] === 'refs.md') throw new Error('IO_ERROR'); return replace(...args) }) as typeof fs.replace
+  try {
+    const result = await service.commit(preview.id, { repairLinks: true })
+    expect(result.unrepaired).toEqual(fail ? ['refs.md'] : [])
+  } finally { fs.replace = replace }
+  if (fail) expect(receipts).toEqual([])
+  else expect(receipts).toEqual([{ relPath: 'refs.md', previousPath: 'refs.md', previousObjectVersion: before.objectVersion,
+    objectVersion: fs.readSnapshot('refs.md').objectVersion, content: '[[New]]' }])
+})

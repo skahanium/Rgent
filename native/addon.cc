@@ -158,20 +158,37 @@ napi_value Read(napi_env env, napi_callback_info info) {
   });
 }
 
+napi_value ReadSnapshot(napi_env env, napi_callback_info info) {
+  return Invoke(env, [&] {
+    size_t argc = 2;
+    napi_value args[2];
+    Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+    if (argc != 2) throw std::runtime_error("BAD_ARGS");
+    const auto snapshot = rgent::ReadSnapshot(Root(env, args[0]), String(env, args[1]));
+    napi_value result, bytes;
+    Check(env, napi_create_object(env, &result));
+    Check(env, napi_create_buffer_copy(env, snapshot.bytes.size(), snapshot.bytes.data(), nullptr, &bytes));
+    Set(env, result, "bytes", bytes);
+    Set(env, result, "objectVersion", Text(env, snapshot.object_version));
+    return result;
+  });
+}
+
 napi_value Replace(napi_env env, napi_callback_info info) {
   return Invoke(env, [&] {
-    size_t argc = 4;
-    napi_value args[4];
+    size_t argc = 5;
+    napi_value args[5];
     Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
-    if (argc != 4) throw std::runtime_error("BAD_ARGS");
-    std::optional<std::string> expected;
+    if (argc < 4) throw std::runtime_error("BAD_ARGS");
+    std::optional<std::string> expected, expected_id;
     napi_valuetype type;
     Check(env, napi_typeof(env, args[2], &type));
     if (type != napi_null) expected = Bytes(env, args[2]);
-    rgent::Replace(Root(env, args[0]), String(env, args[1]), expected, Bytes(env, args[3]));
-    napi_value result;
-    Check(env, napi_get_undefined(env, &result));
-    return result;
+    if (argc == 5) {
+      Check(env, napi_typeof(env, args[4], &type));
+      if (type != napi_undefined) expected_id = String(env, args[4]);
+    }
+    return Text(env, rgent::Replace(Root(env, args[0]), String(env, args[1]), expected, Bytes(env, args[3]), expected_id));
   });
 }
 
@@ -220,6 +237,7 @@ napi_value Init(napi_env env, napi_value exports) {
     {"closeRoot", nullptr, CloseRoot, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"list", nullptr, List, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"resolve", nullptr, Resolve, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"readSnapshot", nullptr, ReadSnapshot, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"read", nullptr, Read, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"replace", nullptr, Replace, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"create", nullptr, Create, nullptr, nullptr, nullptr, napi_default, nullptr},

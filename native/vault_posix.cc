@@ -181,7 +181,7 @@ std::string ActualName(int parent, const struct stat& child) {
   return name;
 }
 
-void ExpectExisting(int root, const std::string& relative, const std::optional<std::string>& expected) {
+void ExpectExisting(int root, const std::string& relative, const std::optional<std::string>& expected, const std::optional<std::string>& expected_id) {
   if (!expected) {
     Fd current(openat(root, relative.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY |
                                             kResolveBeneath | O_CLOEXEC));
@@ -190,6 +190,9 @@ void ExpectExisting(int root, const std::string& relative, const std::optional<s
     return;
   }
   Fd current = File(root, relative);
+  struct stat info;
+  if (fstat(current.value, &info) != 0) Fail("IO_ERROR");
+  if (expected_id && Id(info) != *expected_id) Fail("PATH_CHANGED");
   if (ReadFd(current.value) != *expected) Fail("CONFLICT");
 }
 
@@ -265,21 +268,28 @@ std::vector<Component> Resolve(VaultHandle* root, const std::string& relative_pa
   return out;
 }
 
-std::string ReadBytes(VaultHandle* root, const std::string& relative_file) {
+ReadSnapshotResult ReadSnapshot(VaultHandle* root, const std::string& relative_file) {
   (void)Parts(relative_file);
   Fd root_fd = DupRoot(root);
   Fd file = File(root_fd.value, relative_file);
   auto bytes = ReadFd(file.value);
   Fd still_here = File(root_fd.value, relative_file);
   if (!SameObject(file.value, still_here.value)) Fail("PATH_CHANGED");
-  return bytes;
+  struct stat info;
+  if (fstat(file.value, &info) != 0) Fail("IO_ERROR");
+  return {std::move(bytes), Id(info)};
 }
 
-void Replace(VaultHandle* root, const std::string& relative_file,
-             const std::optional<std::string>& expected, const std::string& content) {
+std::string ReadBytes(VaultHandle* root, const std::string& relative_file) {
+  return ReadSnapshot(root, relative_file).bytes;
+}
+
+std::string Replace(VaultHandle* root, const std::string& relative_file,
+             const std::optional<std::string>& expected, const std::string& content,
+             const std::optional<std::string>& expected_id) {
   const auto parts = Parts(relative_file);
   Fd root_fd = DupRoot(root);
-  ExpectExisting(root_fd.value, relative_file, expected);
+  ExpectExisting(root_fd.value, relative_file, expected, expected_id);
   mode_t mode = 0600;
   if (expected) {
     struct stat info;
@@ -310,7 +320,9 @@ void Replace(VaultHandle* root, const std::string& relative_file,
   try {
     WriteFd(file.value, content);
     if (fsync(file.value) != 0) Fail("IO_ERROR");
-    ExpectExisting(root_fd.value, relative_file, expected);
+    ExpectExisting(root_fd.value, relative_file, expected, expected_id);
+    // Identity and byte checks are preconditions, not atomic identity-CAS: an
+    // external replacement after this check can still win the rename window.
     // 来源与目标都在一次内核改名里从固定库根/固定父目录解析：
     // 被搬走的子目录或被换掉的符号链接都改不了提交去向。
 #ifdef __APPLE__
@@ -330,6 +342,11 @@ void Replace(VaultHandle* root, const std::string& relative_file,
     // 改名已经提交，这里只是让它在断电后也可见。失败不能报成写盘失败——
     // 磁盘上已经是新内容，报错会让人以为没存上。
     (void)fsync(parent.value);
+    Fd current = File(root_fd.value, relative_file);
+    if (!SameObject(file.value, current.value)) Fail("PATH_CHANGED");
+    struct stat info;
+    if (fstat(file.value, &info) != 0) Fail("IO_ERROR");
+    return Id(info);
   } catch (...) {
     if (created) (void)unlinkat(parent.value, temp.c_str(), 0);
     throw;

@@ -63,3 +63,28 @@ describe('secure vault structure', () => {
     expect(() => fs.move('归档/资料', '资料', id)).toThrow('EEXIST')
   })
 })
+
+it('binds note snapshots and writes to the opened object, including identical-byte replacements', async () => {
+  const { readNoteSnapshot, writeNote } = await import('../../src/main/notes-fs.ts')
+  const { rename } = await import('node:fs/promises')
+  const root = await vault()
+  await writeFile(path.join(root, 'a.md'), 'same\r\n')
+  const first = await readNoteSnapshot(root, 'a.md')
+  expect(first.objectVersion).toBe(secureFsFor(root).resolve('a.md').at(-1)!.id)
+  await rename(path.join(root, 'a.md'), path.join(root, 'held.md'))
+  await writeFile(path.join(root, 'a.md'), first.content)
+  await expect(writeNote(root, 'a.md', 'changed', first.revision, first.objectVersion)).rejects.toThrow('PATH_CHANGED')
+  expect(await readFile(path.join(root, 'a.md'), 'utf8')).toBe(first.content)
+  const second = await readNoteSnapshot(root, 'a.md')
+  const saved = await writeNote(root, 'a.md', 'saved', second.revision, second.objectVersion)
+  expect(saved.objectVersion).not.toBe(second.objectVersion)
+  expect(await readNoteSnapshot(root, 'a.md')).toMatchObject(saved)
+})
+
+it('checks expected object identity inside the native replace call', async () => {
+  const root = await vault()
+  await writeFile(path.join(root, 'a.md'), 'same')
+  const fs = secureFsFor(root)
+  expect(() => fs.replace('a.md', 'same', 'changed', 'stale-id')).toThrow('PATH_CHANGED')
+  expect(fs.readText('a.md')).toBe('same')
+})

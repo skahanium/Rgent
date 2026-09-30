@@ -11,8 +11,9 @@ type NativeBinding = {
   closeRoot(root: unknown): void
   list(root: unknown, relDir: string): NativeEntry[]
   resolve(root: unknown, relPath: string): ResolvedComponent[]
+  readSnapshot(root: unknown, relPath: string): { bytes: Buffer; objectVersion: string }
   read(root: unknown, relPath: string): Buffer
-  replace(root: unknown, relPath: string, expected: Buffer | null, content: Buffer): void
+  replace(root: unknown, relPath: string, expected: Buffer | null, content: Buffer, expectedId?: string): string
   create(root: unknown, relPath: string): void
   createDirectory(root: unknown, relPath: string): void
   move(root: unknown, source: string, target: string, expectedId: string): void
@@ -39,6 +40,10 @@ export class SecureVaultFs {
     return binding.resolve(this.handle, relPath)
   }
 
+  readSnapshot(relPath: string): { bytes: Buffer; objectVersion: string } {
+    return binding.readSnapshot(this.handle, relPath)
+  }
+
   readBytes(relPath: string): Buffer {
     return binding.read(this.handle, relPath)
   }
@@ -47,8 +52,8 @@ export class SecureVaultFs {
     return this.readBytes(relPath).toString('utf8')
   }
 
-  replace(relPath: string, expected: string | null, content: string): void {
-    binding.replace(this.handle, relPath, expected === null ? null : Buffer.from(expected, 'utf8'), Buffer.from(content, 'utf8'))
+  replace(relPath: string, expected: string | null, content: string, expectedId?: string): string {
+    return binding.replace(this.handle, relPath, expected === null ? null : Buffer.from(expected, 'utf8'), Buffer.from(content, 'utf8'), expectedId)
   }
 
   create(relPath: string): void {

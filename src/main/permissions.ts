@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { resolveInVault } from './paths.ts'
 import { secureFsFor } from './secure-fs.ts'
 import type { ResolvedComponent } from './secure-fs.ts'
@@ -88,15 +89,22 @@ function requireStableLifecycle(root: string): void {
   } catch { throw new Error('LIFECYCLE_RECOVERY_REQUIRED') }
 }
 
-export async function loadPermissions(root: string): Promise<PermissionState> {
+export type PermissionSnapshot = { raw: string | null; revision: string | null; state: PermissionState }
+
+/** Raw bytes, revision and parsed entries all belong to this one read. */
+export async function loadPermissionSnapshot(root: string): Promise<PermissionSnapshot> {
   let raw: string | null
   try {
     raw = secureFsFor(root).readText(FILE_NAME)
   } catch (error) {
     if (error instanceof Error && error.message === 'ENOENT') raw = null
-    else return { status: 'invalid', error: '权限名单无法读取' }
+    else return { raw: null, revision: null, state: { status: 'invalid', error: '权限名单无法读取' } }
   }
-  return parsePermissions(root, raw)
+  return { raw, revision: raw === null ? null : createHash('sha256').update(raw, 'utf8').digest('hex'), state: parsePermissions(root, raw) }
+}
+
+export async function loadPermissions(root: string): Promise<PermissionState> {
+  return (await loadPermissionSnapshot(root)).state
 }
 
 function parsePermissions(root: string, raw: string | null): PermissionState {
@@ -133,7 +141,8 @@ function parsePermissions(root: string, raw: string | null): PermissionState {
 }
 
 /** Match a note's attachment folder by its actual filesystem spelling. */
-export function effectivePermissionEntries(root: string, entries: readonly PermissionEntry[]): PermissionEntry[] {
+export function effectivePermissionEntries(root: string, entries: readonly PermissionEntry[],
+  resolveFolder?: (stem: string) => string | null): PermissionEntry[] {
   const fs = secureFsFor(root)
   const effective = [...entries]
   const direct = new Set(entries.map((entry) => entry.relPath))
@@ -141,15 +150,18 @@ export function effectivePermissionEntries(root: string, entries: readonly Permi
   for (const entry of entries) {
     if (!entry.relPath.toLowerCase().endsWith('.md')) continue
     const stem = entry.relPath.slice(0, -3)
-    let folder
+    let canonical: string | null
     try {
-      folder = fs.resolve(stem)
+      if (resolveFolder) canonical = resolveFolder(stem)
+      else {
+        const folder = fs.resolve(stem)
+        canonical = folder.at(-1)?.kind === 'dir' ? folder.map((part) => part.name).join('/') : null
+      }
     } catch (error) {
       if (error instanceof Error && (error.message === 'ENOENT' || error.message === 'UNSAFE_PATH')) continue
       throw error
     }
-    if (folder.at(-1)?.kind !== 'dir') continue
-    const canonical = folder.map((part) => part.name).join('/')
+    if (canonical === null) continue
     if (canonical === stem || direct.has(canonical)) continue
     const prior = derived.get(canonical)
     if (prior && prior !== entry.tier) throw new Error('PERMISSIONS_INVALID')

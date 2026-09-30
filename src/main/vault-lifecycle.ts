@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { collectNotePaths } from '../shared/vault-rel.ts'
 import { compile } from '../markdown/index.ts'
-import { listVaultTree, readNote, revisionOf } from './notes-fs.ts'
-import { loadPermissions, tierFor } from './permissions.ts'
+import { listVaultTree, readNoteSnapshot, revisionOf } from './notes-fs.ts'
+import { effectivePermissionEntries, loadPermissionSnapshot, tierFor } from './permissions.ts'
 import { hasHiddenSegment, isNotePath, resolveInVault } from './paths.ts'
 import { secureFsFor } from './secure-fs.ts'
 import { VaultMutationQueue } from './vault-mutation-queue.ts'
@@ -13,7 +13,7 @@ const PERMISSIONS = '.rgent-permissions'
 
 export type RelocationRequest = { kind: 'note' | 'folder'; source: string; target: string }
 export type RelocationMove = { from: string; to: string; id: string }
-export type LinkChange = { relPath: string; newPath: string; expectedRevision: string; changes: { start: number; end: number; before: string; after: string }[] }
+export type LinkChange = { relPath: string; newPath: string; expectedRevision: string; expectedObjectVersion: string; changes: { start: number; end: number; before: string; after: string }[] }
 export type RelocationPreview = {
   id: string
   sessionId: string
@@ -24,6 +24,7 @@ export type RelocationPreview = {
   linkChanges: LinkChange[]
   permissionChanges: { from: string; to: string; tier: string }[]
 }
+export type CommittedNoteWrite = { relPath: string; previousPath: string; previousObjectVersion: string; objectVersion: string; content: string }
 type Fingerprint = { relPath: string; id: string; kind: string; hash?: string; repairedHash?: string }
 type PendingMove = {
   kind: 'move'
@@ -62,7 +63,8 @@ export class VaultLifecycle {
   private readonly previews = new Map<string, { view: RelocationPreview; fingerprints: Fingerprint[]; permissionBefore: string | null; permissionAfter: string | null }>()
 
   constructor(private readonly root: string, private readonly queue = new VaultMutationQueue(),
-    private readonly sessionId: string = randomUUID(), private readonly assertCurrent: () => void = () => {}) {}
+    private readonly sessionId: string = randomUUID(), private readonly assertCurrent: () => void = () => {},
+    private readonly onCommittedNoteWrite: (write: CommittedNoteWrite) => void = () => {}) {}
 
   status(): LifecycleStatus {
     this.assertCurrent()
@@ -154,15 +156,28 @@ export class VaultLifecycle {
       }),
       ...moves.flatMap((move) => this.fingerprintTree(move.from))
     ]
-    const policy = await loadPermissions(this.root)
+    const snapshot = await loadPermissionSnapshot(this.root)
+    const policy = snapshot.state
     this.assertCurrent()
     if (policy.status !== 'ready') throw new Error('PERMISSIONS_INVALID')
-    const permissionBefore = this.readOptional(PERMISSIONS)
+    const permissionBefore = snapshot.raw
+    const effectiveBefore = effectivePermissionEntries(this.root, policy.entries)
     const mappedEntries = policy.entries.map((entry) => ({ ...entry, relPath: mapped(entry.relPath, moves) }))
     if (new Set(mappedEntries.map((entry) => entry.relPath)).size !== mappedEntries.length) throw new Error('PERMISSION_COLLISION')
+    const reversed = moves.map((move) => ({ from: move.to, to: move.from, id: move.id }))
+    const effectiveAfter = effectivePermissionEntries(this.root, mappedEntries, (stem) => {
+      const requested = mapped(stem, reversed)
+      const resolved = fs.resolve(requested)
+      if (resolved.at(-1)?.kind !== 'dir') return null
+      const before = resolved.map((part) => part.name).join('/')
+      const after = mapped(before, moves)
+      // A folder moved away from an unchanged note is no longer its attachment.
+      if (requested === stem && after !== before) return null
+      return after
+    })
     for (const item of fingerprints) {
-      const oldTier = tierFor(item.relPath, policy.entries)
-      const newTier = tierFor(mapped(item.relPath, moves), mappedEntries)
+      const oldTier = tierFor(item.relPath, effectiveBefore)
+      const newTier = tierFor(mapped(item.relPath, moves), effectiveAfter)
       const strength = { reference: 0, follow: 1, forbidden: 2 }
       if (strength[newTier] < strength[oldTier]) throw new Error('PERMISSION_DOWNGRADE')
     }
@@ -195,6 +210,10 @@ export class VaultLifecycle {
       const freshState = this.previews.get(fresh.id)!
       this.previews.delete(fresh.id)
       if (!sameFingerprints(prepared.fingerprints, freshState.fingerprints) ||
+          freshState.permissionBefore !== prepared.permissionBefore ||
+          freshState.permissionAfter !== prepared.permissionAfter ||
+          JSON.stringify(fresh.moves) !== JSON.stringify(prepared.view.moves) ||
+          JSON.stringify(fresh.permissionChanges) !== JSON.stringify(prepared.view.permissionChanges) ||
           this.readOptional(PERMISSIONS) !== prepared.permissionBefore ||
           JSON.stringify(fresh.linkChanges) !== JSON.stringify(prepared.view.linkChanges)) throw new Error('STALE_PREVIEW')
       const journalRaw = this.readOptional(JOURNAL)
@@ -203,8 +222,9 @@ export class VaultLifecycle {
       const fingerprints = prepared.fingerprints.map((item) => {
         const link = options.repairLinks ? prepared.view.linkChanges.find((change) => change.relPath === item.relPath) : undefined
         if (!link) return item
-        const source = secureFsFor(this.root).readText(item.relPath)
-        if (revisionOf(source) !== link.expectedRevision) throw new Error('STALE_PREVIEW')
+        const snapshot = secureFsFor(this.root).readSnapshot(item.relPath)
+        const source = snapshot.bytes.toString('utf8')
+        if (snapshot.objectVersion !== link.expectedObjectVersion || revisionOf(source) !== link.expectedRevision) throw new Error('STALE_PREVIEW')
         return { ...item, repairedHash: hash(Buffer.from(applyChanges(source, link.changes))) }
       })
       const active: PendingMove = {
@@ -281,16 +301,24 @@ export class VaultLifecycle {
     if (active.repairLinks) {
       for (const item of active.linkRepairs) {
         const relPath = item.newPath
+        let committed: CommittedNoteWrite | null = null
         try {
-          const source = fs.readText(relPath)
+          const snapshot = fs.readSnapshot(relPath)
+          const source = snapshot.bytes.toString('utf8')
           if (revisionOf(source) !== item.expectedRevision) {
             if (!linkChangesInSource(source, active.intent.moves).length) continue
             unrepaired.push(relPath)
             continue
           }
           const next = applyChanges(source, linkChangesInSource(source, active.intent.moves))
-          if (next !== source) fs.replace(relPath, source, next)
+          if (next !== source) {
+            const objectVersion = fs.replace(relPath, source, next, snapshot.objectVersion)
+            committed = { relPath, previousPath: item.relPath, previousObjectVersion: snapshot.objectVersion, objectVersion, content: next }
+          }
         } catch { unrepaired.push(relPath) }
+        // Only the successful native replace receipt proves this identity edge.
+        // Callback failure preserves the recovery journal instead of swallowing it.
+        if (committed) this.onCommittedNoteWrite(committed)
       }
     }
     verifyMoved()
@@ -305,8 +333,10 @@ export class VaultLifecycle {
     const fs = secureFsFor(this.root)
     const components = fs.resolve(relPath)
     const leaf = components.at(-1)!
-    const result: Fingerprint[] = [{ relPath, id: leaf.id, kind: leaf.kind,
-      ...(leaf.kind === 'file' ? { hash: hash(fs.readBytes(relPath)) } : {}) }]
+    const snapshot = leaf.kind === 'file' ? fs.readSnapshot(relPath) : null
+    if (snapshot && snapshot.objectVersion !== leaf.id) throw new Error('PATH_CHANGED')
+    const result: Fingerprint[] = [{ relPath, id: snapshot?.objectVersion ?? leaf.id, kind: leaf.kind,
+      ...(snapshot ? { hash: hash(snapshot.bytes) } : {}) }]
     if (leaf.kind === 'dir') {
       for (const child of fs.list(relPath)) {
         if (child.kind !== 'file' && child.kind !== 'dir') throw new Error('UNSAFE_PATH')
@@ -319,9 +349,9 @@ export class VaultLifecycle {
   private async scanLinks(moves: readonly RelocationMove[]): Promise<LinkChange[]> {
     const results: LinkChange[] = []
     for (const relPath of collectNotePaths(await listVaultTree(this.root))) {
-      const source = await readNote(this.root, relPath)
-      const changes = linkChangesInSource(source, moves)
-      if (changes.length) results.push({ relPath, newPath: mapped(relPath, moves), expectedRevision: revisionOf(source), changes })
+      const snapshot = await readNoteSnapshot(this.root, relPath)
+      const changes = linkChangesInSource(snapshot.content, moves)
+      if (changes.length) results.push({ relPath, newPath: mapped(relPath, moves), expectedRevision: snapshot.revision, expectedObjectVersion: snapshot.objectVersion, changes })
     }
     return results
   }
@@ -429,8 +459,10 @@ export class VaultLifecycle {
     const current = fs.resolve(relPath).at(-1)
     if (!current || current.kind !== item.kind) return false
     if (!item.hash) return current.id === item.id
-    const currentHash = hash(fs.readBytes(relPath))
-    if (current.id === item.id) return currentHash === item.hash || currentHash === item.repairedHash
+    const snapshot = fs.readSnapshot(relPath)
+    if (snapshot.objectVersion !== current.id) return false
+    const currentHash = hash(snapshot.bytes)
+    if (snapshot.objectVersion === item.id) return currentHash === item.hash || currentHash === item.repairedHash
     return relPath === mapped(item.relPath, active.intent.moves) && currentHash === item.repairedHash
   }
 
@@ -557,9 +589,10 @@ function linkChangesInSource(source: string, moves: readonly RelocationMove[]): 
     const inner = before.slice(marker, -2)
     const pipe = inner.indexOf('|')
     const rawTarget = pipe < 0 ? inner : inner.slice(0, pipe)
-    const outputTarget = rawTarget.toLowerCase().endsWith('.md') ? newTarget : newTarget.replace(/\.md$/i, '')
-    const after = `${before.slice(0, marker)}${outputTarget}${pipe < 0 ? '' : inner.slice(pipe)}]]`
-    changes.push({ start: link.range.start, end: link.range.end, before, after })
+    const target = rawTarget.trim()
+    const start = link.range.start + marker + rawTarget.length - rawTarget.trimStart().length
+    const after = target.toLowerCase().endsWith('.md') ? newTarget : newTarget.replace(/\.md$/i, '')
+    changes.push({ start, end: start + target.length, before: target, after })
   }
   return changes
 }

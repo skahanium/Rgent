@@ -166,3 +166,36 @@ it('does not commit outside the vault when an opened child directory moves out',
     await worker.terminate()
   }
 })
+
+it('rejects an identical-byte replacement made while the native save writes its temporary file', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-object-race-'))
+  writeFileSync(path.join(root, 'a.md'), 'same')
+  const expectedId = secureFsFor(root).resolve('a.md').at(-1)!.id
+  const done = new SharedArrayBuffer(4)
+  const worker = new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads')
+    const fs = require('node:fs')
+    const path = require('node:path')
+    const done = new Int32Array(workerData.done)
+    parentPort.postMessage('ready')
+    while (Atomics.load(done, 0) === 0) {
+      if (fs.readdirSync(workerData.root).some(name => name.endsWith('.tmp'))) {
+        try {
+          fs.renameSync(path.join(workerData.root, 'a.md'), path.join(workerData.root, 'held.md'))
+          fs.writeFileSync(path.join(workerData.root, 'a.md'), 'same')
+          Atomics.store(done, 0, 1)
+        } catch { Atomics.store(done, 0, 2) }
+      }
+    }
+  `, { eval: true, workerData: { root, done } })
+  await once(worker, 'message')
+  try {
+    expect(() => secureFsFor(root).replace('a.md', 'same', 'x'.repeat(64 * 1024 * 1024), expectedId)).toThrow('PATH_CHANGED')
+    expect(Atomics.load(new Int32Array(done), 0)).toBe(1)
+    expect(readFileSync(path.join(root, 'a.md'), 'utf8')).toBe('same')
+    expect(readFileSync(path.join(root, 'held.md'), 'utf8')).toBe('same')
+  } finally {
+    Atomics.store(new Int32Array(done), 0, 3)
+    await worker.terminate()
+  }
+})
