@@ -121,10 +121,11 @@ export function createVaultImageElement(
     root.classList.add('md-image-ph')
     root.setAttribute('role', 'status')
     const label = document.createElement('span')
-    label.textContent = alt ? `${alt} · 图片未加载` : '图片未加载'
+    label.textContent = standalone && alt ? `${alt} · 图片未加载` : '图片未加载'
     const details = document.createElement('details')
     const summary = document.createElement('summary')
-    summary.textContent = '查看路径与来源'
+    summary.textContent = standalone ? '查看路径与来源' : '来源'
+    summary.setAttribute('aria-label', '查看图片路径与来源')
     const address = document.createElement('span')
     details.addEventListener('toggle', () => {
       address.textContent = details.open ? `${sourceDescription(source)} · ${rel}` : ''
@@ -173,7 +174,8 @@ export function createImageElement(
     if (action) {
       const details = document.createElement('details')
       const summary = document.createElement('summary')
-      summary.textContent = '查看地址与来源'
+      summary.textContent = standalone ? '查看地址与来源' : '来源'
+      summary.setAttribute('aria-label', '查看图片地址与来源')
       const address = document.createElement('span')
       details.addEventListener('toggle', () => {
         address.textContent = details.open ? `${sourceLabel} · ${target}` : ''

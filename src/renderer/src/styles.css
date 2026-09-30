@@ -1123,6 +1123,7 @@ input:focus-visible,
 .md-image-inline.md-image-ph { max-width: min(18em, 100%); gap: 4px; padding: 0; border: 0; background: transparent; vertical-align: baseline; line-height: 1.2; }
 .md-image-inline.md-image-ph button { min-height: 24px; padding: 0; border: 0; border-radius: 0; color: var(--accent-primary); background: transparent; text-decoration: underline; text-underline-offset: 2px; }
 .md-image-inline.md-image-ph button:hover { color: var(--text-body); background: transparent; }
+.md-image-inline.md-image-ph summary, .md-image-inline.md-image-ph button { white-space: nowrap; }
 .md-image-inline .md-image { display: inline-block; max-width: 3em; max-height: 2em; margin: 0 0.15em; vertical-align: middle; }
 
 .md-image {
