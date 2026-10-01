@@ -6,7 +6,7 @@ export { collectNotePaths, collectRelPaths } from '../../shared/vault-rel.ts'
 export type TreeAction = 'new-note' | 'new-folder' | 'rename' | 'move'
 
 type BrowserPreference = {
-  version: 1; selected: string; resource: string; expanded: string[]; ratio: number; attachments: boolean
+  version: 1; selected: string; resource: string; expanded: string[]; ratio: number; attachments: boolean; width?: number
 }
 type BrowserOptions = {
   onOpenNote: (path: string) => void
@@ -15,6 +15,9 @@ type BrowserOptions = {
 }
 export type FileBrowser = {
   readonly selectedFolder: string
+  readonly preferredWidth: number | null
+  setPreferredWidth(width: number | null): void
+  captureScroll(): void
   setVault(key: string | null): void
   update(entries: TreeEntry[], active: string | null): void
   setActive(path: string | null): void
@@ -26,6 +29,7 @@ const parentOf = (path: string): string => path.split('/').slice(0, -1).join('/'
 const within = (path: string, root: string): boolean => path === root || path.startsWith(root + '/')
 const validRelative = (value: unknown): value is string => typeof value === 'string' && value.length <= 4096 &&
   (value === '' || value.split('/').every(part => !!part && part !== '.' && part !== '..' && !part.includes('\\') && !part.includes('\0') && !part.includes(':')))
+const validWidth = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 192 && value <= 360
 
 function readPreference(key: string): BrowserPreference {
   try {
@@ -33,7 +37,8 @@ function readPreference(key: string): BrowserPreference {
     if (!value || value.version !== 1 || !validRelative(value.selected) || !validRelative(value.resource) ||
       !Array.isArray(value.expanded) || value.expanded.length > 2000 || !value.expanded.every(validRelative) ||
       typeof value.attachments !== 'boolean' || !Number.isFinite(value.ratio) || value.ratio < 0.15 || value.ratio > 0.8) return defaults()
-    return { version: 1, selected: value.selected, resource: value.resource, expanded: [...new Set<string>(value.expanded)], ratio: value.ratio, attachments: value.attachments }
+    return { version: 1, selected: value.selected, resource: value.resource, expanded: [...new Set<string>(value.expanded)], ratio: value.ratio, attachments: value.attachments,
+      ...(validWidth(value.width) ? { width: value.width } : {}) }
   } catch { return defaults() }
 }
 
@@ -233,7 +238,15 @@ export function createFileBrowser(host: HTMLElement, options: BrowserOptions): F
   divider.addEventListener('pointerup', event => { if (dragging === event.pointerId) { dragging = null; divider.releasePointerCapture(event.pointerId) } })
   divider.addEventListener('pointercancel', () => { dragging = null })
   const browser: FileBrowser = {
+    captureScroll: rememberScroll,
     get selectedFolder() { return state.selected },
+    get preferredWidth() { return state.width ?? null },
+    setPreferredWidth(width) {
+      if (width === null) delete state.width
+      else if (validWidth(width)) state.width = width
+      else return
+      save()
+    },
     setVault(key) {
       const next = key ? `rgent:file-browser:v1:${key}` : null
       if (next === storageKey) return

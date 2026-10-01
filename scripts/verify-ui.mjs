@@ -121,6 +121,98 @@ function makePage(send, close) {
   }
 }
 
+/** Real rectangles and pointer/keyboard input exercise the sidebar's layout contract. */
+async function verifySidebarWidth(page, shot) {
+  const toggle = async open => page.eval(`(() => { const button = document.querySelector('.tree-toggle'); if ((button.getAttribute('aria-expanded') === 'true') !== ${open}) button.click() })()`)
+  await toggle(false)
+  check('侧栏收起后无空壳或边界占位，画布接到窗口左缘', await page.eval(`(() => {
+    const panel = document.querySelector('.tree-panel'), body = document.querySelector('.body'), stage = document.querySelector('.stage')
+    return getComputedStyle(panel).display === 'none' && panel.getBoundingClientRect().width === 0 && Math.abs(stage.getBoundingClientRect().left - body.getBoundingClientRect().left) < 1
+  })()`))
+  const exists = await page.eval(`!!document.querySelector('.sidebar-resizer')`)
+  check('侧栏右边界有可键盘操作的垂直分隔柄', exists)
+  if (!exists) return
+  const activePath = await page.eval(`document.querySelector('.tab[aria-selected=true]')?.dataset.rel`)
+  const sourceBefore = await page.eval(`window.rgent.noteRead(${JSON.stringify(activePath)}).then(note => note.content)`)
+  await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; const line = view.state.doc.line(Math.min(3, view.state.doc.lines)); if (line.length >= 3) view.dispatch({ selection: { anchor: line.from + 1, head: line.from + 3 } }) })()`)
+  const geometry = `(() => {
+    const panel = document.querySelector('.tree-panel'), handle = document.querySelector('.sidebar-resizer')
+    const content = document.querySelector('.cm-content'), body = document.querySelector('.body'), scroller = document.querySelector('.cm-scroller')
+    const text = content.getBoundingClientRect(), scroll = scroller.getBoundingClientRect()
+    return { width: panel.getBoundingClientRect().width, textWidth: text.width, leftGap: text.left - scroll.left, rightGap: scroll.left + scroller.clientWidth - text.right, min: Number(handle.getAttribute('aria-valuemin')), max: Number(handle.getAttribute('aria-valuemax')), now: Number(handle.getAttribute('aria-valuenow')), bounded: body.scrollWidth <= body.clientWidth + 1, handleWidth: handle.getBoundingClientRect().width, selection: content.cmTile.root.view.state.selection.main.toJSON() }
+  })()`
+  const settle = async () => page.eval(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
+  const reset = async () => { await page.eval(`document.querySelector('.sidebar-resizer').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`); await settle() }
+  const key = async (name, modifiers = 0) => { await page.eval(`document.querySelector('.sidebar-resizer').focus()`); await page.key(name, name, modifiers); await settle() }
+  await toggle(true)
+  try {
+    for (const mode of ['day', 'night']) {
+      await page.eval(`window.rgent.themeSet('${mode}')`)
+      for (const [width, height] of [[1200, 800], [800, 560]]) {
+        await page.call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
+        await settle(); await reset()
+        const baseline = await page.eval(geometry)
+        await key('End')
+        const enlarged = await page.eval(geometry)
+        check(`${mode} ${width} 侧栏调宽保护正文行宽与反链边界`, enlarged.width > baseline.width && enlarged.width <= 360 && enlarged.width <= enlarged.max + 1 && enlarged.textWidth >= baseline.textWidth - 1 && enlarged.leftGap >= 23.5 && enlarged.rightGap >= 23.5 && enlarged.bounded && enlarged.handleWidth === 8 && JSON.stringify(baseline.selection) === JSON.stringify(enlarged.selection), JSON.stringify({ baseline, enlarged }))
+        await shot(page, `sidebar-width-${mode}-${width}`)
+      }
+      await toggle(false)
+      check(`${mode} 收起后分隔柄隐藏且不能聚焦`, await page.eval(`document.querySelector('.sidebar-resizer').hidden && document.querySelector('.sidebar-resizer').tabIndex === -1 && document.activeElement === document.querySelector('.tree-toggle')`))
+      await shot(page, `sidebar-collapsed-${mode}`)
+      await toggle(true)
+    }
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false })
+    await settle(); await key('End')
+    const wide = await page.eval(geometry)
+    await shot(page, 'sidebar-width-night-wide')
+    await page.eval(`document.querySelector('.ledger-open').click()`)
+    check('调宽后只读账本与反链仍在工作区内', await page.eval(`(() => { const ledger = document.querySelector('.ledger-view'); const r = ledger.getBoundingClientRect(); return !ledger.hidden && !ledger.querySelector('[contenteditable=true]') && r.left >= 0 && r.right <= innerWidth })()`))
+    await shot(page, 'sidebar-width-night-ledger')
+    await page.eval(`document.querySelector('.ledger-close').click()`)
+    await page.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })
+    await shot(page, 'sidebar-width-night-reduced-motion')
+    await page.call('Emulation.setEmulatedMedia', { features: [] })
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
+    await settle()
+    const narrow = await page.eval(geometry)
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false })
+    await settle()
+    const restored = await page.eval(geometry)
+    check('窗口缩小临时限宽，放大恢复首选宽度', wide.width === 360 && narrow.width < wide.width && restored.width === wide.width, JSON.stringify({ wide, narrow, restored }))
+    await key('Home'); await key('ArrowRight', 8)
+    check('分隔柄键盘最小值与 Shift 步进可用', (await page.eval(geometry)).width === 224)
+    // Capture the pointer, then exercise Esc rollback before a separate committed drag.
+    const point = await page.eval(`(() => { const r = document.querySelector('.sidebar-resizer').getBoundingClientRect(); return { x: r.left + 4, y: r.top + 80 } })()`)
+    await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
+    await page.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x + 40, y: point.y, button: 'left', buttons: 1 })
+    await settle()
+    const dragging = await page.eval(geometry)
+    await page.key('Escape', 'Escape', 0, 27)
+    await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x + 40, y: point.y, button: 'left', clickCount: 1 })
+    check('真实拖动即时调整，Esc 恢复本次前宽度', dragging.width === 264 && (await page.eval(geometry)).width === 224, JSON.stringify(dragging))
+    await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
+    await page.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x + 56, y: point.y, button: 'left', buttons: 1 })
+    await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x + 56, y: point.y, button: 'left', clickCount: 1 })
+    await settle()
+    const committed = await page.eval(geometry)
+    check('真实拖动松开后提交宽度且保持正文选区', committed.width === 280 && JSON.stringify(committed.selection) === JSON.stringify(dragging.selection))
+    await page.call('Page.reload', {})
+    check('重新加载页面恢复本库首选宽度而保持默认收起', await waitFor(page, `document.querySelector('.sidebar-resizer')?.getAttribute('aria-valuenow') === '280' && document.querySelector('.tree-panel')?.classList.contains('is-collapsed')`))
+    await toggle(true)
+    await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(node => node.dataset.path === ${JSON.stringify(activePath)})`)
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find(node => node.dataset.path === ${JSON.stringify(activePath)})?.click()`)
+    await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(activePath)}`)
+    await reset()
+    check('双击分隔柄恢复默认展开宽度', (await page.eval(geometry)).width === 224)
+    check('调宽、收起及偏好恢复不改变笔记原文字节', (await page.eval(`window.rgent.noteRead(${JSON.stringify(activePath)}).then(note => note.content)`)) === sourceBefore)
+  } finally {
+    await reset(); await toggle(false)
+    await page.call('Emulation.clearDeviceMetricsOverride', {})
+    await page.eval(`window.rgent.themeSet('night')`)
+  }
+}
+
 /** First Enter prepares and displays authorization; only the second confirms. */
 async function confirmSlashAuthorization(page, inspect = false) {
   await page.key('Enter', 'Enter', 0, 13)
@@ -302,6 +394,11 @@ function seedVisualVault(vault) {
 
 async function verifySidebarScrolling(page) {
   await selectBrowserFolder(page, '浏览验收')
+  await page.eval(`(() => { document.querySelector('.folder-scroll').scrollTop = 60; document.querySelector('.resource-scroll').scrollTop = 80; document.querySelector('.tree-toggle').click() })()`)
+  await sleep(200)
+  await page.eval(`document.querySelector('.tree-toggle').click()`)
+  await sleep(200)
+  check('仅滚动后立即收起再展开保留两区位置', await page.eval(`document.querySelector('.folder-scroll').scrollTop === 60 && document.querySelector('.resource-scroll').scrollTop === 80`) === true)
   await page.eval(`(() => { document.querySelector('.folder-scroll').scrollTop = 60; document.querySelector('.resource-scroll').scrollTop = 80; [...document.querySelectorAll('.tab')].find(node => node.innerText.includes('知识的落点'))?.click() })()`)
   await sleep(200)
   check('真实两区滚动在切 tab 后独立保持', await page.eval(`document.querySelector('.folder-scroll').scrollTop === 60 && document.querySelector('.resource-scroll').scrollTop === 80 && document.querySelector('.resource-path').textContent === '浏览验收'`) === true)
@@ -605,6 +702,10 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     await page.eval(`document.querySelectorAll('.outline-mark')[1]?.blur()`)
   }
   await page.call('Emulation.clearDeviceMetricsOverride', {})
+  await selectBrowserFolder(page, '研究记录')
+  await page.eval(`[...document.querySelectorAll('.tab')].find(node => node.innerText.includes('自然生长'))?.click()`)
+  await page.eval(`document.querySelector('.cm-scroller').scrollTop = 0`)
+  await verifySidebarWidth(page, shot)
   check('同内容日夜截图无运行时异常', page.errors.length === 0, page.errors.slice(0, 1).join(''))
 }
 
@@ -844,6 +945,7 @@ async function main() {
       })()`))
       return { ok: Math.abs(state.offset) <= 1.5 && Math.abs(state.toggleOffset - state.offset) <= 1.5 && state.height <= 54, detail: JSON.stringify(state) }
     })
+    await verifySidebarWidth(page, shot)
     check('底栏有行列、字数与库名', (await page.eval(`!!document.querySelector('.status-left')?.innerText && !!document.querySelector('.status-vault')?.innerText`)) === true)
     await probe('底栏最左的设置入口在边栏收起与展开时都在位', async () => {
       const state = JSON.parse(await page.eval(`(() => {

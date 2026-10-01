@@ -89,6 +89,41 @@ describe('split file browser', () => {
     localStorage.setItem('rgent:file-browser:v1:library-a', '{broken')
     expect(setup().browser.selectedFolder).toBe('')
   })
+  it('restores optional width by library and keeps the old preference format usable', () => {
+    const { browser, select } = setup(); select('工作')
+    expect(browser.preferredWidth).toBeNull()
+    browser.setPreferredWidth(360)
+    expect(setup().browser.preferredWidth).toBe(360)
+    browser.setVault('library-b'); browser.update(entries, null)
+    expect(browser.preferredWidth).toBeNull()
+    browser.setPreferredWidth(240)
+    browser.setVault('library-a'); browser.update(entries, null)
+    expect(browser.preferredWidth).toBe(360)
+    expect(browser.selectedFolder).toBe('工作')
+    browser.setPreferredWidth(null)
+    expect(setup().browser.preferredWidth).toBeNull()
+  })
+  it('ignores only a bad width field without discarding the browsed folder or attachments', () => {
+    const a = setup(); a.select('工作')
+    ;(a.host.querySelector('.attachment-toggle') as HTMLElement).click()
+    const key = 'rgent:file-browser:v1:library-a'
+    const record = JSON.parse(localStorage.getItem(key)!)
+    for (const width of [0, 191, 361, 250.5, '300']) {
+      localStorage.setItem(key, JSON.stringify({ ...record, width }))
+      const restored = setup()
+      expect(restored.browser.preferredWidth).toBeNull()
+      expect(restored.browser.selectedFolder).toBe('工作')
+      expect(restored.host.querySelector('.attachment-toggle')!.getAttribute('aria-pressed')).toBe('true')
+    }
+  })
+  it('retains the current width in memory when saving the device preference fails', () => {
+    const { browser } = setup()
+    const store = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('unavailable') })
+    try {
+      expect(() => browser.setPreferredWidth(280)).not.toThrow()
+      expect(browser.preferredWidth).toBe(280)
+    } finally { store.mockRestore() }
+  })
   it('remaps app relocations, falls back only on successful listings and keeps state on failures', () => {
     const { browser, host, select } = setup(); select('工作/普通')
     browser.fail('读取失败')
@@ -110,6 +145,20 @@ describe('split file browser', () => {
     const before = Number(separator.getAttribute('aria-valuenow'))
     separator.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
     expect(Number(separator.getAttribute('aria-valuenow'))).toBeGreaterThan(before)
+  })
+  it('captures scrolling immediately before hiding without navigation or a tab switch', () => {
+    const { browser, host, select } = setup(); select('工作')
+    const folders = host.querySelector<HTMLElement>('.folder-scroll')!
+    const resources = host.querySelector<HTMLElement>('.resource-scroll')!
+    folders.scrollTop = 61; resources.scrollTop = 89
+    browser.captureScroll()
+    host.style.display = 'none'
+    folders.scrollTop = 0; resources.scrollTop = 0
+    browser.setActive('根.md')
+    host.style.display = 'block'
+    browser.setActive('工作/会议.md')
+    expect(folders.scrollTop).toBe(61)
+    expect(resources.scrollTop).toBe(89)
   })
   it('restores session scroll after changing libraries without storing scroll on disk', () => {
     const { browser, host, select } = setup(); select('工作')

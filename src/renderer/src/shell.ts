@@ -21,6 +21,7 @@ import { openAuthorizationPopover } from './authorization-popover.ts'
 import { hostErrorText } from './host-errors.ts'
 import { slashAtCaret } from './slash.ts'
 import { createFileBrowser, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
+import { createSidebarSizer } from './sidebar.ts'
 import type { Theme } from './theme.ts'
 
 const SAVE_MS = 800
@@ -67,6 +68,7 @@ export async function start(root: HTMLElement): Promise<void> {
             </button>
           </div>
           <div class="tree-scroll"></div>
+          <div class="sidebar-resizer" aria-label="调整侧栏宽度" hidden></div>
         </aside>
         <section class="stage" id="note-panel" role="tabpanel" aria-label="正文">
           <button type="button" class="ledger-open" aria-pressed="false" hidden>账本</button>
@@ -90,6 +92,8 @@ export async function start(root: HTMLElement): Promise<void> {
   `
 
   const treePanel = root.querySelector('#tree-panel') as HTMLElement
+  const bodyEl = root.querySelector('.body') as HTMLElement
+  const sidebarHandle = root.querySelector('.sidebar-resizer') as HTMLElement
   const treeScroll = root.querySelector('.tree-scroll') as HTMLElement
   const treeToggle = root.querySelector('.tree-toggle') as HTMLButtonElement
   const permissionWarning = root.querySelector('.permission-warning') as HTMLElement
@@ -127,6 +131,11 @@ export async function start(root: HTMLElement): Promise<void> {
     onOpenNote: (path) => { void openNote(path) },
     onSetTier: (path, tier) => { void changePermission(path, tier) },
     onAction: (entry, action) => { void handleTreeAction(entry, action) }
+  })
+  const sidebarSizer = createSidebarSizer({
+    body: bodyEl, panel: treePanel, handle: sidebarHandle, toggle: treeToggle, backlinks: backlinksEl,
+    getPreferredWidth: () => fileBrowser.preferredWidth,
+    setPreferredWidth: (width) => fileBrowser.setPreferredWidth(width)
   })
 
   const tabs: Tab[] = []
@@ -276,8 +285,8 @@ export async function start(root: HTMLElement): Promise<void> {
 
   treeToggle.addEventListener('click', () => {
     const open = treePanel.classList.contains('is-collapsed')
-    treePanel.classList.toggle('is-collapsed', !open)
-    treeToggle.setAttribute('aria-expanded', String(open))
+    if (!open) fileBrowser.captureScroll()
+    sidebarSizer.setExpanded(open)
   })
 
   copyButton.addEventListener('click', () => { void saveMissingCopy() })
@@ -505,6 +514,7 @@ export async function start(root: HTMLElement): Promise<void> {
       }
       resetSession()
       fileBrowser.setVault(null)
+      sidebarSizer.refresh()
       vaultNameText = null
       updateStatus()
       showVaultPicker(state.reason)
@@ -521,6 +531,7 @@ export async function start(root: HTMLElement): Promise<void> {
       resetSession()
     }
     fileBrowser.setVault(state.navigationKey ?? null)
+    sidebarSizer.refresh()
     await refreshLifecycle()
     await refreshTree()
   }
