@@ -164,13 +164,15 @@ export type ReadingSetResult = { ok: true; reading: import('./reading-preference
 
 export type VaultState =
   | { status: 'needs-pick'; reason: 'first-run' | 'missing' }
-  | { status: 'ready'; rootName: string; vaultChanged?: boolean; sessionId?: string }
+  | { status: 'ready'; rootName: string; vaultChanged?: boolean; sessionId?: string; navigationKey?: string }
 
 export type TreeEntry = {
   name: string
   relPath: string
   kind: 'dir' | 'note' | 'file'
   tier?: 'follow' | 'forbidden'
+  /** Companion owner resolved by the native library service; display metadata only. */
+  attachmentOf?: string
   children?: TreeEntry[]
 }
 

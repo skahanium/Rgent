@@ -17,6 +17,59 @@ vi.mock('../../src/main/watch.ts', async importOriginal => ({ ...await importOri
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('VaultSession isolation', () => {
+  it('keeps an opaque navigation key across restore, current state and picks while separating same-name libraries', async () => {
+    const userData = await mkdtemp(path.join(os.tmpdir(), 'rgent-navigation-'))
+    const first = path.join(userData, 'first', '笔记库')
+    const second = path.join(userData, 'second', '笔记库')
+    await mkdir(first, { recursive: true })
+    await mkdir(second, { recursive: true })
+    await writeFile(path.join(userData, 'vault.json'), serializeStoredVault(first))
+    const session = new VaultSession(userData, vi.fn())
+    const restarted = new VaultSession(userData, vi.fn())
+    try {
+      const restored = session.restore()
+      expect(restored).toMatchObject({ status: 'ready', navigationKey: expect.stringMatching(/^[a-f0-9]{64}$/) })
+      if (restored.status !== 'ready') throw new Error('EXPECTED_READY')
+      expect(JSON.stringify(restored)).not.toContain(first)
+      expect(session.currentState()).toMatchObject({ navigationKey: restored.navigationKey })
+      expect(restarted.restore()).toMatchObject({ navigationKey: restored.navigationKey })
+      restarted.dispose()
+      vi.mocked(dialog.showOpenDialog).mockResolvedValueOnce({ canceled: false, filePaths: [first + path.sep] })
+      expect(await session.pick(null)).toMatchObject({ navigationKey: restored.navigationKey })
+      vi.mocked(dialog.showOpenDialog).mockResolvedValueOnce({ canceled: false, filePaths: [second] })
+      const picked = await session.pick(null)
+      expect(picked).toMatchObject({ status: 'ready', rootName: restored.rootName, navigationKey: expect.any(String) })
+      if (picked.status !== 'ready') throw new Error('EXPECTED_READY')
+      expect(picked.navigationKey).not.toBe(restored.navigationKey)
+      expect(session.currentState()).toMatchObject({ navigationKey: picked.navigationKey })
+      expect(restarted.restore()).toMatchObject({ navigationKey: picked.navigationKey })
+    } finally { session.dispose(); restarted.dispose(); await rm(userData, { recursive: true, force: true }) }
+  })
+
+  it('uses the canonical root for navigation preferences and omits the key when that root is unavailable', async () => {
+    const userData = await mkdtemp(path.join(os.tmpdir(), 'rgent-navigation-alias-'))
+    const root = path.join(userData, 'vault')
+    const alias = path.join(userData, 'alias')
+    const gone = path.join(userData, 'gone')
+    await mkdir(root)
+    await symlink(root, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    const session = new VaultSession(userData, vi.fn())
+    try {
+      expect(session.currentState()).not.toHaveProperty('navigationKey')
+      await writeFile(path.join(userData, 'vault.json'), serializeStoredVault(root))
+      const direct = session.restore()
+      expect(direct).toMatchObject({ status: 'ready', navigationKey: expect.any(String) })
+      if (direct.status !== 'ready') throw new Error('EXPECTED_READY')
+      await writeFile(path.join(userData, 'vault.json'), serializeStoredVault(alias))
+      expect(session.restore()).toMatchObject({ navigationKey: direct.navigationKey })
+      await rename(root, gone)
+      expect(session.currentState()).toEqual({ status: 'needs-pick', reason: 'missing' })
+      expect(session.restore()).toEqual({ status: 'needs-pick', reason: 'missing' })
+      await mkdir(root)
+      expect(session.currentState()).toEqual({ status: 'needs-pick', reason: 'missing' })
+    } finally { session.dispose(); await rm(userData, { recursive: true, force: true }) }
+  })
+
   it('restarts watching if a read detects a lost root before the polling callback', async () => {
     const { session, attach, first } = await setup(); const gone = first + '-read-gap'
     try {
@@ -320,6 +373,24 @@ describe('notes-fs', () => {
     expect(names).toEqual(['hello.md', 'photo.png', 'sub', 'sub/nested.md'])
     expect(tree.find((entry) => entry.relPath === 'hello.md')?.kind).toBe('note')
     expect(tree.find((entry) => entry.relPath === 'photo.png')?.kind).toBe('file')
+  })
+
+  it('classifies companion folders by native spelling rather than string case guesses', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-companion-'))
+    try {
+      await writeFile(path.join(root, 'Exact.md'), 'note')
+      await mkdir(path.join(root, 'Exact'))
+      await writeFile(path.join(root, 'Alias.md'), 'note')
+      await mkdir(path.join(root, 'alias'))
+      await mkdir(path.join(root, 'orphan'))
+      const nativeAlias = await stat(path.join(root, 'Alias')).then(async info => {
+        const actual = await stat(path.join(root, 'alias')); return info.dev === actual.dev && info.ino === actual.ino
+      }).catch(() => false)
+      const result = await listVaultTree(root)
+      expect(result.find(entry => entry.name === 'Exact')).toMatchObject({ attachmentOf: 'Exact.md' })
+      expect(result.find(entry => entry.name === 'alias')?.attachmentOf).toBe(nativeAlias ? 'Alias.md' : undefined)
+      expect(result.find(entry => entry.name === 'orphan')).not.toHaveProperty('attachmentOf')
+    } finally { await rm(root, { recursive: true, force: true }) }
   })
 
   it('refuses to read outside the vault', async () => {

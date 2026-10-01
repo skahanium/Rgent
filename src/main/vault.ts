@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { dialog, type BrowserWindow } from 'electron'
 import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest } from '../shared/ipc.ts'
 import { createFolder, createNote, listVaultTree, parseStoredVault, readNoteSnapshot, revisionOf, serializeStoredVault, writeNote } from './notes-fs.ts'
@@ -55,7 +55,7 @@ export class VaultSession {
     if (!stored) return { status: 'needs-pick', reason: 'first-run' }
     if (!isUsableDir(stored.path)) return { status: 'needs-pick', reason: 'missing' }
     this.attach(stored.path)
-    return { status: 'ready', rootName: path.basename(stored.path), sessionId: this.captureSession() }
+    return { status: 'ready', rootName: path.basename(stored.path), sessionId: this.captureSession(), navigationKey: this.navigationKey() }
   }
 
   async pick(win: BrowserWindow | null): Promise<VaultState> {
@@ -82,17 +82,27 @@ export class VaultSession {
       status: 'ready',
       rootName: path.basename(chosen),
       sessionId: this.captureSession(),
+      navigationKey: this.navigationKey(),
       vaultChanged: previous !== chosen
     }
   }
 
   currentState(): VaultState {
     if (this.hasUsableRoot()) {
-      return { status: 'ready', rootName: path.basename(this.root!), sessionId: this.captureSession() }
+      return { status: 'ready', rootName: path.basename(this.root!), sessionId: this.captureSession(), navigationKey: this.navigationKey() }
     }
     const stored = parseStoredVault(this.readStateFile())
     if (!stored) return { status: 'needs-pick', reason: 'first-run' }
     return { status: 'needs-pick', reason: 'missing' }
+  }
+
+  /** Opaque renderer preference key only; never a permission or task authorization. */
+  private navigationKey(): string {
+    const root = this.requireUsableRoot()
+    const canonical = realpathSync.native(root)
+    if (vaultRootIdentity(canonical) !== this.rootIdentity) throw new Error('NOTE_UNREADABLE')
+    this.requireUsableRoot()
+    return createHash('sha256').update(canonical).digest('hex')
   }
 
   async tree(): Promise<TreeEntry[]> {

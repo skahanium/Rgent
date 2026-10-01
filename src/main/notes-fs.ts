@@ -54,6 +54,23 @@ async function readDir(root: string, dir: string): Promise<TreeEntry[]> {
       kind: entry.kind === 'file' && isNotePath(relPath) ? 'note' : 'file'
     })
   }
+  // Use the same native resolution as lifecycle/permissions, including aliases
+  // that only the actual filesystem can recognize. This is display metadata.
+  if (out.some(entry => entry.kind === 'dir')) {
+    const fs = secureFsFor(root)
+    for (const note of out.filter(entry => entry.kind === 'note')) {
+      try {
+        const resolved = fs.resolve(note.relPath.slice(0, -3))
+        if (resolved.at(-1)?.kind !== 'dir') continue
+        const actual = resolved.map(part => part.name).join('/')
+        const folder = out.find(entry => entry.kind === 'dir' && entry.relPath === actual)
+        if (folder) folder.attachmentOf = note.relPath
+      } catch (error) {
+        if (error instanceof Error && (error.message === 'ENOENT' || error.message === 'UNSAFE_PATH')) continue
+        throw error
+      }
+    }
+  }
   return out
 }
 
