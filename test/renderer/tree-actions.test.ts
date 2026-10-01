@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { renderTree } from '../../src/renderer/src/tree.ts'
+import { createFileBrowser } from '../../src/renderer/src/tree.ts'
 
 beforeEach(() => { document.body.replaceChildren() })
 
@@ -9,7 +9,7 @@ describe('file tree actions', () => {
     const host = document.createElement('div')
     document.body.append(host)
     const action = vi.fn()
-    renderTree(host, [{ name: '甲.md', relPath: '甲.md', kind: 'note' }], null, () => {}, undefined, action)
+    createFileBrowser(host, { onOpenNote: () => {}, onAction: action }).update([{ name: '甲.md', relPath: '甲.md', kind: 'note' }], null)
     host.querySelector('.tree-note')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 50, clientY: 50 }))
     const labels = [...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)
     expect(labels).toContain('改名')

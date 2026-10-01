@@ -62,6 +62,18 @@ async function waitFor(page, expression, timeout = 12000) {
   return false
 }
 
+async function selectBrowserFolder(page, folder) {
+  await page.eval(`(() => {
+    const target = ${JSON.stringify(folder)}
+    for (const button of document.querySelectorAll('.tree-folder-toggle')) {
+      if ((button.dataset.path === '' || target === button.dataset.path || target.startsWith(button.dataset.path + '/')) && button.getAttribute('aria-expanded') === 'false') button.click()
+    }
+    const select = [...document.querySelectorAll('.tree-select')].find(node => node.dataset.path === target)
+    select?.scrollIntoView({ block: 'nearest' }); select?.click()
+  })()`)
+  return waitFor(page, `document.querySelector('.resource-path')?.textContent === ${JSON.stringify(folder || '笔记库')}`)
+}
+
 function makePage(send, close) {
   let id = 0
   const pending = new Map()
@@ -239,6 +251,16 @@ function seedVisualVault(vault) {
   const assets = path.join(vault, '素材')
   mkdirSync(research)
   mkdirSync(assets)
+  const browsing = path.join(vault, '浏览验收')
+  mkdirSync(browsing)
+  for (let i = 0; i < 20; i++) {
+    mkdirSync(path.join(browsing, `子目录-${String(i).padStart(2, '0')}`))
+    writeFileSync(path.join(browsing, `长名称资源-${String(i).padStart(2, '0')}-独立滚动.md`), '# 浏览夹具\n')
+  }
+  mkdirSync(path.join(research, '自然生长', '子目录'), { recursive: true })
+  writeFileSync(path.join(research, '自然生长', '附件说明.md'), '# 附件说明\n')
+  writeFileSync(path.join(research, '自然生长', '图.png'), '')
+  writeFileSync(path.join(research, '自然生长', '子目录', '资料.pdf'), '')
   writeFileSync(path.join(research, '自然生长.md'), [
     '# 自然生长', '',
     '想让一款笔记软件真正陪伴思考，它要允许未完成的念头停留在正文里。文字是主角，工具只在需要时出现。', '',
@@ -278,6 +300,56 @@ function seedVisualVault(vault) {
   writeFileSync(path.join(assets, '说明.txt'), '')
 }
 
+async function verifySidebarScrolling(page) {
+  await selectBrowserFolder(page, '浏览验收')
+  await page.eval(`(() => { document.querySelector('.folder-scroll').scrollTop = 60; document.querySelector('.resource-scroll').scrollTop = 80; [...document.querySelectorAll('.tab')].find(node => node.innerText.includes('知识的落点'))?.click() })()`)
+  await sleep(200)
+  check('真实两区滚动在切 tab 后独立保持', await page.eval(`document.querySelector('.folder-scroll').scrollTop === 60 && document.querySelector('.resource-scroll').scrollTop === 80 && document.querySelector('.resource-path').textContent === '浏览验收'`) === true)
+  await page.eval(`document.querySelector('.tree-toggle')?.click(); [...document.querySelectorAll('.tab')].find(node => node.innerText.includes('自然生长'))?.click()`)
+  await sleep(200)
+  await page.eval(`document.querySelector('.tree-toggle')?.click()`)
+  await sleep(200)
+  check('收起侧栏切 tab 后展开仍恢复两区滚动', await page.eval(`document.querySelector('.folder-scroll').scrollTop === 60 && document.querySelector('.resource-scroll').scrollTop === 80`) === true)
+  await selectBrowserFolder(page, '素材'); await selectBrowserFolder(page, '浏览验收')
+  check('切目录返回保留资源滚动', await page.eval(`document.querySelector('.resource-scroll').scrollTop === 80`) === true)
+  const before = await page.eval(`document.querySelector('.folder-pane').getBoundingClientRect().height`)
+  const point = await page.eval(`(() => { const rect = document.querySelector('.browser-divider').getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } })()`)
+  await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
+  await page.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y + 35, button: 'left', buttons: 1 })
+  await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y + 35, button: 'left', clickCount: 1 })
+  check('真实鼠标拖动分隔调整区高', await page.eval(`document.querySelector('.folder-pane').getBoundingClientRect().height > ${before + 20}`) === true)
+  await page.eval(`(() => { const divider = document.querySelector('.browser-divider'); divider.focus(); divider.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })); })()`)
+  check('分隔键盘极限报告实际比例并保留两区最小高度', await page.eval(`(() => { const upper = document.querySelector('.folder-pane').offsetHeight, lower = document.querySelector('.resource-pane').offsetHeight, now = Number(document.querySelector('.browser-divider').getAttribute('aria-valuenow')); const host = document.querySelector('.file-browser'), bottom = host.getBoundingClientRect().bottom - parseFloat(getComputedStyle(host).paddingBottom); return upper >= 96 && lower >= 160 && Math.abs(now - upper / (upper + lower) * 100) <= 1 && document.querySelector('.resource-pane').getBoundingClientRect().bottom <= bottom + 1 })()`) === true)
+  await page.eval(`(() => { const divider = document.querySelector('.browser-divider'); divider.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })); for (let i = 0; i < 5; i++) divider.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); document.querySelector('.folder-scroll').scrollTop = 0; })()`)
+  await selectBrowserFolder(page, '研究记录')
+  await page.eval(`(() => { const button = [...document.querySelectorAll('.tree-folder-toggle')].find(node => node.dataset.path === '浏览验收'); if (button?.getAttribute('aria-expanded') === 'true') button.click(); document.querySelector('.folder-scroll').scrollTop = 0; [...document.querySelectorAll('.tab')].find(node => node.innerText.includes('自然生长'))?.click() })()`)
+}
+
+async function captureSidebar(page, shot, mode, size) {
+  await selectBrowserFolder(page, '研究记录')
+  check(`${mode}/${size}两区位于侧栏内且高度可用`, await page.eval(`(() => {
+    const panel = document.querySelector('.tree-panel').getBoundingClientRect()
+    const upper = document.querySelector('.folder-pane').getBoundingClientRect()
+    const lower = document.querySelector('.resource-pane').getBoundingClientRect()
+    const divider = document.querySelector('.browser-divider').getBoundingClientRect()
+    return upper.height >= 96 && lower.height >= 160 && upper.bottom <= divider.bottom && lower.top >= divider.top && lower.bottom <= panel.bottom + 1 && getComputedStyle(document.querySelector('.folder-scroll')).overflowY === 'auto' && getComputedStyle(document.querySelector('.resource-scroll')).overflowY === 'auto'
+  })()`) === true)
+  await page.eval(`document.querySelector('.attachment-toggle')?.click()`)
+  check(`${mode}/${size}附件仅在资源区可切换并标明归属`, await page.eval(`document.querySelector('.attachment-toggle').getAttribute('aria-pressed') === 'true' && document.querySelector('.attachment-folder')?.textContent.includes('附件 · 自然生长') && ![...document.querySelectorAll('.tree-select')].some(node => node.dataset.path.startsWith('研究记录/自然生长'))`) === true)
+  check(`${mode}/${size}附件眼睛与路径同一行且无定位按钮`, await page.eval(`!document.querySelector('.resource-locate') && !!document.querySelector('.attachment-toggle .icon') && document.querySelector('.attachment-toggle').textContent === '' && Math.abs(document.querySelector('.attachment-toggle').getBoundingClientRect().top - document.querySelector('.resource-path').getBoundingClientRect().top) < 6`) === true)
+  await shot(page, `sidebar-${mode}-${size}-resources`)
+  await page.eval(`document.querySelector('.attachment-folder')?.click()`)
+  check(`${mode}/${size}附件浏览不改变目录且无新建笔记`, await page.eval(`document.querySelector('.resource-path').textContent === '研究记录/自然生长' && document.querySelector('.tree-select[aria-current=location]').dataset.path === '研究记录' && document.querySelector('.resource-create').hidden`) === true)
+  await shot(page, `sidebar-${mode}-${size}-attachment`)
+  await page.eval(`document.querySelector('.resource-back')?.click(); document.querySelector('.attachment-toggle')?.click()`)
+  // Tab changes must not follow the note back from a different directory.
+  await selectBrowserFolder(page, '素材')
+  await page.eval(`[...document.querySelectorAll('.tab')].find(node => node.innerText.includes('知识的落点'))?.click()`)
+  check(`${mode}/${size}切 tab 不改变所选目录`, await page.eval(`document.querySelector('.resource-path').textContent === '素材'`) === true)
+  await selectBrowserFolder(page, '研究记录')
+  await page.eval(`(() => { const divider = document.querySelector('.browser-divider'); divider.focus(); divider.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); divider.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true })); [...document.querySelectorAll('.tab')].find(node => node.innerText.includes('自然生长'))?.click(); document.activeElement?.blur() })()`)
+}
+
 async function captureVisualBaseline(page, shot, nativeShot) {
   process.stdout.write('\n同内容视觉样例\n')
   // CI 虚拟屏幕会把真实窗口夹到 1024px 左右；比较 1200×800 稿前先固定页面度量。
@@ -286,15 +358,16 @@ async function captureVisualBaseline(page, shot, nativeShot) {
   const ready = await waitFor(page, `document.querySelectorAll('.tree-dir').length >= 2`)
   check('固定演示库含文件夹和多种文件类型', ready)
   if (!ready) return
-  await page.eval(`(() => {
-    document.querySelector('.tree-toggle')?.click()
-    for (const row of document.querySelectorAll('.tree-dir')) {
-      if (row.innerText.includes('研究记录') && row.getAttribute('aria-expanded') === 'false') row.click()
-      if (row.innerText.includes('素材') && row.getAttribute('aria-expanded') === 'false') row.click()
-    }
-  })()`)
+  await page.eval(`document.querySelector('.tree-toggle')?.click()`)
+  await selectBrowserFolder(page, '素材')
+  const types = await page.eval(`document.querySelectorAll('.resource-scroll .tree-file').length === 3`)
+  await selectBrowserFolder(page, '研究记录')
   const rows = await waitFor(page, `document.querySelectorAll('.tree-note').length >= 3`)
-  check('演示库能显示三篇笔记及附件类型', rows && (await page.eval(`document.querySelectorAll('.tree-file').length >= 3`)) === true)
+  check('演示库按目录显示三篇笔记及多种文件类型', rows && types)
+  check('上方只含普通目录且附件默认不出现', await page.eval(`!document.querySelector('.folder-scroll .tree-note, .folder-scroll .tree-file') && ![...document.querySelectorAll('.tree-select')].some(node => node.dataset.path === '研究记录/自然生长') && !document.querySelector('.attachment-folder')`) === true)
+  await page.call('Page.reload', {})
+  check('重新加载恢复按库保存的目录与展开状态', await waitFor(page, `document.querySelector('.resource-path')?.textContent === '研究记录' && document.querySelector('.tree-select[aria-current=location]')?.dataset.path === '研究记录'`))
+  await page.eval(`document.querySelector('.tree-toggle')?.click()`)
   const opened = await page.eval(`(async () => {
     for (const title of ['自然生长', '知识的落点', '设计片段']) {
       const row = [...document.querySelectorAll('.tree-note')].find((item) => item.innerText.includes(title))
@@ -360,6 +433,8 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
     await sleep(250)
     await shot(page, `reference-${mode}-workspace`)
+    await captureSidebar(page, shot, mode, 'wide')
+    if (mode === 'day') await verifySidebarScrolling(page)
     // CDP's 1x emulation produces comparable renderer captures, but scales a
     // Retina native window differently. Clear it before checking OS chrome.
     await page.call('Emulation.clearDeviceMetricsOverride', {})
@@ -422,11 +497,11 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     if (mode === 'day') {
       await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: 10, y: 10, button: 'left', clickCount: 1 })
       await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 10, y: 10, button: 'left', clickCount: 1 })
-      check('设置面板外真实点击可关闭并返回原焦点', await waitFor(page, `!document.querySelector('.overlay-settings') && document.activeElement?.classList.contains('settings-open')`))
+      check('设置面板外真实点击可关闭并返回原焦点', await waitFor(page, `!document.querySelector('.overlay-settings') && document.activeElement?.classList.contains('settings-open')`), await page.eval(`JSON.stringify({ dialog: !!document.querySelector('.overlay-settings'), focus: document.activeElement?.className, connected: document.querySelector('.settings-open')?.isConnected, hasFocus: document.hasFocus() })`))
     } else {
       await page.eval(`document.querySelector('.settings-nav-current')?.focus()`)
       await page.key('Escape', 'Escape', 0, 27)
-      check('设置面板按 Esc 可关闭并返回原焦点', await waitFor(page, `!document.querySelector('.overlay-settings') && document.activeElement?.classList.contains('settings-open')`))
+      check('设置面板按 Esc 可关闭并返回原焦点', await waitFor(page, `!document.querySelector('.overlay-settings') && document.activeElement?.classList.contains('settings-open')`), await page.eval(`JSON.stringify({ dialog: !!document.querySelector('.overlay-settings'), focus: document.activeElement?.className, connected: document.querySelector('.settings-open')?.isConnected, hasFocus: document.hasFocus() })`))
     }
     if (await page.eval(`!!document.querySelector('.overlay-settings')`)) {
       await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
@@ -447,6 +522,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
     await sleep(250)
     await shot(page, `reference-${mode}-narrow`)
+    await captureSidebar(page, shot, mode, 'narrow')
     await page.eval(`document.querySelector('.settings-open')?.click()`)
     await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
     check('窄窗设置面板保留外边距并由内部滚动', await page.eval(`(() => {
@@ -965,13 +1041,15 @@ async function main() {
     check('长文件名有省略号', (await page.eval(`(() => { const el = [...document.querySelectorAll('.tree-note .tree-label')].find((n) => n.textContent.includes('特别特别长')); return !el || el.scrollWidth > el.clientWidth ? getComputedStyle(el).textOverflow === 'ellipsis' : true })()`)) === true)
     await probe('文件夹收起仍显示文件夹图标，聚焦时原位变为折叠控件', async () =>
       (await page.eval(`(() => {
-        const row = document.querySelector('.tree-dir'); if (!row) return false
-        row.click()
-        const folder = row.querySelector('.icon-folder'), toggle = row.querySelector('.icon-folder-open')
+        const row = document.querySelector('.tree-folder-toggle'); if (!row) return false
+        if (row.getAttribute('aria-expanded') === 'true') row.click()
+        const current = document.querySelector('.tree-folder-toggle')
+        current.blur()
+        const folder = current.querySelector('.icon-folder'), toggle = current.querySelector('.icon-folder-open')
         const normal = getComputedStyle(folder).display !== 'none' && getComputedStyle(toggle).display === 'none'
-        row.focus()
+        current.focus()
         const focused = getComputedStyle(folder).display === 'none' && getComputedStyle(toggle).display !== 'none'
-        return normal && focused && row.getAttribute('aria-expanded') === 'false'
+        return normal && focused && current.getAttribute('aria-expanded') === 'false'
       })()`)) === true
     )
     await page.call('Emulation.clearDeviceMetricsOverride', {})
@@ -1471,8 +1549,9 @@ async function main() {
     writeFileSync(path.join(vault, '生命周期', '原.md'), '# 不应改写的正文\r\n')
     writeFileSync(path.join(vault, '生命周期', '原', '图.png'), Buffer.from([1, 2, 3]))
     writeFileSync(path.join(vault, '生命周期', '引用.md'), '见 [[生命周期/原]]。')
-    check('文件树显示待改名的笔记', await waitFor(page, `[...document.querySelectorAll('[data-parent="生命周期"] .tree-note')].some((node) => node.querySelector('.tree-label')?.textContent === '原')`, 8000))
-    await page.eval(`(() => { const node = [...document.querySelectorAll('[data-parent="生命周期"] .tree-note')].find((n) => n.querySelector('.tree-label')?.textContent === '原'); node?.click(); node?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 220 })) })()`)
+    await selectBrowserFolder(page, '生命周期')
+    check('文件树显示待改名的笔记', await waitFor(page, `[...document.querySelectorAll('.resource-scroll .tree-note')].some((node) => node.querySelector('.tree-label')?.textContent === '原')`, 8000))
+    await page.eval(`(() => { const node = [...document.querySelectorAll('.resource-scroll .tree-note')].find((n) => n.querySelector('.tree-label')?.textContent === '原'); node?.click(); node?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 220 })) })()`)
     check('文件树右键提供改名和移动', await waitFor(page, `[...document.querySelectorAll('.tier-menu button')].some((n) => n.textContent === '改名') && [...document.querySelectorAll('.tier-menu button')].some((n) => n.textContent === '移动')`))
     await page.eval(`(() => { [...document.querySelectorAll('.tier-menu button')].find((n) => n.textContent === '改名')?.click() })()`)
     await waitFor(page, `!!document.querySelector('.modal input')`)
@@ -1529,6 +1608,7 @@ async function main() {
 
     } catch (error) { stageFailed('笔记库文件生命周期', error) }
     process.stdout.write('\n文件操作恢复状态\n')
+    await selectBrowserFolder(page, '生命周期')
     try {
     const native = require(path.join(root, 'out', 'main', 'rgent_fs.node'))
     const handle = native.openRoot(vault)

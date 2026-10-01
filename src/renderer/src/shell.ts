@@ -20,7 +20,7 @@ import { mergeHostBody } from './host-merge.ts'
 import { openAuthorizationPopover } from './authorization-popover.ts'
 import { hostErrorText } from './host-errors.ts'
 import { slashAtCaret } from './slash.ts'
-import { renderTree, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
+import { createFileBrowser, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
 import type { Theme } from './theme.ts'
 
 const SAVE_MS = 800
@@ -65,7 +65,6 @@ export async function start(root: HTMLElement): Promise<void> {
               <span class="search-open-label">搜索笔记</span>
               <kbd class="shortcut-hint"></kbd>
             </button>
-            <button type="button" class="folder-create" aria-label="在库根新建文件夹">新建文件夹</button>
           </div>
           <div class="tree-scroll"></div>
         </aside>
@@ -110,7 +109,6 @@ export async function start(root: HTMLElement): Promise<void> {
   const ledgerBody = root.querySelector('.ledger-body') as HTMLElement
   const ledgerClose = root.querySelector('.ledger-close') as HTMLButtonElement
   const searchOpen = root.querySelector('.search-open') as HTMLButtonElement
-  const folderCreate = root.querySelector('.folder-create') as HTMLButtonElement
   // 设置入口固定在底栏最左：只有图标，命中区域够大（围栏 frontend.md §编辑画布与辅助信息）。
   const settingsOpen = document.createElement('button')
   settingsOpen.type = 'button'
@@ -121,6 +119,12 @@ export async function start(root: HTMLElement): Promise<void> {
   const ledgerOpenButton = root.querySelector('.ledger-open') as HTMLButtonElement
   const shortcutHint = root.querySelector('.shortcut-hint') as HTMLElement
 
+
+  const fileBrowser = createFileBrowser(treeScroll, {
+    onOpenNote: (path) => { void openNote(path) },
+    onSetTier: (path, tier) => { void changePermission(path, tier) },
+    onAction: (entry, action) => { void handleTreeAction(entry, action) }
+  })
 
   const tabs: Tab[] = []
   let active: string | null = null
@@ -139,6 +143,7 @@ export async function start(root: HTMLElement): Promise<void> {
     return next
   }
   let backlinkToken = 0
+  let treeRefreshToken = 0
   let vaultEpoch = 0
   let vaultSession: string | null = null
   let recoveryState: LifecycleStatus | null = null
@@ -229,7 +234,6 @@ export async function start(root: HTMLElement): Promise<void> {
   })
   shortcutHint.textContent = shortcutLabel('k')
   searchOpen.addEventListener('click', () => { if (!conflictDecisionOpen) searchOverlay.open() })
-  folderCreate.addEventListener('click', () => { void createRootFolder() })
   // 图标在创建处已放入，这里只接线（模板时代那行 prepend 会让齿轮出现两次）
   settingsOpen.addEventListener('click', () => { if (!conflictDecisionOpen) settingsOverlay.open() })
   // 底栏模型模块首次取一次配置；之后由设置页写入与面板关闭时刷新。
@@ -313,6 +317,7 @@ export async function start(root: HTMLElement): Promise<void> {
       const match = moved.find((item) => relPath === item.from || relPath.startsWith(`${item.from}/`))
       return match ? `${match.to}${relPath.slice(match.from.length)}` : relPath
     }
+    fileBrowser.relocate(moved)
     for (const tab of tabs) tab.relPath = remap(tab.relPath)
     if (active) active = remap(active)
     const revisions = [...hostRevisions.entries()]
@@ -320,7 +325,7 @@ export async function start(root: HTMLElement): Promise<void> {
     for (const [relPath, revision] of revisions) hostRevisions.set(remap(relPath), revision)
     syncEditorHost()
     renderTabs()
-    paintTree()
+    void refreshTree()
     void refreshMovedTabs()
   }
   window.rgent.onNoteExternalChange(() => {
@@ -493,6 +498,7 @@ export async function start(root: HTMLElement): Promise<void> {
         return
       }
       resetSession()
+      fileBrowser.setVault(null)
       vaultNameText = null
       updateStatus()
       showVaultPicker(state.reason)
@@ -508,6 +514,7 @@ export async function start(root: HTMLElement): Promise<void> {
       // Never send an old tab's path through noteWrite after the new root is active.
       resetSession()
     }
+    fileBrowser.setVault(state.navigationKey ?? null)
     await refreshLifecycle()
     await refreshTree()
   }
@@ -616,16 +623,21 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   async function refreshTree(): Promise<void> {
+    const token = ++treeRefreshToken
     const epoch = vaultEpoch
     try {
       const [nextTree, nextPermissions] = await Promise.all([window.rgent.treeList(), window.rgent.permissionsGet()])
-      if (epoch !== vaultEpoch) return
+      if (epoch !== vaultEpoch || token !== treeRefreshToken) return
       tree = nextTree
       permissionState = nextPermissions
+      fileBrowser.update(tree, active)
     } catch {
-      if (epoch !== vaultEpoch) return
-      tree = []
-      permissionState = { status: 'invalid', error: '无法读取权限名单' }
+      if (epoch !== vaultEpoch || token !== treeRefreshToken) return
+      permissionState = { status: 'invalid', error: '无法读取目录或权限名单' }
+      fileBrowser.fail('目录暂时无法读取，已保留浏览位置。请恢复笔记库后重试。')
+      paintPermissionWarning()
+      syncEditorHost()
+      return
     }
     // A tree listing cannot prove that a missing object is safe to discard.
     // Retain even clean tabs and their verified ledger until object inspection
@@ -668,9 +680,11 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   function paintTree(): void {
-    renderTree(treeScroll, tree, active, (relPath) => {
-      void openNote(relPath)
-    }, (relPath, tier) => { void changePermission(relPath, tier) }, (entry, action) => { void handleTreeAction(entry, action) })
+    fileBrowser.setActive(active)
+    paintPermissionWarning()
+  }
+
+  function paintPermissionWarning(): void {
     permissionWarning.hidden = permissionState.status !== 'invalid'
     if (permissionState.status === 'invalid') permissionWarning.textContent = `AI 门禁暂停：${permissionState.error}。请检查库根 .rgent-permissions。`
   }
@@ -822,15 +836,6 @@ export async function start(root: HTMLElement): Promise<void> {
       if (epoch === vaultEpoch) window.alert(lifecycleErrorText(error))
     }
     finally { if (epoch === vaultEpoch) void refreshLifecycle() }
-  }
-
-  async function createRootFolder(): Promise<void> {
-    const name = await promptText('新建文件夹', '名称', '', '创建')
-    if (!name) return
-    try {
-      await window.rgent.folderCreate({ name, parent: '' })
-      await refreshTree()
-    } catch (error) { window.alert(lifecycleErrorText(error)) }
   }
 
   async function changePermission(relPath: string, tier: PermissionTier): Promise<void> {
