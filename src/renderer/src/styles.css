@@ -977,9 +977,13 @@ input:focus-visible,
   cursor: pointer;
 }
 .status-model:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+/* 底栏控件不用紫色光环：聚焦只把描边加深一档，不用强调色（:focus 也要压，程序化聚焦不触发 :focus-visible） */
+.status-center button:focus,
 .status-center button:focus-visible,
-.status-center select:focus-visible,
-.status .settings-open:focus-visible { outline: none; border-color: var(--accent-focus); background: var(--state-hover); color: var(--text-heading); }
+.status-center select:focus,
+.status-center select:focus-visible { outline: none; border-color: var(--text-muted); color: var(--text-heading); }
+.status .settings-open:focus,
+.status .settings-open:focus-visible { outline: none; border-color: var(--border-strong); background: var(--state-hover); color: var(--text-heading); }
 .status-model-config {
   min-width: 26px;
   min-height: 26px;
