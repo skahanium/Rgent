@@ -54,7 +54,7 @@ export async function start(root: HTMLElement): Promise<void> {
     <div class="app">
       <header class="top">
         <button type="button" class="tree-toggle" aria-controls="tree-panel" aria-expanded="false" aria-label="目录"></button>
-        <div class="tabs" role="tablist" aria-label="打开中的笔记"></div>
+        <div class="tabs" role="tablist" aria-label="打开中的笔记"><button type="button" class="tab-new" aria-label="新建笔记" title="新建笔记"></button></div>
         <span class="permission-warning" role="alert" hidden></span>
         <button type="button" class="lifecycle-warning" hidden>文件操作待核验 · 查看</button>
       </header>
@@ -96,6 +96,9 @@ export async function start(root: HTMLElement): Promise<void> {
   const lifecycleWarning = root.querySelector('.lifecycle-warning') as HTMLButtonElement
   const statusEl = root.querySelector('.status') as HTMLElement
   const tabsEl = root.querySelector('.tabs') as HTMLElement
+  const tabNew = root.querySelector('.tab-new') as HTMLButtonElement
+  tabNew.append(icon('plus'))
+  tabNew.addEventListener('click', () => void createNote())
   const unavailableEl = root.querySelector('.note-unavailable') as HTMLElement
   const copyButton = root.querySelector('.note-save-copy') as HTMLButtonElement
   const discardButton = root.querySelector('.note-discard') as HTMLButtonElement
@@ -128,6 +131,9 @@ export async function start(root: HTMLElement): Promise<void> {
 
   const tabs: Tab[] = []
   let active: string | null = null
+  let renderedActive: string | null = null
+  // 窗口收窄或警告占用顶栏时，仍保证当前项在 tab 栏自己的可视区内。
+  new ResizeObserver(() => revealActiveTab()).observe(tabsEl)
   let tree: TreeEntry[] = []
   let saveTimer: number | null = null
   // 冲突串行化：一次只问一个，后来的排队——旧实现用全局标志直接丢掉，
@@ -914,7 +920,7 @@ export async function start(root: HTMLElement): Promise<void> {
     syncActiveLocks()
     editor.focus()
     closeLedger()
-    renderTabs()
+    renderTabs(true)
     paintTree()
     updateStatus()
     renderOutline()
@@ -926,7 +932,21 @@ export async function start(root: HTMLElement): Promise<void> {
     return tabs.find((tab) => tab.relPath === active)
   }
 
-  function renderTabs(): void {
+  function revealActiveTab(): void {
+    const selected = tabsEl.querySelector('.tab[aria-selected="true"]')?.parentElement
+    if (!selected) return
+    const viewport = tabsEl.getBoundingClientRect()
+    const item = selected.getBoundingClientRect()
+    // 当前是末尾笔记时，把紧随其后的新建按钮一起带入可视区。
+    const right = selected.nextElementSibling === tabNew ? tabNew.getBoundingClientRect().right : item.right
+    // 仅滚动 tab 条；scrollIntoView 会连同外层与正文一起寻找滚动祖先。
+    if (item.left < viewport.left + 4) tabsEl.scrollLeft += item.left - viewport.left - 4
+    else if (right > viewport.right - 4) tabsEl.scrollLeft += right - viewport.right + 4
+  }
+
+  function renderTabs(reveal = false): void {
+    const scrollLeft = tabsEl.scrollLeft
+    const activeChanged = renderedActive !== active
     tabsEl.replaceChildren()
     for (const tab of tabs) {
       const button = document.createElement('button')
@@ -976,14 +996,11 @@ export async function start(root: HTMLElement): Promise<void> {
       wrap.append(button, close)
       tabsEl.append(wrap)
     }
-    const add = document.createElement('button')
-    add.type = 'button'
-    add.className = 'tab-new'
-    add.setAttribute('aria-label', '新建笔记')
-    add.title = '新建笔记'
-    add.append(icon('plus'))
-    add.addEventListener('click', () => void createNote())
-    tabsEl.append(add)
+    tabsEl.append(tabNew)
+    // 编辑、保存和任务状态重绘不把人手动滚动的位置重置到最左。
+    tabsEl.scrollLeft = scrollLeft
+    renderedActive = active
+    if (reveal || activeChanged) revealActiveTab()
     ledgerOpenButton.hidden = !active
     ledgerOpenButton.textContent = ledgerOpen ? '返回正文' : '账本'
     ledgerOpenButton.title = ledgerOpen ? '返回这篇笔记的正文' : '看这篇笔记的账本回顾'

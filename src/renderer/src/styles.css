@@ -174,6 +174,8 @@ input:focus-visible,
 
 .top {
   display: flex;
+  width: 100%;
+  min-width: 0;
   align-items: center;
   gap: 6px;
   min-height: 46px;
@@ -188,6 +190,7 @@ input:focus-visible,
 .top button, .top .tabs, .top .permission-warning { -webkit-app-region: no-drag; }
 
 .top .tree-toggle {
+  flex: 0 0 auto;
   align-self: center;
   min-height: 34px;
   min-width: 34px;
@@ -221,6 +224,11 @@ input:focus-visible,
 }
 
 .permission-warning {
+  min-width: 0;
+  max-width: 25%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--danger);
   font-size: 0.82rem;
   font-weight: 600;
@@ -857,17 +865,21 @@ input:focus-visible,
   display: flex;
   align-items: center;
   gap: 3px;
-  flex: 1;
+  flex: 1 1 0;
   min-width: 0;
+  /* 给焦点描边留出栏内空间，溢出仅发生在这个滚动容器。 */
+  padding: 4px;
   overflow-x: auto;
+  scrollbar-width: none;
   font-family: var(--font-ui);
 }
 
 .tab-wrap {
   display: flex;
   align-items: center;
-  flex: 0 0 auto;
+  flex: 0 1 220px;
   max-width: 220px;
+  min-width: 112px;
   min-height: 32px;
   padding-right: 2px;
   border-radius: var(--radius-md) var(--radius-md) 0 0;
@@ -889,14 +901,15 @@ input:focus-visible,
   gap: 6px;
   min-height: 32px;
   min-width: 0;
-  max-width: 190px;
+  flex: 1 1 auto;
   padding: 0 4px 0 10px;
   border-radius: var(--radius-md) var(--radius-md) 0 0;
   font-size: 0.84rem;
 }
-.tab .icon { width: 17px; height: 17px; }
+.tab .icon { flex: 0 0 17px; width: 17px; height: 17px; }
 
 .tab-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -905,6 +918,7 @@ input:focus-visible,
 .tab[aria-selected='true'] { font-weight: 500; }
 
 .tab-dirty {
+  flex: 0 0 auto;
   color: var(--accent-primary);
   line-height: 1;
 }
@@ -912,6 +926,7 @@ input:focus-visible,
 .tab-close {
   display: grid;
   place-items: center;
+  flex: 0 0 24px;
   min-width: 24px;
   min-height: 24px;
   padding: 0;
@@ -929,6 +944,7 @@ input:focus-visible,
   display: grid;
   place-items: center;
   align-self: center;
+  flex: 0 0 28px;
   min-width: 28px;
   min-height: 28px;
   padding: 0;

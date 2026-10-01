@@ -125,7 +125,7 @@ function makePage(send, close) {
 async function confirmSlashAuthorization(page, inspect = false) {
   await page.key('Enter', 'Enter', 0, 13)
   const ready = await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)
-  check('本场授权准备就绪后才可确认', ready)
+  check('本场授权准备就绪后才可确认', ready, ready ? '' : await page.eval(`JSON.stringify({ tab: document.querySelector('.tab[aria-selected=true]')?.dataset.rel, focused: document.activeElement?.className, popup: document.querySelector('dialog[open]')?.className, text: document.querySelector('.cm-content')?.textContent?.slice(0, 180), status: document.querySelector('.status-left')?.textContent })`))
   if (!ready) return false
   if (inspect) {
     check('首次回车只展示本篇范围与实际模型接收方', await page.eval(`(async () => {
@@ -1342,6 +1342,54 @@ async function main() {
       const maxInput = Math.max(...samples.map((sample) => sample.input))
       return { ok: samples.length === 5 && samples.every((sample) => sample.bytes > 18_000 && sample.open < 5000 && sample.scroll < 1000) && maxInput < 250, detail: JSON.stringify(samples) }
     })
+
+    // 用已有的长文 tab 复现拥挤顶栏：核对实际矩形，不只检查 overflow 属性。
+    const tabGeometry = `(() => {
+      const strip = document.querySelector('.tabs')
+      const top = document.querySelector('.top')
+      const selected = document.querySelector('.tab[aria-selected="true"]')?.closest('.tab-wrap')
+      const add = document.querySelector('.tab-new')
+      const bounds = strip.getBoundingClientRect()
+      const header = top.getBoundingClientRect()
+      const active = selected.getBoundingClientRect()
+      const plus = add.getBoundingClientRect()
+      const last = strip.querySelector('.tab-wrap:last-of-type').getBoundingClientRect()
+      const right = header.right - parseFloat(getComputedStyle(top).paddingRight)
+      const widths = [...strip.querySelectorAll('.tab-wrap')].map(el => el.getBoundingClientRect().width)
+      return { count: widths.length, widths, average: widths.reduce((a, b) => a + b, 0) / widths.length,
+        bounded: bounds.right <= right + 1 && top.scrollWidth <= top.clientWidth + 1,
+        activeVisible: active.left >= bounds.left - 1 && active.right <= bounds.right + 1,
+        addVisible: plus.left >= bounds.left && plus.right <= right + 1,
+        addFollows: add.parentElement === strip && plus.left >= last.right && plus.left - last.right <= 8,
+        overflow: strip.scrollWidth > strip.clientWidth, scroll: strip.scrollLeft }
+    })()`
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+    await sleep(100)
+    const wideTabs = await page.eval(tabGeometry)
+    await shot(page, 'tabs-wide')
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
+    await sleep(100)
+    const narrowTabs = await page.eval(tabGeometry)
+    check('拥挤 tab 先压缩，最小宽度后仅在栏内滚动', wideTabs.count >= 7 && narrowTabs.bounded && narrowTabs.average < wideTabs.average - 1 && narrowTabs.widths.every(width => width >= 110 && width <= 220) && narrowTabs.overflow, JSON.stringify({ wide: wideTabs, narrow: narrowTabs }))
+    check('新建加号紧随最后一个 tab，并随末尾当前项进入可视区', wideTabs.addFollows && narrowTabs.addFollows && narrowTabs.activeVisible && narrowTabs.addVisible, JSON.stringify(narrowTabs))
+    await probe('标题压缩不挤掉 tab 图标和关闭按钮', async () => (await page.eval(`(() => {
+      const wrap = document.querySelector('.tab[aria-selected="true"]').parentElement
+      const bounds = wrap.getBoundingClientRect()
+      const close = wrap.querySelector('.tab-close').getBoundingClientRect()
+      const icon = wrap.querySelector('.tab .icon').getBoundingClientRect()
+      return close.width >= 24 && close.left >= bounds.left && close.right <= bounds.right && icon.width >= 16 && wrap.querySelector('.tab-label').clientWidth > 20
+    })()`)) === true)
+    await shot(page, 'tabs-narrow')
+    await page.eval(`document.querySelector('.cm-content').cmTile.root.view.focus()`)
+    await page.key('Home', 'Home', modifier, 36)
+    await page.eval(`document.querySelector('.tabs').scrollLeft = 60`)
+    await page.key('X', 'KeyX', 0, 88, 'X')
+    await probe('输入引起的 tab 重绘保留手动滚动位置', async () => (await page.eval(`Math.abs(document.querySelector('.tabs').scrollLeft - 60) < 1 && document.querySelector('.tab[aria-selected="true"]').querySelector('.tab-dirty') !== null`)) === true)
+    await page.eval(`document.querySelector('.tab[aria-selected="true"]').focus()`)
+    await page.key('ArrowRight', 'ArrowRight', 0, 39)
+    const keyboardTabs = await page.eval(tabGeometry)
+    check('方向键切到栏外 tab 后，焦点与当前项一起进入可视区', keyboardTabs.activeVisible && (await page.eval(`document.activeElement.matches('.tab[aria-selected="true"]')`)) === true, JSON.stringify(keyboardTabs))
+    await page.call('Emulation.clearDeviceMetricsOverride', {})
 
     } catch (error) { stageFailed('长文响应', error) }
     process.stdout.write('\nHost 最小环\n')
