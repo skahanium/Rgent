@@ -224,6 +224,37 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       keyState.className = 'settings-key-state'
       const selectedState = document.createElement('p')
       selectedState.className = 'settings-key-state'
+      // MiniMax 的密钥与站点绑定：预置两个站点，选完仍可手改接口地址。
+      const MINIMAX_HOSTS: Array<{ label: string; baseURL: string }> = [
+        { label: '国际站点 api.minimax.io', baseURL: 'https://api.minimax.io/v1' },
+        { label: '国内站点 api.minimaxi.com', baseURL: 'https://api.minimaxi.com/v1' }
+      ]
+      const hostRow = document.createElement('div')
+      hostRow.className = 'settings-field settings-minimax-host'
+      const hostRowLabel = document.createElement('span')
+      hostRowLabel.textContent = 'MiniMax 站点'
+      const hostButtons = document.createElement('div')
+      hostButtons.className = 'settings-host-actions'
+      hostRow.append(hostRowLabel, hostButtons)
+      const hostHint = document.createElement('p')
+      hostHint.className = 'settings-host-hint'
+      hostHint.textContent = '密钥与站点绑定：国内 Token Plan 的密钥要在国内站点使用。'
+      const paintHosts = (): void => {
+        const onMinimax = provider.value === 'minimax'
+        hostRow.hidden = !onMinimax
+        hostHint.hidden = !onMinimax
+        hostButtons.replaceChildren()
+        if (!onMinimax) return
+        for (const host of MINIMAX_HOSTS) {
+          const chosen = base.value.trim() === host.baseURL
+          const button = action(chosen ? `${host.label} · 已选` : host.label, () => {
+            base.value = host.baseURL
+            paintHosts()
+          })
+          if (chosen) button.setAttribute('aria-pressed', 'true')
+          hostButtons.append(button)
+        }
+      }
       const paintProfile = (): void => {
         const profile = config.profiles[provider.value as ModelProvider]
         base.value = profile.baseURL
@@ -232,8 +263,10 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         secret.value = ''
         keyState.textContent = profile.hasKey ? '密钥已保存' : '尚未保存密钥'
         selectedState.textContent = config.selected === provider.value ? '当前使用' : '尚未选用'
+        paintHosts()
       }
       provider.addEventListener('change', paintProfile)
+      base.addEventListener('input', paintHosts)
       paintProfile()
       const save = action('保存配置', () => {
         const id = provider.value as ModelProvider
@@ -269,7 +302,9 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         }).catch(() => showError(error, '删除失败，请重试。'))
       })
       body.append(providerLabel)
-      for (const input of [base, model, context, secret]) appendField(body, input)
+      appendField(body, base)
+      body.append(hostRow, hostHint)
+      for (const input of [model, context, secret]) appendField(body, input)
       const state = document.createElement('div')
       state.className = 'settings-model-state'
       state.append(keyState, selectedState)

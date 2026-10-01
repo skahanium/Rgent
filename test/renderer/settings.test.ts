@@ -189,6 +189,47 @@ describe('settings interface page', () => {
     await vi.waitFor(() => expect(setLimits).toHaveBeenCalledWith({ tier: 'none', limits: { seconds: 180, steps: 4, tools: 0 } }))
     panel.close()
   })
+  it('offers the MiniMax domestic station and saves the picked base URL', async () => {
+    const config = {
+      selected: 'minimax' as const,
+      profiles: {
+        deepseek: { baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1000000, hasKey: false },
+        minimax: { baseURL: 'https://api.minimax.io/v1', modelId: 'MiniMax-M3', contextTokens: 204800, hasKey: true },
+        custom: { baseURL: '', modelId: '', contextTokens: 0, hasKey: false }
+      },
+      limits: { none: { seconds: 180, steps: 4, tools: 0 }, local: { seconds: 300, steps: 12, tools: 24 }, network: { seconds: 600, steps: 20, tools: 40 } }
+    }
+    const setProfile = vi.fn().mockResolvedValue({ ok: true, config })
+    const setLimits = vi.fn().mockResolvedValue({ ok: true, config })
+    const panel = createSettingsOverlay({
+      getMode: async () => 'day', setMode: async (mode) => ({ ok: true, mode }),
+      getConfig: async () => ({ ok: true, config }), setProfile,
+      selectModel: async () => ({ ok: true, config }), deleteKey: async () => ({ ok: true, config }), setLimits
+    })
+    panel.open()
+    const nav = [...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')]
+    nav.find((button) => button.textContent === '模型')?.click()
+    await vi.waitFor(() => expect(document.querySelector('.settings-minimax-host')).not.toBeNull())
+    const row = document.querySelector<HTMLElement>('.settings-minimax-host')!
+    expect(row.hidden).toBe(false)
+    expect([...row.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['国际站点 api.minimax.io · 已选', '国内站点 api.minimaxi.com'])
+    // 选国内站点：接口地址跟着改，再保存就带上国内地址
+    ;[...row.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('国内站点'))!.click()
+    const baseInput = [...document.querySelectorAll<HTMLInputElement>('.settings-form input')].find((input) => input.value.includes('minimax'))!
+    expect(baseInput.value).toBe('https://api.minimaxi.com/v1')
+    ;[...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find((b) => b.textContent === '保存配置')!.click()
+    await vi.waitFor(() => expect(setProfile).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'minimax',
+      fields: expect.objectContaining({ baseURL: 'https://api.minimaxi.com/v1' })
+    })))
+    // 换成自定义供应商时站点行隐藏
+    const providerSelect = document.querySelector<HTMLSelectElement>('.settings-provider')!
+    providerSelect.value = 'custom'
+    providerSelect.dispatchEvent(new Event('change'))
+    await vi.waitFor(() => expect(document.querySelector<HTMLElement>('.settings-minimax-host')!.hidden).toBe(true))
+    panel.close()
+  })
+
   it('shows only three live theme choices, saves one, and returns focus on close', async () => {
     const trigger = document.createElement('button')
     document.body.append(trigger)
