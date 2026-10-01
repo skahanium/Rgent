@@ -36,8 +36,7 @@ type StoredConfig = {
 const FILE = 'model-config.json'
 const PROVIDERS: ModelProvider[] = ['deepseek', 'minimax', 'custom']
 const TIERS: LimitTier[] = ['none', 'local', 'network']
-export const MAX_CONNECTIONS = 32
-export const MAX_MODELS_PER_CONNECTION = 100
+export const MAX_MODELS_PER_PROVIDER = 100
 const MAX_CONTEXT_TOKENS = 16777216
 
 const defaults = (): StoredConfig => {
@@ -110,13 +109,16 @@ function parseV2(value: unknown): StoredConfig {
   if (!value || typeof value !== 'object') throw new Error('BAD_MODEL_CONFIG')
   const record = value as Partial<StoredConfig>
   if (!Array.isArray(record.connections) || !Array.isArray(record.models) || !record.limits) throw new Error('BAD_MODEL_CONFIG')
-  if (record.connections.length > MAX_CONNECTIONS) throw new Error('BAD_MODEL_CONFIG')
+  if (record.connections.length > PROVIDERS.length) throw new Error('BAD_MODEL_CONFIG')
   const connections: StoredConnection[] = []
   const seenConnections = new Set<string>()
+  const seenProviders = new Set<string>()
   for (const candidate of record.connections) {
     if (!candidate || typeof candidate !== 'object') throw new Error('BAD_MODEL_CONFIG')
     if (!isRowId(candidate.id) || seenConnections.has(candidate.id) || !isProvider(candidate.provider)) throw new Error('BAD_MODEL_CONFIG')
+    if (seenProviders.has(candidate.provider)) throw new Error('BAD_MODEL_CONFIG')
     seenConnections.add(candidate.id)
+    seenProviders.add(candidate.provider)
     const connection: StoredConnection = {
       id: candidate.id,
       provider: candidate.provider,
@@ -136,7 +138,7 @@ function parseV2(value: unknown): StoredConfig {
     if (!isRowId(candidate.id) || seenModels.has(candidate.id) || !seenConnections.has(candidate.connectionId)) throw new Error('BAD_MODEL_CONFIG')
     seenModels.add(candidate.id)
     const count = (perConnection.get(candidate.connectionId) ?? 0) + 1
-    if (count > MAX_MODELS_PER_CONNECTION) throw new Error('BAD_MODEL_CONFIG')
+    if (count > MAX_MODELS_PER_PROVIDER) throw new Error('BAD_MODEL_CONFIG')
     perConnection.set(candidate.connectionId, count)
     models.push({
       id: candidate.id,
@@ -145,7 +147,7 @@ function parseV2(value: unknown): StoredConfig {
       contextTokens: validateContextTokens(candidate.contextTokens)
     })
   }
-  if (models.some((model) => models.filter((other) => other.connectionId === model.connectionId && other.modelId === model.modelId).length > 1)) throw new Error('BAD_MODEL_CONFIG')
+  if (new Set(models.map((model) => `${model.connectionId}:${model.modelId}`)).size !== models.length) throw new Error('BAD_MODEL_CONFIG')
   if (record.defaultModelId !== null && (!isRowId(record.defaultModelId) || !seenModels.has(record.defaultModelId))) throw new Error('BAD_MODEL_CONFIG')
   const config = defaults()
   config.connections = connections
@@ -290,67 +292,77 @@ export function createModelConfigStore(userData: string, protection: SecretProte
   return {
     getPublic(): PublicModelConfig {
       return {
-        connections: current.connections.map((connection) => ({
-          id: connection.id,
-          provider: connection.provider,
-          baseURL: connection.baseURL,
-          hasKey: connection.encryptedKey !== undefined,
-          modelCount: current.models.filter((model) => model.connectionId === connection.id).length
+        providers: PROVIDERS.map((provider) => {
+          const connection = current.connections.find((item) => item.provider === provider)
+          return {
+            provider,
+            configured: connection !== undefined && (connection.baseURL !== '' || connection.encryptedKey !== undefined),
+            baseURL: connection?.baseURL ?? '',
+            hasKey: connection?.encryptedKey !== undefined,
+            modelCount: connection ? current.models.filter((model) => model.connectionId === connection.id).length : 0
+          }
+        }),
+        models: current.models.map((model) => ({
+          id: model.id,
+          provider: current.connections.find((connection) => connection.id === model.connectionId)!.provider,
+          modelId: model.modelId,
+          contextTokens: model.contextTokens
         })),
-        models: current.models.map((model) => ({ ...model })),
         defaultModelId: current.defaultModelId,
         limits: structuredClone(current.limits)
       }
     },
-    addConnection(fields: { provider: unknown; baseURL: unknown; modelId: unknown; contextTokens: unknown }, newKey?: string): void {
+    /** 保存供应商配置：没有就建（含第一个模型），已有就只改端点与密钥；绝不为同一供应商建第二条。 */
+    saveProvider(fields: { provider: unknown; baseURL: unknown; modelId: unknown; contextTokens: unknown }, newKey?: string): void {
       if (!isProvider(fields.provider)) throw new Error('BAD_PROVIDER')
-      if (current.connections.length >= MAX_CONNECTIONS) throw new Error('TOO_MANY_CONNECTIONS')
-      const connection: StoredConnection = {
-        id: randomUUID(),
-        provider: fields.provider,
-        baseURL: validateConnectionBaseURL(fields.provider, fields.baseURL)
-      }
-      if (newKey !== undefined) connection.encryptedKey = encryptKey(newKey)
-      const model: StoredModel = {
-        id: randomUUID(),
-        connectionId: connection.id,
-        modelId: validateModelId(fields.modelId),
-        contextTokens: validateContextTokens(fields.contextTokens)
-      }
       const next = copy()
-      next.connections.push(connection)
-      next.models.push(model)
-      if (next.defaultModelId === null) next.defaultModelId = model.id
+      const existing = next.connections.find((connection) => connection.provider === fields.provider)
+      const baseURL = validateConnectionBaseURL(fields.provider, fields.baseURL)
+      const key = newKey !== undefined ? encryptKey(newKey) : undefined
+      if (existing) {
+        existing.baseURL = baseURL
+        if (key !== undefined) existing.encryptedKey = key
+        if (!next.models.some((model) => model.connectionId === existing.id)) {
+          const model = { id: randomUUID(), connectionId: existing.id, modelId: validateModelId(fields.modelId), contextTokens: validateContextTokens(fields.contextTokens) }
+          next.models.push(model)
+          if (next.defaultModelId === null) next.defaultModelId = model.id
+        }
+      } else {
+        const connection: StoredConnection = { id: randomUUID(), provider: fields.provider, baseURL }
+        if (key !== undefined) connection.encryptedKey = key
+        const model: StoredModel = { id: randomUUID(), connectionId: connection.id, modelId: validateModelId(fields.modelId), contextTokens: validateContextTokens(fields.contextTokens) }
+        next.connections.push(connection)
+        next.models.push(model)
+        if (next.defaultModelId === null) next.defaultModelId = model.id
+      }
       commit(next)
     },
-    updateConnection(connectionId: string, baseURL: unknown, newKey?: string): void {
+    removeProvider(provider: unknown): void {
+      if (!isProvider(provider)) throw new Error('BAD_PROVIDER')
       const next = copy()
-      const connection = connectionOf(next, connectionId)
-      connection.baseURL = validateConnectionBaseURL(connection.provider, baseURL)
-      if (newKey !== undefined) connection.encryptedKey = encryptKey(newKey)
-      commit(next)
-    },
-    removeConnection(connectionId: string): void {
-      const next = copy()
-      connectionOf(next, connectionId)
-      const removed = new Set(next.models.filter((model) => model.connectionId === connectionId).map((model) => model.id))
-      next.connections = next.connections.filter((connection) => connection.id !== connectionId)
-      next.models = next.models.filter((model) => model.connectionId !== connectionId)
+      const connection = next.connections.find((item) => item.provider === provider)
+      if (!connection) throw new Error('CONNECTION_NOT_FOUND')
+      const removed = new Set(next.models.filter((model) => model.connectionId === connection.id).map((model) => model.id))
+      next.connections = next.connections.filter((item) => item.id !== connection.id)
+      next.models = next.models.filter((model) => model.connectionId !== connection.id)
       if (next.defaultModelId !== null && removed.has(next.defaultModelId)) next.defaultModelId = null
       commit(next)
     },
-    deleteKey(connectionId: string): void {
+    deleteKey(provider: unknown): void {
+      if (!isProvider(provider)) throw new Error('BAD_PROVIDER')
       const next = copy()
-      delete connectionOf(next, connectionId).encryptedKey
+      const connection = next.connections.find((item) => item.provider === provider)
+      if (!connection) throw new Error('CONNECTION_NOT_FOUND')
+      delete connection.encryptedKey
       commit(next)
     },
-    addModel(fields: { connectionId: unknown; modelId: unknown; contextTokens: unknown }): void {
-      if (typeof fields.connectionId !== 'string') throw new Error('CONNECTION_NOT_FOUND')
+    addModel(fields: { provider: unknown; modelId: unknown; contextTokens: unknown }): void {
+      if (!isProvider(fields.provider)) throw new Error('BAD_PROVIDER')
       const next = copy()
-      const connection = connectionOf(next, fields.connectionId)
+      const connection = connectionOf(next, next.connections.find((item) => item.provider === fields.provider)?.id ?? '')
       const modelId = validateModelId(fields.modelId)
       if (next.models.some((model) => model.connectionId === connection.id && model.modelId === modelId)) throw new Error('DUPLICATE_MODEL')
-      if (next.models.filter((model) => model.connectionId === connection.id).length >= MAX_MODELS_PER_CONNECTION) throw new Error('TOO_MANY_MODELS')
+      if (next.models.filter((model) => model.connectionId === connection.id).length >= MAX_MODELS_PER_PROVIDER) throw new Error('TOO_MANY_MODELS')
       next.models.push({ id: randomUUID(), connectionId: connection.id, modelId, contextTokens: validateContextTokens(fields.contextTokens) })
       commit(next)
     },
@@ -391,14 +403,12 @@ export function createModelConfigStore(userData: string, protection: SecretProte
         apiKey: decryptKey(connection)
       }
     },
-    /** 「读取模型」用：只取某条连接的端点与密钥，不用默认模型。 */
-    connectionSecret(connectionId: string): { baseURL: string; apiKey: string } {
-      const connection = connectionOf(current, connectionId)
+    /** 「读取模型」用：只取该供应商的端点与密钥，不用默认模型。 */
+    providerSecret(provider: unknown): { baseURL: string; apiKey: string } {
+      if (!isProvider(provider)) throw new Error('BAD_PROVIDER')
+      const connection = current.connections.find((item) => item.provider === provider)
+      if (!connection) throw new Error('CONNECTION_NOT_FOUND')
       return { baseURL: requireBaseURL(connection), apiKey: decryptKey(connection) }
-    },
-    connectionPublic(connectionId: string): { provider: ModelProvider; baseURL: string } {
-      const connection = connectionOf(current, connectionId)
-      return { provider: connection.provider, baseURL: connection.baseURL }
     }
   }
 }

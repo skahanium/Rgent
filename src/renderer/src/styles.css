@@ -404,10 +404,10 @@ input:focus-visible,
 .settings-limit-group legend { color: var(--text-heading); font-size: 0.85rem; font-weight: 600; }
 .settings-limit-group .settings-action { grid-column: 1 / -1; }
 
-/* 模型页：连接卡、分区标题、模型行、读取模型面板。只用现有 token，日夜主题共用。 */
+/* 模型页：供应商行、子页返回、模型行、读取模型面板。只用现有 token，日夜主题共用。 */
 .settings-section-title { margin: 26px 0 10px; color: var(--text-muted); font-size: 0.72rem; font-weight: 650; letter-spacing: 0.08em; }
-.settings-connections { display: grid; gap: 8px; }
-.settings-connection {
+.settings-providers { display: grid; gap: 8px; }
+.settings-provider-row {
   position: relative;
   display: grid;
   gap: 4px;
@@ -421,18 +421,17 @@ input:focus-visible,
   cursor: pointer;
   font-family: var(--font-ui);
 }
-.settings-connection::before { content: ''; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 3px; background: transparent; }
-.settings-connection:hover { border-color: var(--accent-primary); background: var(--state-hover); }
-.settings-connection.is-active { border-color: var(--accent-primary); background: var(--state-selected); }
-.settings-connection.is-active::before { background: var(--accent-primary); }
-.settings-connection:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
-.settings-connection-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.settings-connection-name { color: var(--text-heading); font-size: 0.86rem; font-weight: 600; }
-.settings-connection-meta { color: var(--text-muted); font-size: 0.7rem; white-space: nowrap; }
-.settings-connection-host { overflow: hidden; color: var(--text-muted); font-family: var(--font-mono); font-size: 0.72rem; text-overflow: ellipsis; white-space: nowrap; }
-.settings-connection-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
-.settings-connection-add select,
-.settings-connection-add input,
+.settings-provider-row::before { content: ''; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 3px; background: transparent; }
+.settings-provider-row:hover { border-color: var(--accent-primary); background: var(--state-hover); }
+.settings-provider-row.is-active { border-color: var(--accent-primary); background: var(--state-selected); }
+.settings-provider-row.is-active::before { background: var(--accent-primary); }
+.settings-provider-row:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
+.settings-provider-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.settings-provider-name { color: var(--text-heading); font-size: 0.86rem; font-weight: 600; }
+.settings-provider-meta { color: var(--text-muted); font-size: 0.7rem; white-space: nowrap; }
+.settings-provider-host { overflow: hidden; color: var(--text-muted); font-family: var(--font-mono); font-size: 0.72rem; text-overflow: ellipsis; white-space: nowrap; }
+.settings-provider-row select,
+.settings-provider-row input,
 .settings-model-add input,
 .settings-model-capacity,
 .settings-candidate-capacity {
@@ -444,14 +443,28 @@ input:focus-visible,
   color: var(--text-heading);
   font: 0.8rem var(--font-ui);
 }
-.settings-connection-add select:focus-visible,
-.settings-connection-add input:focus-visible,
+.settings-provider-row input:focus-visible,
 .settings-model-add input:focus-visible,
 .settings-model-capacity:focus-visible,
 .settings-candidate-capacity:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 1px; }
-.settings-connection-add .settings-action { min-height: 34px; padding: 6px 12px; }
 .settings-add-model, .settings-add-model-id { flex: 1 1 140px; }
-.settings-add-capacity, .settings-add-model-capacity, .settings-model-capacity, .settings-candidate-capacity { width: 132px; text-align: right; }
+.settings-back {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  margin: 0 0 2px;
+  padding: 4px 10px 4px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: 0.8rem var(--font-ui);
+}
+.settings-subtitle { margin: 2px 0 8px; color: var(--text-heading); font-size: 1.06rem; font-weight: 600; }
+.settings-back:hover { border-color: var(--border-subtle); background: var(--state-hover); color: var(--text-heading); }
+.settings-back:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .settings-field.wide { grid-column: 1 / -1; }
 .settings-models { display: grid; margin-top: 4px; }
@@ -916,9 +929,9 @@ input:focus-visible,
 
 /* 底栏：与上方用一条细线分开。 */
 .status {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   min-height: 30px;
   padding: 0 12px;
@@ -930,12 +943,42 @@ input:focus-visible,
 }
 
 .status-left,
+.status-center,
 .status-right {
   display: flex;
   align-items: center;
   gap: 14px;
   min-width: 0;
 }
+.status-left { grid-column: 1; justify-self: start; }
+.status-center { grid-column: 2; justify-self: center; gap: 6px; }
+.status-right { grid-column: 3; justify-self: end; }
+.status-model-label { color: var(--text-muted); font-size: 0.7rem; }
+.status-model {
+  max-width: 22ch;
+  min-height: 22px;
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-overlay);
+  color: var(--text-body);
+  font: inherit;
+  cursor: pointer;
+}
+.status-model:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+.status-model:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
+.status-model-config {
+  min-height: 22px;
+  padding: 1px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-body);
+  cursor: pointer;
+  font: inherit;
+}
+.status-model-config:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+.status-model-config:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
+.status-model-empty { color: var(--text-muted); }
 
 .status-item {
   overflow: hidden;

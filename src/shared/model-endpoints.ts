@@ -27,6 +27,12 @@ export const MODEL_PRESETS: Record<ModelProvider, ProviderPreset> = {
   custom: { endpoints: [], modelId: '', contextTokens: 0 }
 }
 
+export const PROVIDER_LABELS: Record<ModelProvider, string> = {
+  deepseek: 'DeepSeek',
+  minimax: 'MiniMax',
+  custom: '自定义兼容接口'
+}
+
 export const MODEL_ENDPOINTS: Record<ModelProvider, readonly ModelEndpoint[]> = {
   deepseek: MODEL_PRESETS.deepseek.endpoints,
   minimax: MODEL_PRESETS.minimax.endpoints,

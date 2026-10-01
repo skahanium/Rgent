@@ -403,10 +403,15 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '${name}'))?.click()`)
       await waitFor(page, `document.querySelector('.settings-page-title')?.textContent === '${name}'`)
       if (name === '模型') {
-        await page.eval(`(() => { [...document.querySelectorAll('.settings-connection')].find((card) => card.textContent.includes('密钥已保存'))?.click() })()`)
-        await sleep(200)
+        await shot(page, `reference-${mode}-settings-model`)
+        await page.eval(`(() => { document.querySelector('.settings-provider-row[data-provider="minimax"]')?.click() })()`)
+        await sleep(250)
+        await page.eval(`document.querySelector('.settings-main').scrollTop = 0`)
+        await sleep(150)
+        await shot(page, `reference-${mode}-settings-model-provider`)
+        continue
       }
-      await shot(page, `reference-${mode}-settings-${name === '模型' ? 'model' : 'run'}`)
+      await shot(page, `reference-${mode}-settings-run`)
     }
     await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '界面'))?.click()`)
     if (mode === 'day') {
@@ -458,7 +463,15 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     for (const name of ['模型', '运行']) {
       await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '${name}'))?.click()`)
       await waitFor(page, `document.querySelector('.settings-page-title')?.textContent === '${name}'`)
-      await shot(page, `reference-${mode}-settings-${name === '模型' ? 'model' : 'run'}-narrow`)
+      if (name === '模型') {
+        await waitFor(page, `[...document.querySelectorAll('.settings-provider-row')].length === 3`)
+        await shot(page, `reference-${mode}-settings-model-narrow`)
+        await page.eval(`(() => { document.querySelector('.settings-provider-row[data-provider="minimax"]')?.click() })()`)
+        await sleep(200)
+        await shot(page, `reference-${mode}-settings-model-provider-narrow`)
+        continue
+      }
+      await shot(page, `reference-${mode}-settings-run-narrow`)
     }
     await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
     await page.call('Emulation.clearDeviceMetricsOverride', {})
@@ -622,11 +635,9 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
 /** 样张夹具：两条带密钥的连接（含同厂商多条）与三个模型，界面才看得出真实形态。 */
 async function seedVisualModels(page) {
   await page.eval(`(async () => {
-    const deepseek = await window.rgent.modelConnectionAdd({ provider: 'deepseek', baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1048576, newKey: 'ui-visual-secret' })
-    if (!deepseek.ok) return
-    const ds = deepseek.config.connections.find((item) => item.provider === 'deepseek' && item.baseURL === 'https://api.deepseek.com' && item.hasKey)
-    if (ds) await window.rgent.modelAdd({ connectionId: ds.id, modelId: 'deepseek-reasoner', contextTokens: 131072 })
-    await window.rgent.modelConnectionAdd({ provider: 'minimax', baseURL: 'https://api.minimaxi.com/v1', modelId: 'MiniMax-M3', contextTokens: 204800, newKey: 'ui-visual-secret' })
+    const deepseek = await window.rgent.modelProviderSave({ provider: 'deepseek', baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1048576, newKey: 'ui-visual-secret' })
+    if (deepseek.ok) await window.rgent.modelAdd({ provider: 'deepseek', modelId: 'deepseek-reasoner', contextTokens: 131072 })
+    await window.rgent.modelProviderSave({ provider: 'minimax', baseURL: 'https://api.minimaxi.com/v1', modelId: 'MiniMax-M3', contextTokens: 204800, newKey: 'ui-visual-secret' })
   })()`)
 }
 
@@ -1278,23 +1289,46 @@ async function main() {
     const hostAddress = hostServer.address()
     const hostBaseURL = `http://127.0.0.1:${hostAddress.port}/v1`
     const configured = await page.eval(`(async () => {
-      const added = await window.rgent.modelConnectionAdd({ provider: 'custom', baseURL: '${hostBaseURL}', modelId: 'test', contextTokens: 20000, newKey: 'ui-fixture-secret' })
+      const added = await window.rgent.modelProviderSave({ provider: 'custom', baseURL: '${hostBaseURL}', modelId: 'test', contextTokens: 20000, newKey: 'ui-fixture-secret' })
       if (!added.ok) return false
-      const connection = added.config.connections.find((item) => item.baseURL === '${hostBaseURL}')
-      const model = added.config.models.find((item) => item.connectionId === connection?.id)
-      if (!connection?.hasKey || !model) return false
+      const provider = added.config.providers.find((item) => item.provider === 'custom')
+      const model = added.config.models.find((item) => item.provider === 'custom')
+      if (!provider?.hasKey || !model) return false
       const picked = await window.rgent.modelDefaultSet({ modelId: model.id })
       return picked.ok && picked.config.defaultModelId === model.id
     })()`)
-    check('本机模型配置能保存独立密钥并把默认模型指向受控兼容接口', configured === true)
+    check('本机模型配置能保存一份供应商密钥并把默认模型指向受控兼容接口', configured === true)
     await page.eval(`document.querySelector('.settings-open')?.click()`)
     await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '模型')?.click() })()`)
-    await page.eval(`(() => { [...document.querySelectorAll('.settings-connection')].find((card) => card.textContent.includes('密钥已保存'))?.click() })()`)
-    check('模型设置页列出连接与模型、只显示密钥状态且密码不回填', await waitFor(page, `document.querySelector('.settings-connection.is-active')?.textContent.includes('密钥已保存') && document.querySelector('input[type=password]')?.value === '' && document.querySelectorAll('.settings-model-row').length >= 1 && ![...document.querySelectorAll('button')].some((button) => button.textContent.includes('设为当前模型'))`))
+    check('模型页根页按供应商列出三家', await waitFor(page, `[...document.querySelectorAll('.settings-provider-row')].map((row) => row.dataset.provider).join(',') === 'deepseek,minimax,custom'`))
+    await page.eval(`(() => { document.querySelector('.settings-provider-row[data-provider="custom"]')?.click() })()`)
+    check('供应商子页只显示密钥状态、密码不回填、有返回入口且没有「当前模型」', await waitFor(page, `(() => {
+      const password = document.querySelector('input[type=password]')
+      return !!document.querySelector('.settings-back') && !!password && password.value === '' &&
+        document.querySelectorAll('.settings-model-row').length >= 1 &&
+        ![...document.querySelectorAll('button')].some((button) => button.textContent.includes('设为当前模型'))
+    })()`))
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '运行')?.click() })()`)
     check('运行设置页提供三档有限上限', await waitFor(page, `document.querySelectorAll('.settings-limit-group').length === 3`))
     await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
+    check('底栏中间的模型模块列出已配置模型', await waitFor(page, `[...document.querySelectorAll('.status-model option')].some((option) => option.textContent === 'test')`))
+    const switched = await page.eval(`(async () => {
+      const select = document.querySelector('.status-model')
+      const target = select && [...select.options].find((option) => option.textContent === 'test')
+      if (!target) return false
+      select.value = target.value
+      select.dispatchEvent(new Event('change'))
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      const config = await window.rgent.modelConfigGet()
+      return config.ok && config.config.defaultModelId === target.value
+    })()`)
+    check('底栏切换模型即写为新任务所用模型', switched === true)
+    check('底栏模型模块在状态重绘后仍是同一个控件', await waitFor(page, `(() => {
+      const center = document.querySelectorAll('.status-center')
+      const select = center[0]?.querySelector('.status-model')
+      return center.length === 1 && !!select && select.selectedOptions.length === 1 && select.selectedOptions[0].textContent === 'test'
+    })()`))
     writeFileSync(path.join(vault, 'Host 环路.md'), '')
     check('新笔记在目录中出现', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host 环路'))`, 8000))
     await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('Host 环路'))?.click(); document.querySelector('.cm-content')?.focus() })()`)

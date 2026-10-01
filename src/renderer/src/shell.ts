@@ -1,4 +1,4 @@
-import { IPC, type AgentEvent, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
+import { IPC, type AgentEvent, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type PublicModelConfig, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
@@ -13,7 +13,8 @@ import { renderReadOnlyMarkdown, disposeReadOnlyImages } from './view/read-only.
 import { icon } from './icons.ts'
 import { outlineLabel, outlineMarks } from './outline.ts'
 import { installShortcuts, shortcutLabel } from './shortcuts.ts'
-import { renderStatusbar, statusModel, wordsOf } from './statusbar.ts'
+import { renderStatusbar, statusModel, wordsOf, type StatusModelModule } from './statusbar.ts'
+import { PROVIDER_LABELS } from '../../shared/model-endpoints.ts'
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
 import { openAuthorizationPopover } from './authorization-popover.ts'
@@ -153,19 +154,51 @@ export async function start(root: HTMLElement): Promise<void> {
     getReading: () => window.rgent.readingGet(),
     setReading: (reading) => window.rgent.readingSet(reading),
     getConfig: () => window.rgent.modelConfigGet(),
-    addConnection: (request) => window.rgent.modelConnectionAdd(request),
-    updateConnection: (request) => window.rgent.modelConnectionUpdate(request),
-    removeConnection: (request) => window.rgent.modelConnectionRemove(request),
+    saveProvider: (request) => window.rgent.modelProviderSave(request),
+    removeProvider: (request) => window.rgent.modelProviderRemove(request),
     deleteKey: (request) => window.rgent.modelKeyDelete(request),
     addModel: (request) => window.rgent.modelAdd(request),
     updateModel: (request) => window.rgent.modelUpdate(request),
     removeModel: (request) => window.rgent.modelRemove(request),
     readModels: (request) => window.rgent.modelList(request),
     setLimits: (request) => window.rgent.modelLimitsSet(request),
-    onModelConfigChanged: () => { void refreshModelModule() }
+    onModelConfigChanged: () => { void refreshModelModule() },
+    onClose: () => { void refreshModelModule() }
   })
-  // 底栏模型模块在第 5 步接线；这里先保留刷新钩子，配置写入后不留下陈旧状态。
-  const refreshModelModule = async (): Promise<void> => {}
+  // 底栏模型模块：设置页只配置，这里才是「用哪个模型」的入口。
+  let modelConfigSnapshot: PublicModelConfig | null = null
+  let modelModuleCache: { config: PublicModelConfig; module: StatusModelModule } | null = null
+  const modelModule = (): StatusModelModule | undefined => {
+    const config = modelConfigSnapshot
+    if (!config) return undefined
+    if (modelModuleCache?.config === config) return modelModuleCache.module
+    const groups = config.providers
+      .filter((provider) => provider.modelCount > 0)
+      .map((provider) => ({
+        label: provider.hasKey ? PROVIDER_LABELS[provider.provider] : `${PROVIDER_LABELS[provider.provider]}（缺密钥）`,
+        items: config.models.filter((model) => model.provider === provider.provider).map((model) => ({ id: model.id, label: model.modelId }))
+      }))
+    const module: StatusModelModule = {
+      groups,
+      value: config.defaultModelId,
+      signature: JSON.stringify({ groups, value: config.defaultModelId }),
+      onChange: (modelId) => {
+        void window.rgent.modelDefaultSet({ modelId }).then((result) => {
+          if (!result.ok) { hostNotice = hostErrorText(result.error); updateStatus() }
+          else { modelConfigSnapshot = result.config; hostNotice = ''; updateStatus() }
+        }).catch(() => { hostNotice = hostErrorText('IO_ERROR'); updateStatus() })
+      },
+      onConfigure: () => settingsOverlay.open('模型')
+    }
+    modelModuleCache = { config, module }
+    return module
+  }
+  const refreshModelModule = async (): Promise<void> => {
+    const result = await window.rgent.modelConfigGet().catch(() => null)
+    if (!result || !result.ok) return
+    modelConfigSnapshot = result.config
+    updateStatus()
+  }
   let saveInFlight: Promise<boolean> | null = null
   let ledgerOpen = false
   let countedPath: string | null = null
@@ -197,6 +230,8 @@ export async function start(root: HTMLElement): Promise<void> {
   folderCreate.addEventListener('click', () => { void createRootFolder() })
   settingsOpen.prepend(icon('settings'))
   settingsOpen.addEventListener('click', () => { if (!conflictDecisionOpen) settingsOverlay.open() })
+  // 底栏模型模块首次取一次配置；之后由设置页写入与面板关闭时刷新。
+  void refreshModelModule()
   lifecycleWarning.addEventListener('click', () => { if (!conflictDecisionOpen) void showRecoveryStatus() })
 
   editor.onStateChange(() => {
@@ -1019,7 +1054,7 @@ export async function start(root: HTMLElement): Promise<void> {
         words: tab ? countedWords : 0,
         vaultName: vaultNameText,
         noteOpen: tab != null
-      })
+      }, modelModule())
     )
     const left = statusEl.querySelector('.status-left')
     if (hostNotice && left) {

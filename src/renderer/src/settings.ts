@@ -1,7 +1,7 @@
 import type {
-  LimitTier, ModelAddRequest, ModelConfigResult, ModelConnectionAddRequest, ModelConnectionRemoveRequest,
-  ModelConnectionUpdateRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult,
-  ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult
+  LimitTier, ModelAddRequest, ModelConfigResult, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest,
+  ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest,
+  ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult
 } from '../../shared/ipc.ts'
 import { isReadingPreference, READING_FONTS } from '../../shared/reading-preference.ts'
 import { mountModelPage, modelPageAvailable, type ModelPageHandlers } from './settings-model.ts'
@@ -15,9 +15,8 @@ export type SettingsHandlers = {
   getReading?: () => Promise<ReadingPreference>
   setReading?: (reading: ReadingPreference) => Promise<ReadingSetResult>
   getConfig?: () => Promise<ModelConfigResult>
-  addConnection?: (request: ModelConnectionAddRequest) => Promise<ModelConfigResult>
-  updateConnection?: (request: ModelConnectionUpdateRequest) => Promise<ModelConfigResult>
-  removeConnection?: (request: ModelConnectionRemoveRequest) => Promise<ModelConfigResult>
+  saveProvider?: (request: ModelProviderSaveRequest) => Promise<ModelConfigResult>
+  removeProvider?: (request: ModelProviderRemoveRequest) => Promise<ModelConfigResult>
   deleteKey?: (request: ModelKeyDeleteRequest) => Promise<ModelConfigResult>
   addModel?: (request: ModelAddRequest) => Promise<ModelConfigResult>
   updateModel?: (request: ModelUpdateRequest) => Promise<ModelConfigResult>
@@ -26,10 +25,13 @@ export type SettingsHandlers = {
   setLimits?: (request: ModelLimitsSetRequest) => Promise<ModelConfigResult>
   /** 配置写入后通知外壳刷新底栏模型模块。 */
   onModelConfigChanged?: () => void
+  /** 设置面板关闭后通知外壳（底栏模型模块据此取一次最新配置）。 */
+  onClose?: () => void
 }
 
 export type SettingsOverlay = {
-  open: () => void
+  /** 打开设置；可指定落到哪一页（底栏模型模块的「配置」用它直达「模型」页）。 */
+  open: (page?: '界面' | '模型' | '运行') => void
   close: () => void
   isOpen: () => boolean
 }
@@ -67,7 +69,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
   let readingSaveSerial = 0
 
   const close = (): void => overlay?.close()
-  const open = (): void => {
+  const open = (page: '界面' | '模型' | '运行' = '界面'): void => {
     if (overlay?.isOpen()) return
     const current = openOverlay({
       label: '设置',
@@ -78,6 +80,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         overlay = null
         disposeModelPage?.()
         disposeModelPage = null
+        handlers.onClose?.()
       }
     })
     overlay = current
@@ -150,7 +153,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     layout.append(nav, main)
     root.append(layout)
     const themeNodes = [title, intro, group, readingSection]
-    let openedPage: '界面' | '模型' | '运行' = '界面'
+    let openedPage: '界面' | '模型' | '运行' = page
     let themeRequest = 0
     const setPage = (name: '界面' | '模型' | '运行'): void => {
       openedPage = name
@@ -450,6 +453,8 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         paintDraft()
       }).catch(() => { if (current.isOpen()) showError(saveError, '暂时无法读取阅读排版。') })
     }
+
+    if (page !== '界面') setPage(page)
   }
 
   return { open, close, isOpen: () => overlay?.isOpen() ?? false }

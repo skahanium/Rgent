@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { asString, parseEntryCreateRequest, parseFlushDone, parseLifecycleRetryRequest, parseNoteName, parseNoteWriteRequest, parseRelocationCommitRequest, parseRelocationPreviewRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
 import { IPC } from '../shared/ipc.ts'
-import type { AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, ModelAddRequest, ModelConfigResult, ModelConnectionAddRequest, ModelConnectionRemoveRequest, ModelConnectionUpdateRequest, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
+import type { AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, ModelAddRequest, ModelConfigResult, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { isReadingPreference } from '../shared/reading-preference.ts'
@@ -315,7 +315,7 @@ function registerIpc(): void {
     : { ok: false, error: modelConfigError ?? 'MODEL_CONFIG_UNAVAILABLE' }
   registerTrustedHandle(IPC.modelConfigGet, (event): ModelConfigResult =>
     trusted(event) ? configResult() : { ok: false, error: 'BAD_SENDER' })
-  // 每条连接一套密钥；同一供应商允许多条连接。写操作一律返回最新公开配置。
+  // 一个供应商一份凭据：保存即 upsert，界面不提供同厂商第二条。写操作一律返回最新公开配置。
   const modelWrite = (run: () => void): ModelConfigResult => {
     if (!modelConfig) return { ok: false, error: 'MODEL_CONFIG_UNAVAILABLE' }
     try { run(); return configResult() }
@@ -323,35 +323,29 @@ function registerIpc(): void {
   }
   const modelFields = (value: unknown): Record<string, unknown> | null =>
     value && typeof value === 'object' ? value as Record<string, unknown> : null
-  registerTrustedHandle(IPC.modelConnectionAdd, (event, value: unknown): ModelConfigResult => {
+  registerTrustedHandle(IPC.modelProviderSave, (event, value: unknown): ModelConfigResult => {
     if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
-    const request = modelFields(value) as Partial<ModelConnectionAddRequest> | null
+    const request = modelFields(value) as Partial<ModelProviderSaveRequest> | null
     if (!request || (request.newKey !== undefined && typeof request.newKey !== 'string')) return { ok: false, error: 'BAD_REQUEST' }
-    return modelWrite(() => modelConfig!.addConnection({ provider: request.provider, baseURL: request.baseURL, modelId: request.modelId, contextTokens: request.contextTokens }, request.newKey))
+    return modelWrite(() => modelConfig!.saveProvider({ provider: request.provider, baseURL: request.baseURL, modelId: request.modelId, contextTokens: request.contextTokens }, request.newKey))
   })
-  registerTrustedHandle(IPC.modelConnectionUpdate, (event, value: unknown): ModelConfigResult => {
+  registerTrustedHandle(IPC.modelProviderRemove, (event, value: unknown): ModelConfigResult => {
     if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
-    const request = modelFields(value) as Partial<ModelConnectionUpdateRequest> | null
-    if (!request || typeof request.connectionId !== 'string' || (request.newKey !== undefined && typeof request.newKey !== 'string')) return { ok: false, error: 'BAD_REQUEST' }
-    return modelWrite(() => modelConfig!.updateConnection(request.connectionId as string, request.baseURL, request.newKey))
-  })
-  registerTrustedHandle(IPC.modelConnectionRemove, (event, value: unknown): ModelConfigResult => {
-    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
-    const request = modelFields(value) as Partial<ModelConnectionRemoveRequest> | null
-    if (!request || typeof request.connectionId !== 'string') return { ok: false, error: 'BAD_REQUEST' }
-    return modelWrite(() => modelConfig!.removeConnection(request.connectionId as string))
+    const request = modelFields(value) as Partial<ModelProviderRemoveRequest> | null
+    if (!request) return { ok: false, error: 'BAD_REQUEST' }
+    return modelWrite(() => modelConfig!.removeProvider(request.provider))
   })
   registerTrustedHandle(IPC.modelKeyDelete, (event, value: unknown): ModelConfigResult => {
     if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
     const request = modelFields(value) as Partial<ModelKeyDeleteRequest> | null
-    if (!request || typeof request.connectionId !== 'string') return { ok: false, error: 'BAD_REQUEST' }
-    return modelWrite(() => modelConfig!.deleteKey(request.connectionId as string))
+    if (!request) return { ok: false, error: 'BAD_REQUEST' }
+    return modelWrite(() => modelConfig!.deleteKey(request.provider))
   })
   registerTrustedHandle(IPC.modelAdd, (event, value: unknown): ModelConfigResult => {
     if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
     const request = modelFields(value) as Partial<ModelAddRequest> | null
     if (!request) return { ok: false, error: 'BAD_REQUEST' }
-    return modelWrite(() => modelConfig!.addModel({ connectionId: request.connectionId, modelId: request.modelId, contextTokens: request.contextTokens }))
+    return modelWrite(() => modelConfig!.addModel({ provider: request.provider, modelId: request.modelId, contextTokens: request.contextTokens }))
   })
   registerTrustedHandle(IPC.modelUpdate, (event, value: unknown): ModelConfigResult => {
     if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
@@ -371,21 +365,21 @@ function registerIpc(): void {
     if (!request || (request.modelId !== null && typeof request.modelId !== 'string')) return { ok: false, error: 'BAD_REQUEST' }
     return modelWrite(() => modelConfig!.setDefault(request.modelId as string | null))
   })
-  registerTrustedHandle(IPC.modelLimitsSet, (event, value: unknown): ModelConfigResult => {
-    if (!trusted(event) || !modelConfig || !value || typeof value !== 'object') return { ok: false, error: 'BAD_REQUEST' }
-    const request = value as Partial<ModelLimitsSetRequest>
-    return modelWrite(() => modelConfig!.updateLimits(request.tier as LimitTier, request.limits!))
-  })
   // 「读取模型」：主进程发出，只取模型清单与端点自报的容量；渲染层不碰网络。
   registerTrustedHandle(IPC.modelList, async (event, value: unknown): Promise<ModelListResult> => {
     if (!trusted(event) || !modelConfig) return { ok: false, error: 'MODEL_CONFIG_UNAVAILABLE' }
     const request = modelFields(value) as Partial<ModelListRequest> | null
-    if (!request || typeof request.connectionId !== 'string') return { ok: false, error: 'BAD_REQUEST' }
+    if (!request) return { ok: false, error: 'BAD_REQUEST' }
     try {
-      const secret = modelConfig.connectionSecret(request.connectionId)
+      const secret = modelConfig.providerSecret(request.provider)
       const result = await fetchModelList(secret)
       return { ok: true, models: result.models, ...(result.truncated ? { truncated: true } : {}) }
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'MODEL_LIST_FAILED' } }
+  })
+  registerTrustedHandle(IPC.modelLimitsSet, (event, value: unknown): ModelConfigResult => {
+    if (!trusted(event) || !modelConfig || !value || typeof value !== 'object') return { ok: false, error: 'BAD_REQUEST' }
+    const request = value as Partial<ModelLimitsSetRequest>
+    return modelWrite(() => modelConfig!.updateLimits(request.tier as LimitTier, request.limits!))
   })
   registerTrustedHandle(IPC.agentAuthorizationPreview, async (event, value: unknown): Promise<import('../shared/ipc.ts').AgentAuthorizationResult> => {
     if(!authorizations || !isAuthorizationCommand(value))return {ok:false,error:'BAD_REQUEST'}
