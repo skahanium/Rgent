@@ -640,8 +640,8 @@ input:focus-visible,
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
-  /* 齿轮要认得出来：比正文图标大一圈，且不用最浅的 muted 灰 */
-  color: var(--text-body);
+  /* 与底栏辅助文字保持同一亮度。 */
+  color: var(--text-muted);
   cursor: pointer;
 }
 /* 20px 齿轮配 1.3 描边，保持清晰而不抢占底栏的视觉重心。 */
@@ -985,7 +985,7 @@ input:focus-visible,
 .status-center select:focus,
 .status-center select:focus-visible { outline: none; border-color: var(--text-muted); color: var(--text-heading); }
 .status .settings-open:focus,
-.status .settings-open:focus-visible { outline: none; border-color: var(--border-strong); background: var(--state-hover); color: var(--text-heading); }
+.status .settings-open:focus-visible { outline: none; border-color: var(--border-strong); background: var(--state-hover); color: var(--text-muted); }
 .status-model-config {
   min-width: 26px;
   min-height: 26px;
