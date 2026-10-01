@@ -1522,6 +1522,7 @@ async function main() {
     } catch (error) { stageFailed('Host 最小环', error) }
     process.stdout.write('\n笔记库文件生命周期\n')
     try {
+    check('新建文件夹入口为带名称的同行图标', await page.eval(`(() => { const button = document.querySelector('.folder-create'); return button.textContent === '' && !!button.querySelector('.icon') && button.getAttribute('aria-label').includes('新建文件夹') && button.title.includes('新建文件夹') && button.parentElement.classList.contains('browser-tools') && getComputedStyle(button.querySelector('.icon')).width === '16px' })()`) === true)
     await page.eval(`document.querySelector('.folder-create')?.click()`)
     check('库根新建文件夹入口可由键盘和鼠标使用', await waitFor(page, `!!document.querySelector('.modal input')`))
     await page.eval(`(() => { const input = document.querySelector('.modal input'); input.value = '生命周期'; document.querySelector('.modal button[value=ok]')?.click() })()`)

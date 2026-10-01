@@ -129,7 +129,11 @@ describe('split file browser', () => {
     const { host, select, onAction, onOpenNote, row } = setup(); select('工作')
     ;(host.querySelector('.resource-create') as HTMLElement).click()
     expect(onAction).toHaveBeenLastCalledWith(expect.objectContaining({ relPath: '工作' }), 'new-note')
-    ;(host.querySelector('.folder-create') as HTMLElement).click()
+    const folderCreate = host.querySelector('.folder-create') as HTMLButtonElement
+    expect(folderCreate.textContent).toBe('')
+    expect(folderCreate.querySelector('svg')).not.toBeNull()
+    expect(folderCreate.getAttribute('aria-label')).toBe('在 工作 新建文件夹')
+    folderCreate.click()
     expect(onAction).toHaveBeenLastCalledWith(expect.objectContaining({ relPath: '工作' }), 'new-folder')
     row('.tree-note', '工作/会议.md').click()
     expect(onOpenNote).toHaveBeenCalledWith('工作/会议.md')

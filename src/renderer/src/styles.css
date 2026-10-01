@@ -665,8 +665,8 @@ input:focus-visible,
 .browser-tools button[aria-pressed='true'] { color: var(--accent-primary); background: var(--state-selected); }
 .browser-tools button:disabled { opacity: .5; cursor: default; }
 .browser-tools button:focus-visible, .tree-select:focus-visible, .tree-folder-toggle:focus-visible, .browser-divider:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: -2px; }
-.resource-create, .attachment-toggle { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; }
-.resource-create .icon, .attachment-toggle .icon { width: 16px; height: 16px; }
+.resource-create, .attachment-toggle, .folder-create { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; }
+.resource-create .icon, .attachment-toggle .icon, .folder-create .icon { width: 16px; height: 16px; }
 .resource-tools { flex-wrap: nowrap; border-bottom: 1px solid var(--border-subtle); }
 .resource-path { flex: 1; min-width: 0; padding: 6px; color: var(--text-heading); font: 500 0.8rem var(--font-ui); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .browser-notice { flex: 0 0 auto; padding: 6px; color: var(--text-muted); font: 0.75rem/1.5 var(--font-ui); }

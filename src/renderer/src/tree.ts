@@ -43,7 +43,7 @@ export function createFileBrowser(host: HTMLElement, options: BrowserOptions): F
   host.innerHTML = `
     <div class="browser-notice" role="status" hidden></div>
     <section class="folder-pane" aria-label="文件夹导航">
-      <div class="browser-tools"><span>文件夹</span><button type="button" class="folder-create">新建文件夹</button></div>
+      <div class="browser-tools"><span>文件夹</span><button type="button" class="folder-create" aria-label="新建文件夹"></button></div>
       <div class="folder-scroll"></div>
     </section>
     <div class="browser-divider" role="separator" tabindex="0" aria-label="调整目录与资源区高度" aria-orientation="horizontal" aria-valuemin="15" aria-valuemax="80"></div>
@@ -62,6 +62,7 @@ export function createFileBrowser(host: HTMLElement, options: BrowserOptions): F
   const divider = get<HTMLElement>('.browser-divider'), notice = get<HTMLElement>('.browser-notice')
   const back = get<HTMLButtonElement>('.resource-back'), create = get<HTMLButtonElement>('.resource-create')
   create.append(icon('plus'))
+  get<HTMLButtonElement>('.folder-create').append(icon('folder-plus'))
   const attachmentToggle = get<HTMLButtonElement>('.attachment-toggle')
   attachmentToggle.append(icon('eye'))
   let state = defaults(), storageKey: string | null = null, active: string | null = null
@@ -189,7 +190,9 @@ export function createFileBrowser(host: HTMLElement, options: BrowserOptions): F
     get<HTMLButtonElement>('.folder-create').disabled = !listingReady
     create.title = `在 ${state.selected || '笔记库根目录'} 新建笔记`
     create.setAttribute('aria-label', create.title)
-    get<HTMLButtonElement>('.folder-create').title = `在 ${state.selected || '笔记库根目录'} 新建文件夹`
+    const folderCreate = get<HTMLButtonElement>('.folder-create')
+    folderCreate.title = `在 ${state.selected || '笔记库根目录'} 新建文件夹`
+    folderCreate.setAttribute('aria-label', folderCreate.title)
     attachmentToggle.setAttribute('aria-pressed', String(state.attachments))
     attachmentToggle.title = state.attachments ? '隐藏附件' : '显示附件'
     attachmentToggle.setAttribute('aria-label', attachmentToggle.title)
