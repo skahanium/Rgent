@@ -35,9 +35,15 @@ export const IPC = {
   readingSet: 'reading:set',
   remoteImageGet: 'image:get',
   modelConfigGet: 'model-config:get',
-  modelProfileSet: 'model-config:profile-set',
-  modelSelect: 'model-config:select',
+  modelConnectionAdd: 'model-config:connection-add',
+  modelConnectionUpdate: 'model-config:connection-update',
+  modelConnectionRemove: 'model-config:connection-remove',
   modelKeyDelete: 'model-config:key-delete',
+  modelAdd: 'model-config:model-add',
+  modelUpdate: 'model-config:model-update',
+  modelRemove: 'model-config:model-remove',
+  modelDefaultSet: 'model-config:default-set',
+  modelList: 'model-config:model-list',
   modelLimitsSet: 'model-config:limits-set',
   agentAuthorizationPreview: 'agent:authorization-preview',
   agentAuthorizationDiscard: 'agent:authorization-discard',
@@ -49,15 +55,48 @@ export const IPC = {
 
 export type ModelProvider = 'deepseek' | 'minimax' | 'custom'
 export type LimitTier = 'none' | 'local' | 'network'
-export type ModelProfileFields = { baseURL: string; modelId: string; contextTokens: number }
 export type RunLimits = { seconds: number; steps: number; tools: number }
+/** 一条连接：一个端点 + 一套独立密钥。同一供应商可以有多条。 */
+export type PublicConnection = {
+  id: string
+  provider: ModelProvider
+  baseURL: string
+  hasKey: boolean
+  modelCount: number
+}
+/** 一条连接下的一个模型。 */
+export type PublicModel = {
+  id: string
+  connectionId: string
+  modelId: string
+  contextTokens: number
+}
 export type PublicModelConfig = {
-  selected: ModelProvider
-  profiles: Record<ModelProvider, ModelProfileFields & { hasKey: boolean }>
+  connections: PublicConnection[]
+  models: PublicModel[]
+  /** 新任务使用的模型；由底栏模型模块选择。null 表示尚未选择。 */
+  defaultModelId: string | null
   limits: Record<LimitTier, RunLimits>
 }
 export type ModelConfigResult = { ok: true; config: PublicModelConfig } | { ok: false; error: string }
-export type ModelProfileSetRequest = { provider: ModelProvider; fields: ModelProfileFields; newKey?: string }
+export type ModelConnectionAddRequest = {
+  provider: ModelProvider
+  baseURL: string
+  modelId: string
+  contextTokens: number
+  newKey?: string
+}
+export type ModelConnectionUpdateRequest = { connectionId: string; baseURL: string; newKey?: string }
+export type ModelConnectionRemoveRequest = { connectionId: string }
+export type ModelKeyDeleteRequest = { connectionId: string }
+export type ModelAddRequest = { connectionId: string; modelId: string; contextTokens: number }
+export type ModelUpdateRequest = { modelId: string; contextTokens: number }
+export type ModelRemoveRequest = { modelId: string }
+export type ModelDefaultSetRequest = { modelId: string | null }
+export type ModelListRequest = { connectionId: string }
+/** 端点自报的上下文容量可能缺失；缺失时由人填写。 */
+export type ModelListEntry = { id: string; contextTokens?: number }
+export type ModelListResult = { ok: true; models: ModelListEntry[]; truncated?: boolean } | { ok: false; error: string }
 export type ModelLimitsSetRequest = { tier: LimitTier; limits: RunLimits }
 export type ObjectBinding = { sessionId: string; objectVersion: string }
 export type AgentCommandRequest = ObjectBinding & {

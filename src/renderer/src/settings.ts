@@ -1,6 +1,10 @@
-import type { LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult } from '../../shared/ipc.ts'
+import type {
+  LimitTier, ModelAddRequest, ModelConfigResult, ModelConnectionAddRequest, ModelConnectionRemoveRequest,
+  ModelConnectionUpdateRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult,
+  ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult
+} from '../../shared/ipc.ts'
 import { isReadingPreference, READING_FONTS } from '../../shared/reading-preference.ts'
-import { MODEL_ENDPOINTS } from '../../shared/model-endpoints.ts'
+import { mountModelPage, modelPageAvailable, type ModelPageHandlers } from './settings-model.ts'
 import { openOverlay, type Overlay } from './overlay.ts'
 import { applyReadingPreference } from './reading.ts'
 import { icon, type IconName } from './icons.ts'
@@ -11,10 +15,17 @@ export type SettingsHandlers = {
   getReading?: () => Promise<ReadingPreference>
   setReading?: (reading: ReadingPreference) => Promise<ReadingSetResult>
   getConfig?: () => Promise<ModelConfigResult>
-  setProfile?: (request: ModelProfileSetRequest) => Promise<ModelConfigResult>
-  selectModel?: (provider: ModelProvider) => Promise<ModelConfigResult>
-  deleteKey?: (provider: ModelProvider) => Promise<ModelConfigResult>
+  addConnection?: (request: ModelConnectionAddRequest) => Promise<ModelConfigResult>
+  updateConnection?: (request: ModelConnectionUpdateRequest) => Promise<ModelConfigResult>
+  removeConnection?: (request: ModelConnectionRemoveRequest) => Promise<ModelConfigResult>
+  deleteKey?: (request: ModelKeyDeleteRequest) => Promise<ModelConfigResult>
+  addModel?: (request: ModelAddRequest) => Promise<ModelConfigResult>
+  updateModel?: (request: ModelUpdateRequest) => Promise<ModelConfigResult>
+  removeModel?: (request: ModelRemoveRequest) => Promise<ModelConfigResult>
+  readModels?: (request: ModelListRequest) => Promise<ModelListResult>
   setLimits?: (request: ModelLimitsSetRequest) => Promise<ModelConfigResult>
+  /** 配置写入后通知外壳刷新底栏模型模块。 */
+  onModelConfigChanged?: () => void
 }
 
 export type SettingsOverlay = {
@@ -65,6 +76,8 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         if (overlay !== current) return
         request += 1
         overlay = null
+        disposeModelPage?.()
+        disposeModelPage = null
       }
     })
     overlay = current
@@ -106,7 +119,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     }
     navGroup('工作区')
     addNav('界面', 'appearance')
-    if (handlers.getConfig && handlers.setProfile && handlers.selectModel && handlers.deleteKey && handlers.setLimits) {
+    if (modelPageAvailable(handlers) && handlers.setLimits) {
       navGroup('Agent')
       addNav('模型', 'model')
       addNav('运行', 'run')
@@ -141,13 +154,14 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     let themeRequest = 0
     const setPage = (name: '界面' | '模型' | '运行'): void => {
       openedPage = name
+      if (name !== '模型') { disposeModelPage?.(); disposeModelPage = null }
       for (const [label, button] of navButtons) {
         button.className = label === name ? 'settings-nav-current' : 'settings-nav-item'
         if (label === name) button.setAttribute('aria-current', 'page')
         else button.removeAttribute('aria-current')
       }
       if (name === '界面') main.replaceChildren(...themeNodes)
-      else if (name === '模型') void renderModelPage()
+      else if (name === '模型') renderModelPage()
       else void renderRunPage()
     }
 
@@ -193,106 +207,21 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       return button
     }
 
-    async function renderModelPage(): Promise<void> {
-      if (!handlers.getConfig || !handlers.setProfile || !handlers.selectModel || !handlers.deleteKey) return
-      const mine = ++request
-      const { body, error } = pageFrame('模型', '配置文本模型。密钥保存在此设备，读取时只显示保存状态。')
-      const result = await handlers.getConfig().catch(() => ({ ok: false, error: '读取失败' }) as ModelConfigResult)
-      if (!current.isOpen() || openedPage !== '模型' || mine !== request) return
-      if (!result.ok) { showError(error, `模型配置不可用：${configErrorText(result.error)}`); return }
-      const config = result.config
-      const provider = document.createElement('select')
-      provider.className = 'settings-provider'
-      const names: Record<ModelProvider, string> = { deepseek: 'DeepSeek', minimax: 'MiniMax', custom: '自定义兼容接口' }
-      for (const id of ['deepseek', 'minimax', 'custom'] as ModelProvider[]) {
-        const option = document.createElement('option')
-        option.value = id
-        option.textContent = names[id]
-        provider.append(option)
-      }
-      provider.value = config.selected
-      const providerLabel = document.createElement('label')
-      providerLabel.className = 'settings-field'
-      providerLabel.textContent = '供应商'
-      providerLabel.append(provider)
-      const base = field('接口地址', '')
-      const model = field('模型 ID', '')
-      const context = field('上下文容量（token）', '', 'number')
-      context.min = '1'
-      const secret = field('替换密钥（留空则不更改）', '', 'password')
-      secret.autocomplete = 'new-password'
-      const keyState = document.createElement('p')
-      keyState.className = 'settings-key-state'
-      const selectedState = document.createElement('p')
-      selectedState.className = 'settings-key-state'
-      // 已知端点只是接口地址的候选：同一控件对所有供应商生效，字段本身是唯一真源。
-      const endpointOptions = document.createElement('datalist')
-      endpointOptions.id = 'model-endpoint-options'
-      base.setAttribute('list', 'model-endpoint-options')
-      const paintEndpoints = (): void => {
-        endpointOptions.replaceChildren(...MODEL_ENDPOINTS[provider.value as ModelProvider].map((endpoint) => {
-          const option = document.createElement('option')
-          option.value = endpoint.baseURL
-          option.label = endpoint.note ? `${endpoint.label} · ${endpoint.note}` : endpoint.label
-          return option
-        }))
-      }
-      const paintProfile = (): void => {
-        const profile = config.profiles[provider.value as ModelProvider]
-        base.value = profile.baseURL
-        model.value = profile.modelId
-        context.value = profile.contextTokens ? String(profile.contextTokens) : ''
-        secret.value = ''
-        keyState.textContent = profile.hasKey ? '密钥已保存' : '尚未保存密钥'
-        selectedState.textContent = config.selected === provider.value ? '当前使用' : '尚未选用'
-        paintEndpoints()
-      }
-      provider.addEventListener('change', paintProfile)
-      paintProfile()
-      const save = action('保存配置', () => {
-        const id = provider.value as ModelProvider
-        const newKey = secret.value.trim()
-        save.disabled = true
-        showError(error, '')
-        void handlers.setProfile!({ provider: id, fields: { baseURL: base.value, modelId: model.value, contextTokens: Number(context.value) }, ...(newKey ? { newKey } : {}) })
-          .then((updated) => {
-            if (!current.isOpen() || openedPage !== '模型') return
-            if (!updated.ok) { showError(error, `保存失败：${configErrorText(updated.error)}`); return }
-            config.profiles = updated.config.profiles
-            secret.value = ''
-            paintProfile()
-          }).catch(() => showError(error, '保存失败，请重试。'))
-          .finally(() => { save.disabled = false })
-      })
-      const select = action('设为当前模型', () => {
-        void handlers.selectModel!(provider.value as ModelProvider).then((updated) => {
-          if (!current.isOpen() || openedPage !== '模型') return
-          if (!updated.ok) { showError(error, `切换失败：${configErrorText(updated.error)}`); return }
-          config.selected = updated.config.selected
-          paintProfile()
-          showError(error, '')
-        }).catch(() => showError(error, '切换失败，请重试。'))
-      })
-      const remove = action('删除密钥', () => {
-        void handlers.deleteKey!(provider.value as ModelProvider).then((updated) => {
-          if (!current.isOpen() || openedPage !== '模型') return
-          if (!updated.ok) { showError(error, `删除失败：${configErrorText(updated.error)}`); return }
-          config.profiles = updated.config.profiles
-          paintProfile()
-          showError(error, '')
-        }).catch(() => showError(error, '删除失败，请重试。'))
-      })
-      body.append(providerLabel)
-      appendField(body, base)
-      body.append(endpointOptions)
-      for (const input of [model, context, secret]) appendField(body, input)
-      const state = document.createElement('div')
-      state.className = 'settings-model-state'
-      state.append(keyState, selectedState)
-      const actions = document.createElement('div')
-      actions.className = 'settings-actions'
-      actions.append(save, select, remove)
-      body.append(state, actions)
+    let disposeModelPage: (() => void) | null = null
+    const modelHandlers = (): ModelPageHandlers | null => modelPageAvailable(handlers) ? handlers : null
+    function renderModelPage(): void {
+      const page = modelHandlers()
+      if (!page) return
+      disposeModelPage?.()
+      disposeModelPage = null
+      const { body, error } = pageFrame('模型', '配置连接与模型。密钥只保存在此设备；用哪个模型在底栏选择。')
+      disposeModelPage = mountModelPage({
+        body,
+        showError: (message) => showError(error, message),
+        configErrorText,
+        isCurrent: () => current.isOpen() && openedPage === '模型',
+        onChanged: () => handlers.onModelConfigChanged?.()
+      }, page)
     }
 
     async function renderRunPage(): Promise<void> {

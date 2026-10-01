@@ -153,11 +153,19 @@ export async function start(root: HTMLElement): Promise<void> {
     getReading: () => window.rgent.readingGet(),
     setReading: (reading) => window.rgent.readingSet(reading),
     getConfig: () => window.rgent.modelConfigGet(),
-    setProfile: (request) => window.rgent.modelProfileSet(request),
-    selectModel: (provider) => window.rgent.modelSelect(provider),
-    deleteKey: (provider) => window.rgent.modelKeyDelete(provider),
-    setLimits: (request) => window.rgent.modelLimitsSet(request)
+    addConnection: (request) => window.rgent.modelConnectionAdd(request),
+    updateConnection: (request) => window.rgent.modelConnectionUpdate(request),
+    removeConnection: (request) => window.rgent.modelConnectionRemove(request),
+    deleteKey: (request) => window.rgent.modelKeyDelete(request),
+    addModel: (request) => window.rgent.modelAdd(request),
+    updateModel: (request) => window.rgent.modelUpdate(request),
+    removeModel: (request) => window.rgent.modelRemove(request),
+    readModels: (request) => window.rgent.modelList(request),
+    setLimits: (request) => window.rgent.modelLimitsSet(request),
+    onModelConfigChanged: () => { void refreshModelModule() }
   })
+  // 底栏模型模块在第 5 步接线；这里先保留刷新钩子，配置写入后不留下陈旧状态。
+  const refreshModelModule = async (): Promise<void> => {}
   let saveInFlight: Promise<boolean> | null = null
   let ledgerOpen = false
   let countedPath: string | null = null

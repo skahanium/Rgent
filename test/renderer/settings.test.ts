@@ -49,21 +49,18 @@ describe('settings interface page', () => {
     let finishMode!: (mode: 'night') => void
     const mode = new Promise<'night'>((resolve) => { finishMode = resolve })
     const config = {
-      selected: 'custom' as const,
-      profiles: {
-        deepseek: { baseURL: 'https://api.deepseek.com', modelId: 'deepseek-chat', contextTokens: 64000, hasKey: false },
-        minimax: { baseURL: 'https://api.minimax.io/v1', modelId: 'MiniMax-M2.7', contextTokens: 204800, hasKey: false },
-        custom: { baseURL: 'http://127.0.0.1:5555/v1', modelId: 'test', contextTokens: 16000, hasKey: false }
-      },
+      connections: [{ id: 'c-1', provider: 'custom' as const, baseURL: 'http://127.0.0.1:5555/v1', hasKey: false, modelCount: 1 }],
+      models: [{ id: 'm-1', connectionId: 'c-1', modelId: 'test', contextTokens: 16000 }],
+      defaultModelId: 'm-1',
       limits: { none: { seconds: 180, steps: 4, tools: 0 }, local: { seconds: 300, steps: 12, tools: 24 }, network: { seconds: 600, steps: 20, tools: 40 } }
     }
+    const stub = async () => ({ ok: true as const, config })
     const panel = createSettingsOverlay({
       getMode: () => mode, setMode: async (value) => ({ ok: true, mode: value }),
       getConfig: async () => ({ ok: true, config }),
-      setProfile: async () => ({ ok: true, config }),
-      selectModel: async () => ({ ok: true, config }),
-      deleteKey: async () => ({ ok: true, config }),
-      setLimits: async () => ({ ok: true, config })
+      addConnection: stub, updateConnection: stub, removeConnection: stub, deleteKey: stub,
+      addModel: stub, updateModel: stub, removeModel: stub, readModels: async () => ({ ok: true, models: [] }),
+      setLimits: stub
     })
     panel.open()
     const nav = [...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')]
@@ -154,85 +151,168 @@ describe('settings interface page', () => {
     finish({ ok: true, reading: { ...DEFAULT_READING_PREFERENCE, fontSize: 19 } })
     await vi.waitFor(() => expect(document.documentElement.style.getPropertyValue('--reading-font-size')).toBe('19px'))
   })
-  it('saves a model profile without displaying a stored secret, and edits finite run limits', async () => {
-    const config = {
-      selected: 'custom' as const,
-      profiles: {
-        deepseek: { baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1000000, hasKey: false },
-        minimax: { baseURL: 'https://api.minimax.io/v1', modelId: 'MiniMax-M2.7', contextTokens: 204800, hasKey: false },
-        custom: { baseURL: 'http://127.0.0.1:5555/v1', modelId: 'test', contextTokens: 16000, hasKey: true }
-      },
-      limits: { none: { seconds: 180, steps: 4, tools: 0 }, local: { seconds: 300, steps: 12, tools: 24 }, network: { seconds: 600, steps: 20, tools: 40 } }
-    }
-    const setProfile = vi.fn().mockResolvedValue({ ok: true, config })
-    const setLimits = vi.fn().mockResolvedValue({ ok: true, config })
+  type FixtureConfig = {
+    connections: { id: string; provider: 'deepseek' | 'minimax' | 'custom'; baseURL: string; hasKey: boolean; modelCount: number }[]
+    models: { id: string; connectionId: string; modelId: string; contextTokens: number }[]
+    defaultModelId: string | null
+    limits: Record<'none' | 'local' | 'network', { seconds: number; steps: number; tools: number }>
+  }
+  const modelConfig = (overrides: Partial<FixtureConfig> = {}): FixtureConfig => ({
+    connections: [
+      { id: 'c-deepseek', provider: 'deepseek' as const, baseURL: 'https://api.deepseek.com', hasKey: true, modelCount: 2 },
+      { id: 'c-minimax', provider: 'minimax' as const, baseURL: 'https://api.minimaxi.com/v1', hasKey: true, modelCount: 1 }
+    ],
+    models: [
+      { id: 'm-ds-1', connectionId: 'c-deepseek', modelId: 'deepseek-flash', contextTokens: 1048576 },
+      { id: 'm-ds-2', connectionId: 'c-deepseek', modelId: 'deepseek-reasoner', contextTokens: 65536 },
+      { id: 'm-mm-1', connectionId: 'c-minimax', modelId: 'MiniMax-M3', contextTokens: 204800 }
+    ],
+    defaultModelId: 'm-mm-1',
+    limits: { none: { seconds: 180, steps: 4, tools: 0 }, local: { seconds: 300, steps: 12, tools: 24 }, network: { seconds: 600, steps: 20, tools: 40 } }
+  , ...overrides })
+  const modelHandlers = (config = modelConfig()) => ({
+    getConfig: vi.fn().mockResolvedValue({ ok: true, config }),
+    addConnection: vi.fn().mockResolvedValue({ ok: true, config }),
+    updateConnection: vi.fn().mockResolvedValue({ ok: true, config }),
+    removeConnection: vi.fn().mockResolvedValue({ ok: true, config }),
+    deleteKey: vi.fn().mockResolvedValue({ ok: true, config }),
+    addModel: vi.fn().mockResolvedValue({ ok: true, config }),
+    updateModel: vi.fn().mockResolvedValue({ ok: true, config }),
+    removeModel: vi.fn().mockResolvedValue({ ok: true, config }),
+    readModels: vi.fn().mockResolvedValue({ ok: true, models: [] }),
+    setLimits: vi.fn().mockResolvedValue({ ok: true, config })
+  })
+  const openModelPage = async (handlers: ReturnType<typeof modelHandlers>) => {
     const panel = createSettingsOverlay({
       getMode: async () => 'day', setMode: async (mode) => ({ ok: true, mode }),
-      getConfig: async () => ({ ok: true, config }), setProfile,
-      selectModel: async () => ({ ok: true, config }), deleteKey: async () => ({ ok: true, config }), setLimits
+      ...handlers
     })
     panel.open()
     const nav = [...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')]
     nav.find((button) => button.textContent === '模型')?.click()
-    await vi.waitFor(() => expect(document.querySelector('.settings-key-state')?.textContent).toBe('密钥已保存'))
-    expect((document.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('')
-    const fields = [...document.querySelectorAll<HTMLInputElement>('.settings-form input')]
-    fields.find((input) => input.type === 'password')!.value = 'new-key'
-    const saveButton = [...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find((button) => button.textContent === '保存配置')
-    saveButton?.click()
-    await vi.waitFor(() => expect(setProfile).toHaveBeenCalledWith(expect.objectContaining({ provider: 'custom', newKey: 'new-key' })))
-    nav.find((button) => button.textContent === '运行')?.click()
-    await vi.waitFor(() => expect(document.querySelectorAll('.settings-limit-group')).toHaveLength(3))
-    expect(document.querySelector<HTMLInputElement>('.settings-limit-group input:disabled')?.value).toBe('0')
-    const limitButton = document.querySelector<HTMLButtonElement>('.settings-limit-group .settings-action')
-    limitButton?.click()
-    await vi.waitFor(() => expect(setLimits).toHaveBeenCalledWith({ tier: 'none', limits: { seconds: 180, steps: 4, tools: 0 } }))
+    await vi.waitFor(() => expect(document.querySelector('.settings-connections')).not.toBeNull())
+    return panel
+  }
+  const buttonByText = (text: string): HTMLButtonElement | undefined =>
+    [...document.querySelectorAll<HTMLButtonElement>('.settings-action, .settings-row-action')].find((button) => button.textContent === text)
+
+  it('lists connections with key state and model count, and edits the selected one', async () => {
+    const handlers = modelHandlers()
+    const panel = await openModelPage(handlers)
+    const cards = [...document.querySelectorAll<HTMLElement>('.settings-connection')]
+    expect(cards).toHaveLength(2)
+    expect(cards[0]!.classList.contains('is-active')).toBe(true)
+    expect(cards[0]!.textContent).toContain('DeepSeek')
+    expect(cards[0]!.textContent).toContain('密钥已保存 · 2 个模型')
+    expect(cards[0]!.textContent).toContain('api.deepseek.com')
+    expect(document.querySelector('.settings-key-state')?.textContent).toBe('密钥已保存')
+    expect(document.querySelector<HTMLInputElement>('input[type="password"]')!.value).toBe('')
+
+    cards[1]!.click()
+    await vi.waitFor(() => expect(document.querySelector('.settings-page-title + .settings-intro')?.textContent).toContain('底栏'))
+    expect(document.querySelector<HTMLElement>('.settings-connection.is-active')!.textContent).toContain('MiniMax')
+    expect([...document.querySelectorAll('.settings-model-row')].map((row) => row.querySelector('.settings-model-id')?.textContent)).toEqual(['MiniMax-M3'])
     panel.close()
   })
-  it('offers known endpoints through the address field and never adds a vendor control', async () => {
-    const config = {
-      selected: 'minimax' as const,
-      profiles: {
-        deepseek: { baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1000000, hasKey: false },
-        minimax: { baseURL: 'https://api.minimax.io/v1', modelId: 'MiniMax-M3', contextTokens: 204800, hasKey: true },
-        custom: { baseURL: '', modelId: '', contextTokens: 0, hasKey: false }
-      },
-      limits: { none: { seconds: 180, steps: 4, tools: 0 }, local: { seconds: 300, steps: 12, tools: 24 }, network: { seconds: 600, steps: 20, tools: 40 } }
-    }
-    const setProfile = vi.fn().mockResolvedValue({ ok: true, config })
-    const setLimits = vi.fn().mockResolvedValue({ ok: true, config })
+
+  it('adds a connection from the provider preset and saves a replaced key without echoing it', async () => {
+    const handlers = modelHandlers()
+    const panel = await openModelPage(handlers)
+    buttonByText('添加连接')!.click()
+    await vi.waitFor(() => expect(handlers.addConnection).toHaveBeenCalled())
+    const added = handlers.addConnection.mock.calls[0]![0] as Record<string, unknown>
+    expect(added).toEqual({ provider: 'deepseek', baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1048576 })
+
+    const secret = document.querySelector<HTMLInputElement>('input[type="password"]')!
+    secret.value = 'new-key'
+    buttonByText('保存连接')!.click()
+    await vi.waitFor(() => expect(handlers.updateConnection).toHaveBeenCalledWith({
+      connectionId: 'c-deepseek', baseURL: 'https://api.deepseek.com', newKey: 'new-key'
+    }))
+    panel.close()
+  })
+
+  it('requires a second click before removing a connection or a model', async () => {
+    const handlers = modelHandlers()
+    const panel = await openModelPage(handlers)
+    const removeConnection = buttonByText('删除连接')!
+    removeConnection.click()
+    expect(handlers.removeConnection).not.toHaveBeenCalled()
+    expect(removeConnection.textContent).toBe('确认删除？')
+    removeConnection.click()
+    await vi.waitFor(() => expect(handlers.removeConnection).toHaveBeenCalledWith({ connectionId: 'c-deepseek' }))
+
+    const removeModel = document.querySelectorAll<HTMLButtonElement>('.settings-model-row .settings-row-action')[1]!
+    removeModel.click()
+    expect(handlers.removeModel).not.toHaveBeenCalled()
+    removeModel.click()
+    await vi.waitFor(() => expect(handlers.removeModel).toHaveBeenCalledWith({ modelId: 'm-ds-2' }))
+    panel.close()
+  })
+
+  it('edits a model capacity in place and adds a hand-written model', async () => {
+    const handlers = modelHandlers()
+    const panel = await openModelPage(handlers)
+    const capacity = document.querySelectorAll<HTMLInputElement>('.settings-model-capacity')[0]!
+    capacity.value = '200000'
+    capacity.dispatchEvent(new Event('change'))
+    await vi.waitFor(() => expect(handlers.updateModel).toHaveBeenCalledWith({ modelId: 'm-ds-1', contextTokens: 200000 }))
+
+    const id = document.querySelector<HTMLInputElement>('.settings-add-model-id')!
+    const size = document.querySelector<HTMLInputElement>('.settings-add-model-capacity')!
+    id.value = 'deepseek-chat'
+    size.value = '65536'
+    buttonByText('添加模型')!.click()
+    await vi.waitFor(() => expect(handlers.addModel).toHaveBeenCalledWith({ connectionId: 'c-deepseek', modelId: 'deepseek-chat', contextTokens: 65536 }))
+    panel.close()
+  })
+
+  it('reads models as candidates and demands capacity the endpoint did not report', async () => {
+    const handlers = modelHandlers()
+    handlers.readModels.mockResolvedValue({
+      ok: true,
+      models: [{ id: 'MiniMax-M3', contextTokens: 204800 }, { id: 'MiniMax-M4' }]
+    })
+    const panel = await openModelPage(handlers)
+    buttonByText('读取模型')!.click()
+    await vi.waitFor(() => expect(document.querySelectorAll('.settings-candidate')).toHaveLength(2))
+    expect(handlers.readModels).toHaveBeenCalledWith({ connectionId: 'c-deepseek' })
+    const notes = [...document.querySelectorAll('.settings-candidate-note')].map((node) => node.textContent)
+    expect(notes).toEqual(['端点提供', '须填写'])
+    const add = buttonByText('添加所选（2）')!
+    expect(add.disabled).toBe(true)
+
+    const capacities = document.querySelectorAll<HTMLInputElement>('.settings-candidate-capacity')
+    capacities[1]!.value = '4096'
+    capacities[1]!.dispatchEvent(new Event('input'))
+    expect(add.disabled).toBe(false)
+    add.click()
+    await vi.waitFor(() => expect(handlers.addModel).toHaveBeenCalledTimes(2))
+    expect(handlers.addModel.mock.calls[0]![0]).toEqual({ connectionId: 'c-deepseek', modelId: 'MiniMax-M3', contextTokens: 204800 })
+    expect(handlers.addModel.mock.calls[1]![0]).toEqual({ connectionId: 'c-deepseek', modelId: 'MiniMax-M4', contextTokens: 4096 })
+    panel.close()
+  })
+
+  it('guides instead of showing a dead page when nothing is configured, and has no set-as-current control', async () => {
+    const handlers = modelHandlers({ ...modelConfig(), connections: [], models: [], defaultModelId: null })
+    const panel = await openModelPage(handlers)
+    expect(document.querySelector('.settings-empty')?.textContent).toContain('还没有连接')
+    expect(buttonByText('添加连接')).toBeTruthy()
+    expect(document.querySelector('.settings-models')).toBeNull()
+    expect([...document.querySelectorAll('button')].some((button) => button.textContent?.includes('设为当前模型'))).toBe(false)
+    panel.close()
+  })
+
+  it('reports a corrupt model configuration in the shared alert area', async () => {
     const panel = createSettingsOverlay({
       getMode: async () => 'day', setMode: async (mode) => ({ ok: true, mode }),
-      getConfig: async () => ({ ok: true, config }), setProfile,
-      selectModel: async () => ({ ok: true, config }), deleteKey: async () => ({ ok: true, config }), setLimits
+      ...modelHandlers(),
+      getConfig: vi.fn().mockResolvedValue({ ok: false, error: 'BAD_MODEL_CONFIG' })
     })
     panel.open()
     const nav = [...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')]
     nav.find((button) => button.textContent === '模型')?.click()
-    await vi.waitFor(() => expect(document.querySelector('#model-endpoint-options')).not.toBeNull())
-    const baseInput = () => [...document.querySelectorAll<HTMLInputElement>('.settings-form input')].find((input) => input.getAttribute('list') === 'model-endpoint-options')!
-    const options = (): HTMLOptionElement[] => [...document.querySelectorAll<HTMLOptionElement>('#model-endpoint-options option')]
-    // MiniMax 的两个已知端点作为候选，密钥与端点绑定的说明挂在候选上，不另占一行
-    expect(baseInput().value).toBe('https://api.minimax.io/v1')
-    expect(options().map((option) => option.value)).toEqual(['https://api.minimax.io/v1', 'https://api.minimaxi.com/v1'])
-    expect(options()[1]!.label).toContain('国内站点')
-    expect(options()[1]!.label).toContain('国内 Token Plan')
-    // 接口地址是唯一真源：手填候选之外的合法地址也原样保存
-    baseInput().value = 'https://example.internal/v1'
-    ;[...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find((b) => b.textContent === '保存配置')!.click()
-    await vi.waitFor(() => expect(setProfile).toHaveBeenCalledWith(expect.objectContaining({
-      provider: 'minimax',
-      fields: expect.objectContaining({ baseURL: 'https://example.internal/v1' })
-    })))
-    // 换供应商时同一控件跟着换候选；界面里没有按厂商分支的控件
-    const providerSelect = document.querySelector<HTMLSelectElement>('.settings-provider')!
-    providerSelect.value = 'deepseek'
-    providerSelect.dispatchEvent(new Event('change'))
-    expect(options().map((option) => option.value)).toEqual(['https://api.deepseek.com'])
-    providerSelect.value = 'custom'
-    providerSelect.dispatchEvent(new Event('change'))
-    expect(options()).toEqual([])
-    expect(document.querySelector('.settings-minimax-host, .settings-host-actions, .settings-host-hint')).toBeNull()
+    await vi.waitFor(() => expect(document.querySelector('.settings-error')?.textContent).toContain('损坏'))
     panel.close()
   })
 

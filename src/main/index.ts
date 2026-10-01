@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { asString, parseEntryCreateRequest, parseFlushDone, parseLifecycleRetryRequest, parseNoteName, parseNoteWriteRequest, parseRelocationCommitRequest, parseRelocationPreviewRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
 import { IPC } from '../shared/ipc.ts'
-import type { AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
+import type { AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, ModelAddRequest, ModelConfigResult, ModelConnectionAddRequest, ModelConnectionRemoveRequest, ModelConnectionUpdateRequest, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { isReadingPreference } from '../shared/reading-preference.ts'
@@ -15,6 +15,7 @@ import { RemoteImageService, REMOTE_IMAGE_SCHEME, remoteImageUrl } from './remot
 import { attachRemoteImageProtocol } from './remote-image-protocol.ts'
 import { VAULT_MEDIA_SCHEME } from '../shared/vault-rel.ts'
 import { VaultSession } from './vault.ts'
+import { fetchModelList } from './model-list.ts'
 import { createModelConfigStore, type ModelConfigStore } from './model-config.ts'
 import { TaskAuthorizationRegistry, isAuthorizationCommand } from './task-authorization.ts'
 import { createScopedAgentTools } from './scoped-agent-tools.ts'
@@ -314,31 +315,77 @@ function registerIpc(): void {
     : { ok: false, error: modelConfigError ?? 'MODEL_CONFIG_UNAVAILABLE' }
   registerTrustedHandle(IPC.modelConfigGet, (event): ModelConfigResult =>
     trusted(event) ? configResult() : { ok: false, error: 'BAD_SENDER' })
-  registerTrustedHandle(IPC.modelProfileSet, (event, value: unknown): ModelConfigResult => {
-    if (!trusted(event) || !modelConfig) return { ok: false, error: 'MODEL_CONFIG_UNAVAILABLE' }
-    const request = value as Partial<ModelProfileSetRequest> | null
-    if (!request || typeof request !== 'object' || !request.fields || typeof request.fields !== 'object' ||
-        (request.newKey !== undefined && typeof request.newKey !== 'string')) return { ok: false, error: 'BAD_REQUEST' }
-    try {
-      modelConfig.updateProfile(request.provider as ModelProvider, request.fields, request.newKey)
-      return configResult()
-    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
-  })
-  registerTrustedHandle(IPC.modelSelect, (event, value: unknown): ModelConfigResult => {
-    if (!trusted(event) || !modelConfig) return { ok: false, error: 'MODEL_CONFIG_UNAVAILABLE' }
-    try { modelConfig.select(value as ModelProvider); return configResult() }
+  // 每条连接一套密钥；同一供应商允许多条连接。写操作一律返回最新公开配置。
+  const modelWrite = (run: () => void): ModelConfigResult => {
+    if (!modelConfig) return { ok: false, error: 'MODEL_CONFIG_UNAVAILABLE' }
+    try { run(); return configResult() }
     catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
+  }
+  const modelFields = (value: unknown): Record<string, unknown> | null =>
+    value && typeof value === 'object' ? value as Record<string, unknown> : null
+  registerTrustedHandle(IPC.modelConnectionAdd, (event, value: unknown): ModelConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const request = modelFields(value) as Partial<ModelConnectionAddRequest> | null
+    if (!request || (request.newKey !== undefined && typeof request.newKey !== 'string')) return { ok: false, error: 'BAD_REQUEST' }
+    return modelWrite(() => modelConfig!.addConnection({ provider: request.provider, baseURL: request.baseURL, modelId: request.modelId, contextTokens: request.contextTokens }, request.newKey))
+  })
+  registerTrustedHandle(IPC.modelConnectionUpdate, (event, value: unknown): ModelConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const request = modelFields(value) as Partial<ModelConnectionUpdateRequest> | null
+    if (!request || typeof request.connectionId !== 'string' || (request.newKey !== undefined && typeof request.newKey !== 'string')) return { ok: false, error: 'BAD_REQUEST' }
+    return modelWrite(() => modelConfig!.updateConnection(request.connectionId as string, request.baseURL, request.newKey))
+  })
+  registerTrustedHandle(IPC.modelConnectionRemove, (event, value: unknown): ModelConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const request = modelFields(value) as Partial<ModelConnectionRemoveRequest> | null
+    if (!request || typeof request.connectionId !== 'string') return { ok: false, error: 'BAD_REQUEST' }
+    return modelWrite(() => modelConfig!.removeConnection(request.connectionId as string))
   })
   registerTrustedHandle(IPC.modelKeyDelete, (event, value: unknown): ModelConfigResult => {
-    if (!trusted(event) || !modelConfig) return { ok: false, error: 'MODEL_CONFIG_UNAVAILABLE' }
-    try { modelConfig.deleteKey(value as ModelProvider); return configResult() }
-    catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const request = modelFields(value) as Partial<ModelKeyDeleteRequest> | null
+    if (!request || typeof request.connectionId !== 'string') return { ok: false, error: 'BAD_REQUEST' }
+    return modelWrite(() => modelConfig!.deleteKey(request.connectionId as string))
+  })
+  registerTrustedHandle(IPC.modelAdd, (event, value: unknown): ModelConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const request = modelFields(value) as Partial<ModelAddRequest> | null
+    if (!request) return { ok: false, error: 'BAD_REQUEST' }
+    return modelWrite(() => modelConfig!.addModel({ connectionId: request.connectionId, modelId: request.modelId, contextTokens: request.contextTokens }))
+  })
+  registerTrustedHandle(IPC.modelUpdate, (event, value: unknown): ModelConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const request = modelFields(value) as Partial<ModelUpdateRequest> | null
+    if (!request || typeof request.modelId !== 'string') return { ok: false, error: 'BAD_REQUEST' }
+    return modelWrite(() => modelConfig!.updateModel(request.modelId as string, request.contextTokens))
+  })
+  registerTrustedHandle(IPC.modelRemove, (event, value: unknown): ModelConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const request = modelFields(value) as Partial<ModelRemoveRequest> | null
+    if (!request || typeof request.modelId !== 'string') return { ok: false, error: 'BAD_REQUEST' }
+    return modelWrite(() => modelConfig!.removeModel(request.modelId as string))
+  })
+  registerTrustedHandle(IPC.modelDefaultSet, (event, value: unknown): ModelConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const request = modelFields(value) as Partial<ModelDefaultSetRequest> | null
+    if (!request || (request.modelId !== null && typeof request.modelId !== 'string')) return { ok: false, error: 'BAD_REQUEST' }
+    return modelWrite(() => modelConfig!.setDefault(request.modelId as string | null))
   })
   registerTrustedHandle(IPC.modelLimitsSet, (event, value: unknown): ModelConfigResult => {
     if (!trusted(event) || !modelConfig || !value || typeof value !== 'object') return { ok: false, error: 'BAD_REQUEST' }
     const request = value as Partial<ModelLimitsSetRequest>
-    try { modelConfig.updateLimits(request.tier as LimitTier, request.limits!); return configResult() }
-    catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
+    return modelWrite(() => modelConfig!.updateLimits(request.tier as LimitTier, request.limits!))
+  })
+  // 「读取模型」：主进程发出，只取模型清单与端点自报的容量；渲染层不碰网络。
+  registerTrustedHandle(IPC.modelList, async (event, value: unknown): Promise<ModelListResult> => {
+    if (!trusted(event) || !modelConfig) return { ok: false, error: 'MODEL_CONFIG_UNAVAILABLE' }
+    const request = modelFields(value) as Partial<ModelListRequest> | null
+    if (!request || typeof request.connectionId !== 'string') return { ok: false, error: 'BAD_REQUEST' }
+    try {
+      const secret = modelConfig.connectionSecret(request.connectionId)
+      const result = await fetchModelList(secret)
+      return { ok: true, models: result.models, ...(result.truncated ? { truncated: true } : {}) }
+    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'MODEL_LIST_FAILED' } }
   })
   registerTrustedHandle(IPC.agentAuthorizationPreview, async (event, value: unknown): Promise<import('../shared/ipc.ts').AgentAuthorizationResult> => {
     if(!authorizations || !isAuthorizationCommand(value))return {ok:false,error:'BAD_REQUEST'}
@@ -686,7 +733,7 @@ app.whenReady().then(() => {
     configuration:extraReferences=>{
       if(!modelConfig)throw Error(modelConfigError??'MODEL_CONFIG_UNAVAILABLE')
       const config=modelConfig.getPublic()
-      return {credential:modelConfig.credential(config.selected),limits:extraReferences ? config.limits.local : config.limits.none}
+      return {credential:modelConfig.credential(),limits:extraReferences ? config.limits.local : config.limits.none}
     }
   })
   agentHost = new AgentHost({
@@ -706,8 +753,7 @@ app.whenReady().then(() => {
     tier: modelTierFor,
     credential: () => {
       if (!modelConfig) throw new Error(modelConfigError ?? 'MODEL_CONFIG_UNAVAILABLE')
-      const selected = modelConfig.getPublic().selected
-      return modelConfig.credential(selected)
+      return modelConfig.credential()
     },
     limits: () => {
       if (!modelConfig) throw new Error(modelConfigError ?? 'MODEL_CONFIG_UNAVAILABLE')

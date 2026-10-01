@@ -366,6 +366,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     await sleep(160)
     nativeShot(mode)
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+    if (mode === 'day') await seedVisualModels(page)
     await page.eval(`(() => { const button = document.querySelector('.settings-open'); button?.focus(); button?.click() })()`)
     await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
     if (mode === 'day') await probe('设置浮层放大且仍悬浮于工作区', async () => {
@@ -401,6 +402,10 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     for (const name of ['模型', '运行']) {
       await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '${name}'))?.click()`)
       await waitFor(page, `document.querySelector('.settings-page-title')?.textContent === '${name}'`)
+      if (name === '模型') {
+        await page.eval(`(() => { [...document.querySelectorAll('.settings-connection')].find((card) => card.textContent.includes('密钥已保存'))?.click() })()`)
+        await sleep(200)
+      }
       await shot(page, `reference-${mode}-settings-${name === '模型' ? 'model' : 'run'}`)
     }
     await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '界面'))?.click()`)
@@ -614,6 +619,17 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
   check('原库恢复后重新核验原对象，正文和账本字节保持', await waitFor(page, `document.querySelector('.note-unavailable')?.hidden === true`) && readFileSync(path.join(vault, copyName), 'utf8') === copied)
 }
 
+/** 样张夹具：两条带密钥的连接（含同厂商多条）与三个模型，界面才看得出真实形态。 */
+async function seedVisualModels(page) {
+  await page.eval(`(async () => {
+    const deepseek = await window.rgent.modelConnectionAdd({ provider: 'deepseek', baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1048576, newKey: 'ui-visual-secret' })
+    if (!deepseek.ok) return
+    const ds = deepseek.config.connections.find((item) => item.provider === 'deepseek' && item.baseURL === 'https://api.deepseek.com' && item.hasKey)
+    if (ds) await window.rgent.modelAdd({ connectionId: ds.id, modelId: 'deepseek-reasoner', contextTokens: 131072 })
+    await window.rgent.modelConnectionAdd({ provider: 'minimax', baseURL: 'https://api.minimaxi.com/v1', modelId: 'MiniMax-M3', contextTokens: 204800, newKey: 'ui-visual-secret' })
+  })()`)
+}
+
 async function main() {
   const port = await availablePort()
   const electron = require('electron')
@@ -625,6 +641,7 @@ async function main() {
   writeFileSync(path.join(profile, 'vault.json'), JSON.stringify({ path: vault }))
   writeFileSync(path.join(profile, 'theme.json'), JSON.stringify({ mode: 'night' }))
   if (visualOnly) seedVisualVault(vault)
+
   else {
     writeFileSync(path.join(vault, '研究记录.md'), initialWithLedger)
     writeFileSync(path.join(vault, '过程稿.md'), longNote)
@@ -1261,16 +1278,20 @@ async function main() {
     const hostAddress = hostServer.address()
     const hostBaseURL = `http://127.0.0.1:${hostAddress.port}/v1`
     const configured = await page.eval(`(async () => {
-      const profile = await window.rgent.modelProfileSet({ provider: 'custom', fields: { baseURL: '${hostBaseURL}', modelId: 'test', contextTokens: 20000 }, newKey: 'ui-fixture-secret' })
-      if (!profile.ok || !profile.config.profiles.custom.hasKey) return false
-      const selected = await window.rgent.modelSelect('custom')
-      return selected.ok && selected.config.selected === 'custom'
+      const added = await window.rgent.modelConnectionAdd({ provider: 'custom', baseURL: '${hostBaseURL}', modelId: 'test', contextTokens: 20000, newKey: 'ui-fixture-secret' })
+      if (!added.ok) return false
+      const connection = added.config.connections.find((item) => item.baseURL === '${hostBaseURL}')
+      const model = added.config.models.find((item) => item.connectionId === connection?.id)
+      if (!connection?.hasKey || !model) return false
+      const picked = await window.rgent.modelDefaultSet({ modelId: model.id })
+      return picked.ok && picked.config.defaultModelId === model.id
     })()`)
-    check('本机模型配置能保存密钥状态并选用受控兼容接口', configured === true)
+    check('本机模型配置能保存独立密钥并把默认模型指向受控兼容接口', configured === true)
     await page.eval(`document.querySelector('.settings-open')?.click()`)
     await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '模型')?.click() })()`)
-    check('模型设置页只显示密钥状态，密码输入不回填', await waitFor(page, `document.querySelector('.settings-key-state')?.textContent === '密钥已保存' && document.querySelector('input[type=password]')?.value === ''`))
+    await page.eval(`(() => { [...document.querySelectorAll('.settings-connection')].find((card) => card.textContent.includes('密钥已保存'))?.click() })()`)
+    check('模型设置页列出连接与模型、只显示密钥状态且密码不回填', await waitFor(page, `document.querySelector('.settings-connection.is-active')?.textContent.includes('密钥已保存') && document.querySelector('input[type=password]')?.value === '' && document.querySelectorAll('.settings-model-row').length >= 1 && ![...document.querySelectorAll('button')].some((button) => button.textContent.includes('设为当前模型'))`))
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '运行')?.click() })()`)
     check('运行设置页提供三档有限上限', await waitFor(page, `document.querySelectorAll('.settings-limit-group').length === 3`))
     await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
