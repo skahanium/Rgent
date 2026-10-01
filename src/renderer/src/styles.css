@@ -625,30 +625,26 @@ input:focus-visible,
 .tree-panel.is-collapsed .tree-tools,
 .tree-panel.is-collapsed .tree-scroll { display: none; }
 
-.tree-settings {
-  margin-top: auto;
-  padding: 8px 9px 10px;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.settings-open {
-  display: flex;
+/* 底栏最左的设置入口：只有图标，命中区域 30×30。 */
+.status .settings-open {
+  justify-self: start;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  width: 100%;
-  min-height: 36px;
-  padding: 0 10px;
-  border-radius: var(--radius-md);
+  justify-content: center;
+  /* 全局 button 有 40px 最小尺寸，这里明确收成 32×32，别让它撑高底栏 */
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--text-muted);
-  text-align: left;
-  font-size: 0.84rem;
+  cursor: pointer;
 }
-
-.settings-open:hover { color: var(--accent-primary); background: var(--state-hover); }
-.settings-open .icon { flex: 0 0 16px; }
-.tree-panel.is-collapsed .tree-settings { padding: 8px 4px 10px; }
-.tree-panel.is-collapsed .settings-open { justify-content: center; padding: 0; }
-.tree-panel.is-collapsed .settings-open-label { display: none; }
+.status .settings-open .icon { width: 18px; height: 18px; stroke-width: 1.6; }
+.status .settings-open:hover { color: var(--accent-primary); background: var(--state-hover); }
 
 .tree-tools {
   display: grid;
@@ -941,12 +937,14 @@ input:focus-visible,
 
 /* 底栏：与上方用一条细线分开。 */
 .status {
+  position: relative;
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: 12px;
-  min-height: 30px;
-  padding: 0 12px;
+  min-height: 38px;
+  /* 左侧给固定槽位留出位置，模型模块仍是严格居中 */
+  padding: 0 10px 0 46px;
   border-top: 1px solid var(--border-subtle);
   background: var(--surface-nav);
   color: var(--text-muted);
@@ -962,6 +960,7 @@ input:focus-visible,
   gap: 14px;
   min-width: 0;
 }
+.status-lead { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; }
 .status-left { grid-column: 1; justify-self: start; }
 .status-center { grid-column: 2; justify-self: center; gap: 6px; }
 .status-right { grid-column: 3; justify-self: end; }
@@ -978,9 +977,12 @@ input:focus-visible,
   cursor: pointer;
 }
 .status-model:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
-.status-model:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
+.status-center button:focus-visible,
+.status-center select:focus-visible,
+.status .settings-open:focus-visible { outline: none; border-color: var(--accent-focus); background: var(--state-hover); color: var(--text-heading); }
 .status-model-config {
-  min-height: 22px;
+  min-width: 26px;
+  min-height: 26px;
   padding: 1px 7px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -989,7 +991,6 @@ input:focus-visible,
   font: inherit;
 }
 .status-model-config:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
-.status-model-config:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
 .status-model-empty { color: var(--text-muted); }
 
 .status-item {

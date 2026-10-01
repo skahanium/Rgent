@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import { compile } from '../../src/markdown/index.ts'
-import { renderStatusbar, statusModel, wordsOf } from '../../src/renderer/src/statusbar.ts'
+import { modelModuleGroups, renderStatusbar, statusModel, wordsOf } from '../../src/renderer/src/statusbar.ts'
 
 describe('status bar word count', () => {
   it('counts CJK characters and Latin or numeric runs in the note body', () => {
@@ -25,7 +25,7 @@ describe('status bar model module', () => {
     const base = {
       groups: [
         { label: 'DeepSeek', items: [{ id: 'm1', label: 'deepseek-flash' }, { id: 'm2', label: 'deepseek-reasoner' }] },
-        { label: 'MiniMax（缺密钥）', items: [{ id: 'm3', label: 'MiniMax-M3' }] }
+        { label: 'MiniMax', items: [{ id: 'm3', label: 'MiniMax-M3' }] }
       ],
       value: 'm3' as string | null,
       onChange: () => {},
@@ -36,11 +36,35 @@ describe('status bar model module', () => {
   }
   const input = { line: 1, column: 1, words: 0, vaultName: '库', noteOpen: true }
 
+  const config = (overrides: Record<string, unknown> = {}) => ({
+    providers: [
+      { provider: 'deepseek' as const, configured: true, baseURL: 'https://api.deepseek.com', hasKey: true, modelCount: 2 },
+      { provider: 'minimax' as const, configured: true, baseURL: 'https://api.minimaxi.com/v1', hasKey: false, modelCount: 1 },
+      { provider: 'custom' as const, configured: false, baseURL: '', hasKey: false, modelCount: 0 }
+    ],
+    models: [
+      { id: 'm1', provider: 'deepseek' as const, modelId: 'deepseek-flash', contextTokens: 1048576 },
+      { id: 'm2', provider: 'deepseek' as const, modelId: 'deepseek-reasoner', contextTokens: 65536 },
+      { id: 'm3', provider: 'minimax' as const, modelId: 'MiniMax-M3', contextTokens: 204800 }
+    ],
+    defaultModelId: 'm3',
+    limits: { none: { seconds: 180, steps: 4, tools: 0 }, local: { seconds: 300, steps: 12, tools: 24 }, network: { seconds: 600, steps: 20, tools: 40 } },
+    ...overrides
+  })
+
+  it('only offers providers that actually have a key', () => {
+    expect(modelModuleGroups(config())).toEqual([
+      { label: 'DeepSeek', items: [{ id: 'm1', label: 'deepseek-flash' }, { id: 'm2', label: 'deepseek-reasoner' }] }
+    ])
+    // 一个都没配好时不产生任何分组，交由「未配置模型」引导态处理
+    expect(modelModuleGroups(config({ providers: config().providers.map((item) => ({ ...item, hasKey: false })) }))).toEqual([])
+  })
+
   it('groups configured models by provider and marks the current one', () => {
     const host = document.createElement('div')
     renderStatusbar(host, statusModel(input, module() as never))
     const select = host.querySelector<HTMLSelectElement>('.status-model')!
-    expect([...select.querySelectorAll('optgroup')].map((group) => group.label)).toEqual(['DeepSeek', 'MiniMax（缺密钥）'])
+    expect([...select.querySelectorAll('optgroup')].map((group) => group.label)).toEqual(['DeepSeek', 'MiniMax'])
     expect([...select.options].map((option) => option.value)).toEqual(['m1', 'm2', 'm3'])
     expect(select.value).toBe('m3')
   })

@@ -769,19 +769,22 @@ async function main() {
       return { ok: Math.abs(state.offset) <= 1.5 && Math.abs(state.toggleOffset - state.offset) <= 1.5 && state.height <= 54, detail: JSON.stringify(state) }
     })
     check('底栏有行列、字数与库名', (await page.eval(`!!document.querySelector('.status-left')?.innerText && !!document.querySelector('.status-vault')?.innerText`)) === true)
-    await probe('侧栏底部设置入口在收起与展开时均可用', async () => {
+    await probe('底栏最左的设置入口在边栏收起与展开时都在位', async () => {
       const state = JSON.parse(await page.eval(`(() => {
-        const button = document.querySelector('.settings-open')
+        const button = document.querySelector('.status .settings-open')
         if (!button) return JSON.stringify({ exists: false })
-        const collapsed = button.getBoundingClientRect()
+        const inBar = button.closest('.status') !== null
+        const before = button.getBoundingClientRect()
         document.querySelector('.tree-toggle').click()
-        const expanded = button.getBoundingClientRect()
-        const panel = document.querySelector('.tree-panel').getBoundingClientRect()
-        const scroll = document.querySelector('.tree-scroll').getBoundingClientRect()
+        const after = button.getBoundingClientRect()
+        const status = document.querySelector('.status').getBoundingClientRect()
         document.querySelector('.tree-toggle').click()
-        return JSON.stringify({ exists: true, collapsedVisible: collapsed.width > 0 && collapsed.height > 0, expandedVisible: expanded.width > collapsed.width, atBottom: expanded.bottom >= panel.bottom - 14, afterScroll: expanded.top >= scroll.bottom - 2, backToCollapsed: button.getBoundingClientRect().width > 0 })
+        const bar = button.closest('.status-lead')
+        return JSON.stringify({ exists: true, inBar, size: Math.round(before.width) + 'x' + Math.round(before.height),
+          moved: Math.abs(before.left - after.left) + Math.abs(before.top - after.top), barHeight: Math.round(status.height),
+          label: button.textContent.trim(), first: bar && bar.firstElementChild === button })
       })()`))
-      return { ok: Object.values(state).every(Boolean), detail: JSON.stringify(state) }
+      return { ok: state.exists && state.inBar && state.first && state.moved <= 1 && state.label === '' && state.size === '32x32' && state.barHeight >= 36, detail: JSON.stringify(state) }
     })
     await probe('设置浮层只提供三档主题并能保存切换', async () => {
       const state = JSON.parse(await page.eval(`(async () => {
@@ -1345,7 +1348,12 @@ async function main() {
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '运行')?.click() })()`)
     check('运行设置页提供三档有限上限', await waitFor(page, `document.querySelectorAll('.settings-limit-group').length === 3`))
     await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
-    check('底栏中间的模型模块列出已配置模型', await waitFor(page, `[...document.querySelectorAll('.status-model option')].some((option) => option.textContent === 'test')`))
+    check('底栏候选只列已存密钥的模型，未配置的不出现', await waitFor(page, `(() => {
+      const options = [...document.querySelectorAll('.status-model option')].map((option) => option.textContent)
+      const groups = [...document.querySelectorAll('.status-model optgroup')].map((group) => group.label)
+      return options.includes('test') && !options.some((text) => text === 'deepseek-flash' || text === 'MiniMax-M2.7') &&
+        !groups.some((label) => label.includes('缺密钥'))
+    })()`))
     const switched = await page.eval(`(async () => {
       const select = document.querySelector('.status-model')
       const target = select && [...select.options].find((option) => option.textContent === 'test')

@@ -13,8 +13,8 @@ import { renderReadOnlyMarkdown, disposeReadOnlyImages } from './view/read-only.
 import { icon } from './icons.ts'
 import { outlineLabel, outlineMarks } from './outline.ts'
 import { installShortcuts, shortcutLabel } from './shortcuts.ts'
-import { renderStatusbar, statusModel, wordsOf, type StatusModelModule } from './statusbar.ts'
-import { PROVIDER_LABELS } from '../../shared/model-endpoints.ts'
+import { modelModuleGroups, renderStatusbar, statusModel, wordsOf, type StatusModelModule } from './statusbar.ts'
+
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
 import { openAuthorizationPopover } from './authorization-popover.ts'
@@ -68,7 +68,6 @@ export async function start(root: HTMLElement): Promise<void> {
             <button type="button" class="folder-create" aria-label="在库根新建文件夹">新建文件夹</button>
           </div>
           <div class="tree-scroll"></div>
-          <div class="tree-settings"><button type="button" class="settings-open" aria-label="设置" title="设置"><span class="settings-open-label">设置</span></button></div>
         </aside>
         <section class="stage" id="note-panel" role="tabpanel" aria-label="正文">
           <button type="button" class="ledger-open" aria-pressed="false" hidden>账本</button>
@@ -112,7 +111,13 @@ export async function start(root: HTMLElement): Promise<void> {
   const ledgerClose = root.querySelector('.ledger-close') as HTMLButtonElement
   const searchOpen = root.querySelector('.search-open') as HTMLButtonElement
   const folderCreate = root.querySelector('.folder-create') as HTMLButtonElement
-  const settingsOpen = root.querySelector('.settings-open') as HTMLButtonElement
+  // 设置入口固定在底栏最左：只有图标，命中区域够大（围栏 frontend.md §编辑画布与辅助信息）。
+  const settingsOpen = document.createElement('button')
+  settingsOpen.type = 'button'
+  settingsOpen.className = 'settings-open'
+  settingsOpen.setAttribute('aria-label', '设置')
+  settingsOpen.title = '设置'
+  settingsOpen.append(icon('settings'))
   const ledgerOpenButton = root.querySelector('.ledger-open') as HTMLButtonElement
   const shortcutHint = root.querySelector('.shortcut-hint') as HTMLElement
 
@@ -174,12 +179,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const config = modelConfigSnapshot
     if (!config) return undefined
     if (modelModuleCache?.config === config) return modelModuleCache.module
-    const groups = config.providers
-      .filter((provider) => provider.modelCount > 0)
-      .map((provider) => ({
-        label: provider.hasKey ? PROVIDER_LABELS[provider.provider] : `${PROVIDER_LABELS[provider.provider]}（缺密钥）`,
-        items: config.models.filter((model) => model.provider === provider.provider).map((model) => ({ id: model.id, label: model.modelId }))
-      }))
+    const groups = modelModuleGroups(config)
     const module: StatusModelModule = {
       groups,
       value: config.defaultModelId,
@@ -1059,6 +1059,9 @@ export async function start(root: HTMLElement): Promise<void> {
       }, modelModule())
     )
     const left = statusEl.querySelector('.status-left')
+    // 只在还没放进固定槽位时移动它：稳定的父子关系才保得住焦点。
+    const lead = statusEl.querySelector('.status-lead')
+    if (lead && settingsOpen.parentElement !== lead) lead.append(settingsOpen)
     if (hostNotice && left) {
       const notice = document.createElement('span')
       notice.className = 'status-item status-host-notice'

@@ -1,4 +1,6 @@
 import type { MarkerRef } from '@markdown'
+import type { PublicModelConfig } from '@shared'
+import { PROVIDER_LABELS } from '../../shared/model-endpoints.ts'
 
 /**
  * 底栏。围栏 docs/frontend.md §编辑画布与辅助信息：
@@ -36,6 +38,19 @@ export type StatusModel = {
   vault: string
   network: 'offline'
   model?: StatusModelModule
+}
+
+/**
+ * 底栏候选：只列**已存密钥**的供应商及其模型。
+ * 未配置或缺密钥的不出现在候选里——选它也不能发起，只会让人以为能用。
+ */
+export function modelModuleGroups(config: PublicModelConfig): StatusModelGroup[] {
+  return config.providers
+    .filter((provider) => provider.hasKey && provider.modelCount > 0)
+    .map((provider) => ({
+      label: PROVIDER_LABELS[provider.provider],
+      items: config.models.filter((model) => model.provider === provider.provider).map((model) => ({ id: model.id, label: model.modelId }))
+    }))
 }
 
 export function statusModel(input: StatusInput, model?: StatusModelModule): StatusModel {
@@ -140,6 +155,9 @@ function renderModelModule(center: HTMLElement, module: StatusModelModule | unde
 }
 
 export function renderStatusbar(host: HTMLElement, model: StatusModel): void {
+  // 左侧的固定槽位（设置入口）绝对定位、不参与栅格，也不被重绘清空——否则每次
+  // 状态更新都会把按钮移除再放回，而移除会夺走焦点。
+  const lead = container(host, 'status-lead')
   const left = container(host, 'status-left')
   left.replaceChildren()
   if (model.position) {
@@ -172,7 +190,8 @@ export function renderStatusbar(host: HTMLElement, model: StatusModel): void {
 
   renderModelModule(center, model.model)
   // 只在顺序不对时重排；常规重绘不移动节点，保住下拉与焦点。
-  if (host.children.length !== 3 || host.children[0] !== left || host.children[1] !== center || host.children[2] !== right) {
-    host.replaceChildren(left, center, right)
+  if (host.children.length !== 4 || host.children[0] !== lead || host.children[1] !== left ||
+      host.children[2] !== center || host.children[3] !== right) {
+    host.replaceChildren(lead, left, center, right)
   }
 }
