@@ -230,7 +230,7 @@ export async function start(root: HTMLElement): Promise<void> {
   shortcutHint.textContent = shortcutLabel('k')
   searchOpen.addEventListener('click', () => { if (!conflictDecisionOpen) searchOverlay.open() })
   folderCreate.addEventListener('click', () => { void createRootFolder() })
-  settingsOpen.prepend(icon('settings'))
+  // 图标在创建处已放入，这里只接线（模板时代那行 prepend 会让齿轮出现两次）
   settingsOpen.addEventListener('click', () => { if (!conflictDecisionOpen) settingsOverlay.open() })
   // 底栏模型模块首次取一次配置；之后由设置页写入与面板关闭时刷新。
   void refreshModelModule()

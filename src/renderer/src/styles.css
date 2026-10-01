@@ -631,19 +631,21 @@ input:focus-visible,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  /* 全局 button 有 40px 最小尺寸，这里明确收成 32×32，别让它撑高底栏 */
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  min-height: 32px;
+  /* 全局 button 有 40px 最小尺寸，这里明确收成 34×34，别让它撑高底栏 */
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
   padding: 0;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text-muted);
+  /* 齿轮要认得出来：比正文图标大一圈，且不用最浅的 muted 灰 */
+  color: var(--text-body);
   cursor: pointer;
 }
-.status .settings-open .icon { width: 18px; height: 18px; stroke-width: 1.6; }
+/* 齿要分开才像齿轮：图标做大、描边收细（16 viewBox 缩到 23px 时约 1.8px 线） */
+.status .settings-open .icon { width: 23px; height: 23px; stroke-width: 1.2; }
 .status .settings-open:hover { color: var(--accent-primary); background: var(--state-hover); }
 
 .tree-tools {
