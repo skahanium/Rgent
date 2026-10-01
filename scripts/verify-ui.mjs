@@ -787,7 +787,7 @@ async function main() {
           moved: Math.abs(before.left - after.left) + Math.abs(before.top - after.top), barHeight: Math.round(status.height),
           label: button.textContent.trim(), first: bar && bar.firstElementChild === button })
       })()`))
-      return { ok: state.exists && state.inBar && state.first && state.moved <= 1 && state.label === '' && state.size === '36x36' && state.glyphs === 1 && state.glyph >= 23 && state.barHeight >= 36, detail: JSON.stringify(state) }
+      return { ok: state.exists && state.inBar && state.first && state.moved <= 1 && state.label === '' && state.size === '36x36' && state.glyphs === 1 && state.glyph === 20 && state.barHeight >= 36, detail: JSON.stringify(state) }
     })
     await probe('设置浮层只提供三档主题并能保存切换', async () => {
       const state = JSON.parse(await page.eval(`(async () => {
