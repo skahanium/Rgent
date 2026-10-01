@@ -1445,6 +1445,25 @@ async function main() {
     check('库根新建文件夹入口可由键盘和鼠标使用', await waitFor(page, `!!document.querySelector('.modal input')`))
     await page.eval(`(() => { const input = document.querySelector('.modal input'); input.value = '生命周期'; document.querySelector('.modal button[value=ok]')?.click() })()`)
     check('新建文件夹进入真实文件树', await waitFor(page, `[...document.querySelectorAll('.tree-dir')].some((node) => node.textContent.includes('生命周期'))`, 8000))
+    // 空名称时「取消」必须能退出：以前它会触发原生校验，弹「请填写此字段」把浮层卡住
+    await page.eval(`(() => { [...document.querySelectorAll('.modal button')].find((button) => button.textContent === '取消')?.click() })()`)
+    check('空名称时取消可直接退出且不弹校验气泡', await waitFor(page, `!document.querySelector('.modal')`))
+    // 空名称点创建：留在浮层并给自家消息，仍可再取消
+    await page.eval(`document.querySelector('.folder-create')?.click()`)
+    await waitFor(page, `!!document.querySelector('.modal input')`)
+    await page.eval(`(() => { [...document.querySelectorAll('.modal button')].find((button) => button.textContent === '创建')?.click() })()`)
+    check('空名称点创建留在浮层并给自家提示', await waitFor(page, `document.querySelector('.modal-error')?.textContent === '请填写名称。' && !!document.querySelector('.modal input')`))
+    await page.eval(`(() => { [...document.querySelectorAll('.modal button')].find((button) => button.textContent === '取消')?.click() })()`)
+    check('提示之后仍可取消退出', await waitFor(page, `!document.querySelector('.modal')`))
+    // 回车等同确认（两个 submit 按钮时它曾落到「取消」上）
+    await page.eval(`document.querySelector('.folder-create')?.click()`)
+    await waitFor(page, `!!document.querySelector('.modal input')`)
+    await page.eval(`(() => { const input = document.querySelector('.modal input'); input.value = '回车新建'; input.focus() })()`)
+    // rawKeyDown 不触发默认动作，这里用 keyDown 才能让浏览器真的提交表单
+    // 回车要带 text 才会触发 char 事件，隐式提交靠的是它
+    await page.call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, text: '\r', unmodifiedText: '\r' })
+    await page.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 })
+    check('回车确认新建而不是取消', await waitFor(page, `[...document.querySelectorAll('.tree-dir')].some((node) => node.textContent.includes('回车新建'))`, 8000))
     mkdirSync(path.join(vault, '生命周期', '原'), { recursive: true })
     writeFileSync(path.join(vault, '生命周期', '原.md'), '# 不应改写的正文\r\n')
     writeFileSync(path.join(vault, '生命周期', '原', '图.png'), Buffer.from([1, 2, 3]))

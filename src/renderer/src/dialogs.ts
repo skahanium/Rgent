@@ -80,7 +80,7 @@ export function promptText(title: string, field: string, initial = '', confirm =
       const input = document.createElement('input')
       input.id = 'new-note-name'
       input.type = 'text'
-      input.required = true
+      // 空值由 modal 自己校验并给消息，不用原生 required（那会在取消时也弹气泡）
       input.autocomplete = 'off'
       input.value = initial
       label.append(input)
@@ -117,26 +117,43 @@ function modal(opts: {
     heading.textContent = opts.title
     const form = document.createElement('form')
     form.method = 'dialog'
+    // 关掉原生约束校验：它会在点「取消」时也弹「请填写此字段」，把取消变成关不掉。
+    // 空值校验改由下面自己给消息，取消永远能关。
+    form.noValidate = true
     const getter = opts.body(form)
+    const message = document.createElement('p')
+    message.className = 'modal-error'
+    message.setAttribute('role', 'alert')
+    message.hidden = true
     const actions = document.createElement('div')
     actions.className = 'modal-actions'
     const cancel = document.createElement('button')
-    cancel.type = 'submit'
+    cancel.type = 'button'
     cancel.value = 'cancel'
     cancel.textContent = opts.cancel
+    cancel.addEventListener('click', () => {
+      finish(null)
+      overlay.close()
+    })
+    // 唯一的提交按钮：回车也就落到「确认」上，不会像两个 submit 时那样被当成取消。
     const ok = document.createElement('button')
     ok.type = 'submit'
     ok.value = 'ok'
     ok.textContent = opts.confirm
     actions.append(cancel, ok)
-    form.append(actions)
+    form.append(message, actions)
     dialog.append(heading, form)
     form.addEventListener('submit', (event) => {
       event.preventDefault()
-      const submitter = (event as SubmitEvent).submitter as HTMLButtonElement | null
-      const value = submitter?.value === 'ok' ? getter().trim() : null
+      const value = getter().trim()
+      if (!value) {
+        message.textContent = '请填写名称。'
+        message.hidden = false
+        form.querySelector('input')?.focus()
+        return
+      }
+      finish(value)
       overlay.close()
-      finish(value && value.length > 0 ? value : null)
     })
     // 打开时聚焦输入框，不是确认按钮：破坏性动作不该是默认。
     queueMicrotask(() => form.querySelector('input')?.focus())

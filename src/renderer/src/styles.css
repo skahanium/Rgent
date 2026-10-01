@@ -1173,6 +1173,8 @@ input:focus-visible,
   gap: 8px;
   margin-top: 16px;
 }
+.modal-error { margin: 0 0 10px; color: var(--status-error); font-size: 0.78rem; }
+.modal-error[hidden] { display: none; }
 
 .lifecycle-dialog { width: min(620px, calc(100vw - 40px)); max-height: calc(100vh - 40px); overflow: auto; }
 .lifecycle-warning:not([hidden]) { flex: 0 1 auto; max-width: 220px; margin: 0 12px; padding: 5px 9px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-heading); background: var(--surface-overlay); font: inherit; font-size: .75rem; cursor: pointer; }
