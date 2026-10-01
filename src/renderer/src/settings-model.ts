@@ -386,7 +386,8 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
     cancel.type = 'button'
     cancel.textContent = '取消'
     cancel.addEventListener('click', () => { candidates = null; candidateNote = ''; paint() })
-    footer.append(selectAll, add, cancel)
+    // 主操作在首位：`.settings-actions` 的首个子元素才是实心按钮
+    footer.append(add, selectAll, cancel)
     panel.append(status, footer)
     body.append(panel)
   }
