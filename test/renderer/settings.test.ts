@@ -189,7 +189,7 @@ describe('settings interface page', () => {
     await vi.waitFor(() => expect(setLimits).toHaveBeenCalledWith({ tier: 'none', limits: { seconds: 180, steps: 4, tools: 0 } }))
     panel.close()
   })
-  it('offers the MiniMax domestic station and saves the picked base URL', async () => {
+  it('offers known endpoints through the address field and never adds a vendor control', async () => {
     const config = {
       selected: 'minimax' as const,
       profiles: {
@@ -209,24 +209,30 @@ describe('settings interface page', () => {
     panel.open()
     const nav = [...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')]
     nav.find((button) => button.textContent === '模型')?.click()
-    await vi.waitFor(() => expect(document.querySelector('.settings-minimax-host')).not.toBeNull())
-    const row = document.querySelector<HTMLElement>('.settings-minimax-host')!
-    expect(row.hidden).toBe(false)
-    expect([...row.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['国际站点 api.minimax.io · 已选', '国内站点 api.minimaxi.com'])
-    // 选国内站点：接口地址跟着改，再保存就带上国内地址
-    ;[...row.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('国内站点'))!.click()
-    const baseInput = [...document.querySelectorAll<HTMLInputElement>('.settings-form input')].find((input) => input.value.includes('minimax'))!
-    expect(baseInput.value).toBe('https://api.minimaxi.com/v1')
+    await vi.waitFor(() => expect(document.querySelector('#model-endpoint-options')).not.toBeNull())
+    const baseInput = () => [...document.querySelectorAll<HTMLInputElement>('.settings-form input')].find((input) => input.getAttribute('list') === 'model-endpoint-options')!
+    const options = (): HTMLOptionElement[] => [...document.querySelectorAll<HTMLOptionElement>('#model-endpoint-options option')]
+    // MiniMax 的两个已知端点作为候选，密钥与端点绑定的说明挂在候选上，不另占一行
+    expect(baseInput().value).toBe('https://api.minimax.io/v1')
+    expect(options().map((option) => option.value)).toEqual(['https://api.minimax.io/v1', 'https://api.minimaxi.com/v1'])
+    expect(options()[1]!.label).toContain('国内站点')
+    expect(options()[1]!.label).toContain('国内 Token Plan')
+    // 接口地址是唯一真源：手填候选之外的合法地址也原样保存
+    baseInput().value = 'https://example.internal/v1'
     ;[...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find((b) => b.textContent === '保存配置')!.click()
     await vi.waitFor(() => expect(setProfile).toHaveBeenCalledWith(expect.objectContaining({
       provider: 'minimax',
-      fields: expect.objectContaining({ baseURL: 'https://api.minimaxi.com/v1' })
+      fields: expect.objectContaining({ baseURL: 'https://example.internal/v1' })
     })))
-    // 换成自定义供应商时站点行隐藏
+    // 换供应商时同一控件跟着换候选；界面里没有按厂商分支的控件
     const providerSelect = document.querySelector<HTMLSelectElement>('.settings-provider')!
+    providerSelect.value = 'deepseek'
+    providerSelect.dispatchEvent(new Event('change'))
+    expect(options().map((option) => option.value)).toEqual(['https://api.deepseek.com'])
     providerSelect.value = 'custom'
     providerSelect.dispatchEvent(new Event('change'))
-    await vi.waitFor(() => expect(document.querySelector<HTMLElement>('.settings-minimax-host')!.hidden).toBe(true))
+    expect(options()).toEqual([])
+    expect(document.querySelector('.settings-minimax-host, .settings-host-actions, .settings-host-hint')).toBeNull()
     panel.close()
   })
 

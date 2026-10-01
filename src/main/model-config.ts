@@ -1,6 +1,7 @@
 import { closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
+import { defaultBaseURL } from '../shared/model-endpoints.ts'
 
 export type ModelProvider = 'deepseek' | 'minimax' | 'custom'
 export type LimitTier = 'none' | 'local' | 'network'
@@ -36,8 +37,8 @@ const defaults = (): StoredConfig => ({
   version: 1,
   selected: 'deepseek',
   profiles: {
-    deepseek: { baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1048576 },
-    minimax: { baseURL: 'https://api.minimax.io/v1', modelId: 'MiniMax-M2.7', contextTokens: 204800 },
+    deepseek: { baseURL: defaultBaseURL('deepseek'), modelId: 'deepseek-flash', contextTokens: 1048576 },
+    minimax: { baseURL: defaultBaseURL('minimax'), modelId: 'MiniMax-M2.7', contextTokens: 204800 },
     custom: { baseURL: '', modelId: '', contextTokens: 0 }
   },
   limits: {

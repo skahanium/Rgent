@@ -1,5 +1,6 @@
 import type { LimitTier, ModelConfigResult, ModelLimitsSetRequest, ModelProfileSetRequest, ModelProvider, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult } from '../../shared/ipc.ts'
 import { isReadingPreference, READING_FONTS } from '../../shared/reading-preference.ts'
+import { MODEL_ENDPOINTS } from '../../shared/model-endpoints.ts'
 import { openOverlay, type Overlay } from './overlay.ts'
 import { applyReadingPreference } from './reading.ts'
 import { icon, type IconName } from './icons.ts'
@@ -224,36 +225,17 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       keyState.className = 'settings-key-state'
       const selectedState = document.createElement('p')
       selectedState.className = 'settings-key-state'
-      // MiniMax 的密钥与站点绑定：预置两个站点，选完仍可手改接口地址。
-      const MINIMAX_HOSTS: Array<{ label: string; baseURL: string }> = [
-        { label: '国际站点 api.minimax.io', baseURL: 'https://api.minimax.io/v1' },
-        { label: '国内站点 api.minimaxi.com', baseURL: 'https://api.minimaxi.com/v1' }
-      ]
-      const hostRow = document.createElement('div')
-      hostRow.className = 'settings-field settings-minimax-host'
-      const hostRowLabel = document.createElement('span')
-      hostRowLabel.textContent = 'MiniMax 站点'
-      const hostButtons = document.createElement('div')
-      hostButtons.className = 'settings-host-actions'
-      hostRow.append(hostRowLabel, hostButtons)
-      const hostHint = document.createElement('p')
-      hostHint.className = 'settings-host-hint'
-      hostHint.textContent = '密钥与站点绑定：国内 Token Plan 的密钥要在国内站点使用。'
-      const paintHosts = (): void => {
-        const onMinimax = provider.value === 'minimax'
-        hostRow.hidden = !onMinimax
-        hostHint.hidden = !onMinimax
-        hostButtons.replaceChildren()
-        if (!onMinimax) return
-        for (const host of MINIMAX_HOSTS) {
-          const chosen = base.value.trim() === host.baseURL
-          const button = action(chosen ? `${host.label} · 已选` : host.label, () => {
-            base.value = host.baseURL
-            paintHosts()
-          })
-          if (chosen) button.setAttribute('aria-pressed', 'true')
-          hostButtons.append(button)
-        }
+      // 已知端点只是接口地址的候选：同一控件对所有供应商生效，字段本身是唯一真源。
+      const endpointOptions = document.createElement('datalist')
+      endpointOptions.id = 'model-endpoint-options'
+      base.setAttribute('list', 'model-endpoint-options')
+      const paintEndpoints = (): void => {
+        endpointOptions.replaceChildren(...MODEL_ENDPOINTS[provider.value as ModelProvider].map((endpoint) => {
+          const option = document.createElement('option')
+          option.value = endpoint.baseURL
+          option.label = endpoint.note ? `${endpoint.label} · ${endpoint.note}` : endpoint.label
+          return option
+        }))
       }
       const paintProfile = (): void => {
         const profile = config.profiles[provider.value as ModelProvider]
@@ -263,10 +245,9 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         secret.value = ''
         keyState.textContent = profile.hasKey ? '密钥已保存' : '尚未保存密钥'
         selectedState.textContent = config.selected === provider.value ? '当前使用' : '尚未选用'
-        paintHosts()
+        paintEndpoints()
       }
       provider.addEventListener('change', paintProfile)
-      base.addEventListener('input', paintHosts)
       paintProfile()
       const save = action('保存配置', () => {
         const id = provider.value as ModelProvider
@@ -303,7 +284,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       })
       body.append(providerLabel)
       appendField(body, base)
-      body.append(hostRow, hostHint)
+      body.append(endpointOptions)
       for (const input of [model, context, secret]) appendField(body, input)
       const state = document.createElement('div')
       state.className = 'settings-model-state'
