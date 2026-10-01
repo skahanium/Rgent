@@ -24,7 +24,7 @@
 - 测试不把真实 API Key 写进仓库。
 - 改壳、preload 或 sandbox 之后：`pnpm test` 必须过，且 `pnpm build` 后窗口能起来。sandbox 下 preload 必须是可加载的 CommonJS（`out/preload/index.cjs`）。
 - 当前阶段提交前跑 `pnpm docs:check`；CI 按[变更范围分层](#ci-分层)。代码门在 macOS、Windows 上以锁文件安装，先构建与原生装载检查，再运行 `pnpm test` 与功能 `pnpm ui:check`；纯文档不触发产品构建。
-- 功能走分支 + PR。GitHub 是源码枢纽。不要用未 push 的本机工作树当云端起点。
+- 提交与推送分开：**默认只提交到本地**，推送必须等用户明确指令。不要在未获指令时 push、开 PR 或触发 CI；本地验收用 `pnpm test`／`docs:check`／`build`／`ui:check`。也不要擅自新建分支或工作树（用户 2026-10-01 定）。
 
 ## CI 分层
 
@@ -46,7 +46,7 @@
 
 两条已定的分支纪律，收紧前须有用户明确要求：
 
-- **直接推送保持可用**。功能走分支 + PR，文档与收尾提交可直接推送到 `branch-v0.1.0`；不接受「必须走 PR」或打开 `enforce_admins` 这类收紧——`CI gate` 仍对每次推送给出结论，保护只挡住 force push 与删除。
+- **推送权限在用户手里**。技术上不设「必须走 PR」，也不需要 `enforce_admins` 这类收紧——`CI gate` 对每次推送给出结论，保护只挡住 force push 与删除。但提交只到本地为止，推送要等用户明确指令（见上）。
 - **`master` 只在里程碑同步到 `branch-v0.1.0`**，一律纯快进。日常提交留在工作分支，master 落后是预期状态，不跟着每次提交走。里程碑指：换阶段（[施工图](build.md) 的「当前阶段」变更）、一次独立验收收口、或用户明确要求三者之一。
 
 GitHub 的手动入口要求默认分支已有 `workflow_dispatch`。默认分支 `master` 已快进到与 `branch-v0.1.0` 同一提交（纯快进，未改历史），手动入口随之可用并已现场运行：`full` 见 [CI 36742424920](https://github.com/skahanium/Rgent/actions/runs/36742424920)（文档、两平台代码与功能窗口、两平台废纸篓探针采证、`CI gate` 全 success）；`standard`／`trash` 仍按需使用。新 PR 的默认对比基准因此变为 `master`，以 `branch-v0.1.0` 为工作分支时记得显式指定 base。
