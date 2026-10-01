@@ -375,11 +375,18 @@ describe('settings interface page', () => {
     save()!.click()
     await vi.waitFor(() => expect(setAssistant).toHaveBeenCalledWith({ address: '小陈', tone: 'concise', note: '先给结论' }))
 
+    await vi.waitFor(() => expect(save()!.disabled).toBe(true))
+
     ;[...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find((button) => button.textContent === '恢复默认')!.click()
     expect(address.value).toBe('')
     expect(tone.value).toBe('plain')
     expect(save()!.disabled).toBe(false)
     expect(setAssistant).toHaveBeenCalledTimes(1)
+    // 输入框保留人刚敲下的字符（trim 只发生在草稿层）
+    note.value = '先说结论 '
+    note.dispatchEvent(new Event('input'))
+    expect(note.value).toBe('先说结论 ')
+    expect(document.querySelector('.settings-hint')?.textContent).toContain('已用 4 / 500 字')
     panel.close()
   })
 

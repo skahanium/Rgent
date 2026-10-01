@@ -84,6 +84,8 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         overlay = null
         disposeModelPage?.()
         disposeModelPage = null
+        disposeAssistantPage?.()
+        disposeAssistantPage = null
         handlers.onClose?.()
       }
     })
@@ -273,7 +275,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
           draft = { ...result.habits }
           paint()
         }).catch(() => { if (!disposed) showError(error, '保存失败，请重试。') })
-          .finally(() => { save.disabled = false })
+          .finally(() => { if (!disposed) save.disabled = same(draft, saved) })
       })
       const reset = action('恢复默认', () => {
         draft = { ...DEFAULT_ASSISTANT_HABITS }
@@ -282,16 +284,20 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       actions.append(save, reset)
       body.append(address.parentElement!, toneLabel, noteLabel, counter, scope, actions)
 
+      const paintState = (): void => {
+        counter.textContent = `补充说明已用 ${draft.note.length} / ${ASSISTANT_LIMITS.note} 字。`
+        save.disabled = same(draft, saved)
+      }
       const paint = (): void => {
         address.value = draft.address
         tone.value = draft.tone
         note.value = draft.note
-        counter.textContent = `补充说明已用 ${draft.note.length} / ${ASSISTANT_LIMITS.note} 字。`
-        save.disabled = same(draft, saved)
+        paintState()
       }
       const onDraftChange = (): void => {
+        // 只在草稿层 trim：输入框里保留人刚敲下的字符，保存时送出的仍是去空白版本
         draft = { address: address.value.trim(), tone: tone.value as AssistantTone, note: note.value.trim() }
-        paint()
+        paintState()
       }
       address.addEventListener('input', onDraftChange)
       tone.addEventListener('change', onDraftChange)
