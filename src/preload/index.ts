@@ -18,6 +18,8 @@ import {
   type ReadingSetResult,
   type TreeEntry,
   type VaultState,
+  type AssistantHabits,
+  type AssistantResult,
   type ModelConfigResult,
   type ModelProviderSaveRequest,
   type ModelProviderRemoveRequest,
@@ -79,6 +81,8 @@ const api = {
   readingSet: (reading: ReadingPreference): Promise<ReadingSetResult> => ipcRenderer.invoke(IPC.readingSet, reading),
   remoteImageGet: (request: RemoteImageGetRequest): Promise<RemoteImageGetResult> =>
     ipcRenderer.invoke(IPC.remoteImageGet, request),
+  assistantGet: (): Promise<AssistantResult> => ipcRenderer.invoke(IPC.assistantGet),
+  assistantSet: (habits: AssistantHabits): Promise<AssistantResult> => ipcRenderer.invoke(IPC.assistantSet, habits),
   modelConfigGet: (): Promise<ModelConfigResult> => ipcRenderer.invoke(IPC.modelConfigGet),
   modelProviderSave: (request: ModelProviderSaveRequest): Promise<ModelConfigResult> => ipcRenderer.invoke(IPC.modelProviderSave, request),
   modelProviderRemove: (request: ModelProviderRemoveRequest): Promise<ModelConfigResult> => ipcRenderer.invoke(IPC.modelProviderRemove, request),

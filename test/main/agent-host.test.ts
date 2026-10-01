@@ -15,13 +15,18 @@ function withExistingLedger(): { source: string; range: { start: number; end: nu
   return { source: body + (part.ledger ?? ''), range }
 }
 
-function harness(stream: (signal: AbortSignal, prompt: string) => AsyncIterable<string>, initial = '前言\n\n/写个回答\n\n后文\n') {
+function harness(
+  stream: (signal: AbortSignal, prompt: string) => AsyncIterable<string>,
+  initial = '前言\n\n/写个回答\n\n后文\n',
+  assistant?: () => import('../../src/shared/assistant.ts').AssistantHabits
+) {
   let content = initial
   let revision = 1
   let policy: 'reference' | 'forbidden' = 'reference'
   let failLedgerOnce = false
   let lifecycleLocked = false
   const events: unknown[] = []
+  const systems: string[] = []
   const host = new AgentHost({
     root: () => '/vault',
     read: async () => ({ content, revision: String(revision) }),
@@ -44,10 +49,11 @@ function harness(stream: (signal: AbortSignal, prompt: string) => AsyncIterable<
     },
     credential: () => ({ provider: 'custom', baseURL: 'http://127.0.0.1:1234/v1', modelId: 'test', contextTokens: 10000, apiKey: 'secret' }),
     limits: () => ({ seconds: 30, steps: 4, tools: 0 }),
-    stream: (input, signal) => stream(signal, input.prompt),
+    stream: (input, signal) => { systems.push(input.system); return stream(signal, input.prompt) },
+    ...(assistant ? { assistant } : {}),
     emit: (event) => { events.push(event) }
   })
-  return { host, source: () => content, events, setPolicy: (value: typeof policy) => { policy = value }, setLifecycleLock: (value: boolean) => { lifecycleLocked = value }, failLedgerOnce: () => { failLedgerOnce = true }, externalEdit: (change: (source: string) => string) => { content = change(content); revision += 1 } }
+  return { host, source: () => content, events, systems, setPolicy: (value: typeof policy) => { policy = value }, setLifecycleLock: (value: boolean) => { lifecycleLocked = value }, failLedgerOnce: () => { failLedgerOnce = true }, externalEdit: (change: (source: string) => string) => { content = change(content); revision += 1 } }
 }
 
 describe('Host minimal loop', () => {
@@ -371,5 +377,26 @@ describe('Host minimal loop', () => {
     await host.retryPending('/vault', 'a.md')
     expect(host.hasPending('/vault')).toBe(false)
     expect(partitionSource(notes.get('a.md')!.content).ledger).toContain('最终答案')
+  })
+})
+
+describe('assistant habits in a run', () => {
+  it('appends the habit block to the system prompt and records one summary line', async () => {
+    const app = harness(async function* () { yield '回答' }, undefined, () => ({ address: '老陈', tone: 'concise', note: '先给结论' }))
+    const task = await app.host.start({ relPath: 'a.md', range: { start: 4, end: 9 }, expectedText: '/写个回答', promptText: '写个回答' })
+    const full = await task.done
+    expect(full.status).toBe('completed')
+    expect(app.systems).toHaveLength(1)
+    expect(app.systems[0]).toContain('不改变本场范围、工具与权限')
+    expect(app.systems[0]).toContain('称呼用户为「老陈」')
+    expect(app.source()).toContain('助手习惯：已应用（称呼=老陈；语气=简洁；补充说明 4 字）')
+  })
+
+  it('changes nothing for tasks when the habits are untouched', async () => {
+    const app = harness(async function* () { yield '回答' }, undefined, () => ({ address: '', tone: 'plain', note: '' }))
+    const task = await app.host.start({ relPath: 'a.md', range: { start: 4, end: 9 }, expectedText: '/写个回答', promptText: '写个回答' })
+    await task.done
+    expect(app.systems[0]).not.toContain('助手习惯')
+    expect(app.source()).not.toContain('助手习惯：已应用')
   })
 })

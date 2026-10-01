@@ -346,6 +346,43 @@ describe('settings interface page', () => {
     broken.close()
   })
 
+  it('edits the assistant habits with an explicit save and a reset that still needs saving', async () => {
+    const saved = { address: '老陈', tone: 'concise' as const, note: '先给结论' }
+    const getAssistant = vi.fn().mockResolvedValue({ ok: true, habits: saved })
+    const setAssistant = vi.fn().mockResolvedValue({ ok: true, habits: { address: '小陈', tone: 'detailed' as const, note: '多说一步' } })
+    const panel = createSettingsOverlay({
+      getMode: async () => 'day', setMode: async (mode) => ({ ok: true, mode }),
+      getAssistant, setAssistant
+    })
+    panel.open()
+    const nav = [...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')]
+    expect(nav.map((button) => button.textContent)).toEqual(['界面', '助手'])
+    nav.find((button) => button.textContent === '助手')?.click()
+    await vi.waitFor(() => expect(document.querySelector('.settings-page-title')?.textContent).toBe('助手'))
+    const address = document.querySelector<HTMLInputElement>('.settings-form input')!
+    const tone = document.querySelector<HTMLSelectElement>('.settings-form select')!
+    const note = document.querySelector<HTMLTextAreaElement>('.settings-form textarea')!
+    expect([address.value, tone.value, note.value]).toEqual(['老陈', 'concise', '先给结论'])
+    expect(address.maxLength).toBe(40)
+    expect(note.maxLength).toBe(500)
+    expect(document.querySelector('.settings-hint')?.textContent).toContain('补充说明已用 4 / 500 字')
+    const save = (): HTMLButtonElement | undefined => [...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find((button) => button.textContent === '保存')
+    expect(save()!.disabled).toBe(true)
+
+    address.value = '小陈'
+    address.dispatchEvent(new Event('input'))
+    expect(save()!.disabled).toBe(false)
+    save()!.click()
+    await vi.waitFor(() => expect(setAssistant).toHaveBeenCalledWith({ address: '小陈', tone: 'concise', note: '先给结论' }))
+
+    ;[...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find((button) => button.textContent === '恢复默认')!.click()
+    expect(address.value).toBe('')
+    expect(tone.value).toBe('plain')
+    expect(save()!.disabled).toBe(false)
+    expect(setAssistant).toHaveBeenCalledTimes(1)
+    panel.close()
+  })
+
   it('shows only three live theme choices, saves one, and returns focus on close', async () => {
     const trigger = document.createElement('button')
     document.body.append(trigger)

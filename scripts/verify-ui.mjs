@@ -381,7 +381,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       const dialog = document.querySelector('.overlay-settings')
       const blur = getComputedStyle(dialog, '::backdrop').backdropFilter
       const labels = [...dialog.querySelectorAll('.settings-nav button')].map((button) => button.textContent)
-      return blur.includes('blur(') && JSON.stringify(labels) === JSON.stringify(['界面','模型','运行']) && dialog.querySelectorAll('.settings-nav .icon').length === 3
+      return blur.includes('blur(') && JSON.stringify(labels) === JSON.stringify(['界面','助手','模型','运行']) && dialog.querySelectorAll('.settings-nav .icon').length === 4
     })()`) === true)
     check('阅读排版有真实中英样张和五项可调控件', await waitFor(page, `document.querySelector('.settings-reading-sample')?.textContent.includes('English') && document.querySelectorAll('.settings-reading-controls [data-setting]').length === 5`))
     await shot(page, `reference-${mode}-settings`)
@@ -399,9 +399,14 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     })()`) === true)
     await shot(page, `reference-${mode}-settings-reading`)
     await page.eval(`document.querySelector('.settings-main').scrollTop = 0`)
-    for (const name of ['模型', '运行']) {
+    for (const name of ['助手', '模型', '运行']) {
       await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '${name}'))?.click()`)
       await waitFor(page, `document.querySelector('.settings-page-title')?.textContent === '${name}'`)
+      if (name === '助手') {
+        await waitFor(page, `!!document.querySelector('.settings-form textarea')`)
+        await shot(page, `reference-${mode}-settings-assistant`)
+        continue
+      }
       if (name === '模型') {
         await shot(page, `reference-${mode}-settings-model`)
         await page.eval(`(() => { document.querySelector('.settings-provider-row[data-provider="minimax"]')?.click() })()`)
@@ -460,9 +465,14 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     })()`) === true)
     await shot(page, `reference-${mode}-settings-reading-narrow`)
     await page.eval(`document.querySelector('.settings-main').scrollTop = 0`)
-    for (const name of ['模型', '运行']) {
+    for (const name of ['助手', '模型', '运行']) {
       await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '${name}'))?.click()`)
       await waitFor(page, `document.querySelector('.settings-page-title')?.textContent === '${name}'`)
+      if (name === '助手') {
+        await waitFor(page, `!!document.querySelector('.settings-form textarea')`)
+        await shot(page, `reference-${mode}-settings-assistant-narrow`)
+        continue
+      }
       if (name === '模型') {
         await waitFor(page, `[...document.querySelectorAll('.settings-provider-row')].length === 3`)
         await shot(page, `reference-${mode}-settings-model-narrow`)
@@ -638,6 +648,7 @@ async function seedVisualModels(page) {
     const deepseek = await window.rgent.modelProviderSave({ provider: 'deepseek', baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1048576, newKey: 'ui-visual-secret' })
     if (deepseek.ok) await window.rgent.modelAdd({ provider: 'deepseek', modelId: 'deepseek-reasoner', contextTokens: 131072 })
     await window.rgent.modelProviderSave({ provider: 'minimax', baseURL: 'https://api.minimaxi.com/v1', modelId: 'MiniMax-M3', contextTokens: 204800, newKey: 'ui-visual-secret' })
+    await window.rgent.assistantSet({ address: '写作者', tone: 'concise', note: '先给结论，再补不超过三句的理由。' })
   })()`)
 }
 
@@ -1309,6 +1320,28 @@ async function main() {
         document.querySelectorAll('.settings-model-row').length >= 1 &&
         ![...document.querySelectorAll('button')].some((button) => button.textContent.includes('设为当前模型'))
     })()`))
+    await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '助手')?.click() })()`)
+    check('助手设置页有称呼、语气与补充说明三项', await waitFor(page, `(() => {
+      const address = document.querySelector('.settings-form input')
+      const tone = document.querySelector('.settings-form select')
+      const note = document.querySelector('.settings-form textarea')
+      return !!address && address.maxLength === 40 && !!tone && tone.options.length === 3 && !!note && note.maxLength === 500
+    })()`))
+    const habitsSaved = await page.eval(`(async () => {
+      const address = document.querySelector('.settings-form input')
+      address.value = '试跑者'
+      address.dispatchEvent(new Event('input'))
+      const tone = document.querySelector('.settings-form select')
+      tone.value = 'concise'
+      tone.dispatchEvent(new Event('change'))
+      const save = [...document.querySelectorAll('.settings-action')].find((button) => button.textContent === '保存')
+      if (!save || save.disabled) return false
+      save.click()
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      const habits = await window.rgent.assistantGet()
+      return habits.ok && habits.habits.address === '试跑者' && habits.habits.tone === 'concise'
+    })()`)
+    check('助手习惯保存后只改变设备级偏好', habitsSaved === true)
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '运行')?.click() })()`)
     check('运行设置页提供三档有限上限', await waitFor(page, `document.querySelectorAll('.settings-limit-group').length === 3`))
     await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
@@ -1340,7 +1373,7 @@ async function main() {
     check('回车后底栏出现当前篇停止入口', running, running ? '' : await page.eval(`(async () => JSON.stringify({ status: document.querySelector('.status-left')?.innerText, note: (await window.rgent.noteRead('Host 环路.md')).content, editor: document.querySelector('.cm-content')?.textContent }))()`))
     check('回答与账本写回同一篇，回答为未采纳块', await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead('Host 环路.md')
-      return note.content.includes('受控回答第一句。第二句。') && note.content.includes('<!-- rgent:ai:v1 task-id=') && note.content.includes('<!-- rgent:ledger-task:v1 id=')
+      return note.content.includes('受控回答第一句。第二句。') && note.content.includes('<!-- rgent:ai:v1 task-id=') && note.content.includes('<!-- rgent:ledger-task:v1 id=') && note.content.includes('助手习惯：已应用（称呼=试跑者；语气=简洁）')
     })()`, 10000))
     await page.eval(`document.querySelector('.ledger-open')?.click()`)
     check('同一 tab 的只读账本能回顾口令和回答', await waitFor(page, `document.querySelector('.ledger-body')?.textContent.includes('请写两句话') && document.querySelector('.ledger-body')?.textContent.includes('受控回答第一句。')`))

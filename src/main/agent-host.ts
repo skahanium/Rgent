@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { AgentTasks, type TaskResult, type StopReason } from './agent-tasks.ts'
 import { buildHostContext, type ContextChapter, type ContextSummary } from './host-context.ts'
 import { appendLedgerChapter, markPrompt, upsertAiAnswer } from './host-source.ts'
+import { assistantSystemBlock, assistantSummary, type AssistantHabits } from '../shared/assistant.ts'
 import type { ModelCredential, RunLimits } from './model-config.ts'
 import type { SourceRange } from '../markdown/types.ts'
 import type { ObjectBinding } from '../shared/ipc.ts'
@@ -60,7 +61,15 @@ export type HostDependencies = {
   stream: (input: ModelCredential & { system: string; prompt: string; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<string>
   streamStep?: (input: ModelCredential & { system: string; messages: ModelMessage[]; tools?: typeof READ_ONLY_TOOL_SCHEMAS; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<ModelStepEvent>
   createReadOnlyTools?: (grant: TaskGrant, taskId: string) => ScopedAgentTools
+  /** 一个助手的设备级习惯；任务启动时取一次快照，运行中改动只影响新任务。 */
+  assistant?: () => AssistantHabits | null
   emit: (event: HostEvent) => void
+}
+
+/** 习惯只拼在系统提示末尾，并写明它不改变范围、工具与权限。 */
+function systemText(habits: AssistantHabits | null): string {
+  const block = habits ? assistantSystemBlock(habits) : null
+  return block ? `${SYSTEM_RULES}\n\n${block}` : SYSTEM_RULES
 }
 
 const SYSTEM_RULES = [
@@ -250,6 +259,10 @@ export class AgentHost {
       this.deps.emit({ ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running', answer: '', persisted: true, revision: markedRevision })
 
       const startedAt = new Date().toISOString()
+      // 助手习惯与模型、上限一样在任务启动时固定；运行中改设置只影响新任务。
+      const habits = this.deps.assistant?.() ?? null
+      const system = systemText(habits)
+      const assistantLine = habits ? assistantSummary(habits) : ''
       let answer = ''
       // 推理只进账本；trace 按发生顺序记这一步做了什么（模型步、工具、失败、收尾）。
       let reasoning = ''
@@ -301,8 +314,8 @@ export class AgentHost {
             if (signal.aborted) throw Error('TASK_CANCELLED')
             scoped?.markSent()
             return this.deps.streamStep
-            ? this.deps.streamStep({ ...credential, system: SYSTEM_RULES, messages: outgoing, ...(schemas ? { tools: schemas } : {}), maxOutputTokens }, signal)
-            : textEvents(this.deps.stream({ ...credential, system: SYSTEM_RULES, prompt: String(outgoing[0]?.content ?? ''), maxOutputTokens }, signal))
+            ? this.deps.streamStep({ ...credential, system, messages: outgoing, ...(schemas ? { tools: schemas } : {}), maxOutputTokens }, signal)
+            : textEvents(this.deps.stream({ ...credential, system, prompt: String(outgoing[0]?.content ?? ''), maxOutputTokens }, signal))
           }
           return safeModelStep(create, signal, credential.apiKey)
         }
@@ -436,6 +449,7 @@ export class AgentHost {
           ...(reason ? { reason: String(reason) } : {}),
           ...(reasoning ? { reasoning } : {}),
           ...(trace.length ? { trace } : {}),
+          ...(assistantLine ? { assistant: assistantLine } : {}),
           ...(grant?{provenance:{version:1 as const,model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant.sources.map(s=>s.relPath),sources:scoped?.dependencies() ?? [],sentSources:scoped?.sentSources() ?? [],tools:[...(scoped?.summary() ?? []),... [...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`${label.split(':')[1]} × ${count}`}))]}}:{})
         }
         try {

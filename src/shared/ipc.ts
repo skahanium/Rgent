@@ -34,6 +34,8 @@ export const IPC = {
   readingGet: 'reading:get',
   readingSet: 'reading:set',
   remoteImageGet: 'image:get',
+  assistantGet: 'assistant:get',
+  assistantSet: 'assistant:set',
   modelConfigGet: 'model-config:get',
   modelProviderSave: 'model-config:provider-save',
   modelProviderRemove: 'model-config:provider-remove',
@@ -52,6 +54,8 @@ export const IPC = {
   agentEvent: 'agent:event'
 } as const
 
+export type { AssistantHabits } from './assistant.ts'
+export type AssistantResult = { ok: true; habits: import('./assistant.ts').AssistantHabits } | { ok: false; error: string }
 export type ModelProvider = 'deepseek' | 'minimax' | 'custom'
 export type LimitTier = 'none' | 'local' | 'network'
 export type RunLimits = { seconds: number; steps: number; tools: number }

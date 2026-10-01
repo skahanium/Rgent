@@ -5,10 +5,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { asString, parseEntryCreateRequest, parseFlushDone, parseLifecycleRetryRequest, parseNoteName, parseNoteWriteRequest, parseRelocationCommitRequest, parseRelocationPreviewRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
 import { IPC } from '../shared/ipc.ts'
-import type { AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, ModelAddRequest, ModelConfigResult, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
+import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, ModelAddRequest, ModelConfigResult, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
+import { loadAssistantHabits, saveAssistantHabits } from './assistant-preference.ts'
 import { isReadingPreference } from '../shared/reading-preference.ts'
+import { isAssistantHabits } from '../shared/assistant.ts'
 import { attachVaultProtocol } from './vault-protocol.ts'
 import { verifyImageSource } from './image-source.ts'
 import { RemoteImageService, REMOTE_IMAGE_SCHEME, remoteImageUrl } from './remote-image.ts'
@@ -448,6 +450,16 @@ function registerIpc(): void {
       return result.ok ? { ok: true, src: remoteImageUrl(result.token) } : result
     } catch { return { ok: false, error: 'NOT_ALLOWED' } }
   })
+  registerTrustedHandle(IPC.assistantGet, (event): AssistantResult =>
+    trusted(event) ? { ok: true, habits: loadAssistantHabits(app.getPath('userData')) } : { ok: false, error: 'BAD_SENDER' })
+  registerTrustedHandle(IPC.assistantSet, (event, value: unknown): AssistantResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    if (!isAssistantHabits(value)) return { ok: false, error: 'BAD_ASSISTANT' }
+    try {
+      saveAssistantHabits(app.getPath('userData'), value)
+      return { ok: true, habits: value }
+    } catch { return { ok: false, error: 'IO_ERROR' } }
+  })
   registerTrustedHandle(IPC.themeGet, () => themeMode)
   registerTrustedHandle(IPC.readingGet, () => loadReadingPreference(app.getPath('userData')))
   registerTrustedHandle(IPC.readingSet, (_event, value: unknown): ReadingSetResult => {
@@ -749,6 +761,7 @@ app.whenReady().then(() => {
       if (!modelConfig) throw new Error(modelConfigError ?? 'MODEL_CONFIG_UNAVAILABLE')
       return modelConfig.credential()
     },
+    assistant: () => loadAssistantHabits(app.getPath('userData')),
     limits: () => {
       if (!modelConfig) throw new Error(modelConfigError ?? 'MODEL_CONFIG_UNAVAILABLE')
       return modelConfig.getPublic().limits.none

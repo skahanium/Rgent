@@ -1,10 +1,11 @@
 import type {
-  LimitTier, ModelAddRequest, ModelConfigResult, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest,
-  ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest,
-  ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult
+  AssistantResult, LimitTier, ModelAddRequest, ModelConfigResult, ModelKeyDeleteRequest, ModelLimitsSetRequest,
+  ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest,
+  ModelUpdateRequest, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult
 } from '../../shared/ipc.ts'
 import { isReadingPreference, READING_FONTS } from '../../shared/reading-preference.ts'
 import { mountModelPage, modelPageAvailable, type ModelPageHandlers } from './settings-model.ts'
+import { ASSISTANT_LIMITS, ASSISTANT_TONE_LABELS, ASSISTANT_TONES, DEFAULT_ASSISTANT_HABITS, isAssistantHabits, type AssistantHabits, type AssistantTone } from '../../shared/assistant.ts'
 import { openOverlay, type Overlay } from './overlay.ts'
 import { applyReadingPreference } from './reading.ts'
 import { icon, type IconName } from './icons.ts'
@@ -25,13 +26,15 @@ export type SettingsHandlers = {
   setLimits?: (request: ModelLimitsSetRequest) => Promise<ModelConfigResult>
   /** 配置写入后通知外壳刷新底栏模型模块。 */
   onModelConfigChanged?: () => void
+  getAssistant?: () => Promise<AssistantResult>
+  setAssistant?: (habits: AssistantHabits) => Promise<AssistantResult>
   /** 设置面板关闭后通知外壳（底栏模型模块据此取一次最新配置）。 */
   onClose?: () => void
 }
 
 export type SettingsOverlay = {
   /** 打开设置；可指定落到哪一页（底栏模型模块的「配置」用它直达「模型」页）。 */
-  open: (page?: '界面' | '模型' | '运行') => void
+  open: (page?: '界面' | '助手' | '模型' | '运行') => void
   close: () => void
   isOpen: () => boolean
 }
@@ -59,7 +62,8 @@ const CONFIG_ERRORS: Record<string, string> = {
   KEY_ENCRYPT_FAILED: '密钥加密失败，原配置保持不变。',
   KEY_DECRYPT_FAILED: '已保存的密钥无法解密，请替换。',
   BAD_LIMITS: '运行上限须为允许范围内的有限整数。',
-  IO_ERROR: '写入本机配置失败，原配置保持不变。'
+  IO_ERROR: '写入本机配置失败，原配置保持不变。',
+  BAD_ASSISTANT: '助手习惯不合法：称呼或说明过长、含控制字符，或语气取值不对。'
 }
 const configErrorText = (error: string): string => CONFIG_ERRORS[error] ?? error
 
@@ -69,7 +73,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
   let readingSaveSerial = 0
 
   const close = (): void => overlay?.close()
-  const open = (page: '界面' | '模型' | '运行' = '界面'): void => {
+  const open = (page: '界面' | '助手' | '模型' | '运行' = '界面'): void => {
     if (overlay?.isOpen()) return
     const current = openOverlay({
       label: '设置',
@@ -109,7 +113,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       nav.append(label)
     }
     const navButtons = new Map<string, HTMLButtonElement>()
-    const addNav = (name: '界面' | '模型' | '运行', graphic: IconName): HTMLButtonElement => {
+    const addNav = (name: '界面' | '助手' | '模型' | '运行', graphic: IconName): HTMLButtonElement => {
       const button = document.createElement('button')
       button.type = 'button'
       button.className = name === '界面' ? 'settings-nav-current' : 'settings-nav-item'
@@ -122,10 +126,15 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     }
     navGroup('工作区')
     addNav('界面', 'appearance')
-    if (modelPageAvailable(handlers) && handlers.setLimits) {
+    const assistantReady = Boolean(handlers.getAssistant && handlers.setAssistant)
+    const modelsReady = modelPageAvailable(handlers) && Boolean(handlers.setLimits)
+    if (assistantReady || modelsReady) {
       navGroup('Agent')
-      addNav('模型', 'model')
-      addNav('运行', 'run')
+      if (assistantReady) addNav('助手', 'assistant')
+      if (modelsReady) {
+        addNav('模型', 'model')
+        addNav('运行', 'run')
+      }
     }
     const main = document.createElement('section')
     main.className = 'settings-main'
@@ -153,17 +162,19 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     layout.append(nav, main)
     root.append(layout)
     const themeNodes = [title, intro, group, readingSection]
-    let openedPage: '界面' | '模型' | '运行' = page
+    let openedPage: '界面' | '助手' | '模型' | '运行' = page
     let themeRequest = 0
-    const setPage = (name: '界面' | '模型' | '运行'): void => {
+    const setPage = (name: '界面' | '助手' | '模型' | '运行'): void => {
       openedPage = name
       if (name !== '模型') { disposeModelPage?.(); disposeModelPage = null }
+      if (name !== '助手') disposeAssistantPage?.()
       for (const [label, button] of navButtons) {
         button.className = label === name ? 'settings-nav-current' : 'settings-nav-item'
         if (label === name) button.setAttribute('aria-current', 'page')
         else button.removeAttribute('aria-current')
       }
       if (name === '界面') main.replaceChildren(...themeNodes)
+      else if (name === '助手') renderAssistantPage()
       else if (name === '模型') renderModelPage()
       else void renderRunPage()
     }
@@ -208,6 +219,92 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       button.textContent = label
       button.addEventListener('click', click)
       return button
+    }
+
+    let disposeAssistantPage: (() => void) | null = null
+    function renderAssistantPage(): void {
+      if (!handlers.getAssistant || !handlers.setAssistant) return
+      disposeAssistantPage?.()
+      let disposed = false
+      disposeAssistantPage = () => { disposed = true }
+      const { body, error } = pageFrame('助手', '一个助手的设备级习惯，所有笔记库共用；它不改变笔记权限与工具范围。')
+      let saved: AssistantHabits = { ...DEFAULT_ASSISTANT_HABITS }
+      let draft: AssistantHabits = { ...DEFAULT_ASSISTANT_HABITS }
+      const same = (left: AssistantHabits, right: AssistantHabits): boolean =>
+        left.address === right.address && left.tone === right.tone && left.note === right.note
+
+      const address = field('称呼（怎么称呼你，可留空）', '')
+      address.maxLength = ASSISTANT_LIMITS.address
+      const toneLabel = document.createElement('label')
+      toneLabel.className = 'settings-field'
+      const toneName = document.createElement('span')
+      toneName.textContent = '语气'
+      const tone = document.createElement('select')
+      for (const value of ASSISTANT_TONES) {
+        const option = document.createElement('option')
+        option.value = value
+        option.textContent = ASSISTANT_TONE_LABELS[value]
+        tone.append(option)
+      }
+      toneLabel.append(toneName, tone)
+      const noteLabel = document.createElement('label')
+      noteLabel.className = 'settings-field settings-field-block'
+      const noteName = document.createElement('span')
+      noteName.textContent = '补充说明（人写的附加要求）'
+      const note = document.createElement('textarea')
+      note.rows = 4
+      note.maxLength = ASSISTANT_LIMITS.note
+      noteLabel.append(noteName, note)
+      const counter = document.createElement('p')
+      counter.className = 'settings-hint'
+      const scope = document.createElement('p')
+      scope.className = 'settings-hint'
+      scope.textContent = '本设备共用一个助手；多助手、记忆与技能不在此页。习惯只影响模型怎么回答，不改变权限、范围与工具。'
+      const actions = document.createElement('div')
+      actions.className = 'settings-actions'
+      const save = action('保存', () => {
+        save.disabled = true
+        const next: AssistantHabits = { address: address.value.trim(), tone: tone.value as AssistantTone, note: note.value.trim() }
+        showError(error, '')
+        void handlers.setAssistant!({ ...next }).then((result) => {
+          if (disposed || !current.isOpen() || openedPage !== '助手') return
+          if (!result.ok) { showError(error, configErrorText(result.error)); return }
+          saved = { ...result.habits }
+          draft = { ...result.habits }
+          paint()
+        }).catch(() => { if (!disposed) showError(error, '保存失败，请重试。') })
+          .finally(() => { save.disabled = false })
+      })
+      const reset = action('恢复默认', () => {
+        draft = { ...DEFAULT_ASSISTANT_HABITS }
+        paint()
+      })
+      actions.append(save, reset)
+      body.append(address.parentElement!, toneLabel, noteLabel, counter, scope, actions)
+
+      const paint = (): void => {
+        address.value = draft.address
+        tone.value = draft.tone
+        note.value = draft.note
+        counter.textContent = `补充说明已用 ${draft.note.length} / ${ASSISTANT_LIMITS.note} 字。`
+        save.disabled = same(draft, saved)
+      }
+      const onDraftChange = (): void => {
+        draft = { address: address.value.trim(), tone: tone.value as AssistantTone, note: note.value.trim() }
+        paint()
+      }
+      address.addEventListener('input', onDraftChange)
+      tone.addEventListener('change', onDraftChange)
+      note.addEventListener('input', onDraftChange)
+
+      void handlers.getAssistant().then((result) => {
+        if (disposed || !current.isOpen() || openedPage !== '助手') return
+        if (!result.ok) { showError(error, configErrorText(result.error)); paint(); return }
+        if (!isAssistantHabits(result.habits)) { showError(error, configErrorText('BAD_ASSISTANT')); paint(); return }
+        saved = { ...result.habits }
+        draft = { ...result.habits }
+        paint()
+      }).catch(() => { if (!disposed) { showError(error, '暂时无法读取助手习惯。'); paint() } })
     }
 
     let disposeModelPage: (() => void) | null = null

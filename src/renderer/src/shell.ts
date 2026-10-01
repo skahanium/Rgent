@@ -153,6 +153,8 @@ export async function start(root: HTMLElement): Promise<void> {
     setMode: (mode) => window.rgent.themeSet(mode),
     getReading: () => window.rgent.readingGet(),
     setReading: (reading) => window.rgent.readingSet(reading),
+    getAssistant: () => window.rgent.assistantGet(),
+    setAssistant: (habits) => window.rgent.assistantSet(habits),
     getConfig: () => window.rgent.modelConfigGet(),
     saveProvider: (request) => window.rgent.modelProviderSave(request),
     removeProvider: (request) => window.rgent.modelProviderRemove(request),

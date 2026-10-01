@@ -30,6 +30,8 @@ export interface LedgerChapterWrite {
   reasoning?: string
   /** 按发生顺序的一句话过程：模型步、工具调用与结果、收尾。 */
   trace?: readonly string[]
+  /** 该场助手习惯的一行摘要（已应用时）。 */
+  assistant?: string
 }
 
 /** 账本里的推理保留上限；超出只留开头并标注截断。 */
@@ -207,6 +209,8 @@ export function appendLedgerChapter(source: string, write: LedgerChapterWrite): 
     ...(write.trace?.length ? ['', '### 过程', '', ...write.trace.map(line => escapedModelText(line))] : []),
     ...(write.reasoning?.trim() ? ['', '### 推理', '', escapedModelText(boundedReasoning(write.reasoning))] : []),
     ...(write.provenance ? ['', `模型：${escapedModelText(write.provenance.model.provider)} / ${escapedModelText(write.provenance.model.modelId)}（${escapedModelText(write.provenance.model.endpointHost)}）`, `授权范围：${escapedModelText(write.provenance.scope.join('、'))}`, `实际读取来源：${escapedModelText(write.provenance.sources.map(source => source.relPath).join('、')) || '仅发起篇'}`, `模型消息引用来源：${escapedModelText((write.provenance.sentSources ?? write.provenance.sources.map(source => source.relPath)).join('、')) || '仅发起篇'}`] : []),
+    // 习惯摘要不依赖 provenance：没有授权记录的最小环也要能核对用了什么人格
+    ...(write.assistant ? [`助手习惯：已应用（${escapedModelText(write.assistant)}）`] : []),
     ...(write.reason ? ['', `中止原因：${escapedModelText(write.reason)}`] : []),
     ''
   ]
