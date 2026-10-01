@@ -312,7 +312,7 @@ OAuth、Coding Plan、本机模型（Ollama 等）、角色模型位（小工具
 - 界面：`test/renderer/settings.test.ts` 15 条（含供应商根页与子页、保存一份凭据、两段确认、容量就地编辑、读取模型候选两态、无「设为当前模型」、损坏配置文案）；`test/renderer/statusbar.test.ts` 7 条（分组、缺密钥标注、未配置态引导、切换回调、**重绘保持同一个下拉节点与焦点**）。
 - 窗口与样张：`pnpm ui:check` 功能 **148/0**（含"底栏模型模块列出已配置模型""切换即写为新任务所用模型""状态重绘后仍是同一个控件"）；`RGENT_UI_VISUAL_ONLY=1` **28/0**，模型页出根页与供应商子页两张样张（日／夜、含窄窗）。
 - 真机链路（本机受控端点）：读取模型的请求确实发出并带着**该供应商自己的密钥**（`GET /v1/models` + `Bearer`），3 条返回去重成 2 个候选，缺容量的那条让「添加所选」保持禁用。
-- 本机门禁：`pnpm test` 62 文件／734 通过／2 跳过；`docs:check`、`build` 通过。
+- 本机门禁：`pnpm test` 62 文件／735 通过／2 跳过；`docs:check`、`build` 通过。CI run `36807183722`：plan／docs／verify（macos-latest）／verify（windows-latest）／CI gate 全部 success。
 
 ## 库内 AI 工具（已交）
 
