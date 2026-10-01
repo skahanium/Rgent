@@ -137,6 +137,7 @@ flowchart LR
 | 一次性单场授权 | 主进程／Host | `TaskAuthorizationRegistry` 绑定调用方、会话、对象、口令和接收方；`agentStart` 不接受无预览启动。未知动作、范围外读取／写回、失效或重放均拒绝；Host 读、发、写共用校验，可信取消保稿不恢复模型授权。 |
 | 人写盘 ≠ 模型写盘 | IPC | `noteWrite` 只给人的自动写盘与手动保存。`AgentHost` 不得复用这条通道；Host 阶段建立独立模型入口，并与同篇人的写入串行协调。 |
 | 索引重建注册 | 主进程 | `VaultIndex` 同一时刻只保留一个在飞重建；注册位只有仍持有它的那次重建能清。库失效时的 `reset()` 只置脏位、不清注册位，查询必须等到当前世代装好，不得提前返回未建好的索引（`src/main/vault-index.ts`，反例见 `test/main/vault-index.test.ts`）。 |
+| 推理与过程只进账本 | 主进程 | `src/main/model-stream.ts` 把内联 `<think>…</think>` 与供应商的 `reasoning` 通道拆成独立事件，正文通道只收 `text`；`src/main/agent-host.ts` 分开累积推理与过程；`src/main/host-source.ts` 只把它们写进账本「过程」「推理」两节（推理超长截断）。正文里出现 `<think>` 按缺陷处理。 |
 | 索引不见账本 | 管线 / 索引 | `partitionSource` 切开锚点（`src/markdown/partition.ts`）。`compile` 和 `VaultIndex` 只吃 `body`。身份标记是机器语法，人搜的语料里把它等长填空格（偏移不变）——搜 `rgent` 不该搜到它，片段里也不该出现。 |
 | 画布不见账本 | 画布 | Tab 拆 `content`（正文）与 `ledger`（`src/renderer/src/tabs.ts`）。编辑器只 `setText(body)`。写盘 `composeSource`。账本回顾在当前 tab 内临时只读，入口常驻正文画布右上角；返回正文恢复原位置，不占右侧反链。 |
 | 人搜含禁区 | 索引 | `VaultIndex` 是全量语料，建索引时不按权限过滤。当前人搜是惰性全量 + 子串。模型检索先限定本场对象集合，再复用纯匹配器；不先全库查询再过滤。 |

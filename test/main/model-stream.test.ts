@@ -98,7 +98,7 @@ describe('single model step', () => {
 })
 
 
-it('drops reasoning from public events while charging it to the response byte ceiling', async () => {
+it('keeps reasoning on its own channel and out of the public text stream', async () => {
   const baseURL = await serverFor((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' })
     const emit = (delta: unknown, finish_reason: string | null = null) => response.write(`data: ${JSON.stringify({ id: 'r', object: 'chat.completion.chunk', created: 1, model: 'test', choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
@@ -108,8 +108,13 @@ it('drops reasoning from public events while charging it to the response byte ce
   })
   const events = []
   for await (const event of streamModelStep({ baseURL, modelId: 'test', apiKey: 'secret', messages: [{ role: 'user', content: 'hi' }], signal: new AbortController().signal })) events.push(event)
-  expect(JSON.stringify(events)).not.toContain('不应显示')
+  // 推理走独立事件（账本用它），正文通道拿不到它
+  expect(events).toContainEqual({ type: 'reasoning', text: '不应显示的思考' })
   expect(events).toContainEqual({ type: 'text', text: '公开回答' })
+  const texts: string[] = []
+  for await (const text of streamModelText({ baseURL, modelId: 'test', apiKey: 'secret', prompt: 'hi', signal: new AbortController().signal })) texts.push(text)
+  expect(texts.join('')).toBe('公开回答')
+  expect(texts.join('')).not.toContain('不应显示')
 
   const largeURL = await serverFor((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -185,4 +190,24 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
     expect(record.record.sources.map(item => item.relPath)).toEqual(['b.md', 'c.md'])
     expect(record.record.sentSources).toEqual(['b.md'])
   }
+})
+
+it('splits an inline think block that spans stream deltas', async () => {
+  const baseURL = await serverFor((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' })
+    const emit = (delta: unknown, finish_reason: string | null = null) => response.write(`data: ${JSON.stringify({ id: 'i', object: 'chat.completion.chunk', created: 1, model: 'test', choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
+    emit({ content: '开场' })
+    emit({ content: '<thi' })
+    emit({ content: 'nk>想' })
+    emit({ content: '法</think' })
+    emit({ content: '>正文' })
+    emit({}, 'stop'); response.end('data: [DONE]\n\n')
+  })
+  const events: { type: string; text?: string }[] = []
+  for await (const event of streamModelStep({ baseURL, modelId: 'test', apiKey: 'secret', messages: [{ role: 'user', content: 'hi' }], signal: new AbortController().signal })) events.push(event as { type: string; text?: string })
+  const texts = events.filter((e) => e.type === 'text').map((e) => e.text).join('')
+  const reasoning = events.filter((e) => e.type === 'reasoning').map((e) => e.text).join('')
+  expect(texts).toBe('开场正文')
+  expect(reasoning).toBe('想法')
+  expect(texts).not.toContain('think')
 })

@@ -278,6 +278,43 @@ describe('Host minimal loop', () => {
     expect(app.source()).not.toContain('第二段')
   })
 
+  it('keeps model reasoning and process in the ledger, never in the body', async () => {
+    const seeded = withExistingLedger()
+    let content = seeded.source
+    let revision = 1
+    const host = new AgentHost({
+      root: () => '/vault',
+      read: async () => ({ content, revision: String(revision) }),
+      write: async (_path, next, expected) => {
+        if (expected !== String(revision)) throw new Error('CONFLICT')
+        assertLedgerPreserved(next, partitionSource(content).ledger)
+        content = next
+        revision += 1
+        return String(revision)
+      },
+      tier: async () => 'reference',
+      credential: () => ({ provider: 'custom', baseURL: 'http://127.0.0.1:1234/v1', modelId: 'test', contextTokens: 10000, apiKey: 'secret' }),
+      limits: () => ({ seconds: 30, steps: 4, tools: 0 }),
+      stream: async function* () { throw new Error('LEGACY_FALLBACK') },
+      streamStep: async function* () {
+        yield { type: 'reasoning', text: '先想清楚依据：参考甲与参考乙。' }
+        yield { type: 'text', text: '公开回答。' }
+        yield { type: 'finish', reason: 'stop' }
+      },
+      emit: () => {}
+    })
+    const task = await host.start({ relPath: 'a.md', range: seeded.range, expectedText: '/写个回答', promptText: '写个回答' })
+    expect(await task.done).toEqual({ status: 'completed' })
+    const part = partitionSource(content)
+    expect(part.body).toContain('公开回答。')
+    expect(part.body).not.toContain('先想清楚依据')
+    expect(part.ledger).toContain('### 推理')
+    expect(part.ledger).toContain('先想清楚依据：参考甲与参考乙。')
+    expect(part.ledger).toContain('### 过程')
+    expect(part.ledger).toContain('第 1 步：文本')
+    expect(part.ledger).toContain('收尾：completed')
+  })
+
   it('retries every pending note even when one of them keeps failing', async () => {
     const seed = '前言\n\n/写个回答\n\n后文\n'
     const notes = new Map<string, { content: string; revision: number }>([

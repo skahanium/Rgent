@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { compile, partitionSource } from '../../src/markdown/index.ts'
-import { appendLedgerChapter, markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
+import { appendLedgerChapter, markPrompt, upsertAiAnswer, MAX_LEDGER_REASONING } from '../../src/main/host-source.ts'
 
 const taskId = 'task-123'
 
@@ -209,4 +209,33 @@ it('keeps the document BOM when marking a first-line prompt', () => {
   const marked = markPrompt(source, { taskId, range: { start: 1, end: 3 }, expectedText: '/问', promptText: '问' })
   expect(marked).toBe('\ufeff<!-- rgent:prompt:v1 task-id="task-123" -->\r\n问\r\n')
   expect(upsertAiAnswer(marked, { taskId, answer: '回答' }).startsWith('\ufeff<!-- rgent:prompt')).toBe(true)
+})
+
+describe('ledger records reasoning and process without touching the body', () => {
+  it('writes 过程 and 推理 sections and keeps them out of the answer blocks', () => {
+    const source = markPrompt('/问\n', { taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const answered = upsertAiAnswer(source, { taskId, answer: '公开回答' })
+    const final = appendLedgerChapter(answered, {
+      taskId, startedAt: 'now', status: 'completed', prompt: '问', answer: '公开回答',
+      reasoning: '第一步先看参考甲。\n第二步合并两篇。',
+      trace: ['第 1 步：请求工具', '工具 搜库「青柠计划」：已执行', '第 2 步：文本', '收尾：completed']
+    })
+    const part = partitionSource(final)
+    expect(part.body).toContain('公开回答')
+    expect(part.body).not.toContain('第一步先看参考甲')
+    expect(part.ledger).toContain('### 过程')
+    expect(part.ledger).toContain('工具 搜库「青柠计划」：已执行')
+    expect(part.ledger).toContain('### 推理')
+    expect(part.ledger).toContain('第一步先看参考甲。')
+    expect(part.ledger).toContain('收尾：completed')
+  })
+
+  it('truncates an oversized reasoning block and says so', () => {
+    const final = appendLedgerChapter('正文\n', {
+      taskId, startedAt: 'now', status: 'completed', prompt: 'p', answer: 'a',
+      reasoning: '推'.repeat(MAX_LEDGER_REASONING + 50)
+    })
+    expect(final).toContain('…（推理已截断）')
+    expect(final.length).toBeLessThan(MAX_LEDGER_REASONING * 3 + 2000)
+  })
 })

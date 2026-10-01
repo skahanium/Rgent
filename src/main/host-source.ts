@@ -22,9 +22,22 @@ export interface LedgerChapterWrite {
   startedAt: string
   status: 'completed' | 'cancelled' | 'failed' | 'limit'
   prompt: string
+  /** 只进正文的可见回答；推理不在其中。 */
   answer: string
   reason?: string
   provenance?: LedgerProvenance
+  /** 模型自述思考。只进账本的「推理」，不进正文；超长时截断。 */
+  reasoning?: string
+  /** 按发生顺序的一句话过程：模型步、工具调用与结果、收尾。 */
+  trace?: readonly string[]
+}
+
+/** 账本里的推理保留上限；超出只留开头并标注截断。 */
+export const MAX_LEDGER_REASONING = 8000
+
+function boundedReasoning(text: string): string {
+  const flat = text.replace(/\r\n|\r/g, '\n')
+  return flat.length > MAX_LEDGER_REASONING ? `${flat.slice(0, MAX_LEDGER_REASONING)}\n…（推理已截断）` : flat
 }
 
 function taskKey(taskId: string): string {
@@ -191,6 +204,8 @@ export function appendLedgerChapter(source: string, write: LedgerChapterWrite): 
     '### 工具摘要',
     '',
     write.provenance?.tools.length ? write.provenance.tools.map(tool => `${escapedModelText(tool.name === 'read_library' ? '读库' : tool.name === 'search_library' ? '搜库' : tool.name)}：${escapedModelText(tool.outcome)}`).join('；') : '无工具',
+    ...(write.trace?.length ? ['', '### 过程', '', ...write.trace.map(line => escapedModelText(line))] : []),
+    ...(write.reasoning?.trim() ? ['', '### 推理', '', escapedModelText(boundedReasoning(write.reasoning))] : []),
     ...(write.provenance ? ['', `模型：${escapedModelText(write.provenance.model.provider)} / ${escapedModelText(write.provenance.model.modelId)}（${escapedModelText(write.provenance.model.endpointHost)}）`, `授权范围：${escapedModelText(write.provenance.scope.join('、'))}`, `实际读取来源：${escapedModelText(write.provenance.sources.map(source => source.relPath).join('、')) || '仅发起篇'}`, `模型消息引用来源：${escapedModelText((write.provenance.sentSources ?? write.provenance.sources.map(source => source.relPath)).join('、')) || '仅发起篇'}`] : []),
     ...(write.reason ? ['', `中止原因：${escapedModelText(write.reason)}`] : []),
     ''

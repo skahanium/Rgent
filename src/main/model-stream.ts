@@ -4,6 +4,8 @@ import { streamText, tool, jsonSchema, isStepCount, type ModelMessage, type Tool
 export type ToolSchema = { description: string; inputSchema: Parameters<typeof jsonSchema>[0] }
 export type ModelStepEvent =
   | { type: 'text'; text: string }
+  /** 模型自述的思考。它只进账本，不进正文。 */
+  | { type: 'reasoning'; text: string }
   | { type: 'tool-call'; id: string; name: string; input: unknown; invalid?: boolean }
   | { type: 'finish'; reason: string }
 export type ModelStreamInput = {
@@ -20,6 +22,53 @@ export type ModelStepInput = Omit<ModelStreamInput, 'prompt'> & {
   tools?: Record<string, ToolSchema>
 }
 export const MODEL_STREAM_BOUNDS = { argumentBytes: 65536, callsPerStep: 64, responseBytes: 1048576 } as const
+
+const THINK_OPEN = '<think>'
+const THINK_CLOSE = '</think>'
+
+/** 末尾有多长的一段可能是标签前缀，需要留到下一片再判断。 */
+function heldTail(text: string, tag: string): number {
+  const max = Math.min(text.length, tag.length - 1)
+  for (let size = max; size > 0; size -= 1) if (text.endsWith(tag.slice(0, size))) return size
+  return 0
+}
+
+/**
+ * 有的供应商把思维链内联在 `content` 里，用 `<think>…</think>` 包住。
+ * 这里按标签切开：标签外的算正文，标签内的算推理；跨分片的半个标签留在缓冲里等下一片。
+ */
+export function createThinkSplitter(): {
+  feed(chunk: string): { type: 'text' | 'reasoning'; text: string }[]
+  flush(): { type: 'text' | 'reasoning'; text: string }[]
+} {
+  let mode: 'text' | 'reasoning' = 'text'
+  let buffer = ''
+  return {
+    feed(chunk) {
+      buffer += chunk
+      const out: { type: 'text' | 'reasoning'; text: string }[] = []
+      for (;;) {
+        const tag = mode === 'text' ? THINK_OPEN : THINK_CLOSE
+        const at = buffer.indexOf(tag)
+        if (at < 0) {
+          const hold = heldTail(buffer, tag)
+          const safe = buffer.length - hold
+          if (safe > 0) out.push({ type: mode, text: buffer.slice(0, safe) })
+          buffer = buffer.slice(safe)
+          return out
+        }
+        if (at > 0) out.push({ type: mode, text: buffer.slice(0, at) })
+        buffer = buffer.slice(at + tag.length)
+        mode = mode === 'text' ? 'reasoning' : 'text'
+      }
+    },
+    flush() {
+      const out: { type: 'text' | 'reasoning'; text: string }[] = buffer ? [{ type: mode, text: buffer }] : []
+      buffer = ''
+      return out
+    }
+  }
+}
 
 /** One provider step. Tool definitions deliberately have no execute callback. */
 export async function* streamModelStep(input: ModelStepInput): AsyncGenerator<ModelStepEvent> {
@@ -41,14 +90,16 @@ export async function* streamModelStep(input: ModelStepInput): AsyncGenerator<Mo
   let calls = 0
   let finished = false
   const invalidIds = new Set<string>()
+  const think = createThinkSplitter()
   for await (const part of result.fullStream) {
     if (part.type === 'reasoning-delta') {
       bytes += Buffer.byteLength(part.text, 'utf8')
       if (bytes > MODEL_STREAM_BOUNDS.responseBytes) throw Error('MODEL_OUTPUT_LIMIT')
+      if (part.text) yield { type: 'reasoning', text: part.text }
     } else if (part.type === 'text-delta') {
       bytes += Buffer.byteLength(part.text, 'utf8')
       if (bytes > MODEL_STREAM_BOUNDS.responseBytes) throw Error('MODEL_OUTPUT_LIMIT')
-      yield { type: 'text', text: part.text }
+      for (const piece of think.feed(part.text)) if (piece.text) yield { type: piece.type, text: piece.text }
     } else if (part.type === 'tool-input-start') {
       if (++calls > MODEL_STREAM_BOUNDS.callsPerStep) throw Error('TOOL_CALL_LIMIT')
       if (part.providerExecuted) throw Error('MODEL_PROTOCOL_ERROR')
@@ -65,6 +116,7 @@ export async function* streamModelStep(input: ModelStepInput): AsyncGenerator<Mo
     } else if (part.type === 'finish') {
       if (finished || !['stop', 'length', 'content-filter', 'tool-calls'].includes(part.finishReason) || part.finishReason === 'tool-calls' && !calls) throw Error('MODEL_PROTOCOL_ERROR')
       finished = true
+      for (const piece of think.flush()) if (piece.text) yield { type: piece.type, text: piece.text }
       yield { type: 'finish', reason: part.finishReason }
     } else if (part.type === 'error') {
       throw Error('MODEL_REQUEST_FAILED')
