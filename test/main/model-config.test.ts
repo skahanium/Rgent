@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createModelConfigStore, MAX_MODELS_PER_PROVIDER, type SecretProtection } from '../../src/main/model-config.ts'
+import { createModelConfigStore, memoryAuthorizationState, MAX_MODELS_PER_PROVIDER, type SecretProtection } from '../../src/main/model-config.ts'
 
 const directories: string[] = []
 const directory = (): string => {
@@ -246,6 +246,26 @@ describe('model configuration', () => {
 
 describe('memory model role', () => {
   const vaultKey = 'a'.repeat(64)
+  it.each(['path', 'credential', 'capacity'] as const)('invalidates initial memory authorization when an independent connection changes %s', change => {
+    const store = createModelConfigStore(directory(), protection)
+    store.saveProvider({ provider: 'deepseek', baseURL: 'https://answer.test/v1', modelId: 'answer', contextTokens: 32000 }, 'answer-key')
+    const answerId = store.getPublic().models.find(m => m.provider === 'deepseek')!.id
+    store.setDefault(answerId)
+    store.saveProvider({ provider: 'custom', baseURL: 'https://memory.test/first/v1', modelId: 'organize', contextTokens: 32000 }, 'memory-key')
+    const memoryId = store.getPublic().models.find(m => m.provider === 'custom')!.id
+    store.setMemoryDefault(memoryId)
+    store.setVaultMemory(vaultKey, { enabled: true, override: { mode: 'inherit' } })
+    const before = memoryAuthorizationState(store, vaultKey), answer = store.credential()
+    expect(memoryAuthorizationState(store, vaultKey).signature).toBe(before.signature)
+    expect(JSON.stringify(before.disclosure)).not.toMatch(/memory-key|first\/v1|apiKey|signature/)
+    if (change === 'capacity') store.updateModel(memoryId, 64000)
+    else store.saveProvider({ provider: 'custom', baseURL: change === 'path' ? 'https://memory.test/second/v1' : 'https://memory.test/first/v1', modelId: 'organize', contextTokens: 32000 }, change === 'credential' ? 'changed-memory-key' : undefined)
+    const after = memoryAuthorizationState(store, vaultKey)
+    expect(store.credential()).toEqual(answer)
+    expect(after.disclosure).toEqual(before.disclosure)
+    expect(after.signature).not.toBe(before.signature)
+    expect(JSON.stringify(after.disclosure)).not.toMatch(/changed-memory-key|apiKey|signature/)
+  })
   it('migrates v1/v2 read-only, defaults off, and keeps the public model shape', () => {
     for (const version of [1, 2]) {
       const root = directory()

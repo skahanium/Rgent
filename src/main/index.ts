@@ -21,7 +21,7 @@ import { attachRemoteImageProtocol } from './remote-image-protocol.ts'
 import { VAULT_MEDIA_SCHEME } from '../shared/vault-rel.ts'
 import { VaultSession } from './vault.ts'
 import { fetchModelList } from './model-list.ts'
-import { createModelConfigStore, type ModelConfigStore } from './model-config.ts'
+import { createModelConfigStore, memoryAuthorizationState as configuredMemoryAuthorizationState, type ModelConfigStore } from './model-config.ts'
 import { TaskAuthorizationRegistry, isAuthorizationCommand } from './task-authorization.ts'
 import { createScopedAgentTools } from './scoped-agent-tools.ts'
 import { createMemoryIpc } from './memory-ipc.ts'
@@ -71,11 +71,7 @@ const memoryAuthorizationPreviews = new Map<string, { sessionId: string; signatu
 function memoryAuthorizationState(sessionId: string) {
   vault?.assertSession(sessionId)
   if (!vault || !modelConfig) return { signature: 'unavailable', disclosure: undefined }
-  const ctx = vault.memoryContext(), cfg = modelConfig.getMemoryConfig(ctx.vaultKey)
-  let recipient: { modelId: string; host: string } | null = null
-  if (cfg.modelStatus === 'ready') { const c = modelConfig.memoryCredential(ctx.vaultKey); recipient = { modelId: c.modelId, host: new URL(c.baseURL).host } }
-  const disclosure = { use: cfg.vault.enabled, consolidate: cfg.vault.enabled && !!recipient, recipient, limits: cfg.limits }
-  return { signature: JSON.stringify([cfg, recipient, modelConfig.getVaultMemoryEpoch(ctx.vaultKey)]), disclosure }
+  return configuredMemoryAuthorizationState(modelConfig, vault.memoryContext().vaultKey)
 }
 const imageControllers = new Map<AbortController, {vault: VaultSession; binding: string; request: import('../shared/ipc.ts').RemoteImageGetRequest}>()
 const lifecycleFlushes = new Map<string, (ok: boolean) => void>()

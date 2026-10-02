@@ -324,8 +324,28 @@ async function verifyMemoryIntegration(page, vault, shot, requests) {
   await waitFor(page, `!!document.querySelector('.settings-nav')`)
   await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='记忆').click()`)
   await waitFor(page, `!!document.querySelector('.memory-entry')`)
-  await page.eval(`document.querySelector('.memory-entry').open=true; document.querySelector('.memory-entry').scrollIntoView({block:'start'})`)
+  await page.eval(`document.querySelector('.memory-entry').open=true; document.querySelector('.memory-entry .memory-source').open=true; document.querySelector('.memory-entry').scrollIntoView({block:'start'})`)
   await shot(page,'memory-entry-and-source')
+  const memoryTheme = await page.eval(`window.rgent.themeGet()`)
+  // Earlier layout checks emulate light; nativeTheme can only drive matchMedia after clearing that override.
+  await page.call('Emulation.setEmulatedMedia', { features: [] })
+  if (!await waitFor(page, `document.documentElement.dataset.theme===(matchMedia('(prefers-color-scheme: dark)').matches?'night':'day')`)) throw Error('记忆样张开始前实际主题尚未同步')
+  const memoryRenderedTheme = await page.eval(`document.documentElement.dataset.theme`)
+  for (const mode of ['day', 'night']) {
+    await page.eval(`window.rgent.themeSet('${mode}')`)
+    const themeApplied = await waitFor(page, `document.documentElement.dataset.theme==='${mode}' && matchMedia('(prefers-color-scheme: dark)').matches===${mode==='night'}`)
+    const textareaStyle = await page.eval(`(() => {
+      const textarea=document.querySelector('.memory-entry textarea'),reference=document.createElement('textarea'),field=document.createElement('div');field.className='settings-field-block';field.style.cssText='position:absolute;visibility:hidden';field.append(reference);document.querySelector('.settings-form').append(field)
+      const current=getComputedStyle(textarea),standard=getComputedStyle(reference),properties=['backgroundColor','color','borderColor','borderRadius','paddingTop','paddingRight','paddingBottom','paddingLeft','fontFamily']
+      const themed=properties.every(property=>current[property]===standard[property])&&current.paddingTop==='8px'&&current.paddingLeft==='10px'&&current.borderTopWidth==='1px';field.remove()
+      return document.documentElement.dataset.theme==='${mode}'&&themed&&document.querySelector('.memory-entry').open&&document.querySelector('.memory-entry .memory-source').open
+    })()`)
+    check(`记忆条目文本框${mode==='day'?'日间':'夜间'}复用设置主题及边框留白`,themeApplied&&textareaStyle)
+    await page.eval(`document.querySelector('.memory-entry').scrollIntoView({block:'start'})`)
+    await shot(page,`memory-entry-and-source-${mode}`)
+  }
+  await page.eval(`window.rgent.themeSet(${JSON.stringify(memoryTheme)})`)
+  check('条目日夜样张后恢复原主题',await waitFor(page,`document.documentElement.dataset.theme===${JSON.stringify(memoryRenderedTheme)}`))
   await page.eval(`(() => {const entry=document.querySelector('.memory-entry');entry.open=true;[...entry.querySelectorAll('button')].find(b=>b.textContent==='删除并遗忘').click()})()`)
   check('遗忘预先说明清除待整理重试材料且原文不变',await waitFor(page, `document.querySelector('.memory-forget-warning')?.textContent.includes('原笔记及账本不变')`))
   await page.eval(`[...document.querySelectorAll('.memory-entry button')].find(b=>b.textContent==='确认删除并遗忘').click()`)
@@ -2214,7 +2234,7 @@ async function main() {
       const unrelatedSaved = await waitFor(page, `(async () => {
         const source = (await window.rgent.noteRead('生命周期/无关生成.md')).content
         const [body,ledger] = source.split('<!-- rgent:ledger:v1 -->')
-        const chapters = [...(ledger||'').matchAll(/^<!-- rgent:ledger-task:v1 id="([^"\\r\\n]+)"(?: sources="v1")? -->\\r?$/gm)]
+        const chapters = [...(ledger||'').matchAll(/^<!-- rgent:ledger-task:v1 id="([^"\\r\\n]+)"(?: sources="v[12]")? -->\\r?$/gm)]
         const chapter = chapters.length===1 ? ledger.slice(chapters[0].index) : ''
         const status = /^## [^\\r\\n]+ · (cancelled|failed)\\r?$/m.exec(chapter)?.[1]
         const stopped = status==='cancelled' || status==='failed' && /^中止原因：LIFECYCLE_RECOVERY_REQUIRED\\r?$/m.test(chapter)

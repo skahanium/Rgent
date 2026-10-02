@@ -1,5 +1,5 @@
 import type { MemoryView, MemoryManualRequest, MemoryResult } from '../../shared/memory.ts'
-import { memoryErrorText, renderMemoryPreview, ledgerRememberRanges, type MemoryPageHandlers } from './memory-ui.ts'
+import { memoryErrorText, renderMemoryPreview, mountLedgerRememberButtons, type MemoryPageHandlers } from './memory-ui.ts'
 import { IPC, type AgentEvent, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type PublicModelConfig, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
@@ -1269,17 +1269,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const ledgerSource = tab.ledger ?? ''
     if (ledgerSource.trim()) {
       renderReadOnlyMarkdown(ledgerBody, ledgerSource, noteHost())
-      const headings = Array.from(ledgerBody.querySelectorAll('h2'))
-      for (const choice of ledgerRememberRanges(ledgerSource)) {
-        const chapters = [...ledgerSource.matchAll(/^<!-- rgent:ledger-task:v1 id="([A-Za-z0-9_-]+)"(?: sources="v[12]")? -->\r?$/gm)]
-        const index = chapters.findIndex(match => match[1] === choice.taskId)
-        const target = headings[index]
-        if (!target) continue
-        const remember = document.createElement('button'); remember.type = 'button'; remember.className = 'memory-ledger-remember'
-        remember.textContent = `记住${choice.label}`; remember.setAttribute('aria-label', `记住任务 ${choice.taskId} 的${choice.label}`)
-        remember.addEventListener('click', () => void rememberSelection('ledger', choice.start, choice.end, choice.taskId))
-        target.after(remember)
-      }
+      mountLedgerRememberButtons(ledgerBody, ledgerSource, (start, end, taskId) => void rememberSelection('ledger', start, end, taskId))
     }
     else ledgerBody.textContent = '这篇笔记还没有账本。完成一次生成任务后，可在这里回顾。'
     ledgerEl.hidden = false

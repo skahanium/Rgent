@@ -18,7 +18,16 @@ const modelSelect=(config:PublicModelConfig|null,value:string|null,empty:string)
   select.value=value??'';return select
 }
 function sources(host:HTMLElement,items:MemorySourceView[]):void{
-  for(const source of items){const details=el('details','memory-source');const summary=el('summary');summary.textContent=`${source.relPath}${source.kind==='ledger'?` · 账本任务 ${source.taskId??'无法核对'}`:' · 正文'} · ${source.classification==='adopted-ai'?'人工采纳':source.classification==='command'?'口令':'人写'}`;details.append(summary);if(source.text)details.append(paragraph(source.text,'memory-source-text'));host.append(details)}
+  const existing=Array.from(host.querySelectorAll<HTMLDetailsElement>(':scope > .memory-source'))
+  items.forEach((source,index)=>{
+    const details=existing[index]??el('details','memory-source'),summary=details.querySelector('summary')??el('summary')
+    summary.textContent=`${source.relPath}${source.kind==='ledger'?` · 账本任务 ${source.taskId??'无法核对'}`:' · 正文'} · ${source.classification==='adopted-ai'?'人工采纳':source.classification==='command'?'口令':'人写'}`
+    if(!summary.parentElement)details.append(summary)
+    const text=details.querySelector<HTMLElement>('.memory-source-text')
+    if(source.text){if(text)text.textContent=source.text;else details.append(paragraph(source.text,'memory-source-text'))}else text?.remove()
+    if(!details.parentElement)host.append(details)
+  })
+  for(const details of existing.slice(items.length))details.remove()
 }
 export type MemoryPreviewHandlers={commit:(request:Omit<MemoryCommitRequest,'sessionId'>)=>Promise<MemoryResult<MemoryView>>;isCurrent:()=>boolean;onDone:(view:MemoryView)=>void;onCancel:()=>void}
 /** Used inline for management and in the existing overlay for a body/ledger selection. */
@@ -79,6 +88,25 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     hostNode.querySelector('.memory-preview')?.remove()
     renderMemoryPreview(hostNode,result.value,{commit:handlers.commit,isCurrent:()=>current()&&hostNode.isConnected,onDone:value=>{accept(value)},onCancel:()=>hostNode.querySelector('.memory-preview')?.remove()})
   }
+  function paintEntryMetadata(row: HTMLElement, entry: MemoryEntryView): void {
+    const signature = JSON.stringify([entry.status, entry.reason, entry.sources, entry.updatedAt, entry.pendingTarget])
+    if (row.dataset.metadata === signature) return
+    const summary = row.querySelector('summary')!
+    summary.textContent = `${({active:'有效',paused:'暂停',pending:'待确认',disabled:'停用'})[entry.status]} · ${entry.layer==='core'?'核心':'按需'} · ${entry.content}`
+    const metadata = row.querySelector<HTMLElement>('.memory-entry-metadata')!
+    let detail = metadata.querySelector<HTMLElement>(':scope > .settings-hint')
+    if (!detail) { detail = paragraph(''); metadata.prepend(detail) }
+    detail.textContent = `版本 ${entry.version} · ${entry.updatedAt}${entry.reason?` · ${memoryErrorText(entry.reason)}`:''}`
+    sources(metadata, entry.sources)
+    const action = row.querySelector<HTMLButtonElement>('.memory-entry-state-action')!
+    action.textContent = entry.status === 'active' ? '停用' : entry.pendingTarget ? '核对更正' : '核对来源并恢复'
+    action.onclick = () => { if (entry.status === 'active') void mutate(() => handlers.disable(binding(entry)), action); else void preview(row, () => handlers.restore(binding(entry))) }
+    if (row.querySelector('.memory-preview')) {
+      row.querySelector('.memory-preview')!.remove()
+      row.append(paragraph('来源或状态已变化；原预览已失效，请重新核对。'))
+    }
+    row.dataset.metadata = signature
+  }
   function paintItems():void{
     const focus = document.activeElement instanceof HTMLElement && items.contains(document.activeElement) ? document.activeElement : null
     const existing = new Map(Array.from(items.querySelectorAll<HTMLElement>('.memory-entry')).map(row => [row.dataset.memoryId!, row]))
@@ -86,24 +114,22 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     if(!view?.entries.length)items.append(paragraph('还没有记忆。获准任务保存后可自动整理，也可从正文选区或本篇账本补充记住。'))
     for(const entry of view?.entries??[]){
       const previous = existing.get(entry.id)
-      if (previous && previous.dataset.version === String(entry.version)) { items.append(previous); continue }
+      if (previous && previous.dataset.version === String(entry.version)) { paintEntryMetadata(previous, entry); items.append(previous); continue }
       if (previous instanceof HTMLDetailsElement && previous.open) {
         if (!previous.querySelector('.memory-stale-warning')) previous.append(paragraph('当前条目版本已变化；草稿保留。请关闭条目并刷新后重新核对。', 'settings-hint memory-stale-warning'))
         items.append(previous); continue
       }
       const row=el('details','memory-entry');row.dataset.memoryId=entry.id;row.dataset.version=String(entry.version)
-      const summary=el('summary');summary.textContent=`${({active:'有效',paused:'暂停',pending:'待确认',disabled:'停用'})[entry.status]} · ${entry.layer==='core'?'核心':'按需'} · ${entry.content}`;row.append(summary)
-      row.append(paragraph(`版本 ${entry.version} · ${entry.updatedAt}${entry.reason?` · ${memoryErrorText(entry.reason)}`:''}`));sources(row,entry.sources)
+      row.append(el('summary'), el('div', 'memory-entry-metadata'))
       const content=el('textarea');content.rows=3;content.value=entry.content;content.maxLength=4096;content.setAttribute('aria-label','记忆内容')
       const layer=layerSelect(entry.layer),scope=el('input');scope.value=entry.scope;scope.maxLength=512
       row.append(field('内容',content),field('层级',layer),field('适用范围',scope))
       const actions=el('div','settings-actions')
       const save=button('保存条目',()=>void mutate(()=>handlers.edit({...binding(entry),content:content.value,layer:layer.value as 'core'|'demand',scope:scope.value}),save));actions.append(save)
-      if(entry.status==='active'){const disable=button('停用',()=>void mutate(()=>handlers.disable(binding(entry)),disable));actions.append(disable)}
-      else actions.append(button(entry.pendingTarget?'核对更正':'核对来源并恢复',()=>void preview(row,()=>handlers.restore(binding(entry)))))
+      const stateAction = el('button', 'settings-action memory-entry-state-action'); stateAction.type = 'button'; actions.append(stateAction)
       let armed=false
       const forget=button('删除并遗忘',()=>{if(!armed){armed=true;const warning=paragraph('同时清除无法证明无关的待整理重试材料，原笔记及账本不变。');warning.classList.add('memory-forget-warning');row.append(warning);forget.textContent='确认删除并遗忘';return}void mutate(()=>handlers.forget(binding(entry)),forget)})
-      actions.append(forget);row.append(actions);items.append(row)
+      actions.append(forget);row.append(actions);paintEntryMetadata(row, entry);items.append(row)
     }
     if (focus?.isConnected) focus.focus({ preventScroll: true })
   }
@@ -164,4 +190,23 @@ export function ledgerRememberRanges(ledger:string):{taskId:string;label:string;
     }
   }
   return result
+}
+
+export function mountLedgerRememberButtons(host: HTMLElement, ledger: string, rememberSelection: (start: number, end: number, taskId: string) => void): void {
+  const headings = Array.from(host.querySelectorAll<HTMLHeadingElement>('h2[data-source-start]'))
+  const chapters = [...ledger.matchAll(/^<!-- rgent:ledger-task:v1 id="([A-Za-z0-9_-]+)"(?: sources="(v[12])")? -->\r?$/gm)]
+  for (const choice of ledgerRememberRanges(ledger)) {
+    const chapterIndex = chapters.findIndex(match => match[1] === choice.taskId), chapter = chapters[chapterIndex]
+    if (!chapter) continue
+    const prefix = ledger.slice(chapter.index! + chapter[0].length, chapters[chapterIndex + 1]?.index ?? ledger.length)
+    const header = /^\r?\n(?:<!-- rgent:ledger-sources:(v[12]) data="[A-Za-z0-9_-]+" -->\r?\n)?(?:\r?\n)*## [^\r\n]+\r?(?:\n|$)/u.exec(prefix)
+    if (!header || header[1] !== chapter[2]) continue
+    const start = chapter.index! + chapter[0].length + header[0].indexOf('## ')
+    const target = headings.find(heading => heading.dataset.sourceStart === String(start))
+    if (!target) continue
+    const remember = document.createElement('button'); remember.type = 'button'; remember.className = 'memory-ledger-remember'
+    remember.textContent = `记住${choice.label}`; remember.setAttribute('aria-label', `记住任务 ${choice.taskId} 的${choice.label}`)
+    remember.addEventListener('click', () => rememberSelection(choice.start, choice.end, choice.taskId))
+    target.after(remember)
+  }
 }

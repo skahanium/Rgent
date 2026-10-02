@@ -1,14 +1,19 @@
-import { expect, it } from 'vitest'
+import { afterEach, expect, it } from 'vitest'
 import { AgentHost, type HostEvent } from '../../src/main/agent-host.ts'
+import { createModelConfigStore, memoryAuthorizationState } from '../../src/main/model-config.ts'
+import { mkdtempSync, rmSync } from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
 
-function boundHost() {
+function boundHost(memoryState?: () => { signature: string }) {
+  const approvedMemorySignature = memoryState?.().signature ?? 'approved'
   const state = { content: '/问\n', revision: 1, objectVersion: 'original', sessionId: 'session-1', allowed: true,
     reads: 0, writes: 0, network: 0, failLedger: false, afterRead: () => {}, afterTier: () => {}, memorySignature: 'approved', changeWhileRecalling: false }
   const events: HostEvent[] = []
   const successors = new Map<string, string>()
   let generate: () => AsyncIterable<string> = async function* () { yield 'answer' }
   const host = new AgentHost({
-    assertMemoryAuthorization: input => { if (input.memoryAuthorizationSignature !== state.memorySignature) throw Error('STALE_PREVIEW') },
+    assertMemoryAuthorization: input => { if (input.memoryAuthorizationSignature !== (memoryState?.().signature ?? state.memorySignature)) throw Error('STALE_PREVIEW') },
     memory: { context: () => ({sessionId: state.sessionId,vaultKey:'key'}), config: () => ({enabled: true,epoch:0}), entries: async () => {if (state.changeWhileRecalling) state.memorySignature='changed'; return []} },
     root: () => '/vault', session: () => state.sessionId,
     acceptsObject: (_path, expected, current) => {
@@ -35,7 +40,7 @@ function boundHost() {
     stream: async function* () { state.network++; yield* generate() }, emit: event => events.push(event)
   })
   const start = () => host.start({ relPath: 'a.md', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问',
-    memoryAuthorizationSignature: 'approved', expectedRevision: String(state.revision), sessionId: state.sessionId, objectVersion: state.objectVersion })
+    memoryAuthorizationSignature: approvedMemorySignature, expectedRevision: String(state.revision), sessionId: state.sessionId, objectVersion: state.objectVersion })
   return { host, state, events, start, stream: (next: typeof generate) => { generate = next } }
 }
 
@@ -45,6 +50,25 @@ it('allows a new bound task after a completed task and same-root reattachment', 
   app.state.sessionId = 'session-2'; app.state.content = '/问\n'; app.state.objectVersion = 'reopened'; app.state.revision++
   await expect((await app.start()).done).resolves.toMatchObject({ status: 'completed' })
   expect(app.events.at(-1)).toMatchObject({ sessionId: 'session-2', persisted: true })
+})
+
+const configDirectories: string[] = []
+afterEach(() => { for (const dir of configDirectories.splice(0)) rmSync(dir, { recursive: true, force: true }) })
+it.each(['unchanged', 'path', 'credential'] as const)('rechecks the actual independent memory connection before launch when %s', async change => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'rgent-memory-binding-')); configDirectories.push(directory)
+  const config = createModelConfigStore(directory, { isEncryptionAvailable: () => true, encryptString: Buffer.from, decryptString: b => b.toString() })
+  config.saveProvider({ provider: 'custom', baseURL: 'https://memory.test/first/v1', modelId: 'organize', contextTokens: 32000 }, 'memory-key')
+  const model = config.getPublic().models.find(m => m.provider === 'custom')!, key = 'a'.repeat(64)
+  config.setMemoryDefault(model.id); config.setVaultMemory(key, { enabled: true, override: { mode: 'inherit' } })
+  const app = boundHost(() => memoryAuthorizationState(config, key))
+  let changed = false
+  app.state.afterRead = () => {
+    if (changed || change === 'unchanged') return
+    changed = true
+    config.saveProvider({ provider: 'custom', baseURL: change === 'path' ? 'https://memory.test/second/v1' : 'https://memory.test/first/v1', modelId: 'organize', contextTokens: 32000 }, change === 'credential' ? 'changed-memory-key' : undefined)
+  }
+  if (change === 'unchanged') { await expect((await app.start()).done).resolves.toMatchObject({ status: 'completed' }); expect(app.state.network).toBe(1) }
+  else { await expect(app.start()).rejects.toThrow('STALE_PREVIEW'); expect(app.state.writes).toBe(0); expect(app.state.network).toBe(0) }
 })
 
 it('retains generated chapters under their original object and session after identical-byte replacement', async () => {

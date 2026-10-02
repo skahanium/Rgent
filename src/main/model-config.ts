@@ -17,6 +17,15 @@ export type ModelCredential = {
   apiKey: string
 }
 
+/** Main-only authorization snapshot; disclose only the public recipient to renderer. */
+export function memoryAuthorizationState(config: ModelConfigStore, vaultKey: string) {
+  const cfg = config.getMemoryConfig(vaultKey)
+  const credential = cfg.modelStatus === 'ready' ? config.memoryCredential(vaultKey) : null
+  const recipient = credential ? { modelId: credential.modelId, host: new URL(credential.baseURL).host } : null
+  const disclosure = { use: cfg.vault.enabled, consolidate: cfg.vault.enabled && !!recipient, recipient, limits: cfg.limits }
+  return { signature: JSON.stringify([cfg, credential, config.getVaultMemoryEpoch(vaultKey)]), disclosure }
+}
+
 /** The main process passes Electron safeStorage here; no Electron dependency reaches tests or renderer. */
 export type SecretProtection = {
   isEncryptionAvailable(): boolean

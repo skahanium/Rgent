@@ -76,7 +76,11 @@ function render(node: ExtendedNode, source: string, host?: NoteHost, standaloneI
       paragraph.append(fragment)
       return paragraph
     }
-    case 'heading': return element(`h${Math.min(6, Math.max(1, node.depth ?? 1))}`)
+    case 'heading': {
+      const heading = element(`h${Math.min(6, Math.max(1, node.depth ?? 1))}`)
+      if (node.position?.start.offset !== undefined) heading.dataset.sourceStart = String(node.position.start.offset)
+      return heading
+    }
     case 'strong': return element('strong')
     case 'emphasis': return element('em')
     case 'delete': return element('del')

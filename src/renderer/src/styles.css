@@ -476,7 +476,9 @@ a[href]:focus-visible,
   font: 0.8rem var(--font-ui);
 }
 .settings-subtitle { margin: 2px 0 8px; color: var(--text-heading); font-size: 1.06rem; font-weight: 600; }
-.settings-field-block textarea {
+.settings-field-block textarea,
+.memory-entry textarea,
+.memory-preview textarea {
   width: 100%;
   min-height: 84px;
   padding: 8px 10px;
@@ -487,7 +489,9 @@ a[href]:focus-visible,
   font: 0.84rem/1.5 var(--font-ui);
   resize: vertical;
 }
-.settings-field-block textarea:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.settings-field-block textarea:focus-visible,
+.memory-entry textarea:focus-visible,
+.memory-preview textarea:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .settings-back:hover { border-color: var(--border-subtle); background: var(--state-hover); color: var(--text-heading); }
 .settings-back:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
@@ -1818,7 +1822,7 @@ a[href]:focus-visible,
 .memory-entry { padding: 12px 0; border-bottom: 1px solid var(--border-subtle); overflow-wrap: anywhere; }
 .memory-entry > summary { cursor: pointer; font-size: .82rem; line-height: 1.6; }
 .memory-entry .settings-field { margin-top: 12px; }
-.memory-entry textarea, .memory-preview textarea { resize: vertical; min-height: 88px; width: 100%; font-family: inherit; }
+.memory-entry textarea, .memory-preview textarea { min-height: 88px; }
 .memory-source { margin: 8px 0; font-size: .75rem; overflow-wrap: anywhere; }
 .memory-source summary { cursor: pointer; }
 .memory-source-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-body); font-size: .82rem; line-height: 1.65; }
