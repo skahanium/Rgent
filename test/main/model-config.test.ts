@@ -191,7 +191,7 @@ describe('model configuration', () => {
     store.addModel({ provider: 'minimax', modelId: 'independent', contextTokens: 1024 })
   })
 
-  it('migrates a v1 file in memory, keeps its keys and default, and only writes v2 on the next change', () => {
+  it('migrates a v1 file in memory, keeps its keys and default, and only writes v3 on the next change', () => {
     const root = directory()
     const original = v1File({ keys: { deepseek: 'key-deepseek', minimax: 'key-minimax' } })
     writeFileSync(configPath(root), original)
@@ -211,7 +211,7 @@ describe('model configuration', () => {
 
     store.setDefault(snapshot.models[0]!.id)
     const written = JSON.parse(readFileSync(configPath(root), 'utf8')) as { version: number; defaultModelId: string }
-    expect(written.version).toBe(2)
+    expect(written.version).toBe(3)
     expect(written.defaultModelId).toBe(snapshot.models[0]!.id)
     expect(createModelConfigStore(root, protection).credential().apiKey).toBe('key-deepseek')
   })
@@ -242,4 +242,68 @@ describe('model configuration', () => {
     store.saveProvider({ provider: 'deepseek', baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1048576 })
     expect(store.getPublic().defaultModelId).toBeNull()
   })
+})
+
+describe('memory model role', () => {
+  const vaultKey = 'a'.repeat(64)
+  it('migrates v1/v2 read-only, defaults off, and keeps the public model shape', () => {
+    for (const version of [1, 2]) {
+      const root = directory()
+      let original = v1File()
+      if (version === 2) {
+        const initial = createModelConfigStore(root, protection)
+        initial.setDefault(null)
+        const stored = JSON.parse(readFileSync(configPath(root), 'utf8'))
+        delete stored.memory; stored.version = 2
+        original = JSON.stringify(stored)
+      }
+      writeFileSync(configPath(root), original)
+      const store = createModelConfigStore(root, protection)
+      expect(store.getMemoryConfig(vaultKey)).toEqual({ defaultModelId: null, limits: { seconds: 120, calls: 2, tools: 0 }, vault: { enabled: false, override: { mode: 'inherit' } }, effectiveModelId: null, modelStatus: 'missing' })
+      expect(Object.keys(store.getPublic()).sort()).toEqual(['defaultModelId', 'limits', 'models', 'providers'])
+      expect(readFileSync(configPath(root), 'utf8')).toBe(original)
+      store.setMemoryDefault(store.getPublic().models[0]!.id)
+      expect(JSON.parse(readFileSync(configPath(root), 'utf8')).version).toBe(3)
+    }
+  })
+  it('keeps deleted overrides reportable without falling back and preserves roles in ordinary commits', () => {
+    const root = directory(); const store = createModelConfigStore(root, protection)
+    const [first, second] = store.getPublic().models
+    store.setMemoryDefault(first!.id)
+    store.setVaultMemory(vaultKey, { enabled: true, override: { mode: 'model', modelId: second!.id } })
+    store.updateMemoryLimits({ seconds: 1, calls: 4, tools: 0 })
+    store.removeModel(second!.id)
+    const result = createModelConfigStore(root, protection).getMemoryConfig(vaultKey)
+    expect(result).toMatchObject({ defaultModelId: first!.id, effectiveModelId: second!.id, modelStatus: 'unavailable', vault: { enabled: true } })
+    expect(() => store.memoryCredential(vaultKey)).toThrow('MODEL_NOT_FOUND')
+    expect(store.getMemoryConfig('b'.repeat(64)).vault.enabled).toBe(false)
+    expect(() => store.setMemoryDefault('missing')).toThrow('MODEL_NOT_FOUND')
+    expect(() => store.setVaultMemory('display-key', { enabled: true, override: { mode: 'inherit' } })).toThrow('BAD_VAULT_KEY')
+    for (const limits of [{ seconds: 0, calls: 1, tools: 0 }, { seconds: 601, calls: 1, tools: 0 }, { seconds: 1, calls: 5, tools: 0 }, { seconds: 1, calls: 1, tools: 1 }]) expect(() => store.updateMemoryLimits(limits)).toThrow('BAD_MEMORY_LIMITS')
+  })
+  it('does not change in-memory roles when an atomic configuration write fails', () => {
+    const root = directory(); const store = createModelConfigStore(root, protection)
+    const before = store.getMemoryConfig(vaultKey)
+    rmSync(root, { recursive: true })
+    expect(() => store.setMemoryDefault(store.getPublic().models[0]!.id)).toThrow()
+    expect(store.getMemoryConfig(vaultKey)).toEqual(before)
+  })
+})
+
+it('increments the memory switch epoch across off/on without invalidating it for model edits', () => {
+  const store = createModelConfigStore(directory(), protection); const key = 'a'.repeat(64)
+  expect(store.getVaultMemoryEpoch(key)).toBe(0)
+  store.setVaultMemory(key, { enabled: true, override: { mode: 'inherit' } })
+  expect(store.getVaultMemoryEpoch(key)).toBe(1)
+  store.setMemoryDefault(store.getPublic().models[0]!.id)
+  expect(store.getVaultMemoryEpoch(key)).toBe(1)
+  store.setVaultMemory(key, { enabled: false, override: { mode: 'inherit' } })
+  store.setVaultMemory(key, { enabled: true, override: { mode: 'inherit' } })
+  expect(store.getVaultMemoryEpoch(key)).toBe(3)
+})
+it('can disable a vault while preserving its deleted model override', () => {
+  const store = createModelConfigStore(directory(), protection); const key = 'a'.repeat(64); const modelId = store.getPublic().models[0]!.id
+  store.setVaultMemory(key, { enabled: true, override: { mode: 'model', modelId } }); store.removeModel(modelId)
+  store.setVaultMemory(key, { ...store.getMemoryConfig(key).vault, enabled: false })
+  expect(store.getMemoryConfig(key)).toMatchObject({ vault: { enabled: false, override: { mode: 'model', modelId } }, modelStatus: 'unavailable' })
 })

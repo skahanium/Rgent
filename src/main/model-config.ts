@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { defaultBaseURL } from '../shared/model-endpoints.ts'
 import type { PublicModelConfig, RunLimits } from '../shared/ipc.ts'
+import type { MemoryLimits, VaultMemoryConfig, PublicMemoryConfig, MemoryStoragePin, MemoryStorePinPort } from '../shared/memory.ts'
 
 export type { RunLimits }
 
@@ -26,13 +27,16 @@ export type SecretProtection = {
 type StoredConnection = { id: string; provider: ModelProvider; baseURL: string; encryptedKey?: string }
 type StoredModel = { id: string; connectionId: string; modelId: string; contextTokens: number }
 type StoredConfig = {
-  version: 2
+  version: 3
   connections: StoredConnection[]
   models: StoredModel[]
   defaultModelId: string | null
   limits: Record<LimitTier, RunLimits>
+  memory: { defaultModelId: string | null; limits: MemoryLimits; vaults: Record<string, VaultMemoryConfig>; storagePins: Record<string, MemoryStoragePin>; epochs: Record<string, number> }
 }
 
+const memoryDefaults = (): StoredConfig['memory'] => ({ defaultModelId: null, limits: { seconds: 120, calls: 2, tools: 0 }, vaults: {}, storagePins: {}, epochs: {} })
+const vaultMemoryDefault = (): VaultMemoryConfig => ({ enabled: false, override: { mode: 'inherit' } })
 const FILE = 'model-config.json'
 const PROVIDERS: ModelProvider[] = ['deepseek', 'minimax', 'custom']
 const TIERS: LimitTier[] = ['none', 'local', 'network']
@@ -45,7 +49,8 @@ const defaults = (): StoredConfig => {
   const deepseekModel: StoredModel = { id: randomUUID(), connectionId: deepseek.id, modelId: 'deepseek-flash', contextTokens: 1048576 }
   const minimaxModel: StoredModel = { id: randomUUID(), connectionId: minimax.id, modelId: 'MiniMax-M2.7', contextTokens: 204800 }
   return {
-    version: 2,
+    version: 3,
+    memory: memoryDefaults(),
     connections: [deepseek, minimax],
     models: [deepseekModel, minimaxModel],
     defaultModelId: null,
@@ -199,7 +204,7 @@ function parseV1(value: unknown): StoredConfigV1 {
 
 /** v1（selected + profiles）→ v2（connections + models + defaultModelId）。只在内存里做，下一次写操作才落盘。 */
 export function migrateV1ToV2(old: StoredConfigV1): StoredConfig {
-  const next: StoredConfig = { version: 2, connections: [], models: [], defaultModelId: null, limits: old.limits }
+  const next: StoredConfig = { version: 3, memory: memoryDefaults(), connections: [], models: [], defaultModelId: null, limits: old.limits }
   for (const provider of PROVIDERS) {
     const profile = old.profiles[provider]
     const emptyCustom = provider === 'custom' && profile.baseURL === '' && profile.modelId === ''
@@ -218,9 +223,48 @@ export function migrateV1ToV2(old: StoredConfigV1): StoredConfig {
 
 function parseStored(value: unknown): StoredConfig {
   const version = (value as { version?: unknown } | null)?.version
+  if (version === 3) {
+    const next = parseV2(value)
+    next.memory = parseMemory((value as { memory: unknown }).memory)
+    return next
+  }
   if (version === 2) return parseV2(value)
   if (version === 1) return migrateV1ToV2(parseV1(value))
   throw new Error('BAD_MODEL_CONFIG')
+}
+
+function fields(value: unknown, names: string[]): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === names.sort().join(',')
+}
+function requireVaultKey(key: string): void {
+  if (typeof key !== 'string' || !/^[a-f0-9]{64}$/.test(key)) throw new Error('BAD_VAULT_KEY')
+}
+function memoryLimits(value: unknown): MemoryLimits {
+  if (!fields(value, ['seconds', 'calls', 'tools']) || !positiveInteger(value.seconds) || value.seconds > 600 || !positiveInteger(value.calls) || value.calls > 4 || value.tools !== 0) throw new Error('BAD_MEMORY_LIMITS')
+  return { seconds: value.seconds, calls: value.calls, tools: 0 }
+}
+function vaultMemory(value: unknown): VaultMemoryConfig {
+  if (!fields(value, ['enabled', 'override']) || typeof value.enabled !== 'boolean') throw new Error('BAD_MEMORY_CONFIG')
+  const override = value.override
+  if (fields(override, ['mode']) && override.mode === 'inherit') return { enabled: value.enabled, override: { mode: 'inherit' } }
+  if (fields(override, ['mode', 'modelId']) && override.mode === 'model' && isRowId(override.modelId)) return { enabled: value.enabled, override: { mode: 'model', modelId: override.modelId } }
+  throw new Error('BAD_MEMORY_CONFIG')
+}
+function storagePin(value: unknown): MemoryStoragePin {
+  if (!fields(value, ['objectVersion', 'revision']) || typeof value.objectVersion !== 'string' || !value.objectVersion || value.objectVersion.length > 512 || typeof value.revision !== 'string' || !/^[a-f0-9]{64}$/.test(value.revision)) throw new Error('BAD_MEMORY_PIN')
+  return { objectVersion: value.objectVersion, revision: value.revision }
+}
+function parseMemory(value: unknown): StoredConfig['memory'] {
+  if (!fields(value, ['defaultModelId', 'limits', 'vaults', 'storagePins', 'epochs']) || (value.defaultModelId !== null && !isRowId(value.defaultModelId)) || !value.vaults || typeof value.vaults !== 'object' || Array.isArray(value.vaults)) throw new Error('BAD_MEMORY_CONFIG')
+  const vaults: Record<string, VaultMemoryConfig> = {}
+  for (const [key, item] of Object.entries(value.vaults)) { requireVaultKey(key); vaults[key] = vaultMemory(item) }
+  if (!value.storagePins || typeof value.storagePins !== 'object' || Array.isArray(value.storagePins)) throw new Error('BAD_MEMORY_CONFIG')
+  const storagePins: Record<string, MemoryStoragePin> = {}
+  for (const [key, pin] of Object.entries(value.storagePins)) { requireVaultKey(key); storagePins[key] = storagePin(pin) }
+  if (!value.epochs || typeof value.epochs !== 'object' || Array.isArray(value.epochs)) throw new Error('BAD_MEMORY_CONFIG')
+  const epochs: Record<string, number> = {}
+  for (const [key, epoch] of Object.entries(value.epochs)) { requireVaultKey(key); if (!Number.isSafeInteger(epoch) || Number(epoch) < 0) throw new Error('BAD_MEMORY_CONFIG'); epochs[key] = Number(epoch) }
+  return { defaultModelId: value.defaultModelId as string | null, limits: memoryLimits(value.limits), vaults, storagePins, epochs }
 }
 
 function readConfig(userData: string): StoredConfig {
@@ -290,6 +334,54 @@ export function createModelConfigStore(userData: string, protection: SecretProte
   }
 
   return {
+    memoryStoragePins(): MemoryStorePinPort {
+      return {
+        get(vaultKey) { requireVaultKey(vaultKey); const pin = current.memory.storagePins[vaultKey]; return pin ? { ...pin } : null },
+        set(vaultKey, pin) { requireVaultKey(vaultKey); const next = copy(); next.memory.storagePins[vaultKey] = storagePin(pin); commit(next) }
+      }
+    },
+    /** vaultKey must come from VaultSession.memoryContext(), never a renderer preference key. */
+    getMemoryConfig(vaultKey: string): PublicMemoryConfig {
+      requireVaultKey(vaultKey)
+      const vault = structuredClone(current.memory.vaults[vaultKey] ?? vaultMemoryDefault())
+      const effectiveModelId = vault.override.mode === 'inherit' ? current.memory.defaultModelId : vault.override.modelId
+      let modelStatus: PublicMemoryConfig['modelStatus'] = effectiveModelId === null ? 'missing' : 'unavailable'
+      if (effectiveModelId !== null) {
+        try { const model = modelOf(current, effectiveModelId); const connection = connectionOf(current, model.connectionId); requireBaseURL(connection); decryptKey(connection); modelStatus = 'ready' } catch { /* Keep the role ID and surface its unavailable state. */ }
+      }
+      return { defaultModelId: current.memory.defaultModelId, limits: { ...current.memory.limits }, vault, effectiveModelId, modelStatus }
+    },
+    setMemoryDefault(modelId: string | null): void {
+      const next = copy()
+      if (modelId !== null) modelOf(next, modelId)
+      next.memory.defaultModelId = modelId
+      commit(next)
+    },
+    getVaultMemoryEpoch(vaultKey: string): number { requireVaultKey(vaultKey); return current.memory.epochs[vaultKey] ?? 0 },
+    setVaultMemory(vaultKey: string, value: VaultMemoryConfig): void {
+      requireVaultKey(vaultKey)
+      const next = copy(); const settings = vaultMemory(value)
+      const previousOverride = next.memory.vaults[vaultKey]?.override
+      if (settings.override.mode === 'model' && !(previousOverride?.mode === 'model' && previousOverride.modelId === settings.override.modelId)) modelOf(next, settings.override.modelId)
+      if (settings.enabled !== (next.memory.vaults[vaultKey]?.enabled ?? false)) {
+        const epoch = (next.memory.epochs[vaultKey] ?? 0) + 1
+        if (!Number.isSafeInteger(epoch)) throw new Error('MEMORY_EPOCH_LIMIT')
+        next.memory.epochs[vaultKey] = epoch
+      }
+      next.memory.vaults[vaultKey] = settings
+      commit(next)
+    },
+    updateMemoryLimits(value: MemoryLimits): void {
+      const next = copy(); next.memory.limits = memoryLimits(value); commit(next)
+    },
+    memoryCredential(vaultKey: string): ModelCredential {
+      requireVaultKey(vaultKey)
+      const vault = current.memory.vaults[vaultKey] ?? vaultMemoryDefault()
+      const id = vault.override.mode === 'inherit' ? current.memory.defaultModelId : vault.override.modelId
+      if (id === null) throw new Error('NO_MEMORY_MODEL')
+      const model = modelOf(current, id); const connection = connectionOf(current, model.connectionId)
+      return { provider: connection.provider, baseURL: requireBaseURL(connection), modelId: model.modelId, contextTokens: model.contextTokens, apiKey: decryptKey(connection) }
+    },
     getPublic(): PublicModelConfig {
       return {
         providers: PROVIDERS.map((provider) => {

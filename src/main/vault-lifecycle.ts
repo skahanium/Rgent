@@ -25,9 +25,15 @@ export type RelocationPreview = {
   permissionChanges: { from: string; to: string; tier: string }[]
 }
 export type CommittedNoteWrite = { relPath: string; previousPath: string; previousObjectVersion: string; objectVersion: string; content: string }
+export type VerifiedRelocation = {
+  sessionId: string; operationId: string; journalRevision: string
+  objects: { from: string; to: string; previousObjectVersion: string; objectVersion: string; identityProven: boolean }[]
+}
+type RepairReceipt = { relPath: string; previousPath: string; previousObjectVersion: string; objectVersion: string; revision: string }
 type Fingerprint = { relPath: string; id: string; kind: string; hash?: string; repairedHash?: string }
 type PendingMove = {
   kind: 'move'
+  repairReceipts?: RepairReceipt[]
   intent: Pick<RelocationPreview, 'kind' | 'source' | 'target' | 'moves'>
   linkRepairs: { relPath: string; newPath: string; expectedRevision: string }[]
   fingerprints: Fingerprint[]
@@ -60,11 +66,14 @@ function asciiFold(value: string): string { return value.replace(/[A-Z]/g, (lett
 
 /** Main-process only. Preview tokens bind a structural change to verified disk objects. */
 export class VaultLifecycle {
+  /** Disk journal fields are recovery hints, not native-success identity evidence. */
+  private readonly controlledRepairs = new Map<string, RepairReceipt>()
   private readonly previews = new Map<string, { view: RelocationPreview; fingerprints: Fingerprint[]; permissionBefore: string | null; permissionAfter: string | null }>()
 
   constructor(private readonly root: string, private readonly queue = new VaultMutationQueue(),
     private readonly sessionId: string = randomUUID(), private readonly assertCurrent: () => void = () => {},
-    private readonly onCommittedNoteWrite: (write: CommittedNoteWrite) => void = () => {}) {}
+    private readonly onCommittedNoteWrite: (write: CommittedNoteWrite) => unknown = () => {},
+    private readonly onVerifiedRelocation: (receipt: VerifiedRelocation) => Promise<void> = async () => {}) {}
 
   status(): LifecycleStatus {
     this.assertCurrent()
@@ -255,6 +264,8 @@ export class VaultLifecycle {
   private async recoverMove(active: PendingMove, raw: string): Promise<{ moved: RelocationMove[]; unrepaired: string[] }> {
     this.assertCurrent()
     const fs = secureFsFor(this.root)
+    const { repairReceipts: _receipts, ...intent } = active
+    const operationId = hash(Buffer.from(JSON.stringify(intent)))
     const matchesRecordedState = (item: Fingerprint, path: string): boolean => this.matchesRecordedState(active, item, path)
     if (this.readOptional(JOURNAL) !== raw || !this.policyMatches(active) || this.inspectObjects(active).blocked) {
       throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
@@ -318,14 +329,40 @@ export class VaultLifecycle {
         } catch { unrepaired.push(relPath) }
         // Only the successful native replace receipt proves this identity edge.
         // Callback failure preserves the recovery journal instead of swallowing it.
-        if (committed) this.onCommittedNoteWrite(committed)
+        if (committed) {
+          // Persist the native success edge before notifying dependents. A crash in
+          // replace→journal remains explicitly unproven on recovery.
+          const repair = { relPath: committed.relPath, previousPath: committed.previousPath, previousObjectVersion: committed.previousObjectVersion, objectVersion: committed.objectVersion, revision: revisionOf(committed.content) }
+          this.controlledRepairs.set(committed.relPath, repair)
+          active.repairReceipts = [...(active.repairReceipts ?? []), repair]
+          raw = this.saveJournal({ version: 1, active }, raw)
+          await this.onCommittedNoteWrite(committed)
+        }
       }
     }
     verifyMoved()
     if (this.readOptional(PERMISSIONS) !== active.permissionAfter || !this.policyMatches(active)) {
       throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
     }
+    const objects: VerifiedRelocation['objects'] = active.fingerprints.map(item => {
+      const to = mapped(item.relPath, active.intent.moves)
+      const current = fs.resolve(to).at(-1)!
+      const candidate = this.controlledRepairs.get(to)
+      const proof = candidate?.previousPath === item.relPath && candidate.previousObjectVersion === item.id && candidate.objectVersion === current.id ? candidate : undefined
+      return { from: item.relPath, to, previousObjectVersion: item.id, objectVersion: current.id, identityProven: current.id === item.id || !!proof && proof.revision === revisionOf(fs.readText(to)) }
+    })
+    for (const link of active.linkRepairs) if (!objects.some(o => o.from === link.relPath)) {
+      const proof = active.repairReceipts?.find(r => r.previousPath === link.relPath)
+      if (proof) {
+        const current = fs.readSnapshot(link.newPath)
+        objects.push({ from: link.relPath, to: link.newPath, previousObjectVersion: proof.previousObjectVersion, objectVersion: current.objectVersion, identityProven: this.controlledRepairs.get(link.newPath)?.objectVersion === current.objectVersion && proof.objectVersion === current.objectVersion && proof.revision === revisionOf(current.bytes.toString('utf8')) })
+      }
+    }
+    await this.onVerifiedRelocation({ sessionId: this.sessionId, operationId, journalRevision: hash(Buffer.from(raw)), objects })
+    this.assertCurrent(); verifyMoved()
+    if (this.readOptional(PERMISSIONS) !== active.permissionAfter || !this.policyMatches(active)) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
     this.saveJournal({ version: 1, active: null }, raw)
+    this.controlledRepairs.clear()
     return { moved: active.intent.moves, unrepaired }
   }
 
@@ -543,6 +580,7 @@ function validPending(value: unknown): value is PendingMove {
       (part.kind === 'dir' || part.kind === 'file') &&
       (part.kind === 'file' ? typeof part.hash === 'string' && /^[a-f0-9]{64}$/.test(part.hash) : part.hash === undefined) &&
       (part.repairedHash === undefined || (part.kind === 'file' && /^[a-f0-9]{64}$/.test(part.repairedHash))))) return false
+  if (item.repairReceipts !== undefined && (!Array.isArray(item.repairReceipts) || !item.repairReceipts.every(r => r && validPath(r.relPath) && validPath(r.previousPath) && typeof r.previousObjectVersion === 'string' && !!r.previousObjectVersion && typeof r.objectVersion === 'string' && !!r.objectVersion && /^[a-f0-9]{64}$/.test(r.revision) && item.linkRepairs?.some(l => l.relPath === r.previousPath && l.newPath === r.relPath)) || new Set(item.repairReceipts.map(r => r.relPath)).size !== item.repairReceipts.length)) return false
   const fingerprints = item.fingerprints as Fingerprint[]
   if (fingerprints.some((part) => hasHiddenSegment(part.relPath) &&
       !intent.moves.some((move, index) => (intent.kind === 'folder' || index > 0) &&

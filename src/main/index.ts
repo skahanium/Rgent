@@ -741,7 +741,7 @@ app.whenReady().then(() => {
     await agentHost?.retryPending(previous)
     if (agentHost?.hasPending(previous)) throw new Error('生成内容尚未保存，不能换库')
     if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
-  })
+  }, modelConfig?.memoryStoragePins())
   vault.restore()
   authorizations = new TaskAuthorizationRegistry({
     root:()=>{try{return vault?.requireUsableRoot()??null}catch{return null}},

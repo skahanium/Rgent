@@ -666,3 +666,52 @@ it.each([false, true])('reports structural save identities only after native suc
   else expect(receipts).toEqual([{ relPath: 'refs.md', previousPath: 'refs.md', previousObjectVersion: before.objectVersion,
     objectVersion: fs.readSnapshot('refs.md').objectVersion, content: '[[New]]' }])
 })
+
+it('awaits verified relocation before journal clear and retries the same operation after hook failure', async () => {
+  const root = await vault(); await writeFile(path.join(root, 'a.md'), 'material')
+  let fail = true; const receipts: import('../../src/main/vault-lifecycle.ts').VerifiedRelocation[] = []
+  const service = new VaultLifecycle(root, new VaultMutationQueue(), 'session', () => {}, () => {}, async receipt => {
+    receipts.push(receipt)
+    expect(JSON.parse(await readFile(path.join(root, '.rgent-lifecycle'), 'utf8')).active).not.toBeNull()
+    if (fail) throw new Error('MEMORY_MIGRATION_FAILED')
+  })
+  const preview = await service.preview({ kind: 'note', source: 'a.md', target: 'b.md' })
+  await expect(service.commit(preview.id, { repairLinks: false })).rejects.toThrow('MEMORY_MIGRATION_FAILED')
+  fail = false; await service.recover()
+  expect(receipts).toHaveLength(2)
+  expect(receipts[1]!.operationId).toBe(receipts[0]!.operationId)
+  expect(receipts[1]!.objects).toContainEqual(expect.objectContaining({ from: 'a.md', to: 'b.md', identityProven: true }))
+  expect(JSON.parse(await readFile(path.join(root, '.rgent-lifecycle'), 'utf8')).active).toBeNull()
+})
+
+it('does not use a repaired content hash as proof of a missing native replacement receipt', async () => {
+  const root = await vault(); await writeFile(path.join(root, 'a.md'), '[[a]]')
+  const fs = secureFsFor(root); const replace = fs.replace.bind(fs)
+  const service = new VaultLifecycle(root)
+  const preview = await service.preview({ kind: 'note', source: 'a.md', target: 'b.md' })
+  fs.replace = ((rel, ...args) => { const id = replace(rel, ...args); if (rel === 'b.md') throw new Error('CRASH_AFTER_REPLACE'); return id }) as typeof fs.replace
+  // Model a crash before the hidden hook: legacy lifecycle can see the repaired hash,
+  // but the memory hook must receive an explicitly unproven edge on recovery.
+  const receipts: import('../../src/main/vault-lifecycle.ts').VerifiedRelocation[] = []
+  const guarded = new VaultLifecycle(root, new VaultMutationQueue(), 's', () => {}, () => {}, async receipt => {
+    receipts.push(receipt); if (receipt.objects.some(o => !o.identityProven)) throw new Error('MEMORY_IDENTITY_UNKNOWN')
+  })
+  try {
+    const pending = await guarded.preview({ kind: 'note', source: 'a.md', target: 'b.md' })
+    await expect(guarded.commit(pending.id, { repairLinks: true })).rejects.toThrow('MEMORY_IDENTITY_UNKNOWN')
+  } finally { fs.replace = replace }
+  expect(receipts[0]!.objects.find(o => o.from === 'a.md')!.identityProven).toBe(false)
+  await expect(guarded.recover()).rejects.toThrow('MEMORY_IDENTITY_UNKNOWN')
+  expect(guarded.status().status).toBe('pending')
+})
+it('does not trust a journal-only repaired identity after a process restart', async () => {
+  const root = await vault(); await writeFile(path.join(root, 'a.md'), 'material\n\n[[a]]')
+  const service = new VaultLifecycle(root, new VaultMutationQueue(), 's', () => {}, () => { throw new Error('CRASH_BEFORE_MEMORY_COMMIT') })
+  const preview = await service.preview({ kind: 'note', source: 'a.md', target: 'b.md' })
+  await expect(service.commit(preview.id, { repairLinks: true })).rejects.toThrow('CRASH_BEFORE_MEMORY_COMMIT')
+  const recovered = new VaultLifecycle(root, new VaultMutationQueue(), 's2', () => {}, () => {}, async receipt => {
+    expect(receipt.objects.find(o => o.from === 'a.md')!.identityProven).toBe(false)
+    throw new Error('UNPROVEN_REPAIR')
+  })
+  await expect(recovered.recover()).rejects.toThrow('UNPROVEN_REPAIR')
+})
