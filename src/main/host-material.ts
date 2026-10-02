@@ -4,8 +4,9 @@ import { compile, parseMarker } from '../markdown/index.ts'
 import { ledgerChapters, ledgerTaskFields, historicalBodyTasks, type ContextSourceRef } from './host-context.ts'
 import type { LedgerMemoryDependency, LedgerSource } from './ledger-provenance.ts'
 
-export type MaterialBinding = { relPath: string; sessionId: string; objectVersion: string; revision: string }
+export type MaterialBinding = { relPath: string; sessionId: string; objectVersion: string; revision: string; permissionTier?: 'reference' | 'follow' }
 export type SentFragment = MaterialBinding & {
+  permissionTier: 'reference' | 'follow'
   kind: 'body' | 'ledger'; classification: 'human' | 'command' | 'ai'; taskId: string | null
   start: number; end: number; text: string; hash: string
   sourceDeps: LedgerSource[]; memoryDeps: LedgerMemoryDependency[]
@@ -41,7 +42,7 @@ export class TaskMaterialTracker {
       const marker = parsed.index.markers.filter(m => m.range.end <= block.range.start).at(-1)
       const taskId = marker && block.identity ? parseMarker(source.slice(marker.range.start, marker.range.end))?.attrs['task-id'] ?? null : historical.get(block.range.start)?.[0] ?? null
       const text = source.slice(start, end)
-      this.stage(context ? this.stagedContext : this.stagedTools, { ...binding, kind: 'body', classification: block.identity === 'ai' || historical.has(block.range.start) ? 'ai' : block.identity === 'command' ? 'command' : 'human', taskId, start, end, text, hash:hash(text), sourceDeps:structuredClone(dependencies.sources), memoryDeps:structuredClone(dependencies.memories) })
+      this.stage(context ? this.stagedContext : this.stagedTools, { ...binding, permissionTier: binding.permissionTier ?? 'reference', kind: 'body', classification: block.identity === 'ai' || historical.has(block.range.start) ? 'ai' : block.identity === 'command' ? 'command' : 'human', taskId, start, end, text, hash:hash(text), sourceDeps:structuredClone(dependencies.sources), memoryDeps:structuredClone(dependencies.memories) })
     }
   }
   context(source: string, refs: readonly ContextSourceRef[], binding: MaterialBinding, dependencies: (ref: ContextSourceRef) => MaterialDependencies = () => ({sources:[],memories:[]})) {
@@ -65,7 +66,7 @@ export class TaskMaterialTracker {
           const start=Math.max(field.start,ref.start ?? 0),end=Math.min(field.end,ref.end ?? chapter.text.length)
           if(start>=end)continue
           const text=chapter.text.slice(start,end)
-          this.stage(this.stagedContext,{...binding,kind:'ledger',classification,taskId:chapter.taskId,start,end,text,hash:hash(text),sourceDeps:structuredClone(deps.sources),memoryDeps:structuredClone(deps.memories)})
+          this.stage(this.stagedContext,{...binding,permissionTier:binding.permissionTier ?? 'reference',kind:'ledger',classification,taskId:chapter.taskId,start,end,text,hash:hash(text),sourceDeps:structuredClone(deps.sources),memoryDeps:structuredClone(deps.memories)})
         }
       }
     }

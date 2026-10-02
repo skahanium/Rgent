@@ -169,7 +169,7 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
       if (excluded(item.parsed, item.policy, block.range.start, block.identity)) continue
       if (start !== undefined && end !== undefined && (block.range.end <= start || block.range.start >= end)) continue
       const dependencies = blockDependencies(item.policy,block.range.start)
-      deps.materials?.body(item.snapshot.content, {start:Math.max(start ?? 0, block.range.start), end:Math.min(end ?? item.body.length, block.range.end)}, { ...item.snapshot,relPath:item.path }, {sources:[item.proof,...dependencies.sources],memories:dependencies.memories}, false, item.parsed, item.policy.bodyTasks)
+      deps.materials?.body(item.snapshot.content, {start:Math.max(start ?? 0, block.range.start), end:Math.min(end ?? item.body.length, block.range.end)}, { ...item.snapshot,relPath:item.path,permissionTier:grant.sources.find(s=>s.relPath===item.path)!.tier }, {sources:[item.proof,...dependencies.sources],memories:dependencies.memories}, false, item.parsed, item.policy.bodyTasks)
       for (const dep of dependencies.sources) remember(dep, true)
       rememberMemory(dependencies.memories)
     }

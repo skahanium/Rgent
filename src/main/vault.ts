@@ -613,6 +613,7 @@ export class VaultSession {
         if (snapshot.objectVersion !== target.at(-1)?.id || JSON.stringify(target) !== JSON.stringify(fs.resolve(relPath))) throw new Error('MEMORY_SOURCE_REPLACED')
         return { ...snapshot, sessionId: token, permissionTier }
       },
+      acceptsObject: (relPath, expected, current) => this.acceptsObject(relPath, expected, current),
       pins: this.memoryPins
     })
     this.lifecycle = new VaultLifecycle(this.root, this.mutations, token, check, async write => {

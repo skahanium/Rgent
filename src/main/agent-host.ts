@@ -64,6 +64,10 @@ export type HostDependencies = {
   limits: () => RunLimits
   stream: (input: ModelCredential & { system: string; prompt: string; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<string>
   streamStep?: (input: ModelCredential & { system: string; messages: ModelMessage[]; tools?: typeof READ_ONLY_TOOL_SCHEMAS; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<ModelStepEvent>
+  /** Independent background permission snapshot; unavailable roles must not fail the foreground. */
+  onTaskStarted?: (taskId: string) => void
+  onTaskStartFailed?: (taskId: string) => void
+  onTaskMaterialDiscarded?: (taskId: string) => void
   /** Internal completion seam. Caller must have a separate, task-start consolidation permit. */
   onTaskMaterialSaved?: (material: SavedTaskMaterial) => void | Promise<void>
   /** Handoff outcome only, never a claim that consolidation succeeded. Sink must be local and synchronous. */
@@ -121,7 +125,7 @@ export class AgentHost {
     return [...new Set([...this.pending.values()].filter((item) => item.root === root).map((item) => item.relPath))]
   }
   discardPending(root?: string): void {
-    for (const [id, item] of this.pending) if (!root || item.root === root) this.pending.delete(id)
+    for (const [id, item] of this.pending) if (!root || item.root === root) { this.pending.delete(id); this.deps.onTaskMaterialDiscarded?.(id) }
   }
   async retryPending(root?: string, relPath?: string): Promise<void> {
     // 逐项尝试：一篇永久失败不能挡住其他篇的补存。全部试过之后仍抛第一个错误，
@@ -157,7 +161,7 @@ export class AgentHost {
   acknowledgeCopied(root: string, relPath: string, chapters: Parameters<typeof appendLedgerChapter>[1][]): void {
     for (const chapter of chapters) {
       const item = this.pending.get(chapter.taskId)
-      if (item?.root === root && item.relPath === relPath && JSON.stringify(item.source) === JSON.stringify(chapter)) this.pending.delete(chapter.taskId)
+      if (item?.root === root && item.relPath === relPath && JSON.stringify(item.source) === JSON.stringify(chapter)) { this.pending.delete(chapter.taskId); this.deps.onTaskMaterialDiscarded?.(chapter.taskId) }
     }
   }
   private matchesObject(relPath: string, expected: string, current: string): boolean {
@@ -246,6 +250,7 @@ export class AgentHost {
     this.bindings.delete(key)
     let grant:TaskGrant|undefined
     let launched=false
+    let startedTaskId:string|undefined
     try {
       await this.requirePermission(root, input.relPath)
       grant = await this.deps.authorize?.(input)
@@ -264,6 +269,8 @@ export class AgentHost {
       if (input.expectedRevision !== undefined && original.revision !== input.expectedRevision) throw new Error('CONFLICT')
       if (original.sessionId && original.objectVersion) this.bindings.set(key, { sessionId: original.sessionId, objectVersion: original.objectVersion, originalVersion: input.objectVersion ?? original.objectVersion })
       const id = randomUUID()
+      startedTaskId=id
+      this.deps.onTaskStarted?.(id)
       const parsedOriginal = compile(original.content)
       const nearby = parsedOriginal.index.blocks.filter(b => b.identity !== 'ai' && b.range.end >= input.range.start - 1024 && b.range.start <= input.range.end + 1024).map(b => original.content.slice(b.range.start, b.range.end)).join('\n').slice(0, 2048)
       const memory = this.deps.memory ? await createMemoryUsePermit(this.deps.memory, credential, input.promptText, nearby) : undefined
@@ -508,7 +515,7 @@ export class AgentHost {
       launched=true
       return result
     } finally {
-      if(!launched){grant?.revoke();if(this.grants.get(key)===grant){this.grants.delete(key);this.scoped.delete(key);this.memoryUses.delete(key)}}
+      if(!launched){if(startedTaskId)this.deps.onTaskStartFailed?.(startedTaskId);grant?.revoke();if(this.grants.get(key)===grant){this.grants.delete(key);this.scoped.delete(key);this.memoryUses.delete(key)}}
       this.launching.delete(key)
       if (this.launching.size === 0) {
         for (const notify of this.launchWaiters) notify()

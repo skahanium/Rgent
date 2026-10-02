@@ -29,6 +29,18 @@ export function uniqueMemoryRange(text: string, fragment: string): { start: numb
   if (!fragment || start < 0 || text.indexOf(fragment, start + 1) >= 0) throw new Error('MEMORY_SOURCE_CHANGED')
   return { start, end: start + fragment.length }
 }
+/** Uniqueness belongs to the proven field, not to a different role's echo elsewhere in the chapter. */
+export function uniqueLedgerMemoryRange(chapter:string,fragment:string,classification:MemorySource['classification']):{start:number;end:number}{
+  const fields=ledgerTaskFields(chapter)
+  if(fields.status!=='valid')throw Error('MEMORY_SOURCE_AMBIGUOUS')
+  const field=classification==='command'?fields.prompt:fields.answer
+  const range=uniqueMemoryRange(field.text,fragment)
+  return {start:field.start+range.start,end:field.start+range.end}
+}
+function sourceRange(source:MemorySource,content:string,analysis?:MemorySourceAnalysis):{start:number;end:number}{
+  const corpus=material(source,content,analysis)
+  return source.kind==='ledger'?uniqueLedgerMemoryRange(corpus,source.text,source.classification):uniqueMemoryRange(corpus,source.text)
+}
 /** Reused at preview, every use, and controlled identity continuation. */
 function classifyMaterial(content: string, kind: MemorySource['kind'], requestedTaskId: string | null,
   range: { start: number; end: number }, established?: MemorySource['classification'], analysis = analyzeMemorySource(content)): Pick<MemorySource, 'classification' | 'taskId' | 'taskMaterialHash'> & { chapter?: string } {
@@ -102,8 +114,9 @@ export async function createManualMemorySource(request: ManualMemorySourceReques
   if (!Number.isSafeInteger(request.start) || !Number.isSafeInteger(request.end) || request.start < 0 || request.end <= request.start || request.end > corpus.length) throw new Error('MEMORY_SOURCE_RANGE')
   const text = corpus.slice(request.start, request.end)
   if (Buffer.byteLength(text) > 4096) throw new Error('MEMORY_SOURCE_LIMIT')
-  uniqueMemoryRange(corpus, text)
   const { classification, taskId, taskMaterialHash, chapter } = classifyMaterial(current.content, request.kind, request.taskId ?? null, request, undefined, current.analysis)
+  if(request.kind==='ledger')uniqueLedgerMemoryRange(corpus,text,classification)
+  else uniqueMemoryRange(corpus,text)
   const sourceDeps: MemoryWholeSource[] = []
   const memoryDeps: MemorySource['memoryDeps'] = []
   if (chapter !== undefined) {
@@ -120,16 +133,20 @@ export async function createManualMemorySource(request: ManualMemorySourceReques
       sourceDeps.push({ ...dependency, permissionTier: snapshot.permissionTier })
     }
   }
+  const units = request.kind === 'body'
+    ? (current.analysis?.parsed ?? compile(current.content)).index.blocks.filter(b=>b.range.start<request.end&&b.range.end>request.start).map(b=>current.content.slice(b.range.start,b.range.end))
+    : (()=>{const fields=ledgerTaskFields(corpus);if(fields.status!=='valid')throw Error('MEMORY_SOURCE_AMBIGUOUS');return [classification==='command'?fields.prompt.text:fields.answer.text]})()
+  const basisGroups=[...new Set(units.map(unit=>memoryHash('memory-unit:'+unit.normalize('NFKC').replace(/\s+/gu,'').toLocaleLowerCase())))]
   const hash = memoryHash(text)
   return { id: randomUUID(), version: 1, relPath: request.relPath, objectVersion: current.objectVersion, revision: current.revision, permissionTier: current.permissionTier, kind: request.kind, taskId, taskMaterialHash, classification, start: request.start, end: request.end, text, hash,
-    basisHash: memoryHash(JSON.stringify([request.kind, taskId, hash])), sourceDeps, memoryDeps }
+    basisHash: memoryHash(JSON.stringify([request.kind, taskId, hash])), basisGroups, sourceDeps, memoryDeps }
 }
 export async function verifyMemorySource(source: MemorySource, read: MemorySourceReader, validateMemory: (id: string, version: number) => Promise<boolean>): Promise<MemorySource> {
   const current = await read(source.relPath)
   if (current.objectVersion !== source.objectVersion) throw new Error('MEMORY_SOURCE_REPLACED')
   if (strength[current.permissionTier] > strength[source.permissionTier]) throw new Error('MEMORY_SOURCE_PERMISSION')
   if (memoryHash(source.text) !== source.hash) throw new Error('MEMORY_SOURCE_CHANGED')
-  const range = uniqueMemoryRange(material(source, current.content, current.analysis), source.text)
+  const range = sourceRange(source,current.content,current.analysis)
   verifyClassification(source, current.content, range, current.analysis)
   for (const dep of source.sourceDeps) {
     const other = await read(dep.relPath)
@@ -140,7 +157,7 @@ export async function verifyMemorySource(source: MemorySource, read: MemorySourc
 }
 /** The caller has a native success receipt, but unchanged, unique material is still mandatory. */
 export function continueMemorySource(source: MemorySource, content: string, analysis?: MemorySourceAnalysis): MemorySource {
-  const range = uniqueMemoryRange(material(source, content, analysis), source.text)
+  const range = sourceRange(source,content,analysis)
   verifyClassification(source, content, range, analysis)
   return { ...source, ...range, revision: memoryHash(content) }
 }

@@ -6,6 +6,7 @@ import { VaultSession } from '../../src/main/vault.ts'
 import { createModelConfigStore } from '../../src/main/model-config.ts'
 import { secureFsFor } from '../../src/main/secure-fs.ts'
 import { appendLedgerChapter } from '../../src/main/host-source.ts'
+import { memoryHash } from '../../src/main/memory-source.ts'
 vi.mock('electron', () => ({ dialog: { showOpenDialog: vi.fn() } }))
 vi.mock('../../src/main/watch.ts', async original => ({ ...await original<typeof import('../../src/main/watch.ts')>(), watchVault: vi.fn(() => () => {}) }))
 const cleanup: (() => Promise<void>)[] = []
@@ -372,4 +373,27 @@ it('persists observed recursive dependency failures when validating only the sel
   await writeFile(path.join(env.root, 'note.md'), original)
   expect(await env.store.validatedEntries([parent.id])).toEqual([])
   expect(await env.store.validateDependency({ id: parent.id, version: 1 })).toBe(false)
+})
+
+
+it('review boundary: legacy result payload is usable until forgetting clears it and preserves its terminal reason', async()=>{
+  const env=await setup(),entry=await remember(env),note=await env.session.read('note.md')
+  const start=note.content.indexOf('无关段落。'),source=await env.store.createManualSource({...note,relPath:'note.md',kind:'body',start,end:start+'无关段落。'.length})
+  const material={sources:[source],related:[],result:'未提供来源的旧格式回答副本',status:'completed' as const,reason:null,omitted:false}
+  const version='a'.repeat(64)
+  await expect(env.store.enqueueJob('unissued-result',version,material,()=>{})).rejects.toThrow('MEMORY_MATERIAL_UNVERIFIED')
+  // A valid preexisting record needs no new in-memory capture proof when retried.
+  const snapshot=await env.store.snapshot(),fs=secureFsFor(env.root),before=fs.readSnapshot('.rgent-memory')
+  snapshot.record.jobs.push({taskId:'legacy-result',materialVersion:version,outcome:'rejected',entryIds:[],material})
+  const raw=JSON.stringify(snapshot.record)+'\n',objectVersion=fs.replace('.rgent-memory',before.bytes.toString('utf8'),raw,before.objectVersion)
+  env.config.memoryStoragePins().set(snapshot.vaultKey,{objectVersion,revision:memoryHash(raw)})
+  await env.store.requeueJob('legacy-result',version,()=>{})
+  expect((await env.store.job('legacy-result',version)).material).toEqual(material)
+  await env.store.forget(await env.store.snapshot(),entry.id,entry.version)
+  await expect(env.store.requeueJob('legacy-result',version,()=>{})).rejects.toThrow('MEMORY_MATERIAL_FORGOTTEN')
+  await env.store.jobOutcome('legacy-result',version,'rejected','MEMORY_JOB_STALE')
+  await env.store.rejectJob('legacy-result',version,'MEMORY_MATERIAL_UNAVAILABLE')
+  const job=(await env.store.snapshot()).record.jobs.find(j=>j.taskId==='legacy-result')!
+  expect(job).toMatchObject({outcome:'rejected',reason:'MEMORY_MATERIAL_FORGOTTEN'});expect(job.material).toBeUndefined()
+  expect((await env.session.read('note.md')).content).toBe(note.content)
 })
