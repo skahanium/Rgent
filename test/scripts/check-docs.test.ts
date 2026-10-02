@@ -135,4 +135,48 @@ describe('docs stage invariants', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('交接表阶段')
   })
+
+  it('rejects a current matrix object that names a different existing stage', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    writeFileSync(build, source.replace(/^(\| )助手与多连接( \|[^\n]*\*\*当前\*\*)/m, '$1库内 AI 工具$2'))
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('当前阶段与矩阵当前行不一致')
+  })
+
+  it('accepts pending delivery rows and historical commit references', () => {
+    const { run } = fixture()
+    const result = run()
+    expect(result.stderr).toBe('')
+    expect(result.status).toBe(0)
+  })
+
+  it('rejects a delivery row without a commit or explicit pending marker', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    writeFileSync(build, source.replace('| 文档校准及检查规则 | 待提交 |', '| 文档校准及检查规则 | HEAD |'))
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('交付对照提交引用无效')
+  })
+
+  it('rejects an unstructured evidence claim in the delivery table', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    writeFileSync(build, source.replace('| 文档校准及检查规则 | 待提交 | 未运行 |', '| 文档校准及检查规则 | 待提交 | 应该通过 |'))
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('交付对照证据状态无效')
+  })
+
+  it('rejects a missing current delivery table', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    writeFileSync(build, source.replace('### 本轮交付对照', '### 临时交付说明'))
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('交付对照表缺少施工包')
+  })
+
 })

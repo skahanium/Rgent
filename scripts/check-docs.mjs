@@ -86,6 +86,10 @@ const currentObject = currentRows[0]?.split('|')[1]?.trim()
 if (currentObject && !inOrder(currentObject)) {
   errors.push(`docs/build.md: 对象矩阵「当前」行「${currentObject}」未列入依赖顺序代码块`)
 }
+if (buildStage && currentObject !== buildStage.replace(/[。.!！\s]+$/u, '')) {
+  errors.push(`docs/build.md: 当前阶段与矩阵当前行不一致：${buildStage}／${currentObject ?? '缺失'}`)
+}
+
 const matrixRows = matrixSection?.split(/\r?\n/).filter((line) => /^\|[^-]/.test(line)).slice(1) ?? []
 if (matrixRows.length === 0) errors.push('docs/build.md: 对象矩阵缺少阶段状态行')
 for (const row of matrixRows) {
@@ -101,6 +105,27 @@ for (const row of handoffRows) {
   const stage = row.split('|')[1]?.trim()
   if (stage && !inOrder(stage)) errors.push(`docs/build.md: 交接表阶段「${stage}」未列入依赖顺序代码块`)
 }
+// 只核提交引用的明确形态和状态字段；是否已有平台证据仍由人核对。
+const delivery = build.split(/^### 本轮交付对照\s*$/m)[1]?.split(/^#{2,3}\s/m)[0]
+const deliveryRows = delivery?.split(/\r?\n/).filter((line) => /^\|[^-]/.test(line)).slice(1) ?? []
+if (deliveryRows.length === 0) errors.push('docs/build.md: 交付对照表缺少施工包')
+const evidenceStates = new Set(['通过', '失败', '待核', '未运行', '不适用'])
+const commitReference = /^`[a-f\d]{7,40}`(?:[、, ]+`[a-f\d]{7,40}`)*$/
+for (const row of deliveryRows) {
+  const cells = row.split('|').slice(1, -1).map((cell) => cell.trim())
+  const [work, commit, ...states] = cells
+  if (cells.length !== 6 || !work) {
+    errors.push('docs/build.md: 交付对照行必须有施工包、提交和四项证据状态')
+    continue
+  }
+  if (commit !== '待提交' && !commitReference.test(commit)) {
+    errors.push(`docs/build.md: 交付对照提交引用无效：${work}／${commit}`)
+  }
+  if (states.some((state) => !evidenceStates.has(state))) {
+    errors.push(`docs/build.md: 交付对照证据状态无效：${work}／${states.join('、')}`)
+  }
+}
+
 if (errors.length > 0) {
   for (const error of errors) process.stderr.write(`${error}\n`)
   process.exitCode = 1
