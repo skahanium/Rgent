@@ -22,8 +22,10 @@ export const ASSISTANT_TONE_LABELS: Record<AssistantTone, string> = {
 
 const CONTROL = /[\u0000-\u001f\u007f]/u
 
-const cleanText = (value: unknown, max: number): string | null => {
-  if (typeof value !== 'string' || value !== value.trim() || value.length > max || CONTROL.test(value)) return null
+const cleanText = (value: unknown, max: number, multiline = false): string | null => {
+  if (typeof value !== 'string' || value !== value.trim() || value.length > max) return null
+  // Preserve LF/CRLF verbatim in supplementary notes; lone CR and other controls stay invalid.
+  if (CONTROL.test(multiline ? value.replace(/\r\n|\n/gu, '') : value)) return null
   return value
 }
 
@@ -31,7 +33,7 @@ export function isAssistantHabits(value: unknown): value is AssistantHabits {
   if (!value || typeof value !== 'object') return false
   const candidate = value as Partial<AssistantHabits>
   if (cleanText(candidate.address, ASSISTANT_LIMITS.address) === null) return false
-  if (cleanText(candidate.note, ASSISTANT_LIMITS.note) === null) return false
+  if (cleanText(candidate.note, ASSISTANT_LIMITS.note, true) === null) return false
   return ASSISTANT_TONES.includes(candidate.tone as AssistantTone)
 }
 

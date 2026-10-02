@@ -47,7 +47,8 @@ export function parseEntryCreateRequest(value: unknown): EntryCreateRequest | nu
   const item = value as Partial<EntryCreateRequest>
   const name = asString(item.name)
   const parent = asString(item.parent)
-  return name?.trim() && parent != null ? { name, parent } : null
+  if (item.sessionId !== undefined && (typeof item.sessionId !== 'string' || !item.sessionId || item.sessionId.length > 128)) return null
+  return name?.trim() && parent != null ? { name, parent, ...(item.sessionId !== undefined ? { sessionId: item.sessionId } : {}) } : null
 }
 
 export function parseRelocationPreviewRequest(value: unknown): RelocationPreviewRequest | null {

@@ -12,7 +12,7 @@ async function fixture(content='# B\n\nneedle 正文\n') {
   const acceptsObject=()=>false
   const registry=new TaskAuthorizationRegistry({root:()=>'/v',session:()=> 's',read,tier,acceptsObject,
     tree:async()=>[...records.keys()].map(relPath=>({name:relPath,relPath,kind:'note' as const})),configuration:()=>({credential:{provider:'custom',baseURL:'https://model.example/v1',modelId:'m',contextTokens:16000,apiKey:'secret'},limits:{seconds:300,steps:12,tools:24}})})
-  const request={relPath:'a.md',sessionId:'s',objectVersion:'oa',expectedRevision:'ra',range:{start:0,end:2},expectedText:'/问',promptText:'问',references:['b.md']}
+  const request={modelRecordId:'model-record',relPath:'a.md',sessionId:'s',objectVersion:'oa',expectedRevision:'ra',range:{start:0,end:2},expectedText:'/问',promptText:'问',references:['b.md']}
   const p=await registry.preview('owner',request);const grant=await registry.consume('owner',{...request,previewId:p.id});reads.length=0
   return {records,reads,grant,tools:createScopedAgentTools(grant,'task',{read,tier,acceptsObject}),deny:(path:string)=>{denied=path},hook:(fn:(path:string)=>Promise<void>)=>{hook=fn}}
 }

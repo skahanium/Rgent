@@ -45,3 +45,13 @@ describe('assistant preference', () => {
     expect(existsSync(path.join(root, 'assistant.json'))).toBe(false)
   })
 })
+
+
+it('persists multiline notes and retains the last saved value when a rejected replacement is attempted', () => {
+  const root = directory()
+  const habits = { address: '老陈', tone: 'plain' as const, note: '先给结论\r\n再给理由' }
+  saveAssistantHabits(root, habits)
+  expect(loadAssistantHabits(root)).toEqual(habits)
+  expect(() => saveAssistantHabits(root, { ...habits, note: '坏\u0000说明' })).toThrow('BAD_ASSISTANT')
+  expect(loadAssistantHabits(root)).toEqual(habits)
+})

@@ -67,6 +67,9 @@ describe('ipc payload guards', () => {
   it('requires explicit typed requests for library structure changes', () => {
     expect(parseEntryCreateRequest({ name: '计划', parent: '工作' })).toEqual({ name: '计划', parent: '工作' })
     expect(parseEntryCreateRequest({ name: '计划', parent: 7 })).toBeNull()
+    expect(parseEntryCreateRequest({ name: '计划', parent: '工作', sessionId: 'session-1' })).toEqual({ name: '计划', parent: '工作', sessionId: 'session-1' })
+    expect(parseEntryCreateRequest({ name: '计划', parent: '工作', sessionId: '' })).toBeNull()
+    expect(parseEntryCreateRequest({ name: '计划', parent: '工作', sessionId: 7 })).toBeNull()
     expect(parseRelocationPreviewRequest({ kind: 'note', source: 'a.md', target: 'b.md' }))
       .toEqual({ kind: 'note', source: 'a.md', target: 'b.md' })
     expect(parseRelocationPreviewRequest({ kind: 'file', source: 'a.md', target: 'b.md' })).toBeNull()

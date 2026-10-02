@@ -378,7 +378,7 @@ export async function start(root: HTMLElement): Promise<void> {
     if(current()!==tab || !tabs.includes(tab))return
     const draft=editor.getText()
     if(draft.slice(submission.range.start,submission.range.end)!==`/${submission.prompt}`)return
-    const request=()=>({relPath:tab.relPath,range:submission.range,expectedText:draft.slice(submission.range.start,submission.range.end),promptText:submission.prompt,
+    const request=()=>({modelRecordId:modelConfigSnapshot?.defaultModelId ?? '',relPath:tab.relPath,range:submission.range,expectedText:draft.slice(submission.range.start,submission.range.end),promptText:submission.prompt,
       sessionId:tab.sessionId!,objectVersion:tab.objectVersion!,expectedRevision:tab.revision})
     let displayedRequest:ReturnType<typeof request>|null=null
     const coords=editor.view.coordsAtPos(editor.view.state.selection.main.head)??editor.view.dom.getBoundingClientRect()

@@ -15,7 +15,7 @@ function setup() {
     configuration:()=>({credential:{provider:'custom' as const,baseURL:'https://model.example/v1',modelId:model,contextTokens:16000,apiKey:key},limits:{seconds:180,steps:4,tools:0}})
   }
   const registry = new TaskAuthorizationRegistry(deps)
-  const request={relPath:'a.md',sessionId:session,objectVersion:'o-a',expectedRevision:'r-a',range:{start:0,end:2},expectedText:'/问',promptText:'问',references:['dir']}
+  const request={relPath:'a.md',sessionId:session,objectVersion:'o-a',expectedRevision:'r-a',range:{start:0,end:2},expectedText:'/问',promptText:'问',modelRecordId:'model-record',references:['dir']}
   return {registry,deps,request,records,onRead:(hook:(path:string)=>void | Promise<void>)=>{onRead=hook},onTier:(hook:(path:string)=>void)=>{onTier=hook},session:(x:string)=>{session=x},model:(x:string)=>{model=x},key:(x:string)=>{key=x},deny:(x:string)=>{denied=x}}
 }
 
@@ -152,7 +152,7 @@ it('refuses an attachment reference and a directory expansion beyond the object 
     acceptsObject: () => false,
     configuration: () => ({ credential: { provider: 'custom', baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 16000, apiKey: 'k' }, limits: { seconds: 180, steps: 4, tools: 0 } })
   })
-  await expect(registry.preview('a', { relPath: 'a.md', sessionId: 's', objectVersion: 'oa', expectedRevision: 'ra', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', references: ['big'] }))
+  await expect(registry.preview('a', { relPath: 'a.md', sessionId: 's', objectVersion: 'oa', expectedRevision: 'ra', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', modelRecordId: 'model-record', references: ['big'] }))
     .rejects.toThrow('AUTHORIZATION_SCOPE_TOO_LARGE')
 })
 
@@ -170,4 +170,128 @@ it('fails closed with SOURCE_BUSY when the origin proof is replaced during every
   })
   await expect(grant.assertLive('model')).rejects.toThrow('SOURCE_BUSY')
   await expect(grant.assertLive('model')).rejects.toThrow('AUTHORIZATION_REVOKED')
+})
+
+
+function attachmentSetup() {
+  const app = setup()
+  const tree: TreeEntry[] = [
+    { name: 'a.md', relPath: 'a.md', kind: 'note' },
+    { name: 'dir', relPath: 'dir', kind: 'dir', children: [
+      { name: 'b.md', relPath: 'dir/b.md', kind: 'note' },
+      // 原生 metadata 表明 Note/ 对应实际大小写不同的 note.md，不能靠拼名字判断。
+      { name: 'Note', relPath: 'dir/Note', kind: 'dir', attachmentOf: 'dir/note.md', children: [
+        { name: 'image.md', relPath: 'dir/Note/image.md', kind: 'note' },
+        { name: 'sub', relPath: 'dir/Note/sub', kind: 'dir', children: [
+          { name: 'nested.md', relPath: 'dir/Note/sub/nested.md', kind: 'note' }
+        ] }
+      ] }
+    ] }
+  ]
+  for (const relPath of ['dir/Note/image.md', 'dir/Note/sub/nested.md']) {
+    app.records.set(relPath, { content: '/问\n', revision: 'r-extra', sessionId: 'session-a', objectVersion: 'o-extra' })
+  }
+  const registry = new TaskAuthorizationRegistry({ ...app.deps, tree: async () => tree })
+  return { ...app, tree, registry }
+}
+
+it.each(['dir/Note', 'dir/Note/image.md', 'dir/Note/sub', 'dir/Note/sub/nested.md'])('rejects an explicit attachment subtree reference: %s', async reference => {
+  const app = attachmentSetup()
+  await expect(app.registry.preview('a', { ...app.request, references: [reference] })).rejects.toThrow('OUTSIDE_TASK_SCOPE')
+})
+
+it('excludes attachment Markdown from ordinary directory expansion without blocking its ordinary notes', async () => {
+  const app = attachmentSetup()
+  const preview = await app.registry.preview('a', app.request)
+  expect(preview.sources.map(source => source.relPath)).toEqual(['a.md', 'dir/b.md'])
+})
+
+it('rejects an attachment Markdown as the originating note', async () => {
+  const app = attachmentSetup()
+  await expect(app.registry.preview('a', { ...app.request, relPath: 'dir/Note/image.md', objectVersion: 'o-extra', expectedRevision: 'r-extra', references: [] })).rejects.toThrow('OUTSIDE_TASK_SCOPE')
+})
+
+it.each(['before-consume', 'before-read', 'during-read'] as const)('stops after an approved directory acquires attachment ownership %s', async timing => {
+  const app = attachmentSetup()
+  const preview = await app.registry.preview('a', app.request)
+  const folder = app.tree[1]!
+  if (timing === 'before-consume') {
+    folder.attachmentOf = 'dir.md'
+    await expect(app.registry.consume('a', { ...app.request, previewId: preview.id })).rejects.toThrow('OUTSIDE_TASK_SCOPE')
+    return
+  }
+  const grant = await app.registry.consume('a', { ...app.request, previewId: preview.id })
+  if (timing === 'before-read') folder.attachmentOf = 'dir.md'
+  else app.onRead(path => { if (path === 'dir/b.md') folder.attachmentOf = 'dir.md' })
+  await expect(grant.assertLive(timing === 'before-read' ? 'read' : 'model', 'dir/b.md')).rejects.toThrow('OUTSIDE_TASK_SCOPE')
+  await expect(grant.assertLive('model')).rejects.toThrow('AUTHORIZATION_REVOKED')
+})
+
+it('fails closed when attachment membership cannot be verified', async () => {
+  const app = setup()
+  let available = true
+  const registry = new TaskAuthorizationRegistry({ ...app.deps, tree: async () => {
+    if (!available) throw Error('NOTE_UNREADABLE')
+    return app.deps.tree()
+  } })
+  const preview = await registry.preview('a', app.request)
+  const grant = await registry.consume('a', { ...app.request, previewId: preview.id })
+  available = false
+  await expect(grant.assertLive('model')).rejects.toThrow('NOTE_UNREADABLE')
+  await expect(grant.assertLive('model')).rejects.toThrow('AUTHORIZATION_REVOKED')
+})
+
+
+it('does not return a preview when ownership changes during its source reads', async () => {
+  const app = attachmentSetup()
+  app.onRead(path => { if (path === 'dir/b.md') app.tree[1]!.attachmentOf = 'dir.md' })
+  await expect(app.registry.preview('a', app.request)).rejects.toThrow('OUTSIDE_TASK_SCOPE')
+})
+
+it.each(['', '../model', 'x'.repeat(65)])('rejects malformed model record identifiers: %s', async modelRecordId => {
+  const app = setup()
+  await expect(app.registry.preview('a', { ...app.request, modelRecordId })).rejects.toThrow('BAD_REQUEST')
+})
+
+it('binds model record identity even if two records currently resolve to identical credentials', async () => {
+  const app = setup()
+  const preview = await app.registry.preview('a', app.request)
+  await expect(app.registry.consume('a', { ...app.request, previewId: preview.id, modelRecordId: 'other-model' })).rejects.toThrow('STALE_AUTHORIZATION')
+})
+
+
+it('uses a scoped native ownership verifier rather than rescanning the full tree during live calls', async () => {
+  const app = setup()
+  let treeReads = 0; let attachment = false
+  const registry = new TaskAuthorizationRegistry({ ...app.deps,
+    tree: async () => { treeReads++; return app.deps.tree() },
+    assertOrdinaryNotes: async paths => {
+      expect(paths).toEqual(['a.md', 'dir/b.md'])
+      if (attachment) throw Error('OUTSIDE_TASK_SCOPE')
+    }
+  })
+  const preview = await registry.preview('a', app.request)
+  const grant = await registry.consume('a', { ...app.request, previewId: preview.id })
+  const before = treeReads
+  await grant.assertLive('model')
+  expect(treeReads).toBe(before)
+  attachment = true
+  await expect(grant.assertLive('model')).rejects.toThrow('OUTSIDE_TASK_SCOPE')
+})
+
+it.each(['model', 'key'] as const)('rejects a %s configuration change while consuming and reading sources', async field => {
+  const app = setup()
+  const preview = await app.registry.preview('a', app.request)
+  app.onRead(path => { if (path === 'dir/b.md') { if (field === 'model') app.model('changed'); else app.key('changed') } })
+  await expect(app.registry.consume('a', { ...app.request, previewId: preview.id })).rejects.toThrow('STALE_AUTHORIZATION')
+})
+
+
+it('rejects a run-limit change made during authorization consumption', async () => {
+  const app = setup()
+  const config = app.deps.configuration()
+  const registry = new TaskAuthorizationRegistry({ ...app.deps, configuration: () => structuredClone(config) })
+  const preview = await registry.preview('a', app.request)
+  app.onRead(path => { if (path === 'dir/b.md') config.limits.seconds = 181 })
+  await expect(registry.consume('a', { ...app.request, previewId: preview.id })).rejects.toThrow('STALE_AUTHORIZATION')
 })

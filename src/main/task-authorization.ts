@@ -9,11 +9,12 @@ export type AuthorizationDependencies = {
   root(): string | null
   session(): string | null
   tree(): Promise<TreeEntry[]>
+  assertOrdinaryNotes?: (paths: readonly string[]) => Promise<void>
   read(path: string): Promise<NoteSnapshot>
   tier(root: string, path: string): Promise<'reference' | 'follow'>
   acceptsObject(path: string, expected: string, current: string): boolean
   ownerValid?: (owner:string)=>boolean
-  configuration(extraReferences: boolean): AuthorizationConfiguration
+  configuration(extraReferences: boolean, modelRecordId: string): AuthorizationConfiguration
 }
 export interface TaskGrant {
   readonly id: string
@@ -29,10 +30,10 @@ export interface TaskGrant {
   acknowledgeOrigin(snapshot: NoteSnapshot): void
   revoke(): void
 }
-type Prepared = { owner: string; request: AgentCommandRequest; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number }
+type Prepared = { owner: string; request: AgentCommandRequest; modelRecordId: string; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number }
 const digest = (value: unknown): string => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex')
 function command(request: AgentCommandRequest): AgentCommandRequest {
-  return {relPath:request.relPath,sessionId:request.sessionId,objectVersion:request.objectVersion,expectedRevision:request.expectedRevision,
+  return {modelRecordId:request.modelRecordId,relPath:request.relPath,sessionId:request.sessionId,objectVersion:request.objectVersion,expectedRevision:request.expectedRevision,
     range:{...request.range},expectedText:request.expectedText,promptText:request.promptText}
 }
 function safePath(value: unknown): value is string {
@@ -42,9 +43,37 @@ function safePath(value: unknown): value is string {
 export function isAuthorizationCommand(value: unknown): value is AgentCommandRequest {
   if (!value || typeof value!=='object') return false
   const r=value as Partial<AgentCommandRequest>
-  return safePath(r.relPath) && typeof r.sessionId==='string' && typeof r.objectVersion==='string' && typeof r.expectedRevision==='string' &&
+  return typeof r.modelRecordId==='string' && /^[A-Za-z0-9-]{1,64}$/u.test(r.modelRecordId) && safePath(r.relPath) && typeof r.sessionId==='string' && typeof r.objectVersion==='string' && typeof r.expectedRevision==='string' &&
     typeof r.promptText==='string' && r.promptText.trim().length>0 && r.promptText.length<=20000 && typeof r.expectedText==='string' &&
     !!r.range && Number.isSafeInteger(r.range.start) && Number.isSafeInteger(r.range.end) && r.range.start>=0 && r.range.end>r.range.start
+}
+
+/** The native-backed tree establishes ownership, including filesystem aliases.
+ * Dropping the whole attachment subtree prevents Markdown from becoming an Agent source. */
+function ordinaryEntries(tree: TreeEntry[]): Map<string, TreeEntry> {
+  const entries = new Map<string, TreeEntry>()
+  const collect = (items: TreeEntry[]): void => {
+    for (const item of items) {
+      if (item.attachmentOf !== undefined) continue
+      entries.set(item.relPath, item)
+      if (item.children) collect(item.children)
+    }
+  }
+  collect(tree)
+  return entries
+}
+function assertOrdinaryNotes(entries: Map<string, TreeEntry>, paths: Iterable<string>): void {
+  for (const path of paths) if (entries.get(path)?.kind !== 'note') throw Error('OUTSIDE_TASK_SCOPE')
+}
+
+async function verifyOrdinaryNotes(deps: AuthorizationDependencies, paths: readonly string[], check: () => void): Promise<void> {
+  if (deps.assertOrdinaryNotes) await deps.assertOrdinaryNotes(paths)
+  else {
+    const tree = await deps.tree()
+    check()
+    assertOrdinaryNotes(ordinaryEntries(tree), paths)
+  }
+  check()
 }
 
 /** Ephemeral grants authorize purpose-bound operations, never a generic disk or network channel. */
@@ -59,9 +88,7 @@ export class TaskAuthorizationRegistry {
     if(session!==request.sessionId)throw Error('VAULT_CHANGED')
     const tree=await this.deps.tree()
     this.checkSession(root,session)
-    const entries=new Map<string,TreeEntry>()
-    function collect(items:TreeEntry[]) { for(const item of items){entries.set(item.relPath,item);if(item.children)collect(item.children)} }
-    collect(tree)
+    const entries=ordinaryEntries(tree)
     const selected=new Set([request.relPath])
     for(const path of request.references){
       const entry=entries.get(path)
@@ -87,11 +114,12 @@ export class TaskAuthorizationRegistry {
       if(path===request.relPath && snapshot.content.slice(request.range.start,request.range.end)!==request.expectedText)throw Error('STALE_AUTHORIZATION')
       sources.push({sourceId:randomUUID(),relPath:path,title:noteTitle(path),sessionId:session!,objectVersion:snapshot.objectVersion,revision:snapshot.revision,fingerprint:digest(snapshot.content),tier})
     }
-    const config=structuredClone(this.deps.configuration(sources.length>1))
+    await verifyOrdinaryNotes(this.deps, [...selected], () => this.checkSession(root, session))
+    const config=structuredClone(this.deps.configuration(sources.length>1, request.modelRecordId))
     const view:AgentAuthorizationPreview={id:randomUUID(),sessionId:session!,origin:request.relPath,sources,
       recipient:{modelId:config.credential.modelId,host:new URL(config.credential.baseURL).host,provider:config.credential.provider}}
     for(const [id,p]of this.previews)if(p.expires<Date.now() || p.owner===owner)this.previews.delete(id)
-    this.previews.set(view.id,{owner,request:command(request),view:structuredClone(view),root,config,configHash:digest(config),expires:Date.now()+300000})
+    this.previews.set(view.id,{owner,request:command(request),view:structuredClone(view),modelRecordId:request.modelRecordId,root,config,configHash:digest(config),expires:Date.now()+300000})
     return structuredClone(view)
   }
 
@@ -102,11 +130,16 @@ export class TaskAuthorizationRegistry {
     if(this.deps.ownerValid?.(owner)===false || !prepared || prepared.owner!==owner || prepared.expires<Date.now())throw Error('INVALID_AUTHORIZATION')
     // A legitimate caller consumes once, including stale submissions; retries need a new displayed preview.
     this.previews.delete(request.previewId)
-    if(!isAuthorizationCommand(request) || digest(command(request))!==digest(prepared.request))throw Error('STALE_AUTHORIZATION')
+    if(!isAuthorizationCommand(request) || request.modelRecordId!==prepared.modelRecordId || digest(command(request))!==digest(prepared.request))throw Error('STALE_AUTHORIZATION')
     this.checkSession(prepared.root,prepared.view.sessionId)
-    if(digest(this.deps.configuration(prepared.view.sources.length>1))!==prepared.configHash)throw Error('STALE_AUTHORIZATION')
+    if(digest(this.deps.configuration(prepared.view.sources.length>1, prepared.modelRecordId))!==prepared.configHash)throw Error('STALE_AUTHORIZATION')
     const grant=new LiveGrant(this.deps,prepared)
     await grant.validateSources()
+    this.checkSession(prepared.root,prepared.view.sessionId)
+    if(digest(this.deps.configuration(prepared.view.sources.length>1, prepared.modelRecordId))!==prepared.configHash){
+      grant.revoke()
+      throw Error('STALE_AUTHORIZATION')
+    }
     return grant
   }
   private checkSession(root:string,session:string|null):void { if(this.deps.root()!==root || this.deps.session()!==session)throw Error('VAULT_CHANGED') }
@@ -150,6 +183,8 @@ class LiveGrant implements TaskGrant {
     }
     check()
     try {
+      const paths = this.sources.map(source => source.relPath)
+      await verifyOrdinaryNotes(this.deps, paths, check)
       for (const source of this.sources) {
         let verified = false
         for (let attempt = 0; attempt < 8; attempt++) {
@@ -174,6 +209,7 @@ class LiveGrant implements TaskGrant {
         }
         if (!verified) throw Error('SOURCE_BUSY')
       }
+      await verifyOrdinaryNotes(this.deps, paths, check)
     }catch(error){this.live=false;throw error}
     check()
   }

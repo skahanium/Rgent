@@ -105,6 +105,8 @@ export type ModelListResult = { ok: true; models: ModelListEntry[]; truncated?: 
 export type ModelLimitsSetRequest = { tier: LimitTier; limits: RunLimits }
 export type ObjectBinding = { sessionId: string; objectVersion: string }
 export type AgentCommandRequest = ObjectBinding & {
+  /** 本场最终模型的内部记录 ID，不是供应商自报 modelId。 */
+  modelRecordId: string
   expectedRevision: string
   relPath: string
   range: { start: number; end: number }
@@ -202,7 +204,7 @@ export type SaveCopyPreviewView = {
 export type SaveCopyCommitRequest = { sessionId: string; id: string; draftVersion: string; body: string }
 export type SaveCopyPreviewResult = { ok: true; preview: SaveCopyPreviewView } | { ok: false; error: string }
 export type SaveCopyCommitResult = { ok: true; relPath: string; snapshot: NoteSnapshot; taskIds: string[] } | { ok: false; error: string }
-export type EntryCreateRequest = { name: string; parent: string }
+export type EntryCreateRequest = { name: string; parent: string; sessionId?: string }
 export type RelocationPreviewRequest = { kind: 'note' | 'folder'; source: string; target: string }
 export type RelocationCommitRequest = { id: string; repairLinks: boolean }
 export type RelocationPreviewView = {

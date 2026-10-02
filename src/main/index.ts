@@ -404,6 +404,7 @@ function registerIpc(): void {
     const request = value as Partial<AgentStartRequest>
     if (typeof request.previewId !== 'string' || request.previewId.length > 128 || typeof request.relPath !== 'string' || typeof request.expectedText !== 'string' ||
         typeof request.promptText !== 'string' || request.promptText.length > 20000 ||
+        typeof request.modelRecordId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(request.modelRecordId) ||
         typeof request.sessionId !== 'string' || typeof request.objectVersion !== 'string' || typeof request.expectedRevision !== 'string' ||
         !request.range || !Number.isSafeInteger(request.range.start) || !Number.isSafeInteger(request.range.end)) {
       return { ok: false, error: 'BAD_REQUEST' }
@@ -582,15 +583,17 @@ function registerIpc(): void {
   })
   registerTrustedHandle(IPC.noteCreate, async (_event, name: unknown) => {
     const request = typeof name === 'string'
-      ? { name: parseNoteName(name), parent: '' }
+      ? { name: parseNoteName(name), parent: '', sessionId: undefined }
       : parseEntryCreateRequest(name)
     if (!request?.name) throw new Error('BAD_PATH')
     if (!vault) throw new Error('NO_VAULT')
+    if (request.sessionId !== undefined) vault.assertSession(request.sessionId)
     return vault.create(request.name, request.parent)
   })
   registerTrustedHandle(IPC.folderCreate, async (_event, value: unknown) => {
     const request = parseEntryCreateRequest(value)
     if (!request || !vault) throw new Error('BAD_PATH')
+    if (request.sessionId !== undefined) vault.assertSession(request.sessionId)
     return vault.createFolder(request.name, request.parent)
   })
   registerTrustedHandle(IPC.relocationPreview, async (event, value: unknown): Promise<RelocationPreviewResult> => {
@@ -733,13 +736,14 @@ app.whenReady().then(() => {
     root:()=>{try{return vault?.requireUsableRoot()??null}catch{return null}},
     session:()=>vault?.sessionId()??null,
     tree:()=>vault!.tree(),read:relPath=>vault!.read(relPath),tier:modelTierFor,
+    assertOrdinaryNotes: paths => vault!.requireOrdinaryNotes(paths),
     acceptsObject:(relPath,expected,current)=>vault?.acceptsObject(relPath,expected,current)??false,
     ownerValid:owner=>!!mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed() &&
       mainWindow.webContents.getURL()===rendererEntryUrl && owner===`${mainWindow.webContents.id}:${mainWindow.webContents.mainFrame.routingId}`,
-    configuration:extraReferences=>{
+    configuration:(extraReferences, modelRecordId)=>{
       if(!modelConfig)throw Error(modelConfigError??'MODEL_CONFIG_UNAVAILABLE')
       const config=modelConfig.getPublic()
-      return {credential:modelConfig.credential(),limits:extraReferences ? config.limits.local : config.limits.none}
+      return {credential:modelConfig.credential(modelRecordId),limits:extraReferences ? config.limits.local : config.limits.none}
     }
   })
   agentHost = new AgentHost({

@@ -74,6 +74,50 @@ async function readDir(root: string, dir: string): Promise<TreeEntry[]> {
   return out
 }
 
+/** Main-process Agent guard: inspect only approved note ancestors and their siblings.
+ * Native IDs and resolution establish companion ownership (including aliases), not string casing.
+ * Results are shared only within this synchronous check and never cached across calls. */
+export function requireOrdinaryNotes(root: string, paths: readonly string[]): void {
+  const fs = secureFsFor(root)
+  const proofs = paths.map(relPath => {
+    if (!isNotePath(relPath)) throw new VaultPathError('OUTSIDE_TASK_SCOPE')
+    mustResolve(root, relPath)
+    const parts = fs.resolve(relPath)
+    if (parts.at(-1)?.kind !== 'file') throw new VaultPathError('OUTSIDE_TASK_SCOPE')
+    return { relPath, parts }
+  })
+  const foldersByParent = new Map<string, Set<string>>()
+  for (const { parts } of proofs) {
+    for (let index = 0; index < parts.length - 1; index++) {
+      const parent = parts.slice(0, index).map(part => part.name).join('/')
+      const ids = foldersByParent.get(parent) ?? new Set<string>()
+      ids.add(parts[index]!.id)
+      foldersByParent.set(parent, ids)
+    }
+  }
+  for (const [parent, ancestorIds] of foldersByParent) {
+    for (const entry of fs.list(parent)) {
+      if (entry.kind !== 'file' || isHiddenName(entry.name) || !isNotePath(entry.name)) continue
+      const stem = entry.name.slice(0, -3)
+      const candidate = parent ? `${parent}/${stem}` : stem
+      let folder
+      try { folder = fs.resolve(candidate).at(-1) }
+      catch (error) {
+        if (error instanceof Error && error.message === 'ENOENT') continue
+        throw error // Ownership that cannot be verified does not become permission.
+      }
+      if (folder?.kind === 'dir' && ancestorIds.has(folder.id)) throw new VaultPathError('OUTSIDE_TASK_SCOPE')
+    }
+  }
+  for (const { relPath, parts } of proofs) {
+    const current = fs.resolve(relPath)
+    if (current.length !== parts.length || parts.some((part, index) =>
+      current[index]?.id !== part.id || current[index]?.name !== part.name || current[index]?.kind !== part.kind)) {
+      throw new VaultPathError('PATH_CHANGED')
+    }
+  }
+}
+
 export async function readNote(root: string, relPath: string): Promise<string> {
   if (!isNotePath(relPath)) throw new VaultPathError('不是笔记')
   mustResolve(root, relPath)

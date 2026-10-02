@@ -16,7 +16,7 @@ function fixture(stream:(signal:AbortSignal)=>AsyncIterable<string>) {
     stream:(_input,signal)=>{calls++;return stream(signal)},
     streamStep:async function*(_input,signal){calls++;for await(const text of stream(signal))yield {type:'text',text};yield {type:'finish',reason:'stop'}},
     createReadOnlyTools:(grant,id)=>createScopedAgentTools(grant,id,{read:async p=>({...source[p]!}),tier,acceptsObject:()=>false}),emit:()=>{}})
-  const request={relPath:'a.md',sessionId:'session',objectVersion:'a',expectedRevision:'1',range:{start:0,end:2},expectedText:'/问',promptText:'问',references:['b.md']}
+  const request={modelRecordId:'model-record',relPath:'a.md',sessionId:'session',objectVersion:'a',expectedRevision:'1',range:{start:0,end:2},expectedText:'/问',promptText:'问',references:['b.md']}
   return {host,registry,request,source,calls:()=>calls,deny:(p:string)=>{denied=p}}
 }
 it('requires one-use authorization before changing the note and uses its fixed credential',async()=>{
@@ -60,4 +60,25 @@ it('source invalidation aborts the provider and closes its iterator without chan
   expect(providerSignal.aborted).toBe(true);expect(returned).toBe(true)
   expect(app.source['a.md']!.content).toContain('此前已生成')
   expect(app.source['a.md']!.content).not.toContain('过期增量')
+})
+
+it('binds a task to the explicit model record instead of a device default', async () => {
+  const snapshot = { content: '/问\n', revision: 'r', sessionId: 's', objectVersion: 'o' }
+  const chosen: string[] = []
+  const registry = new TaskAuthorizationRegistry({ root: () => '/vault', session: () => 's',
+    tree: async () => [{ name: 'a.md', relPath: 'a.md', kind: 'note' }], read: async () => snapshot,
+    tier: async () => 'reference', acceptsObject: () => false,
+    configuration: (_extra, modelRecordId) => {
+      chosen.push(modelRecordId)
+      if (modelRecordId !== 'second') throw Error('MODEL_NOT_FOUND')
+      return { credential: { provider: 'minimax', baseURL: 'https://api.minimax.io/v1', modelId: 'M', contextTokens: 16000, apiKey: 'second-secret' }, limits: { seconds: 180, steps: 4, tools: 0 } }
+    } })
+  const request = { relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: 'r', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', references: [], modelRecordId: 'second' }
+  const preview = await registry.preview('owner', request)
+  expect(preview.recipient).toEqual({ provider: 'minimax', modelId: 'M', host: 'api.minimax.io' })
+  expect(JSON.stringify(preview)).not.toContain('second-secret')
+  const grant = await registry.consume('owner', { ...request, previewId: preview.id })
+  expect(grant.credential.apiKey).toBe('second-secret')
+  expect(chosen.length).toBeGreaterThanOrEqual(2)
+  expect(chosen.every(id => id === 'second')).toBe(true)
 })

@@ -28,7 +28,7 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
   const choices=document.createElement('div');choices.className='authorization-choices';fieldset.append(choices)
   function renderEntries(entries:TreeEntry[],depth=0):void {
     for(const entry of entries){
-      if(entry.kind==='file' || entry.relPath===options.origin)continue
+      if(entry.attachmentOf !== undefined || entry.kind==='file' || entry.relPath===options.origin)continue
       const label=document.createElement('label');label.style.paddingInlineStart=`${depth*12}px`
       const input=document.createElement('input');input.type='checkbox';input.value=entry.relPath;input.disabled=entry.tier==='forbidden'
       const text=document.createElement('span');text.textContent=entry.relPath+(entry.kind==='dir'?'（确认时固定目录成员）':entry.tier==='follow'?'（只读）':'')
@@ -80,7 +80,7 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
   send.addEventListener('click',()=>void submit())
   panel.root.querySelector('.authorization-cancel')!.addEventListener('click',()=>panel.close())
   panel.root.addEventListener('keydown',event=>{
-    if(event.key!=='Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.isComposing)return
+    if(event.key!=='Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229)return
     event.preventDefault();if(event.target instanceof Element && event.target.closest('.authorization-cancel')){panel.close();return};void submit()
   })
   void refresh()

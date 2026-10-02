@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { dialog } from 'electron'
+import { secureFsFor } from '../../src/main/secure-fs.ts'
 import { VaultSession } from '../../src/main/vault.ts'
 import { VaultLifecycle } from '../../src/main/vault-lifecycle.ts'
 import { watchVault } from '../../src/main/watch.ts'
@@ -564,3 +565,43 @@ function flatten(entries: { relPath: string; children?: unknown[] }[]): { relPat
   }
   return out
 }
+
+
+it('verifies Agent source ancestry and companion ownership without recursively listing unrelated subtrees', async () => {
+  expect(notesFs).toHaveProperty('requireOrdinaryNotes')
+  const check = (notesFs as typeof notesFs & { requireOrdinaryNotes(root: string, paths: readonly string[]): void }).requireOrdinaryNotes
+  const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-scoped-ownership-'))
+  try {
+    await mkdir(path.join(root, 'ordinary'))
+    await writeFile(path.join(root, 'ordinary', 'read.md'), '正文')
+    await mkdir(path.join(root, 'unrelated'))
+    await mkdir(path.join(root, 'unrelated', 'deep'))
+    const listings = vi.spyOn(secureFsFor(root), 'list')
+    expect(() => check(root, ['ordinary/read.md'])).not.toThrow()
+    expect(listings.mock.calls.map(call => call[0])).toEqual([''])
+    await writeFile(path.join(root, 'ordinary.md'), '拥有附件目录')
+    expect(() => check(root, ['ordinary/read.md'])).toThrow('OUTSIDE_TASK_SCOPE')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it('uses actual native alias resolution for attachment ancestors and rejects missing, hidden and linked sources', async () => {
+  expect(notesFs).toHaveProperty('requireOrdinaryNotes')
+  const check = (notesFs as typeof notesFs & { requireOrdinaryNotes(root: string, paths: readonly string[]): void }).requireOrdinaryNotes
+  const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-scoped-alias-'))
+  try {
+    await writeFile(path.join(root, 'Alias.md'), 'note')
+    await mkdir(path.join(root, 'alias'))
+    await mkdir(path.join(root, 'alias', 'nested'))
+    await writeFile(path.join(root, 'alias', 'nested', 'read.md'), 'nested')
+    const nativeAlias = await stat(path.join(root, 'Alias')).then(async info => {
+      const actual = await stat(path.join(root, 'alias')); return info.dev === actual.dev && info.ino === actual.ino
+    }).catch(() => false)
+    if (nativeAlias) expect(() => check(root, ['alias/nested/read.md'])).toThrow('OUTSIDE_TASK_SCOPE')
+    else expect(() => check(root, ['alias/nested/read.md'])).not.toThrow()
+    await writeFile(path.join(root, '.hidden.md'), 'hidden')
+    await symlink(path.join(root, 'Alias.md'), path.join(root, 'linked.md'))
+    expect(() => check(root, ['missing.md'])).toThrow()
+    expect(() => check(root, ['.hidden.md'])).toThrow()
+    expect(() => check(root, ['linked.md'])).toThrow()
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

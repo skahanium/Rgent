@@ -391,9 +391,9 @@ export function createModelConfigStore(userData: string, protection: SecretProte
       commit(next)
     },
     /** 新任务使用的模型：按 defaultModelId 解析，失败一律显错，不静默换别的。 */
-    credential(): ModelCredential {
-      if (current.defaultModelId === null) throw new Error('NO_MODEL_SELECTED')
-      const model = modelOf(current, current.defaultModelId)
+    credential(modelRecordId: string | null = current.defaultModelId): ModelCredential {
+      if (modelRecordId === null) throw new Error('NO_MODEL_SELECTED')
+      const model = modelOf(current, modelRecordId)
       const connection = connectionOf(current, model.connectionId)
       return {
         provider: connection.provider,

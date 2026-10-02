@@ -43,3 +43,18 @@ describe('assistant habits contract', () => {
     expect(onlyTone).not.toContain('补充说明：')
   })
 })
+
+
+it.each(['先给结论\n再给理由', '先给结论\r\n再给理由'])('accepts ordinary multiline supplementary notes without changing their text: %j', note => {
+  const habits = { address: '老陈', tone: 'plain' as const, note }
+  expect(isAssistantHabits(habits)).toBe(true)
+  expect(assistantSystemBlock(habits)).toContain(note)
+})
+
+it.each(['称呼\n换行', '称呼\r\n换行'])('keeps the address single-line: %j', address => {
+  expect(isAssistantHabits({ address, tone: 'plain', note: '' })).toBe(false)
+})
+
+it.each(['说明\t续写', '说明\u0000续写', '说明\r续写', '说明\u007f续写'])('rejects non-newline controls in supplementary notes: %j', note => {
+  expect(isAssistantHabits({ address: '', tone: 'plain', note })).toBe(false)
+})

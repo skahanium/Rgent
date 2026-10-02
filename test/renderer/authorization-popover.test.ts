@@ -92,3 +92,25 @@ it('keeps focus inside while submitting a selected range and after stale reconfi
   expect(document.activeElement).toBe(popup.root.querySelector('.authorization-send'))
   popup.close()
 })
+
+
+it('omits attachment roots and their full subtree from scope choices', async () => {
+  const popup = openAuthorizationPopover({ anchor: { left: 100, top: 100, bottom: 120 }, origin: 'a.md', entries: [
+    { name: 'ordinary', relPath: 'ordinary', kind: 'dir', children: [{ name: 'b.md', relPath: 'ordinary/b.md', kind: 'note' }] },
+    { name: 'Note', relPath: 'Note', kind: 'dir', attachmentOf: 'note.md', children: [
+      { name: 'sub', relPath: 'Note/sub', kind: 'dir', children: [{ name: 'nested.md', relPath: 'Note/sub/nested.md', kind: 'note' }] }
+    ] }
+  ], preview: async () => ({ ok: true as const, preview }), send: async () => ({ ok: true as const, id: 'task' }) })
+  expect([...popup.root.querySelectorAll<HTMLInputElement>('.authorization-choices input')].map(input => input.value)).toEqual(['ordinary', 'ordinary/b.md'])
+  popup.close()
+})
+
+it('does not confirm from a standalone keyCode 229 even when isComposing is false', async () => {
+  const send = vi.fn(async () => ({ ok: true as const, id: 'task' }))
+  const popup = openAuthorizationPopover({ anchor: { left: 100, top: 100, bottom: 120 }, origin: 'a.md', entries: [], preview: async () => ({ ok: true as const, preview }), send })
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  popup.root.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 229, bubbles: true, cancelable: true }))
+  expect(send).not.toHaveBeenCalled()
+  expect(popup.isOpen()).toBe(true)
+  popup.close()
+})

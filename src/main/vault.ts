@@ -3,7 +3,7 @@ import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { dialog, type BrowserWindow } from 'electron'
 import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest } from '../shared/ipc.ts'
-import { createFolder, createNote, listVaultTree, parseStoredVault, readNoteSnapshot, revisionOf, serializeStoredVault, writeNote } from './notes-fs.ts'
+import { createFolder, createNote, listVaultTree, parseStoredVault, readNoteSnapshot, requireOrdinaryNotes as verifyOrdinaryNotes, revisionOf, serializeStoredVault, writeNote } from './notes-fs.ts'
 import { VaultMutationQueue } from './vault-mutation-queue.ts'
 import { VaultLifecycle, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite } from './vault-lifecycle.ts'
 import { isOwnEcho, type RecentWrite } from './echo.ts'
@@ -113,6 +113,12 @@ export class VaultSession {
     this.assertSession(token); this.requireUsableRoot()
     if (policy.status === 'ready') markTiers(entries, effectivePermissionEntries(root, policy.entries))
     return entries
+  }
+
+  async requireOrdinaryNotes(paths: readonly string[]): Promise<void> {
+    const token = this.captureSession(); const root = this.requireUsableRoot()
+    verifyOrdinaryNotes(root, paths)
+    this.assertSession(token); this.requireUsableRoot()
   }
 
   async permissions(): Promise<PermissionState> {
