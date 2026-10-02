@@ -4,7 +4,7 @@ import type { ModelStepEvent } from './model-stream.ts'
 import type { SavedTaskMaterial } from './host-material.ts'
 import { MemoryStore } from './memory-store.ts'
 
-export type ConsolidationResult = { taskId:string; materialVersion?:string; status:'unavailable'|'queued'|'running'|'applied'|'rejected'|'interrupted'|'handed-off'; reason?:string }
+export type ConsolidationResult = { sessionId?:string; taskId:string; materialVersion?:string; status:'unavailable'|'queued'|'running'|'applied'|'rejected'|'interrupted'|'handed-off'; reason?:string }
 export type ConsolidationPort = {
   context():MemoryContext
   config(vaultKey:string):{enabled:boolean;epoch:number;limits:MemoryLimits}
@@ -32,28 +32,33 @@ export class MemoryConsolidationService {
   private reservations=0
   private readonly now:()=>number
   constructor(private readonly port:ConsolidationPort){this.now=port.now ?? Date.now}
-  private report(result:ConsolidationResult){this.outcomes.set(result.taskId,result);if(this.outcomes.size>256)this.outcomes.delete(this.outcomes.keys().next().value!);try{this.port.changed?.()}catch{/* status notification cannot affect notebook writes */}}
+  private outcomeKey(sessionId:string|undefined,taskId:string):string{return JSON.stringify([sessionId??null,taskId])}
+  private report(result:ConsolidationResult){this.outcomes.set(this.outcomeKey(result.sessionId,result.taskId),result);if(this.outcomes.size>256)this.outcomes.delete(this.outcomes.keys().next().value!);try{this.port.changed?.()}catch{/* status notification cannot affect notebook writes */}}
   state():{permits:number;pending:number;active:number}{return {permits:this.permits.size,pending:this.queue.length+this.reservations,active:this.running.size}}
-  results():ConsolidationResult[]{return structuredClone([...this.outcomes.values()])}
-  handoff(result:{taskId:string;status:'handed-off'|'unavailable'|'failed';reason?:string}):void{
+  results(sessionId?:string):ConsolidationResult[]{return structuredClone([...this.outcomes.values()].filter(r=>sessionId===undefined||r.sessionId===sessionId))}
+  handoff(result:{sessionId?:string;taskId:string;status:'handed-off'|'unavailable'|'failed';reason?:string}):void{
     if(result.status==='unavailable')this.discard(result.taskId)
     if(result.status==='handed-off')return // The consumer already records queued/running/applied; handoff is not completion.
     this.report({...result,status:result.status==='failed'?'rejected':'unavailable'})
   }
+  private capturePermit(taskId:string,context:MemoryContext={...this.port.context()},store:MemoryStore=this.port.store()):Permit{
+    const config=this.port.config(context.vaultKey),limits={...config.limits}
+    if(!Number.isInteger(limits.seconds)||limits.seconds<1||limits.seconds>600||!Number.isInteger(limits.calls)||limits.calls<1||limits.calls>4||limits.tools!==0)throw Error('MEMORY_LIMITS_INVALID')
+    let credential:ModelCredential|null=null,reason:string|undefined
+    if(config.enabled)try{credential={...this.port.credential(context.vaultKey)}}catch{reason='MEMORY_MODEL_UNAVAILABLE'}
+    else reason='MEMORY_PERMISSION_DISABLED'
+    return {taskId,context:{...context},epoch:config.epoch,enabled:config.enabled,credential,limits,store,controller:new AbortController(),reason,attempted:false,deadline:0,calls:0}
+  }
   /** Capture at foreground start. Missing role disables only accumulation, without throwing into Host. */
   start(taskId:string):void{
     if(this.permits.has(taskId))return
+    let context:MemoryContext|undefined
     try{
-      const context={...this.port.context()},config=this.port.config(context.vaultKey),store=this.port.store()
-      const limits={...config.limits}
-      if(!Number.isInteger(limits.seconds)||limits.seconds<1||limits.seconds>600||!Number.isInteger(limits.calls)||limits.calls<1||limits.calls>4||limits.tools!==0)throw Error('MEMORY_LIMITS_INVALID')
-      let credential:ModelCredential|null=null,reason:string|undefined
-      if(config.enabled)try{credential={...this.port.credential(context.vaultKey)}}catch{reason='MEMORY_MODEL_UNAVAILABLE'}
-      else reason='MEMORY_PERMISSION_DISABLED'
-      const permit:Permit={taskId,context,epoch:config.epoch,enabled:config.enabled,credential,limits,store,controller:new AbortController(),reason,attempted:false,deadline:0,calls:0}
-      if(reason){this.report({taskId,status:'unavailable',reason});return}
+      context={...this.port.context()}
+      const permit=this.capturePermit(taskId,context)
+      if(permit.reason){this.report({sessionId:context.sessionId,taskId,status:'unavailable',reason:permit.reason});return}
       this.permits.set(taskId,permit)
-    }catch(error){this.report({taskId,status:'unavailable',reason:errorReason(error)})}
+    }catch(error){this.report({sessionId:context?.sessionId,taskId,status:'unavailable',reason:errorReason(error)})}
   }
   discard(taskId:string):void{const p=this.permits.get(taskId);p?.controller.abort(Error('MEMORY_CANCELLED'));this.permits.delete(taskId)}
   private recover(store:MemoryStore,sessionId:string):Promise<void>{
@@ -67,8 +72,9 @@ export class MemoryConsolidationService {
   private initialize(permit:Permit):Promise<void>{return this.recover(permit.store,permit.context.sessionId)}
   /** Local startup recovery is explicit and never schedules model work. */
   async restore():Promise<void>{
-    try{const context=this.port.context();await this.recover(this.port.store(),context.sessionId);this.outcomes.delete('memory-recovery')}
-    catch(error){this.report({taskId:'memory-recovery',status:'unavailable',reason:errorReason(error)});throw error}
+    const context={...this.port.context()}
+    try{await this.recover(this.port.store(),context.sessionId);this.outcomes.delete(this.outcomeKey(context.sessionId,'memory-recovery'))}
+    catch(error){this.report({sessionId:context.sessionId,taskId:'memory-recovery',status:'unavailable',reason:errorReason(error)});throw error}
   }
   private guard(permit:Permit):void{
     if(permit.controller.signal.aborted)throw permit.controller.signal.reason ?? Error('MEMORY_CANCELLED')
@@ -95,8 +101,8 @@ export class MemoryConsolidationService {
       else await p.store.requeueJob(p.taskId,version,()=>this.guard(p))
       this.guard(p)
       const timer=setTimeout(()=>{p.controller.abort(Error('MEMORY_DEADLINE'));this.pump()},Math.max(1,p.deadline-this.now()));timer.unref?.()
-      this.queue.push({permit:p,version,timer});this.report({taskId:p.taskId,materialVersion:version,status:'queued'});this.pump()
-    }catch(error){const reason=errorReason(error);this.report({taskId:p.taskId,materialVersion:version,status:'rejected',reason});try{await p.store.rejectJob(p.taskId,version,reason)}catch{/* status remains locally inspectable when disk is unavailable */}}
+      this.queue.push({permit:p,version,timer});this.report({sessionId:p.context.sessionId,taskId:p.taskId,materialVersion:version,status:'queued'});this.pump()
+    }catch(error){const reason=errorReason(error);this.report({sessionId:p.context.sessionId,taskId:p.taskId,materialVersion:version,status:'rejected',reason});try{await p.store.rejectJob(p.taskId,version,reason)}catch{/* status remains locally inspectable when disk is unavailable */}}
     finally{if(reserved)this.reservations--;if(!this.queue.some(w=>w.permit===p)&&![...this.running].some(w=>w.permit===p)&&this.permits.get(p.taskId)===p)this.permits.delete(p.taskId)}
   }
   private pump():void{
@@ -112,7 +118,7 @@ export class MemoryConsolidationService {
   private async execute(work:Work):Promise<void>{
     const p=work.permit
     try{
-      this.guard(p);await p.store.jobOutcome(p.taskId,work.version,'running');this.report({taskId:p.taskId,materialVersion:work.version,status:'running'})
+      this.guard(p);await p.store.jobOutcome(p.taskId,work.version,'running');this.report({sessionId:p.context.sessionId,taskId:p.taskId,materialVersion:work.version,status:'running'})
       let job=await this.checkedJob(p,work.version)
       const input=await this.input(p,job.material!)
       await this.checkedJob(p,work.version)
@@ -139,8 +145,8 @@ export class MemoryConsolidationService {
       // Every target was an authorized, fixed related version sent in this request.
       for(const proposal of proposals)if(proposal.target&&!job.material!.related.some(d=>d.id===proposal.target!.id&&d.version===proposal.target!.version))throw Error('MEMORY_TARGET_INVALID')
       await p.store.applyJob(p.taskId,work.version,proposals,()=>this.guard(p))
-      this.report({taskId:p.taskId,materialVersion:work.version,status:'applied'})
-    }catch(error){const reason=errorReason(error),status=reason==='MEMORY_SESSION_CLOSED'?'interrupted':'rejected';try{await p.store.jobOutcome(p.taskId,work.version,status,reason)}catch{}this.report({taskId:p.taskId,materialVersion:work.version,status,reason})}
+      this.report({sessionId:p.context.sessionId,taskId:p.taskId,materialVersion:work.version,status:'applied'})
+    }catch(error){const reason=errorReason(error),status=reason==='MEMORY_SESSION_CLOSED'?'interrupted':'rejected';try{await p.store.jobOutcome(p.taskId,work.version,status,reason)}catch{}this.report({sessionId:p.context.sessionId,taskId:p.taskId,materialVersion:work.version,status,reason})}
   }
   private async input(p:Permit,material:MemoryJobMaterial):Promise<string>{
     const entries=await p.store.validatedEntries(material.related.map(d=>d.id))
@@ -151,20 +157,38 @@ export class MemoryConsolidationService {
     if(!p.credential || bytes+4096>p.credential.contextTokens)throw Error('MEMORY_MODEL_CAPACITY')
     return input
   }
-  /** Only an explicit management retry calls this; no batch/history scan and no previous permit reuse. */
-  async retry(taskId:string,materialVersion:string):Promise<void>{
+  private retryInfo(job:MemoryJobReceipt,p:Permit){
+    return {taskId:p.taskId,materialVersion:job.materialVersion,outcome:job.outcome,epoch:p.epoch,
+      model:p.credential?{modelId:p.credential.modelId,endpointHost:new URL(p.credential.baseURL).host}:null,limits:{...p.limits},
+      sources:(job.material?.sources ?? []).map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId})),omitted:job.material?.omitted ?? false,...(job.reason?{reason:job.reason}:{}),
+      // Main-only signature includes the actual credential, not just the public recipient label.
+      authorizationSignature:this.retryInfoSignature(p)}
+  }
+  private async retryAuthority(taskId:string,materialVersion:string){
+    const context={...this.port.context()},store=this.port.store()
+    const job=(await store.managementSnapshot()).record.jobs.find(j=>j.taskId===taskId&&j.materialVersion===materialVersion)
+    const current=this.port.context()
+    if(current.sessionId!==context.sessionId||current.vaultKey!==context.vaultKey||this.port.store()!==store)throw Error('MEMORY_SESSION_CLOSED')
+    if(!job)throw Error('MEMORY_JOB_MISSING')
+    // All asynchronous reads precede this authority capture. The same permit is installed synchronously.
+    const permit=this.capturePermit(taskId,context,store)
+    return {permit,info:this.retryInfo(job,permit)}
+  }
+  /** Explicit retry creates a fresh permit from the confirmed main-only authority; never reuses a foreground grant. */
+  async retry(taskId:string,materialVersion:string,expectedSignature?:string):Promise<void>{
+    const {permit:p,info}=await this.retryAuthority(taskId,materialVersion)
+    if(expectedSignature!==undefined&&JSON.stringify(info)!==expectedSignature)throw Error('STALE_PREVIEW')
+    // Config may change in the Promise continuation; recapture synchronously before installation.
+    const fresh=this.capturePermit(taskId,p.context,p.store)
+    if(this.retryInfoSignature(fresh)!==this.retryInfoSignature(p))throw Error('STALE_PREVIEW')
+    this.guard(p)
     if(this.queue.some(w=>w.permit.taskId===taskId)||[...this.running].some(w=>w.permit.taskId===taskId))throw Error('MEMORY_JOB_BUSY')
-    this.discard(taskId);this.start(taskId);const p=this.permits.get(taskId);if(!p)throw Error(this.outcomes.get(taskId)?.reason ?? 'MEMORY_MODEL_UNAVAILABLE')
+    this.discard(taskId);this.permits.set(taskId,p)
     p.attempted=true;p.version=materialVersion;p.deadline=this.now()+p.limits.seconds*1000
     const operation=this.prepare(p,materialVersion);this.starting.add(operation);try{await operation}finally{this.starting.delete(operation)}
   }
-  async retryPreview(taskId:string,materialVersion:string):Promise<{taskId:string;materialVersion:string;outcome:MemoryJobReceipt['outcome'];model:{modelId:string;endpointHost:string}|null;limits:MemoryLimits;sources:{relPath:string;kind:string;taskId:string|null}[];omitted:boolean;reason?:string}>{
-    const context=this.port.context(),config=this.port.config(context.vaultKey),job=(await this.port.store().managementSnapshot()).record.jobs.find(j=>j.taskId===taskId&&j.materialVersion===materialVersion)
-    if(!job)throw Error('MEMORY_JOB_MISSING')
-    let model:null|{modelId:string;endpointHost:string}=null
-    try{const credential=this.port.credential(context.vaultKey);model={modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host}}catch{}
-    return {taskId,materialVersion,outcome:job.outcome,model,limits:{...config.limits},sources:(job.material?.sources ?? []).map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId})),omitted:job.material?.omitted ?? false,...(job.reason?{reason:job.reason}:{})}
-  }
+  private retryInfoSignature(p:Permit):string{return JSON.stringify([p.context,p.enabled,p.epoch,p.limits,p.credential])}
+  async retryPreview(taskId:string,materialVersion:string){return (await this.retryAuthority(taskId,materialVersion)).info}
   cancel(taskId:string):void{this.permits.get(taskId)?.controller.abort(Error('MEMORY_CANCELLED'));this.pump()}
   /** OFF/forget/config management and file watchers call this alongside Host.recheckSources. */
   async recheck():Promise<void>{

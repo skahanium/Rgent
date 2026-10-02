@@ -53,7 +53,18 @@ export const IPC = {
   agentStart: 'agent:start',
   agentCancel: 'agent:cancel',
   agentTasks: 'agent:tasks',
-  agentEvent: 'agent:event'
+  agentEvent: 'agent:event',
+  memoryChanged: 'memory:changed',
+  memoryGet: 'memory:get',
+  memoryConfigSave: 'memory:config-save',
+  memoryManualPreview: 'memory:manual-preview',
+  memoryPreviewCommit: 'memory:preview-commit',
+  memoryItemEdit: 'memory:item-edit',
+  memoryItemDisable: 'memory:item-disable',
+  memoryItemForget: 'memory:item-forget',
+  memoryRestorePreview: 'memory:restore-preview',
+  memoryJobRetryPreview: 'memory:job-retry-preview',
+  memoryJobCancel: 'memory:job-cancel'
 } as const
 
 export type { AssistantHabits } from './assistant.ts'
@@ -120,6 +131,7 @@ export type AuthorizedSource = ObjectBinding & { sourceId: string; relPath: stri
 export type AgentAuthorizationPreview = {
   id: string; sessionId: string; origin: string; sources: AuthorizedSource[]
   recipient: { modelId: string; host: string; provider: ModelProvider }
+  memory?: { use: boolean; consolidate: boolean; recipient: { modelId: string; host: string } | null; limits: import('./memory.ts').MemoryLimits }
 }
 export type AgentAuthorizationResult = { ok: true; preview: AgentAuthorizationPreview } | { ok: false; error: string }
 export type AgentStartRequest = AgentCommandRequest & { previewId: string }

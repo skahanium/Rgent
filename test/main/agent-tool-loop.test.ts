@@ -323,7 +323,7 @@ it('reports saved-material handoff failure separately from foreground saving', a
  app.deps.onTaskMaterialSaved=async()=>{throw Error('QUEUE_UNAVAILABLE')}
  const receipts:unknown[]=[];app.deps.onTaskMaterialResult=r=>{receipts.push(r)}
  const task=await app.start();expect((await task.done).status).toBe('completed');await new Promise(resolve=>setTimeout(resolve,0))
- expect(receipts).toEqual([{taskId:task.id,status:'failed',reason:'QUEUE_UNAVAILABLE'}])
+ expect(receipts).toEqual([{sessionId:'s',taskId:task.id,status:'failed',reason:'QUEUE_UNAVAILABLE'}])
  expect(app.host.hasPending()).toBe(false)
 })
 

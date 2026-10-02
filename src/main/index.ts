@@ -24,6 +24,7 @@ import { fetchModelList } from './model-list.ts'
 import { createModelConfigStore, type ModelConfigStore } from './model-config.ts'
 import { TaskAuthorizationRegistry, isAuthorizationCommand } from './task-authorization.ts'
 import { createScopedAgentTools } from './scoped-agent-tools.ts'
+import { createMemoryIpc } from './memory-ipc.ts'
 import { MemoryConsolidationService } from './memory-consolidation.ts'
 import { AgentHost } from './agent-host.ts'
 import { modelTierFor } from './permissions.ts'
@@ -58,7 +59,24 @@ let modelConfigError: string | null = null
 let agentHost: AgentHost | null = null
 let memoryConsolidation: MemoryConsolidationService | null = null
 let authorizations: TaskAuthorizationRegistry | null = null
+const memoryIpc = createMemoryIpc({
+  vault: () => vault, config: () => modelConfig, service: () => memoryConsolidation,
+  recheck: async (current, session) => {
+    current.assertSession(session)
+    await Promise.all([memoryConsolidation?.recheck(), current.root ? agentHost?.recheckSources(current.root, session) : undefined])
+  }
+})
 let cancellingForClose = false
+const memoryAuthorizationPreviews = new Map<string, { sessionId: string; signature: string }>()
+function memoryAuthorizationState(sessionId: string) {
+  vault?.assertSession(sessionId)
+  if (!vault || !modelConfig) return { signature: 'unavailable', disclosure: undefined }
+  const ctx = vault.memoryContext(), cfg = modelConfig.getMemoryConfig(ctx.vaultKey)
+  let recipient: { modelId: string; host: string } | null = null
+  if (cfg.modelStatus === 'ready') { const c = modelConfig.memoryCredential(ctx.vaultKey); recipient = { modelId: c.modelId, host: new URL(c.baseURL).host } }
+  const disclosure = { use: cfg.vault.enabled, consolidate: cfg.vault.enabled && !!recipient, recipient, limits: cfg.limits }
+  return { signature: JSON.stringify([cfg, recipient, modelConfig.getVaultMemoryEpoch(ctx.vaultKey)]), disclosure }
+}
 const imageControllers = new Map<AbortController, {vault: VaultSession; binding: string; request: import('../shared/ipc.ts').RemoteImageGetRequest}>()
 const lifecycleFlushes = new Map<string, (ok: boolean) => void>()
 const structureGate = new VaultStructureGate()
@@ -115,6 +133,8 @@ function send(channel: string, payload?: unknown): void {
 }
 
 async function settleHostBeforeClose(win: BrowserWindow): Promise<boolean> {
+  memoryIpc.clear()
+  memoryAuthorizationPreviews.clear()
   await memoryConsolidation?.close()
   try { await agentHost?.cancelAll('close') } catch { /* pending answer is retained for retry below */ }
   while (agentHost?.hasPending()) {
@@ -321,6 +341,13 @@ function registerIpc(): void {
       if (trusted(event)) listener(event, ...args)
     })
   }
+  for (const [channel, operation] of [
+    [IPC.memoryGet, 'get'], [IPC.memoryConfigSave, 'config'], [IPC.memoryManualPreview, 'manual'],
+    [IPC.memoryPreviewCommit, 'commit'], [IPC.memoryItemEdit, 'edit'], [IPC.memoryItemDisable, 'disable'],
+    [IPC.memoryItemForget, 'forget'], [IPC.memoryRestorePreview, 'restore'],
+    [IPC.memoryJobRetryPreview, 'retry'], [IPC.memoryJobCancel, 'cancel']
+  ] as const) registerTrustedHandle(channel, (event, request) =>
+    memoryIpc.handle(`${event.sender.id}:${event.senderFrame!.routingId}`, operation, request))
   const configResult = (): ModelConfigResult => modelConfig
     ? { ok: true, config: modelConfig.getPublic() }
     : { ok: false, error: modelConfigError ?? 'MODEL_CONFIG_UNAVAILABLE' }
@@ -396,11 +423,19 @@ function registerIpc(): void {
     if(!authorizations || !isAuthorizationCommand(value))return {ok:false,error:'BAD_REQUEST'}
     const request=value as import('../shared/ipc.ts').AgentAuthorizationRequest
     if(structureGate.isBusy())return {ok:false,error:'NOTE_BUSY'}
-    try {return {ok:true,preview:await authorizations.preview(`${event.sender.id}:${event.senderFrame!.routingId}`,request)}}
+    try {
+      const owner = `${event.sender.id}:${event.senderFrame!.routingId}`
+      const memory = memoryAuthorizationState(request.sessionId)
+      const preview = await authorizations.preview(owner, request)
+      if (memoryAuthorizationState(request.sessionId).signature !== memory.signature) throw Error('STALE_PREVIEW')
+      if (memoryAuthorizationPreviews.size >= 128) memoryAuthorizationPreviews.delete(memoryAuthorizationPreviews.keys().next().value!)
+      memoryAuthorizationPreviews.set(`${owner}:${preview.id}`, { sessionId: request.sessionId, signature: memory.signature })
+      return {ok:true,preview:{...preview,...(memory.disclosure?{memory:memory.disclosure}:{})}}
+    }
     catch(error){return {ok:false,error:error instanceof Error?error.message:'AUTHORIZATION_FAILED'}}
   })
   registerTrustedHandle(IPC.agentAuthorizationDiscard, (event, id:unknown) => {
-    if(typeof id==='string' && id.length<=128)authorizations?.discard(`${event.sender.id}:${event.senderFrame!.routingId}`,id)
+    if(typeof id==='string' && id.length<=128) { const owner = `${event.sender.id}:${event.senderFrame!.routingId}`; authorizations?.discard(owner,id); memoryAuthorizationPreviews.delete(`${owner}:${id}`) }
   })
   registerTrustedHandle(IPC.agentTasks, (event) => trusted(event)
     ? agentHost?.active().map(({ id, relPath, startedAt }) => ({ id, relPath, startedAt })) ?? [] : [])
@@ -420,7 +455,11 @@ function registerIpc(): void {
     }
     if (structureGate.isBusy()) return { ok: false, error: 'NOTE_BUSY' }
     try {
-      const task = await agentHost.start({...request as AgentStartRequest, authorizationOwner:`${event.sender.id}:${event.senderFrame!.routingId}`})
+      const owner = `${event.sender.id}:${event.senderFrame!.routingId}`
+      const memory = memoryAuthorizationPreviews.get(`${owner}:${request.previewId}`)
+      memoryAuthorizationPreviews.delete(`${owner}:${request.previewId}`)
+      if (!memory || memory.sessionId !== request.sessionId || memory.signature !== memoryAuthorizationState(request.sessionId).signature) throw Error('STALE_PREVIEW')
+      const task = await agentHost.start({...request as AgentStartRequest, authorizationOwner:`${event.sender.id}:${event.senderFrame!.routingId}`, memoryAuthorizationSignature: memory.signature})
       void task.done.catch(() => {})
       return { ok: true, id: task.id }
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'AGENT_START_FAILED' } }
@@ -696,6 +735,8 @@ function registerIpc(): void {
       await agentHost?.whenLaunchesSettled()
       currentVault.assertSession(request.sessionId)
       // An active recovery record already fails all model requests closed.
+      memoryIpc.clear()
+      memoryAuthorizationPreviews.clear()
       await memoryConsolidation?.close()
       // Stop streams; keep unrelated unsaved output in Host memory until policy is stable again.
       try { await agentHost?.cancelAll('user', root) } catch { /* pending paths are checked below */ }
@@ -747,6 +788,8 @@ app.whenReady().then(() => {
   catch (error) { modelConfigError = error instanceof Error ? error.message : 'MODEL_CONFIG_UNAVAILABLE' }
   vault = new VaultSession(app.getPath('userData'), send, async (previous) => {
     if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
+    memoryIpc.clear()
+    memoryAuthorizationPreviews.clear()
     await memoryConsolidation?.close()
     try { await agentHost?.cancelAll('vault-change', previous) } catch { /* pending retry below */ }
     await agentHost?.retryPending(previous)
@@ -769,6 +812,7 @@ app.whenReady().then(() => {
     }
   })
   memoryConsolidation = new MemoryConsolidationService({
+    changed: () => { const session = vault?.sessionId(); if (session) send(IPC.memoryChanged, session) },
     context: () => vault!.memoryContext(),
     config: key => { if (!modelConfig) throw Error('MEMORY_CONFIG_UNAVAILABLE'); const config=modelConfig.getMemoryConfig(key); return {enabled:config.vault.enabled,epoch:modelConfig.getVaultMemoryEpoch(key),limits:config.limits} },
     credential: key => { if (!modelConfig) throw Error('MEMORY_CONFIG_UNAVAILABLE'); return modelConfig.memoryCredential(key) },
@@ -777,6 +821,9 @@ app.whenReady().then(() => {
   })
   if(vault.root)void memoryConsolidation.restore().catch(()=>{})
   agentHost = new AgentHost({
+    assertMemoryAuthorization: input => {
+      if (!input.sessionId || input.memoryAuthorizationSignature !== memoryAuthorizationState(input.sessionId).signature) throw Error('STALE_PREVIEW')
+    },
     authorize:input=>{
       if(!authorizations || !input.authorizationOwner || !input.previewId || !isAuthorizationCommand(input))throw Error('INVALID_AUTHORIZATION')
       return authorizations.consume((input as import('./agent-host.ts').HostStart).authorizationOwner!,input as AgentStartRequest)

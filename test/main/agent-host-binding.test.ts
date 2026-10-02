@@ -3,11 +3,13 @@ import { AgentHost, type HostEvent } from '../../src/main/agent-host.ts'
 
 function boundHost() {
   const state = { content: '/问\n', revision: 1, objectVersion: 'original', sessionId: 'session-1', allowed: true,
-    reads: 0, writes: 0, network: 0, failLedger: false, afterRead: () => {}, afterTier: () => {} }
+    reads: 0, writes: 0, network: 0, failLedger: false, afterRead: () => {}, afterTier: () => {}, memorySignature: 'approved', changeWhileRecalling: false }
   const events: HostEvent[] = []
   const successors = new Map<string, string>()
   let generate: () => AsyncIterable<string> = async function* () { yield 'answer' }
   const host = new AgentHost({
+    assertMemoryAuthorization: input => { if (input.memoryAuthorizationSignature !== state.memorySignature) throw Error('STALE_PREVIEW') },
+    memory: { context: () => ({sessionId: state.sessionId,vaultKey:'key'}), config: () => ({enabled: true,epoch:0}), entries: async () => {if (state.changeWhileRecalling) state.memorySignature='changed'; return []} },
     root: () => '/vault', session: () => state.sessionId,
     acceptsObject: (_path, expected, current) => {
       while (expected !== current && successors.has(expected)) expected = successors.get(expected)!
@@ -33,7 +35,7 @@ function boundHost() {
     stream: async function* () { state.network++; yield* generate() }, emit: event => events.push(event)
   })
   const start = () => host.start({ relPath: 'a.md', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问',
-    expectedRevision: String(state.revision), sessionId: state.sessionId, objectVersion: state.objectVersion })
+    memoryAuthorizationSignature: 'approved', expectedRevision: String(state.revision), sessionId: state.sessionId, objectVersion: state.objectVersion })
   return { host, state, events, start, stream: (next: typeof generate) => { generate = next } }
 }
 
@@ -90,4 +92,13 @@ it('does not start the model request if the object is replaced during the final 
   app.state.afterTier = () => { if (app.state.reads >= 3) app.state.objectVersion = 'external-before-send' }
   await expect((await app.start()).done).rejects.toThrow('NOTE_REPLACED')
   expect(app.state.network).toBe(0)
+})
+
+it('does not change the displayed memory role while awaiting the origin read or recall', async () => {
+  const reading = boundHost(); reading.state.afterRead = () => { reading.state.memorySignature = 'changed' }
+  await expect(reading.start()).rejects.toThrow('STALE_PREVIEW')
+  expect(reading.state.writes).toBe(0); expect(reading.state.network).toBe(0)
+  const recalling = boundHost(); recalling.state.changeWhileRecalling = true
+  await expect(recalling.start()).rejects.toThrow('STALE_PREVIEW')
+  expect(recalling.state.writes).toBe(0); expect(recalling.state.network).toBe(0)
 })

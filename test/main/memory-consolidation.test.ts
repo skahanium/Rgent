@@ -249,3 +249,27 @@ describe('independent memory consolidation',()=>{
  })
 
 })
+
+it('filters transient unavailable outcomes by the current session without reviving permits', async () => {
+  const e = await setup(); const previous = e.vault.sessionId()!
+  e.invalidModel(); e.service.start('old-session-unavailable')
+  expect(e.service.results(previous).map(r=>r.taskId)).toEqual(['old-session-unavailable'])
+  e.vault.restore(); const current = e.vault.sessionId()!
+  expect(e.service.results(current)).toEqual([])
+  e.service.start('new-session-unavailable')
+  expect(e.service.results(current).map(r=>r.taskId)).toEqual(['new-session-unavailable'])
+  expect(e.service.state().permits).toBe(0)
+})
+
+it.each(['success','failure'] as const)('keeps late old recovery %s scoped to its original session and retains current same-name failure',async(outcome)=>{
+ let context={sessionId:'old',vaultKey:'old-key'},resolve!:()=>void,reject!:(e:Error)=>void
+ const old=new Promise<void>((r,j)=>{resolve=r;reject=j})
+ const service=new MemoryConsolidationService({context:()=>context,store:()=>({interruptJobs:()=>context.sessionId==='old'?old:Promise.reject(Error('MEMORY_REPLACED'))})} as never)
+ const restoring=service.restore().catch(()=>{})
+ context={sessionId:'new',vaultKey:'new-key'}
+ await expect(service.restore()).rejects.toThrow('MEMORY_REPLACED')
+ if(outcome==='success')resolve();else reject(Error('MEMORY_INVALID'))
+ await restoring
+ expect(service.results('new')).toEqual([{sessionId:'new',taskId:'memory-recovery',status:'unavailable',reason:'MEMORY_REPLACED'}])
+ expect(service.results('old')).toEqual(outcome==='failure'?[{sessionId:'old',taskId:'memory-recovery',status:'unavailable',reason:'MEMORY_INVALID'}]:[])
+})

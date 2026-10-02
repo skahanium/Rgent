@@ -1,3 +1,5 @@
+import type { MemoryView, MemoryManualRequest, MemoryResult } from '../../shared/memory.ts'
+import { memoryErrorText, renderMemoryPreview, ledgerRememberRanges, type MemoryPageHandlers } from './memory-ui.ts'
 import { IPC, type AgentEvent, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type PublicModelConfig, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
@@ -71,6 +73,7 @@ export async function start(root: HTMLElement): Promise<void> {
           <div class="sidebar-resizer" aria-label="调整侧栏宽度" hidden></div>
         </aside>
         <section class="stage" id="note-panel" role="tabpanel" aria-label="正文">
+          <button type="button" class="memory-selection-open" hidden>记住选区</button>
           <button type="button" class="ledger-open" aria-pressed="false" hidden>账本</button>
           <div class="ledger-view" hidden>
             <div class="ledger-head">
@@ -123,6 +126,14 @@ export async function start(root: HTMLElement): Promise<void> {
   settingsOpen.setAttribute('aria-label', '设置')
   settingsOpen.title = '设置'
   settingsOpen.append(icon('settings'))
+  const memorySelection = root.querySelector('.memory-selection-open') as HTMLButtonElement
+  const memoryToggle = document.createElement('button')
+  memoryToggle.type = 'button'; memoryToggle.className = 'status-memory'; memoryToggle.append(icon('memory'))
+  memoryToggle.setAttribute('aria-label', '当前库记忆'); memoryToggle.setAttribute('aria-pressed', 'false')
+  let memorySnapshot: MemoryView | null = null
+  let memoryReadSerial = 0
+  let memoryBusy = false
+  let memoryOverlay: ReturnType<typeof openOverlay> | null = null
   const ledgerOpenButton = root.querySelector('.ledger-open') as HTMLButtonElement
   const shortcutHint = root.querySelector('.shortcut-hint') as HTMLElement
 
@@ -174,6 +185,7 @@ export async function start(root: HTMLElement): Promise<void> {
     onOpenNote: (relPath) => void openNote(relPath)
   })
   const settingsOverlay = createSettingsOverlay({
+    memory: memoryHandlers,
     getMode: () => window.rgent.themeGet(),
     setMode: (mode) => window.rgent.themeSet(mode),
     getReading: () => window.rgent.readingGet(),
@@ -192,8 +204,49 @@ export async function start(root: HTMLElement): Promise<void> {
     readModels: (request) => window.rgent.modelList(request),
     setDefaultModel: (request) => window.rgent.modelDefaultSet(request),
     setLimits: (request) => window.rgent.modelLimitsSet(request),
-    onModelConfigChanged: () => { void refreshModelModule() },
-    onClose: () => { void refreshModelModule() }
+    onModelConfigChanged: () => { void refreshModelModule(); void refreshMemory() },
+    onClose: () => { void refreshModelModule(); void refreshMemory() }
+  })
+  function memoryHandlers(): MemoryPageHandlers | null {
+    const sessionId = vaultSession
+    if (!sessionId) return null
+    const accept = (result: MemoryResult<MemoryView>): MemoryResult<MemoryView> => {
+      if (vaultSession !== sessionId) return { ok: false, error: 'VAULT_CHANGED' }
+      if (result.ok && result.value.sessionId === sessionId) { memoryReadSerial++; memorySnapshot = result.value; updateStatus() }
+      return result
+    }
+    return {
+      get: () => window.rgent.memoryGet({ sessionId }).then(accept),
+      models: () => window.rgent.modelConfigGet(),
+      save: r => window.rgent.memoryConfigSave({ ...r, sessionId }).then(accept),
+      edit: r => window.rgent.memoryItemEdit({ ...r, sessionId }).then(accept),
+      disable: r => window.rgent.memoryItemDisable({ ...r, sessionId }).then(accept),
+      forget: r => window.rgent.memoryItemForget({ ...r, sessionId }).then(accept),
+      restore: r => window.rgent.memoryRestorePreview({ ...r, sessionId }),
+      retry: r => window.rgent.memoryJobRetryPreview({ ...r, sessionId }),
+      cancel: r => window.rgent.memoryJobCancel({ ...r, sessionId }).then(accept),
+      commit: r => window.rgent.memoryPreviewCommit({ ...r, sessionId }).then(accept)
+    }
+  }
+  async function refreshMemory(): Promise<void> {
+    if (!vaultSession) { memorySnapshot = null; updateStatus(); return }
+    const session = vaultSession, serial = ++memoryReadSerial
+    const result = await window.rgent.memoryGet({ sessionId: session }).catch(() => null)
+    if (session !== vaultSession || serial !== memoryReadSerial) return
+    if (result?.ok) memorySnapshot = result.value
+    else memorySnapshot = null
+    updateStatus()
+  }
+  memoryToggle.addEventListener('mousedown', event => event.preventDefault())
+  memoryToggle.addEventListener('click', () => {
+    if (!memorySnapshot || memoryBusy || memorySnapshot.sessionId !== vaultSession) return
+    memoryBusy = true; updateStatus()
+    const session = vaultSession!, snapshot = memorySnapshot
+    void window.rgent.memoryConfigSave({ sessionId: session, target: 'vault', vault: { ...snapshot.config.vault, enabled: !snapshot.config.vault.enabled } }).then(result => {
+      if (session !== vaultSession) return
+      if (result.ok) { memoryReadSerial++; memorySnapshot = result.value; hostNotice = '' }
+      else hostNotice = memoryErrorText(result.error)
+    }).catch(() => { if (session === vaultSession) hostNotice = memoryErrorText('MEMORY_UNAVAILABLE') }).finally(() => { if (session === vaultSession) { memoryBusy = false; updateStatus() } })
   })
   // 设备默认由助手设置保存；底栏只为当前笔记保存下一场临时选择。
   let modelConfigSnapshot: PublicModelConfig | null = null
@@ -255,6 +308,9 @@ export async function start(root: HTMLElement): Promise<void> {
   // 底栏模型模块首次取一次配置；之后由设置页写入与面板关闭时刷新。
   void refreshModelModule()
   lifecycleWarning.addEventListener('click', () => { if (!conflictDecisionOpen) void showRecoveryStatus() })
+
+  memorySelection.addEventListener('mousedown', event => event.preventDefault())
+  memorySelection.addEventListener('click', () => { const range = editor.selectionRange(); void rememberSelection('body', Math.min(range.anchor, range.head), Math.max(range.anchor, range.head)) })
 
   editor.onStateChange(() => {
     const tab = current()
@@ -359,8 +415,14 @@ export async function start(root: HTMLElement): Promise<void> {
       updateStatus()
     }).catch(() => { /* 读写失败时保留窗口稿，后续保存仍会复核修订值。 */ })
   })
+  window.rgent.onMemoryChanged(session => {
+    if (session !== vaultSession) return
+    void refreshMemory()
+    window.dispatchEvent(new CustomEvent('rgent:memory', { detail: session }))
+  })
   window.rgent.onAgentEvent((event) => {
     onHostEvent(event)
+    if (event.status !== 'running') void refreshMemory()
   })
 
   void window.rgent.agentTasks().then((tasks) => {
@@ -510,6 +572,7 @@ export async function start(root: HTMLElement): Promise<void> {
         updateStatus()
         return
       }
+      settingsOverlay.close(); memoryOverlay?.close(); memorySnapshot = null; memoryBusy = false
       vaultSession = null
       const ok = await flushSave()
       if (!ok && tabs.some((tab) => tab.dirty)) {
@@ -528,7 +591,9 @@ export async function start(root: HTMLElement): Promise<void> {
     }
     closeVaultPicker()
     const sessionChanged = !!vaultSession && !!state.sessionId && vaultSession !== state.sessionId
+    if (sessionChanged || state.vaultChanged) { settingsOverlay.close(); memoryOverlay?.close(); memorySnapshot = null; memoryBusy = false }
     vaultSession = state.sessionId ?? null
+    void refreshMemory()
     vaultNameText = state.rootName
     updateStatus()
     if (state.vaultChanged || sessionChanged) {
@@ -1084,6 +1149,8 @@ export async function start(root: HTMLElement): Promise<void> {
     paintUnavailable()
     const tab = current()
     const info = tab ? editor.selectionInfo() : null
+    const range = tab ? editor.selectionRange() : null
+    memorySelection.hidden = !tab || ledgerOpen || !!tab.availability || !range || range.anchor === range.head
     if (tab && (tab.relPath !== countedPath || tab.content !== countedSource)) {
       countedWords = wordsOf(tab.content, editor.markers())
       countedPath = tab.relPath
@@ -1099,6 +1166,12 @@ export async function start(root: HTMLElement): Promise<void> {
         noteOpen: tab != null
       }, modelModule())
     )
+    const center = statusEl.querySelector<HTMLElement>('.status-center')
+    if (center) { center.hidden = false; if (memoryToggle.parentElement !== center) center.append(memoryToggle) }
+    memoryToggle.disabled = !memorySnapshot || memoryBusy
+    memoryToggle.setAttribute('aria-pressed', String(memorySnapshot?.config.vault.enabled ?? false))
+    memoryToggle.title = memorySnapshot ? `当前库记忆${memorySnapshot.config.vault.enabled ? '开启' : '关闭'}${memorySnapshot.status === 'invalid' ? ' · 存储不可用，请查看设置' : ''}` : '当前库记忆不可用，请查看设置'
+    memoryToggle.setAttribute('aria-label', memoryToggle.title)
     const left = statusEl.querySelector('.status-left')
     // 只在还没放进固定槽位时移动它：稳定的父子关系才保得住焦点。
     const lead = statusEl.querySelector('.status-lead')
@@ -1164,6 +1237,25 @@ export async function start(root: HTMLElement): Promise<void> {
     if (!activeTasks.size) taskOverlay.close()
   }
 
+  async function rememberSelection(kind: 'body' | 'ledger', start: number, end: number, taskId?: string): Promise<void> {
+    const tab = current(), session = vaultSession
+    if (!tab || !session || !tab.objectVersion || !tab.sessionId || tab.availability || memoryOverlay || conflictDecisionOpen || end <= start) return
+    const draft = tab.content
+    if (!await flushSave() || current() !== tab || vaultSession !== session || tab.content !== draft) { hostNotice = '请先保存并重新核对选区。'; updateStatus(); return }
+    const request: MemoryManualRequest = { sessionId: session, relPath: tab.relPath, objectVersion: tab.objectVersion!, revision: tab.revision, kind, start, end, ...(taskId ? { taskId } : {}) }
+    const result = await window.rgent.memoryManualPreview(request).catch(() => null)
+    if (current() !== tab || vaultSession !== session) return
+    if (!result?.ok) { hostNotice = memoryErrorText(result?.error ?? 'MEMORY_UNAVAILABLE'); updateStatus(); return }
+    const panel = openOverlay({ label: '记住预览', returnFocus: () => editor.view.contentDOM, onClose: () => { if (memoryOverlay === panel) memoryOverlay = null } })
+    memoryOverlay = panel; panel.root.classList.add('overlay-memory')
+    renderMemoryPreview(panel.root, result.value, {
+      commit: r => window.rgent.memoryPreviewCommit({ ...r, sessionId: session }),
+      isCurrent: () => panel.isOpen() && vaultSession === session && current() === tab,
+      onDone: value => { memorySnapshot = value; hostNotice = ''; panel.close(); updateStatus() },
+      onCancel: () => panel.close()
+    })
+  }
+
   function toggleLedger(): void {
     if (ledgerOpen) {
       closeLedger(true)
@@ -1175,7 +1267,20 @@ export async function start(root: HTMLElement): Promise<void> {
     ledgerTitle.textContent = `${titleOf(tab.relPath.split('/').pop() ?? tab.relPath)} · 账本回顾`
     // 账本是同文件的旁路原文，只读展示；Host 按任务追加的章节也走同一视图。
     const ledgerSource = tab.ledger ?? ''
-    if (ledgerSource.trim()) renderReadOnlyMarkdown(ledgerBody, ledgerSource, noteHost())
+    if (ledgerSource.trim()) {
+      renderReadOnlyMarkdown(ledgerBody, ledgerSource, noteHost())
+      const headings = Array.from(ledgerBody.querySelectorAll('h2'))
+      for (const choice of ledgerRememberRanges(ledgerSource)) {
+        const chapters = [...ledgerSource.matchAll(/^<!-- rgent:ledger-task:v1 id="([A-Za-z0-9_-]+)"(?: sources="v[12]")? -->\r?$/gm)]
+        const index = chapters.findIndex(match => match[1] === choice.taskId)
+        const target = headings[index]
+        if (!target) continue
+        const remember = document.createElement('button'); remember.type = 'button'; remember.className = 'memory-ledger-remember'
+        remember.textContent = `记住${choice.label}`; remember.setAttribute('aria-label', `记住任务 ${choice.taskId} 的${choice.label}`)
+        remember.addEventListener('click', () => void rememberSelection('ledger', choice.start, choice.end, choice.taskId))
+        target.after(remember)
+      }
+    }
     else ledgerBody.textContent = '这篇笔记还没有账本。完成一次生成任务后，可在这里回顾。'
     ledgerEl.hidden = false
     renderTabs()

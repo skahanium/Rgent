@@ -1,3 +1,4 @@
+import type { MemorySessionRequest, MemoryConfigRequest, MemoryManualRequest, MemoryCommitRequest, MemoryItemRequest, MemoryEditRequest, MemoryJobRequest, MemoryResult, MemoryView, MemoryPreview } from '../shared/memory.ts'
 import { contextBridge, ipcRenderer } from 'electron'
 import {
   IPC,
@@ -53,6 +54,21 @@ import {
 const menuChannels = [IPC.menuOpenVault, IPC.menuNewNote, IPC.menuSave] as const
 
 const api = {
+  onMemoryChanged: (fn: (sessionId: string) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, sessionId: string): void => fn(sessionId)
+    ipcRenderer.on(IPC.memoryChanged, listener)
+    return () => ipcRenderer.removeListener(IPC.memoryChanged, listener)
+  },
+  memoryGet: (request: MemorySessionRequest): Promise<MemoryResult<MemoryView>> => ipcRenderer.invoke(IPC.memoryGet, request),
+  memoryConfigSave: (request: MemoryConfigRequest): Promise<MemoryResult<MemoryView>> => ipcRenderer.invoke(IPC.memoryConfigSave, request),
+  memoryManualPreview: (request: MemoryManualRequest): Promise<MemoryResult<MemoryPreview>> => ipcRenderer.invoke(IPC.memoryManualPreview, request),
+  memoryPreviewCommit: (request: MemoryCommitRequest): Promise<MemoryResult<MemoryView>> => ipcRenderer.invoke(IPC.memoryPreviewCommit, request),
+  memoryItemEdit: (request: MemoryEditRequest): Promise<MemoryResult<MemoryView>> => ipcRenderer.invoke(IPC.memoryItemEdit, request),
+  memoryItemDisable: (request: MemoryItemRequest): Promise<MemoryResult<MemoryView>> => ipcRenderer.invoke(IPC.memoryItemDisable, request),
+  memoryItemForget: (request: MemoryItemRequest): Promise<MemoryResult<MemoryView>> => ipcRenderer.invoke(IPC.memoryItemForget, request),
+  memoryRestorePreview: (request: MemoryItemRequest): Promise<MemoryResult<MemoryPreview>> => ipcRenderer.invoke(IPC.memoryRestorePreview, request),
+  memoryJobRetryPreview: (request: MemoryJobRequest): Promise<MemoryResult<MemoryPreview>> => ipcRenderer.invoke(IPC.memoryJobRetryPreview, request),
+  memoryJobCancel: (request: MemoryJobRequest): Promise<MemoryResult<MemoryView>> => ipcRenderer.invoke(IPC.memoryJobCancel, request),
   vaultGet: (): Promise<VaultState> => ipcRenderer.invoke(IPC.vaultGet),
   vaultPick: (): Promise<VaultState> => ipcRenderer.invoke(IPC.vaultPick),
   treeList: (): Promise<TreeEntry[]> => ipcRenderer.invoke(IPC.treeList),

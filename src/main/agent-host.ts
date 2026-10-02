@@ -36,6 +36,8 @@ export type HostStart = Partial<ObjectBinding> & {
   expectedRevision?: string
   previewId?: string
   authorizationOwner?: string
+  /** Main-issued preview signature; never accepted from renderer. */
+  memoryAuthorizationSignature?: string
   relPath: string
   range: SourceRange
   expectedText: string
@@ -54,6 +56,7 @@ function toolTraceLine(call: { name: string; input: unknown }, failure?: string)
 export type HostDependencies = {
   root: () => string | null
   authorize?: (input: HostStart) => Promise<TaskGrant>
+  assertMemoryAuthorization?: (input: HostStart) => void
   session?: () => string | null
   acceptsObject?: (relPath: string, expected: string, current: string) => boolean
   read: (relPath: string) => Promise<{ content: string; revision: string; sessionId?: string; objectVersion?: string }>
@@ -71,7 +74,7 @@ export type HostDependencies = {
   /** Internal completion seam. Caller must have a separate, task-start consolidation permit. */
   onTaskMaterialSaved?: (material: SavedTaskMaterial) => void | Promise<void>
   /** Handoff outcome only, never a claim that consolidation succeeded. Sink must be local and synchronous. */
-  onTaskMaterialResult?: (result: {taskId: string; status: 'handed-off' | 'unavailable' | 'failed'; reason?: string}) => void
+  onTaskMaterialResult?: (result: {sessionId?: string; taskId: string; status: 'handed-off' | 'unavailable' | 'failed'; reason?: string}) => void
   memory?: MemoryUsePort
   createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker) => ScopedAgentTools
   /** 一个助手的设备级习惯；任务启动时取一次快照，运行中改动只影响新任务。 */
@@ -268,12 +271,14 @@ export class AgentHost {
       if (input.objectVersion !== undefined && (!original.objectVersion || !this.matchesObject(input.relPath, input.objectVersion, original.objectVersion))) throw new Error('NOTE_REPLACED')
       if (input.expectedRevision !== undefined && original.revision !== input.expectedRevision) throw new Error('CONFLICT')
       if (original.sessionId && original.objectVersion) this.bindings.set(key, { sessionId: original.sessionId, objectVersion: original.objectVersion, originalVersion: input.objectVersion ?? original.objectVersion })
+      this.deps.assertMemoryAuthorization?.(input)
       const id = randomUUID()
       startedTaskId=id
       this.deps.onTaskStarted?.(id)
       const parsedOriginal = compile(original.content)
       const nearby = parsedOriginal.index.blocks.filter(b => b.identity !== 'ai' && b.range.end >= input.range.start - 1024 && b.range.start <= input.range.end + 1024).map(b => original.content.slice(b.range.start, b.range.end)).join('\n').slice(0, 2048)
       const memory = this.deps.memory ? await createMemoryUsePermit(this.deps.memory, credential, input.promptText, nearby) : undefined
+      this.deps.assertMemoryAuthorization?.(input)
       if (memory) this.memoryUses.set(key, {permit: memory, credential})
       const materials = new TaskMaterialTracker()
       const savedMaterial = {tracker:materials,context:memory?.context ?? null}
@@ -566,9 +571,10 @@ export class AgentHost {
     }
     const revision = await this.mutateNote(root, relPath, (source) => appendLedgerChapter(source, finalSource), true)
     if (this.deps.onTaskMaterialSaved && !material.handoffAttempted) {
+      const materialSession = material.context?.sessionId ?? this.bindings.get(`${root}\0${relPath}`)?.sessionId
       const report = (status: 'handed-off' | 'unavailable' | 'failed', error?: unknown) => {
         const reason = error instanceof Error && /^[A-Z_]{1,80}$/.test(error.message) ? error.message : error ? 'MATERIAL_HANDOFF_FAILED' : undefined
-        try { this.deps.onTaskMaterialResult?.({taskId:finalSource.taskId,status,...(reason ? {reason} : {})}) } catch { /* A status sink cannot change the saved task. */ }
+        try { this.deps.onTaskMaterialResult?.({sessionId:materialSession,taskId:finalSource.taskId,status,...(reason ? {reason} : {})}) } catch { /* A status sink cannot change the saved task. */ }
       }
       try {
         const saved = await this.readBound(root, relPath)

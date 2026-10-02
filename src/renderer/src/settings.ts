@@ -1,3 +1,4 @@
+import { mountMemoryPage, memoryErrorText, type MemoryPageHandlers } from './memory-ui.ts'
 import type {
   AssistantResult, LimitTier, ModelAddRequest, ModelConfigResult, ModelKeyDeleteRequest, ModelLimitsSetRequest,
   ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest,
@@ -14,6 +15,8 @@ import { modelModuleGroups } from './statusbar.ts'
 import { icon, type IconName } from './icons.ts'
 
 export type SettingsHandlers = {
+  memory?: () => MemoryPageHandlers | null
+
   getMode: () => Promise<ThemeMode>
   setMode: (mode: ThemeMode) => Promise<ThemeSetResult>
   getReading?: () => Promise<ReadingPreference>
@@ -40,7 +43,7 @@ export type SettingsHandlers = {
 
 export type SettingsOverlay = {
   /** 打开设置；可指定落到哪一页（底栏模型模块的「配置」用它直达「模型」页）。 */
-  open: (page?: '界面' | '助手' | '模型' | '运行') => void
+  open: (page?: '界面' | '助手' | '记忆' | '模型' | '运行') => void
   close: () => void
   isOpen: () => boolean
 }
@@ -80,7 +83,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
   let chromeTextSaveSerial = 0
 
   const close = (): void => overlay?.close()
-  const open = (page: '界面' | '助手' | '模型' | '运行' = '界面'): void => {
+  const open = (page: '界面' | '助手' | '记忆' | '模型' | '运行' = '界面'): void => {
     if (overlay?.isOpen()) return
     const current = openOverlay({
       label: '设置',
@@ -89,6 +92,8 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         if (overlay !== current) return
         request += 1
         overlay = null
+        disposeMemoryPage?.()
+        disposeMemoryPage = null
         disposeModelPage?.()
         disposeModelPage = null
         disposeAssistantPage?.()
@@ -122,7 +127,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       nav.append(label)
     }
     const navButtons = new Map<string, HTMLButtonElement>()
-    const addNav = (name: '界面' | '助手' | '模型' | '运行', graphic: IconName): HTMLButtonElement => {
+    const addNav = (name: '界面' | '助手' | '记忆' | '模型' | '运行', graphic: IconName): HTMLButtonElement => {
       const button = document.createElement('button')
       button.type = 'button'
       button.className = name === '界面' ? 'settings-nav-current' : 'settings-nav-item'
@@ -137,9 +142,10 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     addNav('界面', 'appearance')
     const assistantReady = Boolean(handlers.getAssistant && handlers.setAssistant)
     const modelsReady = modelPageAvailable(handlers) && Boolean(handlers.setLimits)
-    if (assistantReady || modelsReady) {
+    if (assistantReady || modelsReady || handlers.memory) {
       navGroup('Agent')
       if (assistantReady) addNav('助手', 'assistant')
+      if (handlers.memory) addNav('记忆', 'memory')
       if (modelsReady) {
         addNav('模型', 'model')
         addNav('运行', 'run')
@@ -171,10 +177,11 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     layout.append(nav, main)
     root.append(layout)
     const themeNodes = [title, intro, group, readingSection]
-    let openedPage: '界面' | '助手' | '模型' | '运行' = page
+    let openedPage: '界面' | '助手' | '记忆' | '模型' | '运行' = page
     let themeRequest = 0
-    const setPage = (name: '界面' | '助手' | '模型' | '运行'): void => {
+    const setPage = (name: '界面' | '助手' | '记忆' | '模型' | '运行'): void => {
       openedPage = name
+      if (name !== '记忆') { disposeMemoryPage?.(); disposeMemoryPage = null }
       if (name !== '模型') { disposeModelPage?.(); disposeModelPage = null }
       if (name !== '助手') disposeAssistantPage?.()
       for (const [label, button] of navButtons) {
@@ -184,6 +191,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       }
       if (name === '界面') main.replaceChildren(...themeNodes)
       else if (name === '助手') renderAssistantPage()
+      else if (name === '记忆') renderMemoryPage()
       else if (name === '模型') renderModelPage()
       else void renderRunPage()
     }
@@ -383,6 +391,15 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       }).catch(() => { if (!disposed) { showError(error, '暂时无法读取助手习惯。'); paint() } })
     }
 
+    let disposeMemoryPage: (() => void) | null = null
+    function renderMemoryPage(): void {
+      disposeMemoryPage?.()
+      const { body, error } = pageFrame('记忆', '当前库的有来源资料；不扩大读取范围，也不改变设备助手习惯。')
+      const memory = handlers.memory?.()
+      if (!memory) { showError(error, '请先选择笔记库。'); return }
+      disposeMemoryPage = mountMemoryPage({ body, isCurrent: () => current.isOpen() && openedPage === '记忆', onChanged: () => handlers.onModelConfigChanged?.() }, memory)
+    }
+
     let disposeModelPage: (() => void) | null = null
     const modelHandlers = (): ModelPageHandlers | null => modelPageAvailable(handlers) ? handlers : null
     function renderModelPage(): void {
@@ -429,6 +446,28 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         })
         group.append(save)
         body.append(group)
+      }
+      const memory = handlers.memory?.()
+      if (memory) {
+        const result = await memory.get()
+        if (!current.isOpen() || openedPage !== '运行' || mine !== request) return
+        if (!result.ok) { showError(error, memoryErrorText(result.error)); return }
+        const group = document.createElement('fieldset'); group.className = 'settings-limit-group'
+        const legend = document.createElement('legend'); legend.textContent = '记忆后台整理'; group.append(legend)
+        const seconds = field('整理总期限（秒）', String(result.value.config.limits.seconds), 'number')
+        seconds.min = '1'; seconds.max = '600'; seconds.dataset.memory = 'limit-seconds'
+        const calls = field('模型调用数', String(result.value.config.limits.calls), 'number')
+        calls.min = '1'; calls.max = '4'; calls.dataset.memory = 'limit-calls'
+        appendField(group, seconds); appendField(group, calls)
+        const hint = document.createElement('p'); hint.className = 'settings-hint'; hint.textContent = '工具调用固定 0 次；默认 120 秒、2 次模型调用。'; group.append(hint)
+        const save = action('保存整理上限', () => {
+          save.disabled = true
+          void memory.save({ target: 'limits', limits: { seconds: Number(seconds.value), calls: Number(calls.value), tools: 0 } }).then(updated => {
+            if (!current.isOpen() || openedPage !== '运行' || mine !== request) return
+            showError(error, updated.ok ? '' : memoryErrorText(updated.error))
+          }).catch(() => showError(error, '保存失败，请重试。')).finally(() => { save.disabled = false })
+        })
+        group.append(save); body.append(group)
       }
     }
 

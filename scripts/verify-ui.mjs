@@ -276,6 +276,73 @@ async function confirmSlashAuthorization(page, inspect = false) {
 }
 
 /** Three approved notes exercise actual Host tools through the controlled model server. */
+/** Real UI + Host + hidden store + background service, using only the loopback fixture. */
+async function verifyMemoryIntegration(page, vault, shot, requests) {
+  process.stdout.write('\n库内记忆受控完整链路\n')
+  const added = await page.eval(`(async () => {
+    const config = await window.rgent.modelAdd({ provider:'custom', modelId:'memory-ui-fixture', contextTokens:50000 })
+    const model = config.ok && config.config.models.find(m=>m.modelId==='memory-ui-fixture')
+    window.__memoryModel = model?.id
+    return !!model
+  })()`)
+  check('为受控整理配置独立模型角色', added)
+  await page.eval(`document.querySelector('.settings-open').click()`)
+  await waitFor(page, `!!document.querySelector('.settings-nav')`)
+  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='记忆').click()`)
+  check('第五记忆页显示默认空模型与当前库关闭', await waitFor(page, `document.querySelector('[data-memory="default-model"]')?.value==='' && document.querySelector('[data-memory="vault-enabled"]')?.checked===false`))
+  await page.eval(`(() => {const model=document.querySelector('[data-memory="default-model"]');model.value=window.__memoryModel;document.querySelector('[data-memory="save-default"]').click()})()`)
+  check('设备默认记忆模型获得独立保存回执', await waitFor(page, `document.querySelector('[data-memory="current-default"]')?.dataset.modelId===window.__memoryModel`))
+  await page.eval(`(() => {document.querySelector('[data-memory="vault-enabled"]').checked=true;document.querySelector('[data-memory="save-vault"]').click()})()`)
+  check('库开关保存后底栏符号状态才开启', await waitFor(page, `document.querySelector('.status-memory')?.getAttribute('aria-pressed')==='true'`))
+  await shot(page, 'memory-settings-configured')
+  await page.key('Escape', 'Escape', 0, 27)
+  const createAndOpen = async name => {
+    writeFileSync(path.join(vault,name),'')
+    await selectBrowserFolder(page,'')
+    if(!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(n=>n.dataset.path===${JSON.stringify(name)})`)) throw Error('记忆夹具未进入目录')
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(name)}).click()`)
+    if(!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(name)}`)) throw Error('记忆夹具未打开')
+    await page.eval(`document.querySelector('.cm-content').focus()`)
+  }
+  await createAndOpen('记忆长期.md')
+  await page.call('Input.insertText',{text:'/长期记住：后续回答请用中文简短表达（记忆验收）。'})
+  await page.key('Enter','Enter',0,13)
+  await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)
+  check('原授权浮层只读披露独立记忆用途与实际整理接收方', await waitFor(page, `document.querySelector('.authorization-memory')?.textContent.includes('memory-ui-fixture') && document.querySelector('.authorization-memory')?.textContent.includes('独立记忆使用许可') && !document.querySelector('.authorization-memory select')`))
+  await page.key('Enter','Enter',0,13)
+  check('回答和本篇账本成功保存后后台整理完成', await waitFor(page, `(async()=>{const state=await window.rgent.vaultGet();const memory=await window.rgent.memoryGet({sessionId:state.sessionId});const note=await window.rgent.noteRead('记忆长期.md');return memory.ok&&memory.value.entries.some(e=>e.content==='后续回答请用中文简短表达（记忆验收）。'&&e.layer==='core')&&memory.value.jobs.some(j=>j.outcome==='applied')&&note.content.includes('rgent:ledger-task:v1')&&(await window.rgent.agentTasks()).length===0})()`,15000))
+  check('独立后台仅发送实际材料、未确认结果且工具为零', requests.some(r=>r.model==='memory-ui-fixture'&&!r.tools?.length&&JSON.parse(r.messages.find(m=>m.role==='user').content).result.confirmed===false&&!JSON.stringify(r).includes('隐藏工具推理')))
+  await createAndOpen('记忆后续.md')
+  await page.call('Input.insertText',{text:'/记忆后续第一次'})
+  await confirmSlashAuthorization(page)
+  check('下一场自动带入核心记忆并保存实际使用依赖', await waitFor(page, `(async()=>{const note=await window.rgent.noteRead('记忆后续.md');return note.content.includes('记忆验收旧回答')&&(()=>{const marker=/rgent:ledger-sources:v2 data="([A-Za-z0-9_-]+)"/.exec(note.content);return marker&&JSON.parse(atob(marker[1].replace(/-/g,'+').replace(/_/g,'/'))).memoryDeps.length>0})()&&(await window.rgent.agentTasks()).length===0})()`))
+  const nextRequests=requests.filter(r=>r.model!=='memory-ui-fixture'&&JSON.stringify(r).includes('记忆后续第一次'))
+  check('实际回答模型收到低信任核心记忆', nextRequests.some(r=>JSON.stringify(r).includes('后续回答请用中文简短表达（记忆验收）。')))
+  const sourceEdit=await page.eval(`(async()=>{const note=await window.rgent.noteRead('记忆长期.md');const changed=await window.rgent.noteWrite({relPath:'记忆长期.md',content:${JSON.stringify('无关人写段落。\n\n')}+note.content,expectedRevision:note.revision,sessionId:note.sessionId,objectVersion:note.objectVersion});const memory=await window.rgent.memoryGet({sessionId:note.sessionId});return changed.ok&&memory.ok&&memory.value.entries[0]?.status==='active'})()`)
+  check('来源无关受控编辑保留有效记忆',sourceEdit)
+  await page.eval(`document.querySelector('.settings-open').click()`)
+  await waitFor(page, `!!document.querySelector('.settings-nav')`)
+  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='记忆').click()`)
+  await waitFor(page, `!!document.querySelector('.memory-entry')`)
+  await page.eval(`document.querySelector('.memory-entry').open=true; document.querySelector('.memory-entry').scrollIntoView({block:'start'})`)
+  await shot(page,'memory-entry-and-source')
+  await page.eval(`(() => {const entry=document.querySelector('.memory-entry');entry.open=true;[...entry.querySelectorAll('button')].find(b=>b.textContent==='删除并遗忘').click()})()`)
+  check('遗忘预先说明清除待整理重试材料且原文不变',await waitFor(page, `document.querySelector('.memory-forget-warning')?.textContent.includes('原笔记及账本不变')`))
+  await page.eval(`[...document.querySelectorAll('.memory-entry button')].find(b=>b.textContent==='确认删除并遗忘').click()`)
+  check('遗忘回执后条目正文立即从记忆页移除',await waitFor(page, `document.querySelectorAll('.memory-entry').length===0`))
+  await shot(page,'memory-forgotten-receipt')
+  await page.key('Escape','Escape',0,27)
+  await page.eval(`document.querySelector('.cm-content').focus()`)
+  await page.key(process.platform === 'darwin' ? 'ArrowDown' : 'End', process.platform === 'darwin' ? 'ArrowDown' : 'End', process.platform === 'darwin' ? 4 : 2, process.platform === 'darwin' ? 40 : 35)
+  await page.call('Input.insertText',{text:'\n\n/记忆后续遗忘核验'})
+  await confirmSlashAuthorization(page)
+  check('遗忘后新任务仍正常回答保存',await waitFor(page, `(async()=>{const note=await window.rgent.noteRead('记忆后续.md');return note.content.includes('记忆后续遗忘核验')&&(await window.rgent.agentTasks()).length===0})()`))
+  const after=requests.filter(r=>r.model!=='memory-ui-fixture'&&JSON.stringify(r).includes('记忆后续遗忘核验'))
+  check('旧记忆及带依赖的历史回答未再次发出',after.length>0&&after.every(r=>!JSON.stringify(r).includes('记忆验收旧回答')&&!JSON.stringify(r).includes('后续回答请用中文简短表达（记忆验收）。')))
+  const off=await page.eval(`(async()=>{const state=await window.rgent.vaultGet();const memory=await window.rgent.memoryGet({sessionId:state.sessionId});return memory.ok&&window.rgent.memoryConfigSave({sessionId:state.sessionId,target:'vault',vault:{...memory.value.config.vault,enabled:false}}).then(r=>r.ok)})()`)
+  check('受控链路收尾关闭当前库记忆',off)
+}
+
 async function verifyScopedHost(page, vault, shot, requests) {
   writeFileSync(path.join(vault, '工具发起.md'), '')
   writeFileSync(path.join(vault, '工具参考.md'), '# 参考原文\n\n工具线索：受控正文证据。\n')
@@ -676,11 +743,11 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       })()`))
       return { ok: geometry.top >= 24 && geometry.top <= 55 && geometry.width >= 980 && geometry.width <= 1050 && geometry.height >= 680 && geometry.height < 800 && geometry.titleTop >= 35 && geometry.titleTop <= 70 && geometry.titleLeft >= 240, detail: JSON.stringify(geometry) }
     })
-    check('设置遮罩柔焦且导航仅列出四页与同系图标', await page.eval(`(() => {
+    check('设置遮罩柔焦且导航仅列出五页与同系图标', await page.eval(`(() => {
       const dialog = document.querySelector('.overlay-settings')
       const blur = getComputedStyle(dialog, '::backdrop').backdropFilter
       const labels = [...dialog.querySelectorAll('.settings-nav button')].map((button) => button.textContent)
-      return blur.includes('blur(') && JSON.stringify(labels) === JSON.stringify(['界面','助手','模型','运行']) && dialog.querySelectorAll('.settings-nav .icon').length === 4
+      return blur.includes('blur(') && JSON.stringify(labels) === JSON.stringify(['界面','助手','记忆','模型','运行']) && dialog.querySelectorAll('.settings-nav .icon').length === 5
     })()`) === true)
     check('阅读排版有真实中英样张和五项可调控件', await waitFor(page, `document.querySelector('.settings-reading-sample')?.textContent.includes('English') && [...document.querySelectorAll('.settings-reading-controls [data-setting]')].filter(node => !node.dataset.setting.startsWith('chrome-')).length === 5`))
     await shot(page, `reference-${mode}-settings`)
@@ -719,6 +786,13 @@ async function captureVisualBaseline(page, shot, nativeShot) {
         continue
       }
       await shot(page, `reference-${mode}-settings-run`)
+      await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='记忆')?.click()`)
+      await waitFor(page, `!!document.querySelector('[data-memory="default-model"]')`)
+      await shot(page, `reference-${mode}-settings-memory`)
+      await page.call('Emulation.setDeviceMetricsOverride', { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false })
+      await sleep(160)
+      await shot(page, `reference-${mode}-settings-memory-wide`)
+      await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
     }
     await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '界面'))?.click()`)
     if (mode === 'day') {
@@ -789,6 +863,9 @@ async function captureVisualBaseline(page, shot, nativeShot) {
         continue
       }
       await shot(page, `reference-${mode}-settings-run-narrow`)
+      await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='记忆')?.click()`)
+      await waitFor(page, `!!document.querySelector('[data-memory="default-model"]')`)
+      await shot(page, `reference-${mode}-settings-memory-narrow`)
     }
     await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
     await page.call('Emulation.clearDeviceMetricsOverride', {})
@@ -1178,6 +1255,7 @@ async function main() {
     // 阶段各自成块后，跨阶段共用的变量提在这里。
     let marked = ''
     const toolLoopRequests = []
+    const memoryRequests = []
     process.stdout.write('\n外壳与主题\n')
     try {
     await waitFor(page, `document.querySelectorAll('.tree-row').length > 0`)
@@ -1768,6 +1846,24 @@ async function main() {
       request.on('data', (chunk) => { body += String(chunk) })
       request.on('end', () => {
         const decoded = JSON.parse(body)
+        if (decoded.model === 'memory-ui-fixture') {
+          memoryRequests.push(decoded)
+          const material = JSON.parse(decoded.messages.find(m=>m.role==='user').content)
+          const source = material.sources.find(s=>s.role==='command' && s.text.includes('长期记住'))
+          const proposals = source ? [{action:'add',content:'后续回答请用中文简短表达（记忆验收）。',layer:'core',scope:'当前库',category:'lasting',citations:[source.id],target:null}] : []
+          response.writeHead(200, {'content-type':'text/event-stream'})
+          response.write(`data: ${JSON.stringify({id:'memory-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{content:JSON.stringify({proposals})},finish_reason:null}]})}\n\n`)
+          response.write(`data: ${JSON.stringify({id:'memory-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`)
+          response.end('data: [DONE]\n\n'); return
+        }
+        if (body.includes('记忆后续')) {
+          memoryRequests.push(decoded)
+          const answer = body.includes('后续回答请用中文简短表达（记忆验收）。') ? '记忆验收旧回答：后续回答请用中文简短表达（记忆验收）。' : '受控遗忘核验回答。'
+          response.writeHead(200, {'content-type':'text/event-stream'})
+          response.write(`data: ${JSON.stringify({id:'memory-use-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{content:answer},finish_reason:null}]})}\n\n`)
+          response.write(`data: ${JSON.stringify({id:'memory-use-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`)
+          response.end('data: [DONE]\n\n'); return
+        }
         if (body.includes('工具查证') && decoded.tools?.length === 2) {
           toolLoopRequests.push(decoded)
           response.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -1910,6 +2006,7 @@ async function main() {
     })()`, 8000)
     check('快速流结束后底栏不残留运行任务', quickFinished, quickFinished ? '' : await page.eval(`(async () => JSON.stringify({ note: (await window.rgent.noteRead('Host 快速.md')).content, tasks: await window.rgent.agentTasks(), status: document.querySelector('.status-left')?.innerText }))()`))
     await verifyScopedHost(page, vault, shot, toolLoopRequests)
+    try { await verifyMemoryIntegration(page, vault, shot, memoryRequests) } catch (error) { stageFailed('库内记忆', error) }
     await verifyRawSourceLifecycle(page, vault, modifier, shot)
     writeFileSync(path.join(vault, 'Host A.md'), '')
     writeFileSync(path.join(vault, 'Host B.md'), '')

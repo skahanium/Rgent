@@ -21,6 +21,7 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
   panel.root.innerHTML='<h2>本场口令</h2><p class="authorization-origin"></p><p class="authorization-recipient" aria-live="polite"></p><p class="authorization-disclosure">本场口令、获准资料与本篇账本会发送给下方显示的模型接收方。本场范围不会沿用到下一场。</p><fieldset class="authorization-scope"><legend>参考范围 · 默认仅本篇</legend></fieldset><div class="authorization-manifest"></div><p class="authorization-status" role="status"></p><footer><button type="button" class="authorization-cancel">取消</button><button type="button" class="authorization-send" disabled>确认并发送</button></footer>'
   panel.root.querySelector('.authorization-origin')!.textContent=`发起篇：${options.origin}（正文与本篇账本）`
   const recipient=panel.root.querySelector('.authorization-recipient')!
+  const memoryDisclosure=document.createElement('p');memoryDisclosure.className='authorization-memory settings-hint';memoryDisclosure.setAttribute('aria-live','polite');panel.root.querySelector('.authorization-disclosure')!.after(memoryDisclosure)
   const manifest=panel.root.querySelector('.authorization-manifest')!
   const status=panel.root.querySelector('.authorization-status')!
   const send=panel.root.querySelector<HTMLButtonElement>('.authorization-send')!
@@ -51,6 +52,11 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
       if(current!==generation || !panel.isOpen()){if(result.ok)void options.discard?.(result.preview.id);return}
       if(!result.ok){recipient.textContent='接收方尚未核验';status.textContent=`无法准备：${hostErrorText(result.error)}`;return}
       prepared=result.preview
+      const memory=prepared.memory
+      memoryDisclosure.textContent=memory?.use
+        ? `独立记忆使用许可：本场自动使用当前库有效核心与相关记忆，不扩大读库范围。${memory.consolidate && memory.recipient ? `独立整理许可：回答与账本保存后，将本场实际发送的口令、必要结果、来源片段及相关记忆交给 ${memory.recipient.modelId} · ${memory.recipient.host}，用于后台整理；总期限 ${memory.limits.seconds} 秒、最多 ${memory.limits.calls} 次模型调用、工具 0 次，不含思维链或完整历史。` : '整理模型未选择或不可用，本场不积累记忆。'}`
+        : '当前库记忆关闭；本场不使用或整理记忆。'
+
       const title=document.createElement('p');title.textContent='本场固定对象：';manifest.append(title)
       const paths=document.createElement('ul');for(const source of prepared.sources){const item=document.createElement('li');item.textContent=source.relPath;paths.append(item)}manifest.append(paths)
       recipient.textContent=`模型：${prepared.recipient.modelId} · 接口主机：${prepared.recipient.host}`
