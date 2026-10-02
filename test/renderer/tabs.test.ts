@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { LEDGER_ANCHOR } from '../../src/markdown/partition.ts'
-import { applySaved, diskOf, pendingWrites, hasUnavailableDraft, type Tab } from '../../src/renderer/src/tabs.ts'
+import { applySaved, diskOf, pendingWrites, hasUnavailableDraft, taskModelId, type Tab } from '../../src/renderer/src/tabs.ts'
 
 function tab(relPath: string, over: Partial<Tab> = {}): Tab {
   return {
@@ -69,5 +69,21 @@ describe('tab writes', () => {
     expect(item).toMatchObject({ content: '新改', saved: '旧', revision: 'r1', dirty: true })
     applySaved(item, '新改', 'r2')
     expect(item).toMatchObject({ saved: '新改', revision: 'r2', dirty: false })
+  })
+})
+
+describe('per-note task model', () => {
+  it('keeps A and B isolated and clears only a successfully launched override', () => {
+    const a = tab('a.md', { temporaryModelId: 'a-model' }), b = tab('b.md')
+    expect(taskModelId(a, 'default')).toBe('a-model')
+    expect(taskModelId(b, 'default')).toBe('default')
+    expect(taskModelId(a, 'changed-default')).toBe('a-model')
+    a.relPath = 'moved/a.md'
+    expect(taskModelId(a, 'default')).toBe('a-model')
+    delete a.temporaryModelId
+    expect(taskModelId(a, 'changed-default')).toBe('changed-default')
+    b.temporaryModelId = 'removed-model'
+    expect(taskModelId(b, 'default')).toBe('removed-model')
+    expect(taskModelId(undefined, 'default')).toBeNull()
   })
 })

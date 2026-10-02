@@ -79,7 +79,7 @@ export type PublicModelConfig = {
   /** 固定按 DeepSeek、MiniMax、自定义排序，未配置的也在列。 */
   providers: PublicProvider[]
   models: PublicModel[]
-  /** 新任务使用的模型；由底栏模型模块选择。null 表示尚未选择。 */
+  /** 设备默认模型；在助手设置保存。null 表示尚未选择。 */
   defaultModelId: string | null
   limits: Record<LimitTier, RunLimits>
 }

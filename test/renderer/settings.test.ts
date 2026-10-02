@@ -375,18 +375,21 @@ describe('settings interface page', () => {
     save()!.click()
     await vi.waitFor(() => expect(setAssistant).toHaveBeenCalledWith({ address: '小陈', tone: 'concise', note: '先给结论' }))
 
-    await vi.waitFor(() => expect(save()!.disabled).toBe(true))
+    await vi.waitFor(() => expect(note.value).toBe('多说一步'))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(save()!.disabled).toBe(true)
 
     ;[...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find((button) => button.textContent === '恢复默认')!.click()
     expect(address.value).toBe('')
     expect(tone.value).toBe('plain')
     expect(save()!.disabled).toBe(false)
     expect(setAssistant).toHaveBeenCalledTimes(1)
-    // 输入框保留人刚敲下的字符（trim 只发生在草稿层）
+    // 输入草稿原样计数，trim 只发生在保存时
     note.value = '先说结论 '
     note.dispatchEvent(new Event('input'))
     expect(note.value).toBe('先说结论 ')
-    expect(document.querySelector('.settings-hint')?.textContent).toContain('已用 4 / 500 字')
+    expect(document.querySelector('.settings-hint')?.textContent).toContain('已用 5 / 500 字')
     panel.close()
   })
 
@@ -439,4 +442,52 @@ describe('settings interface page', () => {
     expect(document.activeElement?.classList.contains('settings-page-title'), document.activeElement?.outerHTML).toBe(true)
     panel.close()
   })
+})
+
+describe('assistant default model', () => {
+  it('saves independently from habits and retains failed model selection', async () => {
+    const config = {
+      providers: [{ provider: 'custom' as const, configured: true, baseURL: 'http://127.0.0.1:5555/v1', hasKey: true, modelCount: 2 }],
+      models: [{ id: 'one', provider: 'custom' as const, modelId: 'one', contextTokens: 16000 }, { id: 'two', provider: 'custom' as const, modelId: 'two', contextTokens: 16000 }],
+      defaultModelId: 'one',
+      limits: { none: { seconds: 180, steps: 4, tools: 0 }, local: { seconds: 300, steps: 12, tools: 24 }, network: { seconds: 600, steps: 20, tools: 40 } }
+    }
+    const setDefaultModel = vi.fn().mockResolvedValueOnce({ ok: false, error: 'IO_ERROR' }).mockResolvedValueOnce({ ok: true, config: { ...config, defaultModelId: 'two' } })
+    const setAssistant = vi.fn()
+    const onChanged = vi.fn()
+    const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async mode => ({ ok: true, mode }),
+      getAssistant: async () => ({ ok: true, habits: { address: '', tone: 'plain', note: '' } }), setAssistant,
+      getConfig: async () => ({ ok: true, config }), setDefaultModel, onModelConfigChanged: onChanged })
+    panel.open('助手')
+    await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>('.assistant-default-model')?.value).toBe('one'))
+    const select = document.querySelector<HTMLSelectElement>('.assistant-default-model')!
+    const save = document.querySelector<HTMLButtonElement>('.assistant-default-save')!
+    select.value = 'two'; select.dispatchEvent(new Event('change')); save.click()
+    await vi.waitFor(() => expect(document.querySelector('.assistant-default-error')?.textContent).toContain('原配置保持不变'))
+    expect(select.value).toBe('two'); expect(save.disabled).toBe(false)
+    expect(setAssistant).not.toHaveBeenCalled(); expect(onChanged).not.toHaveBeenCalled()
+    save.click()
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
+    expect(setDefaultModel).toHaveBeenLastCalledWith({ modelId: 'two' })
+    expect(save.disabled).toBe(true)
+    panel.close()
+  })
+})
+
+
+it('does not overwrite assistant edits made while a save receipt is in flight', async () => {
+  let finish!: (result: { ok: true; habits: { address: string; tone: 'plain'; note: string } }) => void
+  const pending = new Promise<{ ok: true; habits: { address: string; tone: 'plain'; note: string } }>(resolve => { finish = resolve })
+  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async mode => ({ ok: true, mode }),
+    getAssistant: async () => ({ ok: true, habits: { address: '', tone: 'plain', note: '原说明' } }), setAssistant: () => pending })
+  panel.open('助手')
+  await vi.waitFor(() => expect(document.querySelector<HTMLTextAreaElement>('.settings-form textarea')?.value).toBe('原说明'))
+  const note = document.querySelector<HTMLTextAreaElement>('.settings-form textarea')!
+  const save = [...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find(button => button.textContent === '保存')!
+  note.value = '第一次保存'; note.dispatchEvent(new Event('input')); save.click()
+  note.value = '保存途中新增'; note.dispatchEvent(new Event('input'))
+  finish({ ok: true, habits: { address: '', tone: 'plain', note: '第一次保存' } })
+  await vi.waitFor(() => expect(save.disabled).toBe(false))
+  expect(note.value).toBe('保存途中新增')
+  panel.close()
 })

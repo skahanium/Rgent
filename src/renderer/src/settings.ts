@@ -1,13 +1,14 @@
 import type {
   AssistantResult, LimitTier, ModelAddRequest, ModelConfigResult, ModelKeyDeleteRequest, ModelLimitsSetRequest,
   ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest,
-  ModelUpdateRequest, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult
+  ModelUpdateRequest, ModelDefaultSetRequest, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult
 } from '../../shared/ipc.ts'
 import { isReadingPreference, READING_FONTS } from '../../shared/reading-preference.ts'
 import { mountModelPage, modelPageAvailable, type ModelPageHandlers } from './settings-model.ts'
 import { ASSISTANT_LIMITS, ASSISTANT_TONE_LABELS, ASSISTANT_TONES, DEFAULT_ASSISTANT_HABITS, isAssistantHabits, type AssistantHabits, type AssistantTone } from '../../shared/assistant.ts'
 import { openOverlay, type Overlay } from './overlay.ts'
 import { applyReadingPreference } from './reading.ts'
+import { modelModuleGroups } from './statusbar.ts'
 import { icon, type IconName } from './icons.ts'
 
 export type SettingsHandlers = {
@@ -23,6 +24,7 @@ export type SettingsHandlers = {
   updateModel?: (request: ModelUpdateRequest) => Promise<ModelConfigResult>
   removeModel?: (request: ModelRemoveRequest) => Promise<ModelConfigResult>
   readModels?: (request: ModelListRequest) => Promise<ModelListResult>
+  setDefaultModel?: (request: ModelDefaultSetRequest) => Promise<ModelConfigResult>
   setLimits?: (request: ModelLimitsSetRequest) => Promise<ModelConfigResult>
   /** 配置写入后通知外壳刷新底栏模型模块。 */
   onModelConfigChanged?: () => void
@@ -232,6 +234,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       const { body, error } = pageFrame('助手', '一个助手的设备级习惯，所有笔记库共用；它不改变笔记权限与工具范围。')
       let saved: AssistantHabits = { ...DEFAULT_ASSISTANT_HABITS }
       let draft: AssistantHabits = { ...DEFAULT_ASSISTANT_HABITS }
+      let savingHabits = false
       const same = (left: AssistantHabits, right: AssistantHabits): boolean =>
         left.address === right.address && left.tone === right.tone && left.note === right.note
 
@@ -265,17 +268,20 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       const actions = document.createElement('div')
       actions.className = 'settings-actions'
       const save = action('保存', () => {
-        save.disabled = true
+        savingHabits = true; save.disabled = true
+        const submitted = { address: address.value, tone: tone.value, note: note.value }
         const next: AssistantHabits = { address: address.value.trim(), tone: tone.value as AssistantTone, note: note.value.trim() }
         showError(error, '')
         void handlers.setAssistant!({ ...next }).then((result) => {
           if (disposed || !current.isOpen() || openedPage !== '助手') return
           if (!result.ok) { showError(error, configErrorText(result.error)); return }
           saved = { ...result.habits }
-          draft = { ...result.habits }
-          paint()
+          // 主进程回执只续接已保存值，不能抹掉等待期间继续输入的字符。
+          if (address.value === submitted.address && tone.value === submitted.tone && note.value === submitted.note) {
+            draft = { ...result.habits }; paint()
+          } else paintState()
         }).catch(() => { if (!disposed) showError(error, '保存失败，请重试。') })
-          .finally(() => { if (!disposed) save.disabled = same(draft, saved) })
+          .finally(() => { if (!disposed) { savingHabits = false; paintState() } })
       })
       const reset = action('恢复默认', () => {
         draft = { ...DEFAULT_ASSISTANT_HABITS }
@@ -283,10 +289,58 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       })
       actions.append(save, reset)
       body.append(address.parentElement!, toneLabel, noteLabel, counter, scope, actions)
+      if (handlers.getConfig && handlers.setDefaultModel) {
+        const section = document.createElement('section')
+        section.className = 'settings-section assistant-default-section'
+        const heading = document.createElement('h3'); heading.textContent = '默认模型'
+        const hint = document.createElement('p'); hint.className = 'settings-hint'
+        hint.textContent = '此助手平时使用的模型，保存后所有笔记库共用。底栏切换只影响下一场任务。'
+        const label = document.createElement('label'); label.className = 'settings-field'
+        const name = document.createElement('span'); name.textContent = '模型'
+        const select = document.createElement('select'); select.className = 'assistant-default-model'; select.disabled = true
+        label.append(name, select)
+        const status = document.createElement('p'); status.className = 'settings-hint assistant-default-status'; status.setAttribute('role', 'status')
+        const modelError = document.createElement('p'); modelError.className = 'settings-error assistant-default-error'; modelError.setAttribute('role', 'alert'); modelError.hidden = true
+        let original: string | null = null
+        let loading = true, saving = false
+        const paintModel = (): void => { modelSave.disabled = loading || saving || (select.value || null) === original }
+        const modelSave = action('保存默认模型', () => {
+          const chosen = select.value || null
+          saving = true; select.disabled = true; paintModel(); showError(modelError, ''); status.textContent = ''
+          void handlers.setDefaultModel!({ modelId: chosen }).then(result => {
+            if (disposed || !current.isOpen() || openedPage !== '助手') return
+            if (!result.ok) { showError(modelError, configErrorText(result.error)); return }
+            original = result.config.defaultModelId; select.value = original ?? ''
+            status.textContent = '默认模型已保存。'; handlers.onModelConfigChanged?.()
+          }).catch(() => { if (!disposed) showError(modelError, '保存失败，请重试。') })
+            .finally(() => { if (!disposed) { saving = false; select.disabled = loading; paintModel() } })
+        })
+        modelSave.classList.add('assistant-default-save'); modelSave.disabled = true
+        select.addEventListener('change', () => { status.textContent = ''; paintModel() })
+        section.append(heading, hint, label, modelError, status, modelSave)
+        body.append(section)
+        void handlers.getConfig().then(result => {
+          if (disposed || !current.isOpen() || openedPage !== '助手') return
+          if (!result.ok) { showError(modelError, configErrorText(result.error)); return }
+          const groups = modelModuleGroups(result.config)
+          const none = document.createElement('option'); none.value = ''; none.textContent = '未设置默认模型'; select.append(none)
+          for (const group of groups) {
+            const optgroup = document.createElement('optgroup'); optgroup.label = group.label
+            for (const item of group.items) { const option = document.createElement('option'); option.value = item.id; option.textContent = item.label; optgroup.append(option) }
+            select.append(optgroup)
+          }
+          original = result.config.defaultModelId
+          if (original && !groups.some(group => group.items.some(item => item.id === original))) {
+            const invalid = document.createElement('option'); invalid.value = original; invalid.textContent = '默认模型不可用，请重新选择'; invalid.disabled = true; select.append(invalid)
+          }
+          select.value = original ?? ''; loading = false; select.disabled = false; paintModel()
+        }).catch(() => { if (!disposed) showError(modelError, '暂时无法读取默认模型。') })
+      }
+
 
       const paintState = (): void => {
         counter.textContent = `补充说明已用 ${draft.note.length} / ${ASSISTANT_LIMITS.note} 字。`
-        save.disabled = same(draft, saved)
+        save.disabled = savingHabits || same(draft, saved)
       }
       const paint = (): void => {
         address.value = draft.address
@@ -295,8 +349,8 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         paintState()
       }
       const onDraftChange = (): void => {
-        // 只在草稿层 trim：输入框里保留人刚敲下的字符，保存时送出的仍是去空白版本
-        draft = { address: address.value.trim(), tone: tone.value as AssistantTone, note: note.value.trim() }
+        // 输入保留原样；首尾空白仅在保存时处理。
+        draft = { address: address.value, tone: tone.value as AssistantTone, note: note.value }
         paintState()
       }
       address.addEventListener('input', onDraftChange)
@@ -320,7 +374,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       if (!page) return
       disposeModelPage?.()
       disposeModelPage = null
-      const { body, error } = pageFrame('模型', '配置连接与模型。密钥只保存在此设备；用哪个模型在底栏选择。')
+      const { body, error } = pageFrame('模型', '配置连接与模型。密钥只保存在此设备；设备默认在助手页保存，底栏可为下一场临时选择。')
       disposeModelPage = mountModelPage({
         body,
         showError: (message) => showError(error, message),
@@ -333,7 +387,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     async function renderRunPage(): Promise<void> {
       if (!handlers.getConfig || !handlers.setLimits) return
       const mine = ++request
-      const { body, error } = pageFrame('运行', '上限按任务启动时的快照生效。当前最小环不调用工具。')
+      const { body, error } = pageFrame('运行', '模型与工具上限按任务启动时的快照生效；联网与 MCP 尚未开放。')
       const result = await handlers.getConfig().catch(() => ({ ok: false, error: '读取失败' }) as ModelConfigResult)
       if (!current.isOpen() || openedPage !== '运行' || mine !== request) return
       if (!result.ok) { showError(error, `运行设置不可用：${configErrorText(result.error)}`); return }

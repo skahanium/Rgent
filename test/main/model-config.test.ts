@@ -43,6 +43,23 @@ const v1File = (overrides: { selected?: string; keys?: Record<string, string> } 
 })
 
 describe('model configuration', () => {
+  it('resolves explicit task models without changing the device default or sharing keys', () => {
+    const store = createModelConfigStore(directory(), protection)
+    store.saveProvider({ provider: 'deepseek', baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1048576 }, 'ds-key')
+    store.saveProvider({ provider: 'minimax', baseURL: 'https://api.minimax.io/v1', modelId: 'MiniMax-M2.7', contextTokens: 204800 }, 'mm-key')
+    const models = store.getPublic().models
+    store.setDefault(models[0]!.id)
+    expect(store.credential(models[1]!.id).apiKey).toBe('mm-key')
+    expect(store.credential().apiKey).toBe('ds-key')
+    expect(store.getPublic().defaultModelId).toBe(models[0]!.id)
+    expect(() => store.credential('missing')).toThrow('MODEL_NOT_FOUND')
+    store.setDefault(null)
+    expect(store.credential(models[0]!.id).apiKey).toBe('ds-key')
+    expect(() => store.credential()).toThrow('NO_MODEL_SELECTED')
+    store.deleteKey('minimax')
+    expect(() => store.credential(models[1]!.id)).toThrow('NO_API_KEY')
+  })
+
   it('exposes exactly one entry per provider and creates no file until something changes', () => {
     const root = directory()
     const snapshot = createModelConfigStore(root, protection).getPublic()
@@ -55,7 +72,7 @@ describe('model configuration', () => {
       ['deepseek', 'deepseek-flash', 1048576],
       ['minimax', 'MiniMax-M2.7', 204800]
     ])
-    expect(snapshot.defaultModelId).toBe(snapshot.models[0]!.id)
+    expect(snapshot.defaultModelId).toBeNull()
     expect(snapshot.limits).toEqual({
       none: { seconds: 180, steps: 4, tools: 0 },
       local: { seconds: 300, steps: 12, tools: 24 },
@@ -99,6 +116,7 @@ describe('model configuration', () => {
 
     const store = createModelConfigStore(root, protection)
     store.saveProvider({ provider: 'deepseek', baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1048576 }, 'key')
+    store.setDefault(store.getPublic().models[0]!.id)
     expect(() => createModelConfigStore(root, { ...protection, isEncryptionAvailable: () => false }).credential()).toThrow('ENCRYPTION_UNAVAILABLE')
     expect(() => createModelConfigStore(root, { ...protection, decryptString: () => { throw new Error('broken') } }).credential()).toThrow('KEY_DECRYPT_FAILED')
   })
@@ -219,9 +237,9 @@ describe('model configuration', () => {
     expect(store.getPublic().defaultModelId).toBeNull()
     expect(store.getPublic().providers[1]).toEqual({ provider: 'minimax', configured: false, baseURL: '', hasKey: false, modelCount: 0 })
 
-    // 空配置里首次保存的模型会成为默认，避免用户配好却无法发起
+    // 保存供应商只配置：即使首次添加模型也不得替人选择默认
     store.removeProvider('deepseek')
     store.saveProvider({ provider: 'deepseek', baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1048576 })
-    expect(store.getPublic().defaultModelId).toBe(store.getPublic().models[0]!.id)
+    expect(store.getPublic().defaultModelId).toBeNull()
   })
 })

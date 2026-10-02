@@ -3,6 +3,8 @@ import { composeSource } from '../../markdown/partition.ts'
 
 export type Tab = {
   relPath: string
+  /** 下一场模型覆盖：只活在这个已核验对象的 tab 内，不写设备配置。 */
+  temporaryModelId?: string
   /** 正文。只进画布。 */
   content: string
   /** 旁路账本，画布不碰。没有锚点时为 null。 */
@@ -67,4 +69,9 @@ export function applySaved(tab: Tab, body: string, revision: string): void {
   tab.saved = body
   tab.revision = revision
   tab.dirty = tab.content !== body
+}
+
+/** 临时选择失效时仍返回该 ID，由调用方显错，绝不回退默认。 */
+export function taskModelId(tab: Tab | undefined, defaultModelId: string | null): string | null {
+  return tab ? tab.temporaryModelId ?? defaultModelId : null
 }

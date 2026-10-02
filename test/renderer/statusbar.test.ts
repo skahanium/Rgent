@@ -82,6 +82,8 @@ describe('status bar model module', () => {
     expect((second as HTMLSelectElement).value).toBe('m3')
     renderStatusbar(host, statusModel({ ...input, line: 3 }, module({ value: 'm1' }) as never))
     expect((host.querySelector('.status-model') as HTMLSelectElement).value).toBe('m1')
+    expect(host.querySelector('.status-model')).toBe(first)
+    expect(document.activeElement).toBe(first)
     host.remove()
   })
 
@@ -104,4 +106,14 @@ describe('status bar model module', () => {
     select.dispatchEvent(new Event('change'))
     expect(picked).toEqual(['m1'])
   })
+})
+
+it('updates the active note change callback even when model options are unchanged', () => {
+  const host = document.createElement('div'), selected: string[] = []
+  const base = { groups: [{ label: '供应商', items: [{ id: 'm', label: 'model' }] }], value: 'm', signature: 'same', onConfigure: () => {} }
+  renderStatusbar(host, statusModel({ line: 1, column: 1, words: 0, vaultName: '库', noteOpen: true }, { ...base, onChange: () => selected.push('A') }))
+  const select = host.querySelector<HTMLSelectElement>('.status-model')!
+  renderStatusbar(host, statusModel({ line: 1, column: 1, words: 0, vaultName: '库', noteOpen: true }, { ...base, onChange: () => selected.push('B') }))
+  select.dispatchEvent(new Event('change'))
+  expect(selected).toEqual(['B'])
 })

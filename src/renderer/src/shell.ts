@@ -7,7 +7,7 @@ import { promptConflict } from './conflict.ts'
 import { openOverlay } from './overlay.ts'
 import { createSearchOverlay } from './search-overlay.ts'
 import { createSettingsOverlay } from './settings.ts'
-import { applySaved, pendingWrites, hasUnavailableDraft, type Tab } from './tabs.ts'
+import { applySaved, pendingWrites, hasUnavailableDraft, taskModelId, type Tab } from './tabs.ts'
 import { mountEditor, type EditorHost, type NoteHost } from './view/editor.ts'
 import { renderReadOnlyMarkdown, disposeReadOnlyImages } from './view/read-only.ts'
 import { icon } from './icons.ts'
@@ -188,32 +188,31 @@ export async function start(root: HTMLElement): Promise<void> {
     updateModel: (request) => window.rgent.modelUpdate(request),
     removeModel: (request) => window.rgent.modelRemove(request),
     readModels: (request) => window.rgent.modelList(request),
+    setDefaultModel: (request) => window.rgent.modelDefaultSet(request),
     setLimits: (request) => window.rgent.modelLimitsSet(request),
     onModelConfigChanged: () => { void refreshModelModule() },
     onClose: () => { void refreshModelModule() }
   })
-  // 底栏模型模块：设置页只配置，这里才是「用哪个模型」的入口。
+  // 设备默认由助手设置保存；底栏只为当前笔记保存下一场临时选择。
   let modelConfigSnapshot: PublicModelConfig | null = null
-  let modelModuleCache: { config: PublicModelConfig; module: StatusModelModule } | null = null
   const modelModule = (): StatusModelModule | undefined => {
     const config = modelConfigSnapshot
     if (!config) return undefined
-    if (modelModuleCache?.config === config) return modelModuleCache.module
+    const tab = current()
     const groups = modelModuleGroups(config)
-    const module: StatusModelModule = {
-      groups,
-      value: config.defaultModelId,
-      signature: JSON.stringify({ groups, value: config.defaultModelId }),
-      onChange: (modelId) => {
-        void window.rgent.modelDefaultSet({ modelId }).then((result) => {
-          if (!result.ok) { hostNotice = hostErrorText(result.error); updateStatus() }
-          else { modelConfigSnapshot = result.config; hostNotice = ''; updateStatus() }
-        }).catch(() => { hostNotice = hostErrorText('IO_ERROR'); updateStatus() })
+    const value = taskModelId(tab, config.defaultModelId)
+    const invalid = value !== null && !groups.some(group => group.items.some(item => item.id === value))
+    const unavailableLabel = !tab ? '打开笔记后选择' : invalid ? '模型不可用，请重新选择' : undefined
+    return {
+      groups, value, disabled: !tab, unavailableLabel,
+      signature: JSON.stringify({ groups, value, disabled: !tab, unavailableLabel }),
+      onChange: modelId => {
+        if (!tab || !tabs.includes(tab) || tab !== current() || tab.availability) return
+        tab.temporaryModelId = modelId
+        hostNotice = ''; updateStatus()
       },
-      onConfigure: () => settingsOverlay.open('模型')
+      onConfigure: () => settingsOverlay.open('助手')
     }
-    modelModuleCache = { config, module }
-    return module
   }
   const refreshModelModule = async (): Promise<void> => {
     const result = await window.rgent.modelConfigGet().catch(() => null)
@@ -373,12 +372,16 @@ export async function start(root: HTMLElement): Promise<void> {
   async function submitSlash(submission: { range: { start: number; end: number }; prompt: string }): Promise<void> {
     const tab=current();if(!tab || authorizationPopover || conflictDecisionOpen)return
     if(tab.availability || !tab.sessionId || !tab.objectVersion)return
+    const selectedModelId = taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null)
+    if (!selectedModelId || !modelConfigSnapshot || !modelModuleGroups(modelConfigSnapshot).some(group => group.items.some(item => item.id === selectedModelId))) {
+      hostNotice = '请选择可用模型；设备默认可在设置的「助手」页保存。'; updateStatus(); return
+    }
     if([...activeTasks.values()].some(task=>task.relPath===tab.relPath)){hostNotice='这篇笔记已有正在运行的任务。';updateStatus();return}
     if(!await flushSave()){hostNotice='先保存所有窗口稿，才能准备本场范围。';updateStatus();return}
     if(current()!==tab || !tabs.includes(tab))return
     const draft=editor.getText()
     if(draft.slice(submission.range.start,submission.range.end)!==`/${submission.prompt}`)return
-    const request=()=>({modelRecordId:modelConfigSnapshot?.defaultModelId ?? '',relPath:tab.relPath,range:submission.range,expectedText:draft.slice(submission.range.start,submission.range.end),promptText:submission.prompt,
+    const request=()=>({modelRecordId:taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null) ?? '',relPath:tab.relPath,range:submission.range,expectedText:draft.slice(submission.range.start,submission.range.end),promptText:submission.prompt,
       sessionId:tab.sessionId!,objectVersion:tab.objectVersion!,expectedRevision:tab.revision})
     let displayedRequest:ReturnType<typeof request>|null=null
     const coords=editor.view.coordsAtPos(editor.view.state.selection.main.head)??editor.view.dom.getBoundingClientRect()
@@ -392,10 +395,11 @@ export async function start(root: HTMLElement): Promise<void> {
         return window.rgent.agentAuthorizationPreview({...displayedRequest,references})
       },
       send:async preview=>{
-        if(!displayedRequest || current()!==tab || !tabs.includes(tab) || editor.getText()!==draft)return {ok:false,error:'STALE_AUTHORIZATION'}
+        if(!displayedRequest || current()!==tab || !tabs.includes(tab) || editor.getText()!==draft || taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null)!==displayedRequest.modelRecordId)return {ok:false,error:'STALE_AUTHORIZATION'}
         if(!await flushSave())return {ok:false,error:'UNSAVED_DRAFT'}
         const result=await window.rgent.agentStart({...displayedRequest,previewId:preview.id})
         if(!result.ok)return result
+        delete tab.temporaryModelId
         if(!endedTaskIds.has(result.id))activeTasks.set(result.id,{id:result.id,relPath:tab.relPath,startedAt:Date.now()})
         hostNotice='';syncActiveLocks();updateStatus()
         void runExclusiveConflict(()=>syncHostTab(tab,vaultEpoch))
@@ -1305,6 +1309,7 @@ export async function start(root: HTMLElement): Promise<void> {
   }
   function markUnavailable(tab: Tab, state: import('../../shared/ipc.ts').NoteAvailability): void {
     tab.availability = state
+    if (state === 'replaced' || state === 'missing') delete tab.temporaryModelId
     if (tab.relPath === active) tab.content = editor.getText()
     // Do not throw away the last verified ledger or transfer the old draft to a replacement.
     renderTabs(); updateStatus()

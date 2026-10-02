@@ -48,7 +48,7 @@ const defaults = (): StoredConfig => {
     version: 2,
     connections: [deepseek, minimax],
     models: [deepseekModel, minimaxModel],
-    defaultModelId: deepseekModel.id,
+    defaultModelId: null,
     limits: {
       none: { seconds: 180, steps: 4, tools: 0 },
       local: { seconds: 300, steps: 12, tools: 24 },
@@ -325,7 +325,6 @@ export function createModelConfigStore(userData: string, protection: SecretProte
         if (!next.models.some((model) => model.connectionId === existing.id)) {
           const model = { id: randomUUID(), connectionId: existing.id, modelId: validateModelId(fields.modelId), contextTokens: validateContextTokens(fields.contextTokens) }
           next.models.push(model)
-          if (next.defaultModelId === null) next.defaultModelId = model.id
         }
       } else {
         const connection: StoredConnection = { id: randomUUID(), provider: fields.provider, baseURL }
@@ -333,7 +332,6 @@ export function createModelConfigStore(userData: string, protection: SecretProte
         const model: StoredModel = { id: randomUUID(), connectionId: connection.id, modelId: validateModelId(fields.modelId), contextTokens: validateContextTokens(fields.contextTokens) }
         next.connections.push(connection)
         next.models.push(model)
-        if (next.defaultModelId === null) next.defaultModelId = model.id
       }
       commit(next)
     },
@@ -390,7 +388,7 @@ export function createModelConfigStore(userData: string, protection: SecretProte
       next.limits[tier] = validateLimits(tier, limits)
       commit(next)
     },
-    /** 新任务使用的模型：按 defaultModelId 解析，失败一律显错，不静默换别的。 */
+    /** 默认或单场指定模型：按内部模型记录 ID 解析，失败一律显错，不静默换别的。 */
     credential(modelRecordId: string | null = current.defaultModelId): ModelCredential {
       if (modelRecordId === null) throw new Error('NO_MODEL_SELECTED')
       const model = modelOf(current, modelRecordId)

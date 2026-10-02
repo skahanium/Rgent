@@ -6,8 +6,8 @@ import { PROVIDER_LABELS } from '../../shared/model-endpoints.ts'
  * 底栏。围栏 docs/frontend.md §编辑画布与辅助信息：
  * 与上方用一条细线分开：左侧行列与字数，中间是模型模块，右侧联网圆点与库名。
  *
- * 模型模块是「用哪个模型」的唯一入口（设置页只配置）：原生下拉按供应商分组列出已配置模型，
- * 切换即改变新任务所用模型；没有可用模型时给一句引导与一个打开设置的按钮，不放点不动的死控件。
+ * 默认模型在助手设置保存；此处只为当前笔记的下一场任务临时选择，不写设备配置。
+ * 无活动笔记时提供配置引导，失效选择不自动改用其他模型。
  *
  * 底栏每次状态更新都会重绘，所以三个容器与那个下拉必须复用而不是重建，
  * 否则光标移动会把下拉和它的焦点一起销毁。
@@ -26,6 +26,8 @@ export type StatusModelGroup = { label: string; items: StatusModelOption[] }
 export type StatusModelModule = {
   groups: StatusModelGroup[]
   value: string | null
+  disabled?: boolean
+  unavailableLabel?: string
   /** 由构建方缓存：内容不变时不必重建下拉，底栏在光标移动时会被高频重绘。 */
   signature: string
   onChange: (modelId: string) => void
@@ -104,54 +106,58 @@ function container(host: HTMLElement, className: string): HTMLElement {
 
 /** 模型模块：同一次会话里保持同一个 select 节点，只在下拉内容真的变化时重建选项。 */
 function renderModelModule(center: HTMLElement, module: StatusModelModule | undefined): void {
-  const signature = module?.signature ?? ''
-  if (center.dataset.signature === signature) return
-  center.dataset.signature = signature
-  center.replaceChildren()
   center.hidden = !module
   if (!module) return
-  const label = document.createElement('span')
-  label.className = 'status-model-label'
-  label.textContent = '模型'
-  const available = module.groups.some((group) => group.items.length > 0)
+  const available = module.groups.some(group => group.items.length > 0) && !module.disabled
+  let select = center.querySelector<HTMLSelectElement>('.status-model')
+  let configure = center.querySelector<HTMLButtonElement>('.status-model-config')
   if (!available) {
-    const empty = document.createElement('span')
-    empty.className = 'status-item status-model-empty'
-    empty.textContent = '未配置模型'
-    const configure = document.createElement('button')
-    configure.type = 'button'
-    configure.className = 'status-model-config'
-    configure.textContent = '配置'
-    configure.addEventListener('click', () => module.onConfigure())
-    center.append(label, empty, configure)
+    const signature = `empty:${module.unavailableLabel ?? '未配置模型'}`
+    if (center.dataset.signature !== signature) {
+      center.dataset.signature = signature
+      center.replaceChildren()
+      const label = document.createElement('span')
+      label.className = 'status-model-label'; label.textContent = '模型'
+      const empty = document.createElement('span')
+      empty.className = 'status-item status-model-empty'
+      empty.textContent = module.unavailableLabel ?? '未配置模型'
+      configure = document.createElement('button')
+      configure.type = 'button'; configure.className = 'status-model-config'; configure.textContent = '配置'
+      center.append(label, empty, configure)
+    }
+    configure!.onclick = module.onConfigure
     return
   }
-  const select = document.createElement('select')
-  select.className = 'status-model'
-  select.setAttribute('aria-label', '新任务使用的模型')
-  for (const group of module.groups) {
-    if (!group.items.length) continue
-    const optgroup = document.createElement('optgroup')
-    optgroup.label = group.label
-    for (const item of group.items) {
-      const option = document.createElement('option')
-      option.value = item.id
-      option.textContent = item.label
-      if (item.id === module.value) option.selected = true
-      optgroup.append(option)
+  if (!select) {
+    center.replaceChildren()
+    const label = document.createElement('span')
+    label.className = 'status-model-label'; label.textContent = '模型'
+    select = document.createElement('select')
+    select.className = 'status-model'
+    select.setAttribute('aria-label', '新任务使用的模型')
+    center.append(label, select)
+  }
+  // 回调也随当前笔记更新；复用节点不能把旧 tab 的选择处理器留在原处。
+  select.onchange = () => { if (select!.value) module.onChange(select!.value) }
+  if (center.dataset.signature !== module.signature) {
+    center.dataset.signature = module.signature
+    select.replaceChildren()
+    for (const group of module.groups) {
+      if (!group.items.length) continue
+      const optgroup = document.createElement('optgroup'); optgroup.label = group.label
+      for (const item of group.items) {
+        const option = document.createElement('option'); option.value = item.id; option.textContent = item.label
+        optgroup.append(option)
+      }
+      select.append(optgroup)
     }
-    select.append(optgroup)
+    if (module.value === null || !module.groups.some(group => group.items.some(item => item.id === module.value))) {
+      const placeholder = document.createElement('option')
+      placeholder.value = ''; placeholder.textContent = module.unavailableLabel ?? '未选择模型'; placeholder.disabled = true
+      select.prepend(placeholder)
+      select.value = ''
+    } else select.value = module.value
   }
-  if (module.value === null || !module.groups.some((group) => group.items.some((item) => item.id === module.value))) {
-    const placeholder = document.createElement('option')
-    placeholder.value = ''
-    placeholder.textContent = '未选择模型'
-    placeholder.selected = true
-    placeholder.disabled = true
-    select.prepend(placeholder)
-  }
-  select.addEventListener('change', () => { if (select.value) module.onChange(select.value) })
-  center.append(label, select)
 }
 
 export function renderStatusbar(host: HTMLElement, model: StatusModel): void {
