@@ -96,7 +96,11 @@ function makePage(send, close) {
       new Promise((resolve, reject) => {
         const mine = ++id
         const timer = setTimeout(() => { pending.delete(mine); reject(new Error(`CDP_TIMEOUT:${method}`)) }, 30_000)
-        pending.set(mine, (message) => { clearTimeout(timer); resolve(message) })
+        pending.set(mine, (message) => {
+          clearTimeout(timer)
+          if (message.error) reject(new Error(`${method}: ${JSON.stringify(message.error)}`))
+          else resolve(message)
+        })
         send.send(JSON.stringify({ id: mine, method, params }))
       }),
     async eval(expression) {
@@ -192,7 +196,7 @@ async function verifySidebarWidth(page, shot) {
         return release.call(this, id)
       }
       const record = event => trace.push({ event: event.type, target: event.target?.className,
-        x: event.clientX, id: event.pointerId, captured: event.pointerId ? handle.hasPointerCapture(event.pointerId) : null,
+        x: event.clientX, buttons: event.buttons, button: event.button, trusted: event.isTrusted, id: event.pointerId, captured: event.pointerId ? handle.hasPointerCapture(event.pointerId) : null,
         width: handle.getAttribute('aria-valuenow'), time: performance.now() })
       const events = ['pointerdown', 'pointermove', 'pointercancel', 'lostpointercapture', 'gotpointercapture']
       events.forEach(type => document.addEventListener(type, record, true)); window.addEventListener('resize', record)
@@ -205,13 +209,16 @@ async function verifySidebarWidth(page, shot) {
       trace.push({ event: 'hit-test', target: document.elementFromPoint(point.x, point.y)?.className, width: handle.getAttribute('aria-valuenow') })
       return point
     })()`)
-    await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
+    await page.call('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point, button: 'none', buttons: 0 })
+    await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', buttons: 1, clickCount: 1 })
+    await page.interruptNativeFocus?.()
     await page.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x + 40, y: point.y, button: 'left', buttons: 1 })
     await settle()
     const dragging = await page.eval(geometry)
     await page.key('Escape', 'Escape', 0, 27)
     await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x + 40, y: point.y, button: 'left', clickCount: 1 })
     const dragObservation = await page.eval(`window.__sidebarDragObservation()`)
+    await page.restoreNativeWindow?.()
     check('真实拖动即时调整，Esc 恢复本次前宽度', dragging.width === 264 && (await page.eval(geometry)).width === 224, JSON.stringify({ dragging, dragObservation }))
     await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
     await page.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x + 56, y: point.y, button: 'left', buttons: 1 })
@@ -401,6 +408,7 @@ async function verifyComposition(page, vault, shot) {
     })()`)
     const text = () => page.eval(`(() => { const content = document.querySelector('.cm-content'); const view = content.cmTile.root.view; return { text: view.state.doc.toString(), dom: content.textContent, composing: view.compositionStarted, focus: document.activeElement?.className } })()`)
     for (const syllable of ['n', 'ni', 'nih', 'niha', 'nihao']) {
+      if (name === '输入法混合换行.md' && syllable === 'niha') await page.interruptNativeFocus?.()
       const response = await page.call('Input.imeSetComposition', { text: syllable, selectionStart: syllable.length, selectionEnd: syllable.length })
       if (response.error) throw Error(JSON.stringify(response.error))
       // The first draft is held beyond the save debounce to detect a save-induced interruption.
@@ -431,6 +439,7 @@ async function verifyComposition(page, vault, shot) {
     for (const syllable of ['n', 'ni', '']) await page.call('Input.imeSetComposition', { text: syllable, selectionStart: syllable.length, selectionEnd: syllable.length })
     await sleep(150)
     check(`${name} 取消后保留既有正文且不残留拼音`, (await text()).text === expectedRaw.replace(/\r\n?|\n/g, '\n'))
+    await page.restoreNativeWindow?.()
     const trace = await page.eval(`window.__imeObservation()`)
     if (process.env.RGENT_UI_IME_TRACE === '1' || results.some(result => result.name.startsWith(name) && !result.ok)) process.stdout.write('IME 事件与事务 ' + name + ' — ' + JSON.stringify(trace) + '\n')
   }
@@ -587,7 +596,14 @@ async function captureVisualBaseline(page, shot, nativeShot) {
   })()`)
   check('视觉样例打开三个 tab', opened === 3)
   check('视觉样例包含 AI、反链与三级标题', await waitFor(page, `document.querySelectorAll('.rgent-block-command').length > 0 && document.querySelectorAll('.outline-mark').length >= 3 && document.querySelectorAll('.backlinks-note').length >= 2`))
-  await page.eval(`(() => { document.activeElement?.blur(); document.querySelector('.cm-scroller').scrollTop = 0 })()`)
+  // Switching tabs schedules CodeMirror's scroll restoration in its measure frame.
+  // Establish the screenshot's top-of-note position after that pending layout work.
+  await page.eval(`(async () => {
+    document.activeElement?.blur()
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    document.querySelector('.cm-scroller').scrollTop = 0
+  })()`)
+
   await waitFor(page, `document.querySelector('.cm-scroller').scrollTop === 0 && document.querySelector('.cm-line.md-h1')?.getBoundingClientRect().top - document.querySelector('.stage').getBoundingClientRect().top >= 85`)
   await probe('宽窗画布留白接近参考图', async () => {
     const gaps = JSON.parse(await page.eval(`(() => {
@@ -706,9 +722,11 @@ async function captureVisualBaseline(page, shot, nativeShot) {
     }
     await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '界面'))?.click()`)
     if (mode === 'day') {
+      await page.hideNativeWindow?.()
       await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: 10, y: 10, button: 'left', clickCount: 1 })
       await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 10, y: 10, button: 'left', clickCount: 1 })
-      check('设置面板外真实点击可关闭并返回原焦点', await waitFor(page, `!document.querySelector('.overlay-settings') && document.activeElement?.classList.contains('settings-open')`), await page.eval(`JSON.stringify({ dialog: !!document.querySelector('.overlay-settings'), focus: document.activeElement?.className, connected: document.querySelector('.settings-open')?.isConnected, hasFocus: document.hasFocus() })`))
+      check('设置面板外真实点击可关闭并返回原焦点', await waitFor(page, `!document.querySelector('.overlay-settings') && document.activeElement?.classList.contains('settings-open')`), await page.eval(`JSON.stringify({ dialog: !!document.querySelector('.overlay-settings'), focus: document.activeElement?.className, connected: document.querySelector('.settings-open')?.isConnected, hasFocus: document.hasFocus(), open: document.querySelector('.overlay-settings')?.open, visibility: document.visibilityState })`))
+      await page.restoreNativeWindow?.()
     } else {
       await page.eval(`document.querySelector('.settings-nav-current')?.focus()`)
       await page.key('Escape', 'Escape', 0, 27)
@@ -996,6 +1014,9 @@ async function seedVisualModels(page) {
 
 async function main() {
   const port = await availablePort()
+  let inspectorPort = port
+  for (let attempt = 0; attempt < 5 && inspectorPort === port; attempt += 1) inspectorPort = await availablePort()
+  if (inspectorPort === port) throw new Error('无法为测试主进程分配独立诊断端口')
   const electron = require('electron')
   const workdir = mkdtempSync(path.join(tmpdir(), 'rgent-ui-'))
   const profile = path.join(workdir, 'profile')
@@ -1055,9 +1076,10 @@ async function main() {
   let startupError = ''
   let stderr = ''
   let hostServer = null
+  let nativePage = null
   const child = spawn(
     electron,
-    ['.', `--user-data-dir=${profile}`, '--no-sandbox', '--disable-gpu',
+    ['.', `--inspect=127.0.0.1:${inspectorPort}`, `--user-data-dir=${profile}`, '--no-sandbox', '--disable-gpu',
       // 窗口被别的应用挡住时 Chromium 会降频定时器，页内轮询会假超时。
       '--disable-renderer-backgrounding', '--disable-background-timer-throttling', `--remote-debugging-port=${port}`],
     { cwd: root, env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }, stdio: ['ignore', 'ignore', 'pipe'] }
@@ -1080,6 +1102,63 @@ async function main() {
     }
     if (!ready) throw new Error(`Electron/CDP 未启动：${startupError || `exit=${child.exitCode ?? '仍在运行'}`}\n${stderr || '子进程没有错误输出'}`)
     const page = await connect(port)
+    // This is a disposable test process. Control its native window separately from
+    // CDP input: desktop activation can otherwise commit IME or discard pointer capture.
+    // The product's BrowserWindow options and native/manual acceptance stay unchanged.
+    let inspectorTarget
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${inspectorPort}/json/list`, { signal: AbortSignal.timeout(1000) })
+        if (response.ok) inspectorTarget = (await response.json()).find(target => target.webSocketDebuggerUrl)
+        if (inspectorTarget) break
+      } catch { /* The main inspector can become ready after the renderer CDP endpoint. */ }
+      if (child.exitCode != null) break
+      await sleep(250)
+    }
+    if (!inspectorTarget) throw new Error('测试主进程 inspector 未就绪')
+    const inspectorSocket = new WebSocket(inspectorTarget.webSocketDebuggerUrl)
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('测试主进程 inspector 握手超时')), 10000)
+      inspectorSocket.onopen = () => { clearTimeout(timer); resolve() }
+      inspectorSocket.onerror = error => { clearTimeout(timer); reject(error) }
+    })
+    const inspectorSend = { send: payload => inspectorSocket.send(payload) }
+    inspectorSocket.onmessage = event => inspectorSend.onMessage?.(event.data)
+    nativePage = makePage(inspectorSend, () => inspectorSocket.close())
+    await nativePage.eval(`globalThis.__rgentTestWindow = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('electron').BrowserWindow.getAllWindows()[0]; true`)
+    const isolatedInput = process.env.RGENT_UI_NATIVE_UNISOLATED !== '1'
+    if (isolatedInput) {
+      await nativePage.eval(`(() => {
+        const win = globalThis.__rgentTestWindow
+        win.setFocusable(false); win.blur()
+        // Native hover/move events can also clear a CDP pointer's pending capture.
+        // Ignore desktop mouse input; Input.dispatchMouseEvent still uses Chromium.
+        win.setIgnoreMouseEvents(true)
+        // Chromium's command-line timer flags do not keep animation-frame tasks
+        // (including dialog close events) running when the native window is hidden.
+        win.webContents.setBackgroundThrottling(false)
+      })()`)
+      await page.call('Emulation.setFocusEmulationEnabled', { enabled: true })
+    }
+    // Opt-in deterministic counterexamples; the original assertions remain in place.
+    // Set RGENT_UI_NATIVE_UNISOLATED=1 with this flag to reproduce the old protocol.
+    if (process.env.RGENT_UI_NATIVE_INTERRUPTION === '1') {
+      page.interruptNativeFocus = async () => {
+        const before = await nativePage.eval(`globalThis.__rgentTestWindow.isFocused()`)
+        await nativePage.eval(`(() => {
+          const { BrowserWindow } = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('electron')
+          globalThis.__rgentFocusProbe?.destroy()
+          globalThis.__rgentFocusProbe = new BrowserWindow({ x: -10000, y: -10000, width: 200, height: 150 })
+          globalThis.__rgentFocusProbe.show(); globalThis.__rgentFocusProbe.focus()
+        })()`)
+        await sleep(100)
+        const probeFocused = await nativePage.eval(`globalThis.__rgentFocusProbe.isFocused()`)
+        if (!probeFocused) throw new Error('原生抢焦反例未取得窗口焦点')
+        process.stdout.write('原生抢焦反例 — ' + JSON.stringify({ before, probeFocused, after: await nativePage.eval(`globalThis.__rgentTestWindow.isFocused()`), documentFocus: await page.eval('document.hasFocus()') }) + '\n')
+      }
+      page.hideNativeWindow = () => nativePage.eval(`globalThis.__rgentTestWindow.hide()`)
+      page.restoreNativeWindow = () => nativePage.eval(`globalThis.__rgentFocusProbe?.destroy(); globalThis.__rgentTestWindow.show(); true`)
+    }
 
     if (imeOnly) {
       await waitFor(page, `document.querySelectorAll('.tree-row').length > 0`)
@@ -2070,6 +2149,7 @@ async function main() {
 
     } catch (error) { stageFailed('收尾', error) }
   } finally {
+    nativePage?.close()
     if (child.exitCode == null) {
       child.kill()
       await Promise.race([

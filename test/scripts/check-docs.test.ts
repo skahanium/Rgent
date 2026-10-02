@@ -139,7 +139,9 @@ describe('docs stage invariants', () => {
   it('rejects a current matrix object that names a different existing stage', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    writeFileSync(build, source.replace(/^(\| )助手与多连接( \|[^\n]*\*\*当前\*\*)/m, '$1库内 AI 工具$2'))
+    const changed = source.replace(/^(\| )[^|\n]+( \|[^\n]*\*\*当前\*\*)/m, '$1库内 AI 工具$2')
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
     const result = run()
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('当前阶段与矩阵当前行不一致')
