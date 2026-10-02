@@ -233,8 +233,11 @@ async function confirmSlashAuthorization(page, inspect = false) {
     })()`))
     await page.eval(`document.querySelector('.overlay-authorization')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',isComposing:true,bubbles:true,cancelable:true}))`)
     check('输入法组合回车不启动模型任务', await page.eval(`(async () => (await window.rgent.agentTasks()).length===0 && !!document.querySelector('.overlay-authorization[open]'))()`))
+    await page.eval(`document.querySelector('.overlay-authorization')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',keyCode:229,bubbles:true,cancelable:true}))`)
+    check('单独 keyCode 229 不启动模型任务', await page.eval(`(async () => (await window.rgent.agentTasks()).length===0 && !!document.querySelector('.overlay-authorization[open]'))()`))
     await page.key('Escape','Escape',0,27)
     check('取消授权保留原始口令且焦点回到正文', await waitFor(page, `!document.querySelector('.overlay-authorization[open]') && document.querySelector('.cm-content')?.textContent.includes('/请写两句话') && document.querySelector('.cm-editor')?.contains(document.activeElement)`))
+    check('取消准备保留该篇临时模型', await page.eval(`document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test-override'`) === true)
     await page.key('Enter','Enter',0,13)
     if(!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`))return false
   }
@@ -617,13 +620,13 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       })()`))
       return { ok: geometry.top >= 24 && geometry.top <= 55 && geometry.width >= 980 && geometry.width <= 1050 && geometry.height >= 680 && geometry.height < 800 && geometry.titleTop >= 35 && geometry.titleTop <= 70 && geometry.titleLeft >= 240, detail: JSON.stringify(geometry) }
     })
-    check('设置遮罩柔焦且导航仅列出三页与同系图标', await page.eval(`(() => {
+    check('设置遮罩柔焦且导航仅列出四页与同系图标', await page.eval(`(() => {
       const dialog = document.querySelector('.overlay-settings')
       const blur = getComputedStyle(dialog, '::backdrop').backdropFilter
       const labels = [...dialog.querySelectorAll('.settings-nav button')].map((button) => button.textContent)
       return blur.includes('blur(') && JSON.stringify(labels) === JSON.stringify(['界面','助手','模型','运行']) && dialog.querySelectorAll('.settings-nav .icon').length === 4
     })()`) === true)
-    check('阅读排版有真实中英样张和五项可调控件', await waitFor(page, `document.querySelector('.settings-reading-sample')?.textContent.includes('English') && document.querySelectorAll('.settings-reading-controls [data-setting]').length === 5`))
+    check('阅读排版有真实中英样张和五项可调控件', await waitFor(page, `document.querySelector('.settings-reading-sample')?.textContent.includes('English') && [...document.querySelectorAll('.settings-reading-controls [data-setting]')].filter(node => !node.dataset.setting.startsWith('chrome-')).length === 5`))
     await shot(page, `reference-${mode}-settings`)
     await page.call('Emulation.clearDeviceMetricsOverride', {})
     await sleep(160)
@@ -638,6 +641,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
         main.scrollTop > 0 && getComputedStyle(main).overflowY === 'auto'
     })()`) === true)
     await shot(page, `reference-${mode}-settings-reading`)
+    await verifyChromeText(page, shot, `reference-${mode}-settings`)
     await page.eval(`document.querySelector('.settings-main').scrollTop = 0`)
     for (const name of ['助手', '模型', '运行']) {
       await page.eval(`([...document.querySelectorAll('.settings-nav button')].find((button) => button.textContent === '${name}'))?.click()`)
@@ -645,6 +649,8 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       if (name === '助手') {
         await waitFor(page, `!!document.querySelector('.settings-form textarea')`)
         await shot(page, `reference-${mode}-settings-assistant`)
+        await page.eval(`document.querySelector('.assistant-default-section').scrollIntoView({block:'center'})`)
+        await shot(page, `reference-${mode}-settings-assistant-default`)
         continue
       }
       if (name === '模型') {
@@ -712,6 +718,8 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       if (name === '助手') {
         await waitFor(page, `!!document.querySelector('.settings-form textarea')`)
         await shot(page, `reference-${mode}-settings-assistant-narrow`)
+        await page.eval(`document.querySelector('.assistant-default-section').scrollIntoView({block:'center'})`)
+        await shot(page, `reference-${mode}-settings-assistant-default-narrow`)
         continue
       }
       if (name === '模型') {
@@ -887,12 +895,61 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
   check('原库恢复后重新核验原对象，正文和账本字节保持', await waitFor(page, `document.querySelector('.note-unavailable')?.hidden === true`) && readFileSync(path.join(vault, copyName), 'utf8') === copied)
 }
 
-/** 样张夹具：两条带密钥的连接（含同厂商多条）与三个模型，界面才看得出真实形态。 */
+/** Text presets preview locally; a successful save changes only client typography. */
+async function verifyChromeText(page, shot, label) {
+  await waitFor(page, `!!document.querySelector('[data-setting="chrome-tabs"]:not(:disabled)')`)
+  const original = await page.eval(`window.rgent.chromeTextGet()`)
+  check(label + '实际设置控件使用中性焦点', await page.eval(`(() => {
+    const nodes = [document.querySelector('.settings-nav-current'), document.querySelector('[data-setting="chrome-tabs"]'), document.querySelector('.settings-choice input:checked')]
+    const expected = getComputedStyle(document.documentElement).getPropertyValue('--focus-ring').trim()
+    const probe = document.createElement('span'); probe.style.color = expected; document.body.append(probe); const neutral = getComputedStyle(probe).color; probe.remove()
+    return nodes.every(node => { node.focus(); const style = getComputedStyle(node); return style.outlineStyle === 'none' || style.outlineWidth === '0px' || style.outlineColor === neutral })
+  })()`) === true)
+
+  const baseline = await page.eval(`JSON.stringify({ root: getComputedStyle(document.documentElement).fontSize, editor: getComputedStyle(document.querySelector('.cm-editor')).fontSize, tabs: document.documentElement.style.getPropertyValue('--tab-name-font-size'), sidebar: document.documentElement.style.getPropertyValue('--sidebar-name-font-size') })`)
+  for (const tabs of ['small', 'default', 'large']) for (const sidebar of ['small', 'default', 'large']) {
+    const ok = await page.eval(`(() => {
+      for (const [name, value] of [['tabs', '${tabs}'], ['sidebar', '${sidebar}']]) {
+        const control = document.querySelector('[data-setting="chrome-' + name + '"]'); control.value = value; control.dispatchEvent(new Event('change'))
+      }
+      const sample = document.querySelector('.settings-chrome-sample')
+      const sizes = [sample.querySelector('.tab-label'), sample.querySelector('.tree-row')].map(node => parseFloat(getComputedStyle(node).fontSize))
+      return sizes.every(value => value >= 12 && value <= 16) && JSON.stringify({ root: getComputedStyle(document.documentElement).fontSize, editor: getComputedStyle(document.querySelector('.cm-editor')).fontSize, tabs: document.documentElement.style.getPropertyValue('--tab-name-font-size'), sidebar: document.documentElement.style.getPropertyValue('--sidebar-name-font-size') }) === ${JSON.stringify(baseline)}
+    })()`)
+    check(label + '字号样张 ' + tabs + '/' + sidebar + ' 不改变正文或工作区', ok === true)
+  }
+  const viewport = await page.eval(`({width:innerWidth,height:innerHeight})`)
+  const fonts = JSON.stringify(JSON.parse(baseline), ['root','editor'])
+  for (const size of ['large', 'small']) {
+    await page.eval(`(() => { for (const name of ['tabs', 'sidebar']) { const control = document.querySelector('[data-setting="chrome-' + name + '"]'); control.value = '${size}'; control.dispatchEvent(new Event('change')) } document.querySelector('.settings-chrome-save').click() })()`)
+    const saved = await waitFor(page, `(async () => { const value = await window.rgent.chromeTextGet(); return value.tabs === '${size}' && value.sidebar === '${size}' && document.querySelector('.settings-chrome-save').disabled })()`)
+    check(label + '字号 ' + size + ' 保存后应用且根字号保持', saved && await page.eval(`JSON.stringify({ root: getComputedStyle(document.documentElement).fontSize, editor: getComputedStyle(document.querySelector('.cm-editor')).fontSize }) === ${JSON.stringify(fonts)}`))
+    await page.eval(`document.querySelector('.settings-chrome-section').scrollIntoView({block:'center'})`)
+    await shot(page, label + '-text-' + size)
+    await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
+    for (const [width, height] of [[1200,800],[800,560],[1840,1000]]) {
+      await page.call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
+      await sleep(160)
+      check(label + '字号 ' + size + ' ' + width + ' 工作区不溢出', await page.eval(`document.documentElement.scrollWidth <= innerWidth && document.querySelector('.top').scrollWidth <= innerWidth`) === true)
+      await shot(page, label + '-text-' + size + '-workspace-' + width)
+    }
+    await page.call('Emulation.setDeviceMetricsOverride', { ...viewport, deviceScaleFactor: 1, mobile: false })
+    await page.eval(`document.querySelector('.settings-open')?.click()`)
+    await waitFor(page, `!!document.querySelector('[data-setting="chrome-tabs"]:not(:disabled)')`)
+  }
+  await page.eval(`(() => { for (const [name, value] of Object.entries(${JSON.stringify(original)})) { const control = document.querySelector('[data-setting="chrome-' + name + '"]'); control.value = value; control.dispatchEvent(new Event('change')) } document.querySelector('.settings-chrome-save').click() })()`)
+  check(label + '字号回到原档', await waitFor(page, `(async () => JSON.stringify(await window.rgent.chromeTextGet()) === ${JSON.stringify(JSON.stringify(original))})()`))
+}
+
+/** 样张夹具：每供应商一份凭据、三个模型。 */
 async function seedVisualModels(page) {
   await page.eval(`(async () => {
     const deepseek = await window.rgent.modelProviderSave({ provider: 'deepseek', baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', contextTokens: 1048576, newKey: 'ui-visual-secret' })
     if (deepseek.ok) await window.rgent.modelAdd({ provider: 'deepseek', modelId: 'deepseek-reasoner', contextTokens: 131072 })
     await window.rgent.modelProviderSave({ provider: 'minimax', baseURL: 'https://api.minimaxi.com/v1', modelId: 'MiniMax-M3', contextTokens: 204800, newKey: 'ui-visual-secret' })
+    const current = await window.rgent.modelConfigGet()
+    const model = current.ok && current.config.models.find(row => row.provider === 'minimax')
+    if (model) await window.rgent.modelDefaultSet({ modelId: model.id })
     await window.rgent.assistantSet({ address: '写作者', tone: 'concise', note: '先给结论，再补不超过三句的理由。' })
   })()`)
 }
@@ -1129,6 +1186,10 @@ async function main() {
       await page.eval(`window.rgent.themeSet('system')`)
     }
     await page.eval(`document.querySelector('.tree-toggle').click()`)
+    await page.eval(`document.querySelector('.settings-open')?.click()`)
+    await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
+    await verifyChromeText(page, shot, 'functional')
+    await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
     await probe('账本入口固定在画布右上角且不增加 tab', async () => {
       const state = JSON.parse(await page.eval(`(() => {
         const button = document.querySelector('.ledger-open')
@@ -1626,10 +1687,13 @@ async function main() {
       const provider = added.config.providers.find((item) => item.provider === 'custom')
       const model = added.config.models.find((item) => item.provider === 'custom')
       if (!provider?.hasKey || !model) return false
+      if (added.config.defaultModelId !== null) return false
+      const second = await window.rgent.modelAdd({ provider: 'custom', modelId: 'test-override', contextTokens: 20000 })
+      if (!second.ok) return false
       const picked = await window.rgent.modelDefaultSet({ modelId: model.id })
       return picked.ok && picked.config.defaultModelId === model.id
     })()`)
-    check('本机模型配置能保存一份供应商密钥并把默认模型指向受控兼容接口', configured === true)
+    check('首次供应商保存不自动设默认，显式默认指向受控兼容接口', configured === true)
     await page.eval(`document.querySelector('.settings-open')?.click()`)
     await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '模型')?.click() })()`)
@@ -1644,7 +1708,7 @@ async function main() {
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '助手')?.click() })()`)
     check('助手设置页有称呼、语气与补充说明三项', await waitFor(page, `(() => {
       const address = document.querySelector('.settings-form input')
-      const tone = document.querySelector('.settings-form select')
+      const tone = [...document.querySelectorAll('.settings-form select')].find(select => [...select.options].some(option => option.value === 'concise'))
       const note = document.querySelector('.settings-form textarea')
       return !!address && address.maxLength === 40 && !!tone && tone.options.length === 3 && !!note && note.maxLength === 500
     })()`))
@@ -1652,7 +1716,7 @@ async function main() {
       const address = document.querySelector('.settings-form input')
       address.value = '试跑者'
       address.dispatchEvent(new Event('input'))
-      const tone = document.querySelector('.settings-form select')
+      const tone = [...document.querySelectorAll('.settings-form select')].find(select => [...select.options].some(option => option.value === 'concise'))
       tone.value = 'concise'
       tone.dispatchEvent(new Event('change'))
       const save = [...document.querySelectorAll('.settings-action')].find((button) => button.textContent === '保存')
@@ -1666,40 +1730,50 @@ async function main() {
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '运行')?.click() })()`)
     check('运行设置页提供三档有限上限', await waitFor(page, `document.querySelectorAll('.settings-limit-group').length === 3`))
     await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
+    const bottomDiagnostics = () => page.eval(`(async () => JSON.stringify({ modal: document.querySelector('dialog[open]')?.className, focus: document.activeElement?.className, center: document.querySelector('.status-center')?.outerHTML, config: await window.rgent.modelConfigGet() }))()`)
     check('底栏候选只列已存密钥的模型，未配置的不出现', await waitFor(page, `(() => {
       const options = [...document.querySelectorAll('.status-model option')].map((option) => option.textContent)
       const groups = [...document.querySelectorAll('.status-model optgroup')].map((group) => group.label)
       return options.includes('test') && !options.some((text) => text === 'deepseek-flash' || text === 'MiniMax-M2.7') &&
         !groups.some((label) => label.includes('缺密钥'))
-    })()`))
+    })()`), (await bottomDiagnostics()) + ' runtime=' + JSON.stringify(page.errors))
     const switched = await page.eval(`(async () => {
       const select = document.querySelector('.status-model')
-      const target = select && [...select.options].find((option) => option.textContent === 'test')
+      const target = select && [...select.options].find((option) => option.textContent === 'test-override')
       if (!target) return false
+      window.__statusModelControl = select; select.focus()
       select.value = target.value
       select.dispatchEvent(new Event('change'))
       await new Promise((resolve) => setTimeout(resolve, 400))
       const config = await window.rgent.modelConfigGet()
-      return config.ok && config.config.defaultModelId === target.value
+      return config.ok && config.config.defaultModelId !== target.value && select.value === target.value
     })()`)
-    check('底栏切换模型即写为新任务所用模型', switched === true)
+    check('底栏临时切换不修改设备默认', switched === true)
     check('底栏模型模块在状态重绘后仍是同一个控件', await waitFor(page, `(() => {
       const center = document.querySelectorAll('.status-center')
       const select = center[0]?.querySelector('.status-model')
-      return center.length === 1 && !!select && select.selectedOptions.length === 1 && select.selectedOptions[0].textContent === 'test'
+      return center.length === 1 && !!select && select.selectedOptions.length === 1 && select.selectedOptions[0].textContent === 'test-override' && select === window.__statusModelControl && document.activeElement === select
     })()`))
+    await page.eval(`(() => { const select = document.querySelector('.status-model'); const option = [...select.options].find(row => row.textContent === 'test'); select.value = option.value; select.dispatchEvent(new Event('change')) })()`)
+    await page.eval(`window.__temporaryModelPreviousTab = document.querySelector('.tab[aria-selected=true]').dataset.rel`)
     writeFileSync(path.join(vault, 'Host 环路.md'), '')
     check('新笔记在目录中出现', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((n) => n.innerText.includes('Host 环路'))`, 8000))
     await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('Host 环路'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
     await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('Host 环路')`)
+    await page.eval(`(() => { const select = document.querySelector('.status-model'); const option = [...select.options].find(row => row.textContent === 'test-override'); select.value = option.value; select.dispatchEvent(new Event('change')); [...document.querySelectorAll('.tab')].find(row => row.dataset.rel === window.__temporaryModelPreviousTab).click() })()`)
+    check('切到另一篇不继承临时模型', await waitFor(page, `document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test'`))
+    await page.eval(`[...document.querySelectorAll('.tab')].find(row => row.dataset.rel === 'Host 环路.md').click()`)
+    check('返回原篇保留临时模型', await waitFor(page, `document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test-override'`))
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
     await page.call('Input.insertText', { text: '/请写两句话' })
     check('空段内输入的口令留在编辑器', await waitFor(page, `document.querySelector('.cm-content')?.textContent.includes('/请写两句话')`))
     await confirmSlashAuthorization(page, true)
+    check('启动成功后本篇临时选择复位到设备默认', await waitFor(page, `document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test'`))
     const running = await waitFor(page, `!!document.querySelector('.status-task-stop')`, 4000)
     check('回车后底栏出现当前篇停止入口', running, running ? '' : await page.eval(`(async () => JSON.stringify({ status: document.querySelector('.status-left')?.innerText, note: (await window.rgent.noteRead('Host 环路.md')).content, editor: document.querySelector('.cm-content')?.textContent }))()`))
     check('回答与账本写回同一篇，回答为未采纳块', await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead('Host 环路.md')
-      return note.content.includes('受控回答第一句。第二句。') && note.content.includes('<!-- rgent:ai:v1 task-id=') && note.content.includes('<!-- rgent:ledger-task:v1 id=') && note.content.includes('助手习惯：已应用（称呼=试跑者；语气=简洁）')
+      return note.content.includes('受控回答第一句。第二句。') && note.content.includes('<!-- rgent:ai:v1 task-id=') && note.content.includes('<!-- rgent:ledger-task:v1 id=') && note.content.includes('助手习惯：已应用（称呼=试跑者；语气=简洁）') && note.content.includes('模型：custom / test-override（')
     })()`, 10000))
     await page.eval(`document.querySelector('.ledger-open')?.click()`)
     check('同一 tab 的只读账本能回顾口令和回答', await waitFor(page, `document.querySelector('.ledger-body')?.textContent.includes('请写两句话') && document.querySelector('.ledger-body')?.textContent.includes('受控回答第一句。')`))
@@ -1763,6 +1837,13 @@ async function main() {
     } catch (error) { stageFailed('Host 最小环', error) }
     process.stdout.write('\n笔记库文件生命周期\n')
     try {
+    await selectBrowserFolder(page, '资料')
+    await page.eval(`(() => { if(document.querySelector('.tree-toggle').getAttribute('aria-expanded') === 'true') document.querySelector('.tree-toggle').click(); document.querySelector('.tab-new').click() })()`)
+    await waitFor(page, `!!document.querySelector('.modal input')`)
+    await page.eval(`(() => { document.querySelector('.modal input').value = '顶栏所选目录'; document.querySelector('.modal button[value=ok]').click() })()`)
+    check('收起侧栏的顶栏加号在所选普通目录新建', await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '资料/顶栏所选目录.md'`) && existsSync(path.join(vault, '资料', '顶栏所选目录.md')) && !existsSync(path.join(vault, '顶栏所选目录.md')))
+    await page.eval(`(() => { if(document.querySelector('.tree-toggle').getAttribute('aria-expanded') === 'false') document.querySelector('.tree-toggle').click() })()`)
+    await selectBrowserFolder(page, '')
     check('新建文件夹入口为带名称的同行图标', await page.eval(`(() => { const button = document.querySelector('.folder-create'); return button.textContent === '' && !!button.querySelector('.icon') && button.getAttribute('aria-label').includes('新建文件夹') && button.title.includes('新建文件夹') && button.parentElement.classList.contains('browser-tools') && getComputedStyle(button.querySelector('.icon')).width === '16px' })()`) === true)
     await page.eval(`document.querySelector('.folder-create')?.click()`)
     check('库根新建文件夹入口可由键盘和鼠标使用', await waitFor(page, `!!document.querySelector('.modal input')`))
@@ -1880,6 +1961,7 @@ async function main() {
         const request={ ...${JSON.stringify({ relPath: '生命周期/无关生成.md',
           range: { start: 0, end: unrelatedPrompt.length }, expectedText: unrelatedPrompt, promptText: '多任务恢复' })},
           expectedRevision: note.revision, sessionId: note.sessionId, objectVersion: note.objectVersion }
+        const config = await window.rgent.modelConfigGet(); request.modelRecordId = config.config.defaultModelId
         const authorization=await window.rgent.agentAuthorizationPreview({...request,references:[]})
         return authorization.ok ? window.rgent.agentStart({...request,previewId:authorization.preview.id}) : authorization
       })()` )
