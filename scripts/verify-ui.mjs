@@ -186,6 +186,11 @@ async function verifySidebarWidth(page, shot) {
     const point = await page.eval(`(() => {
       const handle = document.querySelector('.sidebar-resizer'), r = handle.getBoundingClientRect()
       const point = { x: r.left + 4, y: r.top + 80 }, trace = []
+      const release = handle.releasePointerCapture
+      handle.releasePointerCapture = function(id) {
+        trace.push({ event: 'releasePointerCapture', id, width: handle.getAttribute('aria-valuenow'), stack: new Error().stack, time: performance.now() })
+        return release.call(this, id)
+      }
       const record = event => trace.push({ event: event.type, target: event.target?.className,
         x: event.clientX, id: event.pointerId, captured: event.pointerId ? handle.hasPointerCapture(event.pointerId) : null,
         width: handle.getAttribute('aria-valuenow'), time: performance.now() })
@@ -195,7 +200,7 @@ async function verifySidebarWidth(page, shot) {
       mutation.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] })
       window.__sidebarDragObservation = () => {
         events.forEach(type => document.removeEventListener(type, record, true)); window.removeEventListener('resize', record); mutation.disconnect()
-        delete window.__sidebarDragObservation; return trace
+        handle.releasePointerCapture = release; delete window.__sidebarDragObservation; return trace
       }
       trace.push({ event: 'hit-test', target: document.elementFromPoint(point.x, point.y)?.className, width: handle.getAttribute('aria-valuenow') })
       return point
@@ -379,6 +384,21 @@ async function verifyComposition(page, vault, shot) {
     await page.eval(`[...document.querySelectorAll('.tree-note')].find(node => node.dataset.path === ${JSON.stringify(name)}).click()`)
     await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(name)}`)
     await page.eval(`(() => { const content = document.querySelector('.cm-content'); const view = content.cmTile.root.view; view.dispatch({ selection: { anchor: view.state.doc.length } }); view.focus() })()`)
+    await page.eval(`(() => {
+      const content = document.querySelector('.cm-content'), view = content.cmTile.root.view, trace = []
+      const state = () => ({ text: view.state.doc.toString(), composing: view.compositionStarted,
+        selection: view.state.selection.main.toJSON(), dom: content.innerHTML.slice(-600), time: performance.now() })
+      const record = event => trace.push({ event: event.type, data: event.data, inputType: event.inputType, ...state() })
+      const events = ['compositionstart', 'compositionupdate', 'compositionend', 'beforeinput', 'input', 'blur', 'focus']
+      events.forEach(type => content.addEventListener(type, record, true))
+      const original = view.update
+      view.update = function(transactions) {
+        trace.push({ event: 'transaction', transactions: transactions.map(tr => ({ changes: tr.changes.toJSON(), effects: tr.effects.length,
+          compose: tr.isUserEvent('input.type.compose'), external: tr.isUserEvent('rgent.external'), setText: tr.isUserEvent('rgent.setText') })), ...state() })
+        return original.call(this, transactions)
+      }
+      window.__imeObservation = () => { events.forEach(type => content.removeEventListener(type, record, true)); view.update = original; delete window.__imeObservation; return trace }
+    })()`)
     const text = () => page.eval(`(() => { const content = document.querySelector('.cm-content'); const view = content.cmTile.root.view; return { text: view.state.doc.toString(), dom: content.textContent, composing: view.compositionStarted, focus: document.activeElement?.className } })()`)
     for (const syllable of ['n', 'ni', 'nih', 'niha', 'nihao']) {
       const response = await page.call('Input.imeSetComposition', { text: syllable, selectionStart: syllable.length, selectionEnd: syllable.length })
@@ -411,6 +431,8 @@ async function verifyComposition(page, vault, shot) {
     for (const syllable of ['n', 'ni', '']) await page.call('Input.imeSetComposition', { text: syllable, selectionStart: syllable.length, selectionEnd: syllable.length })
     await sleep(150)
     check(`${name} 取消后保留既有正文且不残留拼音`, (await text()).text === expectedRaw.replace(/\r\n?|\n/g, '\n'))
+    const trace = await page.eval(`window.__imeObservation()`)
+    if (process.env.RGENT_UI_IME_TRACE === '1' || results.some(result => result.name.startsWith(name) && !result.ok)) process.stdout.write('IME 事件与事务 ' + name + ' — ' + JSON.stringify(trace) + '\n')
   }
   const cancelled = '输入法AI取消.md'
   const cancelledSource = '<!-- rgent:ai:v1 -->\n回答\n'
