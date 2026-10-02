@@ -240,6 +240,8 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       let saved: AssistantHabits = { ...DEFAULT_ASSISTANT_HABITS }
       let draft: AssistantHabits = { ...DEFAULT_ASSISTANT_HABITS }
       let savingHabits = false
+      let loadingHabits = true
+      const editedHabits = new Set<keyof AssistantHabits>()
       const same = (left: AssistantHabits, right: AssistantHabits): boolean =>
         left.address === right.address && left.tone === right.tone && left.note === right.note
 
@@ -273,6 +275,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       const actions = document.createElement('div')
       actions.className = 'settings-actions'
       const save = action('保存', () => {
+        if (loadingHabits || savingHabits) return
         savingHabits = true; save.disabled = true
         const submitted = { address: address.value, tone: tone.value, note: note.value }
         const next: AssistantHabits = { address: address.value.trim(), tone: tone.value as AssistantTone, note: note.value.trim() }
@@ -289,6 +292,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
           .finally(() => { if (!disposed) { savingHabits = false; paintState() } })
       })
       const reset = action('恢复默认', () => {
+        for (const key of ['address', 'tone', 'note'] as const) editedHabits.add(key)
         draft = { ...DEFAULT_ASSISTANT_HABITS }
         paint()
       })
@@ -345,7 +349,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
 
       const paintState = (): void => {
         counter.textContent = `补充说明已用 ${draft.note.length} / ${ASSISTANT_LIMITS.note} 字。`
-        save.disabled = savingHabits || same(draft, saved)
+        save.disabled = loadingHabits || savingHabits || same(draft, saved)
       }
       const paint = (): void => {
         address.value = draft.address
@@ -353,21 +357,28 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         note.value = draft.note
         paintState()
       }
-      const onDraftChange = (): void => {
+      const onDraftChange = (key: keyof AssistantHabits): void => {
+        editedHabits.add(key)
         // 输入保留原样；首尾空白仅在保存时处理。
         draft = { address: address.value, tone: tone.value as AssistantTone, note: note.value }
         paintState()
       }
-      address.addEventListener('input', onDraftChange)
-      tone.addEventListener('change', onDraftChange)
-      note.addEventListener('input', onDraftChange)
+      address.addEventListener('input', () => onDraftChange('address'))
+      tone.addEventListener('change', () => onDraftChange('tone'))
+      note.addEventListener('input', () => onDraftChange('note'))
 
+      paint()
       void handlers.getAssistant().then((result) => {
         if (disposed || !current.isOpen() || openedPage !== '助手') return
         if (!result.ok) { showError(error, configErrorText(result.error)); paint(); return }
         if (!isAssistantHabits(result.habits)) { showError(error, configErrorText('BAD_ASSISTANT')); paint(); return }
         saved = { ...result.habits }
-        draft = { ...result.habits }
+        draft = {
+          address: editedHabits.has('address') ? draft.address : saved.address,
+          tone: editedHabits.has('tone') ? draft.tone : saved.tone,
+          note: editedHabits.has('note') ? draft.note : saved.note
+        }
+        loadingHabits = false
         paint()
       }).catch(() => { if (!disposed) { showError(error, '暂时无法读取助手习惯。'); paint() } })
     }

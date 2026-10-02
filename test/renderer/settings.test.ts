@@ -2,6 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createSettingsOverlay } from '../../src/renderer/src/settings.ts'
 import { DEFAULT_READING_PREFERENCE } from '../../src/shared/reading-preference.ts'
+import type { AssistantHabits } from '../../src/shared/assistant.ts'
+import type { AssistantResult } from '../../src/shared/ipc.ts'
 
 beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
@@ -549,6 +551,51 @@ it('previews the real tab truncation structure and directory/resource type icons
   const sample = document.querySelector('.settings-chrome-sample')!
   expect(sample.querySelector('.tab .tab-label')).not.toBeNull()
   expect(sample.querySelectorAll('.tree-row .icon')).toHaveLength(3)
+  panel.close()
+})
+
+it.each(['edit', 'reset'] as const)('preserves assistant %s while the initial read is in flight', async mode => {
+  let finish!: (value: AssistantResult) => void
+  const pending = new Promise<AssistantResult>(resolve => { finish = resolve })
+  const setAssistant = vi.fn(async (habits: AssistantHabits) => ({ ok: true as const, habits }))
+  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async mode => ({ ok: true, mode }),
+    getAssistant: () => pending, setAssistant })
+  panel.open('助手')
+  const note = document.querySelector<HTMLTextAreaElement>('.settings-form textarea')!
+  const save = [...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find(button => button.textContent === '保存')!
+  expect(save.disabled).toBe(true)
+  if (mode === 'edit') {
+    note.value = '新草稿\n第二行'; note.dispatchEvent(new Event('input'))
+  } else {
+    [...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find(button => button.textContent === '恢复默认')!.click()
+  }
+  expect(save.disabled).toBe(true)
+  save.click(); expect(setAssistant).not.toHaveBeenCalled()
+  finish({ ok: true, habits: { address: '原称呼', tone: 'concise', note: '磁盘旧说明' } })
+  await vi.waitFor(() => expect(save.disabled).toBe(false))
+  expect(note.value).toBe(mode === 'edit' ? '新草稿\n第二行' : '')
+  save.click()
+  await vi.waitFor(() => expect(setAssistant).toHaveBeenCalledWith(mode === 'edit'
+    ? { address: '原称呼', tone: 'concise', note: '新草稿\n第二行' }
+    : { address: '', tone: 'plain', note: '' }))
+  panel.close()
+})
+
+it('retains assistant draft after a failed initial read without allowing an unchecked save', async () => {
+  let finish!: (value: AssistantResult) => void
+  const pending = new Promise<AssistantResult>(resolve => { finish = resolve })
+  const setAssistant = vi.fn(async (habits: AssistantHabits) => ({ ok: true as const, habits }))
+  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async mode => ({ ok: true, mode }),
+    getAssistant: () => pending, setAssistant })
+  panel.open('助手')
+  const note = document.querySelector<HTMLTextAreaElement>('.settings-form textarea')!
+  note.value = '未保存的新输入\n第二行'; note.dispatchEvent(new Event('input'))
+  finish({ ok: false, error: 'BAD_ASSISTANT' })
+  await vi.waitFor(() => expect(document.querySelector('.settings-error')?.textContent).not.toBe(''))
+  expect(note.value).toBe('未保存的新输入\n第二行')
+  const save = [...document.querySelectorAll<HTMLButtonElement>('.settings-action')].find(button => button.textContent === '保存')!
+  expect(save.disabled).toBe(true)
+  save.click(); expect(setAssistant).not.toHaveBeenCalled()
   panel.close()
 })
 

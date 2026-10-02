@@ -183,14 +183,31 @@ async function verifySidebarWidth(page, shot) {
     await key('Home'); await key('ArrowRight', 8)
     check('分隔柄键盘最小值与 Shift 步进可用', (await page.eval(geometry)).width === 224)
     // Capture the pointer, then exercise Esc rollback before a separate committed drag.
-    const point = await page.eval(`(() => { const r = document.querySelector('.sidebar-resizer').getBoundingClientRect(); return { x: r.left + 4, y: r.top + 80 } })()`)
+    const point = await page.eval(`(() => {
+      const handle = document.querySelector('.sidebar-resizer'), r = handle.getBoundingClientRect()
+      const point = { x: r.left + 4, y: r.top + 80 }, trace = []
+      const record = event => trace.push({ event: event.type, target: event.target?.className,
+        x: event.clientX, id: event.pointerId, captured: event.pointerId ? handle.hasPointerCapture(event.pointerId) : null,
+        width: handle.getAttribute('aria-valuenow'), time: performance.now() })
+      const events = ['pointerdown', 'pointermove', 'pointercancel', 'lostpointercapture', 'gotpointercapture']
+      events.forEach(type => document.addEventListener(type, record, true)); window.addEventListener('resize', record)
+      const mutation = new MutationObserver(() => record({ type: 'root-style', target: document.documentElement }))
+      mutation.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] })
+      window.__sidebarDragObservation = () => {
+        events.forEach(type => document.removeEventListener(type, record, true)); window.removeEventListener('resize', record); mutation.disconnect()
+        delete window.__sidebarDragObservation; return trace
+      }
+      trace.push({ event: 'hit-test', target: document.elementFromPoint(point.x, point.y)?.className, width: handle.getAttribute('aria-valuenow') })
+      return point
+    })()`)
     await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
     await page.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x + 40, y: point.y, button: 'left', buttons: 1 })
     await settle()
     const dragging = await page.eval(geometry)
     await page.key('Escape', 'Escape', 0, 27)
     await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x + 40, y: point.y, button: 'left', clickCount: 1 })
-    check('真实拖动即时调整，Esc 恢复本次前宽度', dragging.width === 264 && (await page.eval(geometry)).width === 224, JSON.stringify(dragging))
+    const dragObservation = await page.eval(`window.__sidebarDragObservation()`)
+    check('真实拖动即时调整，Esc 恢复本次前宽度', dragging.width === 264 && (await page.eval(geometry)).width === 224, JSON.stringify({ dragging, dragObservation }))
     await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 })
     await page.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x + 56, y: point.y, button: 'left', buttons: 1 })
     await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x + 56, y: point.y, button: 'left', clickCount: 1 })
@@ -207,6 +224,7 @@ async function verifySidebarWidth(page, shot) {
     check('双击分隔柄恢复默认展开宽度', (await page.eval(geometry)).width === 224)
     check('调宽、收起及偏好恢复不改变笔记原文字节', (await page.eval(`window.rgent.noteRead(${JSON.stringify(activePath)}).then(note => note.content)`)) === sourceBefore)
   } finally {
+    await page.eval(`window.__sidebarDragObservation?.()`)
     await reset(); await toggle(false)
     await page.call('Emulation.clearDeviceMetricsOverride', {})
     await page.eval(`window.rgent.themeSet('night')`)
