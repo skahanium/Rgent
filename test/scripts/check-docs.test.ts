@@ -146,7 +146,11 @@ describe('docs stage invariants', () => {
   })
 
   it('accepts pending delivery rows and historical commit references', () => {
-    const { run } = fixture()
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    const row = /\| 文档校准及检查规则 \| [^|]+ \|/
+    expect(source).toMatch(row)
+    writeFileSync(build, source.replace(row, '| 文档校准及检查规则 | 待提交 |'))
     const result = run()
     expect(result.stderr).toBe('')
     expect(result.status).toBe(0)
@@ -155,7 +159,9 @@ describe('docs stage invariants', () => {
   it('rejects a delivery row without a commit or explicit pending marker', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    writeFileSync(build, source.replace('| 文档校准及检查规则 | 待提交 |', '| 文档校准及检查规则 | HEAD |'))
+    const row = /\| 文档校准及检查规则 \| [^|]+ \|/
+    expect(source).toMatch(row)
+    writeFileSync(build, source.replace(row, '| 文档校准及检查规则 | HEAD |'))
     const result = run()
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('交付对照提交引用无效')
@@ -164,7 +170,9 @@ describe('docs stage invariants', () => {
   it('rejects an unstructured evidence claim in the delivery table', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    writeFileSync(build, source.replace('| 文档校准及检查规则 | 待提交 | 未运行 |', '| 文档校准及检查规则 | 待提交 | 应该通过 |'))
+    const row = /\| 文档校准及检查规则 \| [^|]+ \| [^|]+ \|/
+    expect(source).toMatch(row)
+    writeFileSync(build, source.replace(row, '| 文档校准及检查规则 | 待提交 | 应该通过 |'))
     const result = run()
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('交付对照证据状态无效')
