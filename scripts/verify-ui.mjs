@@ -1011,6 +1011,15 @@ async function main() {
     await waitFor(page, `document.querySelectorAll('.tab').length > 0`)
     check('顶栏是 tab 条，没有品牌文字', (await page.eval(`!!document.querySelector('.top .tabs') && !document.querySelector('.brand')`)) === true)
     check('tab 有图标与标题', (await page.eval(`!!document.querySelector('.tab .icon') && document.querySelector('.tab').innerText.trim().length > 0`)) === true)
+    await probe('常态 tab 收紧至 176px，侧栏资源名称缩小一号', async () => {
+      const state = JSON.parse(await page.eval(`(() => {
+        const tab = document.querySelector('.tab-wrap').getBoundingClientRect()
+        const names = [...document.querySelectorAll('.tree-row .tree-label')]
+        const rootSize = parseFloat(getComputedStyle(document.documentElement).fontSize)
+        return JSON.stringify({ width: tab.width, sizes: names.map(node => parseFloat(getComputedStyle(node).fontSize)), expected: rootSize * .86 - 1 })
+      })()`))
+      return { ok: Math.abs(state.width - 176) <= 1 && state.sizes.length > 0 && state.sizes.every(size => Math.abs(size - state.expected) < .1), detail: JSON.stringify(state) }
+    })
     await probe('tab 与系统窗口控制区处于同一视觉中线', async () => {
       const state = JSON.parse(await page.eval(`(() => {
         const top = document.querySelector('.top').getBoundingClientRect()
@@ -1548,7 +1557,7 @@ async function main() {
     await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
     await sleep(100)
     const narrowTabs = await page.eval(tabGeometry)
-    check('拥挤 tab 先压缩，最小宽度后仅在栏内滚动', wideTabs.count >= 7 && narrowTabs.bounded && narrowTabs.average < wideTabs.average - 1 && narrowTabs.widths.every(width => width >= 110 && width <= 220) && narrowTabs.overflow, JSON.stringify({ wide: wideTabs, narrow: narrowTabs }))
+    check('拥挤 tab 先压缩，最小宽度后仅在栏内滚动', wideTabs.count >= 7 && narrowTabs.bounded && narrowTabs.average < wideTabs.average - 1 && narrowTabs.widths.every(width => width >= 110 && width <= 176) && narrowTabs.overflow, JSON.stringify({ wide: wideTabs, narrow: narrowTabs }))
     check('新建加号紧随最后一个 tab，并随末尾当前项进入可视区', wideTabs.addFollows && narrowTabs.addFollows && narrowTabs.activeVisible && narrowTabs.addVisible, JSON.stringify(narrowTabs))
     await probe('标题压缩不挤掉 tab 图标和关闭按钮', async () => (await page.eval(`(() => {
       const wrap = document.querySelector('.tab[aria-selected="true"]').parentElement

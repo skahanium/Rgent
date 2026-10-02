@@ -722,7 +722,7 @@ input:focus-visible,
   color: var(--text-body);
   background: transparent;
   font-family: var(--font-ui);
-  font-size: 0.86rem;
+  font-size: calc(0.86rem - 1px);
   cursor: pointer;
 }
 
@@ -893,8 +893,8 @@ input:focus-visible,
 .tab-wrap {
   display: flex;
   align-items: center;
-  flex: 0 1 220px;
-  max-width: 220px;
+  flex: 0 1 176px;
+  max-width: 176px;
   min-width: 112px;
   min-height: 32px;
   padding-right: 2px;
