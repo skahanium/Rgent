@@ -15,6 +15,7 @@ type BrowserOptions = {
 }
 export type FileBrowser = {
   readonly selectedFolder: string
+  readonly canCreate: boolean
   readonly preferredWidth: number | null
   setPreferredWidth(width: number | null): void
   captureScroll(): void
@@ -240,6 +241,7 @@ export function createFileBrowser(host: HTMLElement, options: BrowserOptions): F
   const browser: FileBrowser = {
     captureScroll: rememberScroll,
     get selectedFolder() { return state.selected },
+    get canCreate() { return listingReady && ordinary.has(state.selected) },
     get preferredWidth() { return state.width ?? null },
     setPreferredWidth(width) {
       if (width === null) delete state.width

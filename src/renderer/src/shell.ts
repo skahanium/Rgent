@@ -178,6 +178,8 @@ export async function start(root: HTMLElement): Promise<void> {
     setMode: (mode) => window.rgent.themeSet(mode),
     getReading: () => window.rgent.readingGet(),
     setReading: (reading) => window.rgent.readingSet(reading),
+    getChromeText: () => window.rgent.chromeTextGet(),
+    setChromeText: (value) => window.rgent.chromeTextSet(value),
     getAssistant: () => window.rgent.assistantGet(),
     setAssistant: (habits) => window.rgent.assistantSet(habits),
     getConfig: () => window.rgent.modelConfigGet(),
@@ -813,13 +815,15 @@ export async function start(root: HTMLElement): Promise<void> {
     const epoch = vaultEpoch
     try {
       if (action === 'new-note' || action === 'new-folder') {
+        const sessionId = vaultSession
+        if (!sessionId || !fileBrowser.canCreate) throw new Error('VAULT_CHANGED')
         const name = await promptText(action === 'new-note' ? '新建笔记' : '新建文件夹', '名称', '', '创建')
         if (!name || epoch !== vaultEpoch) return
         const parent = entry.relPath
         const created = action === 'new-note'
-          ? await window.rgent.noteCreateAt({ name, parent })
-          : await window.rgent.folderCreate({ name, parent })
-        if (epoch !== vaultEpoch) return
+          ? await window.rgent.noteCreateAt({ name, parent, sessionId })
+          : await window.rgent.folderCreate({ name, parent, sessionId })
+        if (epoch !== vaultEpoch || sessionId !== vaultSession) return
         await refreshTree()
         if (action === 'new-note') await openNote(created)
         return
@@ -1408,10 +1412,16 @@ export async function start(root: HTMLElement): Promise<void> {
       state = await window.rgent.vaultGet()
       if (state.status !== 'ready') return
     }
+    const epoch = vaultEpoch
+    const sessionId = vaultSession
+    const parent = fileBrowser.selectedFolder
+    if (!sessionId || !fileBrowser.canCreate) { window.alert('目录暂时无法核验，请恢复后重新选择。'); return }
     const name = await promptNewNote()
-    if (!name) return
+    if (!name || epoch !== vaultEpoch) return
     try {
-      const relPath = await window.rgent.noteCreate(name)
+      if (!fileBrowser.canCreate || parent !== fileBrowser.selectedFolder) throw new Error('STALE_PREVIEW')
+      const relPath = await window.rgent.noteCreateAt({ name, parent, sessionId })
+      if (epoch !== vaultEpoch || sessionId !== vaultSession) return
       await refreshTree()
       await openNote(relPath)
     } catch (err) {

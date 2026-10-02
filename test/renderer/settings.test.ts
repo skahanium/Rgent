@@ -19,9 +19,28 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.replaceChildren()
-  for (const key of ['--reading-font-family', '--heading-font-family', '--reading-font-size', '--reading-line-height', '--reading-max-width']) {
+  for (const key of ['--reading-font-family', '--heading-font-family', '--reading-font-size', '--reading-line-height', '--reading-max-width', '--tab-name-font-size', '--sidebar-name-font-size']) {
     document.documentElement.style.removeProperty(key)
   }
+})
+
+it('previews interface text only in samples and applies it after a successful save', async () => {
+  const setChromeText = vi.fn(async (value: unknown) => ({ ok: true, preference: value }))
+  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async (mode: string) => ({ ok: true, mode }),
+    getChromeText: async () => ({ tabs: 'default', sidebar: 'default' }), setChromeText } as never)
+  panel.open()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const select = document.querySelector<HTMLSelectElement>('[data-setting="chrome-tabs"]')
+  expect(select).not.toBeNull()
+  select!.value = 'large'; select!.dispatchEvent(new Event('change', { bubbles: true }))
+  expect(document.documentElement.style.getPropertyValue('--tab-name-font-size')).toBe('')
+  document.querySelector<HTMLButtonElement>('.settings-chrome-save')!.click()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(setChromeText).toHaveBeenCalledWith({ tabs: 'large', sidebar: 'default' })
+  expect(document.documentElement.style.getPropertyValue('--tab-name-font-size')).toContain('+ 1px')
+  panel.close()
+  document.documentElement.style.removeProperty('--tab-name-font-size')
+  document.documentElement.style.removeProperty('--sidebar-name-font-size')
 })
 
 describe('settings interface page', () => {
@@ -474,6 +493,64 @@ describe('assistant default model', () => {
   })
 })
 
+
+it('keeps interface text unchanged on cancel and preserves a failed draft for retry', async () => {
+  const setChromeText = vi.fn().mockResolvedValueOnce({ ok: false, error: 'IO_ERROR' }).mockResolvedValueOnce({ ok: true, preference: { tabs: 'small', sidebar: 'large' } })
+  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async mode => ({ ok: true, mode }),
+    getChromeText: async () => ({ tabs: 'default', sidebar: 'default' }), setChromeText })
+  panel.open()
+  await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>('[data-setting="chrome-tabs"]')!.disabled).toBe(false))
+  let tab = document.querySelector<HTMLSelectElement>('[data-setting="chrome-tabs"]')!
+  tab.value = 'large'; tab.dispatchEvent(new Event('change'))
+  panel.close()
+  expect(setChromeText).not.toHaveBeenCalled()
+  expect(document.documentElement.style.getPropertyValue('--tab-name-font-size')).toBe('')
+  panel.open()
+  await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>('[data-setting="chrome-tabs"]')!.disabled).toBe(false))
+  tab = document.querySelector<HTMLSelectElement>('[data-setting="chrome-tabs"]')!
+  const sidebar = document.querySelector<HTMLSelectElement>('[data-setting="chrome-sidebar"]')!
+  tab.value = 'small'; sidebar.value = 'large'; tab.dispatchEvent(new Event('change'))
+  const save = document.querySelector<HTMLButtonElement>('.settings-chrome-save')!
+  save.click()
+  await vi.waitFor(() => expect(save.disabled).toBe(false))
+  expect(tab.value).toBe('small'); expect(sidebar.value).toBe('large')
+  expect(document.querySelector('.settings-chrome-section')!.textContent).toContain('保存失败')
+  expect(document.documentElement.style.getPropertyValue('--tab-name-font-size')).toBe('')
+  save.click()
+  await vi.waitFor(() => expect(document.documentElement.style.getPropertyValue('--tab-name-font-size')).toContain('max(12px'))
+  panel.close()
+})
+
+it('does not let an old closed-panel save receipt overwrite a newer saved interface size', async () => {
+  const receipts: Array<(value: { ok: true; preference: { tabs: 'small' | 'large'; sidebar: 'default' } }) => void> = []
+  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async mode => ({ ok: true, mode }),
+    getChromeText: async () => ({ tabs: 'default', sidebar: 'default' }),
+    setChromeText: () => new Promise(resolve => receipts.push(resolve)) })
+  for (const size of ['small', 'large']) {
+    panel.open()
+    await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>('[data-setting="chrome-tabs"]')!.disabled).toBe(false))
+    const select = document.querySelector<HTMLSelectElement>('[data-setting="chrome-tabs"]')!
+    select.value = size; select.dispatchEvent(new Event('change'))
+    document.querySelector<HTMLButtonElement>('.settings-chrome-save')!.click()
+    expect(select.disabled).toBe(true)
+    panel.close()
+  }
+  receipts[1]!({ ok: true, preference: { tabs: 'large', sidebar: 'default' } })
+  await vi.waitFor(() => expect(document.documentElement.style.getPropertyValue('--tab-name-font-size')).toContain('+ 1px'))
+  receipts[0]!({ ok: true, preference: { tabs: 'small', sidebar: 'default' } })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(document.documentElement.style.getPropertyValue('--tab-name-font-size')).toContain('+ 1px')
+})
+
+it('previews the real tab truncation structure and directory/resource type icons', async () => {
+  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async mode => ({ ok: true, mode }),
+    getChromeText: async () => ({ tabs: 'default', sidebar: 'default' }), setChromeText: async preference => ({ ok: true, preference }) })
+  panel.open()
+  const sample = document.querySelector('.settings-chrome-sample')!
+  expect(sample.querySelector('.tab .tab-label')).not.toBeNull()
+  expect(sample.querySelectorAll('.tree-row .icon')).toHaveLength(3)
+  panel.close()
+})
 
 it('does not overwrite assistant edits made while a save receipt is in flight', async () => {
   let finish!: (result: { ok: true; habits: { address: string; tone: 'plain'; note: string } }) => void

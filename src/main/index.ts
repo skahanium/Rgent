@@ -5,6 +5,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { asString, parseEntryCreateRequest, parseFlushDone, parseLifecycleRetryRequest, parseNoteName, parseNoteWriteRequest, parseRelocationCommitRequest, parseRelocationPreviewRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
 import { IPC } from '../shared/ipc.ts'
+import type { ChromeTextSetResult } from '../shared/ipc.ts'
+import { loadChromeTextPreference, saveChromeTextPreference } from './theme-preference.ts'
+import { isChromeTextPreference } from '../shared/reading-preference.ts'
 import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, ModelAddRequest, ModelConfigResult, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
@@ -463,6 +466,14 @@ function registerIpc(): void {
   })
   registerTrustedHandle(IPC.themeGet, () => themeMode)
   registerTrustedHandle(IPC.readingGet, () => loadReadingPreference(app.getPath('userData')))
+  registerTrustedHandle(IPC.chromeTextGet, () => loadChromeTextPreference(app.getPath('userData')))
+  registerTrustedHandle(IPC.chromeTextSet, (_event, value: unknown): ChromeTextSetResult => {
+    if (!isChromeTextPreference(value)) return { ok: false, error: 'BAD_CHROME_TEXT' }
+    try {
+      saveChromeTextPreference(app.getPath('userData'), value)
+      return { ok: true, preference: { ...value } }
+    } catch { return { ok: false, error: 'IO_ERROR' } }
+  })
   registerTrustedHandle(IPC.readingSet, (_event, value: unknown): ReadingSetResult => {
     if (!isReadingPreference(value)) return { ok: false, error: 'BAD_READING' }
     try {

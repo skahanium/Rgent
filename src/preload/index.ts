@@ -16,6 +16,8 @@ import {
   type ThemeSetResult,
   type ReadingPreference,
   type ReadingSetResult,
+  type ChromeTextPreference,
+  type ChromeTextSetResult,
   type TreeEntry,
   type VaultState,
   type AssistantHabits,
@@ -79,6 +81,8 @@ const api = {
   themeSet: (mode: ThemeMode): Promise<ThemeSetResult> => ipcRenderer.invoke(IPC.themeSet, mode),
   readingGet: (): Promise<ReadingPreference> => ipcRenderer.invoke(IPC.readingGet),
   readingSet: (reading: ReadingPreference): Promise<ReadingSetResult> => ipcRenderer.invoke(IPC.readingSet, reading),
+  chromeTextGet: (): Promise<ChromeTextPreference> => ipcRenderer.invoke(IPC.chromeTextGet),
+  chromeTextSet: (value: ChromeTextPreference): Promise<ChromeTextSetResult> => ipcRenderer.invoke(IPC.chromeTextSet, value),
   remoteImageGet: (request: RemoteImageGetRequest): Promise<RemoteImageGetResult> =>
     ipcRenderer.invoke(IPC.remoteImageGet, request),
   assistantGet: (): Promise<AssistantResult> => ipcRenderer.invoke(IPC.assistantGet),

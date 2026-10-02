@@ -33,6 +33,8 @@ export const IPC = {
   themeSet: 'theme:set',
   readingGet: 'reading:get',
   readingSet: 'reading:set',
+  chromeTextGet: 'chrome-text:get',
+  chromeTextSet: 'chrome-text:set',
   remoteImageGet: 'image:get',
   assistantGet: 'assistant:get',
   assistantSet: 'assistant:set',
@@ -163,6 +165,8 @@ export type ThemeMode = 'day' | 'night' | 'system'
 export type ThemeSetResult = { ok: true; mode: ThemeMode } | { ok: false; error: 'BAD_MODE' | 'IO_ERROR' }
 export type { ReadingPreference } from './reading-preference.ts'
 export type ReadingSetResult = { ok: true; reading: import('./reading-preference.ts').ReadingPreference } | { ok: false; error: 'BAD_READING' | 'IO_ERROR' }
+export type { ChromeTextPreference } from './reading-preference.ts'
+export type ChromeTextSetResult = { ok: true; preference: import('./reading-preference.ts').ChromeTextPreference } | { ok: false; error: 'BAD_CHROME_TEXT' | 'IO_ERROR' }
 
 export type VaultState =
   | { status: 'needs-pick'; reason: 'first-run' | 'missing' }

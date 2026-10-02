@@ -62,6 +62,7 @@ const PAIRS: Array<[string, string, number]> = [
   ['--text-on-accent', '--accent-solid', 4.5],
   ['--accent-primary', '--surface-canvas', 4.5],
   ['--accent-primary', '--surface-nav', 4.5],
+  ['--accent-primary', '--state-selected', 4.5],
   ['--ai-prompt', '--surface-canvas', 4.5],
   ['--ai-answer', '--surface-canvas', 4.5],
   ['--status-error', '--surface-canvas', 4.5],
@@ -69,6 +70,8 @@ const PAIRS: Array<[string, string, number]> = [
   ['--border-strong', '--surface-nav', 3],
   ['--accent-focus', '--surface-canvas', 3],
   ['--accent-focus', '--surface-nav', 3],
+  ['--focus-ring', '--surface-canvas', 3],
+  ['--focus-ring', '--surface-nav', 3],
   ['--status-online', '--surface-nav', 3],
   ['--status-offline', '--surface-nav', 3],
   ['--status-error', '--surface-nav', 3]
@@ -93,6 +96,10 @@ describe.each([
 })
 
 describe('token 段', () => {
+  it('uses neutral keyboard outlines and never accent enclosing borders', () => {
+    for (const tokens of [day, night]) expect(tokens['--focus-ring']).toBe(tokens['--text-muted'])
+    expect(css).not.toMatch(/(?:outline|border(?:-color)?|box-shadow)\s*:[^;{}]*var\(--accent(?:-primary|-solid|-focus)?\)/u)
+  })
   it('日夜两套给出同一批角色，不缺项', () => {
     const roles = Object.keys(day).filter((name) => !name.startsWith('--font') && !name.startsWith('--radius'))
     const missing = roles.filter((name) => {
@@ -110,4 +117,10 @@ describe('token 段', () => {
       expect(day[alias], `${alias} 应该是 var() 别名`).toMatch(/^var\(--/)
     }
   })
+})
+
+
+it('limits the tab name preference to tab labels rather than settings and conflict explanations', () => {
+  const selectors = [...css.matchAll(/([^{}]+)\{[^{}]*font-size:\s*var\(--tab-name-font-size[^{}]*\}/gu)].map(match => match[1]!.trim())
+  expect(selectors).toEqual(['.tab'])
 })

@@ -2,6 +2,17 @@
 export const READING_FONTS = ['literary', 'song', 'system', 'humanist'] as const
 export type ReadingFont = (typeof READING_FONTS)[number]
 
+/** Device-wide UI names only; never scales the editor or root font. */
+export const CHROME_TEXT_SIZES = ['small', 'default', 'large'] as const
+export type ChromeTextSize = (typeof CHROME_TEXT_SIZES)[number]
+export type ChromeTextPreference = { tabs: ChromeTextSize; sidebar: ChromeTextSize }
+export const DEFAULT_CHROME_TEXT: ChromeTextPreference = { tabs: 'default', sidebar: 'default' }
+export function isChromeTextPreference(value: unknown): value is ChromeTextPreference {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<ChromeTextPreference>
+  return Object.keys(value).length === 2 && CHROME_TEXT_SIZES.includes(item.tabs!) && CHROME_TEXT_SIZES.includes(item.sidebar!)
+}
+
 export type ReadingPreference = {
   bodyFont: ReadingFont
   headingFont: ReadingFont

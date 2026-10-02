@@ -4,6 +4,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from '../../src/main/theme-preference.ts'
 import { DEFAULT_READING_PREFERENCE } from '../../src/shared/reading-preference.ts'
+import * as appearance from '../../src/main/theme-preference.ts'
 
 const directories: string[] = []
 const directory = (): string => {
@@ -22,7 +23,7 @@ describe('device theme preference', () => {
     expect(loadThemePreference(root)).toBe('system')
     saveThemePreference(root, 'night')
     expect(loadThemePreference(root)).toBe('night')
-    expect(JSON.parse(readFileSync(path.join(root, 'theme.json'), 'utf8'))).toEqual({ mode: 'night', reading: DEFAULT_READING_PREFERENCE })
+    expect(JSON.parse(readFileSync(path.join(root, 'theme.json'), 'utf8'))).toEqual({ mode: 'night', reading: DEFAULT_READING_PREFERENCE, chromeText: { tabs: 'default', sidebar: 'default' } })
     expect(() => saveThemePreference(root, 'unsupported' as never)).toThrow()
     expect(loadThemePreference(root)).toBe('night')
   })
@@ -71,4 +72,26 @@ describe('device theme preference', () => {
     expect(() => saveReadingPreference(invalidParent, DEFAULT_READING_PREFERENCE)).toThrow()
     expect(loadThemePreference(root)).toBe('night')
   })
+})
+
+it('keeps independent chrome text choices across theme and reading writes', () => {
+  const root = directory()
+  expect(appearance).toHaveProperty('saveChromeTextPreference')
+  const api = appearance as typeof appearance & { saveChromeTextPreference(root: string, value: unknown): void; loadChromeTextPreference(root: string): unknown }
+  api.saveChromeTextPreference(root, { tabs: 'large', sidebar: 'small' })
+  saveThemePreference(root, 'night')
+  saveReadingPreference(root, { ...DEFAULT_READING_PREFERENCE, fontSize: 19 })
+  expect(api.loadChromeTextPreference(root)).toEqual({ tabs: 'large', sidebar: 'small' })
+  expect(() => api.saveChromeTextPreference(root, { tabs: 'huge', sidebar: 'small' })).toThrow()
+  expect(api.loadChromeTextPreference(root)).toEqual({ tabs: 'large', sidebar: 'small' })
+})
+
+it('recovers only an invalid chrome field and never rewrites on read', () => {
+  const root = directory()
+  expect(appearance).toHaveProperty('loadChromeTextPreference')
+  const api = appearance as typeof appearance & { loadChromeTextPreference(root: string): unknown }
+  const original = JSON.stringify({ mode: 'night', reading: DEFAULT_READING_PREFERENCE, chromeText: { tabs: 'broken', sidebar: 'large' } })
+  writeFileSync(path.join(root, 'theme.json'), original)
+  expect(api.loadChromeTextPreference(root)).toEqual({ tabs: 'default', sidebar: 'large' })
+  expect(readFileSync(path.join(root, 'theme.json'), 'utf8')).toBe(original)
 })

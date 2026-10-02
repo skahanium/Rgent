@@ -1,7 +1,7 @@
 import './styles.css'
 import { start } from './shell.ts'
 import { watchTheme } from './theme.ts'
-import { applyReadingPreference } from './reading.ts'
+import { applyChromeTextPreference, applyReadingPreference } from './reading.ts'
 
 const root = document.getElementById('app')
 if (!root) throw new Error('missing #app')
@@ -18,5 +18,7 @@ watchTheme((theme) => {
 void (async () => {
   try { applyReadingPreference(await window.rgent.readingGet()) }
   catch { /* A broken local preference must not prevent notes from opening. */ }
+  try { applyChromeTextPreference(await window.rgent.chromeTextGet()) }
+  catch { /* UI choices are independent of note availability. */ }
   await start(root)
 })()

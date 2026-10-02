@@ -2,7 +2,7 @@ import { closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, w
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ThemeMode } from '../shared/ipc.ts'
-import { DEFAULT_READING_PREFERENCE, isReadingPreference, type ReadingPreference } from '../shared/reading-preference.ts'
+import { CHROME_TEXT_SIZES, DEFAULT_CHROME_TEXT, DEFAULT_READING_PREFERENCE, isChromeTextPreference, isReadingPreference, type ChromeTextPreference, type ReadingPreference } from '../shared/reading-preference.ts'
 
 const FILE = 'theme.json'
 
@@ -23,7 +23,7 @@ export function loadThemePreference(userData: string): ThemeMode {
 
 export function saveThemePreference(userData: string, mode: ThemeMode): void {
   if (!isThemeMode(mode)) throw new Error('BAD_MODE')
-  saveAppearance(userData, { mode, reading: loadReadingPreference(userData) })
+  saveAppearance(userData, { mode, reading: loadReadingPreference(userData), chromeText: loadChromeTextPreference(userData) })
 }
 
 export function loadReadingPreference(userData: string): ReadingPreference {
@@ -36,10 +36,22 @@ export function loadReadingPreference(userData: string): ReadingPreference {
 
 export function saveReadingPreference(userData: string, reading: ReadingPreference): void {
   if (!isReadingPreference(reading)) throw new Error('BAD_READING')
-  saveAppearance(userData, { mode: loadThemePreference(userData), reading })
+  saveAppearance(userData, { mode: loadThemePreference(userData), reading, chromeText: loadChromeTextPreference(userData) })
 }
 
-function saveAppearance(userData: string, value: { mode: ThemeMode; reading: ReadingPreference }): void {
+export function loadChromeTextPreference(userData: string): ChromeTextPreference {
+  try {
+    const value = JSON.parse(readFileSync(path.join(userData, FILE), 'utf8'))?.chromeText
+    return { tabs: CHROME_TEXT_SIZES.includes(value?.tabs) ? value.tabs : 'default', sidebar: CHROME_TEXT_SIZES.includes(value?.sidebar) ? value.sidebar : 'default' }
+  } catch { return { ...DEFAULT_CHROME_TEXT } }
+}
+
+export function saveChromeTextPreference(userData: string, chromeText: ChromeTextPreference): void {
+  if (!isChromeTextPreference(chromeText)) throw new Error('BAD_CHROME_TEXT')
+  saveAppearance(userData, { mode: loadThemePreference(userData), reading: loadReadingPreference(userData), chromeText })
+}
+
+function saveAppearance(userData: string, value: { mode: ThemeMode; reading: ReadingPreference; chromeText: ChromeTextPreference }): void {
   const target = path.join(userData, FILE)
   const temporary = path.join(userData, `.theme-${randomUUID()}.tmp`)
   let fd: number | null = null

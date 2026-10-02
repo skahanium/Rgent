@@ -1,4 +1,4 @@
-import { DEFAULT_READING_PREFERENCE, type ReadingFont, type ReadingPreference } from '../../shared/reading-preference.ts'
+import { DEFAULT_READING_PREFERENCE, type ChromeTextPreference, type ReadingFont, type ReadingPreference } from '../../shared/reading-preference.ts'
 
 const FONT_STACKS: Record<ReadingFont, string> = {
   literary: "'Iowan Old Style', Palatino, 'Palatino Linotype', Georgia, 'Songti SC', 'STSong', 'Noto Serif CJK SC', 'Source Han Serif SC', SimSun, serif",
@@ -17,3 +17,10 @@ export function applyReadingPreference(reading: ReadingPreference, element: HTML
 }
 
 export { DEFAULT_READING_PREFERENCE }
+
+export function applyChromeTextPreference(value: ChromeTextPreference, element: HTMLElement = document.documentElement): void {
+  const size = (base: string, choice: ChromeTextPreference['tabs']): string =>
+    choice === 'default' ? base : choice === 'small' ? `max(12px, calc(${base} - 1px))` : `calc(${base} + 1px)`
+  element.style.setProperty('--tab-name-font-size', size('0.84rem', value.tabs))
+  element.style.setProperty('--sidebar-name-font-size', size('calc(0.86rem - 1px)', value.sidebar))
+}

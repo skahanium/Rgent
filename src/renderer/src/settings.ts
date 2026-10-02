@@ -4,10 +4,12 @@ import type {
   ModelUpdateRequest, ModelDefaultSetRequest, ReadingPreference, ReadingSetResult, ThemeMode, ThemeSetResult
 } from '../../shared/ipc.ts'
 import { isReadingPreference, READING_FONTS } from '../../shared/reading-preference.ts'
+import { CHROME_TEXT_SIZES, isChromeTextPreference, type ChromeTextPreference } from '../../shared/reading-preference.ts'
+import type { ChromeTextSetResult } from '../../shared/ipc.ts'
 import { mountModelPage, modelPageAvailable, type ModelPageHandlers } from './settings-model.ts'
 import { ASSISTANT_LIMITS, ASSISTANT_TONE_LABELS, ASSISTANT_TONES, DEFAULT_ASSISTANT_HABITS, isAssistantHabits, type AssistantHabits, type AssistantTone } from '../../shared/assistant.ts'
 import { openOverlay, type Overlay } from './overlay.ts'
-import { applyReadingPreference } from './reading.ts'
+import { applyChromeTextPreference, applyReadingPreference } from './reading.ts'
 import { modelModuleGroups } from './statusbar.ts'
 import { icon, type IconName } from './icons.ts'
 
@@ -16,6 +18,8 @@ export type SettingsHandlers = {
   setMode: (mode: ThemeMode) => Promise<ThemeSetResult>
   getReading?: () => Promise<ReadingPreference>
   setReading?: (reading: ReadingPreference) => Promise<ReadingSetResult>
+  getChromeText?: () => Promise<ChromeTextPreference>
+  setChromeText?: (value: ChromeTextPreference) => Promise<ChromeTextSetResult>
   getConfig?: () => Promise<ModelConfigResult>
   saveProvider?: (request: ModelProviderSaveRequest) => Promise<ModelConfigResult>
   removeProvider?: (request: ModelProviderRemoveRequest) => Promise<ModelConfigResult>
@@ -73,6 +77,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
   let overlay: Overlay | null = null
   let request = 0
   let readingSaveSerial = 0
+  let chromeTextSaveSerial = 0
 
   const close = (): void => overlay?.close()
   const open = (page: '界面' | '助手' | '模型' | '运行' = '界面'): void => {
@@ -611,6 +616,51 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       }).catch(() => { if (current.isOpen()) showError(saveError, '暂时无法读取阅读排版。') })
     }
 
+    if (handlers.getChromeText && handlers.setChromeText) {
+      const section = document.createElement('section')
+      section.className = 'settings-chrome-section'
+      section.innerHTML = '<h3>界面文字</h3><p class="settings-hint">在样张中预览，保存后应用到这台设备。正文排版单独设置。</p><div class="settings-chrome-sample" aria-label="tab 与侧栏字号预览"><div class="tab-wrap"><span class="tab"><span class="tab-label">研究记录 · 中英文 Research</span></span></div><div class="tree-row"><span class="tree-label">资料与研究</span></div><div class="tree-row"><span class="tree-label">一个特别特别长的笔记名称.md</span></div><div class="tree-row"><span class="tree-label">附件</span><span class="attachment-label">附件 · 研究记录</span></div></div>'
+      const sample = section.querySelector<HTMLElement>('.settings-chrome-sample')!
+      sample.querySelector('.tab')!.prepend(icon('note'))
+      sample.querySelectorAll('.tree-row').forEach((row, index) => row.prepend(icon(index === 1 ? 'note' : 'folder')))
+      const controls = document.createElement('div'); controls.className = 'settings-reading-controls'
+      const selects = (['tabs', 'sidebar'] as const).map(key => {
+        const label = document.createElement('label'); label.className = 'settings-reading-control'
+        const name = document.createElement('span'); name.textContent = key === 'tabs' ? 'tab 名称字号' : '侧栏目录与资源字号'
+        const select = document.createElement('select'); select.dataset.setting = `chrome-${key}`; select.disabled = true
+        CHROME_TEXT_SIZES.forEach((id, index) => { const option = document.createElement('option'); option.value = id; option.textContent = ['小', '默认', '大'][index]!; select.append(option) })
+        label.append(name, select); controls.append(label); return select
+      })
+      const save = document.createElement('button'); save.type = 'button'; save.className = 'settings-action settings-chrome-save'; save.textContent = '保存界面字号'; save.disabled = true
+      const error = document.createElement('p'); error.className = 'settings-error'; error.setAttribute('role', 'alert'); error.hidden = true
+      section.append(controls, save, error); readingSection.append(section)
+      let original: ChromeTextPreference | null = null; let draft: ChromeTextPreference | null = null; let busy = false
+      const paint = (): void => {
+        if (draft) { applyChromeTextPreference(draft, sample); selects[0]!.value = draft.tabs; selects[1]!.value = draft.sidebar }
+        selects.forEach(select => { select.disabled = !original || busy })
+        save.disabled = busy || !draft || !original || draft.tabs === original.tabs && draft.sidebar === original.sidebar
+      }
+      selects.forEach(select => select.addEventListener('change', () => {
+        if (!original || busy) return
+        draft = { tabs: selects[0]!.value, sidebar: selects[1]!.value } as ChromeTextPreference; paint(); showError(error, '')
+      }))
+      save.addEventListener('click', () => {
+        if (!draft || busy || !isChromeTextPreference(draft)) return
+        const serial = ++chromeTextSaveSerial
+        busy = true; paint()
+        void handlers.setChromeText!({ ...draft }).then(result => {
+          if (serial !== chromeTextSaveSerial) return
+          if (!result.ok) { if (current.isOpen()) showError(error, '界面字号保存失败，工作区未更改。'); return }
+          applyChromeTextPreference(result.preference)
+          original = { ...result.preference }; draft = { ...result.preference }
+          if (current.isOpen()) showError(error, '')
+        }).catch(() => { if (current.isOpen()) showError(error, '界面字号保存失败，工作区未更改。') }).finally(() => { busy = false; if (current.isOpen()) paint() })
+      })
+      void handlers.getChromeText().then(value => {
+        if (!current.isOpen() || !isChromeTextPreference(value)) return
+        original = { ...value }; draft = { ...value }; paint()
+      }).catch(() => { if (current.isOpen()) showError(error, '暂时无法读取界面字号。') })
+    }
     if (page !== '界面') setPage(page)
   }
 
