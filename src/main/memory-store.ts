@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import type { MemoryContext, MemoryDependency, MemoryEntry, MemoryRecord, MemorySnapshot, MemorySource, MemoryStatus, MemoryStorePinPort } from '../shared/memory.ts'
 import type { CommittedNoteWrite, VerifiedRelocation } from './vault-lifecycle.ts'
+import { memoryDependency, sameMemoryDependency } from './memory-use.ts'
 import { bodyFingerprint } from './ledger-provenance.ts'
-import { continueMemorySource, createManualMemorySource, memoryHash, verifyMemorySource, type ManualMemorySourceRequest, type MemorySourceReader } from './memory-source.ts'
+import { analyzeMemorySource, continueMemorySource, createManualMemorySource, memoryHash, verifyMemorySource, type ManualMemorySourceRequest, type MemorySourceReader } from './memory-source.ts'
 
 export const MEMORY_FILE = '.rgent-memory'
 export const MAX_MEMORY_FILE_BYTES = 2 * 1024 * 1024
@@ -100,37 +101,72 @@ export class MemoryStore {
     try { const snapshot = await this.snapshot(); return { status: 'ready', count: snapshot.record.entries.length } }
     catch (error) { return { status: 'invalid', reason: reason(error) } }
   }
-  async list(): Promise<MemoryEntry[]> {
+  /** One operation sees one checked snapshot per source; never retained across uses or commits. */
+  private sourceBatch(): MemorySourceReader {
+    const sources = new Map<string, ReturnType<MemorySourceReader>>()
+    return path => {
+      let reading = sources.get(path)
+      if (!reading) { reading = this.access.source(path).then(snapshot => ({...snapshot,analysis:analyzeMemorySource(snapshot.content)})); sources.set(path,reading) }
+      return reading
+    }
+  }
+  private async readEntries(ids?: readonly string[]): Promise<MemoryEntry[]> {
+    if (ids && (ids.length > 1000 || !ids.every(id))) throw Error('MEMORY_DEPENDENCY_INVALID')
+    const selected = ids ? new Set(ids) : null
+    const select = (entries: MemoryEntry[]) => selected ? entries.filter(entry => selected.has(entry.id)) : entries
     const snapshot = await this.snapshot()
     const pauses = new Map<string, string>()
-    for (const entry of snapshot.record.entries) if (entry.status === 'active') {
-      try { await this.verifyEntry(entry, snapshot.record, new Set()) }
+    const verified = new Map<string, Promise<void>>(), read = this.sourceBatch()
+    for (const entry of select(snapshot.record.entries)) if (entry.status === 'active') {
+      try { await this.verifyEntry(entry, snapshot.record, new Set(), verified, read) }
       catch (error) { pauses.set(entry.id, reason(error)) }
+    }
+    // Persist every failure actually observed in this dependency walk, including unselected parents.
+    // Otherwise restoring a failed parent's bytes could silently reactivate its old version.
+    for (const [entryId, checking] of verified) {
+      try { await checking } catch (error) { pauses.set(entryId, reason(error)) }
     }
     if (pauses.size) return this.mutate(snapshot, async record => {
       for (const entry of record.entries) if (pauses.has(entry.id)) {
         entry.status = 'paused'; entry.reason = pauses.get(entry.id)!; entry.version++; entry.updatedAt = new Date().toISOString()
       }
-      return structuredClone(record.entries)
+      return structuredClone(select(record.entries))
     })
-    return snapshot.record.entries
+    const after = await this.snapshot()
+    if (after.revision !== snapshot.revision || after.objectVersion !== snapshot.objectVersion) throw Error('MEMORY_CONFLICT')
+    return select(snapshot.record.entries)
   }
-  async validatedEntries(): Promise<MemoryEntry[]> { return (await this.list()).filter(e => e.status === 'active') }
+  async list(): Promise<MemoryEntry[]> { return this.readEntries() }
+  /** IDs are entry identities, never caller-supplied source paths. Each operation uses a fresh snapshot/CAS. */
+  async validatedEntries(ids?: readonly string[]): Promise<MemoryEntry[]> { return (await this.readEntries(ids)).filter(e => e.status === 'active') }
   async validateDependency(dependency: MemoryDependency): Promise<boolean> {
-    try { return (await this.validatedEntries()).some(e => e.id === dependency.id && e.version === dependency.version) } catch { return false }
+    try { return (await this.validatedEntries([dependency.id])).some(e => e.id === dependency.id && e.version === dependency.version) } catch { return false }
   }
-  private async verifyEntry(entry: MemoryEntry, record: MemoryRecord, seen: Set<string>): Promise<void> {
+  private async verifyEntry(entry: MemoryEntry, record: MemoryRecord, seen: Set<string>, memo = new Map<string, Promise<void>>(), read = this.sourceBatch()): Promise<void> {
     if (seen.has(entry.id) || entry.status !== 'active') throw new Error('MEMORY_DEPENDENCY_CHANGED')
+    const cached = memo.get(entry.id)
+    if (cached) return cached
     const nextSeen = new Set(seen).add(entry.id)
-    for (const source of entry.sources) await verifyMemorySource(source, this.access.source, async (id, version) => {
-      const dependency = record.entries.find(e => e.id === id && e.version === version && e.status === 'active')
-      if (!dependency || record.forgotten.some(f => f.id === id && f.throughVersion >= version)) return false
-      try { await this.verifyEntry(dependency, record, nextSeen); return true } catch { return false }
-    })
+    const checking = (async () => {
+      for (const source of entry.sources) await verifyMemorySource(source, read, async (id, version) => {
+        const dependency = record.entries.find(e => e.id === id && e.version === version && e.status === 'active')
+        if (!dependency || record.forgotten.some(f => f.id === id && f.throughVersion >= version)) return false
+        try { await this.verifyEntry(dependency, record, nextSeen, memo, read); return true } catch { return false }
+      })
+    })()
+    memo.set(entry.id, checking)
+    return checking
   }
   async createManualSource(request: ManualMemorySourceRequest): Promise<MemorySource> {
     await this.access.ready()
-    const source = await createManualMemorySource(request, this.access.source)
+    const snapshot = await this.snapshot(), memo = new Map<string, Promise<void>>(), read = this.sourceBatch()
+    const source = await createManualMemorySource(request, read, async dep => {
+      const entry = snapshot.record.entries.find(e => e.id === dep.id && e.version === dep.version)
+      if (!entry || !sameMemoryDependency(dep, memoryDependency(entry))) return false
+      try { await this.verifyEntry(entry, snapshot.record, new Set(), memo, read); return true } catch { return false }
+    })
+    const after = await this.snapshot()
+    if (after.revision !== snapshot.revision || after.objectVersion !== snapshot.objectVersion) throw Error('MEMORY_CONFLICT')
     this.issued.set(source, JSON.stringify(source)); return source
   }
   async verifySource(source: MemorySource): Promise<boolean> {
@@ -202,15 +238,16 @@ export class MemoryStore {
     try {
       const { snapshot, disk } = this.read(); if (!disk) return
       let changed = false
+      const analysis = analyzeMemorySource(write.content), wholeHash = bodyFingerprint(write.content, analysis.parsed)
       for (const entry of snapshot.record.entries) for (const source of entry.sources) {
         if (source.relPath === write.previousPath && source.objectVersion === write.previousObjectVersion) {
           changed = true
-          try { Object.assign(source, continueMemorySource(source, write.content), { relPath: write.relPath, objectVersion: write.objectVersion }) }
+          try { Object.assign(source, continueMemorySource(source, write.content, analysis), { relPath: write.relPath, objectVersion: write.objectVersion }) }
           catch (error) { source.relPath = write.relPath; source.objectVersion = write.objectVersion; source.revision = memoryHash(write.content); entry.status = 'paused'; entry.reason = reason(error) }
         }
         for (const dep of source.sourceDeps) if (dep.relPath === write.previousPath && dep.objectVersion === write.previousObjectVersion) {
           changed = true
-          if (bodyFingerprint(write.content) === dep.bodyHash) { dep.relPath = write.relPath; dep.objectVersion = write.objectVersion }
+          if (wholeHash === dep.bodyHash) { dep.relPath = write.relPath; dep.objectVersion = write.objectVersion }
           else { dep.relPath = write.relPath; dep.objectVersion = write.objectVersion; entry.status = 'paused'; entry.reason = 'MEMORY_DEPENDENCY_CHANGED' }
         }
       }
@@ -234,8 +271,9 @@ export class MemoryStore {
         target.relPath = object.to; target.objectVersion = object.objectVersion
       }
     }
+    const verified = new Map<string, Promise<void>>(), read = this.sourceBatch()
     for (const entry of snapshot.record.entries) if (entry.status === 'active') {
-      try { await this.verifyEntry(entry, snapshot.record, new Set()) }
+      try { await this.verifyEntry(entry, snapshot.record, new Set(), verified, read) }
       catch (error) { entry.status = 'paused'; entry.reason = reason(error) }
     }
     if (!uncertain && !snapshot.record.relocations.includes(receipt.operationId)) snapshot.record.relocations.push(receipt.operationId)

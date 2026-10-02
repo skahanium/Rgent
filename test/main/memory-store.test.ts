@@ -296,3 +296,80 @@ it('rejects a complete known AI sentence embedded in a larger human paragraph', 
   const note = await env.session.read('note.md')
   await expect(env.store.createManualSource({ relPath: 'note.md', ...note, kind: 'body', start: 0, end: body.length })).rejects.toThrow('MEMORY_SOURCE_UNKNOWN')
 })
+
+it('inherits adopted v2 memory dependencies and cannot wash a forgotten version into a new source', async () => {
+  const { memoryDependency } = await import('../../src/main/memory-use.ts')
+  const env = await setup(); const parent = await remember(env)
+  const derived = appendLedgerChapter('派生事实。', { taskId: 'derived', startedAt: 'now', status: 'completed', prompt: '问', answer: '派生事实。', provenance: { version: 2, model: { provider: 'test', modelId: 'm', endpointHost: 'example.test' }, scope: ['derived.md'], sources: [], tools: [], memoryDeps: [memoryDependency(parent)] } })
+  await writeFile(path.join(env.root, 'derived.md'), derived)
+  const note = await env.session.read('derived.md')
+  const request = { ...note, relPath: 'derived.md', kind: 'body' as const, start: 0, end: '派生事实。'.length }
+  const source = await env.store.createManualSource(request)
+  expect(source.memoryDeps).toEqual([{ id: parent.id, version: 1 }])
+  const child = await env.store.remember(await env.store.snapshot(), { content: '派生', layer: 'demand', scope: '本库', sources: [source], explicit: true })
+  await env.store.forget(await env.store.snapshot(), parent.id, 1)
+  expect(await env.store.validateDependency({ id: child.id, version: 1 })).toBe(false)
+  await expect(env.store.createManualSource(request)).rejects.toThrow('MEMORY_DEPENDENCY_CHANGED')
+})
+
+it('does not reclassify an established human source when a later AI answer quotes it', async () => {
+  const env = await setup(); const entry = await remember(env); const note = await env.session.read('note.md')
+  const next = appendLedgerChapter(note.content, {taskId:'later',startedAt:'now',status:'completed',prompt:'重复原文',answer:'长期使用中文。',provenance:{version:1,model:{provider:'test',modelId:'m',endpointHost:'example.test'},scope:['note.md'],sources:[],tools:[]}})
+  await env.session.write('note.md',next,note.revision,note)
+  expect((await env.store.snapshot()).record.entries[0]?.status).toBe('active')
+  expect((await env.store.validatedEntries()).map(e=>e.id)).toEqual([entry.id])
+})
+
+it('rechecks the real source before another memory send and does not revive the paused version', async () => {
+ const {createMemoryUsePermit}=await import('../../src/main/memory-use.ts')
+ const env=await setup(),entry=await remember(env)
+ const model={provider:'custom' as const,baseURL:'https://example.test/v1',modelId:'m',contextTokens:16000,apiKey:'key'}
+ const permit=await createMemoryUsePermit({context:()=>env.session.memoryContext(),config:()=>({enabled:true,epoch:0}),entries:()=>env.store.validatedEntries()},model,'问','')
+ permit.stage([entry.id]);await permit.assertCurrent(model);permit.markSent()
+ const note=await env.session.read('note.md')
+ await env.session.write('note.md',note.content.replace('长期使用中文。','长期使用英文。'),note.revision,note)
+ await expect(permit.assertCurrent(model)).rejects.toThrow('MEMORY_CHANGED')
+ const changed=await env.session.read('note.md');await env.session.write('note.md',note.content,changed.revision,changed)
+ expect(await env.store.validateDependency({id:entry.id,version:1})).toBe(false)
+})
+
+it.each(['普通引言。\n\n### 工具摘要\n\nFORGOTTEN_SECRET。','普通引言。\n\n```md\n### 工具摘要\n```\n\nFORGOTTEN_SECRET。'])('refuses to remember adopted text hidden past an ambiguous ledger heading: %s', async answer=>{
+ const {memoryDependency}=await import('../../src/main/memory-use.ts')
+ const env=await setup(),parent=await remember(env)
+ const derived=appendLedgerChapter('FORGOTTEN_SECRET。',{taskId:'ambiguous',startedAt:'now',status:'completed',prompt:'问',answer,provenance:{version:2,model:{provider:'test',modelId:'m',endpointHost:'example.test'},scope:['derived.md'],sources:[],tools:[],memoryDeps:[memoryDependency(parent)]}})
+ await writeFile(path.join(env.root,'derived.md'),derived)
+ await env.store.forget(await env.store.snapshot(),parent.id,parent.version)
+ const note=await env.session.read('derived.md')
+ await expect(env.store.createManualSource({...note,relPath:'derived.md',kind:'body',start:0,end:'FORGOTTEN_SECRET。'.length})).rejects.toThrow('MEMORY_SOURCE_AMBIGUOUS')
+})
+
+it('validates only requested memory IDs and their dependencies after startup, without reading unrelated sources', async()=>{
+ const env=await setup(),entry=await remember(env)
+ await writeFile(path.join(env.root,'unrelated.md'),'另一个来源。')
+ const note=await env.session.read('unrelated.md')
+ const source=await env.store.createManualSource({...note,relPath:'unrelated.md',kind:'body',start:0,end:note.content.length})
+ await env.store.remember(await env.store.snapshot(),{content:'无关条目',layer:'demand',scope:'本库',sources:[source],explicit:true})
+ const read=vi.spyOn(secureFsFor(env.root),'readSnapshot')
+ expect((await env.store.validatedEntries([entry.id])).map(e=>e.id)).toEqual([entry.id])
+ expect(read.mock.calls.some(([p])=>p==='note.md')).toBe(true)
+ expect(read.mock.calls.some(([p])=>p==='unrelated.md')).toBe(false)
+})
+
+it('persists observed recursive dependency failures when validating only the selected child', async () => {
+  const { memoryDependency } = await import('../../src/main/memory-use.ts')
+  const env = await setup(), parent = await remember(env)
+  const original = (await env.session.read('note.md')).content
+  const derived = appendLedgerChapter('派生事实。', { taskId: 'derived', startedAt: 'now', status: 'completed', prompt: '问', answer: '派生事实。', provenance: { version: 2, model: { provider: 'test', modelId: 'm', endpointHost: 'example.test' }, scope: ['derived.md'], sources: [], tools: [], memoryDeps: [memoryDependency(parent)] } })
+  await writeFile(path.join(env.root, 'derived.md'), derived)
+  const note = await env.session.read('derived.md')
+  const source = await env.store.createManualSource({ ...note, relPath: 'derived.md', kind: 'body', start: 0, end: '派生事实。'.length })
+  const child = await env.store.remember(await env.store.snapshot(), { content: '派生', layer: 'demand', scope: '本库', sources: [source], explicit: true })
+  await writeFile(path.join(env.root, 'note.md'), original.replace('长期使用中文。', '长期使用英文。'))
+  expect(await env.store.validatedEntries([child.id])).toEqual([])
+  const snapshot = await env.store.snapshot()
+  expect(snapshot.record.entries.find(e => e.id === child.id)).toMatchObject({ status: 'paused', version: 2 })
+  expect(snapshot.record.entries.find(e => e.id === parent.id)).toMatchObject({ status: 'paused', version: 2 })
+  await writeFile(path.join(env.root, 'note.md'), original)
+  expect(await env.store.validatedEntries([parent.id])).toEqual([])
+  expect(await env.store.validateDependency({ id: parent.id, version: 1 })).toBe(false)
+})

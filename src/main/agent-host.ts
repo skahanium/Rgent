@@ -1,11 +1,15 @@
 import type { ModelMessage, AssistantContent, ToolContent } from 'ai'
 import type { ScopedAgentTools } from './scoped-agent-tools.ts'
-import { encodeLedgerProvenance } from './ledger-provenance.ts'
+import { createMemoryUsePermit, MEMORY_NOTICE, memorySection, type MemoryUsePort, type MemoryUsePermit } from './memory-use.ts'
+import type { MemoryContext } from '../shared/memory.ts'
+import { memoryHash } from './memory-source.ts'
+import { TaskMaterialTracker, type SavedTaskMaterial } from './host-material.ts'
+import { encodeLedgerProvenance, historicalContextPolicy } from './ledger-provenance.ts'
 import { READ_ONLY_TOOL_SCHEMAS } from './scoped-agent-tools.ts'
 import { MODEL_STREAM_BOUNDS, type ModelStepEvent } from './model-stream.ts'
 import { randomUUID } from 'node:crypto'
 import { AgentTasks, type TaskResult, type StopReason } from './agent-tasks.ts'
-import { buildHostContext, type ContextChapter, type ContextSummary } from './host-context.ts'
+import { buildHostContext, ledgerChapters, type ContextChapter, type ContextSummary, type ContextSourceRef } from './host-context.ts'
 import { appendLedgerChapter, markPrompt, upsertAiAnswer } from './host-source.ts'
 import { assistantSystemBlock, assistantSummary, type AssistantHabits } from '../shared/assistant.ts'
 import type { ModelCredential, RunLimits } from './model-config.ts'
@@ -60,7 +64,12 @@ export type HostDependencies = {
   limits: () => RunLimits
   stream: (input: ModelCredential & { system: string; prompt: string; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<string>
   streamStep?: (input: ModelCredential & { system: string; messages: ModelMessage[]; tools?: typeof READ_ONLY_TOOL_SCHEMAS; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<ModelStepEvent>
-  createReadOnlyTools?: (grant: TaskGrant, taskId: string) => ScopedAgentTools
+  /** Internal completion seam. Caller must have a separate, task-start consolidation permit. */
+  onTaskMaterialSaved?: (material: SavedTaskMaterial) => void | Promise<void>
+  /** Handoff outcome only, never a claim that consolidation succeeded. Sink must be local and synchronous. */
+  onTaskMaterialResult?: (result: {taskId: string; status: 'handed-off' | 'unavailable' | 'failed'; reason?: string}) => void
+  memory?: MemoryUsePort
+  createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker) => ScopedAgentTools
   /** 一个助手的设备级习惯；任务启动时取一次快照，运行中改动只影响新任务。 */
   assistant?: () => AssistantHabits | null
   emit: (event: HostEvent) => void
@@ -85,12 +94,14 @@ export class AgentHost {
   private readonly grants = new Map<string, TaskGrant>()
   private readonly signals = new Map<string, AbortSignal>()
   private readonly scoped = new Map<string, ScopedAgentTools>()
+  private readonly memoryUses = new Map<string, { permit: MemoryUsePermit; credential: ModelCredential }>()
   private readonly checkpoints = new Map<string, Promise<void>>()
   private readonly finalizing = new Set<string>()
   private readonly rechecking = new Map<string, Promise<void>>()
   private readonly launching = new Set<string>()
   private readonly launchWaiters = new Set<() => void>()
-  private readonly pending = new Map<string, { root: string; relPath: string; source: Parameters<typeof appendLedgerChapter>[1]; persisted: { answer: string } }>()
+  private readonly retrying = new Map<string, Promise<void>>()
+  private readonly pending = new Map<string, { root: string; relPath: string; source: Parameters<typeof appendLedgerChapter>[1]; persisted: { answer: string }; material: { tracker: TaskMaterialTracker; context: MemoryContext | null; handoffAttempted?: boolean } }>()
 
   private readonly bindings = new Map<string, ObjectBinding & { originalVersion: string }>()
 
@@ -119,13 +130,22 @@ export class AgentHost {
     for (const [id, item] of [...this.pending]) {
       if (root && item.root !== root) continue
       if (relPath && item.relPath !== relPath) continue
-      try {
-        const revision = await this.finishWrite(item.root, item.relPath, item.source, item.persisted)
-        this.pending.delete(id)
-        this.deps.emit({ ...this.bindings.get(`${item.root}\0${item.relPath}`), id, root: item.root, relPath: item.relPath, status: item.source.status === 'limit' ? 'failed' : item.source.status, reason: item.source.reason, answer: item.source.answer, persisted: true, revision })
-      } catch (error) {
-        failure ??= error
+      let retry = this.retrying.get(id)
+      if (!retry) {
+        if(this.pending.get(id) !== item)continue
+        // Register before the first read/write can yield, so all overlapping callers
+        // share both saving and the successful material handoff for this task.
+        retry = Promise.resolve().then(async () => {
+          if(this.pending.get(id) !== item)return
+          const revision = await this.finishWrite(item.root, item.relPath, item.source, item.persisted, item.material)
+          if(this.pending.get(id) === item)this.pending.delete(id)
+          this.deps.emit({ ...this.bindings.get(`${item.root}\0${item.relPath}`), id, root: item.root, relPath: item.relPath, status: item.source.status === 'limit' ? 'failed' : item.source.status, reason: item.source.reason, answer: item.source.answer, persisted: true, revision })
+        })
+        this.retrying.set(id,retry)
       }
+      try { await retry }
+      catch(error) { failure ??= error }
+      finally { if(this.retrying.get(id) === retry)this.retrying.delete(id) }
     }
     if (failure) throw failure
   }
@@ -196,6 +216,8 @@ export class AgentHost {
           if (this.deps.root() !== root || (sessionId && grant?.sessionId !== sessionId) || !this.active().some(t => t.id === task.id)) return
           await awaiting(grant?.validateSources(signal) ?? Promise.resolve(), signal)
           await awaiting(this.scoped.get(key)?.assertCurrent(signal) ?? Promise.resolve(), signal)
+          const memory = this.memoryUses.get(key)
+          if (memory) await awaiting(memory.permit.assertCurrent(memory.credential), signal)
           await awaiting(this.requirePermission(root, task.relPath), signal)
           await awaiting(this.readBound(root, task.relPath), signal)
         } catch (error) {
@@ -242,7 +264,13 @@ export class AgentHost {
       if (input.expectedRevision !== undefined && original.revision !== input.expectedRevision) throw new Error('CONFLICT')
       if (original.sessionId && original.objectVersion) this.bindings.set(key, { sessionId: original.sessionId, objectVersion: original.objectVersion, originalVersion: input.objectVersion ?? original.objectVersion })
       const id = randomUUID()
-      const scoped = grant && this.deps.createReadOnlyTools?.(grant, id)
+      const parsedOriginal = compile(original.content)
+      const nearby = parsedOriginal.index.blocks.filter(b => b.identity !== 'ai' && b.range.end >= input.range.start - 1024 && b.range.start <= input.range.end + 1024).map(b => original.content.slice(b.range.start, b.range.end)).join('\n').slice(0, 2048)
+      const memory = this.deps.memory ? await createMemoryUsePermit(this.deps.memory, credential, input.promptText, nearby) : undefined
+      if (memory) this.memoryUses.set(key, {permit: memory, credential})
+      const materials = new TaskMaterialTracker()
+      const savedMaterial = {tracker:materials,context:memory?.context ?? null}
+      const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials)
       const toolsEnabled = Boolean(grant && grant.sources.length > 1)
       if (toolsEnabled && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
       if (scoped) this.scoped.set(key, scoped)
@@ -251,7 +279,7 @@ export class AgentHost {
       const placement = submitted.position
       const budget = this.inputBudget(credential.contextTokens)
       // Check that the current prompt and its nearby paragraph fit before changing disk.
-      const initial = buildHostContext({ source: marked, prompt: input.promptText, placement, inputBudgetTokens: budget, countTokens: byteCount })
+      const initial = buildHostContext({ source: marked, prompt: input.promptText, placement, inputBudgetTokens: budget, countTokens: byteCount, memory: memory?.recall })
       if (initial.status === 'too-large') throw new Error(initial.reason)
       await this.requirePermission(root, input.relPath)
       await grant?.assertLive('write',input.relPath)
@@ -303,6 +331,7 @@ export class AgentHost {
           await wait(this.requirePermission(root, input.relPath))
           await wait(grant?.assertLive('model', undefined, signal) ?? Promise.resolve())
           await wait(scoped?.assertCurrent(signal) ?? Promise.resolve())
+          await wait(memory?.assertCurrent(credential) ?? Promise.resolve())
         }
         const step = (outgoing: ModelMessage[], withTools: boolean, maxOutputTokens: number): AsyncIterable<ModelStepEvent> => {
           if (++steps > limits.steps) throw Error('MODEL_STEP_LIMIT')
@@ -312,7 +341,9 @@ export class AgentHost {
           snapshot('running')
           const create = () => {
             if (signal.aborted) throw Error('TASK_CANCELLED')
-            scoped?.markSent()
+            scoped?.markSent(withTools)
+            memory?.markSent()
+            materials.commit(withTools)
             return this.deps.streamStep
             ? this.deps.streamStep({ ...credential, system, messages: outgoing, ...(schemas ? { tools: schemas } : {}), maxOutputTokens }, signal)
             : textEvents(this.deps.stream({ ...credential, system, prompt: String(outgoing[0]?.content ?? ''), maxOutputTokens }, signal))
@@ -325,29 +356,34 @@ export class AgentHost {
         }
         contextLoop: while (!signal.aborted) {
           await guard()
-          const source = (await wait(this.readBound(root, input.relPath))).content
+          const currentSnapshot = await wait(this.readBound(root, input.relPath))
+          const source = currentSnapshot.content
           if (source !== policySource) {
-            policy = scoped ? await wait(scoped.contextPolicy(source, signal)) : undefined
+            policy = scoped ? await wait(scoped.contextPolicy(source, signal)) : await wait(historicalContextPolicy(source, async () => false, undefined, undefined, dep => memory?.validateDependency(dep) ?? Promise.resolve(false)))
             policySource = source
           }
           const currentPrompt = promptBlock(source, id)
           if (currentPrompt.text !== submitted.text) throw Error('任务口令已被外部修改')
           const metadata = toolsEnabled ? `\n本场工具来源清单（正文须经工具读取，附件和账本不可读）：${JSON.stringify(grant!.sources.map(s => ({ sourceId: s.sourceId, title: s.title, relPath: s.relPath })))}` : ''
           const planBudget = budget - byteCount(metadata) - (toolsEnabled ? byteCount(JSON.stringify(READ_ONLY_TOOL_SCHEMAS)) : 0) - byteCount(JSON.stringify(messages)) - 128
-          const plan = buildHostContext({ source, prompt: input.promptText, placement: currentPrompt.position, inputBudgetTokens: planBudget, countTokens: byteCount, summary, ...policy })
+          const plan = buildHostContext({ source, prompt: input.promptText, placement: currentPrompt.position, inputBudgetTokens: planBudget, countTokens: byteCount, summary, memory: memory?.recall, ...policy })
           if (plan.status === 'too-large') throw Error(plan.reason)
           if (plan.status === 'needs-summary') {
             const summaries: string[] = []
             let summaryBatch = 0
-            for (const batch of summaryBatches(plan.chapters, budget - 640)) {
+            const core = memory?.recall.core ?? []
+            const summaryPrefix = `请仅摘要下列旧账本，标明来源 ID；不补写未知细节，摘要不超过 400 字：\n${core.length ? MEMORY_NOTICE + '\n' + core.map(memorySection).join('\n') + '\n' : ''}当前口令：${JSON.stringify(input.promptText)}；落点：${currentPrompt.position}。\n`
+            for (const batch of summaryBatches(plan.chapters, budget - byteCount(summaryPrefix) - 640)) {
               await guard()
               if ((await wait(this.readBound(root, input.relPath))).content !== source) { summary = undefined; continue contextLoop }
-              scoped?.recordContext(plan.chapters.filter(chapter => batch.includes(`来源 ${chapter.sourceId}\n`)).map(chapter => ({ kind: 'ledger' as const, sourceId: chapter.sourceId })))
+              scoped?.recordContext(batch.refs)
+              if (currentSnapshot.sessionId && currentSnapshot.objectVersion) materials.context(source, batch.refs, { ...currentSnapshot, sessionId: currentSnapshot.sessionId, objectVersion: currentSnapshot.objectVersion, relPath: input.relPath }, scoped?.contextDependencies)
+              memory?.stage(core.map(e => e.id))
               await guard()
               let text = ''
               summaryBatch += 1
               noteTrace(`旧账本摘要 第 ${summaryBatch} 批`)
-              for await (const event of step([{ role: 'user', content: `请仅摘要下列旧账本，标明来源 ID；不补写未知细节，摘要不超过 400 字：\n${batch}` }], false, Math.min(512, this.outputBudget(credential.contextTokens)))) {
+              for await (const event of step([{ role: 'user', content: summaryPrefix + batch.text }], false, Math.min(512, this.outputBudget(credential.contextTokens)))) {
                 if (event.type === 'text') {
                   if (signal.aborted) { text += event.text; break }
                   await guard(); addOutput(event.text); text += event.text
@@ -364,9 +400,13 @@ export class AgentHost {
           }
           const omitted = plan.omitted.bodyBlockNumbers.length || plan.omitted.ledgerChapterIds.length
             ? `\n省略：正文块 ${plan.omitted.bodyBlockNumbers.join(', ') || '无'}；账本章 ${plan.omitted.ledgerChapterIds.join(', ') || '无'}。` : ''
-          const outgoing: ModelMessage[] = [{ role: 'user', content: `${plan.content}${omitted}${metadata}` }, ...messages]
+          const memoryOmitted = plan.omitted.memoryIds.length ? `\n按需记忆因预算省略 ${plan.omitted.memoryIds.length} 条。` : ''
+          if (plan.omitted.memoryIds.length) noteTrace(`按需记忆省略：${plan.omitted.memoryIds.slice(0,8).join('、')}${plan.omitted.memoryIds.length > 8 ? ` 等 ${plan.omitted.memoryIds.length} 条` : ''}（预算）`)
+          const outgoing: ModelMessage[] = [{ role: 'user', content: `${plan.content}${omitted}${memoryOmitted}${metadata}` }, ...messages]
           if ((await wait(this.readBound(root, input.relPath))).content !== source) { summary = undefined; continue }
           scoped?.recordContext(plan.refs)
+          if (currentSnapshot.sessionId && currentSnapshot.objectVersion) materials.context(source, plan.refs, { ...currentSnapshot, sessionId: currentSnapshot.sessionId, objectVersion: currentSnapshot.objectVersion, relPath: input.relPath }, scoped?.contextDependencies)
+          memory?.stage(plan.memoryIds)
           await guard()
           if ((await wait(this.readBound(root, input.relPath))).content !== source) { summary = undefined; continue }
           await guard()
@@ -450,25 +490,25 @@ export class AgentHost {
           ...(reasoning ? { reasoning } : {}),
           ...(trace.length ? { trace } : {}),
           ...(assistantLine ? { assistant: assistantLine } : {}),
-          ...(grant?{provenance:{version:1 as const,model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant.sources.map(s=>s.relPath),sources:scoped?.dependencies() ?? [],sentSources:scoped?.sentSources() ?? [],tools:[...(scoped?.summary() ?? []),... [...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`${label.split(':')[1]} × ${count}`}))]}}:{})
+          ...(grant?{provenance:{version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies() ?? []),...(scoped?.memoryDependencies?.() ?? [])].map(dep=>[dep.id,dep])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant.sources.map(s=>s.relPath),sources:scoped?.dependencies() ?? [],sentSources:scoped?.sentSources() ?? [],tools:[...(scoped?.summary() ?? []),... [...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`${label.split(':')[1]} × ${count}`}))]}}:{})
         }
         try {
-          const revision = await this.finishWrite(root, input.relPath, finalSource, persisted)
+          const revision = await this.finishWrite(root, input.relPath, finalSource, persisted, savedMaterial)
           snapshot(status, reason ? String(reason) : undefined, revision)
         } catch (error) {
-          this.pending.set(id, { root, relPath: input.relPath, source: finalSource, persisted })
+          this.pending.set(id, { root, relPath: input.relPath, source: finalSource, persisted, material:savedMaterial })
           snapshot('failed', error instanceof Error ? error.message : 'WRITE_FAILED')
           throw error
         } finally {
           this.finalizing.delete(key)
           this.signals.delete(key)
-          if(this.grants.get(key)===grant){this.grants.delete(key);this.scoped.delete(key)}
+          if(this.grants.get(key)===grant){this.grants.delete(key);this.scoped.delete(key);this.memoryUses.delete(key)}
         }
       })
       launched=true
       return result
     } finally {
-      if(!launched){grant?.revoke();if(this.grants.get(key)===grant){this.grants.delete(key);this.scoped.delete(key)}}
+      if(!launched){grant?.revoke();if(this.grants.get(key)===grant){this.grants.delete(key);this.scoped.delete(key);this.memoryUses.delete(key)}}
       this.launching.delete(key)
       if (this.launching.size === 0) {
         for (const notify of this.launchWaiters) notify()
@@ -512,12 +552,39 @@ export class AgentHost {
     throw new Error('CONFLICT')
   }
 
-  private async finishWrite(root: string, relPath: string, finalSource: Parameters<typeof appendLedgerChapter>[1], persisted: { answer: string }): Promise<string> {
+  private async finishWrite(root: string, relPath: string, finalSource: Parameters<typeof appendLedgerChapter>[1], persisted: { answer: string }, material: {tracker: TaskMaterialTracker; context: MemoryContext | null; handoffAttempted?: boolean}): Promise<string> {
     if (finalSource.answer) {
       await this.mutateNote(root, relPath, (source) => upsertAiAnswer(source, { taskId: finalSource.taskId, answer: finalSource.answer, expectedPreviousAnswer: persisted.answer }), true)
       persisted.answer = finalSource.answer
     }
-    return this.mutateNote(root, relPath, (source) => appendLedgerChapter(source, finalSource), true)
+    const revision = await this.mutateNote(root, relPath, (source) => appendLedgerChapter(source, finalSource), true)
+    if (this.deps.onTaskMaterialSaved && !material.handoffAttempted) {
+      const report = (status: 'handed-off' | 'unavailable' | 'failed', error?: unknown) => {
+        const reason = error instanceof Error && /^[A-Z_]{1,80}$/.test(error.message) ? error.message : error ? 'MATERIAL_HANDOFF_FAILED' : undefined
+        try { this.deps.onTaskMaterialResult?.({taskId:finalSource.taskId,status,...(reason ? {reason} : {})}) } catch { /* A status sink cannot change the saved task. */ }
+      }
+      try {
+        const saved = await this.readBound(root, relPath)
+        if (!saved.sessionId || !saved.objectVersion || saved.revision !== revision) throw Error('SAVED_MATERIAL_CHANGED')
+        const chapters = ledgerChapters(compile(saved.content).partition.ledger).filter(c => c.taskId === finalSource.taskId)
+        const expected = ledgerChapters(compile(appendLedgerChapter('', finalSource)).partition.ledger)[0]
+        if (chapters.length !== 1 || !expected || chapters[0]!.text.replace(/\r\n|\r/g,'\n').trimEnd() !== expected.text.trimEnd()) throw Error('SAVED_MATERIAL_CHANGED')
+        const ledgerHash = memoryHash(chapters[0]!.text.trimEnd()), sent = material.tracker.snapshot()
+        const evidence: SavedTaskMaterial = {
+          taskId:finalSource.taskId,context:material.context,origin:{relPath,sessionId:saved.sessionId,objectVersion:saved.objectVersion,revision},
+          status:finalSource.status,...(finalSource.reason ? {reason:finalSource.reason} : {}),prompt:finalSource.prompt,answer:finalSource.answer,
+          ledgerHash,materialVersion:memoryHash(JSON.stringify([finalSource.taskId,ledgerHash,sent])),material:sent,
+          sourceDeps:structuredClone(finalSource.provenance?.sources ?? []),memoryDeps:structuredClone(finalSource.provenance?.version === 2 ? finalSource.provenance.memoryDeps : [])
+        }
+        // Synchronous once registration survives callback failure. A consumer retry
+        // is a separate, freshly authorized operation, never another note-save retry.
+        if(material.handoffAttempted)return revision
+        material.handoffAttempted = true
+        // Enqueue only: a slow or failed consumer must not delay the next task or undo successful saving.
+        void Promise.resolve().then(() => this.deps.onTaskMaterialSaved!(evidence)).then(() => report('handed-off'), error => report('failed', error))
+      } catch (error) { report('unavailable',error) }
+    }
+    return revision
   }
 }
 
@@ -548,32 +615,30 @@ async function* abortableStream<T>(stream: AsyncIterable<T>, signal: AbortSignal
 }
 
 /** Split long old chapters into bounded model calls without losing their source labels. */
-function summaryBatches(chapters: readonly ContextChapter[], maxBytes: number): string[] {
+function summaryBatches(chapters: readonly ContextChapter[], maxBytes: number): {text: string; refs: ContextSourceRef[]}[] {
   if (maxBytes < 512) throw new Error('旧账本摘要预算不足')
-  const pieces: string[] = []
+  const pieces: {text: string; refs: ContextSourceRef[]}[] = []
   for (const chapter of chapters) {
     const prefix = `来源 ${chapter.sourceId}\n`
-    let piece = ''
+    let piece = '', start = 0
+    const push = () => { pieces.push({text:prefix + piece,refs:[{kind:'ledger',sourceId:chapter.sourceId,start,end:start + piece.length}]});start+=piece.length;piece='' }
     for (const character of chapter.text) {
       if (byteCount(prefix + piece + character) > maxBytes) {
         if (!piece) throw new Error('旧账本摘要预算不足')
-        pieces.push(prefix + piece)
-        piece = ''
+        push()
       }
       piece += character
     }
-    if (piece) pieces.push(prefix + piece)
+    if (piece) push()
   }
-  const batches: string[] = []
-  let current = ''
+  const batches: {text: string; refs: ContextSourceRef[]}[] = []
+  let current = {text:'',refs:[] as ContextSourceRef[]}
   for (const piece of pieces) {
-    const joined = current ? `${current}\n\n${piece}` : piece
-    if (byteCount(joined) > maxBytes && current) {
-      batches.push(current)
-      current = piece
-    } else current = joined
+    const joined = current.text ? `${current.text}\n\n${piece.text}` : piece.text
+    if (byteCount(joined) > maxBytes && current.text) { batches.push(current); current = piece }
+    else current = {text:joined, refs:[...current.refs,...piece.refs]}
   }
-  if (current) batches.push(current)
+  if (current.text) batches.push(current)
   return batches
 }
 

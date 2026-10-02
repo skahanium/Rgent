@@ -783,8 +783,15 @@ app.whenReady().then(() => {
     },
     stream: (input, signal) => streamModelText({ ...input, signal }),
     streamStep: (input, signal) => streamModelStep({ ...input, signal }),
-    createReadOnlyTools: (grant, taskId) => createScopedAgentTools(grant, taskId, {
+    memory: {
+      context: () => vault!.memoryContext(),
+      config: key => { if (!modelConfig) throw Error('MEMORY_CONFIG_UNAVAILABLE'); return {enabled:modelConfig.getMemoryConfig(key).vault.enabled,epoch:modelConfig.getVaultMemoryEpoch(key)} },
+      entries: ids => vault!.memory().validatedEntries(ids)
+    },
+    createReadOnlyTools: (grant, taskId, memory, materials) => createScopedAgentTools(grant, taskId, {
       read: relPath => vault!.read(relPath), tier: modelTierFor,
+      validateMemory: dep => memory?.validateDependency(dep) ?? Promise.resolve(false),
+      validateMemoryBatch: deps => memory?.validateDependencies(deps) ?? Promise.resolve(deps.map(() => false)), materials,
       acceptsObject: (relPath, expected, current) => vault?.acceptsObject(relPath, expected, current) ?? false
     }),
     emit: ({ root, ...event }) => {

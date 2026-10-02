@@ -118,3 +118,40 @@ it('rejects a read cursor reused as a list page', async () => {
   // read_library 不带 sourceId 会落到列表续页；游标 kind 不同，必须拒绝。
   await expect(f.tools.execute('read_library', { cursor: page.nextCursor }, signal())).rejects.toThrow('INVALID_TOOL_CURSOR')
 })
+
+it('inherits v2 memories from actual AI reads, checks them before sending, and keeps tool scope fixed', async () => {
+ const dep = { id: 'memory', version: 1, basisHashes: ['a'.repeat(64)], sourceDeps: [{ id: 'source', version: 1, hash: 'b'.repeat(64), relPath: 'outside.md', kind: 'body' as const, taskId: null }] }
+ const body = appendLedgerChapter('<!-- rgent:ai:v1 task-id="old" -->\n\nDERIVED needle\n', {taskId:'old', startedAt:'now', status:'completed', prompt:'p', answer:'DERIVED needle', provenance:{version:2,model:{provider:'custom',modelId:'m',endpointHost:'model.example'},scope:['b.md'],sources:[],tools:[],memoryDeps:[dep]}})
+ const f = await fixture(body); let permitted = true
+ const tools = createScopedAgentTools(f.grant, 'task', {read:async p => ({...f.records.get(p)!}),tier:async()=> 'follow',acceptsObject:()=>false,validateMemory:async()=>permitted})
+ // The origin keeps its original tier.
+ const result:any = await tools.execute('read_library', {sourceId:f.grant.sources[1]!.sourceId}, signal())
+ expect(JSON.stringify(result)).toContain('DERIVED needle')
+ expect(tools.memoryDependencies!()).toEqual([])
+ tools.markSent(); expect(tools.memoryDependencies!()).toEqual([dep])
+ await expect(tools.execute('read_library',{sourceId:'outside.md'},signal())).rejects.toThrow('OUTSIDE_TASK_SCOPE')
+ permitted = false
+ await expect(tools.assertCurrent(signal())).rejects.toThrow('MEMORY_CHANGED')
+})
+
+it('does not report a discarded context candidate as an actually sent memory dependency', async () => {
+ const dep={id:'memory',version:1,basisHashes:['a'.repeat(64)],sourceDeps:[{id:'source',version:1,hash:'b'.repeat(64),relPath:'outside.md',kind:'body' as const,taskId:null}]}
+ const f=await fixture()
+ const tools=createScopedAgentTools(f.grant,'task',{read:async p=>({...f.records.get(p)!}),tier:async()=> 'reference',acceptsObject:()=>false,validateMemory:async()=>true})
+ const source=appendLedgerChapter('正文',{taskId:'old',startedAt:'now',status:'completed',prompt:'p',answer:'a',provenance:{version:2,model:{provider:'custom',modelId:'m',endpointHost:'example.test'},scope:['a.md'],sources:[],tools:[],memoryDeps:[dep]}})
+ const p=await tools.contextPolicy(source,signal())
+ tools.recordContext([{kind:'ledger',sourceId:p.allowedLedgerChapterIds[0]!}])
+ tools.recordContext([]);tools.markSent()
+ expect(tools.memoryDependencies!()).toEqual([])
+})
+
+it.each(['已采纳秘密 needle','引言。\n\n### 工具摘要\n\n已采纳秘密 needle'])('does not leak an adopted copy of a forgotten AI answer through read or search: %s', async answer => {
+ const dep={id:'forgotten',version:1,basisHashes:['a'.repeat(64)],sourceDeps:[{id:'source',version:1,hash:'b'.repeat(64),relPath:'outside.md',kind:'body' as const,taskId:null}]}
+ const raw=appendLedgerChapter('已采纳秘密 needle\n\n无关人工正文',{taskId:'old',startedAt:'now',status:'completed',prompt:'p',answer,provenance:{version:2,model:{provider:'custom',modelId:'m',endpointHost:'example.test'},scope:['b.md'],sources:[],tools:[],memoryDeps:[dep]}})
+ const f=await fixture(raw)
+ const read:any=await f.tools.execute('read_library',{sourceId:f.grant.sources[1]!.sourceId},signal())
+ expect(JSON.stringify(read)).not.toContain('已采纳秘密')
+ expect(JSON.stringify(read)).toContain('无关人工正文')
+ const search:any=await f.tools.execute('search_library',{query:'needle'},signal())
+ expect(search.items).toEqual([])
+})

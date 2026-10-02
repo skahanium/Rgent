@@ -251,3 +251,118 @@ describe('Host manual read-only loop', () => {
   })
 
 })
+
+it('sends memory independently of tool scope and records only dispatch-used v2 dependencies', async () => {
+  const app = appFor([[{type:'text',text:'已答'},finish('stop')]])
+  const entry = memoryEntry()
+  app.deps.memory = { context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled:true,epoch:0}),entries:async()=>[entry] }
+  const task = await app.start(); expect(await task.done).toEqual({status:'completed'})
+  expect(JSON.stringify(app.messages)).toContain('记忆独立正文')
+  const record = ledgerProvenance(app.content())
+  expect(record.status).toBe('valid')
+  if(record.status!=='valid' || record.record.version!==2) throw Error('missing v2')
+  expect(record.record.memoryDeps[0]?.id).toBe('mem')
+  expect(record.record.scope).not.toContain('outside.md')
+  expect(app.content()).toContain('outside.md / body')
+})
+it('stops on memory OFF during a stream and preserves generated text without another dispatch', async () => {
+  const app = appFor([]); let enabled=true,epoch=0
+  app.deps.memory = { context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled,epoch}),entries:async()=>[memoryEntry()] }
+  app.deps.streamStep = async function* () { app.messages.push('dispatched'); yield {type:'text',text:'已生成'}; enabled=false;epoch++;yield {type:'text',text:'不得接受'};yield finish('stop') }
+  const task=await app.start();expect((await task.done).status).toBe('failed')
+  expect(app.messages).toHaveLength(1);expect(app.content()).toContain('已生成');expect(app.content()).not.toContain('不得接受')
+})
+it('rejects overflowing core before saving the prompt or contacting a model', async () => {
+  const app=appFor([])
+  app.deps.memory={context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled:true,epoch:0}),entries:async()=>[{...memoryEntry(),content:'中'.repeat(900)}]}
+  await expect(app.start()).rejects.toThrow('MEMORY_CORE_LIMIT')
+  expect(app.content()).toBe('/问\n');expect(app.calls()).toBe(0)
+})
+function memoryEntry(): import('../../src/shared/memory.ts').MemoryEntry {
+  return {id:'mem',version:1,content:'记忆独立正文',layer:'core',scope:'本库',status:'active',reason:null,updatedAt:'now',updateBasis:{kind:'manual',id:'manual',version:1},sources:[{id:'source',version:1,relPath:'outside.md',objectVersion:'other',revision:'a'.repeat(64),permissionTier:'reference',kind:'body',taskId:null,taskMaterialHash:null,classification:'human',start:0,end:2,text:'依据',hash:'b'.repeat(64),basisHash:'c'.repeat(64),sourceDeps:[],memoryDeps:[]}]}
+}
+
+it('rechecks memory while a provider is stalled and cancels without waiting for another token', async () => {
+ const app=appFor([]);let enabled=true,epoch=0
+ app.deps.memory={context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled,epoch}),entries:async()=>[memoryEntry()]}
+ const entered=deferred(),release=deferred()
+ app.deps.streamStep=async function*(){yield {type:'text',text:'流中保稿'};entered.resolve();await release.promise;yield finish('stop')}
+ const task=await app.start();await entered.promise;enabled=false;epoch++
+ await app.host.recheckSources('/vault','s')
+ const result=await Promise.race([task.done,new Promise(resolve=>setTimeout(()=>resolve('HUNG'),200))])
+ release.resolve()
+ expect(result).toEqual({status:'failed',reason:'MEMORY_PERMISSION_CHANGED'})
+ expect(app.content()).toContain('流中保稿')
+})
+
+it('publishes bounded saved materials once only after both answer and ledger succeed, including retry', async () => {
+ const app=appFor([[{type:'reasoning',text:'PRIVATE_REASONING'},{type:'text',text:'可见回答'},finish('stop')]])
+ const read=app.deps.read,write=app.deps.write;let fail=true
+ app.deps.session=()=> 's';app.deps.read=async p=>({...await read(p),sessionId:'s',objectVersion:'oa'})
+ app.deps.write=async (...args)=>{if(fail && args[1].includes('ledger-task'))throw Error('CONFLICT');return write(...args)}
+ const saved:import('../../src/main/host-material.ts').SavedTaskMaterial[]=[]
+ app.deps.onTaskMaterialSaved=material=>{saved.push(material)}
+ const task=await app.start();await expect(task.done).rejects.toThrow('CONFLICT')
+ expect(saved).toEqual([]);expect(app.host.hasPending()).toBe(true)
+ fail=false;await app.host.retryPending();await Promise.resolve()
+ expect(saved).toHaveLength(1);expect(saved[0]?.material.fragments.some(f=>f.classification==='command' && f.text==='问')).toBe(true)
+ expect(JSON.stringify(saved)).not.toContain('PRIVATE_REASONING')
+ await app.host.retryPending();expect(saved).toHaveLength(1)
+})
+it('keeps successful saving successful if the background saved-material callback fails', async () => {
+ const app=appFor([[{type:'text',text:'可见回答'},finish('stop')]]),read=app.deps.read
+ app.deps.session=()=> 's';app.deps.read=async p=>({...await read(p),sessionId:'s',objectVersion:'oa'})
+ app.deps.onTaskMaterialSaved=()=>{throw Error('QUEUE_UNAVAILABLE')}
+ const task=await app.start();expect((await task.done).status).toBe('completed')
+ expect(app.host.hasPending()).toBe(false)
+})
+
+it('reports saved-material handoff failure separately from foreground saving', async () => {
+ const app=appFor([[{type:'text',text:'正文已保存'},finish('stop')]]),read=app.deps.read
+ app.deps.session=()=> 's';app.deps.read=async p=>({...await read(p),sessionId:'s',objectVersion:'oa'})
+ app.deps.onTaskMaterialSaved=async()=>{throw Error('QUEUE_UNAVAILABLE')}
+ const receipts:unknown[]=[];app.deps.onTaskMaterialResult=r=>{receipts.push(r)}
+ const task=await app.start();expect((await task.done).status).toBe('completed');await new Promise(resolve=>setTimeout(resolve,0))
+ expect(receipts).toEqual([{taskId:task.id,status:'failed',reason:'QUEUE_UNAVAILABLE'}])
+ expect(app.host.hasPending()).toBe(false)
+})
+
+it('records demand omissions in the saved task ledger', async () => {
+ const app=appFor([[{type:'text',text:'已答'},finish('stop')]])
+ app.deps.memory={context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled:true,epoch:0}),entries:async()=>Array.from({length:10},(_,i)=>({...memoryEntry(),id:`mem-${i}`,content:'问需求',layer:'demand' as const}))}
+ const task=await app.start();await task.done
+ expect(app.content()).toContain('按需记忆省略：mem-8、mem-9')
+})
+
+it.each(['success','failed'])('shares concurrent retries and attempts saved-material handoff once when consumer is %s', async outcome=>{
+ const app=appFor([[{type:'text',text:'并发补存的回答'},finish('stop')]])
+ const read=app.deps.read,write=app.deps.write;let failLedger=true,revision=1
+ app.deps.session=()=> 's';app.deps.read=async p=>({...await read(p),sessionId:'s',objectVersion:'oa'})
+ app.deps.write=async (...args)=>{
+  if(failLedger && args[1].includes('ledger-task'))throw Error('CONFLICT')
+  if(args[2] !== String(revision))throw Error('CONFLICT')
+  const saved=write(...args);revision++;return saved
+ }
+ const callbacks:string[]=[];const receipts:unknown[]=[]
+ app.deps.onTaskMaterialSaved=async material=>{callbacks.push(material.taskId);if(outcome==='failed')throw Error('QUEUE_UNAVAILABLE')}
+ app.deps.onTaskMaterialResult=r=>{receipts.push(r)}
+ const task=await app.start();await expect(task.done).rejects.toThrow('CONFLICT')
+ expect(callbacks).toEqual([])
+ failLedger=false
+ await Promise.all([app.host.retryPending(),app.host.retryPending('/vault','a.md')])
+ await new Promise(resolve=>setTimeout(resolve,0))
+ expect(callbacks).toEqual([task.id]);expect(receipts).toHaveLength(1)
+ expect(app.host.hasPending()).toBe(false)
+ await app.host.retryPending();expect(callbacks).toEqual([task.id])
+})
+
+it('retains the once handoff stamp if a later save notification throws and the task becomes pending', async()=>{
+ const app=appFor([[{type:'text',text:'已保存回答'},finish('stop')]]),read=app.deps.read,emit=app.deps.emit
+ app.deps.session=()=> 's';app.deps.read=async p=>({...await read(p),sessionId:'s',objectVersion:'oa'})
+ let failNotification=true;app.deps.emit=e=>{if(failNotification && e.persisted && e.status==='completed'){failNotification=false;throw Error('NOTE_NOTIFICATION_FAILED')}emit(e)}
+ const callbacks:string[]=[];app.deps.onTaskMaterialSaved=m=>{callbacks.push(m.taskId)}
+ const task=await app.start();await expect(task.done).rejects.toThrow('NOTE_NOTIFICATION_FAILED')
+ expect(callbacks).toEqual([task.id])
+ await app.host.retryPending();await Promise.resolve()
+ expect(callbacks).toEqual([task.id])
+})

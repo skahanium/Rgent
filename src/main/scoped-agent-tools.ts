@@ -1,11 +1,12 @@
+import type { TaskMaterialTracker, MaterialDependencies } from './host-material.ts'
 import { createHash, randomUUID } from 'node:crypto'
-import { compile, parseMarker } from '../markdown/index.ts'
+import { compile } from '../markdown/index.ts'
 import type { CompileResult } from '../markdown/types.ts'
 import type { NoteSnapshot } from '../shared/ipc.ts'
 import type { TaskGrant } from './task-authorization.ts'
 import { blankMarkers, folderOf, searchDocuments, searchSnippetRange } from './vault-index.ts'
-import { bodyFingerprint, historicalContextPolicy, ledgerProvenance, type LedgerSource } from './ledger-provenance.ts'
-import { ledgerChapters, type ContextSourceRef } from './host-context.ts'
+import { bodyFingerprint, historicalContextPolicy, ledgerProvenance, type LedgerSource, type LedgerMemoryDependency } from './ledger-provenance.ts'
+import { ledgerChapters, historicalBodyTasks, type ContextSourceRef } from './host-context.ts'
 
 export const READ_ONLY_TOOL_SCHEMAS = {
   read_library: { description: '列出本场获准笔记；使用返回的 sourceId 分页读取正文块。账本与附件不可读，nextCursor 用于续读。', inputSchema: { type: 'object', properties: { sourceId: { type: 'string', maxLength: 256 }, cursor: { type: 'string', maxLength: 256 } }, additionalProperties: false } },
@@ -17,17 +18,22 @@ export interface ScopedAgentTools {
   execute(name: string, input: unknown, signal: AbortSignal): Promise<unknown>
   assertCurrent(signal: AbortSignal): Promise<void>
   dependencies(): LedgerSource[]
+  contextDependencies?(ref: ContextSourceRef): MaterialDependencies
+  memoryDependencies?(): LedgerMemoryDependency[]
   summary(): { name: string; outcome: string }[]
   recordContext(refs: readonly ContextSourceRef[]): void
-  markSent(): void
+  markSent(includeTools?: boolean): void
   sentSources(): string[]
 }
 type Dependencies = {
   read(path: string): Promise<NoteSnapshot>
   tier(root: string, path: string): Promise<'reference' | 'follow'>
+  materials?: TaskMaterialTracker
+  validateMemoryBatch?: (dependencies: readonly LedgerMemoryDependency[]) => Promise<boolean[]>
+  validateMemory?: (dependency: LedgerMemoryDependency) => Promise<boolean>
   acceptsObject(path: string, expected: string, current: string): boolean
 }
-type Policy = { allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[]; byChapter: Map<string, LedgerSource[]>; byTask: Map<string, LedgerSource[]> }
+type Policy = { bodyTasks: Map<number,string[]>; memoryByChapter: Map<string, LedgerMemoryDependency[]>; memoryByTask: Map<string, LedgerMemoryDependency[]>; allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[]; byChapter: Map<string, LedgerSource[]>; byTask: Map<string, LedgerSource[]> }
 type Loaded = { path: string; snapshot: NoteSnapshot; parsed: CompileResult; body: string; policy: Policy; proof: LedgerSource }
 type Cursor = { kind: 'list' | 'read' | 'search'; sourceId?: string; query?: string; stamp: string; index: number; offset: number }
 const hash = (text: string) => createHash('sha256').update(text).digest('hex')
@@ -53,6 +59,9 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
   const sources = new Map(grant.sources.map(source => [source.relPath, source]))
   const ids = new Map(grant.sources.map(source => [source.sourceId, source.relPath]))
   const reads = new Map<string, LedgerSource>()
+  const memories = new Map<string, LedgerMemoryDependency>()
+  const stagedMemory = new Set<string>(), sentMemory = new Set<string>()
+  const contextPaths = new Set<string>(), contextMemories = new Set<string>()
   const staged = new Set<string>()
   const sent = new Set<string>()
   const outcomes = new Map<string, number>()
@@ -67,6 +76,7 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
     for (const dependency of reads.values()) {
       if (!(await dependencyValid(dependency, signal))) { grant.revoke(); throw Error('SOURCE_CHANGED') }
     }
+    if ((await memoryValid([...memories.values()],signal)).some(valid=>!valid)) { grant.revoke(); throw Error('MEMORY_CHANGED') }
     active(signal)
   }
   async function snapshot(path: string, signal: AbortSignal): Promise<NoteSnapshot> {
@@ -92,35 +102,56 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
       return (current.objectVersion === dependency.objectVersion || deps.acceptsObject(dependency.relPath, dependency.objectVersion, current.objectVersion)) && bodyFingerprint(current.content) === dependency.bodyHash
     } catch (error) { active(signal); return false }
   }
+  async function memoryValid(dependencies: LedgerMemoryDependency[], signal: AbortSignal): Promise<boolean[]> {
+    if (!dependencies.length) return []
+    if (deps.validateMemoryBatch) return awaiting(deps.validateMemoryBatch(dependencies),signal)
+    const valid: boolean[] = []
+    for (const dep of dependencies) valid.push(await awaiting(deps.validateMemory?.(dep) ?? Promise.resolve(false),signal))
+    return valid
+  }
   async function policy(source: string, signal: AbortSignal, parsed = compile(source)): Promise<Policy> {
     if (parsed.stale) throw Error('SOURCE_PARSE_FAILED')
     const chapters = ledgerChapters(parsed.partition.ledger)
-    const result = await historicalContextPolicy(source, dep => dependencyValid(dep, signal), parsed, chapters)
+    const memoryDependencies = [...new Map(chapters.flatMap(chapter=>{const p=ledgerProvenance(chapter.text);return p.status === 'valid' && p.record.version === 2 ? p.record.memoryDeps : []}).map(dep=>[JSON.stringify(dep),dep])).values()]
+    const validMemories = await memoryValid(memoryDependencies,signal)
+    const memoryChecks = new Map(memoryDependencies.map((dep,i)=>[JSON.stringify(dep),validMemories[i] === true]))
+    const result = await historicalContextPolicy(source, dep => dependencyValid(dep, signal), parsed, chapters, async dep => memoryChecks.get(JSON.stringify(dep)) === true)
+    const memoryByChapter = new Map<string, LedgerMemoryDependency[]>(), memoryByTask = new Map<string, LedgerMemoryDependency[]>()
     const byChapter = new Map<string, LedgerSource[]>()
     const byTask = new Map<string, LedgerSource[]>()
     for (const chapter of chapters) {
       if (!result.allowedLedgerChapterIds.includes(chapter.sourceId)) continue
       const record = ledgerProvenance(chapter.text)
       const dependencies = record.status === 'valid' ? record.record.sources : []
+      const memory = record.status === 'valid' && record.record.version === 2 ? record.record.memoryDeps : []
+      memoryByChapter.set(chapter.sourceId, memory)
+      if (chapter.taskId) memoryByTask.set(chapter.taskId, memory)
       byChapter.set(chapter.sourceId, dependencies)
       if (chapter.taskId) byTask.set(chapter.taskId, dependencies)
     }
-    return { ...result, byChapter, byTask }
+    return { ...result, byChapter, byTask, memoryByChapter, memoryByTask, bodyTasks:historicalBodyTasks(parsed,chapters) }
   }
-  function taskOf(parsed: CompileResult, start: number): string | undefined {
-    const marker = parsed.index.markers.filter(marker => marker.range.end <= start).at(-1)
-    return marker && parseMarker(parsed.source.slice(marker.range.start, marker.range.end))?.attrs['task-id']
+  function excluded(_parsed: CompileResult, p: Policy, start: number, identity?: string): boolean {
+    const tasks = p.bodyTasks.get(start) ?? []
+    return (identity === 'ai' || tasks.length > 0) && (p.excludedAiTaskIds.includes('*') || tasks.some(task=>p.excludedAiTaskIds.includes(task)))
   }
-  function excluded(parsed: CompileResult, p: Policy, start: number, identity?: string): boolean {
-    const task = taskOf(parsed, start)
-    return identity === 'ai' && (p.excludedAiTaskIds.includes('*') || !!task && p.excludedAiTaskIds.includes(task))
+  function blockDependencies(p: Policy, start: number): MaterialDependencies {
+    const tasks = p.bodyTasks.get(start) ?? []
+    return {sources:tasks.flatMap(task=>p.byTask.get(task) ?? []),memories:tasks.flatMap(task=>p.memoryByTask.get(task) ?? [])}
   }
-  function remember(dependency: LedgerSource, outgoing: boolean): void {
+  function remember(dependency: LedgerSource, outgoing: boolean, context = false): void {
     if (dependency.relPath === grant.origin) return
     const previous = reads.get(dependency.relPath)
     if (previous && (previous.objectVersion !== dependency.objectVersion || previous.bodyHash !== dependency.bodyHash)) throw Error('SOURCE_CHANGED')
     reads.set(dependency.relPath, { ...dependency })
-    if (outgoing) staged.add(dependency.relPath)
+    if (outgoing) (context ? contextPaths : staged).add(dependency.relPath)
+  }
+  function rememberMemory(deps: LedgerMemoryDependency[], context = false): void {
+    for (const dep of deps) {
+      const previous = memories.get(dep.id)
+      if (previous && JSON.stringify(previous) !== JSON.stringify(dep)) throw Error('MEMORY_CHANGED')
+      memories.set(dep.id, structuredClone(dep)); (context ? contextMemories : stagedMemory).add(dep.id)
+    }
   }
   async function load(path: string, signal: AbortSignal): Promise<Loaded> {
     const current = await snapshot(path, signal)
@@ -135,10 +166,12 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
   function recordBody(item: Loaded, start?: number, end?: number): void {
     remember(item.proof, true)
     for (const block of item.parsed.index.blocks) {
-      if (block.identity !== 'ai' || excluded(item.parsed, item.policy, block.range.start, block.identity)) continue
+      if (excluded(item.parsed, item.policy, block.range.start, block.identity)) continue
       if (start !== undefined && end !== undefined && (block.range.end <= start || block.range.start >= end)) continue
-      const task = taskOf(item.parsed, block.range.start)
-      for (const dep of task ? item.policy.byTask.get(task) ?? [] : []) remember(dep, true)
+      const dependencies = blockDependencies(item.policy,block.range.start)
+      deps.materials?.body(item.snapshot.content, {start:Math.max(start ?? 0, block.range.start), end:Math.min(end ?? item.body.length, block.range.end)}, { ...item.snapshot,relPath:item.path }, {sources:[item.proof,...dependencies.sources],memories:dependencies.memories}, false, item.parsed, item.policy.bodyTasks)
+      for (const dep of dependencies.sources) remember(dep, true)
+      rememberMemory(dependencies.memories)
     }
   }
   function cursor(input: string | undefined, expected: Pick<Cursor, 'kind' | 'sourceId' | 'query' | 'stamp'>): Cursor {
@@ -254,19 +287,41 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
       } finally { const key = `${label}\0${outcome}`; outcomes.set(key, (outcomes.get(key) ?? 0) + 1) }
     },
     assertCurrent: check,
+    contextDependencies(ref) {
+      if (!originPolicy || !originParsed) return {sources:[],memories:[]}
+      if (ref.kind !== 'body') return {sources:originPolicy.byChapter.get(ref.sourceId) ?? [],memories:originPolicy.memoryByChapter.get(ref.sourceId) ?? []}
+      const block = originParsed.index.blocks[Number(ref.sourceId.slice(5)) - 1]
+      return block ? blockDependencies(originPolicy,block.range.start) : {sources:[],memories:[]}
+    },
+    memoryDependencies: () => [...sentMemory].map(id => structuredClone(memories.get(id)!)),
     dependencies: () => [...reads.values()].map(dep => ({ ...dep })),
     summary: () => [...outcomes].map(([key, count]) => { const [name, outcome] = key.split('\0'); return { name: name!, outcome: `${outcome} (${count})` } }),
     recordContext(refs) {
+      contextPaths.clear(); contextMemories.clear()
+      for (const id of memories.keys()) if (!stagedMemory.has(id) && !sentMemory.has(id)) memories.delete(id)
       if (!originPolicy || !originParsed) return
       for (const ref of refs) {
-        if (ref.kind === 'ledger' || ref.kind === 'summary') for (const id of ref.kind === 'summary' ? ref.sourceId.split(',') : [ref.sourceId]) for (const dep of originPolicy.byChapter.get(id) ?? []) remember(dep, true)
-        else {
+        if (ref.kind === 'ledger' || ref.kind === 'summary') {
+          for (const id of ref.kind === 'summary' ? ref.sourceId.split(',') : [ref.sourceId]) {
+            for (const dep of originPolicy.byChapter.get(id) ?? []) remember(dep, true, true)
+            rememberMemory(originPolicy.memoryByChapter.get(id) ?? [], true)
+          }
+        } else {
           const block = originParsed.index.blocks[Number(ref.sourceId.slice(5)) - 1]
-          if (block?.identity === 'ai') { const task = taskOf(originParsed, block.range.start); for (const dep of task ? originPolicy.byTask.get(task) ?? [] : []) remember(dep, true) }
+          if (block) {
+            const dependencies = blockDependencies(originPolicy,block.range.start)
+            for (const dep of dependencies.sources) remember(dep, true, true)
+            rememberMemory(dependencies.memories, true)
+          }
         }
       }
     },
-    markSent() { for (const path of staged) sent.add(path) },
+    markSent(includeTools = true) {
+      for (const path of contextPaths) sent.add(path)
+      for (const id of contextMemories) sentMemory.add(id)
+      contextPaths.clear(); contextMemories.clear()
+      if (includeTools) { for (const path of staged) sent.add(path); staged.clear(); for (const id of stagedMemory) sentMemory.add(id); stagedMemory.clear() }
+    },
     sentSources: () => [...sent]
   }
 }

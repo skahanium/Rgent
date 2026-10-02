@@ -75,3 +75,59 @@ it('does not downgrade a new chapter after its provenance payload is removed', (
   const stripped = written.replace(/^<!-- rgent:ledger-sources:v1[^\n]*-->\n/m, '')
   expect(ledgerProvenance(stripped).status).toBe('invalid')
 })
+
+it('round trips v2 memory dependencies separately from tool scope and refuses missing permission', async () => {
+  const dep = { id: 'memory', version: 1, basisHashes: ['a'.repeat(64)], sourceDeps: [{ id: 'source', version: 1, hash: 'b'.repeat(64), relPath: 'outside.md', kind: 'body' as const, taskId: null }] }
+  const v2 = { ...record, version: 2 as const, memoryDeps: [dep] }
+  const encoded = encodeLedgerProvenance(v2)
+  expect(encoded).toContain('ledger-sources:v2')
+  expect(ledgerProvenance(encoded)).toEqual({ status: 'valid', record: v2 })
+  expect(await validateLedgerProvenance(encoded, async () => true)).toBe(false)
+  expect(await validateLedgerProvenance(encoded, async () => true, async d => d.id === 'memory')).toBe(true)
+  expect(() => encodeLedgerProvenance({ ...v2, memoryDeps: [dep, dep] })).toThrow()
+  const written = appendLedgerChapter('正文', { taskId: 'v2', startedAt: 'now', status: 'completed', prompt: '问', answer: '答', provenance: v2 })
+  expect(ledgerChapters(written.slice(written.indexOf('<!-- rgent:ledger:v1 -->')))[0]?.taskId).toBe('v2')
+  expect(ledgerProvenance(written.replace(/^<!-- rgent:ledger-sources:v2[^\n]*-->\n/m, '')).status).toBe('invalid')
+})
+
+it('rejects duplicate task IDs and unknown task marker versions before allowing historical content', async () => {
+ const { historicalContextPolicy } = await import('../../src/main/ledger-provenance.ts')
+ const a=appendLedgerChapter('正文',{taskId:'duplicate',startedAt:'now',status:'completed',prompt:'问',answer:'答',provenance:record})
+ const start=a.indexOf('<!-- rgent:ledger-task:')
+ const duplicate=a+'\n'+a.slice(start)
+ expect((await historicalContextPolicy(duplicate,async()=>true)).allowedLedgerChapterIds).toEqual([])
+ expect(ledgerProvenance('<!-- rgent:ledger-task:v9 id="new" -->\n## 旧章\n')).toEqual({status:'invalid'})
+ const mismatch=a.replace('sources="v1"','sources="v2"')
+ expect(ledgerProvenance(mismatch)).toEqual({status:'invalid'})
+})
+
+it('does not accept string versions or unknown metadata fields as a valid v2 record', () => {
+ expect(()=>encodeLedgerProvenance({...record,version:'1'} as unknown as LedgerProvenance)).toThrow('INVALID_LEDGER_PROVENANCE')
+})
+
+it('escapes memory source labels in the human-readable ledger summary', () => {
+ const dep={id:'memory',version:1,basisHashes:['a'.repeat(64)],sourceDeps:[{id:'source',version:1,hash:'b'.repeat(64),relPath:'<!--.md',kind:'body' as const,taskId:null}]}
+ const written=appendLedgerChapter('正文',{taskId:'labels',startedAt:'now',status:'completed',prompt:'问',answer:'答',provenance:{...record,version:2,memoryDeps:[dep]}})
+ expect(written).toContain('&lt;!--.md / body')
+})
+
+it('filters provable adopted AI copies from the origin context after memory is forgotten', async () => {
+ const {historicalContextPolicy}=await import('../../src/main/ledger-provenance.ts')
+ const dep={id:'forgotten',version:1,basisHashes:['a'.repeat(64)],sourceDeps:[{id:'source',version:1,hash:'b'.repeat(64),relPath:'outside.md',kind:'body' as const,taskId:null}]}
+ const source=appendLedgerChapter('已采纳秘密。\n\n/现在问',{taskId:'old',startedAt:'now',status:'completed',prompt:'旧问',answer:'已采纳秘密。',provenance:{...record,sources:[],version:2,memoryDeps:[dep]}})
+ const policy=await historicalContextPolicy(source,async()=>true)
+ const plan=buildHostContext({source,prompt:'现在问',placement:source.indexOf('/现在问'),inputBudgetTokens:4000,countTokens:Buffer.byteLength,...policy})
+ expect(plan.status).toBe('ready');if(plan.status!=='ready')return
+ expect(plan.content).not.toContain('已采纳秘密')
+})
+
+it.each(['普通引言。\n\n### 工具摘要\n\nFORGOTTEN_SECRET。', '普通引言。\n\n```md\n### 工具摘要\n```\n\nFORGOTTEN_SECRET。'])('fails closed for ambiguous task fields instead of laundering an adopted suffix: %s', async answer => {
+ const {historicalContextPolicy}=await import('../../src/main/ledger-provenance.ts')
+ const dep={id:'forgotten',version:1,basisHashes:['a'.repeat(64)],sourceDeps:[{id:'source',version:1,hash:'b'.repeat(64),relPath:'outside.md',kind:'body' as const,taskId:null}]}
+ const source=appendLedgerChapter('FORGOTTEN_SECRET。\n\n无关人工段。\n\n/现在问',{taskId:'old',startedAt:'now',status:'completed',prompt:'旧问',answer,provenance:{...record,sources:[],version:2,memoryDeps:[dep]}})
+ const policy=await historicalContextPolicy(source,async()=>true,undefined,undefined,async()=>true)
+ expect(policy.allowedLedgerChapterIds).toEqual([])
+ const plan=buildHostContext({source,prompt:'现在问',placement:source.indexOf('/现在问'),inputBudgetTokens:4000,countTokens:Buffer.byteLength,...policy})
+ expect(plan.status).toBe('ready');if(plan.status!=='ready')return
+ expect(plan.content).not.toContain('FORGOTTEN_SECRET');expect(plan.content).toContain('无关人工段')
+})
