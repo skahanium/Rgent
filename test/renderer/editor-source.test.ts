@@ -13,6 +13,94 @@ function editor(): EditorHost {
 afterEach(() => { for (const host of mounted.splice(0)) host.destroy() })
 
 describe('raw Markdown and editor coordinates', () => {
+  it('keeps every Pinyin composition update and commits one undoable word', () => {
+    const host = editor()
+    host.setText('')
+    for (const text of ['n', 'ni', 'nih', 'niha', 'nihao', '你好']) {
+      host.view.dispatch({ changes: { from: 0, to: host.view.state.doc.length, insert: text }, userEvent: 'input.type.compose' })
+      expect(host.getText()).toBe(text)
+    }
+    expect(undo(host.view)).toBe(true)
+    expect(host.getText()).toBe('')
+    expect(redo(host.view)).toBe(true)
+    expect(host.getText()).toBe('你好')
+  })
+
+  it('groups successive keyboard letters without interrupting ordinary typing', () => {
+    const host = editor()
+    host.setText('甲\r\n\r\n')
+    for (const text of ['h', 'e', 'l', 'l', 'o']) {
+      host.view.dispatch({ changes: { from: host.view.state.doc.length, insert: text }, userEvent: 'input.type' })
+    }
+    expect(host.getText()).toBe('甲\r\n\r\nhello')
+    expect(undo(host.view)).toBe(true)
+    expect(host.getText()).toBe('甲\r\n\r\n')
+    expect(redo(host.view)).toBe(true)
+    expect(host.getText()).toBe('甲\r\n\r\nhello')
+  })
+
+  it('prepares the human paragraph before composition starts at an AI boundary', () => {
+    const host = editor()
+    const raw = '<!-- rgent:ai:v1 -->\r\n回答\r\n'
+    host.setText(raw)
+    const at = host.view.state.doc.length
+    host.view.dispatch({ selection: { anchor: at } })
+    host.view.contentDOM.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    expect(host.getText()).toBe(raw + '\r\n')
+    for (const text of ['n', 'ni', 'nihao', '你好']) {
+      host.view.dispatch({ changes: { from: at + 1, to: host.view.state.doc.length, insert: text }, userEvent: 'input.type.compose' })
+    }
+    host.view.contentDOM.dispatchEvent(new CompositionEvent('compositionend', { data: '你好', bubbles: true }))
+    expect(host.getText()).toBe(raw + '\r\n你好')
+    expect(undo(host.view)).toBe(true)
+    expect(host.getText()).toBe(raw)
+    expect(redo(host.view)).toBe(true)
+    expect(host.getText()).toBe(raw + '\r\n你好')
+  })
+
+  it('cancels an empty boundary composition without leaving an automatic blank line', async () => {
+    const host = editor()
+    const raw = '<!-- rgent:ai:v1 -->\n回答\n'
+    host.setText(raw)
+    host.view.dispatch({ selection: { anchor: host.view.state.doc.length } })
+    host.view.contentDOM.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    expect(host.getText()).toBe(raw + '\n')
+    host.view.contentDOM.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
+    await Promise.resolve()
+    expect(host.getText()).toBe(raw)
+    expect(undo(host.view)).toBe(false)
+  })
+
+  it('does not apply delayed composition cleanup to another note with identical text', async () => {
+    const host = editor()
+    const raw = '<!-- rgent:ai:v1 -->\n回答\n'
+    host.setText(raw)
+    host.view.dispatch({ selection: { anchor: host.view.state.doc.length } })
+    host.view.contentDOM.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    const otherNote = host.getText()
+    host.view.contentDOM.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
+    host.setText(otherNote)
+    await Promise.resolve()
+    expect(host.getText()).toBe(otherNote)
+  })
+
+  it('restores a mixed-newline selection replaced by composition after an external prefix update', () => {
+    const host = editor()
+    const raw = '\ufeff开头\r\n甲\n乙\r末尾\r\n'
+    host.setText(raw)
+    const from = '开头\n'.length + 1
+    for (const text of ['n', 'ni', 'n', 'nihao', '你好']) {
+      const to = text === 'n' && host.getText() === raw ? from + '甲\n乙\n'.length : host.view.state.doc.length - '末尾\n'.length
+      host.view.dispatch({ changes: { from, to, insert: text }, userEvent: 'input.type.compose' })
+    }
+    const edited = host.getText()
+    host.applyExternalText('外部\r\n' + edited)
+    expect(undo(host.view)).toBe(true)
+    expect(host.getText()).toBe('外部\r\n' + raw)
+    expect(redo(host.view)).toBe(true)
+    expect(host.getText()).toBe('外部\r\n' + edited)
+  })
+
   it('normalizes the editing projection but preserves mixed source and BOM', () => {
     const host = editor()
     const raw = '\ufeff甲\r\n乙\n丙\r丁\r\n'

@@ -472,6 +472,8 @@ export function mountEditor(
   onChange: (text: string) => void
 ): EditorHost {
   let applying = false
+  let documentGeneration = 0
+  let compositionBoundary: { from: number; raw: string; generation: number } | null = null
   const warning = document.createElement('div')
   warning.className = 'md-render-warning md-parse-error'
   warning.setAttribute('role', 'alert')
@@ -508,6 +510,29 @@ export function mountEditor(
       markdownField,
       identityLock,
       EditorView.domEventHandlers({
+        compositionstart: (_event, view) => {
+          compositionBoundary = null
+          const selection = view.state.selection.main
+          const result = view.state.field(markdownField).result
+          if (!selection.empty || result.stale) return false
+          const projection = sourceOf(view.state)
+          const at = projection.toRaw(selection.head)
+          const plan = planIdentityEdit(projection.raw, [{ from: at, to: at, insert: ' ' }], result.index)
+          if (plan.blocked || !plan.prefixed.length) return false
+          // 在浏览器建立预编辑文字之前断段，避免 transactionFilter 中途重写组合范围。
+          view.dispatch({ changes: { from: selection.head, insert: '\n' }, selection: { anchor: selection.head + 1 }, userEvent: 'input.type.compose.start', annotations: isolateHistory.of('before') })
+          if (sourceOf(view.state) !== projection) compositionBoundary = { from: selection.head, raw: sourceOf(view.state).raw, generation: documentGeneration }
+          return false
+        },
+        compositionend: (event, view) => {
+          const boundary = compositionBoundary
+          compositionBoundary = null
+          if (boundary && !event.data) queueMicrotask(() => {
+            // CM 先刷新取消后的 DOM；只撤回仍为空、仍属本篇的自动断段。
+            if (boundary.generation === documentGeneration && sourceOf(view.state).raw === boundary.raw) view.dispatch({ changes: { from: boundary.from, to: boundary.from + 1 }, annotations: Transaction.addToHistory.of(false) })
+          })
+          return false
+        },
         click: (event, view) => {
           if (!event.metaKey && !event.ctrlKey) return false
           const target = event.target instanceof Element ? event.target.closest<HTMLElement>('.md-link[data-md-url]') : null
@@ -544,6 +569,8 @@ export function mountEditor(
     view,
     getText: () => sourceOf(view.state).raw,
     setText: (text, host, selection) => {
+      documentGeneration += 1
+      compositionBoundary = null
       const projection = new SourceProjection(text)
       applying = true
       view.dispatch({
@@ -641,6 +668,6 @@ export function mountEditor(
       return () => stateListeners.delete(listener)
     },
     focus: () => view.focus(),
-    destroy: () => { view.destroy(); warning.remove() }
+    destroy: () => { documentGeneration += 1; view.destroy(); warning.remove() }
   }
 }

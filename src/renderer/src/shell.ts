@@ -267,7 +267,7 @@ export async function start(root: HTMLElement): Promise<void> {
   editor.setTheme(document.documentElement.dataset.theme === 'night')
 
   editor.view.dom.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return
+    if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229 || editor.view.compositionStarted) return
     const selection = editor.selectionRange()
     if (selection.anchor !== selection.head) return
     const submission = slashAtCaret(editor.getText(), selection.head)
@@ -276,7 +276,7 @@ export async function start(root: HTMLElement): Promise<void> {
     void submitSlash(submission)
   }, { capture: true })
   document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape' || !active || document.querySelector('dialog[open]')) return
+    if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229 || editor.view.compositionStarted || !active || document.querySelector('dialog[open]')) return
     const task = [...activeTasks.values()].find((item) => item.relPath === active)
     if (!task) return
     event.preventDefault()

@@ -45,12 +45,12 @@ export class SourceProjection {
 }
 
 export const setRawSource = StateEffect.define<string>()
-type RawReplacement = { from: number; to: number; insert: string }
+// 只跟踪替换落点和原文字节；被替换范围由 changes 决定，不再映射未使用的范围末端。
+type RawReplacement = { from: number; insert: string }
 const replaceRaw = StateEffect.define<readonly RawReplacement[]>({
   map: (edits, changes) => changes.empty ? edits : edits.map((edit) => ({
     ...edit,
-    from: changes.mapPos(edit.from, 1),
-    to: changes.mapPos(edit.to, -1)
+    from: changes.mapPos(edit.from, 1)
   }))
 })
 
@@ -80,10 +80,12 @@ export const rawSourceHistory = invertedEffects.of((tr) => {
   if (!tr.docChanged) return []
   const old = sourceOf(tr.startState)
   const edits: RawReplacement[] = []
-  tr.changes.iterChanges((from, to, fromB, toB) => {
-    edits.push({ from: fromB, to: toB, insert: old.raw.slice(old.toRaw(from), old.toRaw(to)) })
+  tr.changes.iterChanges((from, to, fromB) => {
+    const insert = old.raw.slice(old.toRaw(from), old.toRaw(to))
+    // 普通字符和空串能由 CM 自身撤销；只有换行需要额外保留 LF／CRLF／CR。
+    if (/[\r\n]/.test(insert)) edits.push({ from: fromB, insert })
   })
-  return [replaceRaw.of(edits)]
+  return edits.length ? [replaceRaw.of(edits)] : []
 })
 
 /** 原文字节作为独立 effect 传递，CM 的 insert 始终只携带 LF 投影。 */
@@ -92,7 +94,7 @@ export function rawEditSpec(state: EditorState, edit: { from: number; to: number
   const from = source.toView(edit.from), to = source.toView(edit.to)
   return {
     changes: { from, to, insert: normalizeSource(edit.insert) },
-    effects: replaceRaw.of([{ from, to, insert: edit.insert }]),
+    effects: replaceRaw.of([{ from, insert: edit.insert }]),
     annotations: isolateHistory.of('full')
   }
 }

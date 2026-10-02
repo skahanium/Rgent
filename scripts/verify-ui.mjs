@@ -336,6 +336,74 @@ const longNote = (() => {
 })()
 
 const visualOnly = process.env.RGENT_UI_VISUAL_ONLY === '1'
+const imeOnly = process.env.RGENT_UI_IME_ONLY === '1'
+
+/** Browser IME commands exercise the real input bridge, rather than inserting final Chinese text. */
+async function verifyComposition(page, vault, shot) {
+  process.stdout.write('\n中文组合输入\n')
+  const fixtures = [
+    ['输入法快速.md', ''],
+    ['输入法普通.md', '前文 '],
+    ['输入法混合换行.md', '\ufeff开头\r\n\r\n'],
+    ['输入法口令.md', '/'],
+    ['输入法标题.md', '# '],
+    ['输入法列表.md', '- '],
+    ['输入法AI后.md', '<!-- rgent:ai:v1 -->\n回答\n']
+  ]
+  for (const [name, source] of fixtures) writeFileSync(path.join(vault, name), source)
+  await page.eval(`(() => { const button = document.querySelector('.tree-toggle'); if (button.getAttribute('aria-expanded') !== 'true') button.click() })()`)
+  await selectBrowserFolder(page, '')
+  for (const [name, source] of fixtures) {
+    await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(node => node.dataset.path === ${JSON.stringify(name)})`)
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find(node => node.dataset.path === ${JSON.stringify(name)}).click()`)
+    await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(name)}`)
+    await page.eval(`(() => { const content = document.querySelector('.cm-content'); const view = content.cmTile.root.view; view.dispatch({ selection: { anchor: view.state.doc.length } }); view.focus() })()`)
+    const text = () => page.eval(`(() => { const content = document.querySelector('.cm-content'); const view = content.cmTile.root.view; return { text: view.state.doc.toString(), dom: content.textContent, composing: view.compositionStarted, focus: document.activeElement?.className } })()`)
+    for (const syllable of ['n', 'ni', 'nih', 'niha', 'nihao']) {
+      const response = await page.call('Input.imeSetComposition', { text: syllable, selectionStart: syllable.length, selectionEnd: syllable.length })
+      if (response.error) throw Error(JSON.stringify(response.error))
+      // The first draft is held beyond the save debounce to detect a save-induced interruption.
+      await sleep(syllable === 'n' && name !== '输入法快速.md' ? 1000 : 80)
+      const current = await text()
+      check(`${name} 拼音预编辑 ${syllable} 不丢字`, current.text === source.replace(/\r\n?|\n/g, '\n') + (name === '输入法AI后.md' ? '\n' : '') + syllable && current.composing, JSON.stringify(current))
+    }
+    if (name === '输入法口令.md') {
+      await page.eval(`document.querySelector('.cm-content').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 229, bubbles: true, cancelable: true }))`)
+      await sleep(1000)
+      check('组合输入的选词回车不准备或发送口令', await page.eval(`!document.querySelector('.overlay-authorization')`) === true)
+      await page.eval(`document.querySelector('.authorization-cancel')?.click()`)
+    }
+    await shot(page, `ime-${name.slice(0, -3)}-preedit`)
+    await page.call('Input.insertText', { text: '你好' })
+    await sleep(200)
+    const committed = await text()
+    check(`${name} 选词后只保留完整汉字`, committed.text === source.replace(/\r\n?|\n/g, '\n') + (name === '输入法AI后.md' ? '\n' : '') + '你好', JSON.stringify(committed))
+    await shot(page, `ime-${name.slice(0, -3)}-committed`)
+    const saved = await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content.endsWith('你好'))()`)
+    check(`${name} 选词结果自动保存`, saved)
+    const expectedRaw = source + (name === '输入法AI后.md' ? '\n' : '') + '你好'
+    check(`${name} 输入保留完整原文字节`, readFileSync(path.join(vault, name), 'utf8') === expectedRaw)
+    await page.key('z', 'KeyZ', process.platform === 'darwin' ? 4 : 2, 90)
+    check(`${name} 一次撤销恢复输入前全文`, (await text()).text === source.replace(/\r\n?|\n/g, '\n'))
+    await page.key('z', 'KeyZ', (process.platform === 'darwin' ? 4 : 2) | 8, 90)
+    check(`${name} 重做恢复完整选词`, (await text()).text === expectedRaw.replace(/\r\n?|\n/g, '\n'))
+    for (const syllable of ['n', 'ni', '']) await page.call('Input.imeSetComposition', { text: syllable, selectionStart: syllable.length, selectionEnd: syllable.length })
+    await sleep(150)
+    check(`${name} 取消后保留既有正文且不残留拼音`, (await text()).text === expectedRaw.replace(/\r\n?|\n/g, '\n'))
+  }
+  const cancelled = '输入法AI取消.md'
+  const cancelledSource = '<!-- rgent:ai:v1 -->\n回答\n'
+  writeFileSync(path.join(vault, cancelled), cancelledSource)
+  await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(node => node.dataset.path === ${JSON.stringify(cancelled)})`)
+  await page.eval(`[...document.querySelectorAll('.tree-note')].find(node => node.dataset.path === ${JSON.stringify(cancelled)}).click()`)
+  await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(cancelled)}`)
+  await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ selection: { anchor: view.state.doc.length } }); view.focus() })()`)
+  for (const text of ['n', 'ni', '']) await page.call('Input.imeSetComposition', { text, selectionStart: text.length, selectionEnd: text.length })
+  await sleep(150)
+  check('AI 边界取消后不残留拼音或自动断段', await page.eval(`document.querySelector('.cm-content').cmTile.root.view.state.doc.toString() === ${JSON.stringify(cancelledSource)}`) === true)
+  check('AI 边界取消结果落盘不修改原文', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(cancelled)})).content === ${JSON.stringify(cancelledSource)})()`))
+  check('组合输入没有未捕获异常', page.errors.length === 0, page.errors.slice(0, 1).join(''))
+}
 
 function seedVisualVault(vault) {
   const liveImage = process.env.RGENT_UI_LIVE_IMAGE_URL || 'https://media.example.invalid/file?id=sample%2Fone'
@@ -916,6 +984,14 @@ async function main() {
     if (!ready) throw new Error(`Electron/CDP 未启动：${startupError || `exit=${child.exitCode ?? '仍在运行'}`}\n${stderr || '子进程没有错误输出'}`)
     const page = await connect(port)
 
+    if (imeOnly) {
+      await waitFor(page, `document.querySelectorAll('.tree-row').length > 0`)
+      await verifyComposition(page, vault, shot)
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode = failures === 0 ? 0 : 1
+      return
+    }
+
     if (visualOnly) {
       await captureVisualBaseline(page, shot, nativeShot)
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
@@ -1494,6 +1570,8 @@ async function main() {
     await page.call('Emulation.clearDeviceMetricsOverride', {})
 
     } catch (error) { stageFailed('长文响应', error) }
+    try { await verifyComposition(page, vault, shot) }
+    catch (error) { stageFailed('中文组合输入', error) }
     process.stdout.write('\nHost 最小环\n')
     try {
     hostServer = createHttpServer((request, response) => {
@@ -1662,6 +1740,10 @@ async function main() {
     await parallelCheck('停止 A 后 B 仍可继续运行', `(async () => {const tasks=await window.rgent.agentTasks();return tasks.length===1 && tasks[0].relPath==='Host B.md' && document.querySelector('.status-task')?.textContent.includes('Host B')})()`)
     await page.key('Escape', 'Escape', 0, 27)
     await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    await page.eval(`(() => { const content = document.querySelector('.cm-content'); content.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })); content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true, cancelable: true })); })()`)
+    check('组合输入的候选 Esc 不取消当前 Host 任务', await page.eval(`(async () => (await window.rgent.agentTasks()).some(task => task.relPath === 'Host B.md'))()`) === true)
+    await page.eval(`document.querySelector('.cm-content').dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))`)
+    await sleep(100)
     await page.key('Escape', 'Escape', 0, 27)
     await parallelCheck('Esc 停止当前 B，两个任务均写入取消账本', `(async () => {
       const a = await window.rgent.noteRead('Host A.md')
