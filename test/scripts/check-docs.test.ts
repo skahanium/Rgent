@@ -117,7 +117,7 @@ describe('docs stage invariants', () => {
   it('rejects a handoff stage missing from the dependency graph', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const changed = source.replace('| 库内人工记忆 | 文件身份', '| 未列入依赖图的记忆阶段 | 文件身份')
+    const changed = source.replace(/^\| 库内记忆 \|/m, '| 未列入依赖图的记忆阶段 |')
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
