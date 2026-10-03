@@ -80,14 +80,14 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
     const source=await service.manualSource(request as unknown as import('../shared/memory.ts').MemoryManualRequest)
     const parents=await service.entries(source.memoryDeps.map(d=>d.id));if(source.memoryDeps.some(d=>!parents.some(e=>e.id===d.id&&e.version===d.version&&e.status==='active')))throw Error('MEMORY_DEPENDENCY_CHANGED')
     const input:WorkingInput={content:source.text,layer:source.classification==='command'?'core':'demand',scope:'本库',sources:[source],semantic:source.classification==='command'?'standing':'fact',attribution:'人明确记住的材料',reviewAt:null}
-    const preview:MemoryPreview={id:randomUUID(),sessionId:session,kind:'manual',content:input.content,layer:input.layer,scope:input.scope,sources:[source],warning:'确认只记住列出的材料；记忆许可不扩大读库范围。未采纳 AI 回答不能成为事实来源。'}
+    const preview:MemoryPreview={id:randomUUID(),sessionId:session,kind:'manual',content:input.content,layer:input.layer,scope:input.scope,sources:[source],warning:'只记住上面列出的材料，不增加 AI 可读取的笔记范围。未采纳的 AI 回答不能作为事实依据。'}
     return hold({owner,preview,input,basis:service.snapshot()})
    }
    if(op==='restore'){
     const item=request as unknown as import('../shared/memory.ts').MemoryItemRequest,basis=service.snapshot(),entry=basis.record.entries.find(e=>e.id===item.id&&e.version===item.version)
     if(!entry||item.revision!==basis.revision||item.objectVersion!==basis.objectVersion)throw Error('MEMORY_CHANGED')
     for(const source of entry.sources)if(!await service.verifySource(source))throw Error('MEMORY_SOURCE_CHANGED')
-    const preview:MemoryPreview={id:randomUUID(),sessionId:session,kind:entry.status==='disputed'||entry.status==='pending'?'confirm':'restore',content:entry.content,layer:entry.layer,scope:entry.scope,sources:entry.sources,warning:'请核对原话、归属与适用范围；本次确认清除复核期限，仍须通过来源和依赖核验。',...(entry.pendingTarget?{previousContent:basis.record.entries.find(e=>e.id===entry.pendingTarget!.id)?.content}:{})}
+    const preview:MemoryPreview={id:randomUUID(),sessionId:session,kind:entry.status==='disputed'||entry.status==='pending'?'confirm':'restore',content:entry.content,layer:entry.layer,scope:entry.scope,sources:entry.sources,warning:'请检查原话是谁说的、适用于哪里。确认后将恢复使用并取消原复核日期；来源及关联记忆仍须通过检查。',...(entry.pendingTarget?{previousContent:basis.record.entries.find(e=>e.id===entry.pendingTarget!.id)?.content}:{})}
     return hold({owner,preview,item,basis})
    }
    if(op==='retry'){
@@ -96,7 +96,7 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
     if(!receipt)throw Error('MEMORY_RETRY_UNAVAILABLE')
     const saved=await service.savedMaterial(vault.ledgerTaskPath(taskId),taskId);if(saved.materialVersion!==materialVersion)throw Error('MEMORY_MATERIAL_CHANGED')
     const cfg=engine.disclosure(),source=await service.sourceForPrompt(saved.origin.relPath,taskId)
-    return hold({owner,signature:cfg.signature,job:{taskId,materialVersion},preview:{id:randomUUID(),sessionId:session,kind:'retry',content:'重新核验原任务的获准材料后，取得新的有限整理许可；不会复活旧授权。',layer:'demand',scope:'本库',sources:[source],warning:'已清理或失效的材料不能重试；不会补采其它历史。',recipient:cfg.recipient,limits:cfg.limits}})
+    return hold({owner,signature:cfg.signature,job:{taskId,materialVersion},preview:{id:randomUUID(),sessionId:session,kind:'retry',content:'重新检查这场任务原来获准的材料，使用本次预览中的模型和上限再次整理；不会沿用已经结束的任务授权。',layer:'demand',scope:'本库',sources:[source],warning:'已清理或不可使用的材料不能重试，不会加入其他历史。',recipient:cfg.recipient,limits:cfg.limits}})
    }
    if(op==='maintenance'){
     if(request.action==='undo'){
@@ -106,14 +106,14 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
     if(request.action==='reset-config'){
      if(!config)throw Error('MEMORY_CONFIG_UNAVAILABLE');const actual=config.memoryConfigDiagnosis()
      if(actual.revision!==request.revision||request.objectVersion!==null)throw Error('MEMORY_CONFIG_CONFLICT')
-     return hold({owner,binding:{revision:actual.revision,objectVersion:null},preview:{id:randomUUID(),sessionId:session,kind:'reset-config',content:'重建设备记忆配置：默认记忆模型为空，所有库记忆许可关闭，覆盖与整理上限恢复默认。',layer:'demand',scope:'设备',sources:[],warning:'本机所有库的记忆配置将重置；库内记忆、笔记、账本、回答模型与密钥不变。原配置不会自动覆盖或作为许可重新启用。'}})
+     return hold({owner,binding:{revision:actual.revision,objectVersion:null},preview:{id:randomUUID(),sessionId:session,kind:'reset-config',content:'重置本设备的记忆设置：清除默认整理模型，关闭所有笔记库的记忆开关；各库单独选择的模型和整理上限恢复默认。',layer:'demand',scope:'设备',sources:[],warning:'影响本设备的所有笔记库。已有记忆、笔记、账本、回答模型与密钥保留；完成后需重新选择整理模型并开启记忆。'}})
     }
     const binding={revision:request.revision as string|null,objectVersion:request.objectVersion as string|null},action=request.action as 'watermark'|'reset'
     const actual=action==='reset'?vault.memoryDiagnostic():service.snapshot()
     if(actual.revision!==binding.revision||actual.objectVersion!==binding.objectVersion)throw Error('MEMORY_CONFLICT')
     const watermark=action==='watermark'?request.watermark as number:vault.materialCeiling()
     if(action==='watermark'&&(watermark<service.snapshot().record.watermark||watermark>vault.materialCeiling()))throw Error('BAD_REQUEST')
-    return hold({owner,binding,watermark,preview:{id:randomUUID(),sessionId:session,kind:action,content:action==='reset'?'清空本库记忆并关闭许可；以当前材料序号建立新的学习水位。':'推进自动学习水位到材料序号 '+watermark,layer:'demand',scope:'本库',sources:[],warning:action==='reset'?'原笔记与账本不变；记忆正文不保留旧副本，需重新配置开启。此前材料不会自动重新学习，不保证清除外部备份或已发送资料。':'现有记忆保留；此序号及以前的材料不再自动生成记忆。能够被水位替代的逐条阻断记录才会回收。'}})
+    return hold({owner,binding,watermark,preview:{id:randomUUID(),sessionId:session,kind:action,content:action==='reset'?'删除本库全部记忆并关闭记忆开关，阻止此前已登记的材料自动重新生成记忆。':'停止从截至本次预览已登记的旧材料自动学习。',layer:'demand',scope:'本库',sources:[],warning:action==='reset'?'原笔记与账本保留，删除的记忆不保留可恢复副本。重新开启后只从新材料自动学习，也可手动“记住”；外部备份及已发送内容不会被清除。':'保留现有记忆，阻止截至本次预览已登记的材料自动重新生成记忆。之后的新材料及手动“记住”仍可建立记忆。'}})
    }
    if(op==='commit'){
     const p=previews.get(request.id as string);previews.delete(request.id as string)

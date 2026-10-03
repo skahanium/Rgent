@@ -615,3 +615,27 @@ it('does not overwrite assistant edits made while a save receipt is in flight', 
   expect(note.value).toBe('保存途中新增')
   panel.close()
 })
+
+it('retains memory drafts when visiting another settings page in the same open dialog',async()=>{
+ const value={sessionId:'session',revision:null,objectVersion:null,config:{defaultModelId:null,limits:{seconds:120,calls:2,tools:0},vault:{enabled:false,override:{mode:'inherit'}},effectiveModelId:null,modelStatus:'missing'},recipient:null,status:'ready',entries:[],jobs:[],running:{permits:0,pending:0,active:0}}
+ const panel=createSettingsOverlay({getMode:async()=>'day',setMode:vi.fn(),memory:()=>({get:async()=>({ok:true,value}),models:async()=>({ok:false,error:'IO_ERROR'})})} as never)
+ panel.open('记忆');await new Promise(r=>setTimeout(r,0))
+ const enabled=document.querySelector<HTMLInputElement>('[data-memory="vault-enabled"]')!;enabled.checked=true;enabled.dispatchEvent(new Event('change'))
+ const go=(name:string)=>[...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')].find(b=>b.textContent===name)!.click()
+ go('界面');go('记忆');await new Promise(r=>setTimeout(r,0))
+ expect(document.querySelector('[data-memory="vault-enabled"]')).toBe(enabled)
+ expect(enabled.checked).toBe(true);expect(document.querySelector('[data-memory="vault-draft"]')!.textContent).toContain('尚未保存')
+ panel.close()
+})
+it('refreshes the model options on return without clearing an unsaved memory model choice',async()=>{
+ const value={sessionId:'session',revision:null,objectVersion:null,config:{defaultModelId:null,limits:{seconds:120,calls:2,tools:0},vault:{enabled:false,override:{mode:'inherit'}},effectiveModelId:null,modelStatus:'missing'},recipient:null,status:'ready',entries:[],jobs:[],running:{permits:0,pending:0,active:0}}
+ const config={defaultModelId:null,models:[{id:'m',modelId:'整理样张',provider:'custom',contextTokens:32000}],providers:[{provider:'custom',configured:true,hasKey:true,modelCount:1,baseURL:'http://localhost:1234'}],limits:{}}
+ const panel=createSettingsOverlay({getMode:async()=>'day',setMode:vi.fn(),memory:()=>({get:async()=>({ok:true,value}),models:async()=>({ok:true,config})})} as never)
+ panel.open('记忆');await new Promise(r=>setTimeout(r,0))
+ const select=document.querySelector<HTMLSelectElement>('[data-memory="default-model"]')!;select.value='m';select.dispatchEvent(new Event('change'))
+ const go=(name:string)=>[...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')].find(b=>b.textContent===name)!.click()
+ go('界面');go('记忆');await new Promise(r=>setTimeout(r,0))
+ expect(document.querySelector('[data-memory="default-model"]')).toBe(select);expect(select.value).toBe('m')
+ expect(document.querySelector('.memory-model-grid [role="status"]')!.textContent).toBe('尚未保存')
+ panel.close()
+})

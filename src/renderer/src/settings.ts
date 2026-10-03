@@ -181,7 +181,6 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     let themeRequest = 0
     const setPage = (name: '界面' | '助手' | '记忆' | '模型' | '运行'): void => {
       openedPage = name
-      if (name !== '记忆') { disposeMemoryPage?.(); disposeMemoryPage = null }
       if (name !== '模型') { disposeModelPage?.(); disposeModelPage = null }
       if (name !== '助手') disposeAssistantPage?.()
       for (const [label, button] of navButtons) {
@@ -392,11 +391,16 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     }
 
     let disposeMemoryPage: (() => void) | null = null
+    let memoryNodes: Node[] | null = null
+    let memoryBody: HTMLElement | null = null
     function renderMemoryPage(): void {
+      // Reuse a loaded page within this dialog; closing/changing vault still disposes it.
+      if(memoryNodes&&memoryBody?.querySelector('[data-memory="vault-enabled"]')){main.replaceChildren(...memoryNodes);memoryBody.dispatchEvent(new Event('rgent:memory-resume'));return}
       disposeMemoryPage?.()
-      const { body, error } = pageFrame('记忆', '当前库的有来源资料；不扩大读取范围，也不改变设备助手习惯。')
+      const { body, error } = pageFrame('记忆', '开启后，AI 会从已保存的任务中整理值得长期保留的信息，并在后续任务中自动参考。记忆只用于当前笔记库，你可以随时修改或遗忘。')
       const memory = handlers.memory?.()
       if (!memory) { showError(error, '请先选择笔记库。'); return }
+      memoryBody=body;memoryNodes=Array.from(main.childNodes)
       disposeMemoryPage = mountMemoryPage({ body, isCurrent: () => current.isOpen() && openedPage === '记忆', onChanged: () => handlers.onModelConfigChanged?.() }, memory)
     }
 
