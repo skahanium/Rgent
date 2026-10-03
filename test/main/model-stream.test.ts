@@ -1,9 +1,10 @@
+import {hostLedgerFixture} from './host-ledger-fixture.ts'
 import { createServer, type RequestListener, type Server } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AgentHost } from '../../src/main/agent-host.ts'
 import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
 import { createScopedAgentTools } from '../../src/main/scoped-agent-tools.ts'
-import { ledgerProvenance } from '../../src/main/ledger-provenance.ts'
+import { encodeLedgerProvenance, ledgerProvenance } from '../../src/main/ledger-provenance.ts'
 import { partitionSource } from '../../src/markdown/partition.ts'
 import type { NoteSnapshot, AgentStartRequest } from '../../src/shared/ipc.ts'
 import { streamModelText, streamModelStep } from '../../src/main/model-stream.ts'
@@ -167,7 +168,8 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
   const tier = async () => 'reference' as const
   const registry = new TaskAuthorizationRegistry({ root: () => '/vault', session: () => 'session', tree: async () => Object.keys(source).map(relPath => ({ name: relPath, relPath, kind: 'note' as const })), read, tier, acceptsObject: () => false, configuration: () => ({ credential, limits }) })
   let revision = 1
-  const host = new AgentHost({ root: () => '/vault', session: () => 'session', authorize: input => registry.consume('owner', input as AgentStartRequest), read, tier,
+  const history=hostLedgerFixture()
+  const host = new AgentHost({ledger:history.ledger, root: () => '/vault', session: () => 'session', authorize: input => registry.consume('owner', input as AgentStartRequest), read, tier,
     write: async (path, content, expected) => { if (expected !== source[path]!.revision) throw Error('CONFLICT'); source[path] = { ...source[path]!, content, revision: String(++revision) }; return { ...source[path]! } },
     credential: () => credential, limits: () => limits, stream: (input, signal) => streamModelText({ ...input, signal }), streamStep: (input, signal) => streamModelStep({ ...input, signal }), createReadOnlyTools: (grant, id) => createScopedAgentTools(grant, id, { read, tier, acceptsObject: () => false }), emit: () => {}
   })
@@ -183,7 +185,7 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
   expect(part.body).toContain('已核对参考原文。')
   expect(part.body).not.toContain('原文证据')
   expect(part.body).not.toContain('隐藏推理')
-  const record = ledgerProvenance(part.ledger!)
+  const record = ledgerProvenance(encodeLedgerProvenance(history.records().at(-1)!.provenance!))
   expect(record.status).toBe('valid')
   if (record.status === 'valid') {
     expect(record.record.tools.map(tool => tool.name)).toEqual(['search_library', 'read_library'])

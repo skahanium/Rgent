@@ -1,3 +1,4 @@
+import {hostLedgerFixture} from './host-ledger-fixture.ts'
 import { afterEach, expect, it } from 'vitest'
 import { AgentHost, type HostEvent } from '../../src/main/agent-host.ts'
 import { createModelConfigStore, memoryAuthorizationState } from '../../src/main/model-config.ts'
@@ -12,7 +13,8 @@ function boundHost(memoryState?: () => { signature: string }) {
   const events: HostEvent[] = []
   const successors = new Map<string, string>()
   let generate: () => AsyncIterable<string> = async function* () { yield 'answer' }
-  const host = new AgentHost({
+  const history=hostLedgerFixture(()=>{if(state.failLedger){state.failLedger=false;throw Error('IO_ERROR')}})
+  const host = new AgentHost({ledger:history.ledger,
     assertMemoryAuthorization: input => { if (input.memoryAuthorizationSignature !== (memoryState?.().signature ?? state.memorySignature)) throw Error('STALE_PREVIEW') },
     memory: { context: () => ({sessionId: state.sessionId,vaultKey:'key'}), config: () => ({enabled: true,revision:0}), entries: async () => {if (state.changeWhileRecalling) state.memorySignature='changed'; return []} },
     root: () => '/vault', session: () => state.sessionId,

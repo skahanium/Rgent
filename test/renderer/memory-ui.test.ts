@@ -26,23 +26,12 @@ describe('memory page drafts',()=>{
   })
 })
 
-import { ledgerRememberRanges, mountLedgerRememberButtons } from '../../src/renderer/src/memory-ui.ts'
+import { ledgerRememberCommand } from '../../src/renderer/src/memory-ui.ts'
 import { renderReadOnlyMarkdown } from '../../src/renderer/src/view/read-only.ts'
 import { readFileSync } from 'node:fs'
 import { appendLedgerChapter } from '../../src/main/host-source.ts'
 import type { LedgerProvenance } from '../../src/main/ledger-provenance.ts'
 import { partitionSource } from '../../src/markdown/partition.ts'
-it('offers interrupted human commands and completed answers with exact chapter offsets',()=>{
-  const source=appendLedgerChapter('正文',{taskId:'cancelled-task',startedAt:'now',status:'cancelled',prompt:'长期使用中文',answer:'部分 AI 回答'})
-  const ledger=partitionSource(source).ledger!
-  const ranges=ledgerRememberRanges(ledger)
-  expect(ranges.map(r=>r.label)).toEqual(['口令'])
-  const chapter=ledger.slice(ledger.indexOf('<!-- rgent:ledger-task:'))
-  expect(chapter.slice(ranges[0]!.start,ranges[0]!.end)).toBe('长期使用中文')
-  const completed=partitionSource(appendLedgerChapter('正文',{taskId:'completed-task',startedAt:'now',status:'completed',prompt:'口令',answer:'完整回答'})).ledger!
-  expect(ledgerRememberRanges(completed).map(r=>r.label)).toEqual(['口令','回答'])
-})
-
 import { renderMemoryPreview } from '../../src/renderer/src/memory-ui.ts'
 it('keeps an empty manual draft local and submits the same unused token only after content is filled',async()=>{
  const host=document.createElement('div'),commit=vi.fn(async()=>({ok:false,error:'MEMORY_SOURCE_CHANGED'}))
@@ -120,20 +109,6 @@ it('refreshes a collapsed same-version entry and its recovery action without exp
  dispose();body.remove()
 })
 
-it.each([0,1,2].flatMap(version=>['\n','\r\n'].map(newline=>[version,newline] as const)))('places each remember button at its marked task chapter despite legacy and answer h2 headings with sources v%i / %j', (version,newline)=>{
- const basis={model:{provider:'test',modelId:'model',endpointHost:'example.test'},scope:['note.md'],sources:[],tools:[]}
- const provenance:LedgerProvenance|undefined=version===0?undefined:version===1?{...basis,version:1}:{...basis,version:2,memoryDeps:[]}
- const first=appendLedgerChapter('正文',{taskId:'first',startedAt:'one',status:'completed',prompt:'第一口令',answer:'## 分析\n\n第一回答',provenance}),second=appendLedgerChapter(first,{taskId:'second',startedAt:'two',status:'completed',prompt:'第二口令',answer:'第二回答',provenance})
- const ledger=('## 旧手写章节\n\n旧材料\n\n'+partitionSource(second).ledger!).replaceAll('\n',newline),host=document.createElement('div'),remember=vi.fn()
- renderReadOnlyMarkdown(host,ledger);mountLedgerRememberButtons(host,ledger,remember)
- const buttons=[...host.querySelectorAll<HTMLButtonElement>('.memory-ledger-remember')]
- expect(buttons).toHaveLength(4)
- for(const b of buttons){let previous=b.previousElementSibling;while(previous?.tagName==='BUTTON')previous=previous.previousElementSibling;const taskId=b.getAttribute('aria-label')!.includes('first')?'first':'second';expect(previous?.textContent).toBe(taskId==='first'?'one · completed':'two · completed');const marker=ledger.indexOf(`<!-- rgent:ledger-task:v1 id="${taskId}"`),offset=ledger.indexOf(`## ${taskId==='first'?'one':'two'} · completed`,marker);expect((previous as HTMLElement).dataset.sourceStart).toBe(String(offset))}
- expect(host.querySelectorAll('h2')[0]!.nextElementSibling!.tagName).not.toBe('BUTTON')
- buttons.find(b=>b.getAttribute('aria-label')==='记住任务 second 的回答')!.click()
- const choice=ledgerRememberRanges(ledger).find(r=>r.taskId==='second'&&r.label==='回答')!;expect(remember).toHaveBeenCalledWith(choice.start,choice.end,'second');const secondChapter=ledger.slice(ledger.indexOf('<!-- rgent:ledger-task:v1 id="second"'));expect(secondChapter.slice(choice.start,choice.end)).toBe('第二回答')
- const legacy=document.createElement('div');renderReadOnlyMarkdown(legacy,'## old · completed\n\n### 口令\n\n口令\n\n### 回答\n\n回答\n\n### 工具摘要\n');mountLedgerRememberButtons(legacy,legacy.textContent!,remember);expect(legacy.querySelector('button')).toBeNull()
-})
 
 it('gives management and manual-preview textareas the existing themed settings padding',async()=>{
  const style=document.createElement('style');style.textContent=readFileSync('src/renderer/src/styles.css','utf8');document.head.append(style)
@@ -142,4 +117,22 @@ it('gives management and manual-preview textareas the existing themed settings p
  const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()}, {get:async()=>({ok:true,value:{...view,entries:[entry]}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
  renderMemoryPreview(body,{id:'preview',sessionId:'session',kind:'manual',content:'source',layer:'demand',scope:'库',sources:[],warning:'核对'}, {commit:vi.fn(),isCurrent:()=>true,onDone:vi.fn(),onCancel:vi.fn()} as never)
  try{for(const textarea of body.querySelectorAll('textarea')){expect(getComputedStyle(textarea).paddingTop).toBe('8px');expect(getComputedStyle(textarea).paddingLeft).toBe('10px')}}finally{dispose();body.remove();style.remove()}
+})
+it('exposes corruption and a single-use repair preview without hiding local management behind model configuration',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ const value:MemoryView={...view,reason:'MEMORY_CONFIG_UNAVAILABLE',learning:{watermark:3,nextSequence:7},diagnosis:{revision:'a'.repeat(64),objectVersion:'object',bytes:42},configDiagnosis:{revision:'b'.repeat(64),bytes:30}}
+ const maintenance=vi.fn(async()=>({ok:true,value:{id:'repair',sessionId:'session',kind:'reset-config',content:'关闭设备记忆许可',layer:'demand',scope:'设备',sources:[],warning:'笔记与密钥不变'}}))
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value}),models:async()=>({ok:false,error:'IO_ERROR'}),maintenance} as never)
+ await flush();expect(body.textContent).toContain('记忆配置')
+ ;[...body.querySelectorAll('button')].find(b=>b.textContent==='核对并重建记忆设备配置')!.click();await flush()
+ expect(maintenance).toHaveBeenCalledWith({action:'reset-config',revision:'b'.repeat(64),objectVersion:null})
+ expect(body.querySelector('.memory-preview')!.textContent).toContain('关闭设备记忆许可')
+ dispose();body.remove()
+})
+
+it.each(['saved','pending-body','cleared','legacy'] as const)('remembers only a verified typed human command when ledger state is %s',state=>{
+ const record={version:1,noteId:'note',taskId:'task',revision:2,sequence:3,state,bodyStatus:'present',chapter:{taskId:'task',startedAt:'now',status:'completed',prompt:'长期使用中文',answer:'未采纳回答'}} as import('../../src/main/ledger-store.ts').LedgerRecord
+ const choice=ledgerRememberCommand(record)
+ if(state!=='saved')expect(choice).toBeNull()
+ else {expect(choice?.taskId).toBe('task');expect(('口令：\n'+record.chapter!.prompt+'\n\n历史回答：\n'+record.chapter!.answer).slice(choice!.start,choice!.end)).toBe('长期使用中文')}
 })

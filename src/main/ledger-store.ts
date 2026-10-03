@@ -33,7 +33,8 @@ function parseRecord(raw:string):LedgerRecord{
 }
 /** Fixed app-owned records. Caller serializes all mutations with the vault queue. */
 export class LedgerStore{
- constructor(private readonly fs:SecureVaultFs,private readonly check:()=>void,private readonly saved?:(relPath:string,before:string,after:string,body:string)=>void){}
+ constructor(private readonly filesystem:SecureVaultFs|(()=>SecureVaultFs),private readonly check:()=>void,private readonly saved?:(relPath:string,before:string,after:string,body:string)=>void){}
+ private get fs(){this.check();return typeof this.filesystem==='function'?this.filesystem():this.filesystem}
  private bases=new Map<string,{raw:string;id:string}|null>()
  private read(path:string){this.check();try{const d=this.fs.readSnapshot(path),raw=d.bytes.toString('utf8');if(!Buffer.from(raw).equals(d.bytes))throw Error('LEDGER_RECORD_INVALID');const value={raw,id:d.objectVersion};this.bases.set(path,value);return value}catch(e){if(e instanceof Error&&e.message==='ENOENT'){this.bases.set(path,null);return null}throw e}}
  private replace(path:string,raw:string){this.check();const old=this.bases.has(path)?this.bases.get(path)!:this.read(path);this.fs.replace(path,old?.raw??null,raw,old?.id);this.check();if(this.read(path)?.raw!==raw)throw Error('LEDGER_CONFLICT')}

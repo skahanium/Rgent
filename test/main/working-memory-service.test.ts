@@ -19,3 +19,20 @@ it('separates source proof from meaning, tolerates unrelated app edits and prese
   expect((await service.entries())[0]?.status).toBe('paused')
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
+it('a manually remembered adopted answer retains its original external dependencies',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-adopted-source-')),root=path.join(base,'vault');await mkdir(root)
+ await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),markPrompt('/查证',{taskId:'task',range:{start:0,end:3},expectedText:'/查证',promptText:'查证'}));await writeFile(path.join(root,'b.md'),'获准外篇原材料')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{
+  const origin=await vault.readOpened('a.md'),external=await vault.readOpened('b.md')
+  await vault.ledgerPrepare('a.md',{taskId:'task',startedAt:new Date().toISOString(),status:'completed',prompt:'查证',answer:'依据外篇的公开结论',provenance:{version:1,model:{provider:'custom',modelId:'model',endpointHost:'model.test'},scope:['a.md','b.md'],sources:[{relPath:'b.md',objectVersion:external.objectVersion,bodyHash:bodyFingerprint(external.content)}],tools:[]}})
+  const saved=await vault.write('a.md',upsertAiAnswer(origin.content,{taskId:'task',answer:'依据外篇的公开结论'}),origin.revision,origin);await vault.ledgerComplete('a.md','task',saved.revision)
+  const note=await vault.read('a.md'),adopted=note.content.replace(/<!-- rgent:ai:v1[^\n]*-->\n/g,'');await vault.write('a.md',adopted,note.revision,note)
+  const current=await vault.read('a.md'),service=new WorkingMemoryService(vault,()=>null),start=current.content.indexOf('依据外篇的公开结论')
+  const source=await service.manualSource({...current,sessionId:current.sessionId,relPath:'a.md',kind:'body',start,end:start+'依据外篇的公开结论'.length})
+  expect(source.classification).toBe('adopted-ai');expect(source.sourceDeps[0]?.relPath).toBe('b.md')
+  await vault.write('b.md','外篇依据已改变',external.revision,external)
+  expect(await service.verifySource(source)).toBe(false)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+import {bodyFingerprint} from '../../src/main/ledger-provenance.ts'

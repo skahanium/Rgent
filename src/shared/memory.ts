@@ -57,8 +57,8 @@ export type MemoryStatus = { status: 'ready'; count: number } | { status: 'inval
 
 /** Only these bounded, human management views cross IPC. No hidden record or authority. */
 export type MemorySourceView = Pick<MemorySource, 'relPath' | 'kind' | 'taskId' | 'text' | 'classification'>
-export type MemoryEntryView = Pick<MemoryEntry, 'id' | 'version' | 'content' | 'layer' | 'scope' | 'status' | 'reason' | 'updatedAt' | 'pendingTarget'> & { sources: MemorySourceView[] }
-export type MemoryJobView = { taskId: string; materialVersion: string | null; outcome: MemoryJobReceipt['outcome'] | 'unavailable' | 'handed-off'; reason?: string; retryable: boolean }
+export type MemoryEntryView = Pick<MemoryEntry, 'id' | 'version' | 'content' | 'layer' | 'scope' | 'status' | 'reason' | 'updatedAt' | 'pendingTarget'> & { sources: MemorySourceView[];semantic?:'standing'|'fact';attribution?:string;reviewAt?:string|null }
+export type MemoryJobView = { taskId: string; materialVersion: string | null; outcome: MemoryJobReceipt['outcome'] | 'unavailable' | 'handed-off'; reason?: string; retryable: boolean; entryIds?: string[]; undoable?:boolean }
 export type MemoryView = {
   sessionId: string; revision: string | null; objectVersion: string | null
   config: PublicMemoryConfig
@@ -67,6 +67,7 @@ export type MemoryView = {
   entries: MemoryEntryView[]; jobs: MemoryJobView[]
   running: { permits: number; pending: number; active: number }
   learning?:{watermark:number;nextSequence:number}
+  configDiagnosis?: {revision:string|null;bytes:number}
   diagnosis?:{revision:string|null;objectVersion:string|null;bytes:number}
 }
 export type MemoryResult<T> = { ok: true; value: T } | { ok: false; error: string }
@@ -87,7 +88,7 @@ export type MemoryManualRequest = MemorySessionRequest & {
 }
 export type MemoryJobRequest = MemorySessionRequest & { taskId: string; materialVersion: string }
 export type MemoryPreview = {
-  id: string; sessionId: string; kind: 'manual' | 'restore' | 'confirm' | 'retry'|'watermark'|'reset'
+  id: string; sessionId: string; kind: 'manual' | 'restore' | 'confirm' | 'retry'|'watermark'|'reset'|'reset-config'|'undo'
   content: string; layer: MemoryEntry['layer']; scope: string
   sources: MemorySourceView[]; warning: string
   previousContent?: string
@@ -97,4 +98,4 @@ export type MemoryPreview = {
 export type MemoryCommitRequest = MemorySessionRequest & {
   id: string; content?: string; layer?: MemoryEntry['layer']; scope?: string
 }
-export type MemoryMaintenanceRequest=MemorySessionRequest&{action:'watermark'|'reset';revision:string|null;objectVersion:string|null;watermark?:number}
+export type MemoryMaintenanceRequest=MemorySessionRequest&{action:'watermark'|'reset'|'reset-config'|'undo';taskId?:string;materialVersion?:string;revision:string|null;objectVersion:string|null;watermark?:number}

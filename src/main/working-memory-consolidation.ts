@@ -69,6 +69,7 @@ export class WorkingMemoryConsolidation{
  private readonly active=new Set<Job>()
  private readonly running=new Set<Promise<void>>()
  private readonly idleWaiters:(()=>void)[]=[]
+ private readonly undoBatches=new Map<string,{service:WorkingMemoryService;sessionId:string;version:string;before:WorkingEntry[];after:{id:string;version:number}[]}>()
  private closed=false
  constructor(private readonly ports:ConsolidationPorts){}
  capture(taskId:string){
@@ -116,7 +117,14 @@ export class WorkingMemoryConsolidation{
  cancel(taskId?:string,reason='MEMORY_CANCELLED'){
   for(const [id] of this.permits)if(!taskId||id===taskId)this.permits.delete(id)
   for(const job of [...this.pending,...this.active])if(!taskId||job.material.taskId===taskId)job.controller.abort(Error(reason))
+  if(!taskId)this.undoBatches.clear()
   this.pump()
+ }
+ canUndo(taskId:string,version:string){const b=this.undoBatches.get(taskId);if(!b||b.version!==version)return false;try{return b.sessionId===b.service.context().sessionId&&b.after.every(a=>b.service.snapshot().record.entries.some(e=>e.id===a.id&&e.version===a.version))}catch{return false}}
+ async undo(taskId:string,version:string){
+  const b=this.undoBatches.get(taskId);if(!b||!this.canUndo(taskId,version))throw Error('MEMORY_RETRY_UNAVAILABLE')
+  for(const entry of b.before)for(const s of entry.sources){if(!await b.service.verifySource(s))throw Error('MEMORY_SOURCE_CHANGED');const parents=await b.service.entries(s.memoryDeps.map(d=>d.id));if(s.memoryDeps.some(d=>!parents.some(e=>e.id===d.id&&e.version===d.version&&e.status==='active')))throw Error('MEMORY_DEPENDENCY_CHANGED')}
+  await b.service.vault.memoryMutation(store=>store.undo(store.read(),b.before,b.after,taskId,version));this.undoBatches.delete(taskId)
  }
  close(){this.closed=true;this.cancel(undefined,'MEMORY_SESSION_CLOSED')}
  idle():Promise<void>{return !this.pending.length&&!this.active.size?Promise.resolve():new Promise(resolve=>this.idleWaiters.push(resolve))}
@@ -191,6 +199,7 @@ export class WorkingMemoryConsolidation{
     if(materialState(current.record)!==materialState(basis.record))throw Error('MEMORY_CONFLICT')
     return store.apply(current,groups,{taskId:job.material.taskId,materialVersion:job.material.materialVersion,outcome:'applied',entryIds:[],...(groups.reduce((n,g)=>n+g.length,0)<values.length?{reason:'MEMORY_OUTPUT_INVALID'}:{})})
    })
+   if(result.entryIds.length){const changed=result.snapshot.record.entries.filter(e=>result.entryIds.includes(e.id));const before=basis.record.entries.filter(e=>result.entryIds.includes(e.id));this.undoBatches.set(job.material.taskId,{service:job.service,sessionId:job.context.sessionId,version:job.material.materialVersion,before:structuredClone(before),after:changed.map(e=>({id:e.id,version:e.version}))});while(this.undoBatches.size>8)this.undoBatches.delete(this.undoBatches.keys().next().value!)}
    if(result.rejected)this.notify(job)
    // Promotion is a separate source recheck; its failure cannot turn a committed batch into failure.
    void job.service.recheckDeferred().then(()=>this.notify(job)).catch(()=>{})

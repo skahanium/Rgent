@@ -155,3 +155,9 @@ it('allocates structured histories by tokens, retains recent whole tasks and nev
  for(const c of first.chapters)expect(plan.refs.some(r=>r.kind==='ledger'&&r.sourceId===c.sourceId)).toBe(false)
  expect(plan.content.length).toBeLessThanOrEqual(2000)
 })
+it('returns unused summary reservation to complete recent history before requesting a lossy summary',()=>{
+ const chapters=Array.from({length:2},(_,n)=>({sourceId:`task-${n}`,text:'甲'.repeat(100)}))
+ const plan=buildHostContext({source:'正文。',chapters,prompt:'继续',placement:3,inputBudgetTokens:1000,countTokens:(s:string)=>s.length})
+ expect(plan.status).toBe('ready')
+ if(plan.status==='ready')expect(plan.refs.filter(r=>r.kind==='ledger').map(r=>r.sourceId)).toEqual(['task-0','task-1'])
+})

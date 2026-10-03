@@ -1,3 +1,6 @@
+import {hostLedgerFixture} from './host-ledger-fixture.ts'
+import {ledgerChapters,ledgerTaskFields} from '../../src/main/host-context.ts'
+import {SUMMARY_SECTIONS} from '../../src/main/summary-cache.ts'
 import { describe, expect, it } from 'vitest'
 import { AgentHost } from '../../src/main/agent-host.ts'
 import { assertLedgerPreserved, partitionSource } from '../../src/markdown/partition.ts'
@@ -20,24 +23,21 @@ function harness(
   initial = '前言\n\n/写个回答\n\n后文\n',
   assistant?: () => import('../../src/shared/assistant.ts').AssistantHabits
 ) {
-  let content = initial
+  let content = partitionSource(initial).body
   let revision = 1
   let policy: 'reference' | 'forbidden' = 'reference'
   let failLedgerOnce = false
   let lifecycleLocked = false
   const events: unknown[] = []
   const systems: string[] = []
-  const host = new AgentHost({
+  const history=hostLedgerFixture(()=>{if(failLedgerOnce){failLedgerOnce=false;throw Error('IO_ERROR')}})
+  for(const c of ledgerChapters(partitionSource(initial).ledger)){const f=ledgerTaskFields(c.text);if(f.status==='valid')history.seed('a.md',{taskId:c.taskId??c.sourceId,startedAt:new Date().toISOString(),status:'completed',prompt:f.prompt.text,answer:f.answer.text})}
+  const host = new AgentHost({ledger:history.ledger,
     root: () => '/vault',
     read: async () => ({ content, revision: String(revision) }),
     write: async (_relPath, next, expected) => {
       if (expected !== String(revision)) throw new Error('CONFLICT')
-      if (failLedgerOnce && next.includes('<!-- rgent:ledger-task:v1')) {
-        failLedgerOnce = false
-        throw new Error('IO_ERROR')
-      }
-      // 与 VaultSession.write 同一条账本边界断言：Host 写回也必须保住原账本前缀。
-      assertLedgerPreserved(next, partitionSource(content).ledger)
+      expect(partitionSource(next).ledger).toBeNull()
       content = next
       revision += 1
       return String(revision)
@@ -53,7 +53,7 @@ function harness(
     ...(assistant ? { assistant } : {}),
     emit: (event) => { events.push(event) }
   })
-  return { host, source: () => content, events, systems, setPolicy: (value: typeof policy) => { policy = value }, setLifecycleLock: (value: boolean) => { lifecycleLocked = value }, failLedgerOnce: () => { failLedgerOnce = true }, externalEdit: (change: (source: string) => string) => { content = change(content); revision += 1 } }
+  return { host, history, source: () => content, events, systems, setPolicy: (value: typeof policy) => { policy = value }, setLifecycleLock: (value: boolean) => { lifecycleLocked = value }, failLedgerOnce: () => { failLedgerOnce = true }, externalEdit: (change: (source: string) => string) => { content = change(content); revision += 1 } }
 }
 
 describe('Host minimal loop', () => {
@@ -89,8 +89,8 @@ describe('Host minimal loop', () => {
     expect(app.host.hasPending('/vault')).toBe(false)
     const saved = app.source()
     expect(partitionSource(saved).body).toContain('锁前已生成与待保存续段')
-    expect(partitionSource(saved).ledger).toContain('锁前已生成与待保存续段')
-    expect(saved.match(/<!-- rgent:ledger-task:v1/g)).toHaveLength(1)
+    expect(app.history.history()).toContain('锁前已生成与待保存续段')
+    expect(app.history.records()).toHaveLength(1);expect(partitionSource(saved).ledger).toBeNull()
     await app.host.retryPending('/vault')
     expect(app.source()).toBe(saved)
   })
@@ -106,8 +106,8 @@ describe('Host minimal loop', () => {
     expect(part.body).not.toContain('/写个回答')
     expect(part.body.match(/<!-- rgent:ai:v1 task-id=/g)).toHaveLength(2)
     expect(part.body).toContain('后文')
-    expect(part.ledger).toContain('第一段。')
-    expect(part.ledger).toContain('写个回答')
+    expect(app.history.history()).toContain('第一段。');expect(part.ledger).toBeNull()
+    expect(app.history.history()).toContain('写个回答')
   })
 
   it('completes and appends the ledger when the model answer ends in an open HTML block', async () => {
@@ -120,10 +120,10 @@ describe('Host minimal loop', () => {
     expect(app.host.hasPending('/vault')).toBe(false)
     const part = partitionSource(app.source())
     // 原账本逐字节保留；题型回答落进正文而未吞掉边界。
-    expect(part.ledger?.startsWith(before!)).toBe(true)
+    expect(part.ledger).toBeNull();expect(app.history.records()[0]?.answer).toBe('旧回答')
     expect(part.body).toContain('被截断的行')
-    expect(part.ledger).toContain('被截断的行')
-    expect(app.source().match(/<!-- rgent:ledger-task:v1/g)).toHaveLength(2)
+    expect(app.history.history()).toContain('被截断的行')
+    expect(app.history.records()).toHaveLength(2)
   })
 
   it('refuses model access when the note is forbidden, without changing bytes', async () => {
@@ -156,7 +156,8 @@ describe('Host minimal loop', () => {
     let revision = 1
     let allowed = true
     let sent = false
-    const host = new AgentHost({
+    const history=hostLedgerFixture(),reasoning:string[]=[]
+    const host = new AgentHost({ledger:history.ledger,onReasoning:(_task,text)=>reasoning.push(text),
       root: () => '/vault',
       read: async () => {
         if (content.includes('<!-- rgent:prompt:v1')) allowed = false
@@ -215,7 +216,7 @@ describe('Host minimal loop', () => {
     expect(app.host.hasPending()).toBe(true)
     await app.host.retryPending()
     expect(app.host.hasPending()).toBe(false)
-    expect(app.source().match(/<!-- rgent:ledger-task:v1/g)).toHaveLength(1)
+    expect(app.history.records()).toHaveLength(1)
   })
 
   it('does not start a later task in a note with an unsaved prior answer', async () => {
@@ -249,23 +250,25 @@ describe('Host minimal loop', () => {
     expect(await task.done).toEqual({ status: 'completed' })
     expect(app.source()).not.toContain('secret')
     expect(JSON.stringify(app.events)).not.toContain('secret')
-    expect(app.source()).toContain('密钥已隐藏')
+    expect(app.history.history()).toContain('密钥已隐藏')
   })
 
   it('summarizes an oversized old ledger in bounded task-local calls before final generation', async () => {
     const prompts: string[] = []
-    const source = '前言\n\n/写个回答\n\n后文\n<!-- rgent:ledger:v1 -->\n## 旧章\n' + '历史。'.repeat(700) + '\n## 最近章\n最近。\n'
+    const source = '前言\n\n/写个回答\n\n后文\n'
     const app = harness(async function* (_signal, prompt) {
       prompts.push(prompt)
-      yield prompt.startsWith('请仅摘要') ? '旧章摘要。' : '最终回答。'
+      yield prompt.startsWith('仅整理') ? SUMMARY_SECTIONS.map(h=>h+'\n旧章摘要。').join('\n\n') : '最终回答。'
     }, source)
+    app.history.seed('a.md',{taskId:'old',startedAt:new Date().toISOString(),status:'completed',prompt:'旧任务',answer:'历史。'.repeat(300)})
+    app.history.seed('a.md',{taskId:'recent',startedAt:new Date().toISOString(),status:'completed',prompt:'最近',answer:'最近。'})
     const start = source.indexOf('/')
     const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
     expect(await task.done).toEqual({ status: 'completed' })
-    expect(prompts.filter((prompt) => prompt.startsWith('请仅摘要')).length).toBeGreaterThan(1)
-    expect(prompts.at(-1)).toContain('仅供本次任务使用')
-    expect(partitionSource(app.source()).ledger).toContain('最终回答。')
-    expect(partitionSource(app.source()).ledger).toContain('历史。')
+    expect(prompts.filter((prompt) => prompt.startsWith('仅整理')).length).toBeGreaterThan(0)
+    expect(prompts.at(-1)).toContain('须查原文')
+    expect(app.history.history()).toContain('最终回答。')
+    expect(app.history.history()).toContain('历史。')
   })
 
   it('keeps an externally changed AI block instead of silently overwriting it', async () => {
@@ -286,9 +289,10 @@ describe('Host minimal loop', () => {
 
   it('keeps model reasoning and process in the ledger, never in the body', async () => {
     const seeded = withExistingLedger()
-    let content = seeded.source
+    let content = partitionSource(seeded.source).body
     let revision = 1
-    const host = new AgentHost({
+    const history=hostLedgerFixture(),reasoning:string[]=[]
+    const host = new AgentHost({ledger:history.ledger,onReasoning:(_task,text)=>reasoning.push(text),
       root: () => '/vault',
       read: async () => ({ content, revision: String(revision) }),
       write: async (_path, next, expected) => {
@@ -314,11 +318,11 @@ describe('Host minimal loop', () => {
     const part = partitionSource(content)
     expect(part.body).toContain('公开回答。')
     expect(part.body).not.toContain('先想清楚依据')
-    expect(part.ledger).toContain('### 推理')
-    expect(part.ledger).toContain('先想清楚依据：参考甲与参考乙。')
-    expect(part.ledger).toContain('### 过程')
-    expect(part.ledger).toContain('第 1 步：文本')
-    expect(part.ledger).toContain('收尾：completed')
+    expect(part.ledger).toBeNull()
+    expect(reasoning.join('')).toContain('先想清楚依据：参考甲与参考乙。')
+    expect(history.history()).not.toContain('先想清楚依据')
+    expect(history.records().at(-1)?.trace?.join('\n')).toContain('第 1 步：文本')
+    expect(history.records().at(-1)?.status).toBe('completed')
   })
 
   it('retries every pending note even when one of them keeps failing', async () => {
@@ -329,17 +333,14 @@ describe('Host minimal loop', () => {
     ])
     const forbidden = new Set<string>()
     let failNextLedger = false
-    const host = new AgentHost({
+    const history=hostLedgerFixture(()=>{if(failNextLedger){failNextLedger=false;throw Error('IO_ERROR')}})
+    const host = new AgentHost({ledger:history.ledger,
       root: () => '/vault',
       read: async (relPath) => ({ content: notes.get(relPath)!.content, revision: String(notes.get(relPath)!.revision) }),
       write: async (relPath, next, expected) => {
         const note = notes.get(relPath)!
         if (expected !== String(note.revision)) throw new Error('CONFLICT')
-        if (failNextLedger && next.includes('<!-- rgent:ledger-task:v1')) {
-          failNextLedger = false
-          throw new Error('IO_ERROR')
-        }
-        assertLedgerPreserved(next, partitionSource(note.content).ledger)
+        expect(partitionSource(next).ledger).toBeNull()
         note.content = next
         note.revision += 1
         return String(note.revision)
@@ -369,14 +370,14 @@ describe('Host minimal loop', () => {
     await expect(host.retryPending('/vault')).rejects.toThrow('FORBIDDEN')
     expect(host.pendingPaths('/vault')).toEqual(['a.md'])
     expect(notes.get('b.md')!.content).toContain('最终答案')
-    expect(notes.get('b.md')!.content).toContain('<!-- rgent:ledger-task:v1')
+    expect(await history.ledger.contexts('b.md')).toHaveLength(1)
     expect(partitionSource(notes.get('a.md')!.content).ledger).toBeNull()
 
     // 按篇过滤只补指定篇；恢复权限后逐篇补完。
     forbidden.delete('a.md')
     await host.retryPending('/vault', 'a.md')
     expect(host.hasPending('/vault')).toBe(false)
-    expect(partitionSource(notes.get('a.md')!.content).ledger).toContain('最终答案')
+    expect((await history.ledger.contexts('a.md'))[0]?.fields).toMatchObject({answer:{text:'最终答案'}})
   })
 })
 
@@ -389,7 +390,7 @@ describe('assistant habits in a run', () => {
     expect(app.systems).toHaveLength(1)
     expect(app.systems[0]).toContain('不改变本场范围、工具与权限')
     expect(app.systems[0]).toContain('称呼用户为「老陈」')
-    expect(app.source()).toContain('助手习惯：已应用（称呼=老陈；语气=简洁；补充说明 4 字）')
+    expect(app.history.history()).toContain('称呼=老陈；语气=简洁；补充说明 4 字')
   })
 
   it('changes nothing for tasks when the habits are untouched', async () => {

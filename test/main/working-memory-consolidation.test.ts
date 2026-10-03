@@ -62,3 +62,33 @@ it('one repair uses only the draft and issues; tool calls are always rejected',a
  expect(String(requests[1]!.messages[0]!.content)).not.toContain('以后用中文');expect(requests[0]!.tools).toBeUndefined()
  expect(f.service.snapshot().record.jobs[0]?.outcome).toBe('applied')
 })
+it('undoes one applied batch without restoring an obsolete version or reviving its evidence',async()=>{
+ const f=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({proposals:[suggestion(input)]})};yield {type:'finish',reason:'stop'}})
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(f.engine.canUndo('task',f.material.materialVersion)).toBe(true)
+ await f.engine.undo('task',f.material.materialVersion)
+ expect(f.service.snapshot().record.entries).toHaveLength(0)
+ expect(f.service.snapshot().record.forgotten).toHaveLength(1)
+ expect(f.engine.canUndo('task',f.material.materialVersion)).toBe(false)
+ await expect(f.engine.undo('task',f.material.materialVersion)).rejects.toThrow('MEMORY_RETRY_UNAVAILABLE')
+})
+it('forgetting evidence while a response is stalled prevents its late commit',async()=>{
+ let release!:()=>void,entered!:()=>void;const waiting=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r)
+ const f=await fixture(async function*(input){entered();await waiting;yield {type:'text',text:JSON.stringify({proposals:[suggestion(input)]})};yield {type:'finish',reason:'stop'}})
+ const source=await f.service.sourceForPrompt('a.md','task')
+ await f.vault.memoryMutation(store=>store.add(store.read(),{content:'同一依据',layer:'demand',scope:'本库',sources:[source],semantic:'fact',attribution:'人确认',reviewAt:null},true))
+ await f.engine.handoff(f.material);await started
+ const basis=f.service.snapshot(),entry=basis.record.entries[0]!
+ await f.service.forget({sessionId:f.material.context!.sessionId,revision:basis.revision,objectVersion:basis.objectVersion,id:entry.id,version:entry.version})
+ release();await f.engine.idle();expect(f.service.snapshot().record.entries).toHaveLength(0)
+})
+
+it('a subsequent human edit invalidates batch undo without overwriting the newer content',async()=>{
+ const f=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({proposals:[suggestion(input)]})};yield {type:'finish',reason:'stop'}})
+ await f.engine.handoff(f.material);await f.engine.idle()
+ const basis=f.service.snapshot(),entry=basis.record.entries[0]!
+ await f.service.edit({sessionId:f.material.context!.sessionId,revision:basis.revision,objectVersion:basis.objectVersion,id:entry.id,version:entry.version},{content:'人的新措辞'})
+ expect(f.engine.canUndo('task',f.material.materialVersion)).toBe(false)
+ await expect(f.engine.undo('task',f.material.materialVersion)).rejects.toThrow('MEMORY_RETRY_UNAVAILABLE')
+ expect(f.service.snapshot().record.entries[0]?.content).toBe('人的新措辞')
+})

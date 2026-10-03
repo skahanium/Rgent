@@ -1,9 +1,10 @@
+import {hostLedgerFixture} from './host-ledger-fixture.ts'
 import { describe, expect, it } from 'vitest'
 import { AgentHost, type HostDependencies } from '../../src/main/agent-host.ts'
 import type { ModelStepEvent } from '../../src/main/model-stream.ts'
 import { TaskAuthorizationRegistry, type TaskGrant } from '../../src/main/task-authorization.ts'
 import { createScopedAgentTools } from '../../src/main/scoped-agent-tools.ts'
-import { ledgerProvenance } from '../../src/main/ledger-provenance.ts'
+import { encodeLedgerProvenance, ledgerProvenance } from '../../src/main/ledger-provenance.ts'
 import type { AgentStartRequest } from '../../src/shared/ipc.ts'
 
 function deferred<T = void>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => { resolve = r }); return { promise, resolve } }
@@ -24,7 +25,9 @@ function appFor(steps: ModelStepEvent[][], options: { tools?: number; modelSteps
     assertCurrent: async () => { if (fault) throw Error(fault) }, dependencies: () => [], summary: (): { name: string; outcome: string }[] => [],
     recordContext: () => {}, markSent: () => {}, sentSources: () => []
   }
+  const history=hostLedgerFixture()
   const deps: HostDependencies = {
+    ledger: history.ledger,
     root: () => '/vault', authorize: async () => grant,
     read: async () => ({ content, revision: String(revision) }),
     write: async (_path, next) => { content = next; return String(++revision) },
@@ -35,7 +38,7 @@ function appFor(steps: ModelStepEvent[][], options: { tools?: number; modelSteps
     emit: e => { events.push(e) }
   }
   const host = new AgentHost(deps)
-  return { host, deps, tools, content: () => content, messages, executed, events, calls: () => calls, setFault: (value: string) => { fault = value }, start: () => host.start({ relPath: 'a.md', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' }) }
+  return { host, deps, tools, history, content: () => content, messages, executed, events, calls: () => calls, setFault: (value: string) => { fault = value }, start: () => host.start({ relPath: 'a.md', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' }) }
 }
 const call = (id: string, name = 'search_library', input: unknown = { query: 'needle' }): ModelStepEvent => ({ type: 'tool-call', id, name, input })
 const finish = (reason = 'tool-calls'): ModelStepEvent => ({ type: 'finish', reason })
@@ -64,7 +67,7 @@ describe('Host loop over the real grant and tools', () => {
       [{ type: 'text', text: '完成' }, { type: 'finish', reason: 'stop' }]
     ]
     let call = 0
-    const host = new AgentHost({
+    const host = new AgentHost({ledger:hostLedgerFixture().ledger,
       root: () => '/vault', session: () => 's',
       authorize: (input) => registry.consume(input.authorizationOwner!, input as unknown as AgentStartRequest),
       read: readNote,
@@ -193,7 +196,7 @@ describe('Host manual read-only loop', () => {
     app.tools.summary = () => [{ name: 'search_library', outcome: 'INVALID_TOOL_ARGUMENTS (1)' }]
     const task = await app.start()
     expect(await task.done).toEqual({ status: 'completed' })
-    const provenance = ledgerProvenance(app.content())
+    const provenance = ledgerProvenance(encodeLedgerProvenance(app.history.records().at(-1)!.provenance!))
     expect(provenance.status).toBe('valid')
     if (provenance.status === 'valid') expect(provenance.record.tools).toEqual([
       { name: 'search_library', outcome: 'INVALID_TOOL_ARGUMENTS (1)' },
@@ -232,7 +235,7 @@ describe('Host manual read-only loop', () => {
     expect(app.host.hasPending('/vault')).toBe(true)
     app.deps.root = () => '/vault'; await app.host.retryPending('/vault')
     expect(app.content()).toContain('库失效前文本')
-    expect(app.content()).toContain('VAULT_CHANGED')
+    expect(app.history.records().at(-1)?.reason).toBe('VAULT_CHANGED')
     expect(app.events.at(-1)).toMatchObject({ status: 'failed', reason: 'VAULT_CHANGED', persisted: true })
   })
 
@@ -258,12 +261,13 @@ it('sends memory independently of tool scope and records only dispatch-used v2 d
   app.deps.memory = { context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled:true,revision:0}),entries:async()=>[entry] }
   const task = await app.start(); expect(await task.done).toEqual({status:'completed'})
   expect(JSON.stringify(app.messages)).toContain('记忆独立正文')
-  const record = ledgerProvenance(app.content())
+  const record = ledgerProvenance(encodeLedgerProvenance(app.history.records().at(-1)!.provenance!))
   expect(record.status).toBe('valid')
   if(record.status!=='valid' || record.record.version!==2) throw Error('missing v2')
   expect(record.record.memoryDeps[0]?.id).toBe('mem')
   expect(record.record.scope).not.toContain('outside.md')
-  expect(app.content()).toContain('outside.md / body')
+  expect(record.record.memoryDeps[0]?.sourceDeps[0]).toMatchObject({relPath:'outside.md',kind:'body'})
+  expect(app.content()).not.toContain('outside.md')
 })
 it('stops on memory OFF during a stream and preserves generated text without another dispatch', async () => {
   const app = appFor([]); let enabled=true,epoch=0
@@ -298,7 +302,8 @@ it('publishes bounded saved materials once only after both answer and ledger suc
  const app=appFor([[{type:'reasoning',text:'PRIVATE_REASONING'},{type:'text',text:'可见回答'},finish('stop')]])
  const read=app.deps.read,write=app.deps.write;let fail=true
  app.deps.session=()=> 's';app.deps.read=async p=>({...await read(p),sessionId:'s',objectVersion:'oa'})
- app.deps.write=async (...args)=>{if(fail && args[1].includes('ledger-task'))throw Error('CONFLICT');return write(...args)}
+ const complete=app.deps.ledger.complete
+ app.deps.ledger.complete=async(...args)=>{if(fail)throw Error('CONFLICT');return complete(...args)}
  const saved:import('../../src/main/host-material.ts').SavedTaskMaterial[]=[]
  app.deps.onTaskMaterialSaved=material=>{saved.push(material)}
  const task=await app.start();await expect(task.done).rejects.toThrow('CONFLICT')
@@ -330,7 +335,7 @@ it('records demand omissions in the saved task ledger', async () => {
  const app=appFor([[{type:'text',text:'已答'},finish('stop')]])
  app.deps.memory={context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled:true,revision:0}),entries:async()=>Array.from({length:10},(_,i)=>({...memoryEntry(),id:`mem-${i}`,content:'问需求',layer:'demand' as const}))}
  const task=await app.start();await task.done
- expect(app.content()).toContain('按需记忆省略：mem-8、mem-9')
+ expect(app.history.history()).toContain('按需记忆省略：mem-8、mem-9')
 })
 
 it.each(['success','failed'])('shares concurrent retries and attempts saved-material handoff once when consumer is %s', async outcome=>{
@@ -338,10 +343,10 @@ it.each(['success','failed'])('shares concurrent retries and attempts saved-mate
  const read=app.deps.read,write=app.deps.write;let failLedger=true,revision=1
  app.deps.session=()=> 's';app.deps.read=async p=>({...await read(p),sessionId:'s',objectVersion:'oa'})
  app.deps.write=async (...args)=>{
-  if(failLedger && args[1].includes('ledger-task'))throw Error('CONFLICT')
   if(args[2] !== String(revision))throw Error('CONFLICT')
   const saved=write(...args);revision++;return saved
  }
+ const complete=app.deps.ledger.complete;app.deps.ledger.complete=async(...args)=>{if(failLedger)throw Error('CONFLICT');return complete(...args)}
  const callbacks:string[]=[];const receipts:unknown[]=[]
  app.deps.onTaskMaterialSaved=async material=>{callbacks.push(material.taskId);if(outcome==='failed')throw Error('QUEUE_UNAVAILABLE')}
  app.deps.onTaskMaterialResult=r=>{receipts.push(r)}

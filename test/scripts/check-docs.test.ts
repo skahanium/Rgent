@@ -190,3 +190,9 @@ describe('docs stage invariants', () => {
   })
 
 })
+
+it('rejects a v2 delivery claim lacking a date or tested commit',()=>{
+ const {build,run}=fixture(),s=readFileSync(build,'utf8')
+ writeFileSync(build,s.replace(/^\| 5 集成 .*$/m,'| 5 集成 | 已开 | 当前运行 | 通过 |'))
+ expect(run().stderr).toContain('v2 交付证据缺少日期或受验提交')
+})

@@ -282,13 +282,14 @@ function buildStructuredContext(input:HostContextInput):HostContextPlan{
  const omitted={bodyBlockNumbers:[] as number[],ledgerChapterIds:all.filter(c=>!chapters.includes(c)).map(c=>c.sourceId),memoryIds:[...(input.memory?.omittedDemand??[])]}
  let bodyCost=0,historyCost=0,memoryCost=0
  // Keep a complete recent suffix; no tool or record is cut in half.
- const summaryReserve=Math.floor(allocation.history*.25),recentLimit=allocation.history-summaryReserve
+ const recentLimit=allocation.history
  for(const chapter of [...chapters].reverse()){
   const text=`账本章 ${chapter.sourceId}（原文）：${JSON.stringify(chapter.text)}`,cost=count('\n'+text)
   if(historyCost+cost>recentLimit)break
   recent.unshift(chapter);historyCost+=cost
  }
  const older=chapters.slice(0,chapters.length-recent.length)
+ const summaryReserve=Math.min(Math.floor(allocation.history*.25),allocation.history-historyCost)
  if(!summary&&older.length&&summaryReserve>0)return {status:'needs-summary',chapters:older}
  const covered=summary?.sourceChapterIds??[],validSummary=summary?.text.trim()&&covered.length&&new Set(covered).size===covered.length&&covered.every(id=>older.some(c=>c.sourceId===id))
  const summaryText=validSummary?`旧账本摘要（来源 ${covered.join(', ')}；须查原文）：${JSON.stringify(summary!.text)}`:''

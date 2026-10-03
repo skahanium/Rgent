@@ -1,3 +1,4 @@
+import {hostLedgerFixture} from './host-ledger-fixture.ts'
 import { describe, it, expect } from 'vitest'
 import { AgentHost } from '../../src/main/agent-host.ts'
 
@@ -5,7 +6,7 @@ function app() {
   let content = '/问\n', revision = 'r0', objectVersion = 'o0', sessionId = 's0'
   const events: unknown[] = []
   let onChunk = () => {}
-  const host = new AgentHost({
+  const host = new AgentHost({ledger:hostLedgerFixture().ledger,
     root: () => '/vault', session: () => sessionId,
     read: async () => ({ content, revision, objectVersion, sessionId }),
     acceptsObject: (_path, expected, current) => expected === current,

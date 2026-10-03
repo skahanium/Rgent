@@ -5,6 +5,7 @@ export const IPC = {
   treeChanged: 'tree:changed',
   noteRead: 'note:read',
   ledgerGet:'ledger:get',
+  ledgerReasoning:'ledger:reasoning',
   memoryMaintenancePreview:'memory:maintenance-preview',
   ledgerMaintenance:'ledger:maintenance',
   ledgerRepair:'ledger:repair',
@@ -136,6 +137,7 @@ export type AuthorizedSource = ObjectBinding & { sourceId: string; relPath: stri
 export type AgentAuthorizationPreview = {
   id: string; sessionId: string; origin: string; sources: AuthorizedSource[]
   recipient: { modelId: string; host: string; provider: ModelProvider }
+  summaryGenerators?: {modelId:string;host:string;time:string}[]
   memory?: { use: boolean; consolidate: boolean; recipient: { modelId: string; host: string } | null; limits: import('./memory.ts').MemoryLimits;search?:{available:boolean;calls:number;sharedTools:number} }
 }
 export type AgentAuthorizationResult = { ok: true; preview: AgentAuthorizationPreview } | { ok: false; error: string }

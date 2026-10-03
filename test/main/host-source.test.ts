@@ -239,3 +239,10 @@ describe('ledger records reasoning and process without touching the body', () =>
     expect(final.length).toBeLessThan(MAX_LEDGER_REASONING * 3 + 2000)
   })
 })
+
+it('leaves an editable human paragraph after a streamed answer at EOF without changing earlier bytes',()=>{
+ const source=markPrompt('/继续',{taskId,range:{start:0,end:3},expectedText:'/继续',promptText:'继续'})
+ const answer=upsertAiAnswer(source,{taskId,answer:'回答'})
+ expect(answer.endsWith('回答\n\n')).toBe(true)
+ expect(upsertAiAnswer(answer,{taskId,answer:'回答更多',expectedPreviousAnswer:'回答'}).endsWith('回答更多\n\n')).toBe(true)
+})

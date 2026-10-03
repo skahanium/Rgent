@@ -181,7 +181,9 @@ export function upsertAiAnswer(source: string, write: AnswerWrite): string {
   const start = where.firstAnswer ?? where.blockEnd
   const end = where.answerEnd ?? where.blockEnd
   const insert = where.firstAnswer == null && rendered ? newline + newline + rendered : rendered
-  const body = source.slice(0, start) + insert + source.slice(end, part.body.length)
+  // Independent ledgers no longer contribute the trailing separator: leave a human paragraph at EOF.
+  const trailing=end===part.body.length&&rendered&&!rendered.endsWith(newline+newline)?newline+newline:''
+  const body = source.slice(0, start) + insert + trailing + source.slice(end, part.body.length)
   return composeSource(body, part.ledger)
 }
 

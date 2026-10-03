@@ -13,6 +13,7 @@ export type ModelProvider = 'deepseek' | 'minimax' | 'custom'
 export type LimitTier = 'none' | 'local' | 'network'
 export type ModelCredential = {
   provider: ModelProvider
+  connectionId?: string
   baseURL: string
   modelId: string
   contextTokens: number
@@ -315,6 +316,8 @@ export function createModelConfigStore(userData: string, protection: SecretProte
   }
 
   return {
+    memoryConfigDiagnosis: () => memory.diagnosis(),
+    resetMemoryConfig: (revision: string | null) => memory.reset(revision),
     /** vaultKey must come from VaultSession.memoryContext(), never a renderer preference key. */
     getMemoryConfig(vaultKey: string): PublicMemoryConfig {
       requireVaultKey(vaultKey)
@@ -339,9 +342,9 @@ export function createModelConfigStore(userData: string, protection: SecretProte
       const previousOverride = next.vaults[vaultKey]?.override
       if (settings.override.mode === 'model' && !(previousOverride?.mode === 'model' && previousOverride.modelId === settings.override.modelId)) modelOf(current, settings.override.modelId)
       if (settings.enabled !== (next.vaults[vaultKey]?.enabled ?? false)) {
-        const epoch = (next.revisions[vaultKey] ?? 0) + 1
-        if (!Number.isSafeInteger(epoch)) throw new Error('MEMORY_CONFIG_LIMIT')
-        next.revisions[vaultKey] = epoch
+        const revision = (next.revisions[vaultKey] ?? 0) + 1
+        if (!Number.isSafeInteger(revision)) throw new Error('MEMORY_CONFIG_LIMIT')
+        next.revisions[vaultKey] = revision
       }
       next.vaults[vaultKey] = settings
       memory.write(next)
@@ -355,7 +358,7 @@ export function createModelConfigStore(userData: string, protection: SecretProte
       const id = vault.override.mode === 'inherit' ? memory.get().defaultModelId : vault.override.modelId
       if (id === null) throw new Error('NO_MEMORY_MODEL')
       const model = modelOf(current, id); const connection = connectionOf(current, model.connectionId)
-      return { provider: connection.provider, baseURL: requireBaseURL(connection), modelId: model.modelId, contextTokens: model.contextTokens, apiKey: decryptKey(connection) }
+      return { connectionId: connection.id, provider: connection.provider, baseURL: requireBaseURL(connection), modelId: model.modelId, contextTokens: model.contextTokens, apiKey: decryptKey(connection) }
     },
     getPublic(): PublicModelConfig {
       return {
@@ -462,6 +465,7 @@ export function createModelConfigStore(userData: string, protection: SecretProte
       const connection = connectionOf(current, model.connectionId)
       return {
         provider: connection.provider,
+        connectionId: connection.id,
         baseURL: requireBaseURL(connection),
         modelId: model.modelId,
         contextTokens: model.contextTokens,

@@ -206,6 +206,7 @@ describe('model configuration', () => {
     expect(snapshot.models.map((model) => model.modelId)).toEqual(['deepseek-flash', 'MiniMax-M3'])
     expect(snapshot.defaultModelId).toBe(snapshot.models[1]!.id)
     expect(store.credential()).toEqual({
+      connectionId: expect.any(String),
       provider: 'minimax', baseURL: 'https://api.minimaxi.com/v1', modelId: 'MiniMax-M3', contextTokens: 204800, apiKey: 'key-minimax'
     })
 

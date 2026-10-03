@@ -310,12 +310,12 @@ async function verifyMemoryIntegration(page, vault, shot, requests) {
   await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)
   check('原授权浮层只读披露独立记忆用途与实际整理接收方', await waitFor(page, `document.querySelector('.authorization-memory')?.textContent.includes('memory-ui-fixture') && document.querySelector('.authorization-memory')?.textContent.includes('独立记忆使用许可') && !document.querySelector('.authorization-memory select')`))
   await page.key('Enter','Enter',0,13)
-  check('回答和本篇账本成功保存后后台整理完成', await waitFor(page, `(async()=>{const state=await window.rgent.vaultGet();const memory=await window.rgent.memoryGet({sessionId:state.sessionId});const note=await window.rgent.noteRead('记忆长期.md');return memory.ok&&memory.value.entries.some(e=>e.content==='后续回答请用中文简短表达（记忆验收）。'&&e.layer==='core')&&memory.value.jobs.some(j=>j.outcome==='applied')&&note.content.includes('rgent:ledger-task:v1')&&(await window.rgent.agentTasks()).length===0})()`,15000))
-  check('独立后台仅发送实际材料、未确认结果且工具为零', requests.some(r=>r.model==='memory-ui-fixture'&&!r.tools?.length&&JSON.parse(r.messages.find(m=>m.role==='user').content).result.confirmed===false&&!JSON.stringify(r).includes('隐藏工具推理')))
+  check('回答和本篇账本成功保存后后台整理完成', await waitFor(page, `(async()=>{const state=await window.rgent.vaultGet();const memory=await window.rgent.memoryGet({sessionId:state.sessionId});const note=await window.rgent.noteRead('记忆长期.md');return memory.ok&&memory.value.entries.some(e=>e.content==='后续回答请用中文简短表达（记忆验收）。'&&e.layer==='core')&&memory.value.jobs.some(j=>j.outcome==='applied')&&!note.content.includes('rgent:ledger:v1')&&(await window.rgent.ledgerGet({sessionId:note.sessionId,objectVersion:note.objectVersion,relPath:'记忆长期.md'})).value?.records.some(r=>r.state==='saved'&&r.chapter?.prompt.includes('长期记住'))&&(await window.rgent.agentTasks()).length===0})()`,15000))
+  check('独立后台仅发送获准材料、不把回答当事实且工具为零', requests.some(r=>{if(r.model!=='memory-ui-fixture'||r.tools?.length)return false;const input=JSON.parse(r.messages.find(m=>m.role==='user').content);return input.sources?.some(s=>s.classification==='command'&&s.text.includes('长期记住'))&&!input.sources.some(s=>s.classification==='ai')&&!JSON.stringify(r).includes('隐藏工具推理')}))
   await createAndOpen('记忆后续.md')
   await page.call('Input.insertText',{text:'/记忆后续第一次'})
   await confirmSlashAuthorization(page)
-  check('下一场自动带入核心记忆并保存实际使用依赖', await waitFor(page, `(async()=>{const note=await window.rgent.noteRead('记忆后续.md');return note.content.includes('记忆验收旧回答')&&(()=>{const marker=/rgent:ledger-sources:v2 data="([A-Za-z0-9_-]+)"/.exec(note.content);return marker&&JSON.parse(atob(marker[1].replace(/-/g,'+').replace(/_/g,'/'))).memoryDeps.length>0})()&&(await window.rgent.agentTasks()).length===0})()`))
+  check('下一场自动带入核心记忆并保存实际使用依赖', await waitFor(page, `(async()=>{const note=await window.rgent.noteRead('记忆后续.md');return note.content.includes('记忆验收旧回答')&&(await window.rgent.ledgerGet({sessionId:note.sessionId,objectVersion:note.objectVersion,relPath:'记忆后续.md'})).value?.records.some(r=>r.state==='saved'&&r.chapter?.provenance?.version===2&&r.chapter.provenance.memoryDeps.length>0)&&(await window.rgent.agentTasks()).length===0})()`))
   const nextRequests=requests.filter(r=>r.model!=='memory-ui-fixture'&&JSON.stringify(r).includes('记忆后续第一次'))
   check('实际回答模型收到低信任核心记忆', nextRequests.some(r=>JSON.stringify(r).includes('后续回答请用中文简短表达（记忆验收）。')))
   const sourceEdit=await page.eval(`(async()=>{const note=await window.rgent.noteRead('记忆长期.md');const changed=await window.rgent.noteWrite({relPath:'记忆长期.md',content:${JSON.stringify('无关人写段落。\n\n')}+note.content,expectedRevision:note.revision,sessionId:note.sessionId,objectVersion:note.objectVersion});const memory=await window.rgent.memoryGet({sessionId:note.sessionId});return changed.ok&&memory.ok&&memory.value.entries[0]?.status==='active'})()`)
@@ -343,24 +343,44 @@ async function verifyMemoryIntegration(page, vault, shot, requests) {
     check(`记忆条目文本框${mode==='day'?'日间':'夜间'}复用设置主题及边框留白`,themeApplied&&textareaStyle)
     await page.eval(`document.querySelector('.memory-entry').scrollIntoView({block:'start'})`)
     await shot(page,`memory-entry-and-source-${mode}`)
+    for (const [width, height] of [[1200, 800], [800, 560], [1600, 900]]) {
+      await page.call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
+      await page.eval(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`)
+      await page.eval(`document.querySelector('.memory-entry').scrollIntoView({block:'start'})`)
+      await shot(page,`memory-entry-and-source-${mode}-${width}`)
+    }
+    await page.call('Emulation.setDeviceMetricsOverride', { width:1200, height:800, deviceScaleFactor:1, mobile:false })
   }
   await page.eval(`window.rgent.themeSet(${JSON.stringify(memoryTheme)})`)
   check('条目日夜样张后恢复原主题',await waitFor(page,`document.documentElement.dataset.theme===${JSON.stringify(memoryRenderedTheme)}`))
   await page.eval(`(() => {const entry=document.querySelector('.memory-entry');entry.open=true;[...entry.querySelectorAll('button')].find(b=>b.textContent==='删除并遗忘').click()})()`)
-  check('遗忘预先说明清除待整理重试材料且原文不变',await waitFor(page, `document.querySelector('.memory-forget-warning')?.textContent.includes('原笔记及账本不变')`))
+  check('遗忘预先说明清除待整理重试材料且原文不变',await waitFor(page, `document.querySelector('.memory-forget-warning')?.textContent.includes('原笔记与账本不变')`))
   await page.eval(`[...document.querySelectorAll('.memory-entry button')].find(b=>b.textContent==='确认删除并遗忘').click()`)
   check('遗忘回执后条目正文立即从记忆页移除',await waitFor(page, `document.querySelectorAll('.memory-entry').length===0`))
   await shot(page,'memory-forgotten-receipt')
   await page.key('Escape','Escape',0,27)
   await page.eval(`document.querySelector('.cm-content').focus()`)
   await page.key(process.platform === 'darwin' ? 'ArrowDown' : 'End', process.platform === 'darwin' ? 'ArrowDown' : 'End', process.platform === 'darwin' ? 4 : 2, process.platform === 'darwin' ? 40 : 35)
-  await page.call('Input.insertText',{text:'\n\n/记忆后续遗忘核验'})
+  await page.key('Enter','Enter',0,13)
+  await page.key('Enter','Enter',0,13)
+  await page.call('Input.insertText',{text:'/记忆后续遗忘核验'})
+  check('遗忘后的新口令进入人写段落',await waitFor(page,`document.querySelector('.cm-content')?.textContent.includes('/记忆后续遗忘核验')`))
   await confirmSlashAuthorization(page)
   check('遗忘后新任务仍正常回答保存',await waitFor(page, `(async()=>{const note=await window.rgent.noteRead('记忆后续.md');return note.content.includes('记忆后续遗忘核验')&&(await window.rgent.agentTasks()).length===0})()`))
   const after=requests.filter(r=>r.model!=='memory-ui-fixture'&&JSON.stringify(r).includes('记忆后续遗忘核验'))
   check('旧记忆及带依赖的历史回答未再次发出',after.length>0&&after.every(r=>!JSON.stringify(r).includes('记忆验收旧回答')&&!JSON.stringify(r).includes('后续回答请用中文简短表达（记忆验收）。')))
   const off=await page.eval(`(async()=>{const state=await window.rgent.vaultGet();const memory=await window.rgent.memoryGet({sessionId:state.sessionId});return memory.ok&&window.rgent.memoryConfigSave({sessionId:state.sessionId,target:'vault',vault:{...memory.value.config.vault,enabled:false}}).then(r=>r.ok)})()`)
   check('受控链路收尾关闭当前库记忆',off)
+  const beforeClear = await page.eval(`window.rgent.noteRead('记忆后续.md').then(n=>n.content)`)
+  await page.eval(`document.querySelector('.ledger-open').click()`)
+  await waitFor(page, `document.querySelectorAll('.ledger-body details').length>=2`)
+  await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
+  await waitFor(page, `document.querySelector('.ledger-body')?.textContent.includes('记忆验收旧回答')`)
+  await page.eval(`[...document.querySelectorAll('.ledger-body button')].find(b=>b.textContent==='预览清理历史').click()`)
+  await waitFor(page, `[...document.querySelectorAll('.ledger-body button')].some(b=>b.textContent==='确认清理列出的历史')`)
+  await page.eval(`[...document.querySelectorAll('.ledger-body button')].find(b=>b.textContent==='确认清理列出的历史').click()`)
+  check('清理历史后已展开的原文立即退出回顾且正文不变', await waitFor(page, `(async()=>{const note=await window.rgent.noteRead('记忆后续.md');const history=await window.rgent.ledgerGet({sessionId:note.sessionId,objectVersion:note.objectVersion,relPath:'记忆后续.md'});return history.ok&&history.value.records.every(r=>r.state==='cleared')&&!document.querySelector('.ledger-body')?.textContent.includes('记忆验收旧回答')&&note.content===${JSON.stringify(beforeClear)}})()`))
+  await page.eval(`document.querySelector('.ledger-close').click()`)
 }
 
 async function verifyScopedHost(page, vault, shot, requests) {
@@ -408,6 +428,9 @@ async function verifyScopedHost(page, vault, shot, requests) {
   check('首步只发送来源清单，后续请求携带实际命中及原文', requests.length === 3 && !JSON.stringify(requests[0]).includes('受控正文证据') && JSON.stringify(requests[1]).includes('受控正文证据') && JSON.stringify(requests[2]).includes('来源复核'))
   check('工具输出和隐藏推理不落正文', await page.eval(`(async () => { const note=await window.rgent.noteRead('工具发起.md');const body=note.content.split('<!-- rgent:ledger:v1 -->')[0];return !body.includes('受控正文证据') && !body.includes('隐藏工具推理') })()`))
   await page.eval(`document.querySelector('.ledger-open')?.click()`)
+    await waitFor(page, `!!document.querySelector('.ledger-body details')`)
+    await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
+    await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`)
   check('同篇账本回顾工具及读取、模型引用来源', await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return text.includes('工具摘要') && (text.includes('search_library')||text.includes('搜库')) && (text.includes('read_library')||text.includes('读库')) && text.includes('实际读取来源：工具其他.md、工具参考.md') && text.includes('模型消息引用来源：工具参考.md')})()`))
   await shot(page, 'tool-ledger-800')
   await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
@@ -967,7 +990,7 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
       document.querySelector('.cm-line.md-h1')?.textContent.includes('原文坐标') &&
       [...document.querySelectorAll('.outline-mark')].some((node) => node.getAttribute('aria-label')?.includes('图片标题')) &&
       !!document.querySelector('.md-image-slot button')
-  })()`) === true && readFileSync(path.join(vault, name), 'utf8') === original)
+  })()`) === true && readFileSync(path.join(vault, name), 'utf8') === body)
   await probe('图片出口核验使用原文范围并拒绝AI自动加载及错位范围', async () => {
     const proof = await page.eval(`(async () => {
       const note = await window.rgent.noteRead(${JSON.stringify(name)})
@@ -986,29 +1009,29 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
   const editAt = projected.indexOf('原文字节。') + '原文字节。'.length
   await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ changes: { from: ${editAt}, insert: '改' }, selection: { anchor: ${editAt + 1} }, userEvent: 'input.type' }); view.focus() })()`)
   await page.key('s', 'KeyS', modifier, 83)
-  const edited = original.replace('原文字节。', '原文字节。改')
+  const edited = body.replace('原文字节。', '原文字节。改')
   check('编辑保存只增加输入字符，BOM与所有原换行保留', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(edited)})()`))
   await page.key('z', 'KeyZ', modifier, 90)
   await page.key('s', 'KeyS', modifier, 83)
-  check('真实键盘撤销恢复原文完整字节', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(original)})()`))
+  check('真实键盘撤销恢复原文完整字节', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(body)})()`))
   await page.key(process.platform === 'darwin' ? 'Z' : 'y', process.platform === 'darwin' ? 'KeyZ' : 'KeyY', process.platform === 'darwin' ? modifier | 8 : modifier, process.platform === 'darwin' ? 90 : 89)
   await page.key('s', 'KeyS', modifier, 83)
   check('真实键盘重做保持混合换行与BOM', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(edited)})()`))
   await page.key('z', 'KeyZ', modifier, 90)
   await page.key('s', 'KeyS', modifier, 83)
-  await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(original)})()`)
+  await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(body)})()`)
   // 移动按钮用原文单位；图片后的标题和尾文必须与标记一并搬走。
   await page.eval(`(() => { const marker = document.querySelector('.rgent-marker-ai'); marker?.querySelector('.rgent-marker-more-toggle')?.click(); [...(marker?.querySelectorAll('button') ?? [])].find((button) => button.textContent === '上移一段')?.click() })()`)
   await page.key('s', 'KeyS', modifier, 83)
-  const swapped = original.replace(`原文字节。\n\n${ai}`, `${ai}\n\n原文字节。`)
+  const swapped = body.replace(`原文字节。\n\n${ai}`, `${ai}\n\n原文字节。`)
   check('身份块搬移保留图、尾文、分隔与账本字节', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(swapped)})()`))
   await page.key('z', 'KeyZ', modifier, 90)
   await page.key('s', 'KeyS', modifier, 83)
-  await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(original)})()`)
+  await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(body)})()`)
   await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; const at = view.state.doc.toString().indexOf('/快速完成') + '/快速完成'.length; view.dispatch({ selection: { anchor: at } }); view.focus() })()`)
   await confirmSlashAuthorization(page)
   const completed = await waitFor(page, `(async () => { const note = await window.rgent.noteRead(${JSON.stringify(name)}); return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 })()`)
-  check('混合换行口令按原文落点生成且旧账本保留', completed && readFileSync(path.join(vault, name), 'utf8').includes(ledger))
+  check('混合换行口令按原文落点生成且旧账本保留', completed && await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(name)});const h=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(name)}});return h.ok&&h.value.records.some(r=>r.legacyRaw?.includes('不改历史。'))&&!n.content.includes('rgent:ledger:v1')})()`))
   const beforeMove = readFileSync(path.join(vault, name), 'utf8')
   const moved = await page.eval(`(async () => { const preview = await window.rgent.relocationPreview({ kind: 'note', source: ${JSON.stringify(name)}, target: ${JSON.stringify(movedName)} }); return preview.ok ? window.rgent.relocationCommit({ id: preview.preview.id, repairLinks: false }) : preview })()`)
   check('生成后结构移动延续原文字节与tab绑定', moved.ok && await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(movedName)}`) && readFileSync(path.join(vault, movedName), 'utf8') === beforeMove)
@@ -1036,7 +1059,7 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
   const copied = readFileSync(path.join(vault, copyName), 'utf8')
   await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; const at = view.state.doc.length; view.dispatch({ changes: { from: at, insert: '\\n\\n\\x60\\x60\\x60js\\nunfinished' }, selection: { anchor: at + 8 }, userEvent: 'input.type' }); view.focus() })()`)
   await page.key('s', 'KeyS', modifier, 83)
-  check('未闭合正文不会吞入账本或写坏磁盘，窗口保留错误提示', await waitFor(page, `document.querySelector('.status-host-notice')?.textContent.includes('账本边界')`) && readFileSync(path.join(vault, copyName), 'utf8') === copied)
+  check('独立账本允许正文保存未闭合代码，不把历史吞入正文', await waitFor(page, `(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(copyName)});return n.content.includes('unfinished')&&!n.content.includes('rgent:ledger:v1')})()`))
   await page.key('z', 'KeyZ', modifier, 90)
   await page.key('s', 'KeyS', modifier, 83)
   const gone = vault + '-temporarily-moved'
@@ -1430,6 +1453,9 @@ async function main() {
     await probe('账本复用阅读呈现且正文不含账本', async () => {
       const before = readFileSync(path.join(vault, '研究记录.md'), 'utf8')
       await page.eval(`document.querySelector('.ledger-open')?.click()`)
+    await waitFor(page, `!!document.querySelector('.ledger-body details')`)
+    await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
+    await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`)
       const state = JSON.parse(await page.eval(`(() => JSON.stringify({ heading: document.querySelector('.ledger-body h2')?.textContent, strong: document.querySelector('.ledger-body strong')?.textContent, editor: document.querySelector('.cm-content')?.innerText, outline: [...document.querySelectorAll('.outline-mark')].map((n) => n.title), editable: !!document.querySelector('.ledger-body [contenteditable]') }))()`))
       await page.eval(`document.querySelector('.ledger-close')?.click()`)
       return { ok: state.heading === '第一场' && state.strong === '账本结论' && !state.editor?.includes('账本结论') && !state.outline.includes('第一场') && !state.editable && readFileSync(path.join(vault, '研究记录.md'), 'utf8') === before, detail: JSON.stringify({ heading: state.heading, strong: state.strong, outline: state.outline }) }
@@ -1869,8 +1895,8 @@ async function main() {
         if (decoded.model === 'memory-ui-fixture') {
           memoryRequests.push(decoded)
           const material = JSON.parse(decoded.messages.find(m=>m.role==='user').content)
-          const source = material.sources.find(s=>s.role==='command' && s.text.includes('长期记住'))
-          const proposals = source ? [{action:'add',content:'后续回答请用中文简短表达（记忆验收）。',layer:'core',scope:'当前库',category:'lasting',citations:[source.id],target:null}] : []
+          const source = (material.sources??[]).find(s=>s.classification==='command' && s.text.includes('长期记住'))
+          const proposals = source ? [{action:'add',content:'后续回答请用中文简短表达（记忆验收）。',layer:'core',scope:'当前库',semantic:'standing',attribution:'本场人的明确长期口令',sourceIds:[source.id],reviewAt:null}] : []
           response.writeHead(200, {'content-type':'text/event-stream'})
           response.write(`data: ${JSON.stringify({id:'memory-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{content:JSON.stringify({proposals})},finish_reason:null}]})}\n\n`)
           response.write(`data: ${JSON.stringify({id:'memory-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`)
@@ -2006,11 +2032,14 @@ async function main() {
     check('启动成功后本篇临时选择复位到设备默认', await waitFor(page, `document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test'`))
     const running = await waitFor(page, `!!document.querySelector('.status-task-stop')`, 4000)
     check('回车后底栏出现当前篇停止入口', running, running ? '' : await page.eval(`(async () => JSON.stringify({ status: document.querySelector('.status-left')?.innerText, note: (await window.rgent.noteRead('Host 环路.md')).content, editor: document.querySelector('.cm-content')?.textContent }))()`))
-    check('回答与账本写回同一篇，回答为未采纳块', await waitFor(page, `(async () => {
+    check('回答写回正文，原始任务写入独立账本', await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead('Host 环路.md')
-      return note.content.includes('受控回答第一句。第二句。') && note.content.includes('<!-- rgent:ai:v1 task-id=') && note.content.includes('<!-- rgent:ledger-task:v1 id=') && note.content.includes('助手习惯：已应用（称呼=试跑者；语气=简洁）') && note.content.includes('模型：custom / test-override（')
+      const history=await window.rgent.ledgerGet({sessionId:note.sessionId,objectVersion:note.objectVersion,relPath:'Host 环路.md'});return note.content.includes('受控回答第一句。第二句。')&&note.content.includes('<!-- rgent:ai:v1 task-id=')&&!note.content.includes('<!-- rgent:ledger:v1 -->')&&history.ok&&history.value.records.some(r=>r.state==='saved'&&r.chapter?.answer.includes('受控回答第一句。第二句。')&&r.chapter.assistant?.includes('试跑者')&&r.chapter.provenance?.model.modelId==='test-override')
     })()`, 10000))
     await page.eval(`document.querySelector('.ledger-open')?.click()`)
+    await waitFor(page, `!!document.querySelector('.ledger-body details')`)
+    await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
+    await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`)
     check('同一 tab 的只读账本能回顾口令和回答', await waitFor(page, `document.querySelector('.ledger-body')?.textContent.includes('请写两句话') && document.querySelector('.ledger-body')?.textContent.includes('受控回答第一句。')`))
     await page.eval(`document.querySelector('.ledger-close')?.click()`)
     writeFileSync(path.join(vault, 'Host 快速.md'), '')
@@ -2067,7 +2096,7 @@ async function main() {
     await parallelCheck('Esc 停止当前 B，两个任务均写入取消账本', `(async () => {
       const a = await window.rgent.noteRead('Host A.md')
       const b = await window.rgent.noteRead('Host B.md')
-      return a.content.includes('· cancelled') && b.content.includes('· cancelled') && (await window.rgent.agentTasks()).length === 0
+      const records=await Promise.all([a,b].map((n,i)=>window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:i?'Host B.md':'Host A.md'})));return records.every(h=>h.ok&&h.value.records.some(r=>r.chapter?.status==='cancelled'))&&(await window.rgent.agentTasks()).length===0
     })()`, 8000)
 
     } catch (error) { stageFailed('Host 最小环', error) }
@@ -2155,8 +2184,9 @@ async function main() {
     const taskGone = await waitFor(page, `(async () => !(await window.rgent.agentTasks()).some((item) => item.relPath === '生命周期/运行.md'))()`)
     const movedTaskSource = existsSync(path.join(vault, '生命周期', '已停止.md'))
       ? readFileSync(path.join(vault, '生命周期', '已停止.md'), 'utf8') : ''
-    check('移动运行任务的笔记先停止并写入取消账本', taskMove.ok === true && taskGone && movedTaskSource.includes('· cancelled'),
-      JSON.stringify({ beforeMoveTask, taskMove, taskGone, moved: movedTaskSource.length > 0, cancelled: movedTaskSource.includes('· cancelled') }))
+    const movedTaskLedger = taskMove.ok && await page.eval(`(async()=>{const note=await window.rgent.noteRead('生命周期/已停止.md');const history=await window.rgent.ledgerGet({sessionId:note.sessionId,objectVersion:note.objectVersion,relPath:'生命周期/已停止.md'});return history.ok&&history.value.records.some(r=>r.state==='saved'&&r.chapter?.status==='cancelled'&&r.chapter?.prompt==='多任务停止')})()`)
+    check('移动运行任务的笔记先停止并写入取消账本', taskMove.ok === true && taskGone && movedTaskLedger && movedTaskSource.includes('多任务停止') && movedTaskSource.includes('rgent:prompt:v1') && !movedTaskSource.includes('<!-- rgent:ledger:v1 -->'),
+      JSON.stringify({ beforeMoveTask, taskMove, taskGone, moved: movedTaskSource.length > 0, cancelled: movedTaskLedger }))
     writeFileSync(path.join(vault, '生命周期', '过期.md'), '第一版')
     const stale = await page.eval(`window.rgent.relocationPreview({ kind: 'note', source: '生命周期/过期.md', target: '生命周期/拒绝.md' })`)
     writeFileSync(path.join(vault, '生命周期', '过期.md'), '外部第二版')
@@ -2233,12 +2263,11 @@ async function main() {
         (!policy || readFileSync(path.join(vault, '.rgent-permissions'), 'utf8') === policy))
       const unrelatedSaved = await waitFor(page, `(async () => {
         const source = (await window.rgent.noteRead('生命周期/无关生成.md')).content
-        const [body,ledger] = source.split('<!-- rgent:ledger:v1 -->')
-        const chapters = [...(ledger||'').matchAll(/^<!-- rgent:ledger-task:v1 id="([^"\\r\\n]+)"(?: sources="v[12]")? -->\\r?$/gm)]
-        const chapter = chapters.length===1 ? ledger.slice(chapters[0].index) : ''
-        const status = /^## [^\\r\\n]+ · (cancelled|failed)\\r?$/m.exec(chapter)?.[1]
-        const stopped = status==='cancelled' || status==='failed' && /^中止原因：LIFECYCLE_RECOVERY_REQUIRED\\r?$/m.test(chapter)
-        return body.includes('受控回答第一句。') && chapter.includes('受控回答第一句。') && chapters.length===1 && chapters[0][1]===${JSON.stringify(unrelatedTask.id)} && stopped && (await window.rgent.agentTasks()).length===0
+        const note=await window.rgent.noteRead('生命周期/无关生成.md')
+        const history=await window.rgent.ledgerGet({sessionId:note.sessionId,objectVersion:note.objectVersion,relPath:'生命周期/无关生成.md'})
+        const records=history.ok?history.value.records:[],record=records.find(r=>r.taskId===${JSON.stringify(unrelatedTask.id)}),chapter=record?.chapter
+        const stopped=chapter?.status==='cancelled'||chapter?.status==='failed'&&chapter.reason==='LIFECYCLE_RECOVERY_REQUIRED'
+        return source.includes('受控回答第一句。')&&!source.includes('rgent:ledger:v1')&&chapter?.answer.includes('受控回答第一句。')&&records.length===1&&stopped&&(await window.rgent.agentTasks()).length===0
       })()`)
       check('恢复后补存无关任务的回答与一章账本', unrelatedSaved, unrelatedSaved ? '' : await page.eval(`(async () => JSON.stringify({taskId:${JSON.stringify(unrelatedTask.id)},tasks:await window.rgent.agentTasks(),source:(await window.rgent.noteRead('生命周期/无关生成.md')).content}))()`))
       const recoveredUnrelatedSource = await page.eval(`(async ()=>(await window.rgent.noteRead('生命周期/无关生成.md')).content)()`)

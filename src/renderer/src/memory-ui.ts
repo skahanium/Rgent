@@ -1,6 +1,6 @@
 import { memoryErrorText } from '../../shared/memory-errors.ts'
 import type { ModelConfigResult, PublicModelConfig } from '../../shared/ipc.ts'
-import type { MemoryConfigChange, MemoryCommitRequest, MemoryEditRequest, MemoryEntryView, MemoryItemRequest, MemoryJobRequest, MemoryPreview, MemoryResult, MemorySourceView, MemoryView } from '../../shared/memory.ts'
+import type { MemoryConfigChange, MemoryCommitRequest, MemoryEditRequest, MemoryEntryView, MemoryItemRequest, MemoryJobRequest, MemoryMaintenanceRequest, MemoryPreview, MemoryResult, MemorySourceView, MemoryView } from '../../shared/memory.ts'
 import { modelModuleGroups } from './statusbar.ts'
 
 export { memoryErrorText } from '../../shared/memory-errors.ts'
@@ -8,7 +8,7 @@ const el=<K extends keyof HTMLElementTagNameMap>(tag:K,className?:string)=>{cons
 const paragraph=(text:string,className='settings-hint')=>{const p=el('p',className);p.textContent=text;return p}
 const button=(text:string,run:()=>void)=>{const b=el('button','settings-action');b.type='button';b.textContent=text;b.addEventListener('click',run);return b}
 const field=(title:string,input:HTMLElement)=>{const label=el('label','settings-field wide');const span=el('span');span.textContent=title;label.append(span,input);return label}
-const layerSelect=(value:string)=>{const s=el('select');for(const [v,label] of [['core','核心'],['demand','按需']]){const o=el('option');o.value=v!;o.textContent=label!;s.append(o)}s.value=value;return s}
+const layerSelect=(value:string)=>{const s=el('select');for(const [v,label] of [['core','持续约定'],['demand','相关知识']]){const o=el('option');o.value=v!;o.textContent=label!;s.append(o)}s.value=value;return s}
 const modelSelect=(config:PublicModelConfig|null,value:string|null,empty:string)=>{
   const select=el('select'),none=el('option');none.value='';none.textContent=empty;select.append(none)
   for(const group of config?modelModuleGroups(config):[]){const optgroup=el('optgroup');optgroup.label=group.label;for(const item of group.items){const option=el('option');option.value=item.id;option.textContent=item.label;optgroup.append(option)}select.append(optgroup)}
@@ -30,7 +30,7 @@ function sources(host:HTMLElement,items:MemorySourceView[]):void{
 export type MemoryPreviewHandlers={commit:(request:Omit<MemoryCommitRequest,'sessionId'>)=>Promise<MemoryResult<MemoryView>>;isCurrent:()=>boolean;onDone:(view:MemoryView)=>void;onCancel:()=>void}
 /** Used inline for management and in the existing overlay for a body/ledger selection. */
 export function renderMemoryPreview(host:HTMLElement,preview:MemoryPreview,handlers:MemoryPreviewHandlers):void{
-  const panel=el('section','memory-preview'),heading=el('h3','settings-section-title');heading.textContent=preview.kind==='manual'?'记住预览':preview.kind==='retry'?'重试整理预览':preview.kind==='confirm'?'确认记忆更正':'恢复记忆预览';panel.append(heading)
+  const panel=el('section','memory-preview'),heading=el('h3','settings-section-title');heading.textContent=preview.kind==='manual'?'记住预览':preview.kind==='retry'?'重试整理预览':preview.kind==='confirm'?'确认记忆更正':preview.kind==='undo'?'撤销本场记忆变更':preview.kind==='watermark'?'学习水位预览':preview.kind==='reset-config'?'设备配置重建预览':preview.kind==='reset'?'本库记忆重建预览':'恢复记忆预览';panel.append(heading)
   if(preview.previousContent!==undefined)panel.append(paragraph(`当前内容：${preview.previousContent}`,'memory-source-text'))
   const content=el('textarea');content.rows=4;content.value=preview.content;content.maxLength=4096;content.readOnly=preview.kind!=='manual';content.setAttribute('aria-label','将记住的内容')
   const layer=layerSelect(preview.layer),scope=el('input');scope.value=preview.scope;scope.maxLength=512
@@ -63,17 +63,18 @@ export type MemoryPageHandlers={
   restore:(r:Omit<MemoryItemRequest,'sessionId'>)=>Promise<MemoryResult<MemoryPreview>>
   retry:(r:Omit<MemoryJobRequest,'sessionId'>)=>Promise<MemoryResult<MemoryPreview>>
   cancel:(r:Omit<MemoryJobRequest,'sessionId'>)=>Promise<MemoryResult<MemoryView>>
+  maintenance:(r:Omit<MemoryMaintenanceRequest,'sessionId'>)=>Promise<MemoryResult<MemoryPreview>>
   commit:(r:Omit<MemoryCommitRequest,'sessionId'>)=>Promise<MemoryResult<MemoryView>>
 }
 export type MemoryPageHost={body:HTMLElement;isCurrent:()=>boolean;onChanged:(view:MemoryView)=>void}
 export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers):()=>void{
   let disposed=false,view:MemoryView|null=null,readSerial=0,modelsSnapshot:PublicModelConfig|null=null
   const current=()=>!disposed&&host.isCurrent(),body=host.body,error=paragraph('','settings-error');error.setAttribute('role','alert');error.hidden=true
-  const status=paragraph('读取当前库记忆…'),items=el('section','memory-entries'),jobs=el('section','memory-jobs');body.append(status,error)
+  const status=paragraph('读取当前库记忆…'),items=el('section','memory-entries'),jobs=el('section','memory-jobs'),maintenance=el('section','memory-maintenance');body.append(status,error)
   const showError=(code:string)=>{error.textContent=memoryErrorText(code);error.hidden=false}
   let currentDefault:HTMLElement|null=null,currentVault:HTMLElement|null=null
   let updateReceiver=(_value:MemoryView):void=>{}
-  const accept=(value:MemoryView)=>{view=value;host.onChanged(value);updateReceiver(value);status.textContent=`当前库记忆${value.config.vault.enabled?'开启':'关闭'} · ${value.entries.length} 条${value.status==='invalid'?` · ${memoryErrorText(value.reason??'MEMORY_UNAVAILABLE')}`:''}`;if(currentDefault){currentDefault.dataset.modelId=value.config.defaultModelId??'';currentDefault.textContent=`现值：${value.config.defaultModelId?(modelsSnapshot?.models.find(m=>m.id===value.config.defaultModelId)?.modelId??'原模型不可用'):'未选择'}`} ;if(currentVault)currentVault.textContent=`现值：${value.config.vault.enabled?'开启':'关闭'} · ${value.config.vault.override.mode==='inherit'?'继承设备默认':(modelsSnapshot?.models.find(m=>value.config.vault.override.mode==='model'&&m.id===value.config.vault.override.modelId)?.modelId??'原模型不可用')}`;paintItems();paintJobs()}
+  const accept=(value:MemoryView)=>{view=value;host.onChanged(value);updateReceiver(value);status.textContent=`当前库记忆${value.config.vault.enabled?'开启':'关闭'} · ${value.entries.length} 条${value.reason||value.status==='invalid'?` · ${memoryErrorText(value.reason??'MEMORY_UNAVAILABLE')}`:''}`;if(currentDefault){currentDefault.dataset.modelId=value.config.defaultModelId??'';currentDefault.textContent=`现值：${value.config.defaultModelId?(modelsSnapshot?.models.find(m=>m.id===value.config.defaultModelId)?.modelId??'原模型不可用'):'未选择'}`} ;if(currentVault)currentVault.textContent=`现值：${value.config.vault.enabled?'开启':'关闭'} · ${value.config.vault.override.mode==='inherit'?'继承设备默认':(modelsSnapshot?.models.find(m=>value.config.vault.override.mode==='model'&&m.id===value.config.vault.override.modelId)?.modelId??'原模型不可用')}`;paintItems();paintJobs();paintMaintenance()}
   async function mutate(run:()=>Promise<MemoryResult<MemoryView>>,b:HTMLButtonElement):Promise<void>{
     b.disabled=true;error.hidden=true
     try{const result=await run();if(!current())return;if(result.ok){ readSerial++; const edited=b.closest<HTMLElement>('.memory-entry'); if (edited && b.textContent==='保存条目') edited.remove(); accept(result.value) }else showError(result.error)}catch{if(current())showError('MEMORY_UNAVAILABLE')}finally{if(current())b.disabled=false}
@@ -87,17 +88,17 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     renderMemoryPreview(hostNode,result.value,{commit:handlers.commit,isCurrent:()=>current()&&hostNode.isConnected,onDone:value=>{accept(value)},onCancel:()=>hostNode.querySelector('.memory-preview')?.remove()})
   }
   function paintEntryMetadata(row: HTMLElement, entry: MemoryEntryView): void {
-    const signature = JSON.stringify([entry.status, entry.reason, entry.sources, entry.updatedAt, entry.pendingTarget])
+    const signature = JSON.stringify([entry.status, entry.reason, entry.sources, entry.updatedAt, entry.pendingTarget,entry.attribution,entry.reviewAt])
     if (row.dataset.metadata === signature) return
     const summary = row.querySelector('summary')!
-    summary.textContent = `${({active:'有效',paused:'证据暂停',pending:'待确认',disabled:'停用',review:'待复核',obsolete:'过时',disputed:'争议',deferred:'容量暂缓'})[entry.status]} · ${entry.layer==='core'?'核心':'按需'} · ${entry.content}`
+    summary.textContent = `${({active:'有效',paused:'证据暂停',pending:'待确认',disabled:'停用',review:'待复核',obsolete:'过时',disputed:'争议',deferred:'容量暂缓'})[entry.status]} · ${entry.layer==='core'?'持续约定':'相关知识'} · ${entry.content}`
     const metadata = row.querySelector<HTMLElement>('.memory-entry-metadata')!
     let detail = metadata.querySelector<HTMLElement>(':scope > .settings-hint')
     if (!detail) { detail = paragraph(''); metadata.prepend(detail) }
-    detail.textContent = `版本 ${entry.version} · ${entry.updatedAt}${entry.reason?` · ${memoryErrorText(entry.reason)}`:''}`
+    detail.textContent = `${entry.attribution??'归属未提供'} · ${entry.scope} · ${entry.reviewAt?'复核期 '+entry.reviewAt:'未设复核期'} · 版本 ${entry.version} · ${entry.updatedAt}${entry.reason?` · ${memoryErrorText(entry.reason)}`:''}`
     sources(metadata, entry.sources)
     const action = row.querySelector<HTMLButtonElement>('.memory-entry-state-action')!
-    action.textContent = entry.status === 'active' ? '停用' : entry.pendingTarget ? '核对更正' : '核对来源并恢复'
+    action.textContent = entry.status === 'active' ? '停用' : entry.pendingTarget ? '核对更正' : entry.status==='pending'||entry.status==='disputed'?'确认新事实':'核对来源并恢复'
     action.onclick = () => { if (entry.status === 'active') void mutate(() => handlers.disable(binding(entry)), action); else void preview(row, () => handlers.restore(binding(entry))) }
     if (row.querySelector('.memory-preview')) {
       row.querySelector('.memory-preview')!.remove()
@@ -126,10 +127,23 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
       const save=button('保存条目',()=>void mutate(()=>handlers.edit({...binding(entry),content:content.value,layer:layer.value as 'core'|'demand',scope:scope.value}),save));actions.append(save)
       const stateAction = el('button', 'settings-action memory-entry-state-action'); stateAction.type = 'button'; actions.append(stateAction)
       let armed=false
-      const forget=button('删除并遗忘',()=>{if(!armed){armed=true;const warning=paragraph('同时清除无法证明无关的待整理重试材料，原笔记及账本不变。');warning.classList.add('memory-forget-warning');row.append(warning);forget.textContent='确认删除并遗忘';return}void mutate(()=>handlers.forget(binding(entry)),forget)})
+      const forget=button('删除并遗忘',()=>{if(!armed){armed=true;const warning=paragraph('删除记忆正文并阻断已知派生内容；取消待整理材料并清除摘要缓存。原笔记与账本不变，不保证清除外部备份或未知改写。');warning.classList.add('memory-forget-warning');row.append(warning);forget.textContent='确认删除并遗忘';return}void mutate(()=>handlers.forget(binding(entry)),forget)})
       actions.append(forget);row.append(actions);paintEntryMetadata(row, entry);items.append(row)
     }
     if (focus?.isConnected) focus.focus({ preventScroll: true })
+  }
+  function paintMaintenance():void{
+    if(!view)return
+    const signature=JSON.stringify([view.learning,view.diagnosis,view.configDiagnosis,view.status])
+    if(maintenance.dataset.signature===signature)return
+    maintenance.dataset.signature=signature;maintenance.replaceChildren()
+    const title=el('h3','settings-section-title');title.textContent='学习与诊断';maintenance.append(title)
+    if(view.learning){maintenance.append(paragraph(`自动学习材料截止于序号 ${view.learning.watermark}；当前材料序号 ${view.learning.nextSequence}。`))
+      maintenance.append(button('预览推进学习水位',()=>void preview(maintenance,()=>handlers.maintenance({action:'watermark',revision:view!.revision,objectVersion:view!.objectVersion,watermark:view!.learning!.nextSequence}))))}
+    if(view.diagnosis){maintenance.append(paragraph(`本库记忆记录 ${view.diagnosis.bytes} 字节；损坏记录不会当作空记录覆盖。`))
+      maintenance.append(button('核对并重建本库记忆',()=>void preview(maintenance,()=>handlers.maintenance({action:'reset',revision:view!.diagnosis!.revision,objectVersion:view!.diagnosis!.objectVersion}))))}
+    if(view.configDiagnosis){maintenance.append(paragraph('记忆配置不可用；本库内容仍可查看和诊断，回答模型与密钥不受影响。'))
+      maintenance.append(button('核对并重建记忆设备配置',()=>void preview(maintenance,()=>handlers.maintenance({action:'reset-config',revision:view!.configDiagnosis!.revision,objectVersion:null}))))}
   }
   function paintJobs():void{
     const focus=document.activeElement instanceof HTMLElement&&jobs.contains(document.activeElement)?document.activeElement:null
@@ -141,7 +155,9 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
       if(previous?.dataset.signature===signature){jobs.append(previous);continue}
       const row=el('div','memory-job');row.dataset.taskId=job.taskId;row.dataset.signature=signature
       row.append(paragraph(`任务 ${job.taskId} · ${({queued:'排队',running:'整理中',applied:'已完成',rejected:'未提交',interrupted:'已中断',unavailable:'不可用', 'handed-off':'已移交'})[job.outcome]}${job.reason?` · ${memoryErrorText(job.reason)}`:''}`));const request={taskId:job.taskId,materialVersion:job.materialVersion!}
+      if(job.outcome==='applied')row.append(paragraph(`本场新增或更新 ${job.entryIds?.length??0} 条；可在上方查看、编辑或删除并遗忘。`))
       if(previous?.querySelector('.memory-preview'))row.append(paragraph('任务材料、状态或整理配置已变化；原预览已失效，请重新预览。'))
+      if(job.undoable)row.append(button('预览撤销本场变更',()=>void preview(row,()=>handlers.maintenance({action:'undo',taskId:job.taskId,materialVersion:job.materialVersion!,revision:view!.revision,objectVersion:view!.objectVersion}))))
       if(job.retryable)row.append(button('预览并重试',()=>void preview(row,()=>handlers.retry(request))))
       if(job.outcome==='queued'||job.outcome==='running'){const cancel=button('停止整理',()=>void mutate(()=>handlers.cancel(request),cancel));row.append(cancel)}
       jobs.append(row)
@@ -161,7 +177,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     vault.append(paragraph('开启允许同库任务自动使用有效核心与相关记忆；已有独立许可只用于已授权任务材料。关闭将停止已使用记忆的任务并保稿。'))
     const saveVault=button('保存当前库',()=>void mutate(()=>handlers.save({target:'vault',vault:{enabled:enabled.checked,override:override.value?{mode:'model',modelId:override.value}:{mode:'inherit'}}}),saveVault));saveVault.dataset.memory='save-vault';vault.append(saveVault)
     const receiver=paragraph('');updateReceiver=(value:MemoryView)=>{receiver.textContent=value.recipient?`整理接收方 ${value.recipient.modelId} · ${value.recipient.host}。用途：仅本任务实际发送的口令、必要结果、来源片段及相关记忆；不含思维链、全库或完整历史。`:'整理模型未选择或不可用；不会回退到其他模型，已有有效记忆仍可使用。'};updateReceiver(view);vault.append(receiver)
-    const refresh=button('刷新状态',()=>void mutate(handlers.get,refresh));body.append(device,vault,refresh,items,jobs);accept(view)
+    const refresh=button('刷新状态',()=>void mutate(handlers.get,refresh));body.append(device,vault,refresh,items,jobs,maintenance);accept(view)
   }).catch(()=>{if(current())showError('MEMORY_UNAVAILABLE')})
   const changed = (event: Event): void => {
     if (!current() || !view || (event as CustomEvent<string>).detail !== view.sessionId) return
@@ -172,39 +188,8 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
   return()=>{disposed=true;window.removeEventListener('rgent:memory', changed)}
 }
 
-/** Display-only chapter ranges; main independently parses and classifies every request. */
-export function ledgerRememberRanges(ledger:string):{taskId:string;label:string;start:number;end:number}[]{
-  const chapters=[...ledger.matchAll(/^<!-- rgent:ledger-task:v1 id="([A-Za-z0-9_-]+)"(?: sources="v[12]")? -->\r?$/gm)]
-  const result:{taskId:string;label:string;start:number;end:number}[]=[]
-  for(let at=0;at<chapters.length;at++){
-    const chapter=ledger.slice(chapters[at]!.index,chapters[at+1]?.index??ledger.length),taskId=chapters[at]![1]!
-    const completed = /^## .* · completed\r?$/m.test(chapter)
-    const prompt=[...chapter.matchAll(/^### 口令\r?\n\r?\n/gm)],answer=[...chapter.matchAll(/^### 回答\r?\n\r?\n/gm)],tools=[...chapter.matchAll(/^### 工具摘要\r?$/gm)]
-    if(prompt.length!==1||answer.length!==1||tools.length!==1)continue
-    for(const [label,from,to] of [['口令',prompt[0]!,answer[0]!],['回答',answer[0]!,tools[0]!]] as const){
-      if (label === '回答' && !completed) continue
-      const start=from.index+from[0].length,end=to.index-(chapter.slice(0,to.index).match(/(?:\r?\n){2}$/u)?.[0].length ?? 0)
-      if(end>start)result.push({taskId,label,start,end})
-    }
-  }
-  return result
-}
-
-export function mountLedgerRememberButtons(host: HTMLElement, ledger: string, rememberSelection: (start: number, end: number, taskId: string) => void): void {
-  const headings = Array.from(host.querySelectorAll<HTMLHeadingElement>('h2[data-source-start]'))
-  const chapters = [...ledger.matchAll(/^<!-- rgent:ledger-task:v1 id="([A-Za-z0-9_-]+)"(?: sources="(v[12])")? -->\r?$/gm)]
-  for (const choice of ledgerRememberRanges(ledger)) {
-    const chapterIndex = chapters.findIndex(match => match[1] === choice.taskId), chapter = chapters[chapterIndex]
-    if (!chapter) continue
-    const prefix = ledger.slice(chapter.index! + chapter[0].length, chapters[chapterIndex + 1]?.index ?? ledger.length)
-    const header = /^\r?\n(?:<!-- rgent:ledger-sources:(v[12]) data="[A-Za-z0-9_-]+" -->\r?\n)?(?:\r?\n)*## [^\r\n]+\r?(?:\n|$)/u.exec(prefix)
-    if (!header || header[1] !== chapter[2]) continue
-    const start = chapter.index! + chapter[0].length + header[0].indexOf('## ')
-    const target = headings.find(heading => heading.dataset.sourceStart === String(start))
-    if (!target) continue
-    const remember = document.createElement('button'); remember.type = 'button'; remember.className = 'memory-ledger-remember'
-    remember.textContent = `记住${choice.label}`; remember.setAttribute('aria-label', `记住任务 ${choice.taskId} 的${choice.label}`)
-    remember.addEventListener('click', () => rememberSelection(choice.start, choice.end, choice.taskId))
-    target.after(remember)
-  }
+/** Program-defined offsets in the typed ledger context, independently rechecked by main. */
+export function ledgerRememberCommand(record:import('../../main/ledger-store.ts').LedgerRecord):{taskId:string;start:number;end:number}|null{
+  if(record.state!=='saved'||!record.chapter?.prompt||record.legacyRaw)return null
+  return {taskId:record.taskId,start:'口令：\n'.length,end:'口令：\n'.length+record.chapter.prompt.length}
 }

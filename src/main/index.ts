@@ -1,3 +1,5 @@
+import {memoryDependency,sameMemoryDependency} from './memory-use.ts'
+import {historicalContextPolicy} from './ledger-provenance.ts'
 import {WorkingMemoryService} from './working-memory-service.ts'
 import {WorkingMemoryConsolidation} from './working-memory-consolidation.ts'
 import {memoryAuthorizationState as configuredMemoryAuthorizationState} from './model-config.ts'
@@ -66,6 +68,7 @@ let agentHost: AgentHost | null = null
 let authorizations: TaskAuthorizationRegistry | null = null
 let consolidation:WorkingMemoryConsolidation|null=null
 let summaryCache:SummaryCache|null=null
+let reasoningStore:ReasoningStore|null=null
 function workingService(){return vault?new WorkingMemoryService(vault,()=>modelConfig):null}
 const memoryIpc = createMemoryIpc({
   vault: () => vault, config: () => modelConfig, service: () => workingService(),
@@ -448,7 +451,13 @@ function registerIpc(): void {
       if (memoryAuthorizationState(request.sessionId).signature !== memory.signature) throw Error('STALE_PREVIEW')
       if (memoryAuthorizationPreviews.size >= 128) memoryAuthorizationPreviews.delete(memoryAuthorizationPreviews.keys().next().value!)
       memoryAuthorizationPreviews.set(`${owner}:${preview.id}`, { sessionId: request.sessionId, signature: memory.signature,search:memorySearch })
-      return {ok:true,preview:{...preview,...(memory.disclosure?{memory:{...memory.disclosure,search:{available:memorySearch,calls:memorySearch?4:0,sharedTools:preview.sources.length>1?modelConfig!.getPublic().limits.local.tools:0}}}:{})}}
+      const chapters=await vault!.ledgerContexts(request.relPath),note=await vault!.read(request.relPath)
+      const validMemories=memory.disclosure?.use?await workingService()!.entries():[]
+      const policy=await historicalContextPolicy(note.content,async dep=>preview.sources.some(s=>s.relPath===dep.relPath&&s.objectVersion===dep.objectVersion&&s.fingerprint===dep.bodyHash),undefined,chapters,async dep=>validMemories.some(e=>e.status==='active'&&sameMemoryDependency(dep,memoryDependency(e))))
+      const generators=summaryCache?.valid(summaryHash(await vault!.ledgerKey(request.relPath)),chapters.filter(c=>policy.allowedLedgerChapterIds.includes(c.sourceId))).map(b=>({modelId:b.generator.modelId,host:b.generator.host,time:b.generator.time}))??[]
+      vault!.assertSession(request.sessionId)
+      if(memoryAuthorizationState(request.sessionId).signature!==memory.signature)throw Error('STALE_PREVIEW')
+      return {ok:true,preview:{...preview,summaryGenerators:generators.slice(0,64),...(memory.disclosure?{memory:{...memory.disclosure,search:{available:memorySearch,calls:memorySearch?4:0,sharedTools:preview.sources.length>1?modelConfig!.getPublic().limits.local.tools:0}}}:{})}}
     }
     catch(error){return {ok:false,error:error instanceof Error?error.message:'AUTHORIZATION_FAILED'}}
   })
@@ -576,6 +585,16 @@ function registerIpc(): void {
     }catch{return {ok:false,error:'LEDGER_UNAVAILABLE'}}
   })
   registerTrustedHandle(IPC.ledgerRepair,async(_event,value:unknown)=>{try{if(!value||typeof value!=='object'||Array.isArray(value))throw Error();const r=value as Record<string,unknown>;if(Object.keys(r).sort().join()!=='registryRevision,sessionId'||typeof r.sessionId!=='string'||r.registryRevision!==null&&(typeof r.registryRevision!=='string'||!/^[a-f0-9]{64}$/.test(r.registryRevision)))throw Error();if(!vault)throw Error();vault.assertSession(r.sessionId);if(structureGate.isBusy()||agentHost?.active().length)throw Error();await vault.ledgerRepair(r.registryRevision as string|null);return {ok:true}}catch{return {ok:false,error:'LEDGER_REGISTRY_INVALID'}}})
+  registerTrustedHandle(IPC.ledgerReasoning,async(_event,value:unknown):Promise<import('../shared/ledger.ts').LedgerReasoningResult>=>{
+    try{
+      if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
+      const r=value as Record<string,unknown>;if(Object.keys(r).sort().join()!=='objectVersion,relPath,sessionId,taskId'||typeof r.relPath!=='string'||typeof r.sessionId!=='string'||typeof r.objectVersion!=='string'||typeof r.taskId!=='string'||! /^[A-Za-z0-9_-]{1,128}$/.test(r.taskId))throw Error('BAD_REQUEST')
+      if(!vault||!reasoningStore)throw Error('NO_VAULT');vault.assertSession(r.sessionId)
+      const note=await vault.read(r.relPath);if(!vault.acceptsObject(r.relPath,r.objectVersion,note.objectVersion))throw Error('NOTE_REPLACED')
+      const record=await vault.ledgerRecord(r.relPath,r.taskId);vault.assertSession(r.sessionId)
+      return {ok:true,text:record.state==='cleared'?null:record.legacyReasoning??reasoningStore.read(vault.memoryContext().vaultKey,r.taskId)}
+    }catch{return {ok:false,error:'LEDGER_UNAVAILABLE'}}
+  })
   registerTrustedHandle(IPC.ledgerGet,async(_event,value:unknown)=>{
     try{
       if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
@@ -855,7 +874,7 @@ app.whenReady().then(() => {
       return {credential:modelConfig.credential(modelRecordId),limits:extraReferences ? config.limits.local : config.limits.none}
     }
   })
-  const reasoningStore=new ReasoningStore(path.join(app.getPath('userData'),'reasoning-v2'))
+  reasoningStore=new ReasoningStore(path.join(app.getPath('userData'),'reasoning-v2'))
   const contextCache=new SummaryCache(path.join(app.getPath('userData'),'context-cache-v2'))
   summaryCache=contextCache
   consolidation=new WorkingMemoryConsolidation({
@@ -874,7 +893,7 @@ app.whenReady().then(() => {
     onTaskMaterialSaved:material=>consolidation!.handoff(material),
     onTaskMaterialResult:result=>{if(result.status!=='handed-off')consolidation?.discard(result.taskId)},
     memory:{context:()=>vault!.memoryContext(),config:key=>({enabled:modelConfig!.getMemoryConfig(key).vault.enabled,revision:modelConfig!.getVaultMemoryRevision(key)}),entries:ids=>workingService()!.entries(ids)},
-    onReasoning:(id,text)=>reasoningStore.write(vault!.memoryContext().vaultKey,id,text),
+    onReasoning:(id,text)=>reasoningStore!.write(vault!.memoryContext().vaultKey,id,text),
     summaries:{cache:contextCache,key:async relPath=>summaryHash(await vault!.ledgerKey(relPath))},
     ledger:{prepare:(relPath,chapter,version)=>vault!.ledgerPrepare(relPath,chapter,version),complete:(relPath,id,revision)=>vault!.ledgerComplete(relPath,id,revision),contexts:relPath=>vault!.ledgerContexts(relPath)},
     assertMemoryAuthorization: input => {

@@ -13,12 +13,11 @@ import { effectivePermissionEntries, loadPermissions, loadPermissionSnapshot, se
 import { closeSecureFs, secureFsFor } from './secure-fs.ts'
 import { VaultIndex } from './vault-index.ts'
 import { vaultRootIdentity, watchVault } from './watch.ts'
-import { assertLedgerPreserved, composeSource, partitionSource } from '../markdown/partition.ts'
+import { assertLedgerPreserved, partitionSource } from '../markdown/partition.ts'
 import { LedgerStore } from './ledger-store.ts'
 import type { LedgerChapterWrite } from './host-source.ts'
 import { retireMemoryFile } from './memory-retirement.ts'
 import type { MemoryContext } from '../shared/memory.ts'
-import { appendLedgerChapter } from './host-source.ts'
 
 export class VaultSession {
   private readonly mutations = new VaultMutationQueue()
@@ -165,7 +164,16 @@ export class VaultSession {
       const migrated=this.ledgerStore!.migrate(relPath)
       if(migrated.migrated)await this.recordCommittedWrite({relPath,previousPath:relPath,previousObjectVersion:before.objectVersion,objectVersion:migrated.objectVersion,content:migrated.body})
     })
-    return this.read(relPath)
+    const note=await this.read(relPath)
+    this.scheduleLedgerCompression(relPath,token)
+    return note
+  }
+  private scheduleLedgerCompression(relPath:string,token:string){
+    setImmediate(()=>{void this.mutations.run(()=>{
+      this.assertSession(token);this.requireStableStructure()
+      const items=this.ledgerStore!.maintenancePreview(relPath,'compress').records
+      if(items.length){const result=this.ledgerStore!.maintain(relPath,'compress',items);if(result.failed.length)this.ledgerFailure='LEDGER_CONFLICT';else if(this.ledgerFailure==='LEDGER_CONFLICT')this.ledgerFailure=null}
+    }).catch(()=>{if(this.token===token)this.ledgerFailure='LEDGER_CONFLICT'})})
   }
   async ledgerPrepare(relPath:string,chapter:LedgerChapterWrite,expectedVersion?:number){
     const token=this.captureSession();return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.prepare(relPath,chapter,expectedVersion)})
@@ -173,13 +181,15 @@ export class VaultSession {
   async ledgerComplete(relPath:string,taskId:string,revision:string){const token=this.captureSession();return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.complete(relPath,taskId,revision)})}
   async ledgerKey(relPath:string){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);return this.memoryContext().vaultKey+':'+this.ledgerStore!.owner(relPath).noteId})}
   async ledgerContexts(relPath:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.contexts(relPath)}
-  async ledgerPage(relPath:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);return this.ledgerStore!.wirePage(relPath,cursor)})}
+  async ledgerPage(relPath:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);return {...this.ledgerStore!.wirePage(relPath,cursor),...(this.ledgerFailure?{maintenanceError:this.ledgerFailure}:{})}})}
 
   async materialUnit(relPath:string,start:number,end:number){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.materialUnit(relPath,start,end)})}
   materialCeiling(){this.requireUsableRoot();return this.ledgerStore!.materialCeiling()}
   ledgerTaskPath(taskId:string){this.requireUsableRoot();return this.ledgerStore!.taskPath(taskId)}
   memoryDiagnostic(){this.requireUsableRoot();return this.workingMemory!.diagnosis()}
   memorySnapshot(){return this.workingMemory!.read()}
+  /** Explicit diagnostic reset stays reachable during a pending structure recovery; it never clears that journal. */
+  async memoryReset(expected:{revision:string|null;objectVersion:string|null},watermark:number){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);this.requireUsableRoot();return this.workingMemory!.reset(expected,watermark)})}
   async memoryMutation<T>(operation:(store:WorkingMemoryStore)=>T|Promise<T>):Promise<T>{const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();const result=await operation(this.workingMemory!);this.assertSession(token);return result})}
   async ledgerRecord(relPath:string,taskId:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.getRecord(relPath,taskId)}
   async ledgerMaintenancePreview(relPath:string,action:'compress'|'clear'){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintenancePreview(relPath,action)})}
@@ -619,8 +629,8 @@ export class VaultSession {
     const token = randomUUID()
     this.token = token
     const check = (): void => { this.assertSession(token); this.requireUsableRoot() }
-    this.workingMemory=new WorkingMemoryStore(secureFsFor(this.root),check)
-    this.ledgerStore=new LedgerStore(secureFsFor(this.root),check)
+    this.workingMemory=new WorkingMemoryStore(()=>secureFsFor(this.requireUsableRoot()),check)
+    this.ledgerStore=new LedgerStore(()=>secureFsFor(this.requireUsableRoot()),check)
     this.ledgerFailure=null
     this.lifecycle = new VaultLifecycle(this.root, this.mutations, token, check, async write => {
       check(); await this.recordCommittedWrite(write)

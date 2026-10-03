@@ -36,8 +36,10 @@ export function parseMemoryRequest(op: MemoryOperation, value: unknown): Record<
       if(!obj(v)||!keys(v,['seconds','calls','tools'])||!Number.isSafeInteger(v.seconds)||Number(v.seconds)<1||Number(v.seconds)>600||!Number.isSafeInteger(v.calls)||Number(v.calls)<1||Number(v.calls)>4||v.tools!==0)return null
     } else return null
   } else if(op==='maintenance') {
-    allowed.push('action','revision','objectVersion','watermark')
-    if(!['watermark','reset'].includes(String(value.action))||value.revision!==null&&!hash(value.revision)||value.objectVersion!==null&&!str(value.objectVersion,512)||value.action==='watermark'&&(!Number.isSafeInteger(value.watermark)||Number(value.watermark)<0)||value.action==='reset'&&value.watermark!==undefined)return null
+    allowed.push('action','revision','objectVersion','watermark','taskId','materialVersion')
+    if(!['watermark','reset','reset-config','undo'].includes(String(value.action))||value.revision!==null&&!hash(value.revision)||value.objectVersion!==null&&!str(value.objectVersion,512)||value.action==='watermark'&&(!Number.isSafeInteger(value.watermark)||Number(value.watermark)<0)||value.action!=='watermark'&&value.watermark!==undefined)return null
+    if(value.action==='undo'&&(!str(value.taskId)||!hash(value.materialVersion)))return null
+    if(value.action!=='undo'&&(value.taskId!==undefined||value.materialVersion!==undefined))return null
   } else if(op==='manual') {
     allowed.push('relPath','objectVersion','revision','kind','taskId','start','end')
     if(!note(value.relPath)||!str(value.objectVersion,512)||!hash(value.revision)||!['body','ledger'].includes(String(value.kind))||!Number.isSafeInteger(value.start)||Number(value.start)<0||!Number.isSafeInteger(value.end)||Number(value.end)<=Number(value.start)||Number(value.end)-Number(value.start)>4096)return null
@@ -67,7 +69,7 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
  const previews=new Map<string,HeldPreview>()
  const clear=()=>previews.clear()
  const hold=(held:Omit<HeldPreview,'expires'>)=>{for(const [id,p] of previews)if(p.expires<Date.now())previews.delete(id);if(previews.size>=128)throw Error('MEMORY_QUEUE_FULL');previews.set(held.preview.id,{...held,expires:Date.now()+120000});return {ok:true as const,value:held.preview}}
- const view=async(service:WorkingMemoryService)=>{const value=await service.view();value.running=ports.engine?.()?.state()??value.running;return {ok:true as const,value}}
+ const view=async(service:WorkingMemoryService)=>{const value=await service.view();value.running=ports.engine?.()?.state()??value.running;for(const job of value.jobs)job.undoable=!!job.materialVersion&&!!ports.engine?.()?.canUndo(job.taskId,job.materialVersion);return {ok:true as const,value}}
  return {clear,async handle(owner:string,op:MemoryOperation,value:unknown):Promise<MemoryResult<MemoryView|MemoryPreview>>{
   try{
    const request=parseMemoryRequest(op,value);if(!request)throw Error('BAD_REQUEST')
@@ -76,6 +78,7 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
    if(op==='get')return view(service)
    if(op==='manual'){
     const source=await service.manualSource(request as unknown as import('../shared/memory.ts').MemoryManualRequest)
+    const parents=await service.entries(source.memoryDeps.map(d=>d.id));if(source.memoryDeps.some(d=>!parents.some(e=>e.id===d.id&&e.version===d.version&&e.status==='active')))throw Error('MEMORY_DEPENDENCY_CHANGED')
     const input:WorkingInput={content:source.text,layer:source.classification==='command'?'core':'demand',scope:'本库',sources:[source],semantic:source.classification==='command'?'standing':'fact',attribution:'人明确记住的材料',reviewAt:null}
     const preview:MemoryPreview={id:randomUUID(),sessionId:session,kind:'manual',content:input.content,layer:input.layer,scope:input.scope,sources:[source],warning:'确认只记住列出的材料；记忆许可不扩大读库范围。未采纳 AI 回答不能成为事实来源。'}
     return hold({owner,preview,input,basis:service.snapshot()})
@@ -96,6 +99,15 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
     return hold({owner,signature:cfg.signature,job:{taskId,materialVersion},preview:{id:randomUUID(),sessionId:session,kind:'retry',content:'重新核验原任务的获准材料后，取得新的有限整理许可；不会复活旧授权。',layer:'demand',scope:'本库',sources:[source],warning:'已清理或失效的材料不能重试；不会补采其它历史。',recipient:cfg.recipient,limits:cfg.limits}})
    }
    if(op==='maintenance'){
+    if(request.action==='undo'){
+     const engine=ports.engine?.();if(!engine||!engine.canUndo(request.taskId as string,request.materialVersion as string))throw Error('MEMORY_RETRY_UNAVAILABLE')
+     return hold({owner,job:{taskId:request.taskId as string,materialVersion:request.materialVersion as string},preview:{id:randomUUID(),sessionId:session,kind:'undo',content:'撤销本场自动新增或更正的记忆；已被再次修改的条目将拒绝覆盖。',layer:'demand',scope:'本库',sources:[],warning:'仅当前打开期间最近八场变更可直接撤销；不会修改原笔记或账本。新增条目会移除并阻止原依据自动重新生成。'}})
+    }
+    if(request.action==='reset-config'){
+     if(!config)throw Error('MEMORY_CONFIG_UNAVAILABLE');const actual=config.memoryConfigDiagnosis()
+     if(actual.revision!==request.revision||request.objectVersion!==null)throw Error('MEMORY_CONFIG_CONFLICT')
+     return hold({owner,binding:{revision:actual.revision,objectVersion:null},preview:{id:randomUUID(),sessionId:session,kind:'reset-config',content:'重建设备记忆配置：默认记忆模型为空，所有库记忆许可关闭，覆盖与整理上限恢复默认。',layer:'demand',scope:'设备',sources:[],warning:'本机所有库的记忆配置将重置；库内记忆、笔记、账本、回答模型与密钥不变。原配置不会自动覆盖或作为许可重新启用。'}})
+    }
     const binding={revision:request.revision as string|null,objectVersion:request.objectVersion as string|null},action=request.action as 'watermark'|'reset'
     const actual=action==='reset'?vault.memoryDiagnostic():service.snapshot()
     if(actual.revision!==binding.revision||actual.objectVersion!==binding.objectVersion)throw Error('MEMORY_CONFLICT')
@@ -106,6 +118,10 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
    if(op==='commit'){
     const p=previews.get(request.id as string);previews.delete(request.id as string)
     if(!p||p.owner!==owner||p.expires<Date.now()||p.preview.sessionId!==session)throw Error('STALE_PREVIEW')
+    if(p.preview.kind==='undo'){const engine=ports.engine?.();if(!engine)throw Error('MEMORY_RETRY_UNAVAILABLE');await engine.undo(p.job!.taskId,p.job!.materialVersion);ports.invalidate?.();await ports.recheck(vault,session);return view(service)}
+    if(p.preview.kind==='reset-config'){
+     if(!config)throw Error('MEMORY_CONFIG_UNAVAILABLE');clear();ports.invalidate?.();config.resetMemoryConfig(p.binding!.revision);await ports.recheck(vault,session);return view(service)
+    }
     if(p.preview.kind==='retry'){await ports.engine!()!.retry(p.job!.taskId,p.job!.materialVersion,p.signature!);return view(service)}
     if(p.preview.kind==='reset'||p.preview.kind==='watermark'){
      clear();ports.invalidate?.()

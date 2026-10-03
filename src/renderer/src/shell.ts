@@ -1,5 +1,5 @@
 import type { MemoryView, MemoryManualRequest, MemoryResult } from '../../shared/memory.ts'
-import { memoryErrorText, renderMemoryPreview, mountLedgerRememberButtons, type MemoryPageHandlers } from './memory-ui.ts'
+import { memoryErrorText, renderMemoryPreview, ledgerRememberCommand, type MemoryPageHandlers } from './memory-ui.ts'
 import { IPC, type AgentEvent, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type PublicModelConfig, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { reportFlush } from '../../shared/flush.ts'
@@ -130,6 +130,7 @@ export async function start(root: HTMLElement): Promise<void> {
   const memoryToggle = document.createElement('button')
   memoryToggle.type = 'button'; memoryToggle.className = 'status-memory'; memoryToggle.append(icon('memory'))
   memoryToggle.setAttribute('aria-label', '当前库记忆'); memoryToggle.setAttribute('aria-pressed', 'false')
+  const memoryChange=document.createElement('button');memoryChange.type='button';memoryChange.className='status-item status-memory-change';memoryChange.hidden=true;memoryChange.onclick=()=>settingsOverlay.open('记忆')
   let memorySnapshot: MemoryView | null = null
   let memoryReadSerial = 0
   let memoryBusy = false
@@ -225,6 +226,7 @@ export async function start(root: HTMLElement): Promise<void> {
       restore: r => window.rgent.memoryRestorePreview({ ...r, sessionId }),
       retry: r => window.rgent.memoryJobRetryPreview({ ...r, sessionId }),
       cancel: r => window.rgent.memoryJobCancel({ ...r, sessionId }).then(accept),
+      maintenance: r => window.rgent.memoryMaintenancePreview({ ...r, sessionId }),
       commit: r => window.rgent.memoryPreviewCommit({ ...r, sessionId }).then(accept)
     }
   }
@@ -1174,6 +1176,8 @@ export async function start(root: HTMLElement): Promise<void> {
     memoryToggle.title = memorySnapshot ? `当前库记忆${memorySnapshot.config.vault.enabled ? '开启' : '关闭'}${memorySnapshot.status === 'invalid' ? ' · 存储不可用，请查看设置' : ''}` : '当前库记忆不可用，请查看设置'
     memoryToggle.setAttribute('aria-label', memoryToggle.title)
     const left = statusEl.querySelector('.status-left')
+    const recentMemory=memorySnapshot?.jobs.filter(j=>j.outcome==='applied').at(-1),changedCount=recentMemory?.entryIds?.length??0
+    memoryChange.hidden=changedCount===0;memoryChange.textContent=`记忆 +${changedCount} · 查看`;memoryChange.title='本场新增或更新记忆；在记忆页查看、编辑或预览撤销';if(left&&memoryChange.parentElement!==left)left.append(memoryChange)
     // 只在还没放进固定槽位时移动它：稳定的父子关系才保得住焦点。
     const lead = statusEl.querySelector('.status-lead')
     if (lead && settingsOpen.parentElement !== lead) lead.append(settingsOpen)
@@ -1270,24 +1274,25 @@ export async function start(root: HTMLElement): Promise<void> {
     ledgerBody.replaceChildren()
     const message=document.createElement('p');message.textContent='正在核对账本归属…';ledgerBody.append(message)
     const captured=tab
-    let cursor:string|null=null,loading=false
+    let cursor:string|null=null,loading=false,pageGeneration=0,maintenanceFeedback=''
     let chunkText='',chunkHash:string|null=null,chunkOffset=0,decoder=new TextDecoder()
     const load=document.createElement('button');load.type='button';load.className='settings-action';load.textContent='加载更多历史'
     const renderRecord=(record:import('../../main/ledger-store.ts').LedgerRecord)=>{
       const details=document.createElement('details'),heading=document.createElement('summary'),content=document.createElement('div')
       heading.textContent=`${record.chapter?.startedAt??'旧记录'} · ${record.chapter?.status??'只读原文'} · ${record.bodyStatus==='present'?'有正文保存回执':'正文状态无法核验'}`
       details.append(heading,content);ledgerBody.insertBefore(details,load)
-      details.addEventListener('toggle',()=>{if(!details.open||content.childNodes.length)return
-        if(record.chapter){const meta=document.createElement('p'),p=record.chapter.provenance;meta.textContent=p?`模型：${p.model.modelId} · 接收方：${p.model.endpointHost}；工具摘要：${p.tools.map(t=>t.name+' '+t.outcome).join('、')||'无'}；实际读取来源：${p.sources.map(d=>d.relPath).join('、')||'无'}；模型消息引用来源：${p.sentSources?.join('、')||'无'}`:'旧记录元数据无法核验。';content.append(meta);const prompt=document.createElement('p');prompt.textContent=`口令：${record.chapter.prompt}`;content.append(prompt);const answer=document.createElement('div');content.append(answer);renderReadOnlyMarkdown(answer,record.chapter.answer,noteHost({taskId:record.taskId,revision:record.revision,field:'answer'}))}
-        else {const raw=document.createElement('pre');raw.textContent=record.legacyRaw??'此记录的正文已清理。';content.append(raw)}
+      const reasoning=document.createElement('button');reasoning.type='button';reasoning.className='settings-action';reasoning.textContent=record.legacyReasoning?'查看旧推理原文':'查看短期推理';reasoning.onclick=async()=>{reasoning.disabled=true;const result=await window.rgent.ledgerReasoning({sessionId:captured.sessionId!,objectVersion:captured.objectVersion!,relPath:captured.relPath,taskId:record.taskId});if(!ledgerOpen||current()!==captured)return;const text=document.createElement('pre');text.textContent=result.ok?result.text??'短期推理已清理或不可用；原回答与历史仍保留。':'推理读取未能核验，原记录保持。';content.append(text);reasoning.remove()};details.append(reasoning)
+      details.addEventListener('toggle',()=>{if(!details.open||content.dataset.rendered)return;content.dataset.rendered='true'
+        if(record.chapter){const meta=document.createElement('p'),p=record.chapter.provenance;meta.textContent=p?`模型：${p.model.modelId} · 接收方：${p.model.endpointHost}；工具摘要：${p.tools.map(t=>t.name+' '+t.outcome).join('、')||'无'}；实际读取来源：${p.sources.map(d=>d.relPath).join('、')||'无'}；模型消息引用来源：${p.sentSources?.join('、')||'无'}`:'旧记录元数据无法核验。';content.append(meta);const prompt=document.createElement('p');prompt.textContent=`口令：${record.chapter.prompt}`;content.append(prompt);const choice=ledgerRememberCommand(record);if(choice){const remember=document.createElement('button');remember.type='button';remember.className='memory-ledger-remember';remember.textContent='记住口令';remember.onclick=()=>void rememberSelection('ledger',choice.start,choice.end,choice.taskId);content.append(remember)}const answer=document.createElement('div');content.append(answer);renderReadOnlyMarkdown(answer,record.chapter.answer,noteHost({taskId:record.taskId,revision:record.revision,field:'answer'}))}
+        else {const raw=document.createElement('div');content.append(raw);if(record.legacyRaw)renderReadOnlyMarkdown(raw,record.legacyRaw);else raw.textContent='此记录的正文已清理。'}
       })
     }
     const fetchPage=async()=>{
-      if(loading||!captured.sessionId||!captured.objectVersion)return;loading=true;load.disabled=true
+      if(loading||!captured.sessionId||!captured.objectVersion)return;loading=true;load.disabled=true;const generation=pageGeneration
       try{const result=await window.rgent.ledgerGet({sessionId:captured.sessionId,objectVersion:captured.objectVersion,relPath:captured.relPath,cursor})
-        if(!ledgerOpen||current()!==captured)return
+        if(!ledgerOpen||current()!==captured||generation!==pageGeneration)return
         if(!result.ok){message.textContent=ledgerErrorText(result.error);if(result.error==='LEDGER_REGISTRY_INVALID'&&result.registryRevision!==undefined){const repair=document.createElement('button');repair.type='button';repair.className='settings-action';repair.textContent='从归属描述重建登记';repair.onclick=async()=>{repair.disabled=true;const r=await window.rgent.ledgerRepair({sessionId:captured.sessionId!,registryRevision:result.registryRevision!});if(!ledgerOpen||current()!==captured)return;if(r.ok){repair.remove();cursor=null;void fetchPage()}else{message.textContent=ledgerErrorText(r.error);repair.disabled=false}};ledgerBody.append(repair)}return}
-        const value=result.value;message.textContent=value.gaps.length?'部分原始历史已清理。':''
+        const value=result.value;message.textContent=maintenanceFeedback+(value.gaps.length?'部分原始历史已清理。':'')+(value.maintenanceError?'后台维护未完成，历史保留；请重新核对。':'')
         if(value.chunk){const c=value.chunk;if(c.offset===0){chunkText='';chunkHash=c.hash;chunkOffset=0;decoder=new TextDecoder()}
           if(c.offset!==chunkOffset||c.hash!==chunkHash)throw Error('LEDGER_CONFLICT')
           const bytes=Uint8Array.from(atob(c.data),x=>x.charCodeAt(0));chunkOffset+=bytes.length;chunkText+=decoder.decode(bytes,{stream:chunkOffset<c.total})
@@ -1295,8 +1300,8 @@ export async function start(root: HTMLElement): Promise<void> {
         }
         value.records.forEach(renderRecord);cursor=value.cursor;load.hidden=cursor===null
         if(!ledgerBody.querySelector('details')&&!value.chunk&&cursor===null)message.textContent='已核验本篇归属，目前没有任务记录。'
-      }catch{if(ledgerOpen&&current()===captured)message.textContent='账本读取未完成，保留已有回顾；请关闭后重新核对。'}
-      finally{loading=false;load.disabled=false}
+      }catch{if(ledgerOpen&&current()===captured&&generation===pageGeneration)message.textContent='账本读取未完成，保留已有回顾；请关闭后重新核对。'}
+      finally{if(generation===pageGeneration){loading=false;load.disabled=false}}
     }
     load.addEventListener('click',()=>void fetchPage());ledgerBody.append(load)
     const migrate=document.createElement('button');migrate.type='button';migrate.className='settings-action';migrate.textContent='迁移库内旧账本'
@@ -1314,7 +1319,7 @@ export async function start(root: HTMLElement): Promise<void> {
         if(!ledgerOpen||current()!==captured)return;control.disabled=false;if(!result.ok||!('id'in result.value)){message.textContent='维护预览不可用，原记录保留。';return}
         const preview=result.value;message.textContent=`当前历史占用 ${preview.totalBytes} 字节；本次 ${preview.records.length} 场。${preview.warning}`
         const apply=document.createElement('button');apply.type='button';apply.className='settings-action';apply.textContent=action==='clear'?'确认清理列出的历史':'执行已核验压缩';ledgerBody.append(apply)
-        apply.onclick=async()=>{apply.disabled=true;const committed=await window.rgent.ledgerMaintenance({...request,previewId:preview.id});if(!ledgerOpen||current()!==captured)return;if(committed.ok&&'success'in committed.value){message.textContent=`已完成 ${committed.value.success.length} 场；${committed.value.failed.length} 场未完成；实际减少 ${committed.value.savedBytes} 字节。`;apply.remove()}else{message.textContent='维护未完成，原记录与正文保持；请重新核对。';apply.remove()}}
+        apply.onclick=async()=>{apply.disabled=true;const committed=await window.rgent.ledgerMaintenance({...request,previewId:preview.id});if(!ledgerOpen||current()!==captured)return;if(committed.ok&&'success'in committed.value){maintenanceFeedback=`已完成 ${committed.value.success.length} 场；${committed.value.failed.length} 场未完成；实际减少 ${committed.value.savedBytes} 字节。`;message.textContent=maintenanceFeedback;apply.remove();ledgerBody.querySelectorAll('details').forEach(node=>node.remove());pageGeneration++;cursor=null;loading=false;chunkText='';chunkHash=null;chunkOffset=0;decoder=new TextDecoder();void fetchPage();ledgerClose.focus()}else{message.textContent='维护未完成，原记录与正文保持；请重新核对。';apply.remove()}}
       };ledgerBody.append(control)
     }
     void fetchPage()
@@ -1508,7 +1513,7 @@ export async function start(root: HTMLElement): Promise<void> {
         const title=document.createElement('h2'); title.textContent='另存为新笔记'
         const description=document.createElement('p'); description.textContent=`${source} → ${result.preview.target}`
         const note=document.createElement('p'); note.textContent=result.preview.warning
-        const tasks=document.createElement('p'); tasks.textContent=result.preview.pendingTaskIds.length ? `将以原任务 ID 保留 ${result.preview.pendingTaskIds.length} 份未落盘完整回答到新笔记账本；任务不重启。` : '最后核验的原账本将一并保留。'
+        const tasks=document.createElement('p'); tasks.textContent=result.preview.pendingTaskIds.length ? `将以原任务 ID 保留 ${result.preview.pendingTaskIds.length} 份未落盘完整回答到新笔记账本；任务不重启。` : '另存保留当前草稿和恢复关系；原账本不移动，不自动继承未列出的历史。'
         const cancel=document.createElement('button'); cancel.textContent='取消'; cancel.onclick=()=>panel.close()
         const save=document.createElement('button'); save.className='save-copy-confirm'; save.textContent='确认另存'; save.onclick=()=>{answer=true;panel.close()}
         panel.root.append(title,description,note,tasks,cancel,save)

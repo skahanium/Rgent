@@ -42,7 +42,8 @@ export function parseWorkingMemory(raw:string):WorkingRecord{
 /** All authoritative changes are a single native CAS, called through the vault mutation queue. */
 export class WorkingMemoryStore{
  private observed:{raw:string;id:string}|null=null
- constructor(private readonly fs:SecureVaultFs,private readonly check:()=>void){}
+ constructor(private readonly filesystem:SecureVaultFs|(()=>SecureVaultFs),private readonly check:()=>void){}
+ private get fs(){this.check();return typeof this.filesystem==='function'?this.filesystem():this.filesystem}
  read():WorkingSnapshot{
   this.check();let disk
   try{disk=this.fs.readSnapshot(FILE)}catch(e){if(e instanceof Error&&e.message==='ENOENT'){if(this.observed)throw Error('MEMORY_STORAGE_CHANGED');return {record:empty(),revision:null,objectVersion:null,raw:null}}throw e}
@@ -95,7 +96,7 @@ export class WorkingMemoryStore{
      candidate.nextSequence=Math.max(candidate.nextSequence,...input.sources.map(s=>s.sequence))
      if(change.action==='add'){
       const duplicate=candidate.entries.find(e=>e.content===input.content&&e.scope===input.scope&&e.semantic===input.semantic&&e.status!=='disabled')
-      if(duplicate){accepted.push(duplicate.id);continue}
+      if(duplicate)continue
       if(candidate.entries.length>=1000)throw Error('MEMORY_ENTRY_LIMIT')
       const e:WorkingEntry={...input,id:randomUUID(),version:1,status:'active',reason:null,updatedAt:now,updateBasis:{kind:'consolidation',id:receipt.taskId,version:1}};candidate.entries.push(e);accepted.push(e.id)
      }else{
@@ -122,6 +123,20 @@ export class WorkingMemoryStore{
   record.jobs.push({...receipt,entryIds:[...new Set(entryIds)],...(rejected?{reason:'MEMORY_OUTPUT_INVALID'}:{})});record.jobs=record.jobs.slice(-256)
   const snapshot=this.commit(basis,record)
   return {snapshot,entryIds:[...new Set(entryIds)],rejected}
+ }
+ /** Explicit batch undo is version-bound and leaves textless anti-relearning constraints. */
+ undo(basis:WorkingSnapshot,before:readonly WorkingEntry[],after:readonly {id:string;version:number}[],taskId:string,materialVersion:string){
+  const record=structuredClone(basis.record),removed:WorkingEntry[]=[]
+  for(const change of after){const at=record.entries.findIndex(e=>e.id===change.id&&e.version===change.version);if(at<0)throw Error('MEMORY_CHANGED')
+   const current=record.entries[at]!,previous=before.find(e=>e.id===current.id)
+   if(previous){record.entries[at]={...structuredClone(previous),version:current.version+1,updatedAt:new Date().toISOString(),updateBasis:{kind:'manual',id:taskId,version:current.version+1}}}
+   else {removed.push(current);record.entries.splice(at,1)}
+  }
+  if(removed.length)record.forgotten.push({materialIds:[...new Set(removed.flatMap(e=>e.sources.map(s=>s.materialId)))],entryIds:removed.map(e=>({id:e.id,version:e.version})),through:Math.max(...removed.flatMap(e=>e.sources.map(s=>s.sequence)))})
+  let cost=record.entries.filter(e=>e.layer==='core'&&e.status==='active'&&!before.some(b=>b.id===e.id)).reduce((n,e)=>n+conservativeTokens(e.content),0)
+  for(const e of record.entries.filter(e=>e.layer==='core'&&e.status==='active'&&before.some(b=>b.id===e.id))){const size=conservativeTokens(e.content);if(cost+size>2048)e.status='deferred';else cost+=size}
+  const receipt=record.jobs.find(j=>j.taskId===taskId&&j.materialVersion===materialVersion);if(!receipt||receipt.outcome!=='applied')throw Error('MEMORY_CHANGED');receipt.outcome='rejected';receipt.reason='MEMORY_UNDONE';receipt.entryIds=[]
+  return this.commit(basis,record)
  }
  forget(basis:WorkingSnapshot,id:string,version:number){
   const record=structuredClone(basis.record),entry=record.entries.find(e=>e.id===id);if(!entry||entry.version!==version)throw Error('MEMORY_CHANGED')

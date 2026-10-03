@@ -2,7 +2,7 @@ import {conservativeTokens} from './context-budget.ts'
 import {SummaryCache,summaryGroups,SUMMARY_SECTIONS,validSummaryText,type SummaryGenerator} from './summary-cache.ts'
 import type { ModelMessage, AssistantContent, ToolContent } from 'ai'
 import type { ScopedAgentTools } from './scoped-agent-tools.ts'
-import { createMemoryUsePermit, MEMORY_NOTICE, MEMORY_SEARCH_SCHEMA, memorySection, type MemoryUsePort, type MemoryUsePermit } from './memory-use.ts'
+import { createMemoryUsePermit, MEMORY_SEARCH_SCHEMA, type MemoryUsePort, type MemoryUsePermit } from './memory-use.ts'
 import type { MemoryContext } from '../shared/memory.ts'
 import { createHash } from 'node:crypto'
 const memoryHash = (text:string) => createHash('sha256').update(text).digest('hex')
@@ -12,8 +12,8 @@ import { READ_ONLY_TOOL_SCHEMAS } from './scoped-agent-tools.ts'
 import { MODEL_STREAM_BOUNDS, type ModelStepEvent, type ToolSchema } from './model-stream.ts'
 import { randomUUID } from 'node:crypto'
 import { AgentTasks, type TaskResult, type StopReason } from './agent-tasks.ts'
-import { buildHostContext, ledgerChapters, type ContextChapter, type ContextSummary, type ContextSourceRef } from './host-context.ts'
-import { appendLedgerChapter, markPrompt, upsertAiAnswer, type LedgerChapterWrite } from './host-source.ts'
+import { buildHostContext, type ContextChapter, type ContextSummary } from './host-context.ts'
+import { markPrompt, upsertAiAnswer, type LedgerChapterWrite } from './host-source.ts'
 import { assistantSystemBlock, assistantSummary, type AssistantHabits } from '../shared/assistant.ts'
 import type { ModelCredential, RunLimits } from './model-config.ts'
 import type { SourceRange } from '../markdown/types.ts'
@@ -58,7 +58,7 @@ function toolTraceLine(call: { name: string; input: unknown }, failure?: string)
 }
 
 export type HostDependencies = {
-  ledger?: {
+  ledger: {
     prepare(relPath:string,chapter:LedgerChapterWrite,expectedVersion?:number):Promise<{revision:number}>
     complete(relPath:string,taskId:string,bodyRevision:string):Promise<unknown>
     contexts(relPath:string):Promise<ContextChapter[]>
@@ -121,7 +121,7 @@ export class AgentHost {
   private readonly retrying = new Map<string, Promise<void>>()
   private readonly ledgerVersions = new Map<string,number>()
   private readonly verifiedToolReceivers=new Set<string>()
-  private readonly pending = new Map<string, { root: string; relPath: string; source: Parameters<typeof appendLedgerChapter>[1]; persisted: { answer: string }; material: { tracker: TaskMaterialTracker; context: MemoryContext | null; handoffAttempted?: boolean } }>()
+  private readonly pending = new Map<string, { root: string; relPath: string; source: LedgerChapterWrite; persisted: { answer: string }; material: { tracker: TaskMaterialTracker; context: MemoryContext | null; handoffAttempted?: boolean } }>()
 
   private readonly bindings = new Map<string, ObjectBinding & { originalVersion: string }>()
 
@@ -170,12 +170,12 @@ export class AgentHost {
     }
     if (failure) throw failure
   }
-  pendingChapters(root: string, relPath: string, sessionId: string, objectVersion: string): Parameters<typeof appendLedgerChapter>[1][] {
+  pendingChapters(root: string, relPath: string, sessionId: string, objectVersion: string): LedgerChapterWrite[] {
     const binding = this.bindings.get(`${root}\0${relPath}`)
     if (binding && (binding.sessionId !== sessionId || objectVersion !== binding.originalVersion && !this.matchesObject(relPath, objectVersion, binding.objectVersion))) return []
     return [...this.pending.values()].filter(item => item.root === root && item.relPath === relPath).map(item => ({ ...item.source }))
   }
-  acknowledgeCopied(root: string, relPath: string, chapters: Parameters<typeof appendLedgerChapter>[1][]): void {
+  acknowledgeCopied(root: string, relPath: string, chapters: LedgerChapterWrite[]): void {
     for (const chapter of chapters) {
       const item = this.pending.get(chapter.taskId)
       if (item?.root === root && item.relPath === relPath && JSON.stringify(item.source) === JSON.stringify(chapter)) { this.pending.delete(chapter.taskId); this.deps.onTaskMaterialDiscarded?.(chapter.taskId) }
@@ -312,7 +312,7 @@ export class AgentHost {
       const assistantLine = habits ? assistantSummary(habits) : ''
       const budget = this.inputBudget(credential.contextTokens) - conservativeTokens(system)
       // Check that the current prompt and its nearby paragraph fit before changing disk.
-      const initial = buildHostContext({ source: marked, prompt: input.promptText, placement, inputBudgetTokens: budget, countTokens: this.deps.ledger?conservativeTokens:byteCount, memory: memory?.recall })
+      const initial = buildHostContext({ source: marked, prompt: input.promptText, placement, chapters:[], inputBudgetTokens: budget, countTokens: conservativeTokens, memory: memory?.recall })
       if (initial.status === 'too-large') throw new Error(initial.reason)
       await this.requirePermission(root, input.relPath)
       await grant?.assertLive('write',input.relPath)
@@ -341,7 +341,7 @@ export class AgentHost {
       const checkpoint = async (): Promise<void> => {
         const saving = (async () => {
         await this.rechecking.get(key)
-        if(this.deps.ledger){const checkpoint=await this.deps.ledger.prepare(input.relPath,{taskId:id,startedAt,status:'completed',prompt:input.promptText,answer,provenance:{version:1,model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:scoped?.dependencies()??[],tools:scoped?.summary()??[]}},this.ledgerVersions.get(id));this.ledgerVersions.set(id,checkpoint.revision)}
+        {const checkpoint=await this.deps.ledger.prepare(input.relPath,{taskId:id,startedAt,status:'completed',prompt:input.promptText,answer,provenance:{version:1,model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:scoped?.dependencies()??[],tools:scoped?.summary()??[]}},this.ledgerVersions.get(id));this.ledgerVersions.set(id,checkpoint.revision)}
         const revision = await this.mutateNote(root, input.relPath, (source) => upsertAiAnswer(source, { taskId: id, answer, expectedPreviousAnswer: persisted.answer }))
         persisted.answer = answer
         lastCheckpoint = Date.now()
@@ -395,7 +395,7 @@ export class AgentHost {
           const currentSnapshot = await wait(this.readBound(root, input.relPath))
           const source = currentSnapshot.content
           if (source !== policySource) {
-            historicalChapters=this.deps.ledger?await wait(this.deps.ledger.contexts(input.relPath)):undefined
+            historicalChapters=await wait(this.deps.ledger.contexts(input.relPath))
             policy = scoped ? await wait(scoped.contextPolicy(source, signal,historicalChapters)) : await wait(historicalContextPolicy(source, async () => false, undefined, historicalChapters, dep => memory?.validateDependency(dep) ?? Promise.resolve(false)))
             policySource = source
           }
@@ -403,18 +403,18 @@ export class AgentHost {
           if (currentPrompt.text !== submitted.text) throw Error('任务口令已被外部修改')
           const metadata = toolsEnabled ? `\n本场工具来源清单（正文须经工具读取，附件和账本不可读）：${JSON.stringify(grant!.sources.map(s => ({ sourceId: s.sourceId, title: s.title, relPath: s.relPath })))}` : ''
           const planBudget = budget - conservativeTokens(metadata) - (toolsEnabled ? conservativeTokens(JSON.stringify(toolSchemas)) : 0) - conservativeTokens(JSON.stringify(messages)) - 128
-          const plan = buildHostContext({ source, chapters:historicalChapters, prompt: input.promptText, placement: currentPrompt.position, inputBudgetTokens: planBudget, countTokens: this.deps.ledger?conservativeTokens:byteCount, summary, memory: memory?.recall, ...policy })
+          const plan = buildHostContext({ source, chapters:historicalChapters, prompt: input.promptText, placement: currentPrompt.position, inputBudgetTokens: planBudget, countTokens: conservativeTokens, summary, memory: memory?.recall, ...policy })
           if (plan.status === 'too-large') throw Error(plan.reason)
-          if (plan.status === 'needs-summary' && this.deps.ledger) {
+          if (plan.status === 'needs-summary') {
             const cache=this.deps.summaries?.cache,quota=Math.min(8192,Math.floor(planBudget*.3))*.25
             const cached=cache&&summaryKey?cache.select(summaryKey,plan.chapters,quota,conservativeTokens):undefined
             if(cached&&cached.sourceChapterIds.length===plan.chapters.length){summary=cached;noteTrace(`复用历史摘要：${cached.generators?.map(g=>g.modelId+'@'+g.host).join('、')}`);continue}
-            const generator:SummaryGenerator={modelId:credential.modelId,connection:credential.provider,host:new URL(credential.baseURL).host,time:new Date().toISOString(),format:1}
+            const generator:SummaryGenerator={modelId:credential.modelId,connection:credential.connectionId??credential.provider,host:new URL(credential.baseURL).host,time:new Date().toISOString(),format:1}
             const generated:ContextSummary=cached??{text:'',sourceChapterIds:[],generators:[]}
             const prefix=`仅整理下列获准历史，不含推理。输出以下六段，未知写“未确定”，不要输出机器元数据：${SUMMARY_SECTIONS.join('、')}。摘要不是证据，不新增事实。\n`
             if(cache&&summaryKey&&steps<limits.steps-1){const blocks=cache.valid(summaryKey,plan.chapters).filter(b=>b.level===1),siblings=blocks.filter(b=>b.dependencyKey===blocks[0]?.dependencyKey).slice(0,4)
               if(siblings.length>=4){const combined=plan.chapters.filter(c=>siblings.some(b=>b.covered.some(d=>d.id===c.sourceId))),payload=prefix+'合并以下已核验块摘要，保留六段结构：'+JSON.stringify(siblings.map(b=>b.text));let merged=''
-                if(conservativeTokens(JSON.stringify([{role:'user',content:payload}]))<=budget){await guard();for await(const event of step([{role:'user',content:payload}],false,Math.max(64,Math.min(1024,Math.floor(quota))))){await guard();if(event.type==='text'){addOutput(event.text);merged+=event.text}else if(event.type==='reasoning')addOutput(event.text);else if(event.type==='tool-call')throw Error('MODEL_PROTOCOL_ERROR')}
+                if(conservativeTokens(JSON.stringify([{role:'user',content:payload}]))<=budget){await guard();scoped?.recordContext(combined.map(c=>({kind:'ledger' as const,sourceId:c.sourceId})));for await(const event of step([{role:'user',content:payload}],false,Math.max(64,Math.min(1024,Math.floor(quota))))){await guard();if(event.type==='text'){addOutput(event.text);merged+=event.text}else if(event.type==='reasoning')addOutput(event.text);else if(event.type==='tool-call')throw Error('MODEL_PROTOCOL_ERROR')}
                   if(validSummaryText(merged)){try{cache.put(summaryKey,combined,merged,generator,undefined,siblings)}catch{noteTrace('二级摘要未保存；一级与原历史保持')}}
                 }
               }
@@ -437,36 +437,6 @@ export class AgentHost {
             }
             summary=cache&&summaryKey?cache.select(summaryKey,plan.chapters,quota,conservativeTokens)??generated:generated
             noteTrace(summary.text?'历史摘要已生成；元数据由程序核验':'历史预算不足，省略较旧历史，保留回答步骤')
-            continue
-          }
-          if (plan.status === 'needs-summary') {
-            const summaries: string[] = []
-            let summaryBatch = 0
-            const core = memory?.recall.core ?? []
-            const summaryPrefix = `请仅摘要下列旧账本，标明来源 ID；不补写未知细节，摘要不超过 400 字：\n${core.length ? MEMORY_NOTICE + '\n' + core.map(memorySection).join('\n') + '\n' : ''}当前口令：${JSON.stringify(input.promptText)}；落点：${currentPrompt.position}。\n`
-            for (const batch of summaryBatches(plan.chapters, budget - byteCount(summaryPrefix) - 640)) {
-              await guard()
-              if ((await wait(this.readBound(root, input.relPath))).content !== source) { summary = undefined; continue contextLoop }
-              scoped?.recordContext(batch.refs)
-              if (currentSnapshot.sessionId && currentSnapshot.objectVersion) materials.context(source, batch.refs, { ...currentSnapshot, sessionId: currentSnapshot.sessionId, objectVersion: currentSnapshot.objectVersion, relPath: input.relPath }, scoped?.contextDependencies,historicalChapters)
-              memory?.stage(core.map(e => e.id))
-              await guard()
-              let text = ''
-              summaryBatch += 1
-              noteTrace(`旧账本摘要 第 ${summaryBatch} 批`)
-              for await (const event of step([{ role: 'user', content: summaryPrefix + batch.text }], false, Math.min(512, this.outputBudget(credential.contextTokens)))) {
-                if (event.type === 'text') {
-                  if (signal.aborted) { text += event.text; break }
-                  await guard(); addOutput(event.text); text += event.text
-                } else if (event.type === 'reasoning') {
-                  // 摘要用的旧账本推理不记入本篇过程。
-                } else if (event.type === 'tool-call' || event.type === 'finish' && event.reason === 'tool-calls') throw Error('MODEL_PROTOCOL_ERROR')
-              }
-              if (signal.aborted) return
-              if (!text.trim()) throw Error('旧账本摘要为空，无法核对来源')
-              summaries.push(text)
-            }
-            summary = { text: summaries.join('\n'), sourceChapterIds: plan.chapters.map(chapter => chapter.sourceId) }
             continue
           }
           usedSummaries=summary?.generators??[]
@@ -633,15 +603,15 @@ export class AgentHost {
     throw new Error('CONFLICT')
   }
 
-  private async finishWrite(root: string, relPath: string, finalSource: Parameters<typeof appendLedgerChapter>[1], persisted: { answer: string }, material: {tracker: TaskMaterialTracker; context: MemoryContext | null; handoffAttempted?: boolean}): Promise<string> {
-    if(this.deps.ledger){const pending=await this.deps.ledger.prepare(relPath,finalSource,this.ledgerVersions.get(finalSource.taskId));this.ledgerVersions.set(finalSource.taskId,pending.revision)}
+  private async finishWrite(root: string, relPath: string, finalSource: LedgerChapterWrite, persisted: { answer: string }, material: {tracker: TaskMaterialTracker; context: MemoryContext | null; handoffAttempted?: boolean}): Promise<string> {
+    {const pending=await this.deps.ledger.prepare(relPath,finalSource,this.ledgerVersions.get(finalSource.taskId));this.ledgerVersions.set(finalSource.taskId,pending.revision)}
     let bodyRevision=(await this.readBound(root,relPath)).revision
     if (finalSource.answer) {
       bodyRevision=await this.mutateNote(root, relPath, (source) => upsertAiAnswer(source, { taskId: finalSource.taskId, answer: finalSource.answer, expectedPreviousAnswer: persisted.answer }), true)
       persisted.answer = finalSource.answer
     }
-    const revision = this.deps.ledger ? bodyRevision : await this.mutateNote(root, relPath, (source) => appendLedgerChapter(source, finalSource), true)
-    if(this.deps.ledger)await this.deps.ledger.complete(relPath,finalSource.taskId,revision)
+    const revision = bodyRevision
+    await this.deps.ledger.complete(relPath,finalSource.taskId,revision)
     if (this.deps.onTaskMaterialSaved && !material.handoffAttempted) {
       const materialSession = material.context?.sessionId ?? this.bindings.get(`${root}\0${relPath}`)?.sessionId
       const report = (status: 'handed-off' | 'unavailable' | 'failed', error?: unknown) => {
@@ -651,9 +621,8 @@ export class AgentHost {
       try {
         const saved = await this.readBound(root, relPath)
         if (!saved.sessionId || !saved.objectVersion || saved.revision !== revision) throw Error('SAVED_MATERIAL_CHANGED')
-        const chapters = (this.deps.ledger?await this.deps.ledger.contexts(relPath):ledgerChapters(compile(saved.content).partition.ledger)).filter(c => c.taskId === finalSource.taskId)
-        const expected = ledgerChapters(compile(appendLedgerChapter('', finalSource)).partition.ledger)[0]
-        if (chapters.length !== 1 || !expected || !this.deps.ledger && chapters[0]!.text.replace(/\r\n|\r/g,'\n').trimEnd() !== expected.text.trimEnd()) throw Error('SAVED_MATERIAL_CHANGED')
+        const chapters = (await this.deps.ledger.contexts(relPath)).filter(c => c.taskId === finalSource.taskId)
+        if (chapters.length !== 1 || chapters[0]!.fields?.status !== 'valid' || chapters[0]!.fields.prompt.text !== finalSource.prompt || chapters[0]!.fields.answer.text !== finalSource.answer) throw Error('SAVED_MATERIAL_CHANGED')
         const ledgerHash = memoryHash(chapters[0]!.text.trimEnd()), sent = material.tracker.snapshot()
         const evidence: SavedTaskMaterial = {
           taskId:finalSource.taskId,context:material.context,origin:{relPath,sessionId:saved.sessionId,objectVersion:saved.objectVersion,revision},
@@ -697,34 +666,6 @@ async function* abortableStream<T>(stream: AsyncIterable<T>, signal: AbortSignal
     try { void iterator.return?.().catch(() => {}) }
     catch { /* Transport cleanup cannot delay trusted finalization. */ }
   }
-}
-
-/** Split long old chapters into bounded model calls without losing their source labels. */
-function summaryBatches(chapters: readonly ContextChapter[], maxBytes: number): {text: string; refs: ContextSourceRef[]}[] {
-  if (maxBytes < 512) throw new Error('旧账本摘要预算不足')
-  const pieces: {text: string; refs: ContextSourceRef[]}[] = []
-  for (const chapter of chapters) {
-    const prefix = `来源 ${chapter.sourceId}\n`
-    let piece = '', start = 0
-    const push = () => { pieces.push({text:prefix + piece,refs:[{kind:'ledger',sourceId:chapter.sourceId,start,end:start + piece.length}]});start+=piece.length;piece='' }
-    for (const character of chapter.text) {
-      if (byteCount(prefix + piece + character) > maxBytes) {
-        if (!piece) throw new Error('旧账本摘要预算不足')
-        push()
-      }
-      piece += character
-    }
-    if (piece) push()
-  }
-  const batches: {text: string; refs: ContextSourceRef[]}[] = []
-  let current = {text:'',refs:[] as ContextSourceRef[]}
-  for (const piece of pieces) {
-    const joined = current.text ? `${current.text}\n\n${piece.text}` : piece.text
-    if (byteCount(joined) > maxBytes && current.text) { batches.push(current); current = piece }
-    else current = {text:joined, refs:[...current.refs,...piece.refs]}
-  }
-  if (current.text) batches.push(current)
-  return batches
 }
 
 function promptBlock(source: string, taskId: string): { position: number; text: string } {

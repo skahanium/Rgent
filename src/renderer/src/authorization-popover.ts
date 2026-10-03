@@ -57,6 +57,8 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
         ? `独立记忆使用许可：本场自动使用当前库有效核心与相关记忆，不扩大读库范围。${memory.consolidate && memory.recipient ? `独立整理许可：回答与账本保存后，将本场实际发送的口令、必要结果、来源片段及相关记忆交给 ${memory.recipient.modelId} · ${memory.recipient.host}，用于后台整理；总期限 ${memory.limits.seconds} 秒、最多 ${memory.limits.calls} 次模型调用、工具 0 次，不含思维链或完整历史。` : '整理模型未选择或不可用，本场不积累记忆。'}`
         : '当前库记忆关闭；本场不使用或整理记忆。'
 
+      if(memory?.use)memoryDisclosure.textContent+=memory.search?.available?` 本场可检索记忆，最多 ${memory.search.calls} 次，计入已批准的 ${memory.search.sharedTools} 次工具额度。`:' 本场仅本机自动召回，不增加工具额度。'
+      if(prepared.summaryGenerators?.length){const generators=document.createElement('p');generators.textContent='本篇账本可复用历史摘要（仍须在发送前核验）：'+prepared.summaryGenerators.map(g=>`${g.modelId} · ${g.host} · ${g.time}`).join('；');manifest.append(generators)}
       const title=document.createElement('p');title.textContent='本场固定对象：';manifest.append(title)
       const paths=document.createElement('ul');for(const source of prepared.sources){const item=document.createElement('li');item.textContent=source.relPath;paths.append(item)}manifest.append(paths)
       recipient.textContent=`模型：${prepared.recipient.modelId} · 接口主机：${prepared.recipient.host}`

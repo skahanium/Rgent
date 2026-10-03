@@ -1,4 +1,4 @@
-import {mkdirSync,readFileSync,writeFileSync,renameSync,readdirSync,unlinkSync} from 'node:fs'
+import {statSync,mkdirSync,readFileSync,writeFileSync,renameSync,readdirSync,unlinkSync} from 'node:fs'
 import path from 'node:path'
 import {randomUUID} from 'node:crypto'
 /** Disposable device-only text, never a summary, source or memory input. */
@@ -16,7 +16,7 @@ export class ReasoningStore{
  read(vault:string,task:string){this.expire(vault);try{const raw=readFileSync(this.file(vault,task));if(raw.length>200000)throw Error();const v=JSON.parse(raw.toString());if(v.version!==1||!Number.isFinite(v.createdAt)||typeof v.text!=='string'||Buffer.byteLength(v.text)>32768)throw Error();return v.text as string}catch{return null}}
  expire(vault:string){const dir=this.dir(vault);let names:string[];try{names=readdirSync(dir)}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e}
   const files:{name:string;time:number;bytes:number}[]=[]
-  for(const name of names.filter(n=>/^[A-Za-z0-9_-]{1,128}\.json$/.test(n))){try{const raw=readFileSync(path.join(dir,name)),v=JSON.parse(raw.toString());if(!Number.isFinite(v.createdAt)||Date.now()-v.createdAt>7*86400000){unlinkSync(path.join(dir,name));continue}files.push({name,time:v.createdAt,bytes:raw.length})}catch{/* corrupt device temporary text is not a source */}}
+  for(const name of names.filter(n=>/^[A-Za-z0-9_-]{1,128}\.json$/.test(n))){try{const file=path.join(dir,name);if(statSync(file).size>200000){unlinkSync(file);continue}const raw=readFileSync(file),v=JSON.parse(raw.toString());if(v.version!==1||typeof v.text!=='string'||Buffer.byteLength(v.text)>32768||!Number.isFinite(v.createdAt)||Date.now()-v.createdAt>7*86400000){unlinkSync(path.join(dir,name));continue}files.push({name,time:v.createdAt,bytes:raw.length})}catch{try{unlinkSync(path.join(dir,name))}catch{/* Device-owned temporary text is disposable; never a vault delete. */}}}
   let total=files.reduce((n,f)=>n+f.bytes,0);for(const file of files.sort((a,b)=>a.time-b.time)){if(total<=8*1024*1024)break;unlinkSync(path.join(dir,file.name));total-=file.bytes}
  }
 }

@@ -1,5 +1,5 @@
 import { closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import type { MemoryLimits, VaultMemoryConfig } from '../shared/memory.ts'
 export type MemoryDeviceConfig = { version: 1; defaultModelId: string | null; limits: MemoryLimits; vaults: Record<string,VaultMemoryConfig>; revisions: Record<string,number> }
@@ -30,14 +30,19 @@ export function createMemoryConfigStore(userData:string){
  const disk=()=>{try{return readFileSync(target,'utf8')}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return null;throw e}}
  let raw:string|null=null,current=emptyMemoryConfig(),invalid=false
  try{raw=disk();if(raw!==null)current=parse(raw)}catch{invalid=true}
- const get=()=>{if(invalid)throw Error('MEMORY_CONFIG_INVALID');return structuredClone(current)}
- return {get,write(next:MemoryDeviceConfig){
-  get();const serialized=JSON.stringify(next);parse(serialized)
-  if(disk()!==raw)throw Error('MEMORY_CONFIG_CONFLICT')
+ const get=()=>{if(invalid)throw Error('MEMORY_CONFIG_INVALID');if(disk()!==raw)throw Error('MEMORY_CONFIG_CONFLICT');return structuredClone(current)}
+ const diagnosis=()=>{const bytes=disk();return {revision:bytes===null?null:createHash('sha256').update(bytes).digest('hex'),bytes:Buffer.byteLength(bytes??'')}}
+ const replace=(next:MemoryDeviceConfig,expected:string|null)=>{
+  const serialized=JSON.stringify(next);parse(serialized)
+  if(disk()!==expected)throw Error('MEMORY_CONFIG_CONFLICT')
   const temporary=path.join(userData,`.memory-config-${randomUUID()}.tmp`);let fd:number|null=null
   try{fd=openSync(temporary,'wx',0o600);writeFileSync(fd,serialized);fsyncSync(fd);closeSync(fd);fd=null
-   if(disk()!==raw)throw Error('MEMORY_CONFIG_CONFLICT')
-   renameSync(temporary,target);raw=serialized;current=structuredClone(next)
+   if(disk()!==expected)throw Error('MEMORY_CONFIG_CONFLICT')
+   renameSync(temporary,target);raw=serialized;current=structuredClone(next);invalid=false
   }finally{if(fd!==null)closeSync(fd);try{unlinkSync(temporary)}catch{/* target committed or temporary never created */}}
+ }
+ return {get,diagnosis,write(next:MemoryDeviceConfig){get();replace(next,raw)},reset(revision:string|null){
+  const expected=disk();if((expected===null?null:createHash('sha256').update(expected).digest('hex'))!==revision)throw Error('MEMORY_CONFIG_CONFLICT')
+  replace(emptyMemoryConfig(),expected)
  }}
 }

@@ -126,6 +126,14 @@ for (const row of deliveryRows) {
   }
 }
 
+// v2 当前交付字段必须指向日期或受验提交；不据此推断产品语义正确。
+const currentV2 = build.split(/^### 2026-10-03 账本上下文与记忆重构\s*$/m)[1]?.split(/^### /m)[0]
+if (currentV2) for (const row of currentV2.split(/\r?\n/).filter(line=>/^\| [0-5] /.test(line))) {
+  const evidence = row.split('|').at(-2) ?? ''
+  if (!/20\d{2}-\d{2}-\d{2}|`[a-f\d]{7,40}`/.test(evidence)) errors.push('docs/build.md: v2 交付证据缺少日期或受验提交')
+  if (/通过/.test(evidence) && !/`[a-f\d]{7,40}`|待提交/.test(evidence)) errors.push('docs/build.md: v2 代码通过证据必须标记受验提交或待提交')
+}
+
 if (errors.length > 0) {
   for (const error of errors) process.stderr.write(`${error}\n`)
   process.exitCode = 1

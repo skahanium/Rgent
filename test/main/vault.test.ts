@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { dialog } from 'electron'
 import { secureFsFor } from '../../src/main/secure-fs.ts'
 import { VaultSession } from '../../src/main/vault.ts'
+import { markPrompt,upsertAiAnswer } from '../../src/main/host-source.ts'
 import { VaultLifecycle } from '../../src/main/vault-lifecycle.ts'
 import { watchVault } from '../../src/main/watch.ts'
 import * as notesFs from '../../src/main/notes-fs.ts'
@@ -75,13 +76,19 @@ describe('VaultSession isolation', () => {
     const { session, attach, first } = await setup(); const gone = first + '-read-gap'
     try {
       await attach(first)
-      const original = await session.read('原篇.md')
+      const original = await session.readOpened('原篇.md')
+      await session.memoryMutation(store=>store.initialize())
+      const memory=session.memorySnapshot()
+      const historyKey=await session.ledgerKey('原篇.md')
       const watched = vi.mocked(watchVault).mock.calls.length
       await rename(first, gone)
       expect((await session.noteStatus('原篇.md', original)).status).not.toBe('ready')
       await rename(gone, first)
       expect((await session.noteStatus('原篇.md', original)).status).toBe('ready')
       expect(vi.mocked(watchVault).mock.calls.length).toBe(watched + 1)
+      expect(await session.ledgerKey('原篇.md')).toBe(historyKey)
+      expect(session.memorySnapshot().revision).toBe(memory.revision)
+      await expect(session.ledgerContexts('原篇.md')).resolves.toEqual([])
     } finally { session.dispose() }
   })
   it('retains verified objects and session when the library disappears, and rechecks restoration', async () => {
@@ -109,6 +116,40 @@ describe('VaultSession isolation', () => {
       await rename(gone, first)
       expect((await session.noteStatus('原篇.md', original)).status).toBe('ready')
     } finally { session.dispose() }
+  })
+  it('compresses only completed seven-day records after open, keeping the same path and exact logical bytes',async()=>{
+    const {session,attach,first}=await setup()
+    try{
+      await attach(first)
+      const source=markPrompt('/问',{taskId:'old-task',range:{start:0,end:2},expectedText:'/问',promptText:'问'})
+      const original=await session.readOpened('原篇.md');await session.write('原篇.md',source,original.revision,original)
+      const note=await session.read('原篇.md'),answer='无损保留。'.repeat(1000)
+      await session.ledgerPrepare('原篇.md',{taskId:'old-task',startedAt:new Date(Date.now()-8*86400000).toISOString(),status:'completed',prompt:'问',answer})
+      const saved=await session.write('原篇.md',upsertAiAnswer(note.content,{taskId:'old-task',answer}),note.revision,note)
+      await session.ledgerComplete('原篇.md','old-task',saved.revision)
+      const before=await session.ledgerRecord('原篇.md','old-task'),owner=(await session.ledgerPage('原篇.md',null)).noteId
+      const file=path.join(first,'.rgent','ledgers',owner,'old-task.json'),raw=await readFile(file,'utf8')
+      await session.readOpened('原篇.md');await new Promise<void>(r=>setImmediate(r));await session.ledgerKey('原篇.md')
+      const compressed=await readFile(file,'utf8')
+      expect(JSON.parse(compressed).codec).toBe('gzip');expect(Buffer.byteLength(compressed)).toBeLessThan(Buffer.byteLength(raw))
+      expect(await session.ledgerRecord('原篇.md','old-task')).toEqual(before)
+      expect((await session.read('原篇.md')).revision).toBe(saved.revision)
+    }finally{session.dispose()}
+  })
+  it('keeps explicit fixed-record memory reset reachable while preserving a failed structure recovery',async()=>{
+    const {session,attach,first}=await setup()
+    const damaged='{"version":1,"active":"broken"}'
+    await writeFile(path.join(first,'.rgent-lifecycle'),damaged)
+    try{
+      await attach(first);await session.permissions()
+      await writeFile(path.join(first,'.rgent-memory'),'broken fixed memory')
+      const diagnosis=session.memoryDiagnostic()
+      await expect(session.memoryMutation(store=>store.initialize())).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+      const reset=await session.memoryReset(diagnosis,0)
+      expect(reset.record.entries).toEqual([])
+      expect(await readFile(path.join(first,'.rgent-lifecycle'),'utf8')).toBe(damaged)
+      await expect(session.memoryMutation(store=>store.initialize())).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+    }finally{session.dispose()}
   })
   async function setup() {
     const userData = await mkdtemp(path.join(os.tmpdir(), 'rgent-session-'))

@@ -5,6 +5,7 @@ import type {ModelConfigStore} from './model-config.ts'
 import type {WorkingSource,WorkingEntry,WorkingSnapshot,WorkingInput} from './working-memory-store.ts'
 import type {MemoryView,MemoryItemRequest,MemoryManualRequest} from '../shared/memory.ts'
 import {compile} from '../markdown/index.ts'
+import {historicalBodyTasks} from './host-context.ts'
 import {bodyFingerprint} from './ledger-provenance.ts'
 import {modelTierFor} from './permissions.ts'
 import {conservativeTokens} from './context-budget.ts'
@@ -62,14 +63,16 @@ export class WorkingMemoryService{
   const context=this.context(),config=this.config();let configError:string|undefined
   let cfg:import('../shared/memory.ts').PublicMemoryConfig={defaultModelId:null,limits:{seconds:120,calls:2,tools:0},vault:{enabled:false,override:{mode:'inherit'}},effectiveModelId:null,modelStatus:'unavailable'}
   try{if(!config)throw Error('MEMORY_CONFIG_UNAVAILABLE');cfg=config.getMemoryConfig(context.vaultKey)}catch{configError='MEMORY_CONFIG_UNAVAILABLE'}
+  let configDiagnosis:import('../shared/memory.ts').MemoryView['configDiagnosis']
+  if(configError&&config)try{configDiagnosis=config.memoryConfigDiagnosis()}catch{/* Local memory remains viewable when the independent device file cannot be read. */}
   let credential:import('./model-config.ts').ModelCredential|null=null;try{credential=cfg.modelStatus==='ready'?config!.memoryCredential(context.vaultKey):null}catch{configError='MEMORY_MODEL_UNAVAILABLE'}
   let basis:WorkingSnapshot,entries:WorkingEntry[]
-  try{basis=this.snapshot();entries=await this.entries()}catch(e){return {sessionId:context.sessionId,revision:null,objectVersion:null,config:cfg,recipient:credential?{modelId:credential.modelId,host:new URL(credential.baseURL).host}:null,status:'invalid',reason:e instanceof Error?e.message:'MEMORY_STORAGE_INVALID',entries:[],jobs:[],running:{permits:0,pending:0,active:0},diagnosis:this.vault.memoryDiagnostic()}}
-  return {sessionId:context.sessionId,revision:basis.revision,objectVersion:basis.objectVersion,config:cfg,recipient:credential?{modelId:credential.modelId,host:new URL(credential.baseURL).host}:null,status:'ready',...(configError?{reason:configError}:{}),entries:entries.map(e=>({...e,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId,text:s.text,classification:s.classification}))})),jobs:basis.record.jobs.map(j=>({...j,retryable:['interrupted','rejected'].includes(j.outcome)&&cfg.vault.enabled&&!!credential})),running:{permits:0,pending:0,active:0},learning:{watermark:basis.record.watermark,nextSequence:Math.max(basis.record.nextSequence,this.vault.materialCeiling())},diagnosis:this.vault.memoryDiagnostic()}
+  try{basis=this.snapshot();entries=await this.entries()}catch(e){return {sessionId:context.sessionId,revision:null,objectVersion:null,config:cfg,recipient:credential?{modelId:credential.modelId,host:new URL(credential.baseURL).host}:null,status:'invalid',reason:e instanceof Error?e.message:'MEMORY_STORAGE_INVALID',entries:[],jobs:[],running:{permits:0,pending:0,active:0},diagnosis:this.vault.memoryDiagnostic(),...(configDiagnosis?{configDiagnosis}:{})}}
+  return {sessionId:context.sessionId,revision:basis.revision,objectVersion:basis.objectVersion,config:cfg,recipient:credential?{modelId:credential.modelId,host:new URL(credential.baseURL).host}:null,status:'ready',...(configError?{reason:configError}:{}),entries:entries.map(e=>({...e,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId,text:s.text,classification:s.classification}))})),jobs:basis.record.jobs.map(j=>({...j,retryable:['interrupted','rejected'].includes(j.outcome)&&cfg.vault.enabled&&!!credential})),running:{permits:0,pending:0,active:0},learning:{watermark:basis.record.watermark,nextSequence:Math.max(basis.record.nextSequence,this.vault.materialCeiling())},diagnosis:this.vault.memoryDiagnostic(),...(configDiagnosis?{configDiagnosis}:{})}
  }
  private bind(request:MemoryItemRequest){this.vault.assertSession(request.sessionId);const basis=this.snapshot();if(basis.revision!==request.revision||basis.objectVersion!==request.objectVersion)throw Error('MEMORY_CONFLICT');const entry=basis.record.entries.find(e=>e.id===request.id&&e.version===request.version);if(!entry)throw Error('MEMORY_CHANGED');return {basis,entry}}
- async edit(request:MemoryItemRequest,change:Partial<WorkingInput>&{status?:WorkingEntry['status']}){return this.vault.memoryMutation(store=>{const {basis}=this.bind(request);return store.edit(basis,request.id,request.version,change)})}
- async forget(request:MemoryItemRequest){return this.vault.memoryMutation(store=>{const {basis}=this.bind(request);return store.forget(basis,request.id,request.version)})}
+ async edit(request:MemoryItemRequest,change:Partial<WorkingInput>&{status?:WorkingEntry['status']}){const committed=await this.vault.memoryMutation(store=>{const {basis}=this.bind(request);return store.edit(basis,request.id,request.version,change)});await this.recheckDeferred().catch(()=>{});return committed}
+ async forget(request:MemoryItemRequest){const committed=await this.vault.memoryMutation(store=>{const {basis}=this.bind(request);return store.forget(basis,request.id,request.version)});await this.recheckDeferred().catch(()=>{});return committed}
  async recheckDeferred(){
   const basis=this.snapshot(),ready:WorkingEntry[]=[]
   for(const e of basis.record.entries.filter(e=>e.status==='deferred'))if((!e.reviewAt||Date.parse(e.reviewAt)>Date.now())&&await this.verifyEntry(e,basis.record.entries))ready.push(e)
@@ -86,7 +89,7 @@ export class WorkingMemoryService{
   const ceiling=this.vault.materialCeiling();if(!Number.isSafeInteger(watermark)||watermark>ceiling)throw Error('BAD_REQUEST')
   return this.vault.memoryMutation(store=>{const basis=store.read();if(basis.revision!==binding.revision||basis.objectVersion!==binding.objectVersion)throw Error('MEMORY_CONFLICT');basis.record.nextSequence=Math.max(basis.record.nextSequence,ceiling);return store.advance(basis,watermark)})
  }
- async reset(binding:{revision:string|null;objectVersion:string|null}){const ceiling=this.vault.materialCeiling();return this.vault.memoryMutation(store=>store.reset(binding,ceiling))}
+ async reset(binding:{revision:string|null;objectVersion:string|null}){const ceiling=this.vault.materialCeiling();return this.vault.memoryReset(binding,ceiling)}
  async manualSource(request:MemoryManualRequest):Promise<WorkingSource>{
   this.vault.assertSession(request.sessionId);const note=await this.vault.read(request.relPath)
   if(note.objectVersion!==request.objectVersion||note.revision!==request.revision)throw Error('MEMORY_SOURCE_CHANGED')
@@ -97,7 +100,12 @@ export class WorkingMemoryService{
   }
   const parsed=compile(note.content),block=parsed.index.blocks.find(b=>b.range.start<=request.start&&b.range.end>=request.end)
   if(parsed.stale||!block||block.identity==='ai')throw Error('MEMORY_SOURCE_UNCONFIRMED')
-  const source=await this.sourceForFragment({...note,relPath:request.relPath,permissionTier:'reference',kind:'body',classification:block.identity==='command'?'command':'human',taskId:null,start:request.start,end:request.end,text:note.content.slice(request.start,request.end),hash:hash(note.content.slice(request.start,request.end)),sourceDeps:[],memoryDeps:[]})
+  const chapters=await this.vault.ledgerContexts(request.relPath),tasks=historicalBodyTasks(parsed,chapters).get(block.range.start)??[]
+  const inherited=tasks.map(id=>chapters.find(c=>c.taskId===id))
+  if(inherited.some(c=>!c||c.eligible===false||!c.provenance))throw Error('MEMORY_SOURCE_UNCONFIRMED')
+  const sourceDeps=inherited.flatMap(c=>c!.provenance!.sources),memoryDeps=inherited.flatMap(c=>c!.provenance!.version===2?c!.provenance!.memoryDeps:[])
+  const source=await this.sourceForFragment({...note,relPath:request.relPath,permissionTier:'reference',kind:'body',classification:block.identity==='command'?'command':'human',taskId:null,start:request.start,end:request.end,text:note.content.slice(request.start,request.end),hash:hash(note.content.slice(request.start,request.end)),sourceDeps,memoryDeps})
+  if(tasks.length)source.classification='adopted-ai'
   if(Buffer.byteLength(source.text)>4096)throw Error('MEMORY_CONTENT_LIMIT');return source
  }
  async confirm(request:MemoryItemRequest){const {basis,entry}=this.bind(request);for(const s of entry.sources){if(!await this.verifySource(s))throw Error('MEMORY_SOURCE_CHANGED');for(const dep of s.memoryDeps){const parent=(await this.entries([dep.id])).find(e=>e.id===dep.id&&e.version===dep.version&&e.status==='active');if(!parent)throw Error('MEMORY_DEPENDENCY_CHANGED')}}

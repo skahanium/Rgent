@@ -1,3 +1,4 @@
+import {hostLedgerFixture} from './host-ledger-fixture.ts'
 import { expect, it } from 'vitest'
 import { createScopedAgentTools } from '../../src/main/scoped-agent-tools.ts'
 import { AgentHost } from '../../src/main/agent-host.ts'
@@ -10,14 +11,15 @@ function fixture(stream:(signal:AbortSignal)=>AsyncIterable<string>) {
   const tier=async(_root:string,path:string)=>{if(path===denied)throw Error('FORBIDDEN');return 'reference' as const}
   const registry=new TaskAuthorizationRegistry({root:()=>'/vault',session:()=> 'session',tree:async()=>Object.keys(source).map(relPath=>({name:relPath,relPath,kind:'note' as const})),
     read:async p=>({...source[p]!}),tier,acceptsObject:()=>false,configuration:()=>({credential:{provider:'custom',baseURL:'https://models.example/v1',modelId:'fixed',contextTokens:12000,apiKey:'secret'},limits:{seconds:30,steps:4,tools:4}})})
-  const host=new AgentHost({root:()=>'/vault',session:()=> 'session',authorize:input=>registry.consume(input.authorizationOwner!,input as AgentStartRequest),
+  const history=hostLedgerFixture()
+  const host=new AgentHost({ledger:history.ledger,root:()=>'/vault',session:()=> 'session',authorize:input=>registry.consume(input.authorizationOwner!,input as AgentStartRequest),
     tier,read:async p=>({...source[p]!}),write:async(p,content,expected)=>{if(expected!==source[p]!.revision)throw Error('CONFLICT');source[p]={...source[p]!,content,revision:String(++revision)};return {...source[p]!}},
     credential:()=>{throw Error('snapshot must be used')},limits:()=>{throw Error('snapshot must be used')},
     stream:(_input,signal)=>{calls++;return stream(signal)},
     streamStep:async function*(_input,signal){calls++;for await(const text of stream(signal))yield {type:'text',text};yield {type:'finish',reason:'stop'}},
     createReadOnlyTools:(grant,id)=>createScopedAgentTools(grant,id,{read:async p=>({...source[p]!}),tier,acceptsObject:()=>false}),emit:()=>{}})
   const request={modelRecordId:'model-record',relPath:'a.md',sessionId:'session',objectVersion:'a',expectedRevision:'1',range:{start:0,end:2},expectedText:'/问',promptText:'问',references:['b.md']}
-  return {host,registry,request,source,calls:()=>calls,deny:(p:string)=>{denied=p}}
+  return {host,history,registry,request,source,calls:()=>calls,deny:(p:string)=>{denied=p}}
 }
 it('requires one-use authorization before changing the note and uses its fixed credential',async()=>{
   const app=fixture(async function*(){yield '回答'})
@@ -36,7 +38,7 @@ it('stops on source changes and trusted finalization retains produced text and r
   const p=await app.registry.preview('owner',app.request)
   const task=await app.host.start({...app.request,previewId:p.id,authorizationOwner:'owner'})
   await expect(task.done).resolves.toMatchObject({status:'failed',reason:'SOURCE_CHANGED'})
-  expect(app.source['a.md']!.content).toContain('已产生文本');expect(app.source['a.md']!.content).toContain('SOURCE_CHANGED')
+  expect(app.source['a.md']!.content).toContain('已产生文本');expect(app.history.records().at(-1)?.reason).toBe('SOURCE_CHANGED')
   expect(app.source['a.md']!.content).not.toContain('不得继续')
 })
 it('cancellation revokes calls yet saves text and same-note ledger',async()=>{
@@ -45,7 +47,7 @@ it('cancellation revokes calls yet saves text and same-note ledger',async()=>{
   const task=await app.host.start({...app.request,previewId:p.id,authorizationOwner:'owner'})
   await new Promise(resolve=>setTimeout(resolve,20))
   await app.host.cancel(task.id)
-  expect(app.source['a.md']!.content).toContain('保留');expect(app.source['a.md']!.content).toContain('· cancelled')
+  expect(app.source['a.md']!.content).toContain('保留');expect(app.history.records().at(-1)?.status).toBe('cancelled')
 })
 it('source invalidation aborts the provider and closes its iterator without changing failed status',async()=>{
   let changed=()=>{};let providerSignal!:AbortSignal;let returned=false
