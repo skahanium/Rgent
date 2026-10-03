@@ -1,3 +1,4 @@
+import type { ContextChapter } from './host-context.ts'
 import type { TaskMaterialTracker, MaterialDependencies } from './host-material.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import { compile } from '../markdown/index.ts'
@@ -5,7 +6,7 @@ import type { CompileResult } from '../markdown/types.ts'
 import type { NoteSnapshot } from '../shared/ipc.ts'
 import type { TaskGrant } from './task-authorization.ts'
 import { blankMarkers, folderOf, searchDocuments, searchSnippetRange } from './vault-index.ts'
-import { bodyFingerprint, historicalContextPolicy, ledgerProvenance, type LedgerSource, type LedgerMemoryDependency } from './ledger-provenance.ts'
+import { bodyFingerprint, historicalContextPolicy, ledgerProvenance, chapterProvenance, type LedgerSource, type LedgerMemoryDependency } from './ledger-provenance.ts'
 import { ledgerChapters, historicalBodyTasks, type ContextSourceRef } from './host-context.ts'
 
 export const READ_ONLY_TOOL_SCHEMAS = {
@@ -14,7 +15,7 @@ export const READ_ONLY_TOOL_SCHEMAS = {
 } as const
 
 export interface ScopedAgentTools {
-  contextPolicy(source: string, signal: AbortSignal): Promise<{ allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[] }>
+  contextPolicy(source: string, signal: AbortSignal, chapters?: ContextChapter[]): Promise<{ allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[] }>
   execute(name: string, input: unknown, signal: AbortSignal): Promise<unknown>
   assertCurrent(signal: AbortSignal): Promise<void>
   dependencies(): LedgerSource[]
@@ -109,10 +110,10 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
     for (const dep of dependencies) valid.push(await awaiting(deps.validateMemory?.(dep) ?? Promise.resolve(false),signal))
     return valid
   }
-  async function policy(source: string, signal: AbortSignal, parsed = compile(source)): Promise<Policy> {
+  async function policy(source: string, signal: AbortSignal, parsed = compile(source), supplied?: ContextChapter[]): Promise<Policy> {
     if (parsed.stale) throw Error('SOURCE_PARSE_FAILED')
-    const chapters = ledgerChapters(parsed.partition.ledger)
-    const memoryDependencies = [...new Map(chapters.flatMap(chapter=>{const p=ledgerProvenance(chapter.text);return p.status === 'valid' && p.record.version === 2 ? p.record.memoryDeps : []}).map(dep=>[JSON.stringify(dep),dep])).values()]
+    const chapters = supplied ?? ledgerChapters(parsed.partition.ledger)
+    const memoryDependencies = [...new Map(chapters.flatMap(chapter=>{const p=chapterProvenance(chapter);return p.status === 'valid' && p.record.version === 2 ? p.record.memoryDeps : []}).map(dep=>[JSON.stringify(dep),dep])).values()]
     const validMemories = await memoryValid(memoryDependencies,signal)
     const memoryChecks = new Map(memoryDependencies.map((dep,i)=>[JSON.stringify(dep),validMemories[i] === true]))
     const result = await historicalContextPolicy(source, dep => dependencyValid(dep, signal), parsed, chapters, async dep => memoryChecks.get(JSON.stringify(dep)) === true)
@@ -121,7 +122,7 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
     const byTask = new Map<string, LedgerSource[]>()
     for (const chapter of chapters) {
       if (!result.allowedLedgerChapterIds.includes(chapter.sourceId)) continue
-      const record = ledgerProvenance(chapter.text)
+      const record = chapterProvenance(chapter)
       const dependencies = record.status === 'valid' ? record.record.sources : []
       const memory = record.status === 'valid' && record.record.version === 2 ? record.record.memoryDeps : []
       memoryByChapter.set(chapter.sourceId, memory)
@@ -268,8 +269,8 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
     return base(items, at === hits.length, at < hits.length ? next({ ...state, index: at }) : undefined, hits.length - at)
   }
   return {
-    async contextPolicy(source, signal) {
-      active(signal); originParsed = compile(source); originPolicy = await policy(source, signal, originParsed); active(signal)
+    async contextPolicy(source, signal, chapters) {
+      active(signal); originParsed = compile(source); originPolicy = await policy(source, signal, originParsed,chapters); active(signal)
       return { allowedLedgerChapterIds: [...originPolicy.allowedLedgerChapterIds], excludedAiTaskIds: [...originPolicy.excludedAiTaskIds] }
     },
     async execute(name, input, signal) {

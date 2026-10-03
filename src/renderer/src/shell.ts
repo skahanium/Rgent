@@ -941,7 +941,7 @@ export async function start(root: HTMLElement): Promise<void> {
     }
   }
 
-  function noteHost(): NoteHost {
+  function noteHost(ledger?:{taskId:string;revision:number;field:'answer'|'prompt'}): NoteHost {
     const present = collectRelPaths(tree)
     const tab = current()
     return {
@@ -950,8 +950,9 @@ export async function start(root: HTMLElement): Promise<void> {
       vaultHas: (relPath) => present.has(relPath),
       imageContext: (range, region = 'body') => tab ? {
         noteRelPath: tab.relPath, region,
-        start: range.start + (region === 'ledger' ? partitionSource(composeSource(tab.content,tab.ledger)).body.length : 0),
-        end: range.end + (region === 'ledger' ? partitionSource(composeSource(tab.content,tab.ledger)).body.length : 0),
+        ...(ledger?{ledgerTaskId:ledger.taskId,ledgerRevision:ledger.revision,ledgerField:ledger.field}:{}),
+        start: range.start + (region === 'ledger' ? tab.content.length : 0),
+        end: range.end + (region === 'ledger' ? tab.content.length : 0),
         sessionId: tab.sessionId, objectVersion: tab.objectVersion, revision: tab.revision,
         ...(tab.dirty ? { draftBody: tab.relPath === active ? editor.getText() : tab.content } : {})
       } : undefined,
@@ -1256,6 +1257,7 @@ export async function start(root: HTMLElement): Promise<void> {
     })
   }
 
+  const ledgerErrorText=(code:string)=>({LEDGER_OWNERSHIP_UNVERIFIED:'这份历史的归属待核验，未自动认领。',LEDGER_REGISTRY_INVALID:'账本登记损坏，历史没有被当成空记录；请检查恢复状态。',LEDGER_RECORD_INVALID:'账本记录无法核验，原字节保持。',NOTE_REPLACED:'笔记对象已替换，历史归属待核验。'} as Record<string,string>)[code]??'账本暂时无法核验；原记录保留，请稍后重新查看。'
   function toggleLedger(): void {
     if (ledgerOpen) {
       closeLedger(true)
@@ -1265,13 +1267,49 @@ export async function start(root: HTMLElement): Promise<void> {
     if (!tab) return
     ledgerOpen = true
     ledgerTitle.textContent = `${titleOf(tab.relPath.split('/').pop() ?? tab.relPath)} · 账本回顾`
-    // 账本是同文件的旁路原文，只读展示；Host 按任务追加的章节也走同一视图。
-    const ledgerSource = tab.ledger ?? ''
-    if (ledgerSource.trim()) {
-      renderReadOnlyMarkdown(ledgerBody, ledgerSource, noteHost())
-      mountLedgerRememberButtons(ledgerBody, ledgerSource, (start, end, taskId) => void rememberSelection('ledger', start, end, taskId))
+    ledgerBody.replaceChildren()
+    const message=document.createElement('p');message.textContent='正在核对账本归属…';ledgerBody.append(message)
+    const captured=tab
+    let cursor:string|null=null,loading=false
+    let chunkText='',chunkHash:string|null=null,chunkOffset=0,decoder=new TextDecoder()
+    const load=document.createElement('button');load.type='button';load.className='settings-action';load.textContent='加载更多历史'
+    const renderRecord=(record:import('../../main/ledger-store.ts').LedgerRecord)=>{
+      const details=document.createElement('details'),heading=document.createElement('summary'),content=document.createElement('div')
+      heading.textContent=`${record.chapter?.startedAt??'旧记录'} · ${record.chapter?.status??'只读原文'} · ${record.bodyStatus==='present'?'有正文保存回执':'正文状态无法核验'}`
+      details.append(heading,content);ledgerBody.insertBefore(details,load)
+      details.addEventListener('toggle',()=>{if(!details.open||content.childNodes.length)return
+        if(record.chapter){const meta=document.createElement('p'),p=record.chapter.provenance;meta.textContent=p?`模型：${p.model.modelId} · 接收方：${p.model.endpointHost}；工具摘要：${p.tools.map(t=>t.name+' '+t.outcome).join('、')||'无'}；实际读取来源：${p.sources.map(d=>d.relPath).join('、')||'无'}；模型消息引用来源：${p.sentSources?.join('、')||'无'}`:'旧记录元数据无法核验。';content.append(meta);const prompt=document.createElement('p');prompt.textContent=`口令：${record.chapter.prompt}`;content.append(prompt);const answer=document.createElement('div');content.append(answer);renderReadOnlyMarkdown(answer,record.chapter.answer,noteHost({taskId:record.taskId,revision:record.revision,field:'answer'}))}
+        else {const raw=document.createElement('pre');raw.textContent=record.legacyRaw??'此记录的正文已清理。';content.append(raw)}
+      })
     }
-    else ledgerBody.textContent = '这篇笔记还没有账本。完成一次生成任务后，可在这里回顾。'
+    const fetchPage=async()=>{
+      if(loading||!captured.sessionId||!captured.objectVersion)return;loading=true;load.disabled=true
+      try{const result=await window.rgent.ledgerGet({sessionId:captured.sessionId,objectVersion:captured.objectVersion,relPath:captured.relPath,cursor})
+        if(!ledgerOpen||current()!==captured)return
+        if(!result.ok){message.textContent=ledgerErrorText(result.error);if(result.error==='LEDGER_REGISTRY_INVALID'&&result.registryRevision!==undefined){const repair=document.createElement('button');repair.type='button';repair.className='settings-action';repair.textContent='从归属描述重建登记';repair.onclick=async()=>{repair.disabled=true;const r=await window.rgent.ledgerRepair({sessionId:captured.sessionId!,registryRevision:result.registryRevision!});if(!ledgerOpen||current()!==captured)return;if(r.ok){repair.remove();cursor=null;void fetchPage()}else{message.textContent=ledgerErrorText(r.error);repair.disabled=false}};ledgerBody.append(repair)}return}
+        const value=result.value;message.textContent=value.gaps.length?'部分原始历史已清理。':''
+        if(value.chunk){const c=value.chunk;if(c.offset===0){chunkText='';chunkHash=c.hash;chunkOffset=0;decoder=new TextDecoder()}
+          if(c.offset!==chunkOffset||c.hash!==chunkHash)throw Error('LEDGER_CONFLICT')
+          const bytes=Uint8Array.from(atob(c.data),x=>x.charCodeAt(0));chunkOffset+=bytes.length;chunkText+=decoder.decode(bytes,{stream:chunkOffset<c.total})
+          if(chunkOffset===c.total){renderRecord(JSON.parse(chunkText));chunkText='';chunkHash=null}else message.textContent=`长记录已读取 ${chunkOffset}／${c.total} 字节，继续加载可读完整记录。`
+        }
+        value.records.forEach(renderRecord);cursor=value.cursor;load.hidden=cursor===null
+        if(!ledgerBody.querySelector('details')&&!value.chunk&&cursor===null)message.textContent='已核验本篇归属，目前没有任务记录。'
+      }catch{if(ledgerOpen&&current()===captured)message.textContent='账本读取未完成，保留已有回顾；请关闭后重新核对。'}
+      finally{loading=false;load.disabled=false}
+    }
+    load.addEventListener('click',()=>void fetchPage());ledgerBody.append(load)
+    const migrate=document.createElement('button');migrate.type='button';migrate.className='settings-action';migrate.textContent='迁移库内旧账本'
+    migrate.addEventListener('click',async()=>{
+      if(!(await flushSave()))return
+      migrate.disabled=true;let after:string|null=null
+      do{const result=await window.rgent.ledgerMigrate({sessionId:captured.sessionId!,after});if(!ledgerOpen||current()!==captured)return
+        if(!result.ok){message.textContent='迁移未完成；已核验的原文仍保留，可重新启动迁移。';break}
+        message.textContent=`本批已迁移 ${result.value.processed.length} 篇，${result.value.failures.length} 篇待核验。`;after=result.value.after
+      }while(after!==null&&ledgerOpen&&current()===captured)
+      migrate.disabled=false
+    });ledgerBody.append(migrate)
+    void fetchPage()
     ledgerEl.hidden = false
     renderTabs()
   }
@@ -1352,7 +1390,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const result = await window.rgent.noteWrite({
       sessionId: tab.sessionId, objectVersion: tab.objectVersion,
       relPath: tab.relPath,
-      content: composeSource(body, tab.ledger),
+      content: body,
       expectedRevision: tab.revision
     })
     if (epoch !== vaultEpoch || !tabs.includes(tab)) return false

@@ -4,7 +4,7 @@ import type { NoteSnapshot, RemoteImageGetRequest } from '../shared/ipc.ts'
 import { composeSource } from '../markdown/partition.ts'
 
 /** Caller trust, source proof, and network destination checks are separate gates. */
-export function verifyImageSource(snapshot: NoteSnapshot, request: RemoteImageGetRequest): {ok:true;binding:string}|{ok:false} {
+export function verifyImageSource(snapshot: NoteSnapshot, request: RemoteImageGetRequest,ledgerSource?:string): {ok:true;binding:string}|{ok:false} {
   const c=request.context
   if (!c || c.sessionId!==snapshot.sessionId || c.objectVersion!==snapshot.objectVersion || c.revision!==snapshot.revision ||
       !Number.isSafeInteger(c.start) || !Number.isSafeInteger(c.end) || c.start<0 || c.end<=c.start ||
@@ -18,13 +18,14 @@ export function verifyImageSource(snapshot: NoteSnapshot, request: RemoteImageGe
     if(parsed.stale) return {ok:false}
     const start=parsed.partition.body.length
     const ledger=c.region==='ledger'
-    if (ledger ? c.start<start || !parsed.partition.ledger : c.end>start) return {ok:false}
-    const index=ledger ? compileFragment(parsed.partition.ledger!).index : parsed.index
+    if(c.ledgerTaskId!==undefined&&(!ledger||ledgerSource===undefined||!Number.isSafeInteger(c.ledgerRevision)||Number(c.ledgerRevision)<1||!['prompt','answer'].includes(c.ledgerField??'')))return {ok:false}
+    if (ledger ? c.start<start || (!parsed.partition.ledger && ledgerSource===undefined) : c.end>start) return {ok:false}
+    const index=ledger ? compileFragment(ledgerSource??parsed.partition.ledger!).index : parsed.index
     const offset=ledger ? start : 0
     const image=index.images.find(i=>i.range.start+offset===c.start && i.range.end+offset===c.end && i.url===request.url)
     if(!image) return {ok:false}
     if(request.mode==='auto' && (ledger || !['human','adopted'].includes(image.source ?? '') || !request.url.startsWith('https:'))) return {ok:false}
     // Full source revision + draft prevents an old redirect confirmation applying to another image.
-    return {ok:true,binding:createHash('sha256').update(JSON.stringify([c.noteRelPath,c.sessionId,c.objectVersion,c.revision,c.region,c.start,c.end,c.draftBody??null])).digest('hex')}
+    return {ok:true,binding:createHash('sha256').update(JSON.stringify([c.noteRelPath,c.sessionId,c.objectVersion,c.revision,c.region,c.start,c.end,c.draftBody??null,c.ledgerTaskId??null,c.ledgerRevision??null,c.ledgerField??null,ledgerSource??null])).digest('hex')}
   }catch { return {ok:false} }
 }

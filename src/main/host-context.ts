@@ -8,6 +8,8 @@ export interface ContextChapter {
   text: string
   taskId?: string
   fields?: LedgerTaskFields
+  provenance?: import("./ledger-provenance.ts").LedgerProvenance
+  eligible?: boolean
 }
 
 export interface ContextSummary {
@@ -17,6 +19,7 @@ export interface ContextSummary {
 
 export interface HostContextInput {
   source: string
+  chapters?: readonly ContextChapter[]
   prompt: string
   /** Offset in the current note body, after the submitted prompt has been written. */
   placement: number
@@ -163,7 +166,7 @@ export function buildHostContext(input: HostContextInput): HostContextPlan {
   if (placement < 0 || placement > part.body.length) return { status: 'too-large', reason: '落点已失效' }
   const blocks = parsed.index.blocks
   const excludedBlocks = new Set<number>()
-  const allChapters = ledgerChapters(part.ledger), bodyTasks = historicalBodyTasks(parsed,allChapters)
+  const allChapters = input.chapters ? [...input.chapters] : ledgerChapters(part.ledger), bodyTasks = historicalBodyTasks(parsed,allChapters)
   const ambiguous = allChapters.filter(c=>c.taskId && requiresLedgerFieldProof(c.text) && (c.fields ?? ledgerTaskFields(c.text)).status === 'ambiguous')
   const excludedTasks = [...(input.excludedAiTaskIds ?? []),...ambiguous.map(c=>c.taskId!)]
   blocks.forEach((block, at) => {

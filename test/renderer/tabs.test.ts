@@ -53,13 +53,13 @@ describe('tab writes', () => {
     ])
   })
 
-  it('composes the ledger onto disk without putting it in the editor body', () => {
+  it('writes only body even when a tab retains an obsolete ledger snapshot', () => {
     const ledger = `${LEDGER_ANCHOR}\n口令：旧场\n`
     const tabs = [tab('a.md', { content: '正文', ledger, dirty: true })]
     expect(pendingWrites(tabs, 'a.md', '新正文')).toEqual([
-      { relPath: 'a.md', body: '新正文', content: `新正文\n${ledger}`, expectedRevision: 'r0' }
+      { relPath: 'a.md', body: '新正文', content: `新正文`, expectedRevision: 'r0' }
     ])
-    expect(diskOf(tabs[0]!, '新正文')).toContain(LEDGER_ANCHOR)
+    expect(diskOf(tabs[0]!, '新正文')).not.toContain(LEDGER_ANCHOR)
     expect(diskOf(tabs[0]!, '新正文').startsWith('新正文')).toBe(true)
   })
 

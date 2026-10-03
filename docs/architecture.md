@@ -73,7 +73,7 @@ flowchart LR
 - `.md` 就是笔记。
 - 每篇笔记带一个附件夹，名字与笔记同名。图和 PDF 跟这篇走。引用写全路径，解析走 Markdown 标准相对路径。
 - 权限名单和技能文件跟库走，对文件树隐藏。权限名单的选定路径见下方强制点。
-- 账本写在这篇笔记同一个文件里，放在最末尾，用一行机器锚点分隔（锚点值见 [已拍板决定](decisions.md) §账本）；正文永远在锚点之前。树上没有单独一条。
+- 2026-10-03 包 1：新任务账本由主进程 `LedgerStore` 写入 `.rgent/ledgers/<noteId>/<taskId>.json`；registry 与有限 owner 描述保存逻辑归属，正文不加 noteId。对象连续性无法核验时显示待核验，坏 registry 可通过显式入口从描述重建，但描述不代替对象与权限核验。旧尾部先精确复制、复读再移除，含糊章节只供回顾。
 - 人搜、反链与模型工具只索引锚点之前的正文，不得索引账本。Host 组模型上下文时另行读取本篇账本，按 [产品合同 · 喂给模型](decisions.md#喂给模型) 的预算与来源规则处理。
 - 密钥不进库。Host 阶段以 Electron `safeStorage` 加密，密文只存应用数据目录，解密材料由操作系统保护。
 - 库根隐藏 `.rgent-lifecycle` 记录结构操作的身份、修订、权限迁移与恢复进度，不记录笔记正文，不提供历史版本。有效的未完成记录使 AI 访问失败关闭，直至按对象身份恢复；不由程序清空不可信状态。
@@ -163,9 +163,9 @@ flowchart LR
 | 一次性单场授权 | 主进程／Host | `TaskAuthorizationRegistry` 绑定调用方、会话、对象、口令和接收方；`agentStart` 不接受无预览启动。未知动作、范围外读取／写回、失效或重放均拒绝；Host 读、发、写共用校验，可信取消保稿不恢复模型授权。 |
 | 人写盘 ≠ 模型写盘 | IPC | `noteWrite` 只给人的自动写盘与手动保存。`AgentHost` 不得复用这条通道；Host 阶段建立独立模型入口，并与同篇人的写入串行协调。 |
 | 索引重建注册 | 主进程 | `VaultIndex` 同一时刻只保留一个在飞重建；注册位只有仍持有它的那次重建能清。库失效时的 `reset()` 只置脏位、不清注册位，查询必须等到当前世代装好，不得提前返回未建好的索引（`src/main/vault-index.ts`，反例见 `test/main/vault-index.test.ts`）。 |
-| 推理与过程只进账本 | 主进程 | `src/main/model-stream.ts` 把内联 `<think>…</think>` 与供应商的 `reasoning` 通道拆成独立事件，正文通道只收 `text`；`src/main/agent-host.ts` 分开累积推理与过程；`src/main/host-source.ts` 只把它们写进账本「过程」「推理」两节（推理超长截断）。正文里出现 `<think>` 按缺陷处理。 |
+| 推理与过程只进账本 | 主进程 | `src/main/model-stream.ts` 把内联 `<think>…</think>` 与供应商的 `reasoning` 通道拆成独立事件，正文通道只收 `text`；`src/main/agent-host.ts` 分开累积推理与过程；包 1 的新结构化账本不再保存推理正文；设备短期区接线在包 2，旧推理随迁移原样保存。正文里出现 `<think>` 按缺陷处理。 |
 | 索引不见账本 | 管线 / 索引 | `partitionSource` 切开锚点（`src/markdown/partition.ts`）。`compile` 和 `VaultIndex` 只吃 `body`。身份标记是机器语法，人搜的语料里把它等长填空格（偏移不变）——搜 `rgent` 不该搜到它，片段里也不该出现。 |
-| 画布不见账本 | 画布 | Tab 拆 `content`（正文）与 `ledger`（`src/renderer/src/tabs.ts`）。编辑器只 `setText(body)`。写盘 `composeSource`。账本回顾在当前 tab 内临时只读，入口常驻正文画布右上角；返回正文恢复原位置，不占右侧反链。 |
+| 画布不见账本 | 画布 | Tab 拆 `content`（正文）与 `ledger`（`src/renderer/src/tabs.ts`）。编辑器只 `setText(body)`。保存只发送正文，历史由主进程分页提供（长记录分段续读）。账本回顾在当前 tab 内临时只读，入口常驻正文画布右上角；返回正文恢复原位置，不占右侧反链。 |
 | 人搜含禁区 | 索引 | `VaultIndex` 是全量语料，建索引时不按权限过滤。当前人搜是惰性全量 + 子串。模型检索先限定本场对象集合，再复用纯匹配器；不先全库查询再过滤。 |
 | 退出不丢稿 | 壳 | 关窗先 `flushRequest`。保存失败时主进程原生对话框让人重试、继续编辑或明确放弃；**渲染进程活着但不应答**（超时，或计时器触发之后才崩）时也进同一个决策态，文案按「写盘失败 / 没有回应」区分——不能让流程停在 flushing，那会让窗口关不掉、`Cmd+Q` 也被挡住。关窗和 `Cmd+Q` 走同一状态流程，重复请求不重复弹框。`vault.dispose()` 在 `will-quit`，不在 `before-quit`（退出 flush 还要走 `noteWrite`）。流程测试见 `test/shared/flush.test.ts`。 |
 | 密钥不进库 | 主进程 | Host 最小环已接 Electron `safeStorage`，密文只存应用数据目录；读取 IPC 仅给保存状态，不回传密钥。 |

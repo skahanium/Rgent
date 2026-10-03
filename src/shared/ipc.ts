@@ -4,6 +4,9 @@ export const IPC = {
   treeList: 'tree:list',
   treeChanged: 'tree:changed',
   noteRead: 'note:read',
+  ledgerGet:'ledger:get',
+  ledgerRepair:'ledger:repair',
+  ledgerMigrate:'ledger:migrate',
   noteInspect: 'note:inspect',
   noteAbandon: 'note:abandon',
   noteWrite: 'note:write',
@@ -153,6 +156,9 @@ export type AgentEvent = {
 export type ImageContext = {
   noteRelPath: string
   region: 'body' | 'ledger'
+  ledgerTaskId?:string
+  ledgerRevision?:number
+  ledgerField?:'prompt'|'answer'
   start: number
   end: number
   sessionId?: string

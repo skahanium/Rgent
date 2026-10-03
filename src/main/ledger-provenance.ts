@@ -76,18 +76,19 @@ export async function validateLedgerProvenance(chapter: string, validate: (sourc
   return true
 }
 
+export function chapterProvenance(chapter:ContextChapter){return chapter.provenance?{status:'valid' as const,record:chapter.provenance}:ledgerProvenance(chapter.text)}
 export async function historicalContextPolicy(source: string, validate: (dependency: LedgerSource) => Promise<boolean>, parsed: CompileResult = compile(source), chapters: ContextChapter[] = ledgerChapters(parsed.partition.ledger), validateMemory: (dependency: LedgerMemoryDependency) => Promise<boolean> = async () => false): Promise<{
   allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[]; dependencies: LedgerSource[]
 }> {
   if (parsed.source !== source || parsed.stale) throw new Error('SOURCE_PARSE_FAILED')
   const result = { allowedLedgerChapterIds: [] as string[], excludedAiTaskIds: [] as string[], dependencies: [] as LedgerSource[] }
   for (const chapter of chapters) {
-    if (chapter.taskId && (chapters.filter(c => c.taskId === chapter.taskId).length !== 1 || requiresLedgerFieldProof(chapter.text) && (chapter.fields ?? ledgerTaskFields(chapter.text)).status === 'ambiguous') || !(await validateLedgerProvenance(chapter.text, validate, validateMemory))) {
+    if (chapter.taskId && (chapters.filter(c => c.taskId === chapter.taskId).length !== 1 || requiresLedgerFieldProof(chapter.text) && (chapter.fields ?? ledgerTaskFields(chapter.text)).status === 'ambiguous') || chapter.eligible===false || !(await validateLedgerProvenance(chapter.provenance?encodeLedgerProvenance(chapter.provenance):chapter.text, validate, validateMemory))) {
       result.excludedAiTaskIds.push(chapter.taskId ?? '*')
       continue
     }
     result.allowedLedgerChapterIds.push(chapter.sourceId)
-    const provenance = ledgerProvenance(chapter.text)
+    const provenance = chapterProvenance(chapter)
     if (provenance.status === 'valid') {
       for (const dependency of provenance.record.sources) {
         const previous = result.dependencies.find(s => s.relPath === dependency.relPath)

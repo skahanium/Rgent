@@ -1,4 +1,4 @@
-import { composeSource, partitionSource, preferDiskLedger } from '@markdown'
+import { partitionSource } from '@markdown'
 import type { NoteSnapshot, NoteWriteRequest, NoteWriteResult } from '@shared'
 import type { Tab } from './tabs.ts'
 
@@ -29,7 +29,7 @@ export async function reconcileNote(tab: Tab, deps: ReconcileDeps): Promise<Reco
     if (disk.revision === tab.revision) return 'unchanged'
 
     const body = deps.draft()
-    if (!tab.dirty || composeSource(body, tab.ledger) === disk.content) {
+    if (!tab.dirty || body === disk.content) {
       deps.applyDisk(disk)
       return 'disk'
     }
@@ -51,12 +51,12 @@ export async function reconcileNote(tab: Tab, deps: ReconcileDeps): Promise<Reco
       return 'disk'
     }
 
-    const ledger = preferDiskLedger(partitionSource(latest.content).ledger, tab.ledger)
+    const ledger = null
     let result: NoteWriteResult
     try {
       result = await deps.write({
         relPath: tab.relPath,
-        content: composeSource(body, ledger),
+        content: body,
         expectedRevision: latest.revision,
         sessionId: latest.sessionId,
         objectVersion: latest.objectVersion

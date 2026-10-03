@@ -13,11 +13,13 @@ vi.mock('../../src/main/watch.ts', async importOriginal => ({ ...await importOri
 const cleanup: { session: VaultSession; base: string }[] = []
 afterEach(async () => { for (const item of cleanup.splice(0)) { item.session.dispose(); await rm(item.base, { recursive: true, force: true }) } })
 const original = 'old body\r\n<!-- rgent:ledger:v1 -->\r\nexisting ledger bytes\r\n'
-const chapter: LedgerChapterWrite = { taskId: 'task-1', startedAt: 'now', status: 'failed', prompt: 'p', answer: 'pending answer' }
-it.each(['```js\na', '<!-- unfinished', '<div>\ntext', '<div>complete</div>'])('refuses a draft that would absorb the verified ledger: %s', async body => {
+const chapter: LedgerChapterWrite = { taskId: 'task-1', startedAt: '2026-10-03T00:00:00.000Z', status: 'failed', prompt: 'p', answer: 'pending answer' }
+it.each(['```js\na', '<!-- unfinished', '<div>\ntext', '<div>complete</div>'])('saves unfinished Markdown safely because historical bytes are separate: %s', async body => {
   const { session, root, request } = await setup()
-  await expect(session.previewSaveCopy({ ...request, body })).rejects.toThrow('LEDGER_BOUNDARY_INVALID')
-  await expect(readFile(path.join(root, 'copy.md'))).rejects.toMatchObject({ code: 'ENOENT' })
+  const preview=await session.previewSaveCopy({ ...request, body })
+  await session.commitSaveCopy({sessionId:request.sessionId,id:preview.id,draftVersion:request.draftVersion,body})
+  expect(await readFile(path.join(root,'copy.md'),'utf8')).toBe(body)
+  expect((await session.ledgerPage('copy.md',null)).records[0]?.legacyRaw).toContain('existing ledger bytes')
 })
 it.each(['```js\na', '<!-- unfinished', '<div>\ntext', '<div>complete</div>'])('refuses an ordinary write that would absorb existing ledger: %s', async body => {
   const { session, root, snapshot } = await setup(false)
@@ -52,8 +54,10 @@ it('saves a missing draft only to a new path with its verified ledger and pendin
   expect(saved.snapshot.sessionId).toBe(request.sessionId)
   const content = await readFile(path.join(root, 'copy.md'), 'utf8')
   expect(partitionSource(content).body).toBe(request.body)
-  expect(content).toContain(partitionSource(original).ledger)
-  expect(content).toContain('pending answer')
+  expect(partitionSource(content).ledger).toBeNull()
+  const history=await session.ledgerPage('copy.md',null)
+  expect(history.records.some(r=>r.legacyRaw?.includes('existing ledger bytes'))).toBe(true)
+  expect(history.records.find(r=>r.taskId==='task-1')?.chapter?.answer).toBe('pending answer')
   await expect(readFile(path.join(root, 'source.md'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
 it('uses the verified original ledger after another object occupies the old path', async () => {
@@ -62,7 +66,8 @@ it('uses the verified original ledger after another object occupies the old path
   await session.read('source.md')
   const preview = await session.previewSaveCopy(request)
   const result = await session.commitSaveCopy({ sessionId: request.sessionId, id: preview.id, draftVersion: request.draftVersion, body: request.body })
-  expect(result.snapshot.content).toContain('existing ledger bytes')
+  expect(result.snapshot.content).toBe(request.body)
+  expect((await session.ledgerPage('copy.md',null)).records[0]?.legacyRaw).toContain('existing ledger bytes')
   expect(result.snapshot.content).not.toContain('wrong ledger')
   expect(await readFile(path.join(root, 'source.md'), 'utf8')).toContain('stranger')
 })
@@ -123,6 +128,6 @@ it('reports a changed parent after publication without clearing the preview or r
   expect(session.saveCopyRequestById(preview.id)?.body).toBe(request.body)
   const published = await readFile(path.join(root, request.target), 'utf8')
   expect(published).toContain(request.body)
-  expect(published).toContain(chapter.answer)
+  expect(published).not.toContain(chapter.answer) // pending Host material and preview remain; no historical bytes in body
   await expect(readFile(path.join(root, 'source.md'))).rejects.toMatchObject({ code: 'ENOENT' })
 })

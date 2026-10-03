@@ -1,5 +1,4 @@
 import type { NoteAvailability } from '../../shared/ipc.ts'
-import { composeSource } from '../../markdown/partition.ts'
 
 export type Tab = {
   relPath: string
@@ -25,13 +24,13 @@ export type PendingWrite = {
   relPath: string
   /** 要收进 tab 的正文。 */
   body: string
-  /** 磁盘整文件：composeSource(body, ledger)。 */
+  /** 磁盘正文；账本只由主进程保存。 */
   content: string
   expectedRevision: string
 }
 
 export function diskOf(tab: Pick<Tab, 'content' | 'ledger'>, body = tab.content): string {
-  return composeSource(body, tab.ledger)
+  return body
 }
 
 /** Recovery may exempt only clean paths supplied by the verified main-process journal. */
@@ -58,7 +57,7 @@ export function pendingWrites(
     out.push({
       relPath: tab.relPath,
       body,
-      content: composeSource(body, tab.ledger),
+      content: body,
       expectedRevision: tab.revision
     })
   }

@@ -13,12 +13,16 @@ import { closeSecureFs, secureFsFor } from './secure-fs.ts'
 import { VaultIndex } from './vault-index.ts'
 import { vaultRootIdentity, watchVault } from './watch.ts'
 import { assertLedgerPreserved, composeSource, partitionSource } from '../markdown/partition.ts'
+import { LedgerStore } from './ledger-store.ts'
+import type { LedgerChapterWrite } from './host-source.ts'
 import { retireMemoryFile } from './memory-retirement.ts'
 import type { MemoryContext } from '../shared/memory.ts'
-import { appendLedgerChapter, type LedgerChapterWrite } from './host-source.ts'
+import { appendLedgerChapter } from './host-source.ts'
 
 export class VaultSession {
   private readonly mutations = new VaultMutationQueue()
+  private ledgerStore: LedgerStore | null = null
+  private ledgerFailure: string | null = null
   private memoryFailure: string | null = null
   private lifecycle: VaultLifecycle | null = null
   private lifecycleReady: Promise<void> = Promise.resolve()
@@ -151,6 +155,38 @@ export class VaultSession {
     return state
   }
 
+  async readOpened(relPath:string):Promise<NoteSnapshot> {
+    const token=this.captureSession(); await this.lifecycleReady; this.assertSession(token)
+    await this.mutations.run(async()=>{
+      this.assertSession(token);this.requireStableStructure()
+      const before=await readNoteSnapshot(this.requireUsableRoot(),relPath)
+      const migrated=this.ledgerStore!.migrate(relPath)
+      if(migrated.migrated)await this.recordCommittedWrite({relPath,previousPath:relPath,previousObjectVersion:before.objectVersion,objectVersion:migrated.objectVersion,content:migrated.body})
+    })
+    return this.read(relPath)
+  }
+  async ledgerPrepare(relPath:string,chapter:LedgerChapterWrite,expectedVersion?:number){
+    const token=this.captureSession();return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.prepare(relPath,chapter,expectedVersion)})
+  }
+  async ledgerComplete(relPath:string,taskId:string,revision:string){const token=this.captureSession();return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.complete(relPath,taskId,revision)})}
+  async ledgerContexts(relPath:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.contexts(relPath)}
+  async ledgerPage(relPath:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);return this.ledgerStore!.wirePage(relPath,cursor)})}
+
+  ledgerRegistryRevision(){return this.ledgerStore?.registryRevision()??null}
+  async ledgerRepair(expected:string|null){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();this.ledgerStore!.repairRegistry(expected)})}
+  async ledgerImage(relPath:string,taskId:string,revision:number,field:'prompt'|'answer'){
+    const token=this.captureSession();await this.lifecycleReady;this.assertSession(token)
+    const record=this.ledgerStore!.getRecord(relPath,taskId)
+    if(record.revision!==revision||!record.chapter||!['saved','legacy'].includes(record.state))throw Error('LEDGER_CONFLICT')
+    return record.chapter[field]
+  }
+  async ledgerMigrateBatch(after:string|null){
+    const token=this.captureSession(),entries=await this.tree(),paths:string[]=[]
+    const walk=(items:TreeEntry[])=>{for(const item of items){if((item.kind==='note'||item.kind==='file')&&item.relPath.toLowerCase().endsWith('.md'))paths.push(item.relPath);if(item.kind==='dir')walk(item.children??[])}}
+    walk(entries);paths.sort();const remaining=paths.filter(p=>after===null||p>after),batch=remaining.slice(0,5),failures:{relPath:string;error:string}[]=[],processed:string[]=[]
+    for(const path of batch){this.assertSession(token);try{await this.readOpened(path);processed.push(path)}catch{failures.push({relPath:path,error:'LEDGER_MIGRATION_FAILED'})}}
+    return {processed,failures,after:remaining.length>batch.length?batch.at(-1)!:null}
+  }
   async read(relPath: string): Promise<NoteSnapshot> {
     const token = this.captureSession()
     const root = this.root!
@@ -254,7 +290,7 @@ export class VaultSession {
     this.remember(relPath, { content, revision, objectVersion, sessionId: this.captureSession() })
     this.lastWrites.set(relPath, { revision, objectVersion, at: Date.now() })
     this.index.markDirty()
-
+    try { this.ledgerStore?.onWrite(relPath,previousObjectVersion,objectVersion,content) } catch { this.ledgerFailure='LEDGER_OWNERSHIP_UNVERIFIED' }
   }
 
   /** Move only bindings that lead to the explicitly verified filesystem object. */
@@ -312,12 +348,10 @@ export class VaultSession {
       if ((await this.noteStatus(request.source, request)).status === 'ready') throw new Error('SOURCE_AVAILABLE')
       this.assertSession(request.sessionId)
       const parentIdentity = this.copyTargetIdentity(request.target)
-      let content = composeSource(request.body, partitionSource(basis.content).ledger)
-      assertLedgerPreserved(content, partitionSource(basis.content).ledger)
-      for (const chapter of chapters) content = appendLedgerChapter(content, chapter)
+      const content = request.body
       const view: SaveCopyPreviewView = { id: randomUUID(), sessionId: request.sessionId, source: request.source,
         target: request.target, draftVersion: request.draftVersion, pendingTaskIds: chapters.map((chapter) => chapter.taskId),
-        warning: '另存保留窗口正文、最后核验的原账本和待保存任务记录；不复制附件，原路径保持原状。' }
+        warning: '另存创建新笔记归属，保留窗口正文及本预览列出的旧账本恢复材料和待保存任务记录；原账本不移动，不复制附件、不重启任务。' }
       this.copyPreviews.clear()
       this.copyPreviews.set(view.id, { view: { ...view, pendingTaskIds: [...view.pendingTaskIds] }, request: { ...request }, content,
         bodyHash: revisionOf(request.body), basisHash: revisionOf(basis.content), pendingHash: revisionOf(JSON.stringify(chapters)), parentIdentity })
@@ -364,6 +398,7 @@ export class VaultSession {
       this.verifyCopyParent(prepared.view.target, prepared.parentIdentity)
       if (written.objectVersion !== objectVersion || written.content !== prepared.content) throw new Error('COPY_VERIFY_FAILED')
       const snapshot = { ...written, sessionId: request.sessionId }
+      this.ledgerStore!.recoveryCopy(prepared.request.source, prepared.view.target, prepared.request.objectVersion, partitionSource(basis.content).ledger, chapters)
       this.remember(prepared.view.target, snapshot)
       this.lastWrites.set(prepared.view.target, { revision: snapshot.revision, objectVersion, at: Date.now() })
       this.copyPreviews.delete(request.id)
@@ -572,9 +607,11 @@ export class VaultSession {
     const token = randomUUID()
     this.token = token
     const check = (): void => { this.assertSession(token); this.requireUsableRoot() }
+    this.ledgerStore=new LedgerStore(secureFsFor(this.root),check)
+    this.ledgerFailure=null
     this.lifecycle = new VaultLifecycle(this.root, this.mutations, token, check, async write => {
       check(); await this.recordCommittedWrite(write)
-    })
+    }, async receipt=>{check();for(const move of receipt.objects)move.identityProven && this.ledgerStore!.relocate(move.from,move.to,move.objectVersion)})
     this.lifecycleError = null
     this.lifecycleReady = this.lifecycle.recover().then((result) => {
       if (this.token !== token) return

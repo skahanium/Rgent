@@ -1,3 +1,4 @@
+import {LEDGER_ERROR_CODES,LEDGER_ERROR_MESSAGES} from '../../shared/ledger-errors.ts'
 import { MEMORY_ERROR_CODES, MEMORY_ERROR_MESSAGES } from '../../shared/memory-errors.ts'
 /**
  * 任务启动、授权与 Host 运行失败时给人看的文案。
@@ -8,6 +9,7 @@ import { MEMORY_ERROR_CODES, MEMORY_ERROR_MESSAGES } from '../../shared/memory-e
  */
 export const HOST_ERROR_CODES = [...new Set([
   ...MEMORY_ERROR_CODES,
+  ...LEDGER_ERROR_CODES,
   'NO_API_KEY',
   'ENCRYPTION_UNAVAILABLE',
   'KEY_DECRYPT_FAILED',
@@ -66,6 +68,7 @@ export const HOST_ERROR_CODES = [...new Set([
 
 const MESSAGES: Record<string, string> = {
   ...MEMORY_ERROR_MESSAGES,
+  ...LEDGER_ERROR_MESSAGES,
   '旧账本摘要预算不足': '旧账本摘要预算不足',
   NO_API_KEY: '请先在设置的「模型」页保存当前供应商的密钥。',
   ENCRYPTION_UNAVAILABLE: '系统密钥保护当前不可用。',

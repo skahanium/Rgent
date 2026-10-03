@@ -1,7 +1,7 @@
 import type { MemoryContext } from '../shared/memory.ts'
 import { createHash } from 'node:crypto'
 import { compile, parseMarker } from '../markdown/index.ts'
-import { ledgerChapters, ledgerTaskFields, historicalBodyTasks, type ContextSourceRef } from './host-context.ts'
+import { ledgerChapters, type ContextChapter, ledgerTaskFields, historicalBodyTasks, type ContextSourceRef } from './host-context.ts'
 import type { LedgerMemoryDependency, LedgerSource } from './ledger-provenance.ts'
 
 export type MaterialBinding = { relPath: string; sessionId: string; objectVersion: string; revision: string; permissionTier?: 'reference' | 'follow' }
@@ -45,11 +45,11 @@ export class TaskMaterialTracker {
       this.stage(context ? this.stagedContext : this.stagedTools, { ...binding, permissionTier: binding.permissionTier ?? 'reference', kind: 'body', classification: block.identity === 'ai' || historical.has(block.range.start) ? 'ai' : block.identity === 'command' ? 'command' : 'human', taskId, start, end, text, hash:hash(text), sourceDeps:structuredClone(dependencies.sources), memoryDeps:structuredClone(dependencies.memories) })
     }
   }
-  context(source: string, refs: readonly ContextSourceRef[], binding: MaterialBinding, dependencies: (ref: ContextSourceRef) => MaterialDependencies = () => ({sources:[],memories:[]})) {
+  context(source: string, refs: readonly ContextSourceRef[], binding: MaterialBinding, dependencies: (ref: ContextSourceRef) => MaterialDependencies = () => ({sources:[],memories:[]}), supplied?: ContextChapter[]) {
     this.stagedContext = []
     const parsed = compile(source)
     if (parsed.stale) throw Error('SOURCE_PARSE_FAILED')
-    const chapters = ledgerChapters(parsed.partition.ledger), historical = historicalBodyTasks(parsed)
+    const chapters = supplied ?? ledgerChapters(parsed.partition.ledger), historical = historicalBodyTasks(parsed,chapters)
     for (const ref of refs) {
       // A summary is derived text; its actual input fragments were committed on the summarization dispatch.
       if (ref.kind === 'summary') continue

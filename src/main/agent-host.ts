@@ -11,7 +11,7 @@ import { MODEL_STREAM_BOUNDS, type ModelStepEvent } from './model-stream.ts'
 import { randomUUID } from 'node:crypto'
 import { AgentTasks, type TaskResult, type StopReason } from './agent-tasks.ts'
 import { buildHostContext, ledgerChapters, type ContextChapter, type ContextSummary, type ContextSourceRef } from './host-context.ts'
-import { appendLedgerChapter, markPrompt, upsertAiAnswer } from './host-source.ts'
+import { appendLedgerChapter, markPrompt, upsertAiAnswer, type LedgerChapterWrite } from './host-source.ts'
 import { assistantSystemBlock, assistantSummary, type AssistantHabits } from '../shared/assistant.ts'
 import type { ModelCredential, RunLimits } from './model-config.ts'
 import type { SourceRange } from '../markdown/types.ts'
@@ -55,6 +55,11 @@ function toolTraceLine(call: { name: string; input: unknown }, failure?: string)
 }
 
 export type HostDependencies = {
+  ledger?: {
+    prepare(relPath:string,chapter:LedgerChapterWrite,expectedVersion?:number):Promise<{revision:number}>
+    complete(relPath:string,taskId:string,bodyRevision:string):Promise<unknown>
+    contexts(relPath:string):Promise<ContextChapter[]>
+  }
   root: () => string | null
   authorize?: (input: HostStart) => Promise<TaskGrant>
   assertMemoryAuthorization?: (input: HostStart) => void
@@ -109,6 +114,7 @@ export class AgentHost {
   private readonly launching = new Set<string>()
   private readonly launchWaiters = new Set<() => void>()
   private readonly retrying = new Map<string, Promise<void>>()
+  private readonly ledgerVersions = new Map<string,number>()
   private readonly pending = new Map<string, { root: string; relPath: string; source: Parameters<typeof appendLedgerChapter>[1]; persisted: { answer: string }; material: { tracker: TaskMaterialTracker; context: MemoryContext | null; handoffAttempted?: boolean } }>()
 
   private readonly bindings = new Map<string, ObjectBinding & { originalVersion: string }>()
@@ -322,6 +328,7 @@ export class AgentHost {
       const checkpoint = async (): Promise<void> => {
         const saving = (async () => {
         await this.rechecking.get(key)
+        if(this.deps.ledger){const checkpoint=await this.deps.ledger.prepare(input.relPath,{taskId:id,startedAt,status:'completed',prompt:input.promptText,answer,provenance:{version:1,model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:scoped?.dependencies()??[],tools:scoped?.summary()??[]}},this.ledgerVersions.get(id));this.ledgerVersions.set(id,checkpoint.revision)}
         const revision = await this.mutateNote(root, input.relPath, (source) => upsertAiAnswer(source, { taskId: id, answer, expectedPreviousAnswer: persisted.answer }))
         persisted.answer = answer
         lastCheckpoint = Date.now()
@@ -335,6 +342,7 @@ export class AgentHost {
         snapshot('running')
         let summary: ContextSummary | undefined
         let policySource = ''
+        let historicalChapters:ContextChapter[]|undefined
         let policy: { allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[] } | undefined
         const messages: ModelMessage[] = []
         const usedIds = new Set<string>()
@@ -372,14 +380,15 @@ export class AgentHost {
           const currentSnapshot = await wait(this.readBound(root, input.relPath))
           const source = currentSnapshot.content
           if (source !== policySource) {
-            policy = scoped ? await wait(scoped.contextPolicy(source, signal)) : await wait(historicalContextPolicy(source, async () => false, undefined, undefined, dep => memory?.validateDependency(dep) ?? Promise.resolve(false)))
+            historicalChapters=this.deps.ledger?await wait(this.deps.ledger.contexts(input.relPath)):undefined
+            policy = scoped ? await wait(scoped.contextPolicy(source, signal,historicalChapters)) : await wait(historicalContextPolicy(source, async () => false, undefined, historicalChapters, dep => memory?.validateDependency(dep) ?? Promise.resolve(false)))
             policySource = source
           }
           const currentPrompt = promptBlock(source, id)
           if (currentPrompt.text !== submitted.text) throw Error('任务口令已被外部修改')
           const metadata = toolsEnabled ? `\n本场工具来源清单（正文须经工具读取，附件和账本不可读）：${JSON.stringify(grant!.sources.map(s => ({ sourceId: s.sourceId, title: s.title, relPath: s.relPath })))}` : ''
           const planBudget = budget - byteCount(metadata) - (toolsEnabled ? byteCount(JSON.stringify(READ_ONLY_TOOL_SCHEMAS)) : 0) - byteCount(JSON.stringify(messages)) - 128
-          const plan = buildHostContext({ source, prompt: input.promptText, placement: currentPrompt.position, inputBudgetTokens: planBudget, countTokens: byteCount, summary, memory: memory?.recall, ...policy })
+          const plan = buildHostContext({ source, chapters:historicalChapters, prompt: input.promptText, placement: currentPrompt.position, inputBudgetTokens: planBudget, countTokens: byteCount, summary, memory: memory?.recall, ...policy })
           if (plan.status === 'too-large') throw Error(plan.reason)
           if (plan.status === 'needs-summary') {
             const summaries: string[] = []
@@ -390,7 +399,7 @@ export class AgentHost {
               await guard()
               if ((await wait(this.readBound(root, input.relPath))).content !== source) { summary = undefined; continue contextLoop }
               scoped?.recordContext(batch.refs)
-              if (currentSnapshot.sessionId && currentSnapshot.objectVersion) materials.context(source, batch.refs, { ...currentSnapshot, sessionId: currentSnapshot.sessionId, objectVersion: currentSnapshot.objectVersion, relPath: input.relPath }, scoped?.contextDependencies)
+              if (currentSnapshot.sessionId && currentSnapshot.objectVersion) materials.context(source, batch.refs, { ...currentSnapshot, sessionId: currentSnapshot.sessionId, objectVersion: currentSnapshot.objectVersion, relPath: input.relPath }, scoped?.contextDependencies,historicalChapters)
               memory?.stage(core.map(e => e.id))
               await guard()
               let text = ''
@@ -418,7 +427,7 @@ export class AgentHost {
           const outgoing: ModelMessage[] = [{ role: 'user', content: `${plan.content}${omitted}${memoryOmitted}${metadata}` }, ...messages]
           if ((await wait(this.readBound(root, input.relPath))).content !== source) { summary = undefined; continue }
           scoped?.recordContext(plan.refs)
-          if (currentSnapshot.sessionId && currentSnapshot.objectVersion) materials.context(source, plan.refs, { ...currentSnapshot, sessionId: currentSnapshot.sessionId, objectVersion: currentSnapshot.objectVersion, relPath: input.relPath }, scoped?.contextDependencies)
+          if (currentSnapshot.sessionId && currentSnapshot.objectVersion) materials.context(source, plan.refs, { ...currentSnapshot, sessionId: currentSnapshot.sessionId, objectVersion: currentSnapshot.objectVersion, relPath: input.relPath }, scoped?.contextDependencies,historicalChapters)
           memory?.stage(plan.memoryIds)
           await guard()
           if ((await wait(this.readBound(root, input.relPath))).content !== source) { summary = undefined; continue }
@@ -503,7 +512,7 @@ export class AgentHost {
           ...(reasoning ? { reasoning } : {}),
           ...(trace.length ? { trace } : {}),
           ...(assistantLine ? { assistant: assistantLine } : {}),
-          ...(grant?{provenance:{version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies() ?? []),...(scoped?.memoryDependencies?.() ?? [])].map(dep=>[dep.id,dep])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant.sources.map(s=>s.relPath),sources:scoped?.dependencies() ?? [],sentSources:scoped?.sentSources() ?? [],tools:[...(scoped?.summary() ?? []),... [...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`${label.split(':')[1]} × ${count}`}))]}}:{})
+          ...({provenance:{version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies() ?? []),...(scoped?.memoryDependencies?.() ?? [])].map(dep=>[dep.id,dep])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:scoped?.dependencies() ?? [],sentSources:scoped?.sentSources() ?? [],tools:[...(scoped?.summary() ?? []),... [...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`${label.split(':')[1]} × ${count}`}))]}})
         }
         try {
           const revision = await this.finishWrite(root, input.relPath, finalSource, persisted, savedMaterial)
@@ -566,11 +575,14 @@ export class AgentHost {
   }
 
   private async finishWrite(root: string, relPath: string, finalSource: Parameters<typeof appendLedgerChapter>[1], persisted: { answer: string }, material: {tracker: TaskMaterialTracker; context: MemoryContext | null; handoffAttempted?: boolean}): Promise<string> {
+    if(this.deps.ledger){const pending=await this.deps.ledger.prepare(relPath,finalSource,this.ledgerVersions.get(finalSource.taskId));this.ledgerVersions.set(finalSource.taskId,pending.revision)}
+    let bodyRevision=(await this.readBound(root,relPath)).revision
     if (finalSource.answer) {
-      await this.mutateNote(root, relPath, (source) => upsertAiAnswer(source, { taskId: finalSource.taskId, answer: finalSource.answer, expectedPreviousAnswer: persisted.answer }), true)
+      bodyRevision=await this.mutateNote(root, relPath, (source) => upsertAiAnswer(source, { taskId: finalSource.taskId, answer: finalSource.answer, expectedPreviousAnswer: persisted.answer }), true)
       persisted.answer = finalSource.answer
     }
-    const revision = await this.mutateNote(root, relPath, (source) => appendLedgerChapter(source, finalSource), true)
+    const revision = this.deps.ledger ? bodyRevision : await this.mutateNote(root, relPath, (source) => appendLedgerChapter(source, finalSource), true)
+    if(this.deps.ledger)await this.deps.ledger.complete(relPath,finalSource.taskId,revision)
     if (this.deps.onTaskMaterialSaved && !material.handoffAttempted) {
       const materialSession = material.context?.sessionId ?? this.bindings.get(`${root}\0${relPath}`)?.sessionId
       const report = (status: 'handed-off' | 'unavailable' | 'failed', error?: unknown) => {
@@ -580,9 +592,9 @@ export class AgentHost {
       try {
         const saved = await this.readBound(root, relPath)
         if (!saved.sessionId || !saved.objectVersion || saved.revision !== revision) throw Error('SAVED_MATERIAL_CHANGED')
-        const chapters = ledgerChapters(compile(saved.content).partition.ledger).filter(c => c.taskId === finalSource.taskId)
+        const chapters = (this.deps.ledger?await this.deps.ledger.contexts(relPath):ledgerChapters(compile(saved.content).partition.ledger)).filter(c => c.taskId === finalSource.taskId)
         const expected = ledgerChapters(compile(appendLedgerChapter('', finalSource)).partition.ledger)[0]
-        if (chapters.length !== 1 || !expected || chapters[0]!.text.replace(/\r\n|\r/g,'\n').trimEnd() !== expected.text.trimEnd()) throw Error('SAVED_MATERIAL_CHANGED')
+        if (chapters.length !== 1 || !expected || !this.deps.ledger && chapters[0]!.text.replace(/\r\n|\r/g,'\n').trimEnd() !== expected.text.trimEnd()) throw Error('SAVED_MATERIAL_CHANGED')
         const ledgerHash = memoryHash(chapters[0]!.text.trimEnd()), sent = material.tracker.snapshot()
         const evidence: SavedTaskMaterial = {
           taskId:finalSource.taskId,context:material.context,origin:{relPath,sessionId:saved.sessionId,objectVersion:saved.objectVersion,revision},

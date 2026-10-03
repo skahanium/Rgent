@@ -108,12 +108,17 @@ function clearFlushTimer(): void {
   flushTimer = null
 }
 
+async function verifyVaultImage(current:VaultSession,snapshot:import('../shared/ipc.ts').NoteSnapshot,request:import('../shared/ipc.ts').RemoteImageGetRequest){
+ const c=request.context;let text:string|undefined
+ if(c?.ledgerTaskId!==undefined){if(typeof c.ledgerTaskId!=='string'||!Number.isSafeInteger(c.ledgerRevision)||!['prompt','answer'].includes(c.ledgerField??''))return {ok:false as const};text=await current.ledgerImage(c.noteRelPath,c.ledgerTaskId,c.ledgerRevision!,c.ledgerField!)}
+ return verifyImageSource(snapshot,request,text)
+}
 function send(channel: string, payload?: unknown): void {
   if (channel === IPC.treeChanged || channel === IPC.noteExternalChange || channel === IPC.vaultLost) {
     for (const [controller, active] of imageControllers) {
       const c = active.request.context!
-      void active.vault.read(c.noteRelPath).then(snapshot => {
-        const proof = verifyImageSource(snapshot,active.request)
+      void active.vault.read(c.noteRelPath).then(async snapshot => {
+        const proof = await verifyVaultImage(active.vault,snapshot,active.request)
         if (!proof.ok || proof.binding!==active.binding || active.vault.sessionId()!==c.sessionId) controller.abort()
       }).catch(()=>controller.abort())
     }
@@ -470,7 +475,7 @@ function registerIpc(): void {
       const token = vault.captureSession()
       if (c.sessionId !== token) return { ok: false, error: 'NOT_ALLOWED' }
       const snapshot = await vault.read(c.noteRelPath)
-      const proof = verifyImageSource(snapshot, request)
+      const proof = await verifyVaultImage(vault,snapshot,request)
       if (!proof.ok) return { ok: false, error: 'NOT_ALLOWED' }
       const controller = new AbortController()
       const currentVault = vault
@@ -482,14 +487,14 @@ function registerIpc(): void {
           validate: async () => {
             try {
               currentVault.assertSession(token)
-              const checked = verifyImageSource(await currentVault.read(c.noteRelPath),request)
+              const checked = await verifyVaultImage(currentVault,await currentVault.read(c.noteRelPath),request)
               return checked.ok && checked.binding===proof.binding
             } catch { return false }
           } })
       } finally { imageControllers.delete(controller) }
       currentVault.assertSession(token)
       const current = await currentVault.read(c.noteRelPath)
-      if (!verifyImageSource(current, request).ok) return { ok: false, error: 'NOT_ALLOWED' }
+      if (!(await verifyVaultImage(currentVault,current,request)).ok) return { ok: false, error: 'NOT_ALLOWED' }
       return result.ok ? { ok: true, src: remoteImageUrl(result.token) } : result
     } catch { return { ok: false, error: 'NOT_ALLOWED' } }
   })
@@ -540,11 +545,28 @@ function registerIpc(): void {
     return state
   })
   registerTrustedHandle(IPC.treeList, async () => vault?.tree() ?? [])
+  registerTrustedHandle(IPC.ledgerRepair,async(_event,value:unknown)=>{try{if(!value||typeof value!=='object'||Array.isArray(value))throw Error();const r=value as Record<string,unknown>;if(Object.keys(r).sort().join()!=='registryRevision,sessionId'||typeof r.sessionId!=='string'||r.registryRevision!==null&&(typeof r.registryRevision!=='string'||!/^[a-f0-9]{64}$/.test(r.registryRevision)))throw Error();if(!vault)throw Error();vault.assertSession(r.sessionId);if(structureGate.isBusy()||agentHost?.active().length)throw Error();await vault.ledgerRepair(r.registryRevision as string|null);return {ok:true}}catch{return {ok:false,error:'LEDGER_REGISTRY_INVALID'}}})
+  registerTrustedHandle(IPC.ledgerGet,async(_event,value:unknown)=>{
+    try{
+      if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
+      const r=value as Record<string,unknown>;if(Object.keys(r).some(k=>!['relPath','sessionId','objectVersion','cursor'].includes(k))||typeof r.relPath!=='string'||typeof r.sessionId!=='string'||typeof r.objectVersion!=='string'||r.cursor!==undefined&&r.cursor!==null&&(typeof r.cursor!=='string'||r.cursor.length>512))throw Error('BAD_REQUEST')
+      if(!vault)throw Error('NO_VAULT');vault.assertSession(r.sessionId)
+      const note=await vault.read(r.relPath);if(!vault.acceptsObject(r.relPath,r.objectVersion,note.objectVersion))throw Error('NOTE_REPLACED')
+      return {ok:true,value:await vault.ledgerPage(r.relPath,(r.cursor??null) as string|null)}
+    }catch(e){const code=e instanceof Error?e.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED','NOTE_REPLACED','LEDGER_REGISTRY_INVALID','LEDGER_OWNERSHIP_UNVERIFIED','LEDGER_RECORD_INVALID','LEDGER_CONFLICT'].includes(code)?code:'LEDGER_UNAVAILABLE',...(code==='LEDGER_REGISTRY_INVALID'?{registryRevision:vault?.ledgerRegistryRevision()}: {})}}
+  })
+  registerTrustedHandle(IPC.ledgerMigrate,async(_event,value:unknown)=>{
+    try{if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST');const r=value as Record<string,unknown>
+      if(Object.keys(r).sort().join()!=='after,sessionId'||typeof r.sessionId!=='string'||r.after!==null&&(typeof r.after!=='string'||r.after.length>4096))throw Error('BAD_REQUEST')
+      if(!vault)throw Error('NO_VAULT');vault.assertSession(r.sessionId);if(structureGate.isBusy()||agentHost?.active().length)throw Error('STRUCTURE_BUSY')
+      return {ok:true,value:await vault.ledgerMigrateBatch(r.after as string|null)}
+    }catch{return {ok:false,error:'LEDGER_MIGRATION_FAILED'}}
+  })
   registerTrustedHandle(IPC.noteRead, async (_event, relPath: unknown) => {
     const pathInVault = asString(relPath)
     if (!pathInVault) throw new Error('BAD_PATH')
     if (!vault) throw new Error('NO_VAULT')
-    return vault.read(pathInVault)
+    return vault.readOpened(pathInVault)
   })
   registerTrustedHandle(IPC.noteWrite, async (_event, value: unknown) => {
     const request = parseNoteWriteRequest(value)
@@ -802,6 +824,7 @@ app.whenReady().then(() => {
     }
   })
   agentHost = new AgentHost({
+    ledger:{prepare:(relPath,chapter,version)=>vault!.ledgerPrepare(relPath,chapter,version),complete:(relPath,id,revision)=>vault!.ledgerComplete(relPath,id,revision),contexts:relPath=>vault!.ledgerContexts(relPath)},
     assertMemoryAuthorization: input => {
       if (!input.sessionId || input.memoryAuthorizationSignature !== memoryAuthorizationState(input.sessionId).signature) throw Error('STALE_PREVIEW')
     },
