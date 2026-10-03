@@ -61,4 +61,8 @@ export class SummaryCache{
  }
  private limitTotal(){const files=readdirSync(this.directory).filter(f=>/^[a-f0-9]{64}\.json$/.test(f)).map(f=>({file:path.join(this.directory,f),stat:statSync(path.join(this.directory,f))})).sort((a,b)=>a.stat.mtimeMs-b.stat.mtimeMs);let size=files.reduce((n,f)=>n+f.stat.size,0);for(const f of files){if(size<=128*1024*1024)break;unlinkSync(f.file);size-=f.stat.size}}
  invalidate(key:string){try{unlinkSync(this.file(key))}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e}}
+ /** Cache metadata is hashed; forgetting conservatively clears all managed summaries. */
+ invalidateAll(){let files:string[];try{files=readdirSync(this.directory)}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e}
+  for(const file of files.filter(f=>/^[a-f0-9]{64}\.json$/.test(f)))this.invalidate(file.slice(0,-5))
+ }
 }

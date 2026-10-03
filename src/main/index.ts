@@ -1,4 +1,5 @@
 import {WorkingMemoryService} from './working-memory-service.ts'
+import {WorkingMemoryConsolidation} from './working-memory-consolidation.ts'
 import {memoryAuthorizationState as configuredMemoryAuthorizationState} from './model-config.ts'
 import {ReasoningStore} from './reasoning-store.ts'
 import {SummaryCache,summaryHash} from './summary-cache.ts'
@@ -63,16 +64,20 @@ let modelConfigError: string | null = null
 let agentHost: AgentHost | null = null
 
 let authorizations: TaskAuthorizationRegistry | null = null
+let consolidation:WorkingMemoryConsolidation|null=null
+let summaryCache:SummaryCache|null=null
 function workingService(){return vault?new WorkingMemoryService(vault,()=>modelConfig):null}
 const memoryIpc = createMemoryIpc({
   vault: () => vault, config: () => modelConfig, service: () => workingService(),
+  engine:()=>consolidation,
+  invalidate:()=>{consolidation?.cancel();summaryCache?.invalidateAll()},
   recheck: async (current, session) => {
     current.assertSession(session)
     await Promise.all([current.root ? agentHost?.recheckSources(current.root, session) : undefined])
   }
 })
 let cancellingForClose = false
-const memoryAuthorizationPreviews = new Map<string, { sessionId: string; signature: string }>()
+const memoryAuthorizationPreviews = new Map<string, { sessionId: string; signature: string;search:boolean }>()
 function memoryAuthorizationState(sessionId: string) {
   vault?.assertSession(sessionId)
   if (!vault || !modelConfig) return { signature: 'unavailable', disclosure: undefined }
@@ -138,6 +143,7 @@ function send(channel: string, payload?: unknown): void {
 }
 
 async function settleHostBeforeClose(win: BrowserWindow): Promise<boolean> {
+  consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED')
   memoryIpc.clear()
   memoryAuthorizationPreviews.clear()
   try { await agentHost?.cancelAll('close') } catch { /* pending answer is retained for retry below */ }
@@ -349,9 +355,16 @@ function registerIpc(): void {
     [IPC.memoryGet, 'get'], [IPC.memoryConfigSave, 'config'], [IPC.memoryManualPreview, 'manual'],
     [IPC.memoryPreviewCommit, 'commit'], [IPC.memoryItemEdit, 'edit'], [IPC.memoryItemDisable, 'disable'],
     [IPC.memoryItemForget, 'forget'], [IPC.memoryRestorePreview, 'restore'],
+    [IPC.memoryMaintenancePreview,'maintenance'],
     [IPC.memoryJobRetryPreview, 'retry'], [IPC.memoryJobCancel, 'cancel']
-  ] as const) registerTrustedHandle(channel, (event, request) =>
-    memoryIpc.handle(`${event.sender.id}:${event.senderFrame!.routingId}`, operation, request))
+  ] as const) registerTrustedHandle(channel, async (event, request) => {
+    const result=await memoryIpc.handle(`${event.sender.id}:${event.senderFrame!.routingId}`, operation, request)
+    if(result.ok&&!['get','manual','restore','retry','maintenance'].includes(operation)){
+      const service=workingService();if(service){await service.recheckDeferred().catch(()=>{});await agentHost?.recheckSources(vault!.requireUsableRoot(),service.context().sessionId)}
+      send(IPC.memoryChanged,vault!.sessionId())
+    }
+    return result
+  })
   const configResult = (): ModelConfigResult => modelConfig
     ? { ok: true, config: modelConfig.getPublic() }
     : { ok: false, error: modelConfigError ?? 'MODEL_CONFIG_UNAVAILABLE' }
@@ -431,10 +444,11 @@ function registerIpc(): void {
       const owner = `${event.sender.id}:${event.senderFrame!.routingId}`
       const memory = memoryAuthorizationState(request.sessionId)
       const preview = await authorizations.preview(owner, request)
+      const memorySearch=!!memory.disclosure?.use&&preview.sources.length>1&&!!modelConfig&&!!agentHost?.supportsMemorySearch(modelConfig.credential(request.modelRecordId))&&(await workingService()!.entries().catch(()=>[])).some(e=>e.status==='active')
       if (memoryAuthorizationState(request.sessionId).signature !== memory.signature) throw Error('STALE_PREVIEW')
       if (memoryAuthorizationPreviews.size >= 128) memoryAuthorizationPreviews.delete(memoryAuthorizationPreviews.keys().next().value!)
-      memoryAuthorizationPreviews.set(`${owner}:${preview.id}`, { sessionId: request.sessionId, signature: memory.signature })
-      return {ok:true,preview:{...preview,...(memory.disclosure?{memory:memory.disclosure}:{})}}
+      memoryAuthorizationPreviews.set(`${owner}:${preview.id}`, { sessionId: request.sessionId, signature: memory.signature,search:memorySearch })
+      return {ok:true,preview:{...preview,...(memory.disclosure?{memory:{...memory.disclosure,search:{available:memorySearch,calls:memorySearch?4:0,sharedTools:preview.sources.length>1?modelConfig!.getPublic().limits.local.tools:0}}}:{})}}
     }
     catch(error){return {ok:false,error:error instanceof Error?error.message:'AUTHORIZATION_FAILED'}}
   })
@@ -463,7 +477,7 @@ function registerIpc(): void {
       const memory = memoryAuthorizationPreviews.get(`${owner}:${request.previewId}`)
       memoryAuthorizationPreviews.delete(`${owner}:${request.previewId}`)
       if (!memory || memory.sessionId !== request.sessionId || memory.signature !== memoryAuthorizationState(request.sessionId).signature) throw Error('STALE_PREVIEW')
-      const task = await agentHost.start({...request as AgentStartRequest, authorizationOwner:`${event.sender.id}:${event.senderFrame!.routingId}`, memoryAuthorizationSignature: memory.signature})
+      const task = await agentHost.start({...request as AgentStartRequest, authorizationOwner:`${event.sender.id}:${event.senderFrame!.routingId}`, memoryAuthorizationSignature: memory.signature,memorySearchAuthorized:memory.search})
       void task.done.catch(() => {})
       return { ok: true, id: task.id }
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'AGENT_START_FAILED' } }
@@ -767,6 +781,7 @@ function registerIpc(): void {
       currentVault.assertSession(request.sessionId)
       // An active recovery record already fails all model requests closed.
       memoryIpc.clear()
+      consolidation?.cancel()
       memoryAuthorizationPreviews.clear()
       // Stop streams; keep unrelated unsaved output in Host memory until policy is stable again.
       try { await agentHost?.cancelAll('user', root) } catch { /* pending paths are checked below */ }
@@ -818,6 +833,7 @@ app.whenReady().then(() => {
   vault = new VaultSession(app.getPath('userData'), send, async (previous) => {
     if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
     memoryIpc.clear()
+    consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED')
     memoryAuthorizationPreviews.clear()
     try { await agentHost?.cancelAll('vault-change', previous) } catch { /* pending retry below */ }
     await agentHost?.retryPending(previous)
@@ -841,7 +857,22 @@ app.whenReady().then(() => {
   })
   const reasoningStore=new ReasoningStore(path.join(app.getPath('userData'),'reasoning-v2'))
   const contextCache=new SummaryCache(path.join(app.getPath('userData'),'context-cache-v2'))
+  summaryCache=contextCache
+  consolidation=new WorkingMemoryConsolidation({
+    service:workingService,
+    configuration:context=>{
+      if(!modelConfig)throw Error('MEMORY_CONFIG_UNAVAILABLE')
+      const cfg=modelConfig.getMemoryConfig(context.vaultKey),credential=modelConfig.memoryCredential(context.vaultKey)
+      return {enabled:cfg.vault.enabled,signature:JSON.stringify([cfg,credential,modelConfig.getVaultMemoryRevision(context.vaultKey)]),credential,limits:cfg.limits}
+    },
+    stream:streamModelStep,changed:context=>{if(vault?.sessionId()===context.sessionId)send(IPC.memoryChanged,context.sessionId)}
+  })
   agentHost = new AgentHost({
+    onTaskStarted:id=>consolidation?.capture(id),
+    onTaskStartFailed:id=>consolidation?.discard(id),
+    onTaskMaterialDiscarded:id=>consolidation?.discard(id),
+    onTaskMaterialSaved:material=>consolidation!.handoff(material),
+    onTaskMaterialResult:result=>{if(result.status!=='handed-off')consolidation?.discard(result.taskId)},
     memory:{context:()=>vault!.memoryContext(),config:key=>({enabled:modelConfig!.getMemoryConfig(key).vault.enabled,revision:modelConfig!.getVaultMemoryRevision(key)}),entries:ids=>workingService()!.entries(ids)},
     onReasoning:(id,text)=>reasoningStore.write(vault!.memoryContext().vaultKey,id,text),
     summaries:{cache:contextCache,key:async relPath=>summaryHash(await vault!.ledgerKey(relPath))},
@@ -905,5 +936,6 @@ app.on('before-quit', () => {
 
 // 必须等渲染进程写完盘再拆库：退出前那次 flush 还要经 noteWrite 落盘。
 app.on('will-quit', () => {
+  consolidation?.close()
   vault?.dispose()
 })

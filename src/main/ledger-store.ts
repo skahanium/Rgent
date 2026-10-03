@@ -19,8 +19,9 @@ function validOwner(v:unknown):v is LedgerOwner{return obj(v)&&exact(v,['noteId'
 function validChapter(v:unknown):v is LedgerRecord['chapter']{
  if(v===null)return true
  if(!obj(v)||!id(v.taskId)||typeof v.startedAt!=='string'||!Number.isFinite(Date.parse(v.startedAt))||!['completed','cancelled','failed','limit'].includes(String(v.status))||typeof v.prompt!=='string'||typeof v.answer!=='string')return false
- if(Object.keys(v).some(k=>!['taskId','startedAt','status','prompt','answer','reason','provenance','trace','assistant','metrics','summaryGenerators'].includes(k)))return false
+ if(Object.keys(v).some(k=>!['taskId','startedAt','status','prompt','answer','reason','provenance','trace','assistant','metrics','summaryGenerators','material'].includes(k)))return false
  if(v.reason!==undefined&&typeof v.reason!=='string'||v.assistant!==undefined&&typeof v.assistant!=='string'||v.trace!==undefined&&(!Array.isArray(v.trace)||v.trace.some(t=>typeof t!=='string')))return false
+ if(v.material!==undefined&&(!obj(v.material)||!Array.isArray(v.material.fragments)||v.material.fragments.length>512||typeof v.material.truncated!=='boolean'||Buffer.byteLength(JSON.stringify(v.material))>256*1024))return false
  if(v.metrics!==undefined&&(!Array.isArray(v.metrics)||v.metrics.length>256||v.metrics.some(m=>!obj(m)||!Number.isSafeInteger(m.step)||!Number.isFinite(m.estimatedInput)||m.actualInput!==null&&!Number.isFinite(m.actualInput)||m.actualOutput!==null&&!Number.isFinite(m.actualOutput))))return false
  if(v.summaryGenerators!==undefined&&(!Array.isArray(v.summaryGenerators)||v.summaryGenerators.length>64||v.summaryGenerators.some(g=>!obj(g)||typeof g.modelId!=='string'||typeof g.host!=='string'||g.format!==1)))return false
  if(v.provenance!==undefined){try{const read=ledgerProvenance(encodeLedgerProvenance(v.provenance as LedgerProvenance));if(read.status!=='valid')return false}catch{return false}}
@@ -58,6 +59,15 @@ export class LedgerStore{
  }
  onWrite(relPath:string,before:string,after:string,body:string){const registry=this.registry(),owner=registry.owners.find(o=>o.relPath===relPath&&o.objectVersion===before);if(!owner)return;owner.objectVersion=after;owner.bodyRevision=digest(body);this.publish(registry,owner)}
  relocate(from:string,to:string,objectVersion:string){const registry=this.registry(),owner=registry.owners.find(o=>o.relPath===from&&o.objectVersion===objectVersion);if(!owner)return;const current=this.fs.readSnapshot(to);if(current.objectVersion!==objectVersion)throw Error('LEDGER_OWNERSHIP_UNVERIFIED');owner.relPath=to;this.publish(registry,owner)}
+ materialUnit(relPath:string,start:number,end:number){
+  if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<=start)throw Error('BAD_REQUEST')
+  const owner=this.owner(relPath),file='.rgent/materials.json',disk=this.read(file);let units:{id:string;noteId:string;start:number;end:number;sequence:number}[]=[]
+  if(disk){try{const v=JSON.parse(disk.raw);if(v.version!==1||!Array.isArray(v.units)||v.units.length>100000||Buffer.byteLength(disk.raw)>8*1024*1024||v.units.some((u:any)=>!id(u.id)||!id(u.noteId)||!Number.isSafeInteger(u.start)||!Number.isSafeInteger(u.end)||u.start<0||u.end<=u.start||!Number.isSafeInteger(u.sequence)||u.sequence<1))throw Error();units=v.units}catch{throw Error('LEDGER_REGISTRY_INVALID')}}
+  const known=units.find(u=>u.noteId===owner.noteId&&u.start===start&&u.end===end);if(known)return known
+  if(units.length>=100000)throw Error('MEMORY_SOURCE_LIMIT')
+  const registry=this.registry();registry.sequence++;const row=registry.owners.find(o=>o.noteId===owner.noteId)!;row.sequenceCeiling=registry.sequence;this.publish(registry,row)
+  const unit={id:randomUUID(),noteId:owner.noteId,start,end,sequence:registry.sequence};units.push(unit);this.replace(file,JSON.stringify({version:1,units}));return unit
+ }
  maintenancePreview(relPath:string,action:'compress'|'clear'){
   const owner=this.owner(relPath);let cursor:string|null=null,totalBytes=0;const records:{taskId:string;revision:number;bytes:number}[]=[]
   do{const page=this.page(relPath,cursor);for(const r of page.records){const d=this.read(this.path(owner,r.taskId))!;totalBytes+=Buffer.byteLength(d.raw);if(records.length<20&&r.state!=='pending-body'&&r.state!=='cleared'&&(action==='clear'||r.state==='saved'&&Date.parse(r.chapter!.startedAt)<Date.now()-7*86400000&&!d.raw.includes('"codec":"gzip"')))records.push({taskId:r.taskId,revision:r.revision,bytes:Buffer.byteLength(d.raw)})}cursor=page.cursor}while(cursor)
@@ -74,6 +84,8 @@ export class LedgerStore{
   return {success,failed,savedBytes}
  }
  registryRevision(){return this.read(fixed)?.raw?digest(this.bases.get(fixed)!.raw):null}
+ materialCeiling(){return this.registry().sequence}
+ taskPath(taskId:string){if(!id(taskId))throw Error('BAD_REQUEST');const matches=this.registry().owners.filter(o=>this.read(this.path(o,taskId))!==null);if(matches.length!==1)throw Error('MEMORY_JOB_UNAVAILABLE');return matches[0]!.relPath}
  repairRegistry(expected:string|null){if(this.registryRevision()!==expected)throw Error('LEDGER_CONFLICT');this.rebuildRegistry()}
  rebuildRegistry(){this.check();const owners:LedgerOwner[]=[];for(const dir of this.fs.list('.rgent/ledgers')){if(dir.kind!=='dir'||!id(dir.name))throw Error('LEDGER_REGISTRY_INVALID');const raw=this.read(`.rgent/ledgers/${dir.name}/owner.json`);if(!raw)throw Error('LEDGER_REGISTRY_INVALID');let owner:unknown;try{owner=JSON.parse(raw.raw)}catch{throw Error('LEDGER_REGISTRY_INVALID')};if(!validOwner(owner)||owner.noteId!==dir.name)throw Error('LEDGER_REGISTRY_INVALID');owners.push(owner)}
  if(new Set(owners.map(o=>o.noteId)).size!==owners.length||new Set(owners.map(o=>o.relPath)).size!==owners.length||new Set(owners.map(o=>o.objectVersion)).size!==owners.length)throw Error('LEDGER_REGISTRY_INVALID');this.replace(fixed,JSON.stringify({version:1,owners,sequence:Math.max(0,...owners.map(o=>o.sequenceCeiling))}))
@@ -99,6 +111,7 @@ export class LedgerStore{
   const body=note.bytes.toString(),blocks=compile(body).index.markers.filter(b=>b.identity==='ai'&&parseMarker(body.slice(b.range.start,b.range.end))?.attrs['task-id']===taskId)
   // The Host write receipt is necessary; identity markers are an additional local check.
   if(record.chapter.answer.trim()){if(blocks.length<1)throw Error('LEDGER_BODY_CHANGED');try{if(upsertAiAnswer(body,{taskId,answer:record.chapter.answer,expectedPreviousAnswer:record.chapter.answer})!==body)throw Error()}catch{throw Error('LEDGER_BODY_CHANGED')}}
+  if(record.state==='saved'&&record.bodyStatus==='present')return record
   record.state='saved';record.bodyStatus='present';record.revision++;this.replace(this.path(owner,taskId),JSON.stringify(record));return record
  }
  private displayed(relPath:string,record:LedgerRecord){

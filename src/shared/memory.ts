@@ -66,6 +66,8 @@ export type MemoryView = {
   status: 'ready' | 'invalid'; reason?: string
   entries: MemoryEntryView[]; jobs: MemoryJobView[]
   running: { permits: number; pending: number; active: number }
+  learning?:{watermark:number;nextSequence:number}
+  diagnosis?:{revision:string|null;objectVersion:string|null;bytes:number}
 }
 export type MemoryResult<T> = { ok: true; value: T } | { ok: false; error: string }
 export type MemorySessionRequest = { sessionId: string }
@@ -85,7 +87,7 @@ export type MemoryManualRequest = MemorySessionRequest & {
 }
 export type MemoryJobRequest = MemorySessionRequest & { taskId: string; materialVersion: string }
 export type MemoryPreview = {
-  id: string; sessionId: string; kind: 'manual' | 'restore' | 'confirm' | 'retry'
+  id: string; sessionId: string; kind: 'manual' | 'restore' | 'confirm' | 'retry'|'watermark'|'reset'
   content: string; layer: MemoryEntry['layer']; scope: string
   sources: MemorySourceView[]; warning: string
   previousContent?: string
@@ -95,3 +97,4 @@ export type MemoryPreview = {
 export type MemoryCommitRequest = MemorySessionRequest & {
   id: string; content?: string; layer?: MemoryEntry['layer']; scope?: string
 }
+export type MemoryMaintenanceRequest=MemorySessionRequest&{action:'watermark'|'reset';revision:string|null;objectVersion:string|null;watermark?:number}

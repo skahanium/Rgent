@@ -1,0 +1,31 @@
+import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises'
+import os from 'node:os';import path from 'node:path'
+import {it,expect,vi} from 'vitest'
+import {VaultSession} from '../../src/main/vault.ts'
+import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
+import {createMemoryIpc} from '../../src/main/memory-ipc.ts'
+import {serializeStoredVault} from '../../src/main/notes-fs.ts'
+vi.mock('electron',()=>({dialog:{showOpenDialog:vi.fn()}}))
+vi.mock('../../src/main/watch.ts',async original=>({...await original<typeof import('../../src/main/watch.ts')>(),watchVault:()=>()=>{}}))
+it('single-use previews bind owner and exact revision; a stale request cannot overwrite a newer memory',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-memory-manage-')),root=path.join(base,'vault');await mkdir(root)
+ await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'项目约定：使用中文。')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{
+  const note=await vault.readOpened('a.md'),service=new WorkingMemoryService(vault,()=>null);await service.initialize()
+  const ipc=createMemoryIpc({vault:()=>vault,service:()=>service,config:()=>null,recheck:async()=>{}})
+  const request={sessionId:note.sessionId,relPath:'a.md',objectVersion:note.objectVersion,revision:note.revision,kind:'body',start:0,end:'项目约定：使用中文。'.length}
+  const preview=await ipc.handle('owner','manual',request);expect(preview.ok).toBe(true)
+  if(!preview.ok||!('id'in preview.value))throw Error('preview missing')
+  expect(await ipc.handle('foreign','commit',{sessionId:note.sessionId,id:preview.value.id})).toMatchObject({ok:false,error:'STALE_PREVIEW'})
+  expect(await ipc.handle('owner','commit',{sessionId:note.sessionId,id:preview.value.id})).toMatchObject({ok:false,error:'STALE_PREVIEW'})
+  const again=await ipc.handle('owner','manual',request);if(!again.ok||!('id'in again.value))throw Error('preview missing')
+  expect(await ipc.handle('owner','commit',{sessionId:note.sessionId,id:again.value.id})).toMatchObject({ok:true})
+  expect(service.snapshot().record.entries[0]?.content).toBe('项目约定：使用中文。')
+  const pending=await ipc.handle('owner','manual',request);if(!pending.ok||!('id'in pending.value))throw Error('preview missing')
+  const basis=service.snapshot(),entry=basis.record.entries[0]!
+  await vault.memoryMutation(store=>store.edit(basis,entry.id,entry.version,{content:'人改写的新约定'}))
+  expect(await ipc.handle('owner','commit',{sessionId:note.sessionId,id:pending.value.id})).toMatchObject({ok:false,error:'MEMORY_CONFLICT'})
+  expect(service.snapshot().record.entries[0]?.content).toBe('人改写的新约定')
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})

@@ -1,5 +1,7 @@
 /** Registered public memory errors. Internal details never cross this text boundary. */
 export const MEMORY_ERROR_MESSAGES = {
+  "MEMORY_OUTPUT_INVALID": "记忆整理输出未通过格式或提议核验；有效的独立提议可保留，未核验内容不会生效。",
+  "MEMORY_INPUT_LIMIT": "获准材料超出整理输入容量，本场未新增记忆；回答与已有记忆保留。",
   "MEMORY_CONFIG_LIMIT": "记忆配置版本达到上限，未改变许可；请在记忆页检查状态。",
   "MEMORY_RECEIVER_CHANGED": "本场记忆接收方发生变化，后续发送已停止；请重新核对模型。",
   "MEMORY_CORE_LIMIT": "持续约定超出本场容量，已暂停使用记忆，普通任务继续。",
@@ -10,7 +12,6 @@ export const MEMORY_ERROR_MESSAGES = {
   "MEMORY_RECORD_INVALID": "记忆操作未完成，记录保持原状；请刷新并检查来源或配置。",
   "MEMORY_SOURCE_NONCANONICAL": "记忆依据无法通过核验，相关材料已停止使用；请查看来源状态。",
   "MEMORY_OUTPUT_TOKEN_LIMIT": "记忆操作达到有限上限，未新增内容；已有记录保持，请查看容量与运行状态。",
-  "MEMORY_INPUT_LIMIT": "记忆操作达到有限上限，未新增内容；已有记录保持，请查看容量与运行状态。",
   "MEMORY_MODEL_CAPACITY": "记忆模型不可用，自动整理已暂停；请检查模型和连接。",
   "MEMORY_TARGET_INVALID": "记忆操作未完成，记录保持原状；请刷新并检查来源或配置。",
   "MEMORY_TOOLS_FORBIDDEN": "记忆操作未完成，记录保持原状；请刷新并检查来源或配置。",

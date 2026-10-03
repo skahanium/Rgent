@@ -2,14 +2,14 @@ import {conservativeTokens} from './context-budget.ts'
 import {SummaryCache,summaryGroups,SUMMARY_SECTIONS,validSummaryText,type SummaryGenerator} from './summary-cache.ts'
 import type { ModelMessage, AssistantContent, ToolContent } from 'ai'
 import type { ScopedAgentTools } from './scoped-agent-tools.ts'
-import { createMemoryUsePermit, MEMORY_NOTICE, memorySection, type MemoryUsePort, type MemoryUsePermit } from './memory-use.ts'
+import { createMemoryUsePermit, MEMORY_NOTICE, MEMORY_SEARCH_SCHEMA, memorySection, type MemoryUsePort, type MemoryUsePermit } from './memory-use.ts'
 import type { MemoryContext } from '../shared/memory.ts'
 import { createHash } from 'node:crypto'
 const memoryHash = (text:string) => createHash('sha256').update(text).digest('hex')
 import { TaskMaterialTracker, type SavedTaskMaterial } from './host-material.ts'
 import { encodeLedgerProvenance, historicalContextPolicy } from './ledger-provenance.ts'
 import { READ_ONLY_TOOL_SCHEMAS } from './scoped-agent-tools.ts'
-import { MODEL_STREAM_BOUNDS, type ModelStepEvent } from './model-stream.ts'
+import { MODEL_STREAM_BOUNDS, type ModelStepEvent, type ToolSchema } from './model-stream.ts'
 import { randomUUID } from 'node:crypto'
 import { AgentTasks, type TaskResult, type StopReason } from './agent-tasks.ts'
 import { buildHostContext, ledgerChapters, type ContextChapter, type ContextSummary, type ContextSourceRef } from './host-context.ts'
@@ -41,6 +41,7 @@ export type HostStart = Partial<ObjectBinding> & {
   authorizationOwner?: string
   /** Main-issued preview signature; never accepted from renderer. */
   memoryAuthorizationSignature?: string
+  memorySearchAuthorized?:boolean
   relPath: string
   range: SourceRange
   expectedText: string
@@ -75,7 +76,7 @@ export type HostDependencies = {
   credential: () => ModelCredential
   limits: () => RunLimits
   stream: (input: ModelCredential & { system: string; prompt: string; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<string>
-  streamStep?: (input: ModelCredential & { system: string; messages: ModelMessage[]; tools?: typeof READ_ONLY_TOOL_SCHEMAS; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<ModelStepEvent>
+  streamStep?: (input: ModelCredential & { system: string; messages: ModelMessage[]; tools?: Record<string,ToolSchema>; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<ModelStepEvent>
   /** Independent background permission snapshot; unavailable roles must not fail the foreground. */
   onReasoning?: (taskId:string,text:string)=>void
   onTaskStarted?: (taskId: string) => void
@@ -119,6 +120,7 @@ export class AgentHost {
   private readonly launchWaiters = new Set<() => void>()
   private readonly retrying = new Map<string, Promise<void>>()
   private readonly ledgerVersions = new Map<string,number>()
+  private readonly verifiedToolReceivers=new Set<string>()
   private readonly pending = new Map<string, { root: string; relPath: string; source: Parameters<typeof appendLedgerChapter>[1]; persisted: { answer: string }; material: { tracker: TaskMaterialTracker; context: MemoryContext | null; handoffAttempted?: boolean } }>()
 
   private readonly bindings = new Map<string, ObjectBinding & { originalVersion: string }>()
@@ -126,6 +128,7 @@ export class AgentHost {
   constructor(private readonly deps: HostDependencies) {}
 
   active() { return this.tasks.active() }
+  supportsMemorySearch(credential:ModelCredential){return this.verifiedToolReceivers.has(memoryHash(JSON.stringify(credential)))}
   bindingFor(root: string, relPath: string): ObjectBinding | null {
     const b = this.bindings.get(`${root}\0${relPath}`)
     return b ? {sessionId:b.sessionId,objectVersion:b.objectVersion} : null
@@ -295,6 +298,10 @@ export class AgentHost {
       const savedMaterial = {tracker:materials,context:memory?.context ?? null}
       const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials)
       const toolsEnabled = Boolean(grant && grant.sources.length > 1)
+      const memorySearchEnabled=input.memorySearchAuthorized===true&&toolsEnabled&&!!memory?.searchable&&!!this.deps.streamStep&&this.supportsMemorySearch(credential)
+      const toolSchemas=memorySearchEnabled?{...READ_ONLY_TOOL_SCHEMAS,search_memory:MEMORY_SEARCH_SCHEMA}:READ_ONLY_TOOL_SCHEMAS
+      let memorySearchCalls=0
+      let successfulLibraryTool=false
       if (toolsEnabled && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
       if (scoped) this.scoped.set(key, scoped)
       const marked = markPrompt(original.content, { ...input, taskId: id })
@@ -363,7 +370,7 @@ export class AgentHost {
         }
         const step = (outgoing: ModelMessage[], withTools: boolean, maxOutputTokens: number): AsyncIterable<ModelStepEvent> => {
           if (++steps > limits.steps) throw Error('MODEL_STEP_LIMIT')
-          const schemas = withTools ? READ_ONLY_TOOL_SCHEMAS : undefined
+          const schemas = withTools ? toolSchemas : undefined
           if (conservativeTokens(JSON.stringify(outgoing)) + (schemas ? conservativeTokens(JSON.stringify(schemas)) : 0) > budget) throw Error('MODEL_CONTEXT_LIMIT')
           activity = `模型第 ${steps} 步`
           snapshot('running')
@@ -395,7 +402,7 @@ export class AgentHost {
           const currentPrompt = promptBlock(source, id)
           if (currentPrompt.text !== submitted.text) throw Error('任务口令已被外部修改')
           const metadata = toolsEnabled ? `\n本场工具来源清单（正文须经工具读取，附件和账本不可读）：${JSON.stringify(grant!.sources.map(s => ({ sourceId: s.sourceId, title: s.title, relPath: s.relPath })))}` : ''
-          const planBudget = budget - conservativeTokens(metadata) - (toolsEnabled ? conservativeTokens(JSON.stringify(READ_ONLY_TOOL_SCHEMAS)) : 0) - conservativeTokens(JSON.stringify(messages)) - 128
+          const planBudget = budget - conservativeTokens(metadata) - (toolsEnabled ? conservativeTokens(JSON.stringify(toolSchemas)) : 0) - conservativeTokens(JSON.stringify(messages)) - 128
           const plan = buildHostContext({ source, chapters:historicalChapters, prompt: input.promptText, placement: currentPrompt.position, inputBudgetTokens: planBudget, countTokens: this.deps.ledger?conservativeTokens:byteCount, summary, memory: memory?.recall, ...policy })
           if (plan.status === 'too-large') throw Error(plan.reason)
           if (plan.status === 'needs-summary' && this.deps.ledger) {
@@ -507,11 +514,11 @@ export class AgentHost {
           if (signal.aborted) return
           if (!finishReason || !['stop', 'length', 'content-filter', 'tool-calls'].includes(finishReason) || finishReason === 'tool-calls' && !calls.length || calls.length && finishReason !== 'tool-calls') throw Error('MODEL_PROTOCOL_ERROR')
           noteTrace(`第 ${steps} 步：${finishReason === 'tool-calls' ? '请求工具' : finishReason === 'length' ? '达到输出上限' : '文本'}`)
-          if (!calls.length) { if (answer) await wait(checkpoint()); return }
+          if (!calls.length) { if (successfulLibraryTool&&finishReason==='stop')this.verifiedToolReceivers.add(memoryHash(JSON.stringify(credential)));if (answer) await wait(checkpoint()); return }
           const results: ToolContent = []
           for (const call of calls) {
             await guard()
-            const registered = call.name === 'read_library' || call.name === 'search_library'
+            const registered = call.name === 'read_library' || call.name === 'search_library'||call.name==='search_memory'&&memorySearchEnabled
             const duplicate = usedIds.has(call.id)
             usedIds.add(call.id)
             // Duplicate IDs cannot enter provider messages. A fresh internal refusal ID preserves their order.
@@ -521,7 +528,15 @@ export class AgentHost {
             let value: unknown
             if (!failure) {
               activity = call.name === 'read_library' ? '读库' : '搜库'; snapshot('running')
-              try { value = await wait(scoped!.execute(call.name, call.input, signal)) }
+              try {
+                if(call.name==='search_memory'){
+                  if(++memorySearchCalls>4)throw Error('TOOL_CALL_LIMIT')
+                  const args=call.input as Record<string,unknown>
+                  if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).join()!=='query'||typeof args.query!=='string')throw Error('INVALID_TOOL_ARGUMENTS')
+                  const found=await wait(memory!.search(args.query))
+                  value={items:found.map(e=>({id:e.id,version:e.version,content:e.content,scope:e.scope,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId}))})),complete:true}
+                }else{value = await wait(scoped!.execute(call.name, call.input, signal));successfulLibraryTool=true}
+              }
               catch (error) {
                 const reason = error instanceof Error ? error.message : 'TOOL_FAILED'
                 if (!['UNKNOWN_TOOL', 'INVALID_TOOL_ARGUMENTS', 'OUTSIDE_TASK_SCOPE', 'INVALID_TOOL_CURSOR', 'SOURCE_METADATA_TOO_LARGE'].includes(reason)) throw error
@@ -550,13 +565,13 @@ export class AgentHost {
         // Finalize even on cancellation; no generated bytes are lost if a late write conflicts.
         noteTrace(`收尾：${status}${reason ? `（${String(reason)}）` : ''}`)
         try{if(reasoning)this.deps.onReasoning?.(id,reasoning)}catch{noteTrace('短期推理未保存，回答不受影响')}
-        const finalSource = {metrics,summaryGenerators:usedSummaries,
+        const finalSource = {material:materials.snapshot(),metrics,summaryGenerators:usedSummaries,
           taskId: id, startedAt, status, prompt: input.promptText, answer,
           ...(reason ? { reason: String(reason) } : {}),
           ...(reasoning ? { reasoning } : {}),
           ...(trace.length ? { trace } : {}),
           ...(assistantLine ? { assistant: assistantLine } : {}),
-          ...({provenance:{version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies() ?? []),...(scoped?.memoryDependencies?.() ?? [])].map(dep=>[dep.id,dep])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:scoped?.dependencies() ?? [],sentSources:scoped?.sentSources() ?? [],tools:[...(scoped?.summary() ?? []),... [...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`${label.split(':')[1]} × ${count}`}))]}})
+          ...({provenance:{version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies() ?? []),...(scoped?.memoryDependencies?.() ?? [])].map(dep=>[dep.id,dep])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:scoped?.dependencies() ?? [],sentSources:scoped?.sentSources() ?? [],tools:[...(scoped?.summary() ?? []),...(memorySearchCalls?[{name:'search_memory',outcome:`执行 ${memorySearchCalls} 次`}]:[]),... [...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`${label.split(':')[1]} × ${count}`}))]}})
         }
         try {
           const revision = await this.finishWrite(root, input.relPath, finalSource, persisted, savedMaterial)

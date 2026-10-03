@@ -9,6 +9,7 @@ export type Forgotten={materialIds:string[];entryIds:{id:string;version:number}[
 export type WorkingRecord={version:2;identity:string;revision:number;nextSequence:number;watermark:number;entries:WorkingEntry[];forgotten:Forgotten[];jobs:MemoryJobReceipt[]}
 export type WorkingSnapshot={record:WorkingRecord;revision:string|null;objectVersion:string|null;raw:string|null}
 export type WorkingInput=Pick<WorkingEntry,'content'|'layer'|'scope'|'sources'|'semantic'|'attribution'|'reviewAt'>
+export type WorkingChange = {action:'add';input:WorkingInput} | {action:'correct'|'conflict'|'obsolete';id:string;version:number;input:WorkingInput}
 const FILE='.rgent-memory',MAX=2*1024*1024,RESERVE=256*1024
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex')
 const identifier=(v:unknown):v is string=>typeof v==='string'&&/^[A-Za-z0-9_/-]{1,256}$/.test(v)&&!v.includes('..')
@@ -58,8 +59,17 @@ export class WorkingMemoryStore{
   return {record:structuredClone(record),revision:hash(raw),objectVersion:next,raw}
  }
  initialize(){const basis=this.read();return basis.raw===null||basis.raw===RETIRED_MEMORY?this.commit(basis,basis.record):basis}
+ diagnosis(){this.check();try{const d=this.fs.readSnapshot(FILE);return {revision:createHash('sha256').update(d.bytes).digest('hex'),objectVersion:d.objectVersion,bytes:d.bytes.length}}catch(e){if(e instanceof Error&&e.message==='ENOENT')return {revision:null,objectVersion:null,bytes:0};throw e}}
+ reset(expected:{revision:string|null;objectVersion:string|null},watermark:number){
+  this.check();const current=this.diagnosis();if(current.revision!==expected.revision||current.objectVersion!==expected.objectVersion||!integer(watermark))throw Error('MEMORY_CONFLICT')
+  const disk=current.objectVersion?this.fs.readSnapshot(FILE):null,raw=disk?.bytes.toString()??null
+  if(disk&&!Buffer.from(raw!).equals(disk.bytes))throw Error('MEMORY_STORAGE_INVALID')
+  const record=empty();record.nextSequence=watermark;record.watermark=watermark;const encoded=encodeWorkingMemory(record)
+  const next=this.fs.replace(FILE,raw,encoded,current.objectVersion??undefined);this.observed={raw:encoded,id:next};return {record,revision:hash(encoded),objectVersion:next,raw:encoded}
+ }
  canLearn(record:WorkingRecord,sources:readonly WorkingSource[],explicit=false){return explicit||sources.every(s=>s.sequence>record.watermark&&!record.forgotten.some(f=>f.materialIds.includes(s.materialId)||s.memoryDeps.some(d=>f.entryIds.some(x=>x.id===d.id&&x.version===d.version))))}
  add(basis:WorkingSnapshot,input:WorkingInput,explicit=false):WorkingEntry{
+  const current=this.read();if(current.revision!==basis.revision||current.objectVersion!==basis.objectVersion)throw Error('MEMORY_CONFLICT')
   if(!inputValid(input))throw Error('BAD_MEMORY_EDIT');if(basis.record.entries.length>=1000)throw Error('MEMORY_ENTRY_LIMIT');if(!this.canLearn(basis.record,input.sources,explicit))throw Error('MEMORY_MATERIAL_FORGOTTEN')
   const record=structuredClone(basis.record);record.nextSequence=Math.max(record.nextSequence,...input.sources.map(s=>s.sequence));const now=new Date().toISOString()
   const duplicate=record.entries.find(e=>e.content===input.content&&e.scope===input.scope&&e.semantic===input.semantic&&e.status!=='disabled')
@@ -71,17 +81,64 @@ export class WorkingMemoryStore{
  edit(basis:WorkingSnapshot,id:string,version:number,change:Partial<WorkingInput>&{status?:WorkingEntry['status']}){
   const record=structuredClone(basis.record),entry=record.entries.find(e=>e.id===id);if(!entry||entry.version!==version)throw Error('MEMORY_CHANGED');Object.assign(entry,structuredClone(change));if(!inputValid(entry))throw Error('BAD_MEMORY_EDIT');entry.version++;entry.updatedAt=new Date().toISOString()
   if(entry.layer==='core'&&entry.status==='active'&&record.entries.filter(e=>e.layer==='core'&&e.status==='active').reduce((n,e)=>n+conservativeTokens(e.content),0)>2048)entry.status='deferred'
-  this.promote(record);return this.commit(basis,record)
+  return this.commit(basis,record)
  }
- private promote(record:WorkingRecord){let size=record.entries.filter(e=>e.layer==='core'&&e.status==='active').reduce((n,e)=>n+conservativeTokens(e.content),0);for(const e of record.entries.filter(e=>e.status==='deferred')){const cost=conservativeTokens(e.content);if(e.layer==='demand'||size+cost<=2048){e.status='review';e.reason='MEMORY_CONFIRMATION_REQUIRED'}}}
+ /** Groups are isolated proposals. Related corrections either commit together or not at all. */
+ apply(basis:WorkingSnapshot,groups:readonly (readonly WorkingChange[])[],receipt:MemoryJobReceipt){
+  if(groups.length>64||groups.reduce((n,g)=>n+g.length,0)>64)throw Error('MEMORY_OUTPUT_LIMIT')
+  let record=structuredClone(basis.record),rejected=0;const entryIds:string[]=[]
+  for(const group of groups){const candidate=structuredClone(record),accepted:string[]=[]
+   try{if(!group.length)throw Error('BAD_MEMORY_EDIT')
+    for(const change of group){
+     if(!inputValid(change.input)||!this.canLearn(candidate,change.input.sources))throw Error('MEMORY_MATERIAL_FORGOTTEN')
+     const input=structuredClone(change.input),now=new Date().toISOString()
+     candidate.nextSequence=Math.max(candidate.nextSequence,...input.sources.map(s=>s.sequence))
+     if(change.action==='add'){
+      const duplicate=candidate.entries.find(e=>e.content===input.content&&e.scope===input.scope&&e.semantic===input.semantic&&e.status!=='disabled')
+      if(duplicate){accepted.push(duplicate.id);continue}
+      if(candidate.entries.length>=1000)throw Error('MEMORY_ENTRY_LIMIT')
+      const e:WorkingEntry={...input,id:randomUUID(),version:1,status:'active',reason:null,updatedAt:now,updateBasis:{kind:'consolidation',id:receipt.taskId,version:1}};candidate.entries.push(e);accepted.push(e.id)
+     }else{
+      const e=candidate.entries.find(e=>e.id===change.id&&e.version===change.version)
+      if(!e)throw Error('MEMORY_CHANGED')
+      if(change.action==='conflict'){
+       if(candidate.entries.length>=1000)throw Error('MEMORY_ENTRY_LIMIT')
+       const pending:WorkingEntry={...input,id:randomUUID(),version:1,status:'disputed',reason:'MEMORY_CONFIRMATION_REQUIRED',updatedAt:now,pendingTarget:{id:e.id,version:e.version},updateBasis:{kind:'consolidation',id:receipt.taskId,version:1}}
+       candidate.entries.push(pending);accepted.push(pending.id)
+      }else{
+       Object.assign(e,input);e.version++;e.updatedAt=now;e.updateBasis={kind:'consolidation',id:receipt.taskId,version:e.version};e.status=change.action==='obsolete'?'obsolete':'active';e.reason=null;accepted.push(e.id)
+      }
+     }
+     // A newly added/corrected agreement may defer itself, never evict an older active one.
+     const changed=accepted.at(-1),entry=candidate.entries.find(e=>e.id===changed)
+     if(entry?.layer==='core'&&entry.status==='active'&&candidate.entries.filter(e=>e.layer==='core'&&e.status==='active').reduce((n,e)=>n+conservativeTokens(e.content),0)>2048)entry.status='deferred'
+    }
+    const raw=encodeWorkingMemory(candidate)
+    if(Buffer.byteLength(raw)-Buffer.byteLength(JSON.stringify(controls(candidate)))>MAX-RESERVE)throw Error('MEMORY_FILE_LIMIT')
+    record=candidate;entryIds.push(...accepted)
+   }catch{rejected++}
+  }
+  record.jobs=record.jobs.filter(j=>j.taskId!==receipt.taskId)
+  record.jobs.push({...receipt,entryIds:[...new Set(entryIds)],...(rejected?{reason:'MEMORY_OUTPUT_INVALID'}:{})});record.jobs=record.jobs.slice(-256)
+  const snapshot=this.commit(basis,record)
+  return {snapshot,entryIds:[...new Set(entryIds)],rejected}
+ }
  forget(basis:WorkingSnapshot,id:string,version:number){
   const record=structuredClone(basis.record),entry=record.entries.find(e=>e.id===id);if(!entry||entry.version!==version)throw Error('MEMORY_CHANGED')
   const removed=new Set([id]);let changed=true;while(changed){changed=false;for(const e of record.entries)if(!removed.has(e.id)&&e.sources.some(s=>s.memoryDeps.some(d=>removed.has(d.id)))){removed.add(e.id);changed=true}}
   const entries=record.entries.filter(e=>removed.has(e.id)),sources=entries.flatMap(e=>e.sources)
   record.forgotten.push({materialIds:[...new Set(sources.map(s=>s.materialId))],entryIds:entries.map(e=>({id:e.id,version:e.version})),through:Math.max(...sources.map(s=>s.sequence))})
-  record.entries=record.entries.filter(e=>!removed.has(e.id));record.jobs=record.jobs.filter(j=>!j.entryIds.some(i=>removed.has(i)));this.promote(record);return this.commit(basis,record)
+  record.entries=record.entries.filter(e=>!removed.has(e.id));record.jobs=record.jobs.filter(j=>!j.entryIds.some(i=>removed.has(i)));return this.commit(basis,record)
  }
  advance(basis:WorkingSnapshot,watermark:number){const record=structuredClone(basis.record);if(!integer(watermark)||watermark<record.watermark||watermark>record.nextSequence)throw Error('BAD_REQUEST');record.watermark=watermark;record.forgotten=record.forgotten.filter(f=>f.through>watermark);return this.commit(basis,record)}
  receipt(basis:WorkingSnapshot,job:MemoryJobReceipt){const record=structuredClone(basis.record);record.jobs=record.jobs.filter(j=>j.taskId!==job.taskId);record.jobs.push(job);record.jobs=record.jobs.slice(-256);return this.commit(basis,record)}
+ interrupted(basis:WorkingSnapshot){const record=structuredClone(basis.record);let changed=false;for(const j of record.jobs)if(j.outcome==='queued'||j.outcome==='running'){j.outcome='interrupted';j.reason='MEMORY_INTERRUPTED';changed=true}return changed?this.commit(basis,record):basis}
+ confirm(basis:WorkingSnapshot,id:string,version:number){const record=structuredClone(basis.record),entry=record.entries.find(e=>e.id===id&&e.version===version);if(!entry)throw Error('MEMORY_CHANGED')
+  let target=entry
+  if(entry.pendingTarget){const prior=record.entries.find(e=>e.id===entry.pendingTarget!.id&&e.version===entry.pendingTarget!.version);if(!prior)throw Error('MEMORY_CHANGED');target=prior;Object.assign(target,{content:entry.content,sources:entry.sources,scope:entry.scope,layer:entry.layer,semantic:entry.semantic,attribution:entry.attribution});record.entries=record.entries.filter(e=>e.id!==entry.id)}
+  target.status='active';target.reason=null;target.reviewAt=null;target.version++;target.updatedAt=new Date().toISOString();target.updateBasis={kind:'manual',id:target.id,version:target.version}
+  if(target.layer==='core'&&record.entries.filter(e=>e.layer==='core'&&e.status==='active').reduce((n,e)=>n+conservativeTokens(e.content),0)>2048)target.status='deferred'
+  return this.commit(basis,record)
+ }
  relocate(basis:WorkingSnapshot,from:string,to:string,objectVersion:string){const record=structuredClone(basis.record);let changed=false;for(const e of record.entries)for(const s of e.sources)if(s.relPath===from&&s.objectVersion===objectVersion){s.relPath=to;changed=true}return changed?this.commit(basis,record):basis}
 }

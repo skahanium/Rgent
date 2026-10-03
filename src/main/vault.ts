@@ -175,6 +175,10 @@ export class VaultSession {
   async ledgerContexts(relPath:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.contexts(relPath)}
   async ledgerPage(relPath:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);return this.ledgerStore!.wirePage(relPath,cursor)})}
 
+  async materialUnit(relPath:string,start:number,end:number){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.materialUnit(relPath,start,end)})}
+  materialCeiling(){this.requireUsableRoot();return this.ledgerStore!.materialCeiling()}
+  ledgerTaskPath(taskId:string){this.requireUsableRoot();return this.ledgerStore!.taskPath(taskId)}
+  memoryDiagnostic(){this.requireUsableRoot();return this.workingMemory!.diagnosis()}
   memorySnapshot(){return this.workingMemory!.read()}
   async memoryMutation<T>(operation:(store:WorkingMemoryStore)=>T|Promise<T>):Promise<T>{const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();const result=await operation(this.workingMemory!);this.assertSession(token);return result})}
   async ledgerRecord(relPath:string,taskId:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.getRecord(relPath,taskId)}
@@ -626,6 +630,7 @@ export class VaultSession {
       if (this.token !== token) return
       if (result) this.emitRelocation(result)
       try { check(); retireMemoryFile(this.root!, check) } catch { this.memoryFailure = 'MEMORY_RETIREMENT_FAILED' }
+      return this.mutations.run(()=>{try{check();const basis=this.workingMemory!.read();if(basis.raw)this.workingMemory!.interrupted(basis)}catch{/* Local memory diagnosis remains accessible; do not block ordinary notes. */}})
     }).catch((error: unknown) => {
       if (this.token !== token) return
       this.lifecycleError = error instanceof Error ? error : new Error('LIFECYCLE_RECOVERY_REQUIRED')

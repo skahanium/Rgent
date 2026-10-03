@@ -29,3 +29,24 @@ it('defers a full standing set without silently evicting a still-effective agree
  while(i<30){store.add(basis,{content:'约定'.repeat(50)+String(i),layer:'core',scope:'本库',sources:[source(i+1)],semantic:'standing',attribution:'口令',reviewAt:null});basis=store.read();i++}
  expect(basis.record.entries.some(e=>e.status==='deferred')).toBe(true);expect(basis.record.entries[0]?.content).toContain('约定')
 })
+it('commits valid proposal groups once; a stale correction group cannot partially change its target',()=>{
+ const {store}=fixture(),target=store.add(store.read(),{content:'旧事实',layer:'demand',scope:'库',sources:[source()],semantic:'fact',attribution:'人说',reviewAt:null}),basis=store.read()
+ const input={content:'新事实',layer:'demand' as const,scope:'库',sources:[source(2)],semantic:'fact' as const,attribution:'新口令',reviewAt:null}
+ const result=store.apply(basis,[[{action:'correct',id:target.id,version:99,input},{action:'add',input}],[{action:'add',input:{...input,content:'独立有效事实'}}]],{taskId:'job',materialVersion:'a'.repeat(64),outcome:'applied',entryIds:[]})
+ expect(result.rejected).toBe(1);expect(result.entryIds).toHaveLength(1)
+ expect(store.read().record.entries.map(e=>e.content)).toEqual(['旧事实','独立有效事实'])
+ expect(store.read().record.revision).toBe(basis.record.revision+1)
+})
+it('freeing standing capacity keeps deferred entries deferred until sources are rechecked',()=>{
+ const {store}=fixture();for(let i=0;i<3;i++)store.add(store.read(),{content:'约'.repeat(500)+i,layer:'core',scope:'库',sources:[source(i+1)],semantic:'standing',attribution:'口令',reviewAt:null})
+ const initial=store.read(),first=initial.record.entries[0]!,deferred=initial.record.entries.find(e=>e.status==='deferred')!
+ store.forget(initial,first.id,first.version)
+ expect(store.read().record.entries.find(e=>e.id===deferred.id)?.status).toBe('deferred')
+})
+it('diagnoses invalid storage without opening it, and requires exact bytes/object before explicit reset',()=>{
+ const {fs,store}=fixture();store.initialize();let d=fs.readSnapshot('.rgent-memory');fs.replace('.rgent-memory',d.bytes.toString(),'corrupt',d.objectVersion)
+ expect(()=>store.read()).toThrow('MEMORY_STORAGE_CHANGED');const diagnosis=store.diagnosis()
+ d=fs.readSnapshot('.rgent-memory');fs.replace('.rgent-memory',d.bytes.toString(),'new corrupt',d.objectVersion)
+ expect(()=>store.reset(diagnosis,4)).toThrow('MEMORY_CONFLICT')
+ store.reset(store.diagnosis(),4);expect(store.read().record.watermark).toBe(4);expect(store.canLearn(store.read().record,[source(3)])).toBe(false)
+})

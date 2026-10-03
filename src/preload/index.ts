@@ -64,6 +64,7 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.memoryChanged, listener)
   },
   memoryGet: (request: MemorySessionRequest): Promise<MemoryResult<MemoryView>> => ipcRenderer.invoke(IPC.memoryGet, request),
+  memoryMaintenancePreview:(request:import('../shared/memory.ts').MemoryMaintenanceRequest):Promise<MemoryResult<MemoryPreview>>=>ipcRenderer.invoke(IPC.memoryMaintenancePreview,request),
   memoryConfigSave: (request: MemoryConfigRequest): Promise<MemoryResult<MemoryView>> => ipcRenderer.invoke(IPC.memoryConfigSave, request),
   memoryManualPreview: (request: MemoryManualRequest): Promise<MemoryResult<MemoryPreview>> => ipcRenderer.invoke(IPC.memoryManualPreview, request),
   memoryPreviewCommit: (request: MemoryCommitRequest): Promise<MemoryResult<MemoryView>> => ipcRenderer.invoke(IPC.memoryPreviewCommit, request),

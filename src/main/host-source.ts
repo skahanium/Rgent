@@ -18,6 +18,7 @@ export interface AnswerWrite {
 }
 
 export interface LedgerChapterWrite {
+  material?:import('./host-material.ts').SentTaskMaterial
   metrics?:{step:number;estimatedInput:number;actualInput:number|null;actualOutput:number|null}[]
   summaryGenerators?:import('./summary-cache.ts').SummaryGenerator[]
   taskId: string

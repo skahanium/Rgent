@@ -97,3 +97,12 @@ it('degrades initial invalid memory to an ordinary task and never blocks on a fu
  const permit=await createMemoryUsePermit({context:()=>context,config:()=>({enabled:true,revision:1}),entries:async()=>{throw Error('MEMORY_STORAGE_INVALID')}},model,'问','')
  expect(permit.recall.core).toEqual([]);await expect(permit.assertCurrent(model)).resolves.toBeUndefined()
 })
+it('memory queries use the frozen snapshot and preserve tool dependencies through context restaging',async()=>{
+ const s=setup(),p=await createMemoryUsePermit(s.port,model,'无关口令','')
+ s.set([entry('core'),entry('demand','中文项目方案','demand'),entry('new','新增加中文','demand')])
+ const result=await p.search('中文');expect(result.map(e=>e.id)).toEqual(['demand'])
+ p.stage(['core']);await p.assertCurrent(model);p.markSent()
+ expect(p.dependencies().map(d=>d.id).sort()).toEqual(['core','demand'])
+ s.set([entry('core'),{...entry('demand','中文项目方案','demand'),status:'disabled'}])
+ await expect(p.assertCurrent(model)).rejects.toThrow('MEMORY_CHANGED')
+})
