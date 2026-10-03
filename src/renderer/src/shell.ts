@@ -153,7 +153,12 @@ export async function start(root: HTMLElement): Promise<void> {
     setPreferredWidth: (width) => fileBrowser.setPreferredWidth(width)
   })
 
-  let restoringWorkspace = false
+  // The gate starts before the initial vaultGet, and belongs to one apply call.
+  let restoringWorkspace = true
+  let stateSerial = 0
+  let transitionBusy = false
+  let releasedSession: string | null | undefined
+  root.inert = true
   let workspaceTimer: number | null = null
   let restoredSession: string | null = null
   const tabs: Tab[] = []
@@ -306,8 +311,8 @@ export async function start(root: HTMLElement): Promise<void> {
   })
 
   installShortcuts({
-    onSearch: () => { if (!conflictDecisionOpen) searchOverlay.open() },
-    onSave: () => void flushSave()
+    onSearch: () => { if (!restoringWorkspace && !transitionBusy && !conflictDecisionOpen) searchOverlay.open() },
+    onSave: () => { if (!restoringWorkspace && !transitionBusy) void flushSave() }
   })
   shortcutHint.textContent = shortcutLabel('k')
   searchOpen.addEventListener('click', () => { if (!conflictDecisionOpen) searchOverlay.open() })
@@ -366,12 +371,15 @@ export async function start(root: HTMLElement): Promise<void> {
   ledgerClose.addEventListener('click', () => closeLedger(true))
 
   window.rgent.onMenu(IPC.menuOpenVault, () => {
+    if (restoringWorkspace || transitionBusy) return
     void chooseVault()
   })
   window.rgent.onMenu(IPC.menuNewNote, () => {
+    if (restoringWorkspace || transitionBusy) return
     void createNote()
   })
   window.rgent.onMenu(IPC.menuSave, () => {
+    if (restoringWorkspace || transitionBusy) return
     void flushSave()
   })
   window.rgent.onTreeChanged(() => {
@@ -383,10 +391,15 @@ export async function start(root: HTMLElement): Promise<void> {
   window.rgent.onFlushRequest(() => {
     void reportFlush(async()=>{await saveWorkspace();return flushSave()}, (payload) => window.rgent.flushDone(payload))
   })
-  window.rgent.onVaultTransition((busy,session)=>{if(busy || session===vaultSession)root.inert=busy})
+  // The release may name the new mount before its ready reply reaches applyState.
+  window.rgent.onVaultTransition((busy,session)=>{
+    releasedSession = !busy && session !== vaultSession ? session : undefined
+    transitionBusy = busy || releasedSession !== undefined
+    syncInteractionGate()
+  })
   window.rgent.onLifecycleFlushRequest((id, cleanUnavailablePaths, phase) => {
-    if (phase === 'settings') { window.rgent.lifecycleFlushDone(id, settingsOverlay.prepareVaultChange()); return }
-    if (phase === 'freeze') { if(editor.view.compositionStarted){window.rgent.lifecycleFlushDone(id,false);return} root.inert=true; window.rgent.lifecycleFlushDone(id,true);return }
+    if (phase === 'settings') { window.rgent.lifecycleFlushDone(id, !restoringWorkspace && settingsOverlay.prepareVaultChange()); return }
+    if (phase === 'freeze') { if(restoringWorkspace || editor.view.compositionStarted){window.rgent.lifecycleFlushDone(id,false);return} releasedSession=undefined;transitionBusy=true;syncInteractionGate(); window.rgent.lifecycleFlushDone(id,true);return }
     const workspaceSave = saveWorkspace()
     const flush = cleanUnavailablePaths.length
       ? Promise.resolve(saveInFlight).then(() => performFlushSave(cleanUnavailablePaths)) : flushSave()
@@ -577,56 +590,71 @@ export async function start(root: HTMLElement): Promise<void> {
   await applyState(await window.rgent.vaultGet())
 
   async function applyState(state: VaultState): Promise<void> {
-    if(state.status!=='ready')root.inert=false
-    if (state.status === 'needs-pick' || state.vaultChanged) vaultEpoch += 1
-    if (state.status === 'needs-pick') {
-      if (tabs.length) {
-        for (const tab of tabs) markUnavailable(tab, 'unavailable')
-        hostNotice = ROOT_UNAVAILABLE_NOTICE
-        closeVaultPicker()
-        updateStatus()
-        return
-      }
-      settingsOverlay.close(); memoryOverlay?.close(); memorySnapshot = null; memoryBusy = false
-      vaultSession = null
-      const ok = await flushSave()
-      if (!ok && tabs.some((tab) => tab.dirty)) {
+    const serial = ++stateSerial
+    restoringWorkspace = true
+    // Consume the release only after this restore owns the interaction gate.
+    if (releasedSession !== undefined && state.sessionId === releasedSession) { releasedSession=undefined;transitionBusy=false }
+    if (workspaceTimer !== null) { clearTimeout(workspaceTimer);workspaceTimer=null }
+    syncInteractionGate()
+    vaultEpoch += 1
+    try {
+      if (state.status === 'needs-pick') {
+        if (tabs.length) {
+          for (const tab of tabs) markUnavailable(tab, 'unavailable')
+          hostNotice = ROOT_UNAVAILABLE_NOTICE
+          closeVaultPicker()
+          updateStatus()
+          return
+        }
+        settingsOverlay.close(); memoryOverlay?.close(); memorySnapshot = null; memoryBusy = false
+        vaultSession = null
+        const ok = await flushSave()
+        if (serial !== stateSerial) return
+        if (!ok && tabs.some((tab) => tab.dirty)) {
+          vaultNameText = null
+          updateStatus()
+          showVaultPicker(state.reason, state.diagnostic)
+          return
+        }
+        resetSession()
+        fileBrowser.setVault(null)
+        sidebarSizer.refresh()
         vaultNameText = null
         updateStatus()
         showVaultPicker(state.reason, state.diagnostic)
         return
       }
-      resetSession()
-      fileBrowser.setVault(null)
-      sidebarSizer.refresh()
-      vaultNameText = null
+      closeVaultPicker()
+      const sessionChanged = !!vaultSession && !!state.sessionId && vaultSession !== state.sessionId
+      if (sessionChanged || state.vaultChanged) { settingsOverlay.close(); memoryOverlay?.close(); memorySnapshot = null; memoryBusy = false }
+      vaultSession = state.sessionId ?? null
+      void refreshMemory()
+      vaultNameText = state.rootName
       updateStatus()
-      showVaultPicker(state.reason, state.diagnostic)
-      return
+      if (state.vaultChanged || sessionChanged) {
+        // chooseVault flushed the old vault before vaultPick switched the root.
+        // Never send an old tab's path through noteWrite after the new root is active.
+        resetSession()
+      }
+      fileBrowser.setVault(state.navigationKey ?? null)
+      sidebarSizer.refresh()
+      await refreshLifecycle()
+      if (serial !== stateSerial) return
+      await refreshTree()
+      if (serial !== stateSerial) return
+      if (vaultSession && restoredSession !== vaultSession) {
+        const session = vaultSession
+        const restored = await restoreWorkspace(session, serial)
+        if (serial !== stateSerial || session !== vaultSession) return
+        if (restored) restoredSession = session
+      }
+      if (state.diagnostic) { hostNotice = state.diagnostic; updateStatus() }
+    } finally {
+      if (serial === stateSerial) { restoringWorkspace=false;syncInteractionGate() }
     }
-    closeVaultPicker()
-    const sessionChanged = !!vaultSession && !!state.sessionId && vaultSession !== state.sessionId
-    if (sessionChanged || state.vaultChanged) { settingsOverlay.close(); memoryOverlay?.close(); memorySnapshot = null; memoryBusy = false }
-    vaultSession = state.sessionId ?? null
-    void refreshMemory()
-    vaultNameText = state.rootName
-    updateStatus()
-    if (state.vaultChanged || sessionChanged) {
-      // chooseVault flushed the old vault before vaultPick switched the root.
-      // Never send an old tab's path through noteWrite after the new root is active.
-      resetSession()
-    }
-    fileBrowser.setVault(state.navigationKey ?? null)
-    sidebarSizer.refresh()
-    await refreshLifecycle()
-    await refreshTree()
-    if (vaultSession && restoredSession !== vaultSession) {
-      restoredSession = vaultSession
-      await restoreWorkspace(vaultSession)
-    }
-    root.inert = false
-    if (state.diagnostic) { hostNotice = state.diagnostic; updateStatus() }
   }
+
+  function syncInteractionGate(): void { root.inert = restoringWorkspace || transitionBusy }
 
   function workspaceSnapshot(): VaultWorkspace {
     const tab = current()
@@ -635,25 +663,26 @@ export async function start(root: HTMLElement): Promise<void> {
       sidebarHidden:treePanel.classList.contains('is-collapsed'),...fileBrowser.workspaceScroll()}
   }
   async function saveWorkspace(): Promise<void> {
-    if (!vaultSession || restoringWorkspace) return
+    if (!vaultSession || restoringWorkspace || restoredSession !== vaultSession) return
     const session = vaultSession
     try { await window.rgent.vaultWorkspaceSave(session,workspaceSnapshot()) }
     catch { if (session === vaultSession) { hostNotice = '工作区位置未保存，笔记编辑不受影响。请检查本机存储。'; updateStatus() } }
   }
   function scheduleWorkspace(): void {
-    if (restoringWorkspace || !vaultSession) return
+    if (restoringWorkspace || !vaultSession || restoredSession !== vaultSession) return
     if (workspaceTimer !== null) clearTimeout(workspaceTimer)
     workspaceTimer = window.setTimeout(()=>{workspaceTimer=null;void saveWorkspace()},400)
   }
-  async function restoreWorkspace(session: string): Promise<void> {
-    restoringWorkspace = true
+  async function restoreWorkspace(session: string, serial: number): Promise<boolean> {
+    const currentRestore = () => vaultSession === session && stateSerial === serial
     try {
       const workspace = await window.rgent.vaultWorkspaceGet(session)
-      if (!workspace || vaultSession !== session) return
+      if (!currentRestore()) return false
+      if (!workspace) return true
       for (const item of workspace.tabs) {
-        if (vaultSession !== session) return
-        await openNote(item.relPath)
-        if (vaultSession !== session) return
+        if (!currentRestore()) return false
+        await openNote(item.relPath, serial)
+        if (!currentRestore()) return false
         let tab = tabs.find(t=>t.relPath===item.relPath)
         if (!tab) { tab = {relPath:item.relPath,content:'',ledger:null,saved:'',revision:'',dirty:false,availability:'unavailable'};tabs.push(tab) }
       }
@@ -668,8 +697,8 @@ export async function start(root: HTMLElement): Promise<void> {
       active = null
       if (selected) activate(selected)
       renderTabs()
-    } catch { if(vaultSession===session){hostNotice='工作区位置无法恢复，笔记仍可正常打开。';updateStatus()} }
-    finally { if(vaultSession===session)restoringWorkspace=false }
+      return true
+    } catch { if(currentRestore()){hostNotice='工作区位置无法恢复，笔记仍可正常打开。';updateStatus()};return false }
   }
   editor.view.scrollDOM.addEventListener('scroll', scheduleWorkspace, {passive:true})
   treeScroll.addEventListener('scroll', scheduleWorkspace, {capture:true,passive:true})
@@ -677,7 +706,6 @@ export async function start(root: HTMLElement): Promise<void> {
 
   function resetSession(): void {
     if (workspaceTimer !== null) { clearTimeout(workspaceTimer);workspaceTimer=null }
-    restoringWorkspace = false
     vaultEpoch += 1
     recoveryState = null
     recoveryOverlay?.close(); recoveryOverlay = null
@@ -721,6 +749,7 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   async function changeVault(operation: () => Promise<VaultState>): Promise<void> {
+    if (restoringWorkspace) throw Error('VAULT_SWITCH_BUSY')
     try {
       const state = await operation()
       if(state.cancelled)throw Error('VAULT_SWITCH_CANCELLED')
@@ -728,7 +757,7 @@ export async function start(root: HTMLElement): Promise<void> {
     } catch (error) {
       const state = await window.rgent.vaultGet().catch(()=>null)
       if(state?.status==='ready' && state.sessionId!==vaultSession)await applyState(state)
-      root.inert=false
+      syncInteractionGate()
       throw error
     }
   }
@@ -1063,16 +1092,18 @@ export async function start(root: HTMLElement): Promise<void> {
     editor.setNoteHost(noteHost())
   }
 
-  async function openNote(relPath: string): Promise<void> {
+  async function openNote(relPath: string, restoreSerial?: number): Promise<void> {
+    if (restoringWorkspace && restoreSerial !== stateSerial) return
     const existing = tabs.find((tab) => tab.relPath === relPath)
     if (existing) {
       activate(relPath)
       return
     }
     const epoch = vaultEpoch
+    const serial = stateSerial
     try {
       const source = await window.rgent.noteRead(relPath)
-      if (epoch !== vaultEpoch || source.sessionId !== vaultSession) return
+      if (epoch !== vaultEpoch || serial !== stateSerial || source.sessionId !== vaultSession) return
       const part = partitionSource(source.content)
       tabs.push({
         relPath,

@@ -197,7 +197,7 @@ export type { ChromeTextPreference } from './reading-preference.ts'
 export type ChromeTextSetResult = { ok: true; preference: import('./reading-preference.ts').ChromeTextPreference } | { ok: false; error: 'BAD_CHROME_TEXT' | 'IO_ERROR' }
 
 export type VaultState =
-  | { status: 'needs-pick'; reason: 'first-run' | 'missing'; cancelled?: boolean; diagnostic?: string }
+  | { status: 'needs-pick'; reason: 'first-run' | 'missing'; sessionId?: string | null; cancelled?: boolean; diagnostic?: string }
   | { status: 'ready'; rootName: string; vaultChanged?: boolean; sessionId?: string; navigationKey?: string; diagnostic?: string; vaultId?: string; cancelled?: boolean }
 
 export type TreeEntry = {

@@ -57,7 +57,7 @@ async function invoke(channel: string, ...args: unknown[]): Promise<any> {
   const session = mountedSession
   const result = await ipcRenderer.invoke(channel, ...(isVaultChannel(channel) ? [{ session, args }] : args))
   if (isVaultChannel(channel) && session !== mountedSession) throw Error('VAULT_CHANGED')
-  if (channel === IPC.vaultGet || channel === IPC.vaultPick || channel === IPC.vaultOpen) mountedSession = result?.status === 'ready' ? result.sessionId ?? null : null
+  if (channel === IPC.vaultGet || channel === IPC.vaultPick || channel === IPC.vaultOpen) mountedSession = result?.sessionId ?? null
   return result
 }
 

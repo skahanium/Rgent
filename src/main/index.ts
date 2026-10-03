@@ -114,7 +114,9 @@ function visibleVaultState(): VaultState {
     state.rootName = entry?.label ?? activeTarget.label
     state.vaultId = entry?.id
   }
-  return state
+  // A temporarily inaccessible root retains its mount for draft recovery.
+  // Availability must not be interpreted as an authoritative unmount.
+  return state.status === 'needs-pick' ? {...state,sessionId:vault?.sessionId()??null} : state
 }
 
 function lifecycleError(error: unknown, fallback: string): string {
