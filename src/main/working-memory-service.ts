@@ -51,7 +51,20 @@ export class WorkingMemoryService{
   }
   this.vault.assertSession(context.sessionId)
   const current=this.snapshot().record.entries
-  return result.filter(e=>current.some(now=>now.id===e.id&&now.version===e.version))
+  // Async source proofs can overlap a queued edit of an upstream entry. Check only
+  // the proven dependency closure against the final snapshot, not its file revision.
+  const dependenciesCurrent=(entry:WorkingEntry,seen=new Set<string>()):boolean=>{
+   if(seen.has(entry.id))return false;seen.add(entry.id)
+   return entry.sources.every(s=>s.memoryDeps.every(dep=>{
+    const parent=current.find(e=>e.id===dep.id&&e.version===dep.version&&e.status==='active')
+    return !!parent&&(!parent.reviewAt||Date.parse(parent.reviewAt)>Date.now())&&dependenciesCurrent(parent,new Set(seen))
+   }))
+  }
+  return result.filter(e=>current.some(now=>now.id===e.id&&now.version===e.version)).map(e=>{
+   if(e.status==='active'&&e.reviewAt&&Date.parse(e.reviewAt)<=Date.now()){e.status='review';e.reason='MEMORY_CONFIRMATION_REQUIRED'}
+   if(e.status==='active'&&!dependenciesCurrent(e)){e.status='paused';e.reason='MEMORY_DEPENDENCY_CHANGED'}
+   return e
+  })
  }
  private async verifyEntry(entry:WorkingEntry,all:WorkingEntry[],seen=new Set<string>()):Promise<boolean>{
   if(seen.has(entry.id))return false;seen.add(entry.id)

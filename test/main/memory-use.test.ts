@@ -1,9 +1,17 @@
 import { expect, it } from 'vitest'
 import type { MemoryEntry } from '../../src/shared/memory.ts'
-import { createMemoryUsePermit, recallMemory } from '../../src/main/memory-use.ts'
+import { createMemoryUsePermit, recallMemory, memorySection } from '../../src/main/memory-use.ts'
 
 const entry = (id: string, content = '项目使用中文', layer: 'core' | 'demand' = 'core'): MemoryEntry => ({ id, version: 1, content, layer, scope: '本库', status: 'active', reason: null, updatedAt: '2026-10-02', updateBasis: { kind: 'manual', id: 'manual', version: 1 }, sources: [{ id: `source-${id}`, version: 1, relPath: 'outside.md', objectVersion: 'object', revision: 'a'.repeat(64), permissionTier: 'reference', kind: 'body', taskId: null, taskMaterialHash: null, classification: 'human', start: 0, end: 2, text: '依据', hash: 'b'.repeat(64), basisHash: 'c'.repeat(64), sourceDeps: [], memoryDeps: [] }] })
 const model = { provider: 'custom' as const, modelId: 'main', baseURL: 'https://example.com/v1', contextTokens: 16000, apiKey: 'secret' }
+it('keeps scope and factual attribution in the material actually sent to the model',()=>{
+ const fact={...entry('meeting','需要使用英文','demand'),scope:'仅项目甲会议',semantic:'fact' as const,attribution:'第三方会议纪要记载',reviewAt:null}
+ const material=memorySection(fact)
+ expect(material).toContain('仅项目甲会议')
+ expect(material).toContain('第三方会议纪要记载')
+ expect(material).toContain('fact')
+ expect(material).toContain(fact.updatedAt)
+})
 function setup() {
   let enabled = true, revision = 0, sessionId = 'session'
   let entries = [entry('core'), entry('demand', '中文项目方案', 'demand')]

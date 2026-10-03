@@ -504,7 +504,7 @@ export class AgentHost {
                   const args=call.input as Record<string,unknown>
                   if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).join()!=='query'||typeof args.query!=='string')throw Error('INVALID_TOOL_ARGUMENTS')
                   const found=await wait(memory!.search(args.query))
-                  value={items:found.map(e=>({id:e.id,version:e.version,content:e.content,scope:e.scope,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId}))})),complete:true}
+                  value={items:found.map(e=>({id:e.id,version:e.version,content:e.content,scope:e.scope,semantic:e.semantic,attribution:e.attribution,updatedAt:e.updatedAt,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId}))})),complete:true}
                 }else{value = await wait(scoped!.execute(call.name, call.input, signal));successfulLibraryTool=true}
               }
               catch (error) {

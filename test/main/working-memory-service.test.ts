@@ -36,3 +36,32 @@ it('a manually remembered adopted answer retains its original external dependenc
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
 import {bodyFingerprint} from '../../src/main/ledger-provenance.ts'
+it.each(['dependency','unrelated','review'] as const)('rechecks the involved memory after asynchronous source proof: %s',async changed=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-memory-read-race-')),root=path.join(base,'vault');await mkdir(root)
+ await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'可核验的来源材料')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{
+  const note=await vault.readOpened('a.md'),service=new WorkingMemoryService(vault,()=>null)
+  const source=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:note.content.length})
+  const add=async(content:string,deps:{id:string;version:number}[]=[])=>vault.memoryMutation(store=>store.add(store.read(),{content,layer:'demand',scope:'本库',sources:[{...source,id:content,memoryDeps:deps}],semantic:'fact',attribution:'来源笔记',reviewAt:null}))
+  const parent=await add('parent'),middle=await add('middle',[{id:parent.id,version:parent.version}]),leaf=await add('leaf',[{id:middle.id,version:middle.version}]),unrelated=await add('unrelated')
+  const started=Date.now();let now=started
+  if(changed==='review'){
+   await vault.memoryMutation(store=>store.edit(store.read(),leaf.id,leaf.version,{reviewAt:new Date(started+1000).toISOString()}))
+   vi.spyOn(Date,'now').mockImplementation(()=>now)
+  }
+  const verify=service.verifySource.bind(service);let committed=false
+  vi.spyOn(service,'verifySource').mockImplementation(async s=>{
+   const valid=await verify(s)
+   if(s.id==='parent'&&!committed){committed=true
+    if(changed==='review')now=started+2000
+    else{const target=changed==='dependency'?parent:unrelated
+     await vault.memoryMutation(store=>store.edit(store.read(),target.id,target.version,{content:target.content+' changed'}))
+    }
+   }
+   return valid
+  })
+  const entries=await service.entries([leaf.id]);expect(committed).toBe(true)
+  expect(entries[0]?.status).toBe(changed==='dependency'?'paused':changed==='review'?'review':'active')
+ }finally{vi.restoreAllMocks();vault.dispose();await rm(base,{recursive:true,force:true})}
+})

@@ -184,7 +184,7 @@ export class WorkingMemoryConsolidation{
    // Only related, valid committed memory is sent, not the entire vault record.
    const words=new Set(job.material.prompt.toLowerCase().match(/[\p{L}\p{N}]+/gu)??[])
    const entries=(await until(job.service.entries(),job.controller.signal)).filter(e=>e.status==='active'&&(e.layer==='core'||[...words].some(w=>e.content.toLowerCase().includes(w)))).slice(0,8)
-   const payload={task:{id:job.material.taskId,status:job.material.status},sources:sources.map(s=>({id:s.id,text:s.text,classification:s.classification,kind:s.kind,attribution:s.relPath})),memory:entries.map(e=>({id:e.id,version:e.version,content:e.content,semantic:e.semantic,scope:e.scope}))}
+   const payload={task:{id:job.material.taskId,status:job.material.status},sources:sources.map(s=>({id:s.id,text:s.text,classification:s.classification,kind:s.kind,attribution:s.relPath})),memory:entries.map(e=>({id:e.id,version:e.version,content:e.content,semantic:e.semantic,scope:e.scope,attribution:e.attribution,updatedAt:e.updatedAt}))}
    let values:unknown[];const draft=await this.response(job,payload,sources,entries)
    try{values=parseMemorySuggestions(draft)}catch{
     if(job.configuration.limits.calls<2)throw Error('MEMORY_OUTPUT_INVALID')

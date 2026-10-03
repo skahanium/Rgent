@@ -39,6 +39,9 @@ export type MemoryEntry = {
   content: string
   layer: 'core' | 'demand'
   scope: string
+  semantic?: 'standing' | 'fact'
+  attribution?: string
+  reviewAt?: string | null
   sources: MemorySource[]
   status: 'active' | 'paused' | 'pending' | 'disabled' | 'review' | 'obsolete' | 'disputed' | 'deferred'
   reason: string | null
