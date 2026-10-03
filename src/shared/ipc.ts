@@ -5,6 +5,7 @@ export const IPC = {
   treeChanged: 'tree:changed',
   noteRead: 'note:read',
   ledgerGet:'ledger:get',
+  ledgerMaintenance:'ledger:maintenance',
   ledgerRepair:'ledger:repair',
   ledgerMigrate:'ledger:migrate',
   noteInspect: 'note:inspect',

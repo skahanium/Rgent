@@ -7,7 +7,7 @@ export type ModelStepEvent =
   /** 模型自述的思考。它只进账本，不进正文。 */
   | { type: 'reasoning'; text: string }
   | { type: 'tool-call'; id: string; name: string; input: unknown; invalid?: boolean }
-  | { type: 'finish'; reason: string }
+  | { type: 'finish'; reason: string; usage?:{inputTokens:number|null;outputTokens:number|null} }
 export type ModelStreamInput = {
   baseURL: string
   modelId: string
@@ -117,7 +117,7 @@ export async function* streamModelStep(input: ModelStepInput): AsyncGenerator<Mo
       if (finished || !['stop', 'length', 'content-filter', 'tool-calls'].includes(part.finishReason) || part.finishReason === 'tool-calls' && !calls) throw Error('MODEL_PROTOCOL_ERROR')
       finished = true
       for (const piece of think.flush()) if (piece.text) yield { type: piece.type, text: piece.text }
-      yield { type: 'finish', reason: part.finishReason }
+      yield { type: 'finish', reason: part.finishReason, usage:{inputTokens:part.totalUsage.inputTokens??null,outputTokens:part.totalUsage.outputTokens??null} }
     } else if (part.type === 'error') {
       throw Error('MODEL_REQUEST_FAILED')
     } else if (part.type === 'tool-error' && invalidIds.has(part.toolCallId)) {

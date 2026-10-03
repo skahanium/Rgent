@@ -18,6 +18,8 @@ export interface AnswerWrite {
 }
 
 export interface LedgerChapterWrite {
+  metrics?:{step:number;estimatedInput:number;actualInput:number|null;actualOutput:number|null}[]
+  summaryGenerators?:import('./summary-cache.ts').SummaryGenerator[]
   taskId: string
   startedAt: string
   status: 'completed' | 'cancelled' | 'failed' | 'limit'

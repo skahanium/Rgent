@@ -1,3 +1,4 @@
+import {decodeLedgerBytes,compressLedgerBytes} from './ledger-codec.ts'
 import {createHash,randomUUID} from 'node:crypto'
 import type {SecureVaultFs} from './secure-fs.ts'
 import {partitionSource,compile,parseMarker} from '../markdown/index.ts'
@@ -18,13 +19,15 @@ function validOwner(v:unknown):v is LedgerOwner{return obj(v)&&exact(v,['noteId'
 function validChapter(v:unknown):v is LedgerRecord['chapter']{
  if(v===null)return true
  if(!obj(v)||!id(v.taskId)||typeof v.startedAt!=='string'||!Number.isFinite(Date.parse(v.startedAt))||!['completed','cancelled','failed','limit'].includes(String(v.status))||typeof v.prompt!=='string'||typeof v.answer!=='string')return false
- if(Object.keys(v).some(k=>!['taskId','startedAt','status','prompt','answer','reason','provenance','trace','assistant'].includes(k)))return false
+ if(Object.keys(v).some(k=>!['taskId','startedAt','status','prompt','answer','reason','provenance','trace','assistant','metrics','summaryGenerators'].includes(k)))return false
  if(v.reason!==undefined&&typeof v.reason!=='string'||v.assistant!==undefined&&typeof v.assistant!=='string'||v.trace!==undefined&&(!Array.isArray(v.trace)||v.trace.some(t=>typeof t!=='string')))return false
+ if(v.metrics!==undefined&&(!Array.isArray(v.metrics)||v.metrics.length>256||v.metrics.some(m=>!obj(m)||!Number.isSafeInteger(m.step)||!Number.isFinite(m.estimatedInput)||m.actualInput!==null&&!Number.isFinite(m.actualInput)||m.actualOutput!==null&&!Number.isFinite(m.actualOutput))))return false
+ if(v.summaryGenerators!==undefined&&(!Array.isArray(v.summaryGenerators)||v.summaryGenerators.length>64||v.summaryGenerators.some(g=>!obj(g)||typeof g.modelId!=='string'||typeof g.host!=='string'||g.format!==1)))return false
  if(v.provenance!==undefined){try{const read=ledgerProvenance(encodeLedgerProvenance(v.provenance as LedgerProvenance));if(read.status!=='valid')return false}catch{return false}}
  return true
 }
 function parseRecord(raw:string):LedgerRecord{
- try{const v:unknown=JSON.parse(raw);if(!obj(v)||!exact(v,['version','noteId','taskId','revision','state','bodyStatus','chapter','sequence',...('legacyRaw'in v?['legacyRaw']:[]),...('legacyReasoning'in v?['legacyReasoning']:[])])||v.version!==1||!id(v.noteId)||!id(v.taskId)||!Number.isSafeInteger(v.revision)||Number(v.revision)<1||!Number.isSafeInteger(v.sequence)||Number(v.sequence)<0||!['pending-body','saved','legacy','cleared'].includes(String(v.state))||!['present','unable-to-verify'].includes(String(v.bodyStatus))||!validChapter(v.chapter)||v.legacyRaw!==undefined&&typeof v.legacyRaw!=='string'||v.legacyReasoning!==undefined&&typeof v.legacyReasoning!=='string'||v.chapter&&v.chapter.taskId!==v.taskId)throw Error()
+ try{const v:unknown=JSON.parse(decodeLedgerBytes(raw));if(!obj(v)||!exact(v,['version','noteId','taskId','revision','state','bodyStatus','chapter','sequence',...('legacyRaw'in v?['legacyRaw']:[]),...('legacyReasoning'in v?['legacyReasoning']:[])])||v.version!==1||!id(v.noteId)||!id(v.taskId)||!Number.isSafeInteger(v.revision)||Number(v.revision)<1||!Number.isSafeInteger(v.sequence)||Number(v.sequence)<0||!['pending-body','saved','legacy','cleared'].includes(String(v.state))||!['present','unable-to-verify'].includes(String(v.bodyStatus))||!validChapter(v.chapter)||v.legacyRaw!==undefined&&typeof v.legacyRaw!=='string'||v.legacyReasoning!==undefined&&typeof v.legacyReasoning!=='string'||v.chapter&&v.chapter.taskId!==v.taskId)throw Error()
  return v as LedgerRecord}catch{throw Error('LEDGER_RECORD_INVALID')}
 }
 /** Fixed app-owned records. Caller serializes all mutations with the vault queue. */
@@ -55,6 +58,21 @@ export class LedgerStore{
  }
  onWrite(relPath:string,before:string,after:string,body:string){const registry=this.registry(),owner=registry.owners.find(o=>o.relPath===relPath&&o.objectVersion===before);if(!owner)return;owner.objectVersion=after;owner.bodyRevision=digest(body);this.publish(registry,owner)}
  relocate(from:string,to:string,objectVersion:string){const registry=this.registry(),owner=registry.owners.find(o=>o.relPath===from&&o.objectVersion===objectVersion);if(!owner)return;const current=this.fs.readSnapshot(to);if(current.objectVersion!==objectVersion)throw Error('LEDGER_OWNERSHIP_UNVERIFIED');owner.relPath=to;this.publish(registry,owner)}
+ maintenancePreview(relPath:string,action:'compress'|'clear'){
+  const owner=this.owner(relPath);let cursor:string|null=null,totalBytes=0;const records:{taskId:string;revision:number;bytes:number}[]=[]
+  do{const page=this.page(relPath,cursor);for(const r of page.records){const d=this.read(this.path(owner,r.taskId))!;totalBytes+=Buffer.byteLength(d.raw);if(records.length<20&&r.state!=='pending-body'&&r.state!=='cleared'&&(action==='clear'||r.state==='saved'&&Date.parse(r.chapter!.startedAt)<Date.now()-7*86400000&&!d.raw.includes('"codec":"gzip"')))records.push({taskId:r.taskId,revision:r.revision,bytes:Buffer.byteLength(d.raw)})}cursor=page.cursor}while(cursor)
+  return {records,totalBytes,warning:action==='clear'?'只清理列出的已完成历史，不修改正文或自动遗忘已学记忆。原始材料清理后不能重建对应摘要。':'核验无损往返与净节省后替换同一记录；不保留双表示。'}
+ }
+ maintain(relPath:string,action:'compress'|'clear',items:readonly {taskId:string;revision:number}[]){
+  if(items.length>20||new Set(items.map(i=>i.taskId)).size!==items.length)throw Error('BAD_REQUEST')
+  const owner=this.owner(relPath),success:string[]=[],failed:string[]=[];let savedBytes=0
+  for(const item of items){try{const r=this.record(owner,item.taskId),disk=this.bases.get(this.path(owner,item.taskId));if(!r||r.revision!==item.revision||r.state==='pending-body'||!disk)throw Error('LEDGER_CONFLICT')
+    if(action==='compress'){if(r.state!=='saved'||Date.parse(r.chapter!.startedAt)>=Date.now()-7*86400000)throw Error('BAD_REQUEST');const zipped=compressLedgerBytes(decodeLedgerBytes(disk.raw));if(zipped){this.replace(this.path(owner,r.taskId),zipped.raw);savedBytes+=Buffer.byteLength(disk.raw)-Buffer.byteLength(zipped.raw)}}
+    else {if(r.legacyRaw){const archive=this.read(`.rgent/ledgers/${owner.noteId}/legacy.json`);if(archive)this.replace(`.rgent/ledgers/${owner.noteId}/legacy.json`,JSON.stringify({version:1,raw:'<!-- rgent:ledger:v1 -->\n',hash:digest('<!-- rgent:ledger:v1 -->\n')}))}const cleared:LedgerRecord={version:1,noteId:owner.noteId,taskId:r.taskId,revision:r.revision+1,state:'cleared',bodyStatus:'unable-to-verify',chapter:null,sequence:r.sequence};this.replace(this.path(owner,r.taskId),JSON.stringify(cleared));savedBytes+=Buffer.byteLength(disk.raw)-Buffer.byteLength(JSON.stringify(cleared))}
+    success.push(item.taskId)
+   }catch{failed.push(item.taskId)}}
+  return {success,failed,savedBytes}
+ }
  registryRevision(){return this.read(fixed)?.raw?digest(this.bases.get(fixed)!.raw):null}
  repairRegistry(expected:string|null){if(this.registryRevision()!==expected)throw Error('LEDGER_CONFLICT');this.rebuildRegistry()}
  rebuildRegistry(){this.check();const owners:LedgerOwner[]=[];for(const dir of this.fs.list('.rgent/ledgers')){if(dir.kind!=='dir'||!id(dir.name))throw Error('LEDGER_REGISTRY_INVALID');const raw=this.read(`.rgent/ledgers/${dir.name}/owner.json`);if(!raw)throw Error('LEDGER_REGISTRY_INVALID');let owner:unknown;try{owner=JSON.parse(raw.raw)}catch{throw Error('LEDGER_REGISTRY_INVALID')};if(!validOwner(owner)||owner.noteId!==dir.name)throw Error('LEDGER_REGISTRY_INVALID');owners.push(owner)}

@@ -1,4 +1,6 @@
 export const LEDGER_ERROR_MESSAGES:Record<string,string>={
+ SUMMARY_FORMAT_INVALID:'历史摘要格式无法核验，原记录未改变。',
+ SUMMARY_CACHE_LIMIT:'历史摘要缓存已达上限，原记录未改变。',
  LEDGER_OWNERSHIP_UNVERIFIED:'历史归属待核验；未自动认领，也未改写原记录。',
  LEDGER_REGISTRY_INVALID:'账本登记损坏；历史保持，可从已核验的归属描述重建。',
  LEDGER_RECORD_INVALID:'历史记录无法核验；原字节保持。',

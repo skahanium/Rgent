@@ -55,6 +55,7 @@ const menuChannels = [IPC.menuOpenVault, IPC.menuNewNote, IPC.menuSave] as const
 
 const api = {
   ledgerRepair:(request:import('../shared/ledger.ts').LedgerRepairRequest):Promise<{ok:true}|{ok:false;error:string}>=>ipcRenderer.invoke(IPC.ledgerRepair,request),
+  ledgerMaintenance:(request:import('../shared/ledger.ts').LedgerMaintenanceRequest):Promise<import('../shared/ledger.ts').LedgerMaintenanceResult>=>ipcRenderer.invoke(IPC.ledgerMaintenance,request),
   ledgerGet:(request:import('../shared/ledger.ts').LedgerRequest):Promise<import('../shared/ledger.ts').LedgerResult>=>ipcRenderer.invoke(IPC.ledgerGet,request),
   ledgerMigrate:(request:import('../shared/ledger.ts').LedgerMigrationRequest):Promise<import('../shared/ledger.ts').LedgerMigrationResult>=>ipcRenderer.invoke(IPC.ledgerMigrate,request),
   onMemoryChanged: (fn: (sessionId: string) => void): (() => void) => {

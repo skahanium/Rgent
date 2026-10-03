@@ -62,3 +62,13 @@ it('paginates a fixed history horizon while new tasks arrive and continues long 
  do{const page=store.wirePage('a.md',cursor);expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(128*1024);if(page.chunk)parts.push(Buffer.from(page.chunk.data,'base64'));cursor=page.cursor;if(!cursor?.startsWith('raw:'))break}while(cursor)
  expect(JSON.parse(Buffer.concat(parts).toString()).chapter.answer).toBe('长'.repeat(120000))
 })
+it('compresses in place only after roundtrip and net-saving checks, and clears without touching the body',()=>{
+ const {root,fs,store}=fixture();const marked=markPrompt('/你好',{taskId:task.taskId,range:{start:0,end:3},expectedText:'/你好',promptText:'你好'}),answer='较旧完整回答'.repeat(1000)
+ writeFileSync(path.join(root,'a.md'),marked);store.prepare('a.md',{...task,startedAt:'2020-01-01T00:00:00Z',answer})
+ const body=upsertAiAnswer(marked,{taskId:task.taskId,answer}),old=fs.readSnapshot('a.md'),next=fs.replace('a.md',marked,body,old.objectVersion);store.onWrite('a.md',old.objectVersion,next,body);store.complete('a.md',task.taskId,awaitHash(body))
+ const preview=store.maintenancePreview('a.md','compress');expect(preview.records).toHaveLength(1)
+ const result=store.maintain('a.md','compress',preview.records);expect(result.success).toEqual([task.taskId]);expect(result.savedBytes).toBeGreaterThan(0)
+ expect(store.getRecord('a.md',task.taskId).chapter?.answer).toBe(answer)
+ const clear=store.maintenancePreview('a.md','clear');store.maintain('a.md','clear',clear.records)
+ expect(store.getRecord('a.md',task.taskId).chapter).toBeNull();expect(fs.readSnapshot('a.md').bytes.toString()).toBe(body)
+})

@@ -1309,6 +1309,14 @@ export async function start(root: HTMLElement): Promise<void> {
       }while(after!==null&&ledgerOpen&&current()===captured)
       migrate.disabled=false
     });ledgerBody.append(migrate)
+    for(const [action,label]of [['compress','核对旧历史压缩'],['clear','预览清理历史']] as const){const control=document.createElement('button');control.type='button';control.className='settings-action';control.textContent=label
+      control.onclick=async()=>{if(!(await flushSave()))return;control.disabled=true;const request={sessionId:captured.sessionId!,objectVersion:captured.objectVersion!,relPath:captured.relPath,action};const result=await window.rgent.ledgerMaintenance(request)
+        if(!ledgerOpen||current()!==captured)return;control.disabled=false;if(!result.ok||!('id'in result.value)){message.textContent='维护预览不可用，原记录保留。';return}
+        const preview=result.value;message.textContent=`当前历史占用 ${preview.totalBytes} 字节；本次 ${preview.records.length} 场。${preview.warning}`
+        const apply=document.createElement('button');apply.type='button';apply.className='settings-action';apply.textContent=action==='clear'?'确认清理列出的历史':'执行已核验压缩';ledgerBody.append(apply)
+        apply.onclick=async()=>{apply.disabled=true;const committed=await window.rgent.ledgerMaintenance({...request,previewId:preview.id});if(!ledgerOpen||current()!==captured)return;if(committed.ok&&'success'in committed.value){message.textContent=`已完成 ${committed.value.success.length} 场；${committed.value.failed.length} 场未完成；实际减少 ${committed.value.savedBytes} 字节。`;apply.remove()}else{message.textContent='维护未完成，原记录与正文保持；请重新核对。';apply.remove()}}
+      };ledgerBody.append(control)
+    }
     void fetchPage()
     ledgerEl.hidden = false
     renderTabs()

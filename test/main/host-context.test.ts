@@ -144,3 +144,14 @@ it('keeps CR-only ledger chapters with raw body placement', () => {
   expect(plan.content).toContain('不能丢的历史')
   expect(plan.content).toContain('落点：正文块 1 之后、正文块 2 之前')
 })
+it('allocates structured histories by tokens, retains recent whole tasks and never duplicates summary coverage',()=>{
+ const chapters=Array.from({length:8},(_,n)=>({sourceId:`task-${n}`,text:`记录${n} `+'甲'.repeat(100)}))
+ const args={source:'正文。\n\n/继续',chapters,prompt:'继续',placement:5,inputBudgetTokens:2000,countTokens:(s:string)=>s.length}
+ const first=buildHostContext(args);expect(first.status).toBe('needs-summary')
+ if(first.status!=='needs-summary')return
+ const plan=buildHostContext({...args,summary:{text:'主题目标：以前的任务',sourceChapterIds:first.chapters.map(c=>c.sourceId)}})
+ expect(plan.status).toBe('ready');if(plan.status!=='ready')return
+ expect(plan.refs.filter(r=>r.kind==='ledger').length).toBeGreaterThan(1)
+ for(const c of first.chapters)expect(plan.refs.some(r=>r.kind==='ledger'&&r.sourceId===c.sourceId)).toBe(false)
+ expect(plan.content.length).toBeLessThanOrEqual(2000)
+})

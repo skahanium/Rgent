@@ -178,3 +178,7 @@ flowchart LR
 | 索引只按渲染层数据算 | 渲染进程 | 标题索引吃 `DocIndex.headings` 的 h1–h3（`src/renderer/src/outline.ts`），当前项由「光标在可视范围内则以光标为准，否则以视口起点为准」推出，不另存状态、不发 IPC。 |
 
 相关：[理念](vision.md) · [已拍板决定](decisions.md) · [施工守则](handbook.md) · [施工图](build.md) · [施工对象](topics.md)
+
+## 2026-10-03 历史上下文接线
+
+`LedgerStore` 唯一写入结构化历史；`context-budget.ts` 区分 token 估算和字节存储。生产上下文按已核验依赖排除历史，再保留近期完整记录；`SummaryCache` 最多两级，以覆盖文本与依赖核验缓存，元数据计入单篇 32 KiB。摘要不扩大当前发送许可，生成模型及主机进入任务记录；设备缓存纳入隐私清单，失效可重建而非原始证据。`ledger-codec.ts` 受限解压、完整字节校验和净节省后替换同一路径；清理替换为无正文回执，不操作笔记或废纸篓。新推理在设备 `reasoning-v2` 临时区有界保存，旧推理随迁移历史保留。跨平台竞态仍待对应证据。

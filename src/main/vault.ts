@@ -169,9 +169,12 @@ export class VaultSession {
     const token=this.captureSession();return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.prepare(relPath,chapter,expectedVersion)})
   }
   async ledgerComplete(relPath:string,taskId:string,revision:string){const token=this.captureSession();return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.complete(relPath,taskId,revision)})}
+  async ledgerKey(relPath:string){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);return this.memoryContext().vaultKey+':'+this.ledgerStore!.owner(relPath).noteId})}
   async ledgerContexts(relPath:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.contexts(relPath)}
   async ledgerPage(relPath:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);return this.ledgerStore!.wirePage(relPath,cursor)})}
 
+  async ledgerMaintenancePreview(relPath:string,action:'compress'|'clear'){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintenancePreview(relPath,action)})}
+  async ledgerMaintenanceCommit(relPath:string,action:'compress'|'clear',items:readonly {taskId:string;revision:number}[]){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintain(relPath,action,items)})}
   ledgerRegistryRevision(){return this.ledgerStore?.registryRevision()??null}
   async ledgerRepair(expected:string|null){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();this.ledgerStore!.repairRegistry(expected)})}
   async ledgerImage(relPath:string,taskId:string,revision:number,field:'prompt'|'answer'){

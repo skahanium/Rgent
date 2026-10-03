@@ -1,3 +1,5 @@
+import {ReasoningStore} from './reasoning-store.ts'
+import {SummaryCache,summaryHash} from './summary-cache.ts'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, safeStorage, shell } from 'electron'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -545,6 +547,17 @@ function registerIpc(): void {
     return state
   })
   registerTrustedHandle(IPC.treeList, async () => vault?.tree() ?? [])
+  const maintenancePreviews=new Map<string,{sessionId:string;objectVersion:string;relPath:string;action:'compress'|'clear';records:{taskId:string;revision:number}[]}>()
+  registerTrustedHandle(IPC.ledgerMaintenance,async(event,value:unknown)=>{
+    try{if(!value||typeof value!=='object'||Array.isArray(value))throw Error();const r=value as Record<string,unknown>
+      if(Object.keys(r).some(k=>!['sessionId','objectVersion','relPath','action','previewId'].includes(k))||typeof r.sessionId!=='string'||typeof r.objectVersion!=='string'||typeof r.relPath!=='string'||!['compress','clear'].includes(String(r.action))||r.previewId!==undefined&&typeof r.previewId!=='string')throw Error()
+      if(!vault)throw Error();vault.assertSession(r.sessionId);if(structureGate.isBusy()||agentHost?.active().length||agentHost?.hasPending())throw Error('STRUCTURE_BUSY')
+      const note=await vault.read(r.relPath);if(!vault.acceptsObject(r.relPath,r.objectVersion,note.objectVersion))throw Error('NOTE_REPLACED')
+      const owner=`${event.sender.id}:${event.senderFrame!.routingId}`
+      if(r.previewId){const key=owner+':'+r.previewId,preview=maintenancePreviews.get(key);maintenancePreviews.delete(key);if(!preview||preview.sessionId!==r.sessionId||preview.objectVersion!==r.objectVersion||preview.relPath!==r.relPath||preview.action!==r.action)throw Error('STALE_PREVIEW');return {ok:true,value:await vault.ledgerMaintenanceCommit(preview.relPath,preview.action,preview.records)}}
+      const preview=await vault.ledgerMaintenancePreview(r.relPath,r.action as 'compress'|'clear'),id=randomUUID();if(maintenancePreviews.size>=128)maintenancePreviews.delete(maintenancePreviews.keys().next().value!);maintenancePreviews.set(owner+':'+id,{sessionId:r.sessionId,objectVersion:r.objectVersion,relPath:r.relPath,action:r.action as 'compress'|'clear',records:preview.records});return {ok:true,value:{id,...preview}}
+    }catch{return {ok:false,error:'LEDGER_UNAVAILABLE'}}
+  })
   registerTrustedHandle(IPC.ledgerRepair,async(_event,value:unknown)=>{try{if(!value||typeof value!=='object'||Array.isArray(value))throw Error();const r=value as Record<string,unknown>;if(Object.keys(r).sort().join()!=='registryRevision,sessionId'||typeof r.sessionId!=='string'||r.registryRevision!==null&&(typeof r.registryRevision!=='string'||!/^[a-f0-9]{64}$/.test(r.registryRevision)))throw Error();if(!vault)throw Error();vault.assertSession(r.sessionId);if(structureGate.isBusy()||agentHost?.active().length)throw Error();await vault.ledgerRepair(r.registryRevision as string|null);return {ok:true}}catch{return {ok:false,error:'LEDGER_REGISTRY_INVALID'}}})
   registerTrustedHandle(IPC.ledgerGet,async(_event,value:unknown)=>{
     try{
@@ -823,7 +836,11 @@ app.whenReady().then(() => {
       return {credential:modelConfig.credential(modelRecordId),limits:extraReferences ? config.limits.local : config.limits.none}
     }
   })
+  const reasoningStore=new ReasoningStore(path.join(app.getPath('userData'),'reasoning-v2'))
+  const contextCache=new SummaryCache(path.join(app.getPath('userData'),'context-cache-v2'))
   agentHost = new AgentHost({
+    onReasoning:(id,text)=>reasoningStore.write(vault!.memoryContext().vaultKey,id,text),
+    summaries:{cache:contextCache,key:async relPath=>summaryHash(await vault!.ledgerKey(relPath))},
     ledger:{prepare:(relPath,chapter,version)=>vault!.ledgerPrepare(relPath,chapter,version),complete:(relPath,id,revision)=>vault!.ledgerComplete(relPath,id,revision),contexts:relPath=>vault!.ledgerContexts(relPath)},
     assertMemoryAuthorization: input => {
       if (!input.sessionId || input.memoryAuthorizationSignature !== memoryAuthorizationState(input.sessionId).signature) throw Error('STALE_PREVIEW')

@@ -82,7 +82,7 @@ describe('single model step', () => {
     })
     const events = []
     for await (const event of streamModelStep({ baseURL, modelId: 'test', apiKey: 'secret', messages: [{ role: 'user', content: 'find' }], tools: { search_library: { description: 'search', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } } }, signal: new AbortController().signal })) events.push(event)
-    expect(events).toEqual([{ type: 'tool-call', id: 'call-1', name: 'search_library', input: { query: 'needle' } }, { type: 'finish', reason: 'tool-calls' }])
+    expect(events).toEqual([{ type: 'tool-call', id: 'call-1', name: 'search_library', input: { query: 'needle' } }, { type: 'finish', reason: 'tool-calls', usage:{inputTokens:null,outputTokens:null} }])
     expect(requests).toBe(1)
     expect(sent.tools).toHaveLength(1)
   })
@@ -133,7 +133,7 @@ it('exposes an unknown tool attempt for finite Host refusal without SDK auto rep
   const events = []
   for await (const event of streamModelStep({ baseURL, modelId: 'test', apiKey: 'secret', tools: { search_library: { description: 'search', inputSchema: { type: 'object' } } }, messages: [{ role: 'user', content: 'hi' }], signal: new AbortController().signal })) events.push(event)
   expect(events[0]).toMatchObject({ type: 'tool-call', id: 'u', name: 'foreign', invalid: true })
-  expect(events.at(-1)).toEqual({ type: 'finish', reason: 'tool-calls' })
+  expect(events.at(-1)).toEqual({ type: 'finish', reason: 'tool-calls', usage:{inputTokens:null,outputTokens:null} })
 })
 
 

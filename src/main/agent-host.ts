@@ -1,3 +1,5 @@
+import {conservativeTokens} from './context-budget.ts'
+import {SummaryCache,summaryGroups,SUMMARY_SECTIONS,validSummaryText,type SummaryGenerator} from './summary-cache.ts'
 import type { ModelMessage, AssistantContent, ToolContent } from 'ai'
 import type { ScopedAgentTools } from './scoped-agent-tools.ts'
 import { createMemoryUsePermit, MEMORY_NOTICE, memorySection, type MemoryUsePort, type MemoryUsePermit } from './memory-use.ts'
@@ -60,6 +62,7 @@ export type HostDependencies = {
     complete(relPath:string,taskId:string,bodyRevision:string):Promise<unknown>
     contexts(relPath:string):Promise<ContextChapter[]>
   }
+  summaries?:{cache:SummaryCache;key(relPath:string):Promise<string>}
   root: () => string | null
   authorize?: (input: HostStart) => Promise<TaskGrant>
   assertMemoryAuthorization?: (input: HostStart) => void
@@ -74,6 +77,7 @@ export type HostDependencies = {
   stream: (input: ModelCredential & { system: string; prompt: string; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<string>
   streamStep?: (input: ModelCredential & { system: string; messages: ModelMessage[]; tools?: typeof READ_ONLY_TOOL_SCHEMAS; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<ModelStepEvent>
   /** Independent background permission snapshot; unavailable roles must not fail the foreground. */
+  onReasoning?: (taskId:string,text:string)=>void
   onTaskStarted?: (taskId: string) => void
   onTaskStartFailed?: (taskId: string) => void
   onTaskMaterialDiscarded?: (taskId: string) => void
@@ -296,9 +300,12 @@ export class AgentHost {
       const marked = markPrompt(original.content, { ...input, taskId: id })
       const submitted = promptBlock(marked, id)
       const placement = submitted.position
-      const budget = this.inputBudget(credential.contextTokens)
+      const habits = this.deps.assistant?.() ?? null
+      const system = systemText(habits)
+      const assistantLine = habits ? assistantSummary(habits) : ''
+      const budget = this.inputBudget(credential.contextTokens) - conservativeTokens(system)
       // Check that the current prompt and its nearby paragraph fit before changing disk.
-      const initial = buildHostContext({ source: marked, prompt: input.promptText, placement, inputBudgetTokens: budget, countTokens: byteCount, memory: memory?.recall })
+      const initial = buildHostContext({ source: marked, prompt: input.promptText, placement, inputBudgetTokens: budget, countTokens: this.deps.ledger?conservativeTokens:byteCount, memory: memory?.recall })
       if (initial.status === 'too-large') throw new Error(initial.reason)
       await this.requirePermission(root, input.relPath)
       await grant?.assertLive('write',input.relPath)
@@ -307,15 +314,14 @@ export class AgentHost {
 
       const startedAt = new Date().toISOString()
       // 助手习惯与模型、上限一样在任务启动时固定；运行中改设置只影响新任务。
-      const habits = this.deps.assistant?.() ?? null
-      const system = systemText(habits)
-      const assistantLine = habits ? assistantSummary(habits) : ''
       let answer = ''
       // 推理只进账本；trace 按发生顺序记这一步做了什么（模型步、工具、失败、收尾）。
       let reasoning = ''
       const trace: string[] = []
       const noteTrace = (line: string): void => { if (trace.length < 200) trace.push(line) }
       const persisted = { answer: '' }
+      const metrics:NonNullable<LedgerChapterWrite['metrics']>=[]
+      let usedSummaries:SummaryGenerator[]=[]
       let steps = 0
       let attempts = 0
       let outputBytes = 0
@@ -341,6 +347,7 @@ export class AgentHost {
         this.signals.set(key, signal)
         snapshot('running')
         let summary: ContextSummary | undefined
+        const summaryKey=this.deps.summaries?await this.deps.summaries.key(input.relPath):null
         let policySource = ''
         let historicalChapters:ContextChapter[]|undefined
         let policy: { allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[] } | undefined
@@ -357,9 +364,10 @@ export class AgentHost {
         const step = (outgoing: ModelMessage[], withTools: boolean, maxOutputTokens: number): AsyncIterable<ModelStepEvent> => {
           if (++steps > limits.steps) throw Error('MODEL_STEP_LIMIT')
           const schemas = withTools ? READ_ONLY_TOOL_SCHEMAS : undefined
-          if (byteCount(JSON.stringify(outgoing)) + (schemas ? byteCount(JSON.stringify(schemas)) : 0) > budget) throw Error('MODEL_CONTEXT_LIMIT')
+          if (conservativeTokens(JSON.stringify(outgoing)) + (schemas ? conservativeTokens(JSON.stringify(schemas)) : 0) > budget) throw Error('MODEL_CONTEXT_LIMIT')
           activity = `模型第 ${steps} 步`
           snapshot('running')
+          const metric={step:steps,estimatedInput:conservativeTokens(system+JSON.stringify(outgoing)+(schemas?JSON.stringify(schemas):'')),actualInput:null as number|null,actualOutput:null as number|null};metrics.push(metric)
           const create = () => {
             if (signal.aborted) throw Error('TASK_CANCELLED')
             scoped?.markSent(withTools)
@@ -369,7 +377,7 @@ export class AgentHost {
             ? this.deps.streamStep({ ...credential, system, messages: outgoing, ...(schemas ? { tools: schemas } : {}), maxOutputTokens }, signal)
             : textEvents(this.deps.stream({ ...credential, system, prompt: String(outgoing[0]?.content ?? ''), maxOutputTokens }, signal))
           }
-          return safeModelStep(create, signal, credential.apiKey)
+          return (async function*(){for await(const event of safeModelStep(create,signal,credential.apiKey)){if(event.type==='finish'&&event.usage){metric.actualInput=event.usage.inputTokens;metric.actualOutput=event.usage.outputTokens}yield event}})()
         }
         const addOutput = (text: string) => {
           outputBytes += byteCount(text)
@@ -387,9 +395,43 @@ export class AgentHost {
           const currentPrompt = promptBlock(source, id)
           if (currentPrompt.text !== submitted.text) throw Error('任务口令已被外部修改')
           const metadata = toolsEnabled ? `\n本场工具来源清单（正文须经工具读取，附件和账本不可读）：${JSON.stringify(grant!.sources.map(s => ({ sourceId: s.sourceId, title: s.title, relPath: s.relPath })))}` : ''
-          const planBudget = budget - byteCount(metadata) - (toolsEnabled ? byteCount(JSON.stringify(READ_ONLY_TOOL_SCHEMAS)) : 0) - byteCount(JSON.stringify(messages)) - 128
-          const plan = buildHostContext({ source, chapters:historicalChapters, prompt: input.promptText, placement: currentPrompt.position, inputBudgetTokens: planBudget, countTokens: byteCount, summary, memory: memory?.recall, ...policy })
+          const planBudget = budget - conservativeTokens(metadata) - (toolsEnabled ? conservativeTokens(JSON.stringify(READ_ONLY_TOOL_SCHEMAS)) : 0) - conservativeTokens(JSON.stringify(messages)) - 128
+          const plan = buildHostContext({ source, chapters:historicalChapters, prompt: input.promptText, placement: currentPrompt.position, inputBudgetTokens: planBudget, countTokens: this.deps.ledger?conservativeTokens:byteCount, summary, memory: memory?.recall, ...policy })
           if (plan.status === 'too-large') throw Error(plan.reason)
+          if (plan.status === 'needs-summary' && this.deps.ledger) {
+            const cache=this.deps.summaries?.cache,quota=Math.min(8192,Math.floor(planBudget*.3))*.25
+            const cached=cache&&summaryKey?cache.select(summaryKey,plan.chapters,quota,conservativeTokens):undefined
+            if(cached&&cached.sourceChapterIds.length===plan.chapters.length){summary=cached;noteTrace(`复用历史摘要：${cached.generators?.map(g=>g.modelId+'@'+g.host).join('、')}`);continue}
+            const generator:SummaryGenerator={modelId:credential.modelId,connection:credential.provider,host:new URL(credential.baseURL).host,time:new Date().toISOString(),format:1}
+            const generated:ContextSummary=cached??{text:'',sourceChapterIds:[],generators:[]}
+            const prefix=`仅整理下列获准历史，不含推理。输出以下六段，未知写“未确定”，不要输出机器元数据：${SUMMARY_SECTIONS.join('、')}。摘要不是证据，不新增事实。\n`
+            if(cache&&summaryKey&&steps<limits.steps-1){const blocks=cache.valid(summaryKey,plan.chapters).filter(b=>b.level===1),siblings=blocks.filter(b=>b.dependencyKey===blocks[0]?.dependencyKey).slice(0,4)
+              if(siblings.length>=4){const combined=plan.chapters.filter(c=>siblings.some(b=>b.covered.some(d=>d.id===c.sourceId))),payload=prefix+'合并以下已核验块摘要，保留六段结构：'+JSON.stringify(siblings.map(b=>b.text));let merged=''
+                if(conservativeTokens(JSON.stringify([{role:'user',content:payload}]))<=budget){await guard();for await(const event of step([{role:'user',content:payload}],false,Math.max(64,Math.min(1024,Math.floor(quota))))){await guard();if(event.type==='text'){addOutput(event.text);merged+=event.text}else if(event.type==='reasoning')addOutput(event.text);else if(event.type==='tool-call')throw Error('MODEL_PROTOCOL_ERROR')}
+                  if(validSummaryText(merged)){try{cache.put(summaryKey,combined,merged,generator,undefined,siblings)}catch{noteTrace('二级摘要未保存；一级与原历史保持')}}
+                }
+              }
+            }
+            for(const group of summaryGroups(plan.chapters).reverse()){
+              if(group.every(c=>cached?.sourceChapterIds.includes(c.sourceId)))continue
+              if(steps>=limits.steps-1)break
+              const prior=cache&&summaryKey?cache.prior(summaryKey,group):undefined
+              const raw=JSON.stringify(group.map(c=>({id:c.sourceId,material:c.text}))),payload=prefix+(prior?'增量合并；保留仍成立的信息。旧摘要：'+prior.text+'\n':'从原记录重建。\n')+raw
+              if(conservativeTokens(JSON.stringify([{role:'user',content:payload}]))>budget)continue
+              await guard();const refs=group.map(c=>({kind:'ledger' as const,sourceId:c.sourceId}));scoped?.recordContext(refs)
+              if(currentSnapshot.sessionId&&currentSnapshot.objectVersion)materials.context(source,refs,{...currentSnapshot,sessionId:currentSnapshot.sessionId,objectVersion:currentSnapshot.objectVersion,relPath:input.relPath},scoped?.contextDependencies,historicalChapters)
+              let text=''
+              for await(const event of step([{role:'user',content:payload}],false,Math.max(64,Math.min(1024,this.outputBudget(credential.contextTokens),Math.floor(quota))))){await guard();if(event.type==='text'){addOutput(event.text);text+=event.text}else if(event.type==='reasoning')addOutput(event.text);else if(event.type==='tool-call')throw Error('MODEL_PROTOCOL_ERROR')}
+              if(!validSummaryText(text)&&steps<limits.steps-1){const repair=prefix+'只修复这份草稿的六段格式，不增添事实：'+text;text='';for await(const event of step([{role:'user',content:repair}],false,1024)){await guard();if(event.type==='text'){addOutput(event.text);text+=event.text}else if(event.type==='reasoning')addOutput(event.text);else if(event.type==='tool-call')throw Error('MODEL_PROTOCOL_ERROR')}}
+              if(!validSummaryText(text)){noteTrace('历史摘要格式不合格，保留回答步骤并省略对应历史');continue}
+              if((await wait(this.readBound(root,input.relPath))).content!==source){summary=undefined;continue contextLoop}
+              if(cache&&summaryKey){try{cache.put(summaryKey,group,text,generator,prior)}catch{noteTrace('摘要缓存未保存；原历史未改动')}}
+              if(conservativeTokens(generated.text+'\n'+text)<=quota){generated.text+='\n'+text;generated.sourceChapterIds.push(...group.map(c=>c.sourceId));generated.generators!.push(generator)}
+            }
+            summary=cache&&summaryKey?cache.select(summaryKey,plan.chapters,quota,conservativeTokens)??generated:generated
+            noteTrace(summary.text?'历史摘要已生成；元数据由程序核验':'历史预算不足，省略较旧历史，保留回答步骤')
+            continue
+          }
           if (plan.status === 'needs-summary') {
             const summaries: string[] = []
             let summaryBatch = 0
@@ -420,6 +462,7 @@ export class AgentHost {
             summary = { text: summaries.join('\n'), sourceChapterIds: plan.chapters.map(chapter => chapter.sourceId) }
             continue
           }
+          usedSummaries=summary?.generators??[]
           const omitted = plan.omitted.bodyBlockNumbers.length || plan.omitted.ledgerChapterIds.length
             ? `\n省略：正文块 ${plan.omitted.bodyBlockNumbers.join(', ') || '无'}；账本章 ${plan.omitted.ledgerChapterIds.join(', ') || '无'}。` : ''
           const memoryOmitted = plan.omitted.memoryIds.length ? `\n按需记忆因预算省略 ${plan.omitted.memoryIds.length} 条。` : ''
@@ -497,7 +540,7 @@ export class AgentHost {
             results.push({ type: 'tool-result', toolCallId: callId, toolName: call.name, output: failure ? { type: 'error-json', value: { error: failure } } : { type: 'json', value: value as import('ai').JSONValue } })
           }
           messages.push({ role: 'assistant', content: parts }, { role: 'tool', content: results })
-          if (byteCount(JSON.stringify(messages)) > budget) throw Error('MODEL_CONTEXT_LIMIT')
+          if (conservativeTokens(JSON.stringify(messages)) > budget) throw Error('MODEL_CONTEXT_LIMIT')
           if (answer) await wait(checkpoint())
         }
       }, async (status, reason) => {
@@ -506,7 +549,8 @@ export class AgentHost {
         grant?.revoke()
         // Finalize even on cancellation; no generated bytes are lost if a late write conflicts.
         noteTrace(`收尾：${status}${reason ? `（${String(reason)}）` : ''}`)
-        const finalSource = {
+        try{if(reasoning)this.deps.onReasoning?.(id,reasoning)}catch{noteTrace('短期推理未保存，回答不受影响')}
+        const finalSource = {metrics,summaryGenerators:usedSummaries,
           taskId: id, startedAt, status, prompt: input.promptText, answer,
           ...(reason ? { reason: String(reason) } : {}),
           ...(reasoning ? { reasoning } : {}),
@@ -540,7 +584,7 @@ export class AgentHost {
   }
 
   private inputBudget(contextTokens: number): number {
-    // One UTF-8 byte per estimated token deliberately overestimates usage.
+    // Output and tool-return reserves are not derived from UTF-8 byte length.
     return Math.max(0, contextTokens - this.outputBudget(contextTokens) - 4096)
   }
 
