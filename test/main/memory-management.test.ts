@@ -29,3 +29,15 @@ it('single-use previews bind owner and exact revision; a stale request cannot ov
   expect(service.snapshot().record.entries[0]?.content).toBe('人改写的新约定')
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
+it('a late enabled initialization cannot change config or cancel the new vault engine',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-config-call-')),a=path.join(base,'A'),b=path.join(base,'New');await mkdir(a);await mkdir(b)
+ const {vaultRootIdentity}=await import('../../src/main/watch.ts'),vault=new VaultSession(base,()=>{});vault.restoreVerified(a,vaultRootIdentity(a));const service=new WorkingMemoryService(vault,()=>null);await service.initialize()
+ let release!:()=>void,entered!:()=>void;const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r)
+ const initialize=service.initialize.bind(service);vi.spyOn(service,'initialize').mockImplementation(async()=>{const result=await initialize();entered();await gate;return result})
+ const setVaultMemory=vi.fn(),cancel=vi.fn(),ipc=createMemoryIpc({vault:()=>vault,service:()=>service,config:()=>({setVaultMemory}) as any,engine:()=>({cancel}) as any,recheck:async()=>{}})
+ try{
+  const old=ipc.handle('owner','config',{sessionId:vault.captureSession(),target:'vault',vault:{enabled:true,override:{mode:'inherit'}}})
+  await started;await vault.openVerified(b,vaultRootIdentity(b));release();expect((await old).ok).toBe(false)
+  expect(setVaultMemory).not.toHaveBeenCalled();expect(cancel).not.toHaveBeenCalled()
+ }finally{release?.();vault.dispose();await rm(base,{recursive:true,force:true})}
+})

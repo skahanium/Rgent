@@ -10,7 +10,7 @@
  * 最后给总账；有失败就退出码 1。
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, renameSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, renameSync, statSync, realpathSync, chmodSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
@@ -226,8 +226,10 @@ async function verifySidebarWidth(page, shot) {
     await settle()
     const committed = await page.eval(geometry)
     check('真实拖动松开后提交宽度且保持正文选区', committed.width === 280 && JSON.stringify(committed.selection) === JSON.stringify(dragging.selection))
+    check('重载前已保存本库展开状态和活动篇', await waitFor(page, `(async()=>{const state=await window.rgent.vaultGet();const workspace=await window.rgent.vaultWorkspaceGet(state.sessionId);return workspace?.sidebarHidden===false && workspace.active===${JSON.stringify(activePath)}})()`))
     await page.call('Page.reload', {})
-    check('重新加载页面恢复本库首选宽度而保持默认收起', await waitFor(page, `document.querySelector('.sidebar-resizer')?.getAttribute('aria-valuenow') === '280' && document.querySelector('.tree-panel')?.classList.contains('is-collapsed')`))
+    // A saved workspace now restores its expanded state; only a new workspace uses the default.
+    check('重新加载页面恢复本库首选宽度、展开状态和活动篇', await waitFor(page, `document.querySelector('.sidebar-resizer')?.getAttribute('aria-valuenow') === '280' && !document.querySelector('.tree-panel')?.classList.contains('is-collapsed') && document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(activePath)}`))
     await toggle(true)
     await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(node => node.dataset.path === ${JSON.stringify(activePath)})`)
     await page.eval(`[...document.querySelectorAll('.tree-note')].find(node => node.dataset.path === ${JSON.stringify(activePath)})?.click()`)
@@ -518,6 +520,7 @@ const longNote = (() => {
 
 const visualOnly = process.env.RGENT_UI_VISUAL_ONLY === '1'
 const imeOnly = process.env.RGENT_UI_IME_ONLY === '1'
+const multiVaultOnly = process.env.RGENT_UI_MULTI_VAULT_ONLY === '1'
 
 /** Browser IME commands exercise the real input bridge, rather than inserting final Chinese text. */
 async function verifyComposition(page, vault, shot) {
@@ -1170,6 +1173,146 @@ async function seedVisualModels(page) {
   })()`)
 }
 
+async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,electron,child) {
+  const openNote=async(name)=>{await waitFor(page,`[...document.querySelectorAll('.tree-note')].some(n=>n.dataset.path===${JSON.stringify(name)})`);await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(name)}).click()`);await waitFor(page,`document.querySelector('.tab[aria-selected="true"]')?.textContent.includes(${JSON.stringify(name.replace(/\.md$/,''))}) && document.querySelector('.cm-content')?.textContent.includes(${JSON.stringify(name==='第二篇.md'?'A 的第二篇':'库 ')})`)}
+  const switchTo=async(id,label)=>{
+    await waitFor(page,`!document.querySelector('.vault-manager:not([open])')`)
+    await page.eval(`document.querySelector('.status-vault').click()`)
+    await waitFor(page,`!!document.querySelector('.vault-manager[open] [data-vault-open="${id}"]:not(:disabled)')`)
+    await page.eval(`document.querySelector('.vault-manager[open] [data-vault-open="${id}"]').click()`)
+    const ok = await waitFor(page,`document.querySelector('.status-vault')?.textContent===${JSON.stringify(label)} && !document.querySelector('.vault-manager[open]')`)
+    if (!ok) throw new Error('切换未完成：'+await page.eval(`JSON.stringify({vault:document.querySelector('.status-vault')?.textContent,status:document.querySelector('.vault-manager-status')?.textContent,inert:document.querySelector('#app').inert,unavailable:document.querySelector('.note-unavailable')?.textContent,notice:document.querySelector('.status-host-notice')?.textContent})`))
+    return ok
+  }
+  check('启动恢复最后使用库 A',await waitFor(page,`document.querySelector('.status-vault')?.textContent==='研究库 A'`))
+  await openNote('同名.md');await openNote('第二篇.md');await openNote('同名.md')
+  await page.eval(`(()=>{const view=document.querySelector('.cm-content').cmTile.root.view;view.dispatch({selection:{anchor:30,head:34}});if(document.querySelector('.tree-toggle').getAttribute('aria-expanded')==='true')document.querySelector('.tree-toggle').click()})()`)
+  await sleep(150)
+  await page.eval(`document.querySelector('.cm-content').cmTile.root.view.scrollDOM.scrollTop=400`)
+  await sleep(700)
+  const old=await page.eval(`(async()=>{const s=await window.rgent.vaultGet();globalThis.__oldNote=await window.rgent.noteRead('同名.md');globalThis.__oldSession=s.sessionId;globalThis.__oldMedia='rgent-vault://media/?p=same.png&s='+encodeURIComponent(s.sessionId);return {session:s.sessionId,workspace:await window.rgent.vaultWorkspaceGet(s.sessionId)}})()`)
+  check('工作区仅保存布局，不包含正文或临时模型',old.workspace?.tabs.length===2 && old.workspace.active==='同名.md' && old.workspace.sidebarHidden && !JSON.stringify(old.workspace).includes('A 段落') && !JSON.stringify(old.workspace).includes('modelId'),JSON.stringify(old.workspace))
+  // The native dialog is controlled only in this disposable test process.
+  await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;globalThis.__oldOpenDialog=d.showOpenDialog;d.showOpenDialog=async()=>({canceled:true,filePaths:[]})})()`)
+  await page.eval(`document.querySelector('.status-vault').click()`)
+  await waitFor(page,`!!document.querySelector('[data-vault-action="open"]')`)
+  await page.eval(`document.querySelector('[data-vault-action="open"]').click()`)
+  await waitFor(page,`document.querySelector('.vault-manager')?.getAttribute('aria-busy')==='false'`)
+  check('取消选库保持旧会话、选区和浮层',await page.eval(`(async()=>{const view=document.querySelector('.cm-content').cmTile.root.view;return (await window.rgent.vaultGet()).sessionId===globalThis.__oldSession && view.state.selection.main.anchor===30 && !!document.querySelector('.vault-manager[open]')})()`))
+  await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showOpenDialog=globalThis.__oldOpenDialog;true`)
+  await page.eval(`document.querySelector('[data-vault-action="manage"]').click()`)
+  await page.eval(`(()=>{const r=document.querySelector('[data-vault-id="vault-b"]');r.querySelector('input').value='写作库 B · 长名称工作资料';r.querySelector('input').dispatchEvent(new Event('input',{bubbles:true}));r.querySelector('[data-vault-action="label"]').click()})()`)
+  check('库显示名称可保存而磁盘目录不改名',await waitFor(page,`document.querySelector('[data-vault-open="vault-b"]')?.textContent.includes('长名称工作资料') && document.querySelector('.vault-manager')?.getAttribute('aria-busy')==='false'`) && existsSync(sibling))
+  await page.eval(`(()=>{const r=document.querySelector('[data-vault-id="vault-b"]');r.querySelector('input').value='写作库 B';r.querySelector('input').dispatchEvent(new Event('input',{bubbles:true}));r.querySelector('[data-vault-action="label"]').click()})()`)
+  await waitFor(page,`document.querySelector('[data-vault-open="vault-b"]')?.textContent==='写作库 B' && document.querySelector('.vault-manager')?.getAttribute('aria-busy')==='false'`)
+  await page.eval(`document.querySelector('[data-vault-id="vault-b"] [data-vault-action="pin"]').click()`)
+  check('固定后库列入已固定组',await waitFor(page,`[...document.querySelectorAll('.vault-manager-group')].some(s=>s.querySelector('h3')?.textContent==='已固定' && !!s.querySelector('[data-vault-id="vault-b"]'))`))
+  await page.eval(`document.querySelector('.vault-manager-close').click()`)
+  await waitFor(page,`!document.querySelector('.vault-manager')`)
+  check('应用内切换至库 B',await switchTo('vault-b','写作库 B'))
+  check('新库使用空工作区及默认收起状态',await page.eval(`document.querySelectorAll('.tab').length===0 && document.querySelector('.tree-panel')?.classList.contains('is-collapsed')`))
+  await page.eval(`document.querySelector('.tree-toggle').click()`)
+  await openNote('同名.md')
+  check('同名正文来自 B',await page.eval(`document.querySelector('.cm-content').textContent.includes('只属于 B') && !document.querySelector('.cm-content').textContent.includes('A 段落')`))
+  const media=await page.eval(`(async()=>({old:globalThis.__oldMedia,current:'rgent-vault://media/?p=same.png&s='+encodeURIComponent((await window.rgent.vaultGet()).sessionId)}))()`)
+  const images=await nativePage.eval(`(async()=>{const net=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').net;const old=await net.fetch(${JSON.stringify(media.old)});const current=await net.fetch(${JSON.stringify(media.current)});const bytes=new Uint8Array(await current.arrayBuffer());return {old:old.status,current:current.status,last:bytes.at(-1)}})()` )
+  check('旧库媒体地址不重新解释为新库同名图片',images.old===410 && images.current===200 && images.last===66,JSON.stringify(images))
+  const denied=await page.eval(`window.rgent.noteWrite({relPath:'同名.md',content:'跨库伪造',sessionId:globalThis.__oldSession,objectVersion:globalThis.__oldNote.objectVersion,expectedRevision:globalThis.__oldNote.revision})`)
+  check('旧会话写请求被拒绝且 B 未改变',!denied.ok && denied.error==='VAULT_CHANGED' && readFileSync(path.join(sibling,'同名.md'),'utf8').includes('只属于 B'))
+  check('返回 A 恢复两篇 tab、活动篇与侧栏',await switchTo('vault-a','研究库 A') && await waitFor(page,`document.querySelectorAll('.tab').length===2 && document.querySelector('.tab[aria-selected="true"]')?.textContent.includes('同名') && document.querySelector('.tree-panel')?.classList.contains('is-collapsed')`))
+  const position=await page.eval(`(()=>{const view=document.querySelector('.cm-content').cmTile.root.view;return {anchor:view.state.selection.main.anchor,head:view.state.selection.main.head,top:view.scrollDOM.scrollTop}})()`)
+  check('恢复选区与阅读位置',position.anchor===30 && position.head===34 && position.top>200,JSON.stringify(position))
+  await page.eval(`document.querySelector('.cm-content').cmTile.root.view.dispatch({selection:{anchor:0},changes:{from:0,insert:'切换前的新输入\\n'}})`)
+  check('有未保存输入时切换 B 成功',await switchTo('vault-b','写作库 B'))
+  check('切换前新输入已保存在 A，不写入 B',readFileSync(path.join(vault,'同名.md'),'utf8').startsWith('切换前的新输入')&&!readFileSync(path.join(sibling,'同名.md'),'utf8').includes('切换前的新输入'))
+  await sleep(700)
+  await page.call('Page.reload');check('页面重载恢复 B 当前工作区',await waitFor(page,`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelectorAll('.tab').length===1 && document.querySelector('.cm-content')?.textContent.includes('只属于 B')`))
+  check('最后使用库持久化为 B',JSON.parse(readFileSync(path.join(profile,'vault-catalog.json'),'utf8')).lastVaultId==='vault-b')
+  const created=path.join(path.dirname(sibling),'新建空库'),relocated=path.join(path.dirname(sibling),'已移动的空库')
+  await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;globalThis.__oldSaveDialog=d.showSaveDialog;d.showSaveDialog=async()=>({canceled:false,filePath:${JSON.stringify(created)}})})()`)
+  await page.eval(`document.querySelector('.status-vault').click()`);await waitFor(page,`!!document.querySelector('[data-vault-action="create"]')`)
+  await page.eval(`document.querySelector('[data-vault-action="create"]').click()`)
+  check('创建空库通过同一切换管线打开',await waitFor(page,`document.querySelector('.status-vault')?.textContent==='新建空库' && !document.querySelector('.vault-manager[open]')`) && existsSync(created))
+  const createdId=await page.eval(`(async()=>{const c=await window.rgent.vaultCatalog();return c.entries.find(e=>e.label==='新建空库').id})()`)
+  check('新空库不恢复旧库笔记',await page.eval(`document.querySelectorAll('.tab').length===0`))
+  await switchTo('vault-b','写作库 B')
+  renameSync(created,relocated)
+  await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;d.showOpenDialog=async()=>({canceled:false,filePaths:[${JSON.stringify(relocated)}]})})()`)
+  await page.eval(`document.querySelector('.status-vault').click()`);await waitFor(page,`!!document.querySelector('[data-vault-action="manage"]')`)
+  await page.eval(`document.querySelector('[data-vault-action="manage"]').click();document.querySelector('[data-vault-id="${createdId}"] [data-vault-action="relocate"]').click()`)
+  check('重新定位更新列表且保留文件',await waitFor(page,`document.querySelector('[data-vault-id="${createdId}"] .vault-manager-path p')?.textContent.includes('已移动的空库') && document.querySelector('.vault-manager')?.getAttribute('aria-busy')==='false'`) && existsSync(relocated))
+  await page.eval(`document.querySelector('[data-vault-id="${createdId}"] [data-vault-action="remove"]').click()`)
+  check('移除目录项前显示保留文件说明',await page.eval(`document.querySelector('[data-vault-id="${createdId}"] .vault-manager-confirmation').textContent.includes('不会删除')`))
+  await page.eval(`document.querySelector('[data-vault-id="${createdId}"] [data-vault-action="confirm-remove"]').click()`)
+  check('确认移除只删除目录项',await waitFor(page,`!document.querySelector('[data-vault-id="${createdId}"]')`) && existsSync(relocated))
+  await page.eval(`document.querySelector('.vault-manager-close').click()`)
+  await waitFor(page,`!document.querySelector('.vault-manager')`)
+  await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;d.showSaveDialog=async()=>({canceled:false,filePath:${JSON.stringify(path.join(sibling,'不允许的子库'))}})})()`)
+  await page.eval(`document.querySelector('.status-vault').click()`);await waitFor(page,`!!document.querySelector('[data-vault-action="create"]')`)
+  await page.eval(`document.querySelector('[data-vault-action="create"]').click()`)
+  check('拒绝嵌套建库且没有残留目录',await waitFor(page,`document.querySelector('.vault-manager-status')?.textContent.includes('不能互相包含')`) && !existsSync(path.join(sibling,'不允许的子库')))
+  await page.eval(`document.querySelector('.vault-manager-close').click()`)
+  await waitFor(page,`!document.querySelector('.vault-manager')`)
+  await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;d.showOpenDialog=globalThis.__oldOpenDialog;d.showSaveDialog=globalThis.__oldSaveDialog})()`)
+  chmodSync(sibling,0o500)
+  try {
+    await page.eval(`document.querySelector('.cm-content').cmTile.root.view.dispatch({changes:{from:0,insert:'必须保留的草稿'}})`)
+    await page.eval(`document.querySelector('.status-vault').click()`);await waitFor(page,`!!document.querySelector('[data-vault-open="vault-a"]')`)
+    await page.eval(`document.querySelector('[data-vault-open="vault-a"]').click()`)
+    await waitFor(page,`document.querySelector('.vault-manager')?.getAttribute('aria-busy')==='false' && document.querySelector('.vault-manager-status')?.textContent.includes('尚未保存')`)
+    check('正文保存失败留在原库并保留草稿',await page.eval(`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelector('.cm-content')?.textContent.includes('必须保留的草稿') && document.querySelector('#app').inert===false`) && !readFileSync(path.join(sibling,'同名.md'),'utf8').includes('必须保留的草稿'))
+    await page.eval(`document.querySelector('.vault-manager-close').click()`)
+  await waitFor(page,`!document.querySelector('.vault-manager')`)
+  } finally { chmodSync(sibling,0o700) }
+  await page.eval(`if(document.querySelector('.note-unavailable')?.hidden===false)document.querySelector('.note-recheck').click()`)
+  await waitFor(page,`document.querySelector('.note-unavailable')?.hidden===true`)
+  await switchTo('vault-a','研究库 A');await switchTo('vault-b','写作库 B')
+  check('存储恢复并重新核验后切换保存草稿',readFileSync(path.join(sibling,'同名.md'),'utf8').includes('必须保留的草稿'))
+  await page.eval(`(async()=>{const c=await window.rgent.vaultCatalog();await window.rgent.vaultCatalogChange({id:'vault-a',revision:c.revision,action:'label',label:'研究资料 · 长期记忆、项目建设与多库工作区的完整记录'})})()`)
+  for(const theme of ['day','night']) {
+    await page.eval(`window.rgent.themeSet('${theme}')`)
+    for(const [width,height] of [[1200,800],[800,560],[1840,1000]]) {
+      await page.call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false})
+      await page.eval(`document.querySelector('.status-vault').click()`);await waitFor(page,`!!document.querySelector('[data-vault-action="manage"]')`)
+      await page.eval(`document.querySelector('[data-vault-action="manage"]').click()`)
+      check(theme+' '+width+' 库管理不横向溢出',await page.eval(`document.querySelector('.vault-manager').scrollWidth<=document.querySelector('.vault-manager').clientWidth && document.documentElement.scrollWidth<=innerWidth`))
+      await page.eval(`document.querySelectorAll('.vault-manager-path').forEach(n=>n.open=true);document.querySelector('.vault-manager-open').focus()`)
+      await shot(page,'vault-manager-'+theme+'-'+width)
+      await page.eval(`document.querySelector('.vault-manager-close').click()`)
+      await waitFor(page,`!document.querySelector('.vault-manager')`)
+    }
+  }
+  const second=spawn(electron,['.',`--user-data-dir=${profile}`,'--no-sandbox','--disable-gpu'],{cwd:root,env:{...process.env,ELECTRON_RUN_AS_NODE:undefined},stdio:'ignore'})
+  const exited=await new Promise(resolve=>{const timer=setTimeout(()=>{second.kill('SIGTERM');resolve(false)},6000);second.on('exit',code=>{clearTimeout(timer);resolve(code===0)})})
+  check('第二次启动只唤起原窗口且退出',exited && await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').BrowserWindow.getAllWindows().length===1`))
+  await nativePage.eval(`setTimeout(()=>process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').app.exit(0),10);true`)
+  nativePage.close();page.close()
+  await new Promise((resolve,reject)=>{if(child.exitCode!==null)return resolve();const t=setTimeout(()=>reject(new Error('原窗口进程退出超时')),6000);child.once('exit',()=>{clearTimeout(t);resolve()})})
+  const restart=async(assertion)=>{
+    const port=await availablePort()
+    const processRun=spawn(electron,['.',`--user-data-dir=${profile}`,'--no-sandbox','--disable-gpu','--disable-renderer-backgrounding','--disable-background-timer-throttling',`--remote-debugging-port=${port}`],{cwd:root,env:{...process.env,ELECTRON_RUN_AS_NODE:undefined},stdio:'ignore'})
+    let restoredPage
+    try {
+      for(let i=0;i<40;i++){try{if((await fetch(`http://127.0.0.1:${port}/json/version`)).ok)break}catch{}await sleep(250)}
+      restoredPage=await connect(port)
+      await assertion(restoredPage)
+    }finally{restoredPage?.close();processRun.kill('SIGKILL');await new Promise((resolve,reject)=>{if(processRun.exitCode!==null||processRun.signalCode!==null)return resolve();const t=setTimeout(()=>reject(new Error('重启夹具进程清理超时')),6000);processRun.once('exit',()=>{clearTimeout(t);resolve()})})}
+  }
+  await restart(async restoredPage=>{
+    check('实际进程重启恢复最后使用库及工作区',await waitFor(restoredPage,`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelectorAll('.tab').length===1 && document.querySelector('.cm-content')?.textContent.includes('必须保留的草稿')`))
+  })
+  renameSync(path.join(sibling,'同名.md'),path.join(sibling,'临时移走.md'))
+  await restart(async restoredPage=>{
+    check('重启时缺失笔记保留提示且不重建文件',await waitFor(restoredPage,`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelectorAll('.tab').length===1 && document.querySelector('.tab')?.textContent.includes('同名') && document.querySelector('.note-unavailable')?.hidden===false`) && !existsSync(path.join(sibling,'同名.md')))
+  })
+  const catalogBefore=readFileSync(path.join(profile,'vault-catalog.json'),'utf8')
+  renameSync(sibling,sibling+'-原对象');mkdirSync(sibling)
+  await restart(async restoredPage=>{
+    check('上次库被替换时停在选库，不回退其他库',await waitFor(restoredPage,`!!document.querySelector('.picker-card') && document.querySelectorAll('.tab').length===0`) && readFileSync(path.join(profile,'vault-catalog.json'),'utf8')===catalogBefore)
+    await restoredPage.eval(`[...document.querySelectorAll('.pick-btn')].find(n=>n.textContent==='已登记的笔记库').click()`);await waitFor(restoredPage,`!!document.querySelector('.vault-manager-close')`);await restoredPage.eval(`document.querySelector('.vault-manager-close').click()`);check('未打开库时关闭管理仍返回选库入口',await waitFor(restoredPage,`!!document.querySelector('.picker-card')`))
+  })
+}
+
 async function main() {
   const port = await availablePort()
   let inspectorPort = port
@@ -1183,6 +1326,17 @@ async function main() {
   mkdirSync(vault)
   writeFileSync(path.join(profile, 'vault.json'), JSON.stringify({ path: vault }))
   writeFileSync(path.join(profile, 'theme.json'), JSON.stringify({ mode: 'night' }))
+  if (multiVaultOnly) {
+    const sibling = path.join(workdir,'第二个笔记库');mkdirSync(sibling)
+    writeFileSync(path.join(vault,'同名.md'),'# 库 A\n\n'+Array.from({length:100},(_,i)=>'A 段落 '+i).join('\n\n'))
+    writeFileSync(path.join(vault,'第二篇.md'),'A 的第二篇')
+    writeFileSync(path.join(sibling,'同名.md'),'# 库 B\n\n只属于 B 的内容。')
+    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aSjAAAAAASUVORK5CYII=','base64')
+    writeFileSync(path.join(vault,'same.png'),Buffer.concat([png,Buffer.from('A')]))
+    writeFileSync(path.join(sibling,'same.png'),Buffer.concat([png,Buffer.from('B')]))
+    const entries=[{id:'vault-a',label:'研究库 A',path:realpathSync.native(vault),pinned:true},{id:'vault-b',label:'写作库 B',path:realpathSync.native(sibling),pinned:false}].map(e=>{const st=statSync(e.path,{bigint:true});return {...e,rootIdentity:`${st.dev}:${st.ino}`,lastUsed:null}})
+    writeFileSync(path.join(profile,'vault-catalog.json'),JSON.stringify({version:1,entries,lastVaultId:'vault-a'}))
+  }
   if (visualOnly) seedVisualVault(vault)
 
   else {
@@ -1318,6 +1472,12 @@ async function main() {
       page.restoreNativeWindow = () => nativePage.eval(`globalThis.__rgentFocusProbe?.destroy(); globalThis.__rgentTestWindow.show(); true`)
     }
 
+    if (multiVaultOnly) {
+      await verifyMultiVault(page,nativePage,vault,path.join(workdir,'第二个笔记库'),profile,shot,electron,child)
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode = failures === 0 ? 0 : 1
+      return
+    }
     if (imeOnly) {
       await waitFor(page, `document.querySelectorAll('.tree-row').length > 0`)
       await verifyComposition(page, vault, shot)

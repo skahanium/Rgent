@@ -160,7 +160,7 @@ function renderModelModule(center: HTMLElement, module: StatusModelModule | unde
   }
 }
 
-export function renderStatusbar(host: HTMLElement, model: StatusModel): void {
+export function renderStatusbar(host: HTMLElement, model: StatusModel, onVault?: () => void): void {
   // 左侧的固定槽位（设置入口）绝对定位、不参与栅格，也不被重绘清空——否则每次
   // 状态更新都会把按钮移除再放回，而移除会夺走焦点。
   const lead = container(host, 'status-lead')
@@ -181,18 +181,22 @@ export function renderStatusbar(host: HTMLElement, model: StatusModel): void {
 
   const center = container(host, 'status-center')
   const right = container(host, 'status-right')
-  right.replaceChildren()
-  const dot = document.createElement('span')
+
+  const dot = right.querySelector<HTMLElement>('.status-dot') ?? document.createElement('span')
   dot.className = 'status-dot'
   dot.dataset.state = model.network
   dot.setAttribute('role', 'img')
   dot.setAttribute('aria-label', '联网状态：离线')
   dot.title = '离线'
-  const vault = document.createElement('span')
+  const vault = right.querySelector<HTMLButtonElement>('.status-vault') ?? document.createElement('button')
+  vault.type = 'button'
+  vault.onclick = onVault ?? null
+  vault.setAttribute('aria-label', `切换或管理笔记库：${model.vault}`)
   vault.className = 'status-item status-vault'
   vault.textContent = model.vault
   vault.title = model.vault
-  right.append(dot, vault)
+  if (!dot.parentElement) right.append(dot)
+  if (!vault.parentElement) right.append(vault)
 
   renderModelModule(center, model.model)
   // 只在顺序不对时重排；常规重绘不移动节点，保住下拉与焦点。

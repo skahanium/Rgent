@@ -1,3 +1,9 @@
+import { parseStoredVault } from './notes-fs.ts'
+import { boundArguments, isVaultChannel, isVaultEvent } from '../shared/vault-binding.ts'
+import { VaultCatalog } from './vault-catalog.ts'
+import { VaultSwitch } from './vault-switch.ts'
+import type { VaultTarget } from '../shared/vault-management.ts'
+import { readFileSync } from 'node:fs'
 import {memoryDependency,sameMemoryDependency} from './memory-use.ts'
 import {historicalContextPolicy} from './ledger-provenance.ts'
 import {WorkingMemoryService} from './working-memory-service.ts'
@@ -11,7 +17,7 @@ import { randomUUID } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { asString, parseEntryCreateRequest, parseFlushDone, parseLifecycleRetryRequest, parseNoteName, parseNoteWriteRequest, parseRelocationCommitRequest, parseRelocationPreviewRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
-import { IPC } from '../shared/ipc.ts'
+import { IPC, type VaultState } from '../shared/ipc.ts'
 import type { ChromeTextSetResult } from '../shared/ipc.ts'
 import { loadChromeTextPreference, saveChromeTextPreference } from './theme-preference.ts'
 import { isChromeTextPreference } from '../shared/reading-preference.ts'
@@ -52,6 +58,10 @@ const rendererEntryUrl = rendererDevelopmentUrl ? new URL(rendererDevelopmentUrl
 /** 退出前给渲染进程留的写盘窗口。渲染进程没回应也不能把它卡死在这里。 */
 const FLUSH_GRACE_MS = 1000
 
+let vaultSwitch: import('./vault-switch.ts').VaultSwitch<import('../shared/vault-management.ts').VaultTarget, VaultState> | null = null
+let vaultCatalog: VaultCatalog | null = null
+let activeTarget: VaultTarget | null = null
+let startupVaultState: Extract<VaultState, {status:'needs-pick'}> | null = null
 let mainWindow: BrowserWindow | null = null
 let vault: VaultSession | null = null
 let quitting = false
@@ -77,10 +87,12 @@ const memoryIpc = createMemoryIpc({
   recheck: async (current, session) => {
     current.assertSession(session)
     await Promise.all([current.root ? agentHost?.recheckSources(current.root, session) : undefined])
+    current.assertSession(session)
   }
 })
 let cancellingForClose = false
 const memoryAuthorizationPreviews = new Map<string, { sessionId: string; signature: string;search:boolean }>()
+const maintenancePreviews=new Map<string,{sessionId:string;objectVersion:string;relPath:string;action:'compress'|'clear';records:{taskId:string;revision:number}[]}>()
 function memoryAuthorizationState(sessionId: string) {
   vault?.assertSession(sessionId)
   if (!vault || !modelConfig) return { signature: 'unavailable', disclosure: undefined }
@@ -94,6 +106,17 @@ const lifecycleErrorCodes = new Set(['BAD_PATH', 'BAD_REQUEST', 'NO_VAULT', 'VAU
   'PERMISSION_COLLISION', 'PERMISSIONS_INVALID', 'UNSAVED_DRAFT', 'PREVIOUS_TASK_UNSAVED',
   'LIFECYCLE_RECOVERY_REQUIRED', 'STRUCTURE_BUSY', 'OTHER_TASK_RUNNING', 'ATTACHMENT_COLLISION', 'LINK_SCAN_FAILED'])
 
+function visibleVaultState(): VaultState {
+  const state = startupVaultState && !vault?.root ? {...startupVaultState} : vault?.currentState() ?? {status:'needs-pick' as const,reason:'first-run' as const}
+  if (state.status === 'needs-pick' && !state.diagnostic && vaultCatalog?.view().diagnostic) state.diagnostic = '设备库目录记录无法读取。原记录已保留，请检查本机存储；仍可手动打开笔记库。'
+  if (state.status === 'ready' && activeTarget && vault?.root === activeTarget.path) {
+    const entry = vaultCatalog?.view().entries.find(e=>e.rootIdentity===activeTarget!.rootIdentity && e.path===activeTarget!.path)
+    state.rootName = entry?.label ?? activeTarget.label
+    state.vaultId = entry?.id
+  }
+  return state
+}
+
 function lifecycleError(error: unknown, fallback: string): string {
   return error instanceof Error && lifecycleErrorCodes.has(error.message) ? error.message : fallback
 }
@@ -102,7 +125,7 @@ function blocksStructureWrite(relPath: string): boolean {
   return !!vault?.root && structureGate.blocksWrite(vault.root, relPath)
 }
 
-async function flushBeforeStructure(win: BrowserWindow, cleanUnavailablePaths: readonly string[] = []): Promise<boolean> {
+async function flushBeforeStructure(win: BrowserWindow, cleanUnavailablePaths: readonly string[] = [], phase?: 'settings' | 'freeze'): Promise<boolean> {
   if (win.isDestroyed() || win.webContents.isDestroyed()) return false
   const id = randomUUID()
   return new Promise<boolean>((resolve) => {
@@ -111,7 +134,7 @@ async function flushBeforeStructure(win: BrowserWindow, cleanUnavailablePaths: r
       resolve(false)
     }, 120_000)
     lifecycleFlushes.set(id, (ok) => { clearTimeout(timer); lifecycleFlushes.delete(id); resolve(ok) })
-    win.webContents.send(IPC.lifecycleFlushRequest, id, cleanUnavailablePaths)
+    win.webContents.send(IPC.lifecycleFlushRequest, id, cleanUnavailablePaths, phase)
   })
 }
 
@@ -123,17 +146,27 @@ function clearFlushTimer(): void {
 
 async function verifyVaultImage(current:VaultSession,snapshot:import('../shared/ipc.ts').NoteSnapshot,request:import('../shared/ipc.ts').RemoteImageGetRequest){
  const c=request.context;let text:string|undefined
+ if(!c||typeof c.sessionId!=='string')return {ok:false as const}
+ current.assertSession(c.sessionId)
+ if(snapshot.sessionId!==c.sessionId)return {ok:false as const}
  if(c?.ledgerTaskId!==undefined){if(typeof c.ledgerTaskId!=='string'||!Number.isSafeInteger(c.ledgerRevision)||!['prompt','answer'].includes(c.ledgerField??''))return {ok:false as const};text=await current.ledgerImage(c.noteRelPath,c.ledgerTaskId,c.ledgerRevision!,c.ledgerField!)}
+ current.assertSession(c.sessionId)
  return verifyImageSource(snapshot,request,text)
 }
 function send(channel: string, payload?: unknown): void {
   if (channel === IPC.treeChanged || channel === IPC.noteExternalChange || channel === IPC.vaultLost) {
     for (const [controller, active] of imageControllers) {
       const c = active.request.context!
-      void active.vault.read(c.noteRelPath).then(async snapshot => {
-        const proof = await verifyVaultImage(active.vault,snapshot,active.request)
-        if (!proof.ok || proof.binding!==active.binding || active.vault.sessionId()!==c.sessionId) controller.abort()
-      }).catch(()=>controller.abort())
+      const imageSession=c.sessionId
+      if(typeof imageSession!=='string'){controller.abort();continue}
+      try {
+        active.vault.assertSession(imageSession)
+        void active.vault.runBound(imageSession, async () => {
+          const snapshot=await active.vault.read(c.noteRelPath);active.vault.assertSession(imageSession)
+          const proof = await verifyVaultImage(active.vault,snapshot,active.request);active.vault.assertSession(imageSession)
+          if (!proof.ok || proof.binding!==active.binding) controller.abort()
+        }).catch(()=>controller.abort())
+      } catch { controller.abort() }
     }
     const current = vault; const token = current?.sessionId()
     if (current?.root && token) {
@@ -142,7 +175,7 @@ function send(channel: string, payload?: unknown): void {
   }
   const target = mainWindow
   if (!target || target.isDestroyed()) return
-  target.webContents.send(channel, payload)
+  target.webContents.send(channel, isVaultEvent(channel) ? { session: vault?.sessionId() ?? null, args: [payload] } : payload)
 }
 
 async function settleHostBeforeClose(win: BrowserWindow): Promise<boolean> {
@@ -217,6 +250,7 @@ function runCloseAction(action: CloseAction, win: BrowserWindow, stalled = false
 }
 
 function createWindow(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); return }
   flushed = false
   rendererGone = false
   flushTimer = null
@@ -344,9 +378,14 @@ function registerIpc(): void {
   const trusted = (event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean =>
     isTrustedIpcSender(event, mainWindow, rendererEntryUrl)
   const registerTrustedHandle = (channel: string, listener: Parameters<typeof ipcMain.handle>[1]): void => {
-    ipcMain.handle(channel, (event, ...args) => {
+    ipcMain.handle(channel, async (event, ...args) => {
       if (!trusted(event)) throw new Error('BAD_SENDER')
-      return listener(event, ...args)
+      const current = vault,session = current?.sessionId() ?? null
+      const actual = isVaultChannel(channel) ? boundArguments(args, session) : args
+      if (vaultSwitch?.busy && [IPC.agentStart, IPC.agentAuthorizationPreview, IPC.noteCreate, IPC.folderCreate, IPC.relocationPreview, IPC.relocationCommit, IPC.lifecycleRetry, IPC.noteSaveCopyPreview, IPC.noteSaveCopyCommit, IPC.permissionsSet, IPC.memoryConfigSave, IPC.memoryPreviewCommit, IPC.memoryItemEdit, IPC.memoryItemDisable, IPC.memoryItemForget, IPC.memoryJobRetryPreview, IPC.ledgerMaintenance, IPC.ledgerMigrate, IPC.ledgerRepair].includes(channel as never)) throw Error('VAULT_SWITCH_BUSY')
+      const result = isVaultChannel(channel) && current ? await current.runBound(session, () => listener(event, ...actual)) : await listener(event, ...actual)
+      if (isVaultChannel(channel) && session !== (vault?.sessionId() ?? null)) throw Error('VAULT_CHANGED')
+      return result
     })
   }
   const registerTrustedOn = (channel: string, listener: Parameters<typeof ipcMain.on>[1]): void => {
@@ -361,10 +400,15 @@ function registerIpc(): void {
     [IPC.memoryMaintenancePreview,'maintenance'],
     [IPC.memoryJobRetryPreview, 'retry'], [IPC.memoryJobCancel, 'cancel']
   ] as const) registerTrustedHandle(channel, async (event, request) => {
+    const currentVault=vault,service=workingService(),session=currentVault?.sessionId(),root=currentVault?.root
     const result=await memoryIpc.handle(`${event.sender.id}:${event.senderFrame!.routingId}`, operation, request)
+    if(currentVault&&session)currentVault.assertSession(session)
     if(result.ok&&!['get','manual','restore','retry','maintenance'].includes(operation)){
-      const service=workingService();if(service){await service.recheckDeferred().catch(()=>{});await agentHost?.recheckSources(vault!.requireUsableRoot(),service.context().sessionId)}
-      send(IPC.memoryChanged,vault!.sessionId())
+      if(service&&currentVault&&session&&root){
+        await service.recheckDeferred().catch(()=>{});currentVault.assertSession(session)
+        await agentHost?.recheckSources(root,session);currentVault.assertSession(session)
+      }
+      send(IPC.memoryChanged,session)
     }
     return result
   })
@@ -564,45 +608,109 @@ function registerIpc(): void {
       return { ok: false, error: 'IO_ERROR' }
     }
   })
-  registerTrustedHandle(IPC.vaultGet, () => vault?.currentState() ?? { status: 'needs-pick', reason: 'first-run' })
-  registerTrustedHandle(IPC.vaultPick, async () => {
-    if (!vault) return { status: 'needs-pick', reason: 'first-run' }
-    if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
-    for(const controller of imageControllers.keys()) controller.abort()
-    const state=await vault.pick(mainWindow)
-    return state
+  registerTrustedHandle(IPC.vaultGet, () => visibleVaultState())
+  registerTrustedHandle(IPC.vaultCatalog, () => ({...vaultCatalog!.view(), activeId:activeTarget?.id ?? null}))
+  registerTrustedHandle(IPC.vaultCatalogChange, async (_event, request: unknown) => {
+    const r = request as Record<string, unknown>
+    if (!r || typeof r !== 'object' || typeof r.revision !== 'string' || typeof r.id !== 'string' || !['label','pin','remove','relocate'].includes(String(r.action))) throw Error('BAD_REQUEST')
+    if (vaultSwitch?.busy) throw Error('VAULT_SWITCH_BUSY')
+    if (r.action === 'remove') return vaultCatalog!.remove(r.id, r.revision)
+    if (r.action === 'pin' && typeof r.pinned === 'boolean') return vaultCatalog!.update(r.id, {pinned:r.pinned}, r.revision)
+    if (r.action === 'label' && typeof r.label === 'string') return vaultCatalog!.update(r.id, {label:r.label}, r.revision)
+    if (r.action === 'relocate') {
+      const id = r.id, revision = r.revision
+      if (activeTarget?.id === r.id) throw Error('ACTIVE_VAULT_RELOCATE')
+      if (structureGate.isBusy()) throw Error('STRUCTURE_BUSY')
+      return vaultSwitch!.select(async () => {
+        const session = vault?.sessionId()
+        const chosen = await dialog.showOpenDialog(mainWindow!, {title:'重新定位笔记库',properties:['openDirectory']})
+        if (chosen.canceled || !chosen.filePaths[0]) return vaultCatalog!.view()
+        if (vault?.sessionId() !== session) throw Error('VAULT_CHANGED')
+        if (structureGate.isBusy()) throw Error('STRUCTURE_BUSY')
+        if (activeTarget?.id === id) throw Error('ACTIVE_VAULT_RELOCATE')
+        return vaultCatalog!.relocate(id, vaultCatalog!.inspect(chosen.filePaths[0]), revision)
+      })
+    }
+    throw Error('BAD_REQUEST')
+  })
+  registerTrustedHandle(IPC.vaultOpen, async (_event, id: unknown) => {
+    if (typeof id !== 'string') throw Error('BAD_REQUEST')
+    if (vaultSwitch?.busy) throw Error('VAULT_SWITCH_BUSY')
+    const entry = vaultCatalog!.view().entries.find(item => item.id === id)
+    if (!entry) throw Error('VAULT_TARGET_INVALID')
+    const target = vaultCatalog!.inspect(entry.path)
+    if (target.rootIdentity !== entry.rootIdentity) throw Error('VAULT_TARGET_CHANGED')
+    if (activeTarget?.rootIdentity === target.rootIdentity && activeTarget.path === target.path) return visibleVaultState()
+    return vaultSwitch!.run(target)
+  })
+  registerTrustedHandle(IPC.vaultWorkspaceGet, (_event, session: unknown) => {
+    if (!vault || typeof session !== 'string') throw Error('VAULT_CHANGED')
+    vault.assertSession(session)
+    return activeTarget ? vaultCatalog!.workspace(activeTarget) : null
+  })
+  registerTrustedHandle(IPC.vaultWorkspaceSave, (_event, session: unknown, workspace: unknown) => {
+    if (!vault || typeof session !== 'string') throw Error('VAULT_CHANGED')
+    vault.assertSession(session)
+    if (activeTarget) vaultCatalog!.saveWorkspace(activeTarget, workspace)
+    return true
+  })
+  registerTrustedHandle(IPC.vaultPick, async (_event, create: unknown) => {
+    if (!vault || !vaultSwitch) return { status: 'needs-pick', reason: 'first-run' }
+    if (vaultSwitch.busy || structureGate.isBusy()) throw Error('VAULT_SWITCH_BUSY')
+    return vaultSwitch.select(async run => {
+      const session = vault?.sessionId()
+      let chosen: string | undefined
+      if (create === true) {
+        const result = await dialog.showSaveDialog(mainWindow!, {title:'创建空笔记库',buttonLabel:'创建笔记库',defaultPath:'新笔记库'})
+        if (result.canceled) return {...visibleVaultState(),cancelled:true}
+        chosen = result.filePath
+      } else {
+        const result = await dialog.showOpenDialog(mainWindow!, {title:'打开笔记库',properties:['openDirectory','createDirectory']})
+        if (result.canceled || !result.filePaths[0]) return {...visibleVaultState(),cancelled:true}
+        chosen = result.filePaths[0]
+      }
+      if (!chosen) return visibleVaultState()
+      if (vault?.sessionId() !== session) throw Error('VAULT_CHANGED')
+      if (structureGate.isBusy()) throw Error('STRUCTURE_BUSY')
+      const target = create === true ? vaultCatalog!.create(chosen) : vaultCatalog!.inspect(chosen)
+      if (!vaultCatalog!.view().diagnostic) vaultCatalog!.register(target)
+      if (activeTarget?.rootIdentity === target.rootIdentity && activeTarget.path === target.path) return visibleVaultState()
+      return run(target)
+    })
   })
   registerTrustedHandle(IPC.treeList, async () => vault?.tree() ?? [])
-  const maintenancePreviews=new Map<string,{sessionId:string;objectVersion:string;relPath:string;action:'compress'|'clear';records:{taskId:string;revision:number}[]}>()
   registerTrustedHandle(IPC.ledgerMaintenance,async(event,value:unknown)=>{
+    const current=vault
     try{if(!value||typeof value!=='object'||Array.isArray(value))throw Error();const r=value as Record<string,unknown>
       if(Object.keys(r).some(k=>!['sessionId','objectVersion','relPath','action','previewId'].includes(k))||typeof r.sessionId!=='string'||typeof r.objectVersion!=='string'||typeof r.relPath!=='string'||!['compress','clear'].includes(String(r.action))||r.previewId!==undefined&&typeof r.previewId!=='string')throw Error()
-      if(!vault)throw Error();vault.assertSession(r.sessionId);if(structureGate.isBusy()||agentHost?.active().length||agentHost?.hasPending())throw Error('STRUCTURE_BUSY')
-      const note=await vault.read(r.relPath);if(!vault.acceptsObject(r.relPath,r.objectVersion,note.objectVersion))throw Error('NOTE_REPLACED')
+      if(!current)throw Error();current.assertSession(r.sessionId);if(structureGate.isBusy()||agentHost?.active().length||agentHost?.hasPending())throw Error('STRUCTURE_BUSY')
+      const note=await current.read(r.relPath);current.assertSession(r.sessionId);if(!current.acceptsObject(r.relPath,r.objectVersion,note.objectVersion))throw Error('NOTE_REPLACED')
       const owner=`${event.sender.id}:${event.senderFrame!.routingId}`
-      if(r.previewId){const key=owner+':'+r.previewId,preview=maintenancePreviews.get(key);maintenancePreviews.delete(key);if(!preview||preview.sessionId!==r.sessionId||preview.objectVersion!==r.objectVersion||preview.relPath!==r.relPath||preview.action!==r.action)throw Error('STALE_PREVIEW');return {ok:true,value:await vault.ledgerMaintenanceCommit(preview.relPath,preview.action,preview.records)}}
-      const preview=await vault.ledgerMaintenancePreview(r.relPath,r.action as 'compress'|'clear'),id=randomUUID();if(maintenancePreviews.size>=128)maintenancePreviews.delete(maintenancePreviews.keys().next().value!);maintenancePreviews.set(owner+':'+id,{sessionId:r.sessionId,objectVersion:r.objectVersion,relPath:r.relPath,action:r.action as 'compress'|'clear',records:preview.records});return {ok:true,value:{id,...preview}}
+      if(r.previewId){const key=owner+':'+r.previewId,preview=maintenancePreviews.get(key);maintenancePreviews.delete(key);if(!preview||preview.sessionId!==r.sessionId||preview.objectVersion!==r.objectVersion||preview.relPath!==r.relPath||preview.action!==r.action)throw Error('STALE_PREVIEW');return {ok:true,value:await current.ledgerMaintenanceCommit(preview.relPath,preview.action,preview.records)}}
+      const preview=await current.ledgerMaintenancePreview(r.relPath,r.action as 'compress'|'clear');current.assertSession(r.sessionId);const id=randomUUID();if(maintenancePreviews.size>=128)maintenancePreviews.delete(maintenancePreviews.keys().next().value!);maintenancePreviews.set(owner+':'+id,{sessionId:r.sessionId,objectVersion:r.objectVersion,relPath:r.relPath,action:r.action as 'compress'|'clear',records:preview.records});return {ok:true,value:{id,...preview}}
     }catch{return {ok:false,error:'LEDGER_UNAVAILABLE'}}
   })
   registerTrustedHandle(IPC.ledgerRepair,async(_event,value:unknown)=>{try{if(!value||typeof value!=='object'||Array.isArray(value))throw Error();const r=value as Record<string,unknown>;if(Object.keys(r).sort().join()!=='registryRevision,sessionId'||typeof r.sessionId!=='string'||r.registryRevision!==null&&(typeof r.registryRevision!=='string'||!/^[a-f0-9]{64}$/.test(r.registryRevision)))throw Error();if(!vault)throw Error();vault.assertSession(r.sessionId);if(structureGate.isBusy()||agentHost?.active().length)throw Error();await vault.ledgerRepair(r.registryRevision as string|null);return {ok:true}}catch{return {ok:false,error:'LEDGER_REGISTRY_INVALID'}}})
   registerTrustedHandle(IPC.ledgerReasoning,async(_event,value:unknown):Promise<import('../shared/ledger.ts').LedgerReasoningResult>=>{
+    const current=vault
     try{
       if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
       const r=value as Record<string,unknown>;if(Object.keys(r).sort().join()!=='objectVersion,relPath,sessionId,taskId'||typeof r.relPath!=='string'||typeof r.sessionId!=='string'||typeof r.objectVersion!=='string'||typeof r.taskId!=='string'||! /^[A-Za-z0-9_-]{1,128}$/.test(r.taskId))throw Error('BAD_REQUEST')
-      if(!vault||!reasoningStore)throw Error('NO_VAULT');vault.assertSession(r.sessionId)
-      const note=await vault.read(r.relPath);if(!vault.acceptsObject(r.relPath,r.objectVersion,note.objectVersion))throw Error('NOTE_REPLACED')
-      const record=await vault.ledgerRecord(r.relPath,r.taskId);vault.assertSession(r.sessionId)
-      return {ok:true,text:record.state==='cleared'?null:record.legacyReasoning??reasoningStore.read(vault.memoryContext().vaultKey,r.taskId)}
+      if(!current||!reasoningStore)throw Error('NO_VAULT');current.assertSession(r.sessionId)
+      const note=await current.read(r.relPath);current.assertSession(r.sessionId);if(!current.acceptsObject(r.relPath,r.objectVersion,note.objectVersion))throw Error('NOTE_REPLACED')
+      const record=await current.ledgerRecord(r.relPath,r.taskId);current.assertSession(r.sessionId)
+      return {ok:true,text:record.state==='cleared'?null:record.legacyReasoning??reasoningStore.read(current.memoryContext().vaultKey,r.taskId)}
     }catch{return {ok:false,error:'LEDGER_UNAVAILABLE'}}
   })
   registerTrustedHandle(IPC.ledgerGet,async(_event,value:unknown)=>{
+    const current=vault,token=current?.sessionId()
     try{
       if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
       const r=value as Record<string,unknown>;if(Object.keys(r).some(k=>!['relPath','sessionId','objectVersion','cursor'].includes(k))||typeof r.relPath!=='string'||typeof r.sessionId!=='string'||typeof r.objectVersion!=='string'||r.cursor!==undefined&&r.cursor!==null&&(typeof r.cursor!=='string'||r.cursor.length>512))throw Error('BAD_REQUEST')
-      if(!vault)throw Error('NO_VAULT');vault.assertSession(r.sessionId)
-      const note=await vault.read(r.relPath);if(!vault.acceptsObject(r.relPath,r.objectVersion,note.objectVersion))throw Error('NOTE_REPLACED')
-      return {ok:true,value:await vault.ledgerPage(r.relPath,(r.cursor??null) as string|null)}
-    }catch(e){const code=e instanceof Error?e.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED','NOTE_REPLACED','LEDGER_REGISTRY_INVALID','LEDGER_OWNERSHIP_UNVERIFIED','LEDGER_RECORD_INVALID','LEDGER_CONFLICT'].includes(code)?code:'LEDGER_UNAVAILABLE',...(code==='LEDGER_REGISTRY_INVALID'?{registryRevision:vault?.ledgerRegistryRevision()}: {})}}
+      if(!current)throw Error('NO_VAULT');current.assertSession(r.sessionId)
+      const note=await current.read(r.relPath);current.assertSession(r.sessionId);if(!current.acceptsObject(r.relPath,r.objectVersion,note.objectVersion))throw Error('NOTE_REPLACED')
+      return {ok:true,value:await current.ledgerPage(r.relPath,(r.cursor??null) as string|null)}
+    }catch(e){const code=e instanceof Error?e.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED','NOTE_REPLACED','LEDGER_REGISTRY_INVALID','LEDGER_OWNERSHIP_UNVERIFIED','LEDGER_RECORD_INVALID','LEDGER_CONFLICT'].includes(code)?code:'LEDGER_UNAVAILABLE',...(code==='LEDGER_REGISTRY_INVALID'&&current?.sessionId()===token?{registryRevision:current?.ledgerRegistryRevision()}: {})}}
   })
   registerTrustedHandle(IPC.ledgerMigrate,async(_event,value:unknown)=>{
     try{if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST');const r=value as Record<string,unknown>
@@ -622,10 +730,11 @@ function registerIpc(): void {
     if (!request) return { ok: false, error: 'BAD_PATH' }
     if (!vault) return { ok: false, error: 'NO_VAULT' }
     if (blocksStructureWrite(request.relPath)) return { ok: false, error: 'NOTE_BUSY' }
+    const current=vault,root=current.root
     try {
-      const result = await vault.write(request.relPath, request.content, request.expectedRevision, request)
+      const result = await current.write(request.relPath, request.content, request.expectedRevision, request)
+      current.assertSession(request.sessionId)
       // 人自己修好语法并成功保存后，给这篇之前写入失败的生成内容一次补存机会。
-      const root = vault.root
       if (root && agentHost?.pendingPaths(root).includes(request.relPath)) {
         void agentHost.retryPending(root, request.relPath).catch(() => { /* 仍未落盘：保留待保存内容 */ })
       }
@@ -642,10 +751,12 @@ function registerIpc(): void {
   registerTrustedHandle(IPC.noteInspect, async (_event, value: unknown) => {
     const r = parseBinding(value)
     if (!r || !vault) throw new Error('BAD_REQUEST')
-    const state = await vault.noteStatus(r.relPath, r)
+    const current=vault,root=current.root
+    const state = await current.noteStatus(r.relPath, r);current.assertSession(r.sessionId)
     if (state.status !== 'ready') {
-      for (const task of agentHost?.active().filter(t => t.root === vault!.root && t.relPath === r.relPath) ?? []) {
+      for (const task of agentHost?.active().filter(t => t.root === root && t.relPath === r.relPath) ?? []) {
         await agentHost?.cancel(task.id, 'user').catch(() => {})
+        current.assertSession(r.sessionId)
       }
       vault.assertSession(r.sessionId)
     }
@@ -654,11 +765,11 @@ function registerIpc(): void {
   registerTrustedHandle(IPC.noteAbandon, async (_event, value: unknown) => {
     const r = parseBinding(value)
     if (!r || !vault) return false
-    vault.assertSession(r.sessionId)
-    if ((await vault.noteStatus(r.relPath, r)).status === 'ready') return false
-    const root = vault.root!
-    for (const task of agentHost?.active().filter(t => t.root === root && t.relPath === r.relPath) ?? []) await agentHost?.cancel(task.id, 'user').catch(() => {})
-    vault.assertSession(r.sessionId)
+    const current=vault,root=current.root!
+    current.assertSession(r.sessionId)
+    const status=await current.noteStatus(r.relPath, r);current.assertSession(r.sessionId)
+    if (status.status === 'ready') return false
+    for (const task of agentHost?.active().filter(t => t.root === root && t.relPath === r.relPath) ?? []) {await agentHost?.cancel(task.id, 'user').catch(() => {});current.assertSession(r.sessionId)}
     const chapters = agentHost?.pendingChapters(root, r.relPath, r.sessionId, r.objectVersion) ?? []
     agentHost?.acknowledgeCopied(root, r.relPath, chapters)
     return true
@@ -844,22 +955,81 @@ function registerIpc(): void {
   })
 }
 
-app.whenReady().then(() => {
+const ownsInstance = app.requestSingleInstanceLock()
+if (!ownsInstance) app.quit()
+else app.on('second-instance', () => { if (mainWindow && !mainWindow.isDestroyed()) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus() } })
+
+if (ownsInstance) app.whenReady().then(() => {
   themeMode = loadThemePreference(app.getPath('userData'))
   nativeTheme.themeSource = themeMode === 'day' ? 'light' : themeMode === 'night' ? 'dark' : 'system'
   try { modelConfig = createModelConfigStore(app.getPath('userData'), safeStorage) }
   catch (error) { modelConfigError = error instanceof Error ? error.message : 'MODEL_CONFIG_UNAVAILABLE' }
-  vault = new VaultSession(app.getPath('userData'), send, async (previous) => {
-    if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
-    memoryIpc.clear()
-    consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED')
-    memoryAuthorizationPreviews.clear()
-    try { await agentHost?.cancelAll('vault-change', previous) } catch { /* pending retry below */ }
-    await agentHost?.retryPending(previous)
-    if (agentHost?.hasPending(previous)) throw new Error('生成内容尚未保存，不能换库')
-    if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
+  vaultCatalog = new VaultCatalog(app.getPath('userData'))
+  vault = new VaultSession(app.getPath('userData'), send)
+  const catalog = vaultCatalog.view()
+  if (catalog.diagnostic) startupVaultState = {status:'needs-pick',reason:'missing',diagnostic:'设备库目录记录无法读取。原记录已保留，请检查本机存储；仍可手动打开笔记库。'}
+  try {
+    const last = catalog.entries.find(item => item.id === catalog.lastVaultId)
+    if (last) {
+      const target = vaultCatalog.inspect(last.path)
+      if (target.rootIdentity !== last.rootIdentity) throw Error('VAULT_REPLACED')
+      const state = vault.restoreVerified(target.path, target.rootIdentity)
+      if (state.status !== 'ready') throw Error('VAULT_TARGET_CHANGED')
+      activeTarget = target
+    } else if (catalog.revision === 'missing') {
+      let legacy: ReturnType<typeof parseStoredVault> = null
+      try { legacy = parseStoredVault(readFileSync(path.join(app.getPath('userData'), 'vault.json'), 'utf8')) } catch {}
+      if (legacy) {
+        const target = vaultCatalog.inspect(legacy.path)
+        vaultCatalog.committed(target)
+        const state = vault.restoreVerified(target.path, target.rootIdentity)
+        if (state.status !== 'ready') throw Error('VAULT_TARGET_CHANGED')
+        activeTarget = target
+      }
+    }
+  } catch {
+    startupVaultState = {status:'needs-pick',reason:'missing',diagnostic:'上次使用的笔记库无法打开，可能已移动、无法访问或被同路径的其他目录替换。请手动选择并核对目标。'}
+  }
+  vaultSwitch = new VaultSwitch({
+    check: target => {
+      const current = vaultCatalog!.inspect(target.path)
+      if (current.rootIdentity !== target.rootIdentity) throw Error('VAULT_TARGET_CHANGED')
+      if (structureGate.isBusy()) throw Error('STRUCTURE_BUSY')
+    },
+    prepare: async () => {
+      if (mainWindow && !await flushBeforeStructure(mainWindow, [], 'settings')) throw Error('VAULT_SWITCH_CANCELLED')
+      await agentHost?.whenLaunchesSettled()
+      if (agentHost?.active().length && mainWindow) {
+        const choice = await dialog.showMessageBox(mainWindow, {type:'question', title:'切换笔记库', message:'停止当前任务并切换笔记库？', detail:'已经生成的回答会保存。切换后不会自动重新启动这些任务。', buttons:['留在当前库','停止任务并切换'], defaultId:0, cancelId:0})
+        if (choice.response !== 1) throw Error('VAULT_SWITCH_CANCELLED')
+      }
+      if (mainWindow && !await flushBeforeStructure(mainWindow, [], 'freeze')) throw Error('VAULT_SWITCH_CANCELLED')
+      const previous = vault?.root
+      consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED')
+      await consolidation?.idle()
+      if (previous) {
+        try { await agentHost?.cancelAll('vault-change', previous) } catch {}
+        await agentHost?.retryPending(previous)
+        await agentHost?.whenLaunchesSettled()
+        consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED')
+        await consolidation?.idle()
+        if (agentHost?.active().length) throw Error('OTHER_TASK_RUNNING')
+        if (agentHost?.hasPending(previous)) throw Error('PREVIOUS_TASK_UNSAVED')
+      }
+    },
+    flush: async () => !vault?.root || !!mainWindow && await flushBeforeStructure(mainWindow),
+    commit: async target => {
+      const state = await vault!.openVerified(target.path, target.rootIdentity)
+      activeTarget = target
+      startupVaultState = null
+      memoryIpc.clear(); memoryAuthorizationPreviews.clear(); maintenancePreviews.clear(); authorizations?.clear()
+      for (const controller of imageControllers.keys()) controller.abort()
+      try { const entry = vaultCatalog!.committed(target); activeTarget = {...target,id:entry.id,label:entry.label} }
+      catch { if (state.status === 'ready') state.diagnostic = '库已打开，但设备库目录未保存。请检查本机存储后重试。' }
+      return state.status === 'ready' ? {...visibleVaultState(), vaultChanged:state.vaultChanged, ...(state.diagnostic?{diagnostic:state.diagnostic}:{})} as VaultState : state
+    },
+    release: () => send(IPC.vaultTransition, {busy:false,session:vault?.sessionId()??null})
   })
-  vault.restore()
   authorizations = new TaskAuthorizationRegistry({
     root:()=>{try{return vault?.requireUsableRoot()??null}catch{return null}},
     session:()=>vault?.sessionId()??null,

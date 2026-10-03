@@ -123,6 +123,8 @@ export class TaskAuthorizationRegistry {
     return structuredClone(view)
   }
 
+  clear(): void { this.previews.clear() }
+
   discard(owner:string,id:string):void {if(this.previews.get(id)?.owner===owner)this.previews.delete(id)}
 
   async consume(owner: string, request: AgentStartRequest): Promise<TaskGrant> {

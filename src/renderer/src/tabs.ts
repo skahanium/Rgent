@@ -17,6 +17,7 @@ export type Tab = {
   objectVersion?: string
   availability?: NoteAvailability
   /** Editor selection kept per open tab; document bytes remain the only persisted content. */
+  scrollTop?: number
   selection?: { anchor: number; head: number }
 }
 

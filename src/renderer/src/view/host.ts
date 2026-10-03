@@ -1,6 +1,7 @@
 import type { RemoteImageGetRequest, RemoteImageGetResult } from '../../../shared/ipc.ts'
 
 export type NoteHost = {
+  sessionId?: string
   noteRelPath: string
   vaultHas: (relPath: string) => boolean
   openNote: (relPath: string) => void

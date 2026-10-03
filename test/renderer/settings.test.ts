@@ -498,7 +498,7 @@ describe('assistant default model', () => {
 
 it('keeps interface text unchanged on cancel and preserves a failed draft for retry', async () => {
   const setChromeText = vi.fn().mockResolvedValueOnce({ ok: false, error: 'IO_ERROR' }).mockResolvedValueOnce({ ok: true, preference: { tabs: 'small', sidebar: 'large' } })
-  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async mode => ({ ok: true, mode }),
+  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async (mode: 'day' | 'night' | 'system') => ({ ok: true, mode }),
     getChromeText: async () => ({ tabs: 'default', sidebar: 'default' }), setChromeText })
   panel.open()
   await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>('[data-setting="chrome-tabs"]')!.disabled).toBe(false))
@@ -525,7 +525,7 @@ it('keeps interface text unchanged on cancel and preserves a failed draft for re
 
 it('does not let an old closed-panel save receipt overwrite a newer saved interface size', async () => {
   const receipts: Array<(value: { ok: true; preference: { tabs: 'small' | 'large'; sidebar: 'default' } }) => void> = []
-  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async mode => ({ ok: true, mode }),
+  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async (mode: 'day' | 'night' | 'system') => ({ ok: true, mode }),
     getChromeText: async () => ({ tabs: 'default', sidebar: 'default' }),
     setChromeText: () => new Promise(resolve => receipts.push(resolve)) })
   for (const size of ['small', 'large']) {
@@ -545,7 +545,7 @@ it('does not let an old closed-panel save receipt overwrite a newer saved interf
 })
 
 it('previews the real tab truncation structure and directory/resource type icons', async () => {
-  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async mode => ({ ok: true, mode }),
+  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async (mode: 'day' | 'night' | 'system') => ({ ok: true, mode }),
     getChromeText: async () => ({ tabs: 'default', sidebar: 'default' }), setChromeText: async preference => ({ ok: true, preference }) })
   panel.open()
   const sample = document.querySelector('.settings-chrome-sample')!
@@ -638,4 +638,24 @@ it('refreshes the model options on return without clearing an unsaved memory mod
  expect(document.querySelector('[data-memory="default-model"]')).toBe(select);expect(select.value).toBe('m')
  expect(document.querySelector('.memory-model-grid [role="status"]')!.textContent).toBe('尚未保存')
  panel.close()
+})
+
+it('keeps settings drafts when switching is cancelled and only closes after explicit discard', async () => {
+  const save = vi.fn()
+  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async (mode: 'day' | 'night' | 'system') => ({ ok: true, mode }),
+    getChromeText: async () => ({ tabs: 'default', sidebar: 'default' }), setChromeText: save } as never)
+  panel.open()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const input = document.querySelector<HTMLSelectElement>('[data-setting="chrome-tabs"]')!
+  input.value = 'large'; input.dispatchEvent(new Event('change', { bubbles: true }))
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+  try {
+    expect(panel.prepareVaultChange()).toBe(false)
+    expect(panel.isOpen()).toBe(true)
+    expect(input.value).toBe('large')
+    expect(save).not.toHaveBeenCalled()
+    confirm.mockReturnValue(true)
+    expect(panel.prepareVaultChange()).toBe(true)
+    expect(panel.isOpen()).toBe(false)
+  } finally { confirm.mockRestore(); panel.close() }
 })

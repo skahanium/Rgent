@@ -136,7 +136,7 @@ function render(node: ExtendedNode, source: string, host?: NoteHost, standaloneI
       const image = document.createElement('img')
       image.alt = node.alt ?? ''
       const rel = host && joinVaultRel(host.noteRelPath, node.url ?? '')
-      if (rel && host?.vaultHas(rel)) return createVaultImageElement(node.alt ?? '', rel, standaloneImage, imageSource)
+      if (rel && host?.vaultHas(rel)) return createVaultImageElement(node.alt ?? '', rel, standaloneImage, imageSource, undefined, host.sessionId)
       image.dataset.unavailable = node.url ?? ''
       return image
     }

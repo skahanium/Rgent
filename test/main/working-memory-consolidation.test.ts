@@ -31,6 +31,17 @@ async function fixture(stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEve
  return {vault,service,engine,material,changeConfig:()=>{signature='changed'}}
 }
 const suggestion=(input:ModelStepInput)=>{const data=JSON.parse(String(input.messages[0]!.content));return {action:'add',content:'后续在本库使用中文',layer:'core',scope:'本库',sourceIds:[data.sources[0].id],semantic:'standing',attribution:'人在本场口令中要求',reviewAt:null}}
+it('cancel and idle include a handoff still checking saved material',async()=>{
+ let calls=0,release!:()=>void
+ const f=await fixture(async function*(){calls++;yield {type:'text',text:'{"proposals":[]}'};yield {type:'finish',reason:'stop'}})
+ const saved=f.service.savedMaterial.bind(f.service),gate=new Promise<void>(r=>release=r)
+ vi.spyOn(f.service,'savedMaterial').mockImplementation(async(...args)=>{await gate;return saved(...args)})
+ const handing=f.engine.handoff(f.material);f.engine.cancel(undefined,'MEMORY_SESSION_CLOSED')
+ let finished=false;const idle=f.engine.idle().then(()=>{finished=true})
+ await Promise.resolve();const prematurelyIdle=finished
+ release();await handing.catch(()=>{});await idle
+ expect(prematurelyIdle).toBe(false);expect(calls).toBe(0);expect(f.service.snapshot().record.jobs).toEqual([])
+})
 it('accepts complete fences, independently rejects invalid proposals, and never treats prose as JSON',()=>{
  expect(parseMemorySuggestions('```json\n{"proposals":[]}\n```')).toEqual([])
  expect(()=>parseMemorySuggestions('建议如下：{"proposals":[]}')).toThrow('MEMORY_OUTPUT_INVALID')

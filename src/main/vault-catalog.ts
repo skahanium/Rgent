@@ -113,6 +113,21 @@ export class VaultCatalog {
     const basename = path.basename(canonical).slice(0, 80)
     return { path: canonical, rootIdentity, label: entry?.label ?? (label(basename) ? basename : '笔记库'), id: entry?.id ?? null }
   }
+  /** Check the canonical existing parent and catalogue before any mkdir. */
+  create(input: string): VaultTarget {
+    if (!text(input, 4096) || !path.isAbsolute(input)) throw new Error('VAULT_TARGET_INVALID')
+    const resolved = path.resolve(input), parent = fs.realpathSync.native(path.dirname(resolved))
+    const canonical = path.join(parent, path.basename(resolved))
+    if (!rootPath(canonical) || canonical === parent) throw new Error('VAULT_TARGET_INVALID')
+    fs.accessSync(parent, fs.constants.R_OK | fs.constants.W_OK | fs.constants.X_OK)
+    const parentIdentity = vaultRootIdentity(parent)
+    const { data } = this.writable()
+    if (data.entries.length >= LIMIT) throw new Error('VAULT_CATALOG_LIMIT')
+    for (const entry of data.entries) if (nested(entry.path, canonical) || nested(canonical, entry.path)) throw new Error('VAULT_NESTED')
+    if (fs.realpathSync.native(path.dirname(resolved)) !== parent || vaultRootIdentity(parent) !== parentIdentity) throw new Error('VAULT_TARGET_CHANGED')
+    fs.mkdirSync(canonical) // exclusive: never populate an existing folder
+    return this.inspect(canonical)
+  }
   private checked(target: VaultTarget): VaultTarget {
     if (!object(target) || !rootPath(target.path) || !identity(target.rootIdentity) || !label(target.label) || !(target.id === null || text(target.id, 128))) throw new Error('VAULT_TARGET_INVALID')
     const current = this.inspect(target.path)

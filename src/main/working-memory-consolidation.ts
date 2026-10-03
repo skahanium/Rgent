@@ -55,11 +55,11 @@ function proposalGroups(values:unknown[],sources:WorkingSource[],entries:Working
  }
  return valid
 }
-async function until<T>(promise:Promise<T>,signal:AbortSignal):Promise<T>{
+async function until<T>(operation:()=>Promise<T>,signal:AbortSignal):Promise<T>{
  if(signal.aborted)throw signal.reason??Error('MEMORY_CANCELLED')
  let abort!:()=>void
  const cancelled=new Promise<never>((_resolve,reject)=>{abort=()=>reject(signal.reason??Error('MEMORY_CANCELLED'));signal.addEventListener('abort',abort,{once:true})})
- try{return await Promise.race([promise,cancelled])}finally{signal.removeEventListener('abort',abort)}
+ try{return await Promise.race([operation(),cancelled])}finally{signal.removeEventListener('abort',abort)}
 }
 
 /** Main-only bounded background work. No renderer claims, secret persistence or revived permits. */
@@ -68,6 +68,7 @@ export class WorkingMemoryConsolidation{
  private readonly pending:Job[]=[]
  private readonly active=new Set<Job>()
  private readonly running=new Set<Promise<void>>()
+ private readonly handoffs=new Map<Promise<void>,{taskId:string;controller:AbortController}>()
  private readonly idleWaiters:(()=>void)[]=[]
  private readonly undoBatches=new Map<string,{service:WorkingMemoryService;sessionId:string;version:string;before:WorkingEntry[];after:{id:string;version:number}[]}>()
  private closed=false
@@ -87,6 +88,7 @@ export class WorkingMemoryConsolidation{
   if(this.disclosure().signature!==signature)throw Error('STALE_PREVIEW')
   const job=service.snapshot().record.jobs.find(j=>j.taskId===taskId&&j.materialVersion===version&&['interrupted','rejected'].includes(j.outcome));if(!job)throw Error('MEMORY_RETRY_UNAVAILABLE')
   const material=await service.savedMaterial(service.vault.ledgerTaskPath(taskId),taskId)
+  service.context()
   if(material.materialVersion!==version)throw Error('MEMORY_MATERIAL_CHANGED')
   this.capture(taskId);await this.handoff(material)
  }
@@ -99,16 +101,23 @@ export class WorkingMemoryConsolidation{
   if(!config.enabled)throw Error('MEMORY_DISABLED')
   if(config.signature!==job.configuration.signature)throw Error('MEMORY_PERMISSION_CHANGED')
  }
- async handoff(material:SavedTaskMaterial){
+ handoff(material:SavedTaskMaterial):Promise<void>{
+  const controller=new AbortController()
+  const promise=this.performHandoff(material,controller).finally(()=>{this.handoffs.delete(promise);this.pump()})
+  this.handoffs.set(promise,{taskId:material.taskId,controller})
+  return promise
+ }
+ private async performHandoff(material:SavedTaskMaterial,controller:AbortController){
   const permit=this.permits.get(material.taskId);this.permits.delete(material.taskId)
   if(!permit)return
-  this.assert(permit)
+  this.assert({...permit,controller})
   if(!material.context||material.context.sessionId!==permit.context.sessionId||material.context.vaultKey!==permit.context.vaultKey)throw Error('MEMORY_MATERIAL_UNVERIFIED')
   const saved=await permit.service.savedMaterial(material.origin.relPath,material.taskId)
+  this.assert({...permit,controller})
   if(saved.materialVersion!==material.materialVersion)throw Error('MEMORY_MATERIAL_CHANGED')
   const previous=permit.service.snapshot().record.jobs.find(j=>j.taskId===material.taskId&&j.materialVersion===material.materialVersion)
   if(previous?.outcome==='applied'||previous?.outcome==='queued'||previous?.outcome==='running')return
-  const job:Job={...permit,material:saved,controller:new AbortController(),deadline:Date.now()+permit.configuration.limits.seconds*1000,timer:undefined!}
+  const job:Job={...permit,material:saved,controller,deadline:Date.now()+permit.configuration.limits.seconds*1000,timer:undefined!}
   if(this.pending.length>=16){await this.receipt(job,'rejected','MEMORY_QUEUE_FULL');return}
   await this.receipt(job,'queued')
   job.timer=setTimeout(()=>{job.controller.abort(Error('MEMORY_DEADLINE'));this.pump()},Math.max(1,job.deadline-Date.now()))
@@ -116,6 +125,7 @@ export class WorkingMemoryConsolidation{
  }
  cancel(taskId?:string,reason='MEMORY_CANCELLED'){
   for(const [id] of this.permits)if(!taskId||id===taskId)this.permits.delete(id)
+  for(const handoff of this.handoffs.values())if(!taskId||handoff.taskId===taskId)handoff.controller.abort(Error(reason))
   for(const job of [...this.pending,...this.active])if(!taskId||job.material.taskId===taskId)job.controller.abort(Error(reason))
   if(!taskId)this.undoBatches.clear()
   this.pump()
@@ -127,7 +137,7 @@ export class WorkingMemoryConsolidation{
   await b.service.vault.memoryMutation(store=>store.undo(store.read(),b.before,b.after,taskId,version));this.undoBatches.delete(taskId)
  }
  close(){this.closed=true;this.cancel(undefined,'MEMORY_SESSION_CLOSED')}
- idle():Promise<void>{return !this.pending.length&&!this.active.size?Promise.resolve():new Promise(resolve=>this.idleWaiters.push(resolve))}
+ idle():Promise<void>{return !this.pending.length&&!this.active.size&&!this.handoffs.size?Promise.resolve():new Promise(resolve=>this.idleWaiters.push(resolve))}
  private notify(job:Permit){try{this.ports.changed(job.context)}catch{/* A closed renderer is not a write failure. */}}
  private pump(){
   for(let i=0;i<this.pending.length;){const job=this.pending[i]!;const occupied=[...this.active].some(j=>j.context.vaultKey===job.context.vaultKey)
@@ -136,18 +146,20 @@ export class WorkingMemoryConsolidation{
    const promise=this.run(job).finally(()=>{clearTimeout(job.timer);this.active.delete(job);this.running.delete(promise);this.notify(job);this.pump()})
    this.running.add(promise)
   }
-  if(!this.pending.length&&!this.active.size)for(const resolve of this.idleWaiters.splice(0))resolve()
+  if(!this.pending.length&&!this.active.size&&!this.handoffs.size)for(const resolve of this.idleWaiters.splice(0))resolve()
  }
  private async receipt(job:Job,outcome:MemoryJobReceipt['outcome'],reason?:string){
-  return job.service.vault.memoryMutation(store=>store.receipt(store.read(),{taskId:job.material.taskId,materialVersion:job.material.materialVersion,outcome,entryIds:[],...(reason?{reason}:{})}))
+  const check=()=>{const current=job.service.context();if(current.sessionId!==job.context.sessionId||current.vaultKey!==job.context.vaultKey)throw Error('MEMORY_SESSION_CLOSED')}
+  check()
+  return job.service.vault.memoryMutation(store=>{check();return store.receipt(store.read(),{taskId:job.material.taskId,materialVersion:job.material.materialVersion,outcome,entryIds:[],...(reason?{reason}:{})})})
  }
  private async recheck(job:Job,sources:WorkingSource[],entries:WorkingEntry[]){
   this.assert(job)
-  for(const source of sources){if(!await until(job.service.verifySource(source),job.controller.signal))throw Error('MEMORY_SOURCE_CHANGED')}
+  for(const source of sources){if(!await until(()=>job.service.verifySource(source),job.controller.signal))throw Error('MEMORY_SOURCE_CHANGED')}
   const dependencies=sources.flatMap(s=>s.memoryDeps)
-  const validParents=await until(job.service.entries(dependencies.map(d=>d.id)),job.controller.signal)
+  const validParents=await until(()=>job.service.entries(dependencies.map(d=>d.id)),job.controller.signal)
   if(dependencies.some(d=>!validParents.some(e=>e.id===d.id&&e.version===d.version&&e.status==='active')))throw Error('MEMORY_DEPENDENCY_CHANGED')
-  const current=await until(job.service.entries(entries.map(e=>e.id)),job.controller.signal)
+  const current=await until(()=>job.service.entries(entries.map(e=>e.id)),job.controller.signal)
   if(entries.some(e=>!current.some(c=>c.id===e.id&&c.version===e.version&&c.status==='active')))throw Error('MEMORY_DEPENDENCY_CHANGED')
   this.assert(job)
  }
@@ -157,7 +169,7 @@ export class WorkingMemoryConsolidation{
   await this.recheck(job,sources,entries)
   const iterator=this.ports.stream({...config.credential,system:SYSTEM,messages:[{role:'user',content}],signal:job.controller.signal,maxOutputTokens:4096})[Symbol.asyncIterator]()
   let raw='',bytes=0,finished=false
-  try{for(;;){const next=await until(Promise.resolve(iterator.next()),job.controller.signal);if(next.done)break
+  try{for(;;){const next=await until(()=>Promise.resolve(iterator.next()),job.controller.signal);if(next.done)break
     await this.recheck(job,sources,entries);const e=next.value
     if(finished)throw Error('MEMORY_OUTPUT_INVALID')
     if(e.type==='tool-call')throw Error('MEMORY_TOOLS_FORBIDDEN')
@@ -170,20 +182,20 @@ export class WorkingMemoryConsolidation{
  }
  private async run(job:Job){
   try{
-   this.assert(job);await this.receipt(job,'running')
+   this.assert(job);await this.receipt(job,'running');this.assert(job)
    const basis=job.service.snapshot(),sources:WorkingSource[]=[]
-   const prompt=await until(job.service.sourceForPrompt(job.material.origin.relPath,job.material.taskId),job.controller.signal)
+   const prompt=await until(()=>job.service.sourceForPrompt(job.material.origin.relPath,job.material.taskId),job.controller.signal)
    if(Buffer.byteLength(prompt.text)>4096)throw Error('MEMORY_SOURCE_LIMIT');sources.push(prompt)
    for(const fragment of job.material.material.fragments){
     if(fragment.classification==='ai'||Buffer.byteLength(fragment.text)>4096)continue
-    try{const source=await until(job.service.sourceForFragment(fragment),job.controller.signal)
+    try{const source=await until(()=>job.service.sourceForFragment(fragment),job.controller.signal)
      if(sources.some(s=>s.materialId===source.materialId&&s.hash===source.hash))continue
      if(Buffer.byteLength(JSON.stringify([...sources,source]))>16384)break;sources.push(source)
     }catch{this.assert(job)}
    }
    // Only related, valid committed memory is sent, not the entire vault record.
    const words=new Set(job.material.prompt.toLowerCase().match(/[\p{L}\p{N}]+/gu)??[])
-   const entries=(await until(job.service.entries(),job.controller.signal)).filter(e=>e.status==='active'&&(e.layer==='core'||[...words].some(w=>e.content.toLowerCase().includes(w)))).slice(0,8)
+   const entries=(await until(()=>job.service.entries(),job.controller.signal)).filter(e=>e.status==='active'&&(e.layer==='core'||[...words].some(w=>e.content.toLowerCase().includes(w)))).slice(0,8)
    const payload={task:{id:job.material.taskId,status:job.material.status},sources:sources.map(s=>({id:s.id,text:s.text,classification:s.classification,kind:s.kind,attribution:s.relPath})),memory:entries.map(e=>({id:e.id,version:e.version,content:e.content,semantic:e.semantic,scope:e.scope,attribution:e.attribution,updatedAt:e.updatedAt}))}
    let values:unknown[];const draft=await this.response(job,payload,sources,entries)
    try{values=parseMemorySuggestions(draft)}catch{
@@ -202,7 +214,7 @@ export class WorkingMemoryConsolidation{
    if(result.entryIds.length){const changed=result.snapshot.record.entries.filter(e=>result.entryIds.includes(e.id));const before=basis.record.entries.filter(e=>result.entryIds.includes(e.id));this.undoBatches.set(job.material.taskId,{service:job.service,sessionId:job.context.sessionId,version:job.material.materialVersion,before:structuredClone(before),after:changed.map(e=>({id:e.id,version:e.version}))});while(this.undoBatches.size>8)this.undoBatches.delete(this.undoBatches.keys().next().value!)}
    if(result.rejected)this.notify(job)
    // Promotion is a separate source recheck; its failure cannot turn a committed batch into failure.
-   void job.service.recheckDeferred().then(()=>this.notify(job)).catch(()=>{})
+   await (async()=>{this.assert(job);await job.service.recheckDeferred();this.notify(job)})().catch(()=>{})
   }catch(e){
    const reason=publicMemoryError(e)
    try{await this.receipt(job,job.controller.signal.aborted?'interrupted':'rejected',reason)}catch{/* Preserve the existing bytes if diagnosis or CAS prevents a receipt. */}

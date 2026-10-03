@@ -68,14 +68,14 @@ type HeldPreview={owner:string;expires:number;preview:MemoryPreview;basis?:Worki
 export function createMemoryIpc(ports:MemoryIpcPorts){
  const previews=new Map<string,HeldPreview>()
  const clear=()=>previews.clear()
- const hold=(held:Omit<HeldPreview,'expires'>)=>{for(const [id,p] of previews)if(p.expires<Date.now())previews.delete(id);if(previews.size>=128)throw Error('MEMORY_QUEUE_FULL');previews.set(held.preview.id,{...held,expires:Date.now()+120000});return {ok:true as const,value:held.preview}}
- const view=async(service:WorkingMemoryService)=>{const value=await service.view();value.running=ports.engine?.()?.state()??value.running;for(const job of value.jobs)job.undoable=!!job.materialVersion&&!!ports.engine?.()?.canUndo(job.taskId,job.materialVersion);return {ok:true as const,value}}
+ const hold=(held:Omit<HeldPreview,'expires'>)=>{ports.vault()?.assertSession(held.preview.sessionId);for(const [id,p] of previews)if(p.expires<Date.now())previews.delete(id);if(previews.size>=128)throw Error('MEMORY_QUEUE_FULL');previews.set(held.preview.id,{...held,expires:Date.now()+120000});return {ok:true as const,value:held.preview}}
+ const view=async(service:WorkingMemoryService)=>{const value=await service.view();service.vault.assertSession(value.sessionId);value.running=ports.engine?.()?.state()??value.running;for(const job of value.jobs)job.undoable=!!job.materialVersion&&!!ports.engine?.()?.canUndo(job.taskId,job.materialVersion);return {ok:true as const,value}}
  return {clear,async handle(owner:string,op:MemoryOperation,value:unknown):Promise<MemoryResult<MemoryView|MemoryPreview>>{
   try{
    const request=parseMemoryRequest(op,value);if(!request)throw Error('BAD_REQUEST')
    const vault=ports.vault(),service=ports.service();if(!vault||!service)throw Error('NO_VAULT');const session=request.sessionId as string;vault.assertSession(session)
    const context=vault.memoryContext(),config=ports.config()
-   if(op==='get')return view(service)
+   if(op==='get')return await view(service)
    if(op==='manual'){
     const source=await service.manualSource(request as unknown as import('../shared/memory.ts').MemoryManualRequest)
     const parents=await service.entries(source.memoryDeps.map(d=>d.id));if(source.memoryDeps.some(d=>!parents.some(e=>e.id===d.id&&e.version===d.version&&e.status==='active')))throw Error('MEMORY_DEPENDENCY_CHANGED')
@@ -118,11 +118,11 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
    if(op==='commit'){
     const p=previews.get(request.id as string);previews.delete(request.id as string)
     if(!p||p.owner!==owner||p.expires<Date.now()||p.preview.sessionId!==session)throw Error('STALE_PREVIEW')
-    if(p.preview.kind==='undo'){const engine=ports.engine?.();if(!engine)throw Error('MEMORY_RETRY_UNAVAILABLE');await engine.undo(p.job!.taskId,p.job!.materialVersion);ports.invalidate?.();await ports.recheck(vault,session);return view(service)}
+    if(p.preview.kind==='undo'){const engine=ports.engine?.();if(!engine)throw Error('MEMORY_RETRY_UNAVAILABLE');await engine.undo(p.job!.taskId,p.job!.materialVersion);vault.assertSession(session);ports.invalidate?.();await ports.recheck(vault,session);vault.assertSession(session);return await view(service)}
     if(p.preview.kind==='reset-config'){
-     if(!config)throw Error('MEMORY_CONFIG_UNAVAILABLE');clear();ports.invalidate?.();config.resetMemoryConfig(p.binding!.revision);await ports.recheck(vault,session);return view(service)
+     if(!config)throw Error('MEMORY_CONFIG_UNAVAILABLE');clear();ports.invalidate?.();config.resetMemoryConfig(p.binding!.revision);await ports.recheck(vault,session);return await view(service)
     }
-    if(p.preview.kind==='retry'){await ports.engine!()!.retry(p.job!.taskId,p.job!.materialVersion,p.signature!);return view(service)}
+    if(p.preview.kind==='retry'){await ports.engine!()!.retry(p.job!.taskId,p.job!.materialVersion,p.signature!);vault.assertSession(session);return await view(service)}
     if(p.preview.kind==='reset'||p.preview.kind==='watermark'){
      clear();ports.invalidate?.()
      if(p.preview.kind==='reset'){
@@ -140,7 +140,7 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
     if(!config)throw Error('MEMORY_CONFIG_UNAVAILABLE');const change=request as unknown as MemoryConfigRequest
     if(change.target==='default')config.setMemoryDefault(change.modelId)
     else if(change.target==='limits')config.updateMemoryLimits(change.limits)
-    else{if(change.vault.enabled)await service.initialize();config.setVaultMemory(context.vaultKey,change.vault)}
+    else{if(change.vault.enabled)await service.initialize();vault.assertSession(session);config.setVaultMemory(context.vaultKey,change.vault)}
     clear();ports.engine?.()?.cancel()
    }else if(op==='cancel'){
     const receipt=service.snapshot().record.jobs.find(j=>j.taskId===request.taskId&&j.materialVersion===request.materialVersion)
@@ -150,8 +150,10 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
     if(op==='forget'){clear();ports.invalidate?.();await service.forget(item)}
     else await service.edit(item,op==='disable'?{status:'disabled'}:{content:request.content as string,layer:request.layer as 'core'|'demand',scope:request.scope as string})
    }
+   vault.assertSession(session)
    await ports.recheck(vault,session)
-   return view(service)
+   vault.assertSession(session)
+   return await view(service)
   }catch(e){return {ok:false,error:publicMemoryError(e)}}
  }}
 }

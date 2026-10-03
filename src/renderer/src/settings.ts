@@ -46,6 +46,7 @@ export type SettingsOverlay = {
   open: (page?: '界面' | '助手' | '记忆' | '模型' | '运行') => void
   close: () => void
   isOpen: () => boolean
+  prepareVaultChange: () => boolean
 }
 
 const CHOICES: Array<{ mode: ThemeMode; name: string; detail: string }> = [
@@ -78,6 +79,7 @@ const configErrorText = (error: string): string => CONFIG_ERRORS[error] ?? error
 
 export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverlay {
   let overlay: Overlay | null = null
+  let inputsEdited = false
   let request = 0
   let readingSaveSerial = 0
   let chromeTextSaveSerial = 0
@@ -102,7 +104,10 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       }
     })
     overlay = current
+    inputsEdited = false
     const root = current.root
+    root.addEventListener('input', () => { inputsEdited = true })
+    root.addEventListener('change', () => { inputsEdited = true })
     root.classList.add('overlay-settings')
     root.addEventListener('click', (event) => {
       if (event.target !== root || event.detail === 0) return
@@ -718,5 +723,8 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     if (page !== '界面') setPage(page)
   }
 
-  return { open, close, isOpen: () => overlay?.isOpen() ?? false }
+  return { open, close, isOpen: () => overlay?.isOpen() ?? false, prepareVaultChange: () => {
+    if (overlay?.isOpen() && inputsEdited && !window.confirm('切换会关闭设置。如果还有未保存的修改，请先保存；继续将放弃这些修改。是否继续？')) return false
+    close(); return true
+  } }
 }

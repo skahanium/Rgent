@@ -9,7 +9,7 @@ export function attachVaultProtocol(getVault: () => VaultSession | null): void {
     const rel = parseVaultMediaUrl(request.url)
     if (!rel) return new Response('', { status: 400 })
     let root: string
-    try { root = getVault()!.requireUsableRoot() } catch { return new Response('', { status: 404 }) }
+    try { const current = getVault()!; const session = new URL(request.url).searchParams.get('s'); if (!session || session !== current.sessionId()) return new Response('', { status: 410 }); root = current.requireUsableRoot() } catch { return new Response('', { status: 404 }) }
     const resolved = readVaultMedia(root, rel)
     if ('error' in resolved) return new Response('', { status: resolved.error })
     return new Response(new Uint8Array(resolved.bytes), {

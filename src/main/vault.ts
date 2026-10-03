@@ -2,6 +2,7 @@ import {WorkingMemoryStore,type WorkingSnapshot} from './working-memory-store.ts
 import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { dialog, type BrowserWindow } from 'electron'
 import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest } from '../shared/ipc.ts'
 import { createFolder, createNote, listVaultTree, parseStoredVault, readNoteSnapshot, requireOrdinaryNotes as verifyOrdinaryNotes, revisionOf, serializeStoredVault, writeNote } from './notes-fs.ts'
@@ -20,11 +21,13 @@ import { retireMemoryFile } from './memory-retirement.ts'
 import type { MemoryContext } from '../shared/memory.ts'
 
 export class VaultSession {
+  private readonly calls = new AsyncLocalStorage<{sessionId:string|null}>()
   private readonly mutations = new VaultMutationQueue()
   private workingMemory:WorkingMemoryStore|null=null
   private ledgerStore: LedgerStore | null = null
   private ledgerFailure: string | null = null
   private memoryFailure: string | null = null
+  private initializationFailure: string | null = null
   private lifecycle: VaultLifecycle | null = null
   private lifecycleReady: Promise<void> = Promise.resolve()
   private lifecycleError: Error | null = null
@@ -57,6 +60,30 @@ export class VaultSession {
   private stateFile(): string {
     return path.join(this.userData, 'vault.json')
   }
+
+  /** Catalogue checks happen without mounting: initialization may recover or migrate files. */
+  restoreVerified(root: string, identity: string): VaultState {
+    if (!isUsableDir(root) || vaultRootIdentity(root) !== identity) return { status: 'needs-pick', reason: 'missing' }
+    this.attach(root)
+    return this.currentState()
+  }
+
+  async openVerified(root: string, identity: string): Promise<VaultState> {
+    const check = (): void => {
+      if (!isUsableDir(root) || vaultRootIdentity(root) !== identity) throw Error('VAULT_TARGET_CHANGED')
+    }
+    check()
+    if (this.root && realpathSync.native(this.root) === realpathSync.native(root) && this.rootIdentity === identity) return this.currentState()
+    const previous = this.root
+    if (previous) await this.beforeChange(previous)
+    await this.mutations.idle()
+    check()
+    this.attach(root)
+    const state = this.currentState()
+    return state.status === 'ready' ? { ...state, vaultChanged: true } : state
+  }
+
+  async idle(): Promise<void> { await this.mutations.idle() }
 
   restore(): VaultState {
     const stored = parseStoredVault(this.readStateFile())
@@ -96,8 +123,9 @@ export class VaultSession {
   }
 
   currentState(): VaultState {
+    this.assertCall()
     if (this.hasUsableRoot()) {
-      return { status: 'ready', rootName: path.basename(this.root!), sessionId: this.captureSession(), navigationKey: this.navigationKey() }
+      return { status: 'ready', rootName: path.basename(this.root!), sessionId: this.captureSession(), navigationKey: this.navigationKey(), ...(this.initializationFailure ? { diagnostic: this.initializationFailure } : {}) }
     }
     const stored = parseStoredVault(this.readStateFile())
     if (!stored) return { status: 'needs-pick', reason: 'first-run' }
@@ -120,7 +148,7 @@ export class VaultSession {
     return { sessionId: this.captureSession(), vaultKey: createHash('sha256').update(JSON.stringify([canonical, this.rootIdentity])).digest('hex') }
   }
 
-  memoryDiagnosis(): string | null { return this.memoryFailure }
+  memoryDiagnosis(): string | null { this.assertCall(); return this.memoryFailure }
 
   async tree(): Promise<TreeEntry[]> {
     const token = this.captureSession(); const root = this.requireUsableRoot()
@@ -187,14 +215,14 @@ export class VaultSession {
   materialCeiling(){this.requireUsableRoot();return this.ledgerStore!.materialCeiling()}
   ledgerTaskPath(taskId:string){this.requireUsableRoot();return this.ledgerStore!.taskPath(taskId)}
   memoryDiagnostic(){this.requireUsableRoot();return this.workingMemory!.diagnosis()}
-  memorySnapshot(){return this.workingMemory!.read()}
+  memorySnapshot(){this.assertCall();return this.workingMemory!.read()}
   /** Explicit diagnostic reset stays reachable during a pending structure recovery; it never clears that journal. */
   async memoryReset(expected:{revision:string|null;objectVersion:string|null},watermark:number){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);this.requireUsableRoot();return this.workingMemory!.reset(expected,watermark)})}
   async memoryMutation<T>(operation:(store:WorkingMemoryStore)=>T|Promise<T>):Promise<T>{const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();const result=await operation(this.workingMemory!);this.assertSession(token);return result})}
   async ledgerRecord(relPath:string,taskId:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.getRecord(relPath,taskId)}
   async ledgerMaintenancePreview(relPath:string,action:'compress'|'clear'){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintenancePreview(relPath,action)})}
   async ledgerMaintenanceCommit(relPath:string,action:'compress'|'clear',items:readonly {taskId:string;revision:number}[]){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintain(relPath,action,items)})}
-  ledgerRegistryRevision(){return this.ledgerStore?.registryRevision()??null}
+  ledgerRegistryRevision(){this.assertCall();return this.ledgerStore?.registryRevision()??null}
   async ledgerRepair(expected:string|null){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();this.ledgerStore!.repairRegistry(expected)})}
   async ledgerImage(relPath:string,taskId:string,revision:number,field:'prompt'|'answer'){
     const token=this.captureSession();await this.lifecycleReady;this.assertSession(token)
@@ -228,6 +256,7 @@ export class VaultSession {
   }
 
   acceptsObject(relPath: string, expected: string, current: string): boolean {
+    this.assertCall()
     const seen = new Set<string>()
     const links = this.successors.get(relPath)
     while (!seen.has(expected)) {
@@ -241,6 +270,7 @@ export class VaultSession {
   }
 
   latestFor(relPath: string, expected: string): NoteSnapshot | null {
+    this.assertCall()
     const seen = new Set<string>()
     const links = this.successors.get(relPath)
     while (links?.has(expected) && !seen.has(expected)) {
@@ -382,6 +412,7 @@ export class VaultSession {
   }
 
   saveCopyRequestById(id: string): SaveCopyPreviewRequest | null {
+    this.assertCall()
     const prepared = this.copyPreviews.get(id)
     return prepared ? { ...prepared.request } : null
   }
@@ -488,14 +519,28 @@ export class VaultSession {
     return relPath
   }
 
-  sessionId(): string | null { return this.token }
+  private assertCall(): void {
+    const call = this.calls.getStore()
+    if (call && call.sessionId !== this.token) throw new Error('VAULT_CHANGED')
+  }
+
+  /** Trusted content IPC retains its original mount across every awaited continuation. */
+  runBound<T>(sessionId: string | null, operation: () => T): T {
+    this.assertCall()
+    if (sessionId !== this.token) throw new Error('VAULT_CHANGED')
+    return this.calls.run({sessionId}, operation)
+  }
+
+  sessionId(): string | null { this.assertCall(); return this.token }
 
   captureSession(): string {
+    this.assertCall()
     if (!this.root || !this.token) throw new Error('NO_VAULT')
     return this.token
   }
 
   assertSession(token: string): void {
+    this.assertCall()
     if (this.token !== token || !this.root) throw new Error('VAULT_CHANGED')
   }
 
@@ -512,7 +557,7 @@ export class VaultSession {
     return result
   }
 
-  relocationPreviewById(id: string): RelocationPreview | null { return this.lifecycle?.peek(id) ?? null }
+  relocationPreviewById(id: string): RelocationPreview | null { this.assertCall(); return this.lifecycle?.peek(id) ?? null }
 
   async commitRelocation(id: string, repairLinks: boolean, token = this.captureSession()): Promise<{ moved: RelocationMove[]; unrepaired: string[] }> {
     this.assertSession(token)
@@ -614,6 +659,7 @@ export class VaultSession {
 
   private attach(root: string): void {
     this.stopWatch?.()
+    this.stopWatch = null
     if (this.debounce) clearTimeout(this.debounce)
     this.debounce = null
     this.changedNotes.clear()
@@ -626,6 +672,8 @@ export class VaultSession {
     this.root = path.resolve(root)
     this.rootIdentity = vaultRootIdentity(this.root)
     this.rootUnavailable = false
+    this.memoryFailure = null
+    this.initializationFailure = null
     const token = randomUUID()
     this.token = token
     const check = (): void => { this.assertSession(token); this.requireUsableRoot() }
@@ -647,7 +695,12 @@ export class VaultSession {
     })
     // 换库必须清索引，否则新库会看到旧库的反链。
     this.index.reset()
-    this.stopWatch = watchVault(this.root, (relPath) => { if (this.token === token) this.onFsEvent(relPath) })
+    try {
+      this.stopWatch = watchVault(this.root, (relPath) => { if (this.token === token) this.onFsEvent(relPath) })
+    } catch {
+      // The binding has committed. Keep its ownership and expose initialization failure.
+      this.initializationFailure = '库已打开，但文件变化监听未能启动。请检查目录访问权限后重新打开应用。'
+    }
   }
 
   private onFsEvent(relPath: string | null): void {
@@ -674,6 +727,7 @@ export class VaultSession {
   }
 
   requireUsableRoot(): string {
+    this.assertCall()
     if (!this.root) throw new Error('NO_VAULT')
     if (!this.hasUsableRoot()) {
       this.suspendRoot()

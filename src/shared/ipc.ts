@@ -1,6 +1,12 @@
 export const IPC = {
   vaultGet: 'vault:get',
   vaultPick: 'vault:pick',
+  vaultCatalog: 'vault:catalog',
+  vaultCatalogChange: 'vault:catalog-change',
+  vaultOpen: 'vault:open',
+  vaultTransition: 'vault:transition',
+  vaultWorkspaceGet: 'vault:workspace-get',
+  vaultWorkspaceSave: 'vault:workspace-save',
   treeList: 'tree:list',
   treeChanged: 'tree:changed',
   noteRead: 'note:read',
@@ -191,8 +197,8 @@ export type { ChromeTextPreference } from './reading-preference.ts'
 export type ChromeTextSetResult = { ok: true; preference: import('./reading-preference.ts').ChromeTextPreference } | { ok: false; error: 'BAD_CHROME_TEXT' | 'IO_ERROR' }
 
 export type VaultState =
-  | { status: 'needs-pick'; reason: 'first-run' | 'missing' }
-  | { status: 'ready'; rootName: string; vaultChanged?: boolean; sessionId?: string; navigationKey?: string }
+  | { status: 'needs-pick'; reason: 'first-run' | 'missing'; cancelled?: boolean; diagnostic?: string }
+  | { status: 'ready'; rootName: string; vaultChanged?: boolean; sessionId?: string; navigationKey?: string; diagnostic?: string; vaultId?: string; cancelled?: boolean }
 
 export type TreeEntry = {
   name: string

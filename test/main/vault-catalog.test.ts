@@ -15,6 +15,25 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }) })
 
 describe('device vault catalog', () => {
+  it('checks canonical parent nesting before creating a new root through an alias', () => {
+    const { root, vault, catalog } = fixture()
+    catalog.register(catalog.inspect(vault))
+    const alias = path.join(root, 'alias'); fs.symlinkSync(vault, alias, 'dir')
+    expect(() => catalog.create(path.join(alias, 'child'))).toThrow('VAULT_NESTED')
+    expect(fs.existsSync(path.join(vault, 'child'))).toBe(false)
+    const sibling = catalog.create(path.join(root, 'new'))
+    expect(fs.readdirSync(sibling.path)).toEqual([])
+    expect(() => catalog.create(sibling.path)).toThrow()
+    expect(fs.readdirSync(sibling.path)).toEqual([])
+  })
+  it('preserves the filesystem when the catalogue cannot authorize creating a root', () => {
+    const { root, data, catalog } = fixture()
+    const file = path.join(data, 'vault-catalog.json'); fs.writeFileSync(file, 'damaged')
+    const chosen = path.join(root, 'new')
+    expect(() => catalog.create(chosen)).toThrow('VAULT_CATALOG_INVALID')
+    expect(fs.existsSync(chosen)).toBe(false)
+    expect(fs.readFileSync(file, 'utf8')).toBe('damaged')
+  })
   it('inspects only directory metadata and preserves an empty root', () => {
     const { vault, catalog } = fixture()
     const target = catalog.inspect(vault)

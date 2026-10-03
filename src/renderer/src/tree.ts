@@ -19,6 +19,8 @@ export type FileBrowser = {
   readonly preferredWidth: number | null
   setPreferredWidth(width: number | null): void
   captureScroll(): void
+  workspaceScroll(): {treeScroll:number;resourceScroll:number}
+  restoreWorkspaceScroll(treeScroll:number, resourceScroll:number): void
   setVault(key: string | null): void
   update(entries: TreeEntry[], active: string | null): void
   setActive(path: string | null): void
@@ -240,6 +242,12 @@ export function createFileBrowser(host: HTMLElement, options: BrowserOptions): F
   divider.addEventListener('pointercancel', () => { dragging = null })
   const browser: FileBrowser = {
     captureScroll: rememberScroll,
+    workspaceScroll() { rememberScroll(); return {treeScroll:folderScroll,resourceScroll:resourceScroll.get(state.resource) ?? 0} },
+    restoreWorkspaceScroll(top, bottom) {
+      folderScroll = Number.isFinite(top) && top >= 0 ? top : 0
+      resourceScroll.set(state.resource, Number.isFinite(bottom) && bottom >= 0 ? bottom : 0)
+      folders.scrollTop = folderScroll; resources.scrollTop = resourceScroll.get(state.resource)!
+    },
     get selectedFolder() { return state.selected },
     get canCreate() { return listingReady && ordinary.has(state.selected) },
     get preferredWidth() { return state.width ?? null },
