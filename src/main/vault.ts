@@ -13,13 +13,13 @@ import { closeSecureFs, secureFsFor } from './secure-fs.ts'
 import { VaultIndex } from './vault-index.ts'
 import { vaultRootIdentity, watchVault } from './watch.ts'
 import { assertLedgerPreserved, composeSource, partitionSource } from '../markdown/partition.ts'
-import { MemoryStore, MEMORY_FILE } from './memory-store.ts'
-import type { MemoryContext, MemoryStorePinPort } from '../shared/memory.ts'
+import { retireMemoryFile } from './memory-retirement.ts'
+import type { MemoryContext } from '../shared/memory.ts'
 import { appendLedgerChapter, type LedgerChapterWrite } from './host-source.ts'
 
 export class VaultSession {
   private readonly mutations = new VaultMutationQueue()
-  private memoryStore: MemoryStore | null = null
+  private memoryFailure: string | null = null
   private lifecycle: VaultLifecycle | null = null
   private lifecycleReady: Promise<void> = Promise.resolve()
   private lifecycleError: Error | null = null
@@ -46,8 +46,7 @@ export class VaultSession {
   constructor(
     private userData: string,
     private emit: (channel: string, payload?: unknown) => void,
-    private beforeChange: (previousRoot: string) => Promise<void> = async () => {},
-    private memoryPins: MemoryStorePinPort = { get() { throw new Error('MEMORY_CONFIG_UNAVAILABLE') }, set() { throw new Error('MEMORY_CONFIG_UNAVAILABLE') } }
+    private beforeChange: (previousRoot: string) => Promise<void> = async () => {}
   ) {}
 
   private stateFile(): string {
@@ -116,11 +115,7 @@ export class VaultSession {
     return { sessionId: this.captureSession(), vaultKey: createHash('sha256').update(JSON.stringify([canonical, this.rootIdentity])).digest('hex') }
   }
 
-  memory(): MemoryStore {
-    this.requireUsableRoot()
-    if (!this.memoryStore) throw new Error('NO_VAULT')
-    return this.memoryStore
-  }
+  memoryDiagnosis(): string | null { return this.memoryFailure }
 
   async tree(): Promise<TreeEntry[]> {
     const token = this.captureSession(); const root = this.requireUsableRoot()
@@ -259,7 +254,7 @@ export class VaultSession {
     this.remember(relPath, { content, revision, objectVersion, sessionId: this.captureSession() })
     this.lastWrites.set(relPath, { revision, objectVersion, at: Date.now() })
     this.index.markDirty()
-    await this.memoryStore?.onCommittedWrite(write)
+
   }
 
   /** Move only bindings that lead to the explicitly verified filesystem object. */
@@ -554,7 +549,7 @@ export class VaultSession {
     this.rootIdentity = null
     this.rootUnavailable = false
     this.lifecycle = null
-    this.memoryStore = null
+    this.memoryFailure = null
     this.token = null
     this.lifecycleError = null
     this.index.reset()
@@ -577,52 +572,14 @@ export class VaultSession {
     const token = randomUUID()
     this.token = token
     const check = (): void => { this.assertSession(token); this.requireUsableRoot() }
-    this.memoryStore = new MemoryStore({
-      context: () => { check(); return this.memoryContext() },
-      ready: async manageRecovery => { check(); await this.lifecycleReady; check(); if (!manageRecovery) this.requireStableStructure() },
-      run: (operation, manageRecovery) => this.mutations.run(async () => { check(); if (!manageRecovery) this.requireStableStructure(); return operation() }),
-      read: () => {
-        check()
-        try {
-          const disk = secureFsFor(this.root!).readSnapshot(MEMORY_FILE)
-          const raw = disk.bytes.toString('utf8')
-          if (!Buffer.from(raw).equals(disk.bytes)) throw new Error('MEMORY_RECORD_INVALID')
-          return { raw, objectVersion: disk.objectVersion }
-        } catch (error) { if (error instanceof Error && error.message === 'ENOENT') return null; throw error }
-      },
-      replace: (expected, raw) => { check(); return secureFsFor(this.root!).replace(MEMORY_FILE, expected?.raw ?? null, raw, expected?.objectVersion) },
-      // This local verification is also used during recovery before journal clear;
-      // it must not await lifecycleReady or invoke modelTierFor's recovery gate.
-      source: async relPath => {
-        check(); const root = this.root!
-        verifyOrdinaryNotes(root, [relPath])
-        const policyBefore = await loadPermissionSnapshot(root); check()
-        const policy = policyBefore.state
-        if (policy.status !== 'ready') throw new Error('PERMISSIONS_INVALID')
-        const fs = secureFsFor(root); const target = fs.resolve(relPath)
-        const canonical = target.map(part => part.name).join('/')
-        if (canonical !== relPath) throw new Error('MEMORY_SOURCE_NONCANONICAL')
-        for (const entry of policy.entries) {
-          const rule = fs.resolve(entry.relPath)
-          if (rule.map(part => part.name).join('/') !== entry.relPath || rule.at(-1)?.kind === 'file' && rule.at(-1)?.id === target.at(-1)?.id && entry.relPath !== canonical) throw new Error('PERMISSIONS_INVALID')
-        }
-        const permissionTier = tierFor(canonical, effectivePermissionEntries(root, policy.entries))
-        const snapshot = await readNoteSnapshot(root, relPath); check()
-        const policyAfter = await loadPermissionSnapshot(root); check()
-        if (policyAfter.state.status !== 'ready' || policyAfter.revision !== policyBefore.revision) throw new Error('PERMISSIONS_CHANGED')
-        if (snapshot.objectVersion !== target.at(-1)?.id || JSON.stringify(target) !== JSON.stringify(fs.resolve(relPath))) throw new Error('MEMORY_SOURCE_REPLACED')
-        return { ...snapshot, sessionId: token, permissionTier }
-      },
-      acceptsObject: (relPath, expected, current) => this.acceptsObject(relPath, expected, current),
-      pins: this.memoryPins
-    })
     this.lifecycle = new VaultLifecycle(this.root, this.mutations, token, check, async write => {
       check(); await this.recordCommittedWrite(write)
-    }, async receipt => { check(); await this.memoryStore!.onVerifiedRelocation(receipt) })
+    })
     this.lifecycleError = null
     this.lifecycleReady = this.lifecycle.recover().then((result) => {
       if (this.token !== token) return
       if (result) this.emitRelocation(result)
+      try { check(); retireMemoryFile(this.root!, check) } catch { this.memoryFailure = 'MEMORY_RETIREMENT_FAILED' }
     }).catch((error: unknown) => {
       if (this.token !== token) return
       this.lifecycleError = error instanceof Error ? error : new Error('LIFECYCLE_RECOVERY_REQUIRED')

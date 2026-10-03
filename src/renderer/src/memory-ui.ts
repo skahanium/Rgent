@@ -1,11 +1,9 @@
+import { memoryErrorText } from '../../shared/memory-errors.ts'
 import type { ModelConfigResult, PublicModelConfig } from '../../shared/ipc.ts'
 import type { MemoryConfigChange, MemoryCommitRequest, MemoryEditRequest, MemoryEntryView, MemoryItemRequest, MemoryJobRequest, MemoryPreview, MemoryResult, MemorySourceView, MemoryView } from '../../shared/memory.ts'
 import { modelModuleGroups } from './statusbar.ts'
 
-export function memoryErrorText(code:string):string {
-  const text:Record<string,string>={IO_ERROR:'保存失败，请重试；当前配置未改动。',BAD_REQUEST:'内容或上限不合法，请检查后重试。',STALE_SESSION:'笔记库已改变，请重新打开记忆页。',VAULT_CHANGED:'笔记库已改变，请重新打开记忆页。',STALE_PREVIEW:'预览已失效，请重新核对。',MEMORY_CONFLICT:'记忆版本已变化，请刷新后重新核对。',MEMORY_SOURCE_CHANGED:'来源片段已改变或无法核验，请重新查看原文。',MEMORY_SOURCE_REPLACED:'来源对象已替换，请从新来源重新记住。',MEMORY_SOURCE_FORBIDDEN:'来源禁止触碰，不能记住或恢复。',MEMORY_SOURCE_PERMISSION:'来源权限已收紧，记忆已暂停。',MEMORY_SOURCE_UNCONFIRMED:'该选区包含未采纳的 AI 或无法确认的材料。',MEMORY_DEPENDENCY_CHANGED:'依赖的记忆或来源已失效，不能通过摘录恢复。',MEMORY_MATERIAL_FORGOTTEN:'材料已因遗忘清理，不可重试。',MEMORY_MODEL_UNAVAILABLE:'整理模型不可用；当前任务不积累记忆，正文仍可保存。',MEMORY_PERMISSION_DISABLED:'当前库记忆关闭；本场未积累。',MEMORY_SESSION_CLOSED:'已停止；旧会话材料不会自动重试。',MEMORY_DEADLINE:'整理超过有限期限，未提交；如材料仍有效可明确重试。',MEMORY_DISABLED:'当前库记忆已关闭，不能整理。',NO_MEMORY_MODEL:'尚未选择记忆模型；已有有效记忆仍可使用。',MEMORY_CONFIG_UNAVAILABLE:'记忆配置不可用，笔记仍可编辑和保存。',MEMORY_PIN_FAILED:'记忆写入核验失败，已停止使用；请检查本机存储。',LIFECYCLE_RECOVERY_REQUIRED:'文件迁移尚未核验，请先处理恢复记录。'}
-  return text[code]??`记忆操作未完成（${code}），请核对来源或配置后重试。`
-}
+export { memoryErrorText } from '../../shared/memory-errors.ts'
 const el=<K extends keyof HTMLElementTagNameMap>(tag:K,className?:string)=>{const n=document.createElement(tag);if(className)n.className=className;return n}
 const paragraph=(text:string,className='settings-hint')=>{const p=el('p',className);p.textContent=text;return p}
 const button=(text:string,run:()=>void)=>{const b=el('button','settings-action');b.type='button';b.textContent=text;b.addEventListener('click',run);return b}

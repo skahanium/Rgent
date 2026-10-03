@@ -191,7 +191,7 @@ describe('model configuration', () => {
     store.addModel({ provider: 'minimax', modelId: 'independent', contextTokens: 1024 })
   })
 
-  it('migrates a v1 file in memory, keeps its keys and default, and only writes v3 on the next change', () => {
+  it('migrates a v1 file in memory, keeps its keys and default, and only writes v4 on the next change', () => {
     const root = directory()
     const original = v1File({ keys: { deepseek: 'key-deepseek', minimax: 'key-minimax' } })
     writeFileSync(configPath(root), original)
@@ -211,7 +211,7 @@ describe('model configuration', () => {
 
     store.setDefault(snapshot.models[0]!.id)
     const written = JSON.parse(readFileSync(configPath(root), 'utf8')) as { version: number; defaultModelId: string }
-    expect(written.version).toBe(3)
+    expect(written.version).toBe(4)
     expect(written.defaultModelId).toBe(snapshot.models[0]!.id)
     expect(createModelConfigStore(root, protection).credential().apiKey).toBe('key-deepseek')
   })
@@ -283,7 +283,7 @@ describe('memory model role', () => {
       expect(Object.keys(store.getPublic()).sort()).toEqual(['defaultModelId', 'limits', 'models', 'providers'])
       expect(readFileSync(configPath(root), 'utf8')).toBe(original)
       store.setMemoryDefault(store.getPublic().models[0]!.id)
-      expect(JSON.parse(readFileSync(configPath(root), 'utf8')).version).toBe(3)
+      expect(JSON.parse(readFileSync(path.join(root,'memory-config.json'), 'utf8')).version).toBe(1)
     }
   })
   it('keeps deleted overrides reportable without falling back and preserves roles in ordinary commits', () => {

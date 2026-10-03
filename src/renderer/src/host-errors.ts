@@ -1,3 +1,4 @@
+import { MEMORY_ERROR_CODES, MEMORY_ERROR_MESSAGES } from '../../shared/memory-errors.ts'
 /**
  * 任务启动、授权与 Host 运行失败时给人看的文案。
  *
@@ -5,7 +6,8 @@
  * 新增可上报的错误码时，把它加进 `HOST_ERROR_CODES`——`host-errors.test.ts`
  * 会强制每个码都有说明，避免状态栏或授权浮层直接显示内部码。
  */
-export const HOST_ERROR_CODES = [
+export const HOST_ERROR_CODES = [...new Set([
+  ...MEMORY_ERROR_CODES,
   'NO_API_KEY',
   'ENCRYPTION_UNAVAILABLE',
   'KEY_DECRYPT_FAILED',
@@ -60,9 +62,11 @@ export const HOST_ERROR_CODES = [
   'VAULT_CHANGED',
   'NO_VAULT',
   'IO_ERROR'
-] as const
+] as const)]
 
 const MESSAGES: Record<string, string> = {
+  ...MEMORY_ERROR_MESSAGES,
+  '旧账本摘要预算不足': '旧账本摘要预算不足',
   NO_API_KEY: '请先在设置的「模型」页保存当前供应商的密钥。',
   ENCRYPTION_UNAVAILABLE: '系统密钥保护当前不可用。',
   KEY_DECRYPT_FAILED: '已保存的模型密钥无法解密，请在设置中替换。',
@@ -126,5 +130,5 @@ const MESSAGES: Record<string, string> = {
  * - `COPY_*`／`SOURCE_AVAILABLE`／`STALE_PREVIEW`／`LEDGER_BASIS_UNAVAILABLE`／`BAD_BODY`／`BAD_PERMISSION`／`EEXIST`：另存与生命周期通道，由 `shell.ts` 的 `LIFECYCLE_ERRORS` 翻译。
  */
 
-/** 未收录的码原样返回：计划层已经给出中文原因，不再二次翻译。 */
-export const hostErrorText = (error: string): string => MESSAGES[error] ?? error
+/** 未知错误使用固定文案，不能回显内部字符串。 */
+export const hostErrorText = (error: string): string => MESSAGES[error] ?? '本场未完成，请检查任务状态；已有回答仍保留。'

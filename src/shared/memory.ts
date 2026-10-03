@@ -46,36 +46,13 @@ export type MemoryEntry = {
   updateBasis: { kind: 'manual' | 'consolidation'; id: string; version: number }
   pendingTarget?: MemoryDependency
 }
-export type MemoryForget = { id: string; throughVersion: number; basisHashes: string[]; contentHash: string; forgottenAt: string }
-export type MemoryJobMaterial = {
-  sources: MemorySource[]
-  related: MemoryDependency[]
-  result: string
-  status: 'completed' | 'cancelled' | 'failed' | 'limit'
-  reason: string | null
-  omitted: boolean
-}
 export type MemoryJobReceipt = {
   taskId: string; materialVersion: string
   outcome: 'queued' | 'running' | 'applied' | 'rejected' | 'interrupted'
   entryIds: string[]
   reason?: string
-  material?: MemoryJobMaterial
 }
-export type MemoryProposal = {
-  action: 'add' | 'update'; content: string; layer: MemoryEntry['layer']; scope: string
-  category: 'lasting' | 'confirmed' | 'correction' | 'ambiguous'
-  citations: string[]; target: MemoryDependency | null
-}
-export type MemoryRecord = { version: 1; entries: MemoryEntry[]; forgotten: MemoryForget[]; jobs: MemoryJobReceipt[]; relocations: string[] }
 export type MemoryContext = { sessionId: string; vaultKey: string }
-export type MemoryStoragePin = { objectVersion: string; revision: string }
-/** Main process only. No root, path argument or generic disk access. */
-export type MemoryStorePinPort = {
-  get(vaultKey: string): MemoryStoragePin | null
-  set(vaultKey: string, pin: MemoryStoragePin): void
-}
-export type MemorySnapshot = MemoryContext & { revision: string | null; objectVersion: string | null; record: MemoryRecord }
 export type MemoryStatus = { status: 'ready'; count: number } | { status: 'invalid'; reason: string }
 
 /** Only these bounded, human management views cross IPC. No hidden record or authority. */
