@@ -1,3 +1,5 @@
+import {WorkingMemoryService} from './working-memory-service.ts'
+import {memoryAuthorizationState as configuredMemoryAuthorizationState} from './model-config.ts'
 import {ReasoningStore} from './reasoning-store.ts'
 import {SummaryCache,summaryHash} from './summary-cache.ts'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, safeStorage, shell } from 'electron'
@@ -61,8 +63,9 @@ let modelConfigError: string | null = null
 let agentHost: AgentHost | null = null
 
 let authorizations: TaskAuthorizationRegistry | null = null
+function workingService(){return vault?new WorkingMemoryService(vault,()=>modelConfig):null}
 const memoryIpc = createMemoryIpc({
-  vault: () => vault, config: () => modelConfig, service: () => null,
+  vault: () => vault, config: () => modelConfig, service: () => workingService(),
   recheck: async (current, session) => {
     current.assertSession(session)
     await Promise.all([current.root ? agentHost?.recheckSources(current.root, session) : undefined])
@@ -73,7 +76,7 @@ const memoryAuthorizationPreviews = new Map<string, { sessionId: string; signatu
 function memoryAuthorizationState(sessionId: string) {
   vault?.assertSession(sessionId)
   if (!vault || !modelConfig) return { signature: 'unavailable', disclosure: undefined }
-  return { signature: 'memory-v2-retired', disclosure: undefined }
+  try{if(!modelConfig)throw Error();return configuredMemoryAuthorizationState(modelConfig,vault!.memoryContext().vaultKey)}catch{return {signature:'memory-v2-unavailable',disclosure:undefined}}
 }
 const imageControllers = new Map<AbortController, {vault: VaultSession; binding: string; request: import('../shared/ipc.ts').RemoteImageGetRequest}>()
 const lifecycleFlushes = new Map<string, (ok: boolean) => void>()
@@ -839,6 +842,7 @@ app.whenReady().then(() => {
   const reasoningStore=new ReasoningStore(path.join(app.getPath('userData'),'reasoning-v2'))
   const contextCache=new SummaryCache(path.join(app.getPath('userData'),'context-cache-v2'))
   agentHost = new AgentHost({
+    memory:{context:()=>vault!.memoryContext(),config:key=>({enabled:modelConfig!.getMemoryConfig(key).vault.enabled,revision:modelConfig!.getVaultMemoryRevision(key)}),entries:ids=>workingService()!.entries(ids)},
     onReasoning:(id,text)=>reasoningStore.write(vault!.memoryContext().vaultKey,id,text),
     summaries:{cache:contextCache,key:async relPath=>summaryHash(await vault!.ledgerKey(relPath))},
     ledger:{prepare:(relPath,chapter,version)=>vault!.ledgerPrepare(relPath,chapter,version),complete:(relPath,id,revision)=>vault!.ledgerComplete(relPath,id,revision),contexts:relPath=>vault!.ledgerContexts(relPath)},

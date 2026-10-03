@@ -5,12 +5,12 @@ import { createMemoryUsePermit, recallMemory } from '../../src/main/memory-use.t
 const entry = (id: string, content = '项目使用中文', layer: 'core' | 'demand' = 'core'): MemoryEntry => ({ id, version: 1, content, layer, scope: '本库', status: 'active', reason: null, updatedAt: '2026-10-02', updateBasis: { kind: 'manual', id: 'manual', version: 1 }, sources: [{ id: `source-${id}`, version: 1, relPath: 'outside.md', objectVersion: 'object', revision: 'a'.repeat(64), permissionTier: 'reference', kind: 'body', taskId: null, taskMaterialHash: null, classification: 'human', start: 0, end: 2, text: '依据', hash: 'b'.repeat(64), basisHash: 'c'.repeat(64), sourceDeps: [], memoryDeps: [] }] })
 const model = { provider: 'custom' as const, modelId: 'main', baseURL: 'https://example.com/v1', contextTokens: 16000, apiKey: 'secret' }
 function setup() {
-  let enabled = true, epoch = 0, sessionId = 'session'
+  let enabled = true, revision = 0, sessionId = 'session'
   let entries = [entry('core'), entry('demand', '中文项目方案', 'demand')]
   let reads = 0
   return {
-    port: { context: () => ({ sessionId, vaultKey: 'vault' }), config: () => ({ enabled, epoch }), entries: async () => { reads++; return structuredClone(entries) } },
-    set: (next: MemoryEntry[]) => { entries = next }, off: () => { enabled = false; epoch++ }, on: () => { enabled = true; epoch++ }, swap: () => { sessionId = 'next' }, reads: () => reads
+    port: { context: () => ({ sessionId, vaultKey: 'vault' }), config: () => ({ enabled, revision }), entries: async () => { reads++; return structuredClone(entries) } },
+    set: (next: MemoryEntry[]) => { entries = next }, off: () => { enabled = false; revision++ }, on: () => { enabled = true; revision++ }, swap: () => { sessionId = 'next' }, reads: () => reads
   }
 }
 it('defaults off and never loads or emits entries without independent permission', async () => {
@@ -49,8 +49,8 @@ it('filters before local Unicode matching; caps demand at eight and reports ever
   expect(recall.demand.some(e => e.id === 'disabled')).toBe(false)
   expect(recallMemory([entry('match', '中华人民共和国项目', 'demand')], '中华', '').demand).toHaveLength(1)
 })
-it('errors on core overflow and omits demand that exceeds its own byte budget', () => {
-  expect(() => recallMemory([entry('large', '中'.repeat(800))], '', '')).toThrow('MEMORY_CORE_LIMIT')
+it('omits core overflow and demand that exceeds its own token budget', () => {
+  expect(recallMemory([entry('large', '中'.repeat(2000))], '', '').core).toEqual([])
   const recall = recallMemory([entry('large', '中文'.repeat(800), 'demand')], '中文', '')
   expect(recall.demand).toEqual([]); expect(recall.omittedDemand).toEqual(['large'])
 })
@@ -91,4 +91,9 @@ it('uses full selection only at startup, then requests just the actual direct or
  const {memoryDependency}=await import('../../src/main/memory-use.ts')
  await p.validateDependencies([memoryDependency(entry('demand','中文项目方案','demand'))])
  expect(requests).toEqual([undefined,['core'],['demand']])
+})
+it('degrades initial invalid memory to an ordinary task and never blocks on a full core',async()=>{
+ const context={sessionId:'s',vaultKey:'a'.repeat(64)},model={provider:'custom' as const,baseURL:'https://example.test/v1',modelId:'m',apiKey:'secret',contextTokens:8192}
+ const permit=await createMemoryUsePermit({context:()=>context,config:()=>({enabled:true,revision:1}),entries:async()=>{throw Error('MEMORY_STORAGE_INVALID')}},model,'问','')
+ expect(permit.recall.core).toEqual([]);await expect(permit.assertCurrent(model)).resolves.toBeUndefined()
 })

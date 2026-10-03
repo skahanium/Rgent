@@ -312,14 +312,14 @@ describe('memory model role', () => {
 
 it('increments the memory switch epoch across off/on without invalidating it for model edits', () => {
   const store = createModelConfigStore(directory(), protection); const key = 'a'.repeat(64)
-  expect(store.getVaultMemoryEpoch(key)).toBe(0)
+  expect(store.getVaultMemoryRevision(key)).toBe(0)
   store.setVaultMemory(key, { enabled: true, override: { mode: 'inherit' } })
-  expect(store.getVaultMemoryEpoch(key)).toBe(1)
+  expect(store.getVaultMemoryRevision(key)).toBe(1)
   store.setMemoryDefault(store.getPublic().models[0]!.id)
-  expect(store.getVaultMemoryEpoch(key)).toBe(1)
+  expect(store.getVaultMemoryRevision(key)).toBe(1)
   store.setVaultMemory(key, { enabled: false, override: { mode: 'inherit' } })
   store.setVaultMemory(key, { enabled: true, override: { mode: 'inherit' } })
-  expect(store.getVaultMemoryEpoch(key)).toBe(3)
+  expect(store.getVaultMemoryRevision(key)).toBe(3)
 })
 it('can disable a vault while preserving its deleted model override', () => {
   const store = createModelConfigStore(directory(), protection); const key = 'a'.repeat(64); const modelId = store.getPublic().models[0]!.id

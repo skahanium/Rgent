@@ -22,10 +22,10 @@ export type ModelCredential = {
 /** Main-only authorization snapshot; disclose only the public recipient to renderer. */
 export function memoryAuthorizationState(config: ModelConfigStore, vaultKey: string) {
   const cfg = config.getMemoryConfig(vaultKey)
-  const credential = cfg.modelStatus === 'ready' ? config.memoryCredential(vaultKey) : null
+  let credential:ModelCredential|null=null;try{credential=cfg.modelStatus === 'ready' ? config.memoryCredential(vaultKey) : null}catch{/* unavailable consolidation does not revoke independently licensed use */}
   const recipient = credential ? { modelId: credential.modelId, host: new URL(credential.baseURL).host } : null
   const disclosure = { use: cfg.vault.enabled, consolidate: cfg.vault.enabled && !!recipient, recipient, limits: cfg.limits }
-  return { signature: JSON.stringify([cfg, credential, config.getVaultMemoryEpoch(vaultKey)]), disclosure }
+  return { signature: JSON.stringify([cfg, credential, config.getVaultMemoryRevision(vaultKey)]), disclosure }
 }
 
 /** The main process passes Electron safeStorage here; no Electron dependency reaches tests or renderer. */
@@ -332,7 +332,7 @@ export function createModelConfigStore(userData: string, protection: SecretProte
       next.defaultModelId = modelId
       memory.write(next)
     },
-    getVaultMemoryEpoch(vaultKey: string): number { requireVaultKey(vaultKey); return memory.get().revisions[vaultKey] ?? 0 },
+    getVaultMemoryRevision(vaultKey: string): number { requireVaultKey(vaultKey); return memory.get().revisions[vaultKey] ?? 0 },
     setVaultMemory(vaultKey: string, value: VaultMemoryConfig): void {
       requireVaultKey(vaultKey)
       const next = memory.get(); const settings = vaultMemory(value)

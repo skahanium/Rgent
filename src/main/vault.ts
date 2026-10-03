@@ -1,3 +1,4 @@
+import {WorkingMemoryStore,type WorkingSnapshot} from './working-memory-store.ts'
 import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -21,6 +22,7 @@ import { appendLedgerChapter } from './host-source.ts'
 
 export class VaultSession {
   private readonly mutations = new VaultMutationQueue()
+  private workingMemory:WorkingMemoryStore|null=null
   private ledgerStore: LedgerStore | null = null
   private ledgerFailure: string | null = null
   private memoryFailure: string | null = null
@@ -173,6 +175,9 @@ export class VaultSession {
   async ledgerContexts(relPath:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.contexts(relPath)}
   async ledgerPage(relPath:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);return this.ledgerStore!.wirePage(relPath,cursor)})}
 
+  memorySnapshot(){return this.workingMemory!.read()}
+  async memoryMutation<T>(operation:(store:WorkingMemoryStore)=>T|Promise<T>):Promise<T>{const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();const result=await operation(this.workingMemory!);this.assertSession(token);return result})}
+  async ledgerRecord(relPath:string,taskId:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.getRecord(relPath,taskId)}
   async ledgerMaintenancePreview(relPath:string,action:'compress'|'clear'){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintenancePreview(relPath,action)})}
   async ledgerMaintenanceCommit(relPath:string,action:'compress'|'clear',items:readonly {taskId:string;revision:number}[]){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintain(relPath,action,items)})}
   ledgerRegistryRevision(){return this.ledgerStore?.registryRevision()??null}
@@ -610,11 +615,12 @@ export class VaultSession {
     const token = randomUUID()
     this.token = token
     const check = (): void => { this.assertSession(token); this.requireUsableRoot() }
+    this.workingMemory=new WorkingMemoryStore(secureFsFor(this.root),check)
     this.ledgerStore=new LedgerStore(secureFsFor(this.root),check)
     this.ledgerFailure=null
     this.lifecycle = new VaultLifecycle(this.root, this.mutations, token, check, async write => {
       check(); await this.recordCommittedWrite(write)
-    }, async receipt=>{check();for(const move of receipt.objects)move.identityProven && this.ledgerStore!.relocate(move.from,move.to,move.objectVersion)})
+    }, async receipt=>{check();for(const move of receipt.objects){if(!move.identityProven)continue;this.ledgerStore!.relocate(move.from,move.to,move.objectVersion);try{const basis=this.workingMemory!.read();this.workingMemory!.relocate(basis,move.from,move.to,move.objectVersion)}catch(e){try{secureFsFor(this.root!).readSnapshot('.rgent-memory')}catch(m){if(m instanceof Error&&m.message==='ENOENT')continue}throw e}}})
     this.lifecycleError = null
     this.lifecycleReady = this.lifecycle.recover().then((result) => {
       if (this.token !== token) return

@@ -14,7 +14,7 @@ function boundHost(memoryState?: () => { signature: string }) {
   let generate: () => AsyncIterable<string> = async function* () { yield 'answer' }
   const host = new AgentHost({
     assertMemoryAuthorization: input => { if (input.memoryAuthorizationSignature !== (memoryState?.().signature ?? state.memorySignature)) throw Error('STALE_PREVIEW') },
-    memory: { context: () => ({sessionId: state.sessionId,vaultKey:'key'}), config: () => ({enabled: true,epoch:0}), entries: async () => {if (state.changeWhileRecalling) state.memorySignature='changed'; return []} },
+    memory: { context: () => ({sessionId: state.sessionId,vaultKey:'key'}), config: () => ({enabled: true,revision:0}), entries: async () => {if (state.changeWhileRecalling) state.memorySignature='changed'; return []} },
     root: () => '/vault', session: () => state.sessionId,
     acceptsObject: (_path, expected, current) => {
       while (expected !== current && successors.has(expected)) expected = successors.get(expected)!

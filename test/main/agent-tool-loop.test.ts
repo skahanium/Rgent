@@ -255,7 +255,7 @@ describe('Host manual read-only loop', () => {
 it('sends memory independently of tool scope and records only dispatch-used v2 dependencies', async () => {
   const app = appFor([[{type:'text',text:'已答'},finish('stop')]])
   const entry = memoryEntry()
-  app.deps.memory = { context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled:true,epoch:0}),entries:async()=>[entry] }
+  app.deps.memory = { context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled:true,revision:0}),entries:async()=>[entry] }
   const task = await app.start(); expect(await task.done).toEqual({status:'completed'})
   expect(JSON.stringify(app.messages)).toContain('记忆独立正文')
   const record = ledgerProvenance(app.content())
@@ -267,16 +267,15 @@ it('sends memory independently of tool scope and records only dispatch-used v2 d
 })
 it('stops on memory OFF during a stream and preserves generated text without another dispatch', async () => {
   const app = appFor([]); let enabled=true,epoch=0
-  app.deps.memory = { context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled,epoch}),entries:async()=>[memoryEntry()] }
+  app.deps.memory = { context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled,revision:epoch}),entries:async()=>[memoryEntry()] }
   app.deps.streamStep = async function* () { app.messages.push('dispatched'); yield {type:'text',text:'已生成'}; enabled=false;epoch++;yield {type:'text',text:'不得接受'};yield finish('stop') }
   const task=await app.start();expect((await task.done).status).toBe('failed')
   expect(app.messages).toHaveLength(1);expect(app.content()).toContain('已生成');expect(app.content()).not.toContain('不得接受')
 })
-it('rejects overflowing core before saving the prompt or contacting a model', async () => {
-  const app=appFor([])
-  app.deps.memory={context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled:true,epoch:0}),entries:async()=>[{...memoryEntry(),content:'中'.repeat(900)}]}
-  await expect(app.start()).rejects.toThrow('MEMORY_CORE_LIMIT')
-  expect(app.content()).toBe('/问\n');expect(app.calls()).toBe(0)
+it('omits overflowing core and still saves an ordinary answer', async () => {
+  const app=appFor([[{type:'text',text:'普通回答'},finish('stop')]])
+  app.deps.memory={context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled:true,revision:0}),entries:async()=>[{...memoryEntry(),content:'中'.repeat(900)}]}
+  const task=await app.start();expect((await task.done).status).toBe('completed');expect(app.content()).toContain('普通回答');expect(app.calls()).toBe(1)
 })
 function memoryEntry(): import('../../src/shared/memory.ts').MemoryEntry {
   return {id:'mem',version:1,content:'记忆独立正文',layer:'core',scope:'本库',status:'active',reason:null,updatedAt:'now',updateBasis:{kind:'manual',id:'manual',version:1},sources:[{id:'source',version:1,relPath:'outside.md',objectVersion:'other',revision:'a'.repeat(64),permissionTier:'reference',kind:'body',taskId:null,taskMaterialHash:null,classification:'human',start:0,end:2,text:'依据',hash:'b'.repeat(64),basisHash:'c'.repeat(64),sourceDeps:[],memoryDeps:[]}]}
@@ -284,7 +283,7 @@ function memoryEntry(): import('../../src/shared/memory.ts').MemoryEntry {
 
 it('rechecks memory while a provider is stalled and cancels without waiting for another token', async () => {
  const app=appFor([]);let enabled=true,epoch=0
- app.deps.memory={context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled,epoch}),entries:async()=>[memoryEntry()]}
+ app.deps.memory={context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled,revision:epoch}),entries:async()=>[memoryEntry()]}
  const entered=deferred(),release=deferred()
  app.deps.streamStep=async function*(){yield {type:'text',text:'流中保稿'};entered.resolve();await release.promise;yield finish('stop')}
  const task=await app.start();await entered.promise;enabled=false;epoch++
@@ -329,7 +328,7 @@ it('reports saved-material handoff failure separately from foreground saving', a
 
 it('records demand omissions in the saved task ledger', async () => {
  const app=appFor([[{type:'text',text:'已答'},finish('stop')]])
- app.deps.memory={context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled:true,epoch:0}),entries:async()=>Array.from({length:10},(_,i)=>({...memoryEntry(),id:`mem-${i}`,content:'问需求',layer:'demand' as const}))}
+ app.deps.memory={context:()=>({sessionId:'s',vaultKey:'vault'}),config:()=>({enabled:true,revision:0}),entries:async()=>Array.from({length:10},(_,i)=>({...memoryEntry(),id:`mem-${i}`,content:'问需求',layer:'demand' as const}))}
  const task=await app.start();await task.done
  expect(app.content()).toContain('按需记忆省略：mem-8、mem-9')
 })

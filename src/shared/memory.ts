@@ -40,7 +40,7 @@ export type MemoryEntry = {
   layer: 'core' | 'demand'
   scope: string
   sources: MemorySource[]
-  status: 'active' | 'paused' | 'pending' | 'disabled'
+  status: 'active' | 'paused' | 'pending' | 'disabled' | 'review' | 'obsolete' | 'disputed' | 'deferred'
   reason: string | null
   updatedAt: string
   updateBasis: { kind: 'manual' | 'consolidation'; id: string; version: number }

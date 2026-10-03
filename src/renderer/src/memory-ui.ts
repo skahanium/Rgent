@@ -90,7 +90,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     const signature = JSON.stringify([entry.status, entry.reason, entry.sources, entry.updatedAt, entry.pendingTarget])
     if (row.dataset.metadata === signature) return
     const summary = row.querySelector('summary')!
-    summary.textContent = `${({active:'有效',paused:'暂停',pending:'待确认',disabled:'停用'})[entry.status]} · ${entry.layer==='core'?'核心':'按需'} · ${entry.content}`
+    summary.textContent = `${({active:'有效',paused:'证据暂停',pending:'待确认',disabled:'停用',review:'待复核',obsolete:'过时',disputed:'争议',deferred:'容量暂缓'})[entry.status]} · ${entry.layer==='core'?'核心':'按需'} · ${entry.content}`
     const metadata = row.querySelector<HTMLElement>('.memory-entry-metadata')!
     let detail = metadata.querySelector<HTMLElement>(':scope > .settings-hint')
     if (!detail) { detail = paragraph(''); metadata.prepend(detail) }

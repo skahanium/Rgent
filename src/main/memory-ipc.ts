@@ -1,3 +1,4 @@
+import type {WorkingMemoryService} from './working-memory-service.ts'
 import { MEMORY_ERROR_CODES } from '../shared/memory-errors.ts'
 import type { MemoryConfigRequest, MemoryPreview, MemoryResult, MemoryView } from '../shared/memory.ts'
 import type { ModelConfigStore } from './model-config.ts'
@@ -48,19 +49,21 @@ export function parseMemoryRequest(op: MemoryOperation, value: unknown): Record<
   return keys(value,allowed) ? value : null
 }
 
-export type MemoryIpcPorts={vault():VaultSession|null;config():ModelConfigStore|null;service():unknown;recheck(vault:VaultSession,session:string):Promise<void>}
+export type MemoryIpcPorts={vault():VaultSession|null;config():ModelConfigStore|null;service():WorkingMemoryService|null;recheck(vault:VaultSession,session:string):Promise<void>}
 /** Transitional diagnostic surface; no old previews, data or permits remain usable. */
 export function createMemoryIpc(ports:MemoryIpcPorts){return {clear(){},async handle(_owner:string,op:MemoryOperation,value:unknown):Promise<MemoryResult<MemoryView|MemoryPreview>>{
  try{const request=parseMemoryRequest(op,value);if(!request)throw Error('BAD_REQUEST')
   const vault=ports.vault();if(!vault)throw Error('NO_VAULT');vault.assertSession(request.sessionId as string)
-  const config=ports.config();if(!config)throw Error('MEMORY_CONFIG_UNAVAILABLE')
   const context=vault.memoryContext()
+  if(op==='get'&&ports.service())return {ok:true,value:await ports.service()!.view()}
+  const config=ports.config();if(!config&&op==='config')throw Error('MEMORY_CONFIG_UNAVAILABLE')
   if(op==='config'){const change=request as unknown as MemoryConfigRequest
-   if(change.target==='default')config.setMemoryDefault(change.modelId)
-   else if(change.target==='limits')config.updateMemoryLimits(change.limits)
-   else {if(change.vault.enabled)throw Error('MEMORY_RETIRED');config.setVaultMemory(context.vaultKey,change.vault)}
-  }else if(op!=='get')throw Error('MEMORY_RETIRED')
-  const cfg=config.getMemoryConfig(context.vaultKey)
+   if(change.target==='default')config!.setMemoryDefault(change.modelId)
+   else if(change.target==='limits')config!.updateMemoryLimits(change.limits)
+   else {if(change.vault.enabled)await ports.service()?.initialize();config!.setVaultMemory(context.vaultKey,change.vault)}
+  }else if(op==='edit'||op==='disable'||op==='forget'){const service=ports.service();if(!service)throw Error('MEMORY_UNAVAILABLE');const item=request as unknown as import('../shared/memory.ts').MemoryItemRequest;if(op==='forget')await service.forget(item);else await service.edit(item,op==='disable'?{status:'disabled'}:{content:request.content as string,layer:request.layer as 'core'|'demand',scope:request.scope as string})}else if(op!=='get')throw Error('MEMORY_UNAVAILABLE')
+  const service=ports.service();if(service)return {ok:true,value:await service.view()}
+  const cfg=config!.getMemoryConfig(context.vaultKey)
   return {ok:true,value:{sessionId:context.sessionId,revision:null,objectVersion:null,config:cfg,recipient:null,status:'invalid',reason:vault.memoryDiagnosis()??'MEMORY_RETIRED',entries:[],jobs:[],running:{permits:0,pending:0,active:0}}}
  }catch(e){return {ok:false,error:publicMemoryError(e)}}
 }}}
