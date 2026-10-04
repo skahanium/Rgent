@@ -85,7 +85,7 @@ function parseWorkspaces(source: Snapshot): WorkspaceData | null {
     if (!object(value) || value.version !== 1 || !Array.isArray(value.entries) || value.entries.length > LIMIT) return null
     const entries: WorkspaceData['entries'] = []
     for (const item of value.entries) {
-      if (!object(item) || item.id !== undefined && !text(item.id,128) || !rootPath(item.path) || !identity(item.rootIdentity) || !object(item.workspace) || item.workspace.version !== 1 || entries.some(entry => entry.path === item.path && entry.rootIdentity === item.rootIdentity)) return null
+      if (!object(item) || item.id !== undefined && !text(item.id,128) || !rootPath(item.path) || !identity(item.rootIdentity) || !object(item.workspace) || item.workspace.version !== 1 || entries.some(entry => item.id === undefined && entry.id === undefined && entry.path === item.path && entry.rootIdentity === item.rootIdentity)) return null
       if(item.id!==undefined&&entries.some(entry=>entry.id===item.id))return null
       entries.push({ ...(item.id?{id:item.id as string}:{}), path: item.path, rootIdentity: item.rootIdentity, workspace: workspaceValue(item.workspace) })
     }
@@ -210,8 +210,10 @@ export class VaultCatalog {
     return { ...entry }
   }
   private migrateWorkspaceId(entry: VaultCatalogEntry): void {
+    if(entry.displayVersion && entry.legacyDisplayKey!==createHash('sha256').update(entry.path).digest('hex'))return
     const source=snapshot(this.workspaceFile),data=parseWorkspaces(source)
     if(!data)throw Error('VAULT_WORKSPACE_INVALID')
+    if(data.entries.some(item=>item.id===entry.id))return
     const legacy=data.entries.find(item=>!item.id&&item.path===entry.path&&item.rootIdentity===entry.rootIdentity)
     if(legacy){legacy.id=entry.id;this.save(this.workspaceFile,data,source,'VAULT_WORKSPACE_CONFLICT')}
   }
@@ -224,7 +226,8 @@ export class VaultCatalog {
   workspace(target: VaultTarget): VaultWorkspace | null {
     this.checked(target)
     const data = parseWorkspaces(snapshot(this.workspaceFile))
-    return data?.entries.find(item => item.id ? item.id === this.inspect(target.path).id : item.path === target.path && item.rootIdentity === target.rootIdentity)?.workspace ?? null
+    const current=this.inspect(target.path),entry=this.view().entries.find(item=>item.id===current.id)
+    return data?.entries.find(item => item.id ? item.id === current.id : (!entry || !entry.displayVersion || entry.legacyDisplayKey===createHash('sha256').update(entry.path).digest('hex')) && item.path === target.path && item.rootIdentity === target.rootIdentity)?.workspace ?? null
   }
   saveWorkspace(target: VaultTarget, value: unknown): void {
     this.checked(target)
@@ -232,7 +235,8 @@ export class VaultCatalog {
     if (!data) throw new Error('VAULT_WORKSPACE_INVALID')
     const workspace = workspaceValue(value)
     const id=this.inspect(target.path).id
-    const existing = data.entries.find(item => item.id ? item.id === id : item.path === target.path && item.rootIdentity === target.rootIdentity)
+    const entry=this.view().entries.find(item=>item.id===id)
+    const existing = data.entries.find(item => item.id ? item.id === id : (!entry || !entry.displayVersion || entry.legacyDisplayKey===createHash('sha256').update(entry.path).digest('hex')) && item.path === target.path && item.rootIdentity === target.rootIdentity)
     if (existing) { existing.workspace = workspace; if(id)existing.id=id }
     else {
       if (data.entries.length >= LIMIT) throw new Error('VAULT_WORKSPACE_LIMIT')

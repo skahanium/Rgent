@@ -444,6 +444,7 @@ export type EditorHost = {
   setText: (text: string, host?: NoteHost, selection?: { anchor: number; head: number }) => void
   /** Apply a saved Host change without replacing this tab's history or scroll position. */
   applyExternalText: (text: string) => void
+  setReadOnly: (value: boolean) => void
   setActiveTaskIds: (ids: ReadonlySet<string>) => void
   setNoteHost: (host: NoteHost) => void
   /** 应用主进程选择后的实际日夜外观；不写笔记、不进撤销栈。 */
@@ -486,11 +487,15 @@ export function mountEditor(
   // 主题：CM6 自带的默认样式跟 darkTheme 走，装饰跟 themeFacet 走。
   const themeCompartment = new Compartment()
   const activeTaskCompartment = new Compartment()
+  const readOnlyCompartment = new Compartment()
+  let readOnly = false
   let dark = false
   const state = EditorState.create({
     doc: '',
     extensions: [
       historyCompartment.of(history()),
+      readOnlyCompartment.of([]),
+      EditorState.transactionFilter.of(tr => readOnly && tr.docChanged && !applying ? [] : tr),
       EditorState.transactionExtender.of((tr) => {
         if (!tr.docChanged) return null
         const old = sourceOf(tr.startState)
@@ -613,6 +618,11 @@ export function mountEditor(
           userEvent: 'rgent.host'
         })
       } finally { applying = false }
+    },
+    setReadOnly: (value) => {
+      if (readOnly === value) return
+      readOnly = value
+      view.dispatch({ effects: readOnlyCompartment.reconfigure([EditorState.readOnly.of(value), EditorView.editable.of(!value)]) })
     },
     setActiveTaskIds: (ids) => {
       view.dispatch({ effects: activeTaskCompartment.reconfigure(activeTaskIdsFacet.of(new Set(ids))) })

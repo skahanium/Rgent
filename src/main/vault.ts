@@ -349,10 +349,10 @@ export class VaultSession {
     const token=this.captureSession(),prepared=this.ledgerRecoveryPreviews.get(id)
     this.ledgerRecoveryPreviews.delete(id)
     if(!prepared||prepared.view.sessionId!==token||!prepared.view.canCommit)throw Error('STALE_PREVIEW')
-    const result=await this.lifecycle!.commitRepair(prepared.plan);this.assertSession(token);this.lifecycleError=null;if(result.status==='complete')this.resetMemoryReader();return result
+    const result=await this.lifecycle!.commitRepair(prepared.plan);this.assertSession(token);this.lifecycleError=null;if(result.status==='complete'){this.resetMemoryReader();if(this.ledgerFailure==='LEDGER_OWNERSHIP_UNVERIFIED')this.ledgerFailure=null}return result
   }
   private resetMemoryReader(){const token=this.captureSession();this.workingMemory=new WorkingMemoryStore(()=>secureFsFor(this.requireUsableRoot()),()=>{this.assertSession(token);this.requireUsableRoot()})}
-  async ledgerRecoveryResume(revision:string){const token=this.captureSession();await this.lifecycleReady;const result=await this.lifecycle!.resumeRepair(revision);this.assertSession(token);this.lifecycleError=null;if(result.status==='complete')this.resetMemoryReader();return result}
+  async ledgerRecoveryResume(revision:string){const token=this.captureSession();await this.lifecycleReady;const result=await this.lifecycle!.resumeRepair(revision);this.assertSession(token);this.lifecycleError=null;if(result.status==='complete'){this.resetMemoryReader();if(this.ledgerFailure==='LEDGER_OWNERSHIP_UNVERIFIED')this.ledgerFailure=null}return result}
   async ledgerImage(relPath:string,taskId:string,revision:number,field:'prompt'|'answer'){
     const token=this.captureSession();await this.lifecycleReady;this.assertSession(token)
     const record=this.ledgerStore!.getRecord(relPath,taskId)
@@ -436,6 +436,8 @@ export class VaultSession {
       this.assertSession(token)
       try {
         this.requireUsableRoot()
+        const lifecycle=this.lifecycle?.status()
+        if(lifecycle?.status==='invalid'||lifecycle?.operation?.kind==='ledger-repair')throw Error('LIFECYCLE_RECOVERY_REQUIRED')
         const current = await readNoteSnapshot(root, relPath)
         this.assertSession(token)
         this.requireUsableRoot()
@@ -454,7 +456,7 @@ export class VaultSession {
         return binding ? { ...saved, sessionId: token } : saved.revision
       } catch (error) {
         this.assertSession(token)
-        if (error instanceof Error && ['CONFLICT', 'NOTE_REPLACED', 'LEDGER_BOUNDARY_INVALID'].includes(error.message)) throw error
+        if (error instanceof Error && ['CONFLICT', 'NOTE_REPLACED', 'LEDGER_BOUNDARY_INVALID', 'LIFECYCLE_RECOVERY_REQUIRED'].includes(error.message)) throw error
         throw noteReadError(error)
       }
     })
@@ -474,7 +476,7 @@ export class VaultSession {
     this.remember(relPath, { content, revision, objectVersion, sessionId: this.captureSession() })
     this.lastWrites.set(relPath, { revision, objectVersion, at: Date.now() })
     this.index.markDirty()
-    try { this.ledgerStore?.onWrite(relPath,previousObjectVersion,objectVersion,content) } catch { this.ledgerFailure='LEDGER_OWNERSHIP_UNVERIFIED' }
+    try { this.ledgerStore?.onWrite(relPath,previousObjectVersion,objectVersion,content) } catch { this.ledgerFailure='LEDGER_OWNERSHIP_UNVERIFIED';this.emit('tree:changed') }
   }
 
   /** Move only bindings that lead to the explicitly verified filesystem object. */

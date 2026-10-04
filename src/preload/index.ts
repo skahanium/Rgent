@@ -1,3 +1,4 @@
+import type { LifecycleFlushPhase, RecoveryFlushContext } from '../shared/flush.ts'
 import { boundEvent, isVaultChannel, isVaultEvent } from '../shared/vault-binding.ts'
 import type { MemorySessionRequest, MemoryConfigRequest, MemoryManualRequest, MemoryCommitRequest, MemoryItemRequest, MemoryEditRequest, MemoryJobRequest, MemoryResult, MemoryView, MemoryPreview } from '../shared/memory.ts'
 import { contextBridge, ipcRenderer } from 'electron'
@@ -146,9 +147,15 @@ const api = {
     subscribe(IPC.treeChanged, () => handler()),
   onNoteRelocated: (handler: (payload: RelocationEvent) => void): (() => void) =>
     subscribe(IPC.noteRelocated, (payload) => handler(payload as RelocationEvent)),
-  onLifecycleFlushRequest: (handler: (id: string, cleanUnavailablePaths: readonly string[], phase?: 'settings' | 'freeze') => void): (() => void) =>
-    subscribe(IPC.lifecycleFlushRequest, (id, paths, phase) => {
-      if (typeof id === 'string' && Array.isArray(paths) && paths.every(path => typeof path === 'string')) handler(id, paths, phase === 'settings' || phase === 'freeze' ? phase : undefined)
+  onLifecycleFlushRequest: (handler: (id: string, cleanUnavailablePaths: readonly string[], phase?: LifecycleFlushPhase, context?: RecoveryFlushContext) => void): (() => void) =>
+    subscribe(IPC.lifecycleFlushRequest, (id, paths, phase, context) => {
+      if (typeof id !== 'string' || !Array.isArray(paths) || !paths.every(path => typeof path === 'string')) return
+      if (typeof phase === 'string' && ['recovery-preview','recovery-commit','recovery-resume','recovery-release'].includes(phase)) {
+        if (!context || typeof context !== 'object' || Array.isArray(context)) return
+        const c = context as Record<string, unknown>
+        if (Object.keys(c).sort().join() !== 'operationId,sessionId' || typeof c.sessionId !== 'string' || !c.sessionId || typeof c.operationId !== 'string' || !c.operationId) return
+        handler(id, paths, phase as LifecycleFlushPhase, c as RecoveryFlushContext)
+      } else if (phase === undefined || phase === 'settings' || phase === 'freeze') handler(id, paths, phase)
     }),
   lifecycleFlushDone: (id: string, ok: boolean): void => { ipcRenderer.send(IPC.lifecycleFlushDone, { id, ok }) },
   onNoteExternalChange: (handler: (payload: NotePayload) => void): (() => void) =>

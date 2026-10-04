@@ -88,3 +88,34 @@ describe('CloseFlow', () => {
     expect(flow.flushed(true)).toBe('none')
   })
 })
+it('holds dirty drafts without a fake save on recovery resume, rejects dirty commit and drains preview',async()=>{
+ const {RecoveryDraftGate}=await import('../../src/shared/flush.ts'),gate=new RecoveryDraftGate(),calls:string[]=[]
+ let dirty=true;const context={sessionId:'session',operationId:'one'},deps={session:()=> 'session',composing:()=>false,changed:()=>calls.push('gate'),settled:async()=>{calls.push('settled')},save:async()=>{calls.push('save');dirty=false;return true},dirty:()=>dirty}
+ expect(await gate.handle('recovery-resume',context,deps)).toBe(true);expect(gate.held('session')).toBe(true);expect(calls).not.toContain('save');expect(dirty).toBe(true)
+ await gate.handle('recovery-release',context,deps);expect(gate.held('session')).toBe(false)
+ expect(await gate.handle('recovery-commit',context,deps)).toBe(false);expect(dirty).toBe(true)
+ await gate.handle('recovery-release',context,deps)
+ expect(await gate.handle('recovery-preview',context,deps)).toBe(true);expect(dirty).toBe(false);expect(calls.indexOf('gate')).toBeLessThan(calls.indexOf('save'))
+})
+it('keeps the new session gate when old recovery completions and releases arrive late',async()=>{
+ const {RecoveryDraftGate}=await import('../../src/shared/flush.ts'),gate=new RecoveryDraftGate();let session='old',release!:()=>void
+ const pending=new Promise<void>(r=>{release=r}),deps={session:()=>session,composing:()=>false,changed:()=>{},settled:()=>pending,save:async()=>true,dirty:()=>true}
+ const old=gate.handle('recovery-resume',{sessionId:'old',operationId:'one'},deps);session='new'
+ expect(await gate.handle('recovery-resume',{sessionId:'new',operationId:'two'},{...deps,settled:async()=>{}})).toBe(true)
+ release();expect(await old).toBe(false);await gate.handle('recovery-release',{sessionId:'old',operationId:'one'},deps)
+ expect(gate.held('new')).toBe(true)
+})
+it('reports preview save failure and preserves held drafts until the matching release',async()=>{
+ const {RecoveryDraftGate}=await import('../../src/shared/flush.ts'),gate=new RecoveryDraftGate(),context={sessionId:'s',operationId:'one'},deps={session:()=> 's',composing:()=>false,changed:()=>{},settled:async()=>{},save:async()=>false,dirty:()=>true}
+ expect(await gate.handle('recovery-preview',context,deps)).toBe(false);expect(gate.held('s')).toBe(true)
+ await gate.handle('recovery-release',{...context,operationId:'wrong'},deps);expect(gate.held('s')).toBe(true)
+ await gate.handle('recovery-release',context,deps);expect(gate.held('s')).toBe(false)
+})
+it('allows only the preview owner to drain drafts while other flushes remain blocked',async()=>{
+ const {RecoveryDraftGate}=await import('../../src/shared/flush.ts'),gate=new RecoveryDraftGate();let release!:()=>void
+ const pending=new Promise<void>(r=>{release=r}),context={sessionId:'s',operationId:'one'},deps={session:()=> 's',composing:()=>false,changed:()=>{},settled:()=>pending,save:async()=>true,dirty:()=>true}
+ const hold=gate.handle('recovery-preview',context,deps)
+ expect(gate.maySave('s')).toBe(false);expect(gate.maySave('s',context.operationId)).toBe(true)
+ release();await hold;await gate.handle('recovery-release',context,deps)
+ await gate.handle('recovery-resume',context,deps);expect(gate.maySave('s',context.operationId)).toBe(false)
+})

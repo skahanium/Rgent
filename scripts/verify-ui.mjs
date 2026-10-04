@@ -1512,6 +1512,47 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   })
 }
 
+/** Disposable recovery counterexample. Native fixture creates a valid owner-complete,
+ * registry-pending intent; real renderer, preload, IPC and resume perform the repair. */
+async function verifyLedgerRecoveryDrafts(page,nativePage,vault) {
+  const names=['恢复甲.md','恢复乙.md']
+  writeFileSync(path.join(vault,names[0]),'恢复甲正文\n<!-- rgent:ledger:v1 -->\n旧历史')
+  writeFileSync(path.join(vault,names[1]),'恢复乙正文')
+  await page.eval(`(async()=>{const s=await window.rgent.vaultGet();const r=await window.rgent.ledgerMigrate({sessionId:s.sessionId,after:null});if(!r.ok||r.value.failures.length)throw Error('恢复夹具迁移失败')})()`)
+  await waitFor(page,`[...document.querySelectorAll('.tree-note')].some(n=>n.dataset.path==='恢复乙.md')`)
+  await nativePage.eval(`(()=>{const ipc=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain;const old=ipc._invokeHandlers.get('note:write');globalThis.__recoverySave={old,seen:false};ipc._invokeHandlers.set('note:write',async(...args)=>{const g=globalThis.__recoverySave;g.seen=true;await new Promise(r=>g.release=r);return old(...args)});return true})()`)
+  try {
+    for(const name of names){
+      await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(name)}).click()`)
+      await waitFor(page,`document.querySelector('.tab[aria-selected="true"]')?.dataset.rel===${JSON.stringify(name)}`)
+      await page.eval(`(()=>{const v=document.querySelector('.cm-content').cmTile.root.view;v.dispatch({changes:{from:v.state.doc.length,insert:'未保存草稿'},userEvent:'input.type'})})()`)
+    }
+    for(let n=0;n<40&&!await nativePage.eval(`globalThis.__recoverySave.seen`);n++)await sleep(100)
+    const session=await page.eval(`(async()=>{const s=await window.rgent.vaultGet();return s.sessionId})()`)
+    await nativePage.eval(`(()=>{
+      const req=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json'),fs=req('node:fs'),path=req('node:path'),native=req(path.join(process.cwd(),'out/main/rgent_fs.node')),root=${JSON.stringify(vault)},h=native.openRoot(root)
+      try{const snap=p=>native.readSnapshot(h,p),registry=snap('.rgent/registry.json'),r=JSON.parse(registry.bytes.toString()),owner=r.owners.find(o=>o.relPath==='恢复甲.md'),ownerPath='.rgent/ledgers/'+owner.noteId+'/owner.json',before=snap(ownerPath),body=snap(owner.relPath),stat=fs.statSync(root,{bigint:true});let permission=null;try{permission=snap('.rgent-permissions')}catch{}
+        owner.sequenceCeiling=++r.sequence;const nextOwner=JSON.stringify(owner),nextRegistry=JSON.stringify(r)
+        const receipt=native.replace(h,ownerPath,before.bytes,Buffer.from(nextOwner),before.objectVersion)
+        const plan={kind:'ledger-publication',rootIdentity:stat.dev+':'+stat.ino,sessionId:${JSON.stringify(session)},relPath:owner.relPath,objectVersion:body.objectVersion,bodyRevision:req('node:crypto').createHash('sha256').update(body.bytes).digest('hex'),permissionRaw:permission?permission.bytes.toString():null,permissionId:permission?.objectVersion??null,ownerPath,writes:[{path:ownerPath,before:before.bytes.toString(),beforeId:before.objectVersion,after:nextOwner,receipt},{path:'.rgent/registry.json',before:registry.bytes.toString(),beforeId:registry.objectVersion,after:nextRegistry}]}
+        const journal=snap('.rgent-lifecycle');native.replace(h,'.rgent-lifecycle',journal.bytes,Buffer.from(JSON.stringify({version:1,active:plan})),journal.objectVersion)
+      }finally{native.closeRoot(h)}return true
+    })()`)
+  } finally {
+    await nativePage.eval(`(()=>{const ipc=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain,g=globalThis.__recoverySave;ipc._invokeHandlers.set('note:write',g.old);g.release?.();return true})()`)
+  }
+  check('发布中断后真实自动保存拒绝写盘、两篇窗口稿保留',await waitFor(page,`document.querySelectorAll('.tab-dirty').length===2 && document.querySelector('.cm-content')?.getAttribute('contenteditable')==='false'`))
+  check('恢复暂停仍能阅读正文且磁盘未被草稿改写',!readFileSync(path.join(vault,names[0]),'utf8').includes('未保存草稿')&&!readFileSync(path.join(vault,names[1]),'utf8').includes('未保存草稿')&&await page.eval(`document.querySelector('.cm-content')?.textContent.includes('未保存草稿') && !document.querySelector('#app').inert`))
+  await page.eval(`document.querySelector('.settings-open').click()`)
+  await waitFor(page,`!!document.querySelector('.overlay-settings')`)
+  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(n=>n.textContent==='笔记库').click()`)
+  await waitFor(page,`[...document.querySelectorAll('.vault-settings-recovery button')].some(b=>b.textContent==='核验并继续一批')`)
+  await page.eval(`[...document.querySelectorAll('.vault-settings-recovery button')].find(b=>b.textContent==='核验并继续一批').click()`)
+  check('携带脏 tab 通过真实恢复 IPC 续跑、没有预先强制保存',await waitFor(page,`document.querySelector('.vault-settings-recovery')?.textContent.includes('恢复已完成')`))
+  check('恢复完成后两篇窗口稿自动保存且编辑恢复',await waitFor(page,`document.querySelectorAll('.tab-dirty').length===0 && document.querySelector('.cm-content')?.getAttribute('contenteditable')==='true'`))
+  check('恢复后磁盘保存两篇原窗口稿且意图完成',names.every(name=>readFileSync(path.join(vault,name),'utf8').includes('未保存草稿'))&&JSON.parse(readFileSync(path.join(vault,'.rgent-lifecycle'),'utf8')).active===null)
+}
+
 async function verifyModelFeedback(page, nativePage, shot) {
   const longId = '失败候选模型名称用于验证窄窗口省略与容量草稿保留'.repeat(4)
   const config = await page.eval(`(async()=>{const r=await window.rgent.modelConfigGet();if(!r.ok)throw new Error('模型反馈夹具初读失败');return r.config})()`)
@@ -1791,6 +1832,12 @@ async function main() {
       page.restoreNativeWindow = () => nativePage.eval(`globalThis.__rgentFocusProbe?.destroy(); globalThis.__rgentTestWindow.show(); true`)
     }
 
+    if(process.env.RGENT_UI_LEDGER_RECOVERY_ONLY==='1'){
+      await verifyLedgerRecoveryDrafts(page,nativePage,vault)
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode=failures===0?0:1
+      return
+    }
     if (multiVaultOnly) {
       await verifyMultiVault(page,nativePage,vault,path.join(workdir,'第二个笔记库'),profile,shot,electron,child)
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)

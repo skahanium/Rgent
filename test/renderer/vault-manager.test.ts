@@ -276,3 +276,14 @@ it('cancels an uncommitted recovery and ignores its late preview after leaving t
  late=true;click('预览整库恢复');await flush();page.dispose();const before=root.textContent;release(preview);await flush();expect(root.textContent).toBe(before)
  expect(repair.mock.calls.some(([request])=>request.action==='commit')).toBe(false)
 })
+it('offers a fresh preview after dirty commit fails and refreshes actual pending progress after a failed resume',async()=>{
+ const root=document.createElement('div');document.body.append(root);let pending=false
+ const state=async()=>({sessionId:'session',status:pending?'pending' as const:'ready' as const,revision:pending?'latest':null,items:[],...(pending?{operation:{kind:'ledger-repair' as const,source:'',target:''}}:{})})
+ const repair=vi.fn(async(request:import('../../src/shared/ledger.ts').LedgerRepairRequest):Promise<import('../../src/shared/ledger.ts').LedgerRepairResult>=>request.action==='preview'?{ok:true,value:{id:'preview',sessionId:'session',mode:'restore',canCommit:true,warning:'授权新关联',rows:[]}}:{ok:false,error:request.action==='commit'?'UNSAVED_DRAFT':'STALE_RECOVERY'})
+ mountVaultManager({body:root,isCurrent:()=>true},{get:async()=>view([]),open:async()=>{},pick:async()=>{},change:async()=>view([]),recovery:{state,repair}})
+ const click=(text:string)=>[...root.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent===text)!.click()
+ await flush();click('预览整库恢复');await flush();click('确认授权新关联');await flush()
+ expect([...root.querySelectorAll('button')].some(b=>b.textContent==='预览整库恢复')).toBe(true);expect(root.textContent).toContain('重新预览')
+ pending=true;click('预览整库恢复');await flush();click('确认授权新关联');await flush();click('核验并继续一批');await flush()
+ expect(repair).toHaveBeenLastCalledWith({sessionId:'session',action:'resume',revision:'latest'})
+})

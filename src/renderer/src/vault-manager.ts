@@ -56,7 +56,13 @@ export function mountVaultManager(context: {
   const recoveryMessage=element('p','vault-settings-hint'),recoveryRows=element('ul',''),recoveryActions=element('div','vault-settings-shortcuts')
   recovery.append(element('h3','','账本登记与整库恢复'),recoveryMessage,recoveryRows,recoveryActions);root.append(recovery)
   let recoveryState:LifecycleStatus|null=null,recoveryPreview:LedgerRecoveryView|null=null
-  const repair=async(request:LedgerRepairRequest)=>{const result=await handlers.recovery!.repair(request);if(!alive())return;if(!result.ok)throw Error(result.error);if(result.value&&'rows'in result.value){recoveryPreview=result.value;showRecovery()}else if(result.value&&'processed'in result.value){const progress=result.value;recoveryPreview=null;recoveryState={...recoveryState!,status:progress.status==='complete'?'ready':'pending',revision:progress.revision,operation:progress.status==='complete'?undefined:{kind:'ledger-repair',source:'',target:''}};showRecovery();recoveryMessage.textContent=progress.status==='complete'?'恢复已完成。账本和合格来源已核验；未通过的来源仍暂停。':`已核验 ${progress.processed} / ${progress.total} 项。可暂停并离开本库，进度保留。`}}
+  const repair=async(request:LedgerRepairRequest)=>{const result=await handlers.recovery!.repair(request);if(!alive())return;if(!result.ok){
+    if(request.action==='commit'||request.action==='cancel')recoveryPreview=null
+    const state=await handlers.recovery!.state().catch(()=>null)
+    if(!alive()||state&&state.sessionId!==request.sessionId)return
+    if(state)recoveryState=state
+    showRecovery();throw Error(result.error==='UNSAVED_DRAFT'?'RECOVERY_UNSAVED_DRAFT':result.error)
+  }if(result.value&&'rows'in result.value){recoveryPreview=result.value;showRecovery()}else if(result.value&&'processed'in result.value){const progress=result.value;recoveryPreview=null;recoveryState={...recoveryState!,status:progress.status==='complete'?'ready':'pending',revision:progress.revision,operation:progress.status==='complete'?undefined:{kind:'ledger-repair',source:'',target:''}};showRecovery();recoveryMessage.textContent=progress.status==='complete'?'恢复已完成。账本和合格来源已核验；未通过的来源仍暂停。':`已核验 ${progress.processed} / ${progress.total} 项。可暂停并离开本库，进度保留；如有窗口稿，请先继续恢复，再保存后离库。`}}
   function showRecovery(){
     recovery.hidden=!recoveryState;recoveryRows.replaceChildren();recoveryActions.replaceChildren();if(!recoveryState)return
     const sessionId=recoveryState.sessionId
@@ -66,7 +72,7 @@ export function mountVaultManager(context: {
       const cancel=button('取消恢复预览',()=>{void run('取消预览…',async()=>{await repair({sessionId,action:'cancel',previewId:preview.id});if(alive()){recoveryPreview=null;showRecovery()}})})
       recoveryActions.append(cancel,confirm)
     }else if(recoveryState.status!=='ready'){
-      recoveryMessage.textContent=recoveryState.status==='invalid'?'恢复记录无法核验，原记录保留。可以退出本页或切换笔记库。':recoveryState.operation?.kind==='ledger-repair'?'整库恢复已暂停，可核验并继续一批，或离开本库。正文可读；任务、结构操作和整理写入暂停。':'文件操作尚未完成，请先核验现有恢复记录。'
+      recoveryMessage.textContent=recoveryState.status==='invalid'?'恢复记录无法核验，原记录保留。可以退出本页或切换笔记库。':recoveryState.operation?.kind==='ledger-repair'?'整库恢复已暂停，可核验并继续一批，或离开本库。正文可读，编辑和保存暂停；已有窗口稿保留，先继续恢复再保存后离库。任务、结构操作和整理写入暂停。':'文件操作尚未完成，请先核验现有恢复记录。'
       if(recoveryState.status==='pending'&&recoveryState.operation?.kind==='ledger-repair'&&recoveryState.revision){const revision=recoveryState.revision;recoveryActions.append(button('核验并继续一批',()=>{void run('正在续接恢复…',()=>repair({sessionId,action:'resume',revision}))}))}
     }else{recoveryMessage.textContent='登记损坏可先重建原描述；整库复制或恢复后，须预览并明确授权新关联。单篇复制仍是新笔记。'
       for(const [mode,label]of [['rebuild','预览重建登记'],['restore','预览整库恢复']]as const)recoveryActions.append(button(label,()=>{void run('正在核验整库…',()=>repair({sessionId,action:'preview',mode}))}))
@@ -236,6 +242,7 @@ function errorText(error: unknown): string {
   if(message.includes('STALE_PREVIEW')||message.includes('STALE_RECOVERY'))return '文件、附件或权限已改变，恢复已停止；已核验进度保留，请核查后重试。'
   if (message.includes('VAULT_SWITCH_CANCELLED')) return ''
   if (message.includes('VAULT_SWITCH_BODY_CONFLICT')) return '窗口稿与磁盘稿发生冲突，两份均已保留。请先关闭设置，处理正文保存冲突后，再重试切换。'
+  if (message==='RECOVERY_UNSAVED_DRAFT') return '窗口稿已保留。请先关闭设置处理保存问题，再重新预览；如恢复尚未完成，请先继续恢复，完成后保存草稿。'
   if (message.includes('UNSAVED_DRAFT')) return '笔记草稿尚未保存，已留在当前库。请先处理保存问题，再重试切换。'
   if (message.includes('PREVIOUS_TASK_UNSAVED')) return '生成回答尚未保存，已留在原库。请先处理保存问题，再重试切换。'
   if (message.includes('VAULT_TARGET_INVALID')) return '无法打开所选位置。请检查目录是否存在及访问权限后重试。'

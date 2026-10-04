@@ -18,3 +18,8 @@ it('registers ledger recovery errors and keeps unknown diagnostics bounded',()=>
  for(const code of LEDGER_ERROR_CODES)expect(ledgerErrorText(code)).toMatch(/[\u4e00-\u9fff]/)
  expect(ledgerErrorText('private /secret/path')).not.toContain('/secret')
 })
+it('distinguishes an unregistered empty ledger from verified ownership',async()=>{
+ const {ledgerEmptyText}=await import('../../src/shared/ledger-errors.ts')
+ expect(ledgerEmptyText('unregistered')).toContain('尚未登记');expect(ledgerEmptyText('unregistered')).not.toContain('已核验')
+ expect(ledgerEmptyText('verified')).toContain('已核验本篇归属')
+})

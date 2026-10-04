@@ -77,3 +77,34 @@ export class CloseFlow {
 export function timeoutAction(flow: CloseFlow, rendererAlive: boolean): CloseAction {
   return rendererAlive ? flow.stalled() : flow.rendererGone()
 }
+
+export type RecoveryFlushPhase = 'recovery-preview' | 'recovery-commit' | 'recovery-resume' | 'recovery-release'
+export type LifecycleFlushPhase = 'settings' | 'freeze' | RecoveryFlushPhase
+export type RecoveryFlushContext = { sessionId: string; operationId: string }
+
+/** Only an in-memory input hold. A resume acknowledgement does not claim drafts were saved. */
+export class RecoveryDraftGate {
+  private owner: RecoveryFlushContext | null = null
+  private preview = false
+  held(sessionId: string | null): boolean { return !!this.owner && this.owner.sessionId === sessionId }
+  maySave(sessionId:string|null,operationId?:string):boolean { return !this.held(sessionId)||(this.preview&&!!operationId&&this.owner?.operationId===operationId) }
+  async handle(phase: RecoveryFlushPhase, context: RecoveryFlushContext, deps: {
+    session: () => string | null; composing: () => boolean; changed: () => void
+    settled: () => Promise<unknown>; save: () => Promise<boolean>; dirty: () => boolean
+  }): Promise<boolean> {
+    if (context.sessionId !== deps.session()) return false
+    if (phase === 'recovery-release') {
+      if (this.owner?.sessionId === context.sessionId && this.owner.operationId === context.operationId) {
+        this.owner = null; deps.changed()
+      }
+      return true
+    }
+    if (deps.composing() || this.held(context.sessionId)) return false
+    this.owner = context; this.preview = phase==='recovery-preview'; deps.changed()
+    const current = () => this.owner === context && deps.session() === context.sessionId
+    await deps.settled()
+    if (!current()) return false
+    if (phase === 'recovery-preview') return await deps.save() && current()
+    return current() && (phase === 'recovery-resume' || !deps.dirty())
+  }
+}

@@ -735,7 +735,7 @@ it('keeps a multi-note copied-library recovery resumable after leaving and reope
  const {session,attach,first,second}=await setup();const {LedgerStore}=await import('../../src/main/ledger-store.ts');const {vaultRootIdentity}=await import('../../src/main/watch.ts');const {cp}=await import('node:fs/promises')
  try{const store=new LedgerStore(secureFsFor(first),()=>{},undefined,()=>vaultRootIdentity(first));store.owner('原篇.md');for(let n=0;n<5;n++){await writeFile(path.join(first,`note${n}.md`),`body${n}`);store.owner(`note${n}.md`)}
   await cp(first,second,{recursive:true,force:true});await attach(second);const preview=await session.ledgerRecoveryPreview('restore'),progress=await session.ledgerRecoveryCommit(preview.id)
-  expect(progress.status).toBe('pending');await expect(modelTierFor(second,'原篇.md')).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED');expect((await session.readOpened('原篇.md')).content).toBe('first')
+  expect(progress.status).toBe('pending');const pausedNote=await session.read('原篇.md');await expect(session.write('原篇.md','blocked edit',pausedNote.revision,pausedNote)).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED');await expect(modelTierFor(second,'原篇.md')).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED');expect((await session.readOpened('原篇.md')).content).toBe('first')
   await expect(session.memoryMutation(s=>s.initialize())).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED');await attach(first);await attach(second)
   const status=await session.lifecycleStatus();expect(status.status).toBe('pending');expect(status.revision).toBe(progress.revision)
   const done=await session.ledgerRecoveryResume(status.revision!);expect(done.status).toBe('complete');expect((await session.readOpened('原篇.md')).ledger?.status).toBe('verified')
@@ -747,5 +747,41 @@ it('keeps old descriptors as history only and rejects same-body template ambigui
   const historical=await session.ledgerRecoveryPreview('restore');expect(historical.rows[0].outcome).toBe('history-only')
   await writeFile(path.join(second,'另一个模板.md'),'first');const ambiguous=await session.ledgerRecoveryPreview('restore');expect(ambiguous.canCommit).toBe(false)
   expect(ambiguous.rows[0].reasons).toContain('同正文材料不能唯一对应')
+ }finally{session.dispose()}
+})
+it('blocks ordinary saves after interrupted owner publication, then resumes and saves both drafts',async()=>{
+ const {session,attach,first}=await setup();const {LedgerStore}=await import('../../src/main/ledger-store.ts');const {vaultRootIdentity}=await import('../../src/main/watch.ts')
+ try{await attach(first);await writeFile(path.join(first,'other.md'),'other');const fs=secureFsFor(first),store=new LedgerStore(fs,()=>{},undefined,()=>vaultRootIdentity(first));store.owner('原篇.md')
+  const note=await session.readOpened('原篇.md'),other=await session.readOpened('other.md'),replace=fs.replace.bind(fs)
+  let fail=true;vi.spyOn(fs,'replace').mockImplementation((...args)=>{if(fail&&args[0]==='.rgent/registry.json')throw Error('injected registry failure');return replace(...args)})
+  const saved=await session.write('原篇.md','first edit',note.revision,note)
+  const status=await session.lifecycleStatus();expect(status.status).toBe('pending')
+  const journal=await readFile(path.join(first,'.rgent-lifecycle'),'utf8')
+  await expect(session.write('原篇.md','later draft',saved.revision,saved)).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+  await expect(session.write('other.md','other draft',other.revision,other)).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+  expect(await readFile(path.join(first,'.rgent-lifecycle'),'utf8')).toBe(journal)
+  expect((await session.read('原篇.md')).content).toBe('first edit');expect((await session.read('other.md')).content).toBe('other')
+  await expect(session.ledgerRecoveryResume(status.revision!)).rejects.toThrow();expect(await readFile(path.join(first,'.rgent-lifecycle'),'utf8')).toBe(journal)
+  fail=false;expect((await session.ledgerRecoveryResume(status.revision!)).status).toBe('complete');expect((await session.ledgerPage('原篇.md',null)).maintenanceError).toBeUndefined()
+  await session.write('原篇.md','later draft',saved.revision,saved);await session.write('other.md','other draft',other.revision,other)
+  expect((await session.read('原篇.md')).content).toBe('later draft');expect((await session.read('other.md')).content).toBe('other draft')
+ }finally{session.dispose()}
+})
+it('runs the production recovery coordination with dirty tabs and permits a safe switch only after saving them',async()=>{
+ const {session,attach,first,second}=await setup();const {LedgerStore}=await import('../../src/main/ledger-store.ts'),{vaultRootIdentity}=await import('../../src/main/watch.ts'),{VaultStructureGate}=await import('../../src/main/vault-mutation-queue.ts'),{RecoveryDraftGate}=await import('../../src/shared/flush.ts'),{VaultSwitch}=await import('../../src/main/vault-switch.ts')
+ try{await attach(first);await writeFile(path.join(first,'other.md'),'other');const fs=secureFsFor(first),store=new LedgerStore(fs,()=>{},undefined,()=>vaultRootIdentity(first));store.owner('原篇.md')
+  const original=await session.read('原篇.md'),other=await session.read('other.md'),replace=fs.replace.bind(fs)
+  let fail=true;vi.spyOn(fs,'replace').mockImplementation((...args)=>{if(fail&&args[0]==='.rgent/registry.json')throw Error('registry unavailable');return replace(...args)})
+  const saved=await session.write('原篇.md','saved first',original.revision,original),drafts=[{relPath:'原篇.md',body:'later draft',binding:saved},{relPath:'other.md',body:'other draft',binding:other}]
+  const gate=new VaultStructureGate(),renderer=new RecoveryDraftGate();let flushes=0
+  const flush=async()=>{flushes++;try{for(const draft of drafts)await session.write(draft.relPath,draft.body,draft.binding.revision,draft.binding);drafts.length=0;return true}catch{return false}}
+  const switcher=new VaultSwitch({check:()=>{if(gate.isBusy())throw Error('STRUCTURE_BUSY')},prepare:async()=>{},flush,commit:attach,release:()=>{}})
+  await expect(switcher.run(second)).rejects.toThrow('UNSAVED_DRAFT');expect(drafts).toHaveLength(2);expect(session.root).toBe(first)
+  const status=await session.lifecycleStatus(),context={sessionId:session.sessionId()!,operationId:'recovery'},deps={session:()=>session.sessionId(),composing:()=>false,changed:()=>{},settled:async()=>{},save:flush,dirty:()=>drafts.length>0}
+  const resume=()=>gate.recover(first,{assert:()=>session.assertSession(context.sessionId),quiesce:async()=>{},prepare:()=>renderer.handle('recovery-resume',context,deps),drain:()=>session.idle(),release:()=>{void renderer.handle('recovery-release',context,deps)}},()=>session.ledgerRecoveryResume(status.revision!))
+  const count=flushes;await expect(resume()).rejects.toThrow();expect(flushes).toBe(count);expect(drafts).toHaveLength(2)
+  fail=false;expect((await resume()).status).toBe('complete');expect(flushes).toBe(count);expect(drafts).toHaveLength(2)
+  expect((await switcher.run(second)).status).toBe('ready');expect(drafts).toHaveLength(0)
+  expect(await readFile(path.join(first,'原篇.md'),'utf8')).toBe('later draft');expect(await readFile(path.join(first,'other.md'),'utf8')).toBe('other draft')
  }finally{session.dispose()}
 })

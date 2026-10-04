@@ -290,3 +290,10 @@ it('applies heading line decoration at physical line zero while keeping the BOM 
   expect(host.headings()[0]!.range.start).toBe(1)
   expect(host.getText()).toBe('\ufeff# BOM 标题\r\n\r\n正文\n')
 })
+it('keeps paused recovery drafts readable and prevents typing, undo and widget edits until released',()=>{
+ const host=editor();host.setText('原文');host.view.dispatch({changes:{from:2,insert:'草稿'},userEvent:'input.type'})
+ host.setReadOnly(true);host.view.dispatch({changes:{from:0,insert:'误写'},userEvent:'input.type'});undo(host.view)
+ expect(host.getText()).toBe('原文草稿');expect(host.view.contentDOM.getAttribute('contenteditable')).toBe('false')
+ host.setText('另一篇');expect(host.getText()).toBe('另一篇');host.view.dispatch({changes:{from:0,insert:'误写'}});expect(host.getText()).toBe('另一篇')
+ host.setReadOnly(false);host.view.dispatch({changes:{from:3,insert:'可写'},userEvent:'input.type'});expect(host.getText()).toBe('另一篇可写')
+})

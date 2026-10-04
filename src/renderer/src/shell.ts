@@ -1,10 +1,10 @@
-import { ledgerErrorText } from '../../shared/ledger-errors.ts'
+import { ledgerEmptyText, ledgerErrorText } from '../../shared/ledger-errors.ts'
 import type { VaultWorkspace } from '../../shared/vault-management.ts'
 import type { MemoryView, MemoryManualRequest, MemoryResult } from '../../shared/memory.ts'
 import { memoryErrorText, renderMemoryPreview, ledgerRememberCommand, type MemoryPageHandlers } from './memory-ui.ts'
 import { IPC, type AgentEvent, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type PublicModelConfig, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
-import { reportFlush } from '../../shared/flush.ts'
+import { RecoveryDraftGate, reportFlush } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
 import { openLifecycleStatus, promptNewNote, promptText } from './dialogs.ts'
 import { promptConflict } from './conflict.ts'
@@ -184,6 +184,8 @@ export async function start(root: HTMLElement): Promise<void> {
   let vaultEpoch = 0
   let vaultSession: string | null = null
   let recoveryState: LifecycleStatus | null = null
+  let lifecycleSerial = 0
+  const recoveryDraftGate = new RecoveryDraftGate()
   let recoveryOverlay: ReturnType<typeof openLifecycleStatus> | null = null
   let conflictDecisionOpen = false
   let deferredVaultBodyConflict = false
@@ -416,7 +418,19 @@ export async function start(root: HTMLElement): Promise<void> {
     transitionBusy = busy || releasedSession !== undefined
     syncInteractionGate()
   })
-  window.rgent.onLifecycleFlushRequest((id, cleanUnavailablePaths, phase) => {
+  window.rgent.onLifecycleFlushRequest((id, cleanUnavailablePaths, phase, context) => {
+    if (phase?.startsWith('recovery-')) {
+      if (!context) { window.rgent.lifecycleFlushDone(id,false); return }
+      const deps = {session:()=>vaultSession,composing:()=>restoringWorkspace||editor.view.compositionStarted,
+        changed:syncRecoveryInput,settled:()=>Promise.resolve(saveInFlight),save:()=>flushSave(context.operationId),dirty:()=>tabs.some(tab=>tab.dirty||!!tab.availability)}
+      void (async()=>{
+        if (phase==='recovery-release') await refreshLifecycle()
+        const ok=await recoveryDraftGate.handle(phase as import('../../shared/flush.ts').RecoveryFlushPhase,context,deps)
+        if (phase==='recovery-release') { if(context.sessionId===vaultSession&&!bodyWritesPaused()&&tabs.some(tab=>tab.dirty))scheduleSave() }
+        else window.rgent.lifecycleFlushDone(id,ok)
+      })().catch(()=>window.rgent.lifecycleFlushDone(id,false))
+      return
+    }
     if (phase === 'settings') { window.rgent.lifecycleFlushDone(id, !restoringWorkspace && settingsOverlay.prepareVaultChange()); return }
     if (phase === 'freeze') { if(restoringWorkspace || editor.view.compositionStarted){window.rgent.lifecycleFlushDone(id,false);return} releasedSession=undefined;transitionBusy=true;syncInteractionGate(); window.rgent.lifecycleFlushDone(id,true);return }
     const workspaceSave = saveWorkspace()
@@ -681,6 +695,11 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   function syncInteractionGate(): void { root.inert = restoringWorkspace || transitionBusy }
+  function bodyWritesPaused(): boolean { return recoveryState?.status==='invalid'||recoveryState?.operation?.kind==='ledger-repair' }
+  function syncRecoveryInput(): void {
+    editor.setReadOnly(bodyWritesPaused()||recoveryDraftGate.held(vaultSession))
+    if(bodyWritesPaused()&&saveTimer!=null){window.clearTimeout(saveTimer);saveTimer=null}
+  }
 
   function workspaceSnapshot(): VaultWorkspace {
     const tab = current()
@@ -734,6 +753,7 @@ export async function start(root: HTMLElement): Promise<void> {
     if (workspaceTimer !== null) { clearTimeout(workspaceTimer);workspaceTimer=null }
     vaultEpoch += 1
     recoveryState = null
+    syncRecoveryInput()
     recoveryOverlay?.close(); recoveryOverlay = null
     lifecycleWarning.hidden = true
     // 底栏跟着库与 tab 走，重置之后统一刷一次。
@@ -874,11 +894,12 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   async function refreshLifecycle(): Promise<LifecycleStatus | null> {
-    const epoch = vaultEpoch
+    const epoch = vaultEpoch,serial=++lifecycleSerial
     try {
       const status = await window.rgent.lifecycleStatus()
-      if (epoch !== vaultEpoch || (vaultSession && status.sessionId !== vaultSession)) return null
+      if (epoch !== vaultEpoch || serial!==lifecycleSerial || (vaultSession && status.sessionId !== vaultSession)) return null
       recoveryState = status
+      syncRecoveryInput()
       lifecycleWarning.hidden = status.status === 'ready'
       lifecycleWarning.textContent = status.status === 'invalid' ? '恢复记录无法核验 · 查看' : '文件操作待核验 · 查看'
       return status
@@ -1449,7 +1470,7 @@ export async function start(root: HTMLElement): Promise<void> {
           if(chunkOffset===c.total){renderRecord(JSON.parse(chunkText));chunkText='';chunkHash=null}else message.textContent=`长记录已读取 ${chunkOffset}／${c.total} 字节，继续加载可读完整记录。`
         }
         value.records.forEach(renderRecord);cursor=value.cursor;load.hidden=cursor===null
-        if(!ledgerBody.querySelector('details')&&!value.chunk&&cursor===null)message.textContent='已核验本篇归属，目前没有任务记录。'
+        if(!ledgerBody.querySelector('details')&&!value.chunk&&cursor===null)message.textContent=ledgerEmptyText(value.ownership)
       }catch{if(ledgerOpen&&current()===captured&&generation===pageGeneration)message.textContent='账本读取未完成，保留已有回顾；请关闭后重新核对。'}
       finally{if(generation===pageGeneration){loading=false;load.disabled=false}}
     }
@@ -1506,28 +1527,32 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   function scheduleSave(): void {
+    if(bodyWritesPaused()||recoveryDraftGate.held(vaultSession))return
     if (saveTimer != null) window.clearTimeout(saveTimer)
     saveTimer = window.setTimeout(() => {
       void flushSave()
     }, SAVE_MS)
   }
 
-  function flushSave(): Promise<boolean> {
+  function flushSave(recoveryOperation?:string): Promise<boolean> {
+    if(!recoveryDraftGate.maySave(vaultSession,recoveryOperation))return Promise.resolve(false)
     if (saveInFlight) {
-      return saveInFlight.then((ok) => ok && tabs.some((tab) => tab.dirty) ? flushSave() : ok)
+      return saveInFlight.then((ok) => ok && tabs.some((tab) => tab.dirty) ? flushSave(recoveryOperation) : ok)
     }
-    const task = performFlushSave()
+    const task = performFlushSave([],recoveryOperation)
     saveInFlight = task
     return task.finally(() => {
       if (saveInFlight === task) saveInFlight = null
     })
   }
 
-  async function performFlushSave(cleanUnavailablePaths: readonly string[] = []): Promise<boolean> {
+  async function performFlushSave(cleanUnavailablePaths: readonly string[] = [],recoveryOperation?:string): Promise<boolean> {
     if (saveTimer != null) {
       window.clearTimeout(saveTimer)
       saveTimer = null
     }
+    if(!recoveryDraftGate.maySave(vaultSession,recoveryOperation))return false
+    if(bodyWritesPaused())return !tabs.some(tab=>tab.dirty)&&!hasUnavailableDraft(tabs,cleanUnavailablePaths)
     let ok = !hasUnavailableDraft(tabs, cleanUnavailablePaths)
     let wrote = false
     for (let pass = 0; pass < 3; pass += 1) {
@@ -1537,7 +1562,7 @@ export async function start(root: HTMLElement): Promise<void> {
         const tab = tabs.find((item) => item.relPath === write.relPath)
         if (!tab || tab.availability) continue
         wrote = true
-        if (!(await writeTab(tab, write.body))) ok = false
+        if (!(await writeTab(tab, write.body,0,recoveryOperation))) ok = false
       }
       if (!ok) break
     }
@@ -1547,8 +1572,8 @@ export async function start(root: HTMLElement): Promise<void> {
     return ok && !tabs.some((tab) => tab.dirty)
   }
 
-  async function writeTab(tab: Tab, body = tab.relPath === active ? editor.getText() : tab.content, attempt = 0): Promise<boolean> {
-    if (tab.availability || !tab.sessionId || !tab.objectVersion || tab.sessionId !== vaultSession) return false
+  async function writeTab(tab: Tab, body = tab.relPath === active ? editor.getText() : tab.content, attempt = 0,recoveryOperation?:string): Promise<boolean> {
+    if (!recoveryDraftGate.maySave(vaultSession,recoveryOperation) || bodyWritesPaused() || tab.availability || !tab.sessionId || !tab.objectVersion || tab.sessionId !== vaultSession) return false
     const epoch = vaultEpoch
     const result = await window.rgent.noteWrite({
       sessionId: tab.sessionId, objectVersion: tab.objectVersion,
@@ -1561,6 +1586,8 @@ export async function start(root: HTMLElement): Promise<void> {
       tab.objectVersion = result.objectVersion
       tab.sessionId = result.sessionId
       applySaved(tab, body, result.revision)
+      await refreshLifecycle()
+      if(epoch!==vaultEpoch||!tabs.includes(tab))return false
       if (hostNotice === LIFECYCLE_ERRORS.LEDGER_BOUNDARY_INVALID) { hostNotice = ''; updateStatus() }
       syncEditorHost()
       void refreshBacklinks()
@@ -1568,6 +1595,11 @@ export async function start(root: HTMLElement): Promise<void> {
     }
     if (['NOTE_MISSING','NOTE_REPLACED','NOTE_UNREADABLE'].includes(result.error)) {
       markUnavailable(tab, result.error === 'NOTE_MISSING' ? 'missing' : result.error === 'NOTE_REPLACED' ? 'replaced' : 'unavailable')
+      return false
+    }
+    if(result.error==='LIFECYCLE_RECOVERY_REQUIRED'){
+      await refreshLifecycle()
+      if(epoch===vaultEpoch){hostNotice='账本恢复尚未完成，窗口稿已保留。请到笔记库设置继续恢复，完成后保存草稿再离库。';updateStatus()}
       return false
     }
     if (result.error === 'NOTE_BUSY') {
@@ -1591,7 +1623,7 @@ export async function start(root: HTMLElement): Promise<void> {
       const outcome = await runExclusiveConflict(() => syncHostTab(tab, vaultEpoch))
       renderTabs()
       updateStatus()
-      if (outcome === 'merged' && tab.dirty && attempt < 3) return writeTab(tab, tab.relPath === active ? editor.getText() : tab.content, attempt + 1)
+      if (outcome === 'merged' && tab.dirty && attempt < 3) return writeTab(tab, tab.relPath === active ? editor.getText() : tab.content, attempt + 1,recoveryOperation)
       if (outcome === 'merged') return !tab.dirty
       return outcome === 'disk' || outcome === 'saved' || outcome === 'unchanged'
     }

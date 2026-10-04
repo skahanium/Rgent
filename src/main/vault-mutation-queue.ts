@@ -27,7 +27,7 @@ export class VaultStructureGate {
   affects(root: string, relPath: string): boolean {
     const operation = this.operation
     return !!operation && operation.root === root &&
-      (operation.exact.includes(relPath) || operation.prefixes.some((prefix) => relPath.startsWith(`${prefix}/`)))
+      (operation.exact.includes(relPath) || operation.prefixes.some((prefix) => prefix === '' || relPath.startsWith(`${prefix}/`)))
   }
 
   blocksWrite(root: string, relPath: string): boolean {
@@ -37,6 +37,20 @@ export class VaultStructureGate {
   seal(): void {
     if (!this.operation) throw new Error('STRUCTURE_BUSY')
     this.operation.sealed = true
+  }
+
+  async recover<T>(root: string, deps: {
+    assert: () => void; quiesce: () => Promise<void>; prepare: () => Promise<boolean>
+    drain: () => Promise<void>; release: () => void
+  }, run: () => Promise<T>): Promise<T> {
+    this.begin({ root, exact: [], prefixes: [''] })
+    try {
+      await deps.quiesce(); deps.assert()
+      if (!await deps.prepare()) throw Error('UNSAVED_DRAFT')
+      deps.assert(); this.seal()
+      await deps.drain(); deps.assert()
+      const result = await run(); deps.assert(); return result
+    } finally { this.finish(); deps.release() }
   }
 
   finish(): void { this.operation = null }

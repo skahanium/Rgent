@@ -51,3 +51,14 @@ describe('VaultStructureGate', () => {
     expect(gate.blocksWrite('/vault', '资料/原篇.md')).toBe(false)
   })
 })
+it('seals every body path while coordinating ledger recovery, including root notes',async()=>{
+ const {VaultStructureGate}=await import('../../src/main/vault-mutation-queue.ts'),gate=new VaultStructureGate()
+ gate.begin({root:'/vault',exact:[],prefixes:['']});expect(gate.blocksWrite('/vault','note.md')).toBe(false)
+ gate.seal();expect(gate.blocksWrite('/vault','note.md')).toBe(true);expect(gate.blocksWrite('/vault','dir/note.md')).toBe(true);expect(gate.blocksWrite('/other','note.md')).toBe(false)
+})
+it('coordinates the production recovery lane: quiesce, real prepare, seal, drain, execute, release',async()=>{
+ const {VaultStructureGate}=await import('../../src/main/vault-mutation-queue.ts'),gate=new VaultStructureGate(),events:string[]=[]
+ const deps={assert:()=>{},quiesce:async()=>{events.push('quiesce')},prepare:async()=>{events.push('prepare');expect(gate.blocksWrite('/vault','a.md')).toBe(false);return true},drain:async()=>{events.push('drain');expect(gate.blocksWrite('/vault','a.md')).toBe(true)},release:()=>{events.push('release')}}
+ expect(await gate.recover('/vault',deps,async()=>{events.push('execute');return 'done'})).toBe('done');expect(events).toEqual(['quiesce','prepare','drain','execute','release']);expect(gate.isBusy()).toBe(false)
+ events.length=0;await expect(gate.recover('/vault',{...deps,prepare:async()=>false},async()=>{events.push('execute')})).rejects.toThrow('UNSAVED_DRAFT');expect(events).toEqual(['quiesce','release']);expect(gate.isBusy()).toBe(false)
+})

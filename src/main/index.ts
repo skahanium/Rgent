@@ -1,3 +1,4 @@
+import type { LifecycleFlushPhase, RecoveryFlushContext } from '../shared/flush.ts'
 import { parseLedgerRepairRequest } from '../shared/ledger.ts'
 import { parseStoredVault } from './notes-fs.ts'
 import { boundArguments, isVaultChannel, isVaultEvent } from '../shared/vault-binding.ts'
@@ -129,7 +130,7 @@ function blocksStructureWrite(relPath: string): boolean {
   return !!vault?.root && structureGate.blocksWrite(vault.root, relPath)
 }
 
-async function flushBeforeStructure(win: BrowserWindow, cleanUnavailablePaths: readonly string[] = [], phase?: 'settings' | 'freeze'): Promise<boolean> {
+async function flushBeforeStructure(win: BrowserWindow, cleanUnavailablePaths: readonly string[] = [], phase?: LifecycleFlushPhase, context?: RecoveryFlushContext): Promise<boolean> {
   if (win.isDestroyed() || win.webContents.isDestroyed()) return false
   const id = randomUUID()
   return new Promise<boolean>((resolve) => {
@@ -138,7 +139,7 @@ async function flushBeforeStructure(win: BrowserWindow, cleanUnavailablePaths: r
       resolve(false)
     }, 120_000)
     lifecycleFlushes.set(id, (ok) => { clearTimeout(timer); lifecycleFlushes.delete(id); resolve(ok) })
-    win.webContents.send(IPC.lifecycleFlushRequest, id, cleanUnavailablePaths, phase)
+    win.webContents.send(IPC.lifecycleFlushRequest, id, cleanUnavailablePaths, phase, context)
   })
 }
 
@@ -698,7 +699,6 @@ function registerIpc(): void {
   registerTrustedHandle(IPC.ledgerRepair,async(event,value:unknown):Promise<import('../shared/ledger.ts').LedgerRepairResult>=>{
     const request=parseLedgerRepairRequest(value),current=vault,win=mainWindow
     if(!request||!current||!win)return {ok:false,error:'BAD_REQUEST'}
-    let ownsGate=false
     try{
       current.assertSession(request.sessionId)
       const frame=`${event.sender.id}:${event.senderFrame!.routingId}`
@@ -708,23 +708,29 @@ function registerIpc(): void {
         if(request.action==='cancel'){current.ledgerRecoveryCancel(request.previewId);return {ok:true}}
       }
       if(structureGate.isBusy()||agentHost?.active().length||agentHost?.hasPending())throw Error('STRUCTURE_BUSY')
-      structureGate.begin({root:current.requireUsableRoot(),exact:[],prefixes:[]});ownsGate=true
-      await agentHost?.whenLaunchesSettled();current.assertSession(request.sessionId)
-      if(agentHost?.active().length||agentHost?.hasPending())throw Error('STRUCTURE_BUSY')
-      consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED');await consolidation?.idle()
-      if(!await flushBeforeStructure(win))throw Error('UNSAVED_DRAFT')
-      current.assertSession(request.sessionId)
-      if(request.action==='preview'){
-        const preview=await current.ledgerRecoveryPreview(request.mode)
-        if(recoveryPreviewOwners.size>=16)recoveryPreviewOwners.clear()
-        recoveryPreviewOwners.set(preview.id,{frame,sessionId:request.sessionId});return {ok:true,value:preview}
-      }
-      // A recovery authorization never carries old sending or background permits.
-      authorizations?.clear();memoryIpc.clear();memoryAuthorizationPreviews.clear()
-      const result=request.action==='commit'?await current.ledgerRecoveryCommit(request.previewId):await current.ledgerRecoveryResume(request.revision)
-      current.assertSession(request.sessionId);return {ok:true,value:result}
+      const context={sessionId:request.sessionId,operationId:randomUUID()}
+      return await structureGate.recover(current.requireUsableRoot(),{
+        assert:()=>current.assertSession(request.sessionId),
+        quiesce:async()=>{
+          await agentHost?.whenLaunchesSettled();current.assertSession(request.sessionId)
+          if(agentHost?.active().length||agentHost?.hasPending())throw Error('STRUCTURE_BUSY')
+          consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED');await consolidation?.idle()
+        },
+        prepare:()=>flushBeforeStructure(win,[],`recovery-${request.action}`,context),
+        drain:()=>current.idle(),
+        release:()=>{if(!win.isDestroyed()&&!win.webContents.isDestroyed())win.webContents.send(IPC.lifecycleFlushRequest,context.operationId,[],'recovery-release',context)}
+      },async()=>{
+        if(request.action==='preview'){
+          const preview=await current.ledgerRecoveryPreview(request.mode)
+          if(recoveryPreviewOwners.size>=16)recoveryPreviewOwners.clear()
+          recoveryPreviewOwners.set(preview.id,{frame,sessionId:request.sessionId});return {ok:true as const,value:preview}
+        }
+        // A recovery authorization never carries old sending or background permits.
+        authorizations?.clear();memoryIpc.clear();memoryAuthorizationPreviews.clear()
+        const result=request.action==='commit'?await current.ledgerRecoveryCommit(request.previewId):await current.ledgerRecoveryResume(request.revision)
+        return {ok:true as const,value:result}
+      })
     }catch(error){const code=error instanceof Error?error.message:'';return {ok:false,error:['BAD_REQUEST','STALE_PREVIEW','STALE_RECOVERY','VAULT_CHANGED','STRUCTURE_BUSY','UNSAVED_DRAFT','PERMISSIONS_INVALID','LEDGER_RECOVERY_AMBIGUOUS','LEDGER_REGISTRY_INVALID','LIFECYCLE_RECOVERY_REQUIRED'].includes(code)?code:'LEDGER_REGISTRY_INVALID'}}
-    finally{if(ownsGate)structureGate.finish()}
   })
   registerTrustedHandle(IPC.ledgerReasoning,async(_event,value:unknown):Promise<import('../shared/ledger.ts').LedgerReasoningResult>=>{
     const current=vault
@@ -775,7 +781,7 @@ function registerIpc(): void {
       }
       return { ok: true, ...result }
     } catch (err) {
-      return { ok: false, error: err instanceof Error && ['CONFLICT', 'NOTE_MISSING', 'NOTE_REPLACED', 'NOTE_UNREADABLE', 'VAULT_CHANGED', 'LEDGER_BOUNDARY_INVALID'].includes(err.message) ? err.message : 'IO_ERROR' }
+      return { ok: false, error: err instanceof Error && ['CONFLICT', 'NOTE_MISSING', 'NOTE_REPLACED', 'NOTE_UNREADABLE', 'VAULT_CHANGED', 'LEDGER_BOUNDARY_INVALID', 'LIFECYCLE_RECOVERY_REQUIRED'].includes(err.message) ? err.message : 'IO_ERROR' }
     }
   })
   const parseBinding = (value: unknown): import('../shared/ipc.ts').NoteInspectRequest | null => {

@@ -122,3 +122,8 @@ describe('reconcileNote', () => {
     expect(item.tab).toMatchObject({ content: '窗口', revision: 'r0', dirty: true })
   })
 })
+it('preserves a dirty draft and its basis when pending ledger recovery rejects a conflict write',async()=>{
+ const item=fixture();item.choices.push('window')
+ const outcome=await reconcileNote(item.tab,{...item.deps,write:async()=>({ok:false,error:'LIFECYCLE_RECOVERY_REQUIRED'})})
+ expect(outcome).toBe('error');expect(item.tab.content).toBe('窗口');expect(item.tab.saved).toBe('原文');expect(item.tab.dirty).toBe(true)
+})
