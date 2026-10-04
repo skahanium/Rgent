@@ -1097,7 +1097,7 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 |---|---|---|
 | A | 打开不写盘，坏账本可读正文，磁盘尾部保护，可信材料三态，共享归档保护与诊断 | `8b5ed9c` 最终 Spec／Quality 复核通过，四项 P1 与诊断 P2 闭合。`47bd095` 范围的 7 文件 181 项、追加 `8b5ed9c` 早退诊断 45 项与类型分别记录，不合并为一次全量；窗口与最终完整门待收口 |
 | B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `e04a02f` 最后实际队列修补独立 Spec／Quality 复核通过（2026-10-05）；定向 13 文件 261／0、类型／文档通过。打开 A+ 串行工程门；全部 B 实际窗口及整轮完整门仍待核，不能据此宣称整库恢复已完整验收 |
-| A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | `1ecc6fa` 本机接线及自查已交；14 文件 315／0、类型／文档通过，本机受控 SSE 2 文件 13／0；长期约定溢出加强反例另记 20／0，不相加。独立复核、实际窗口及整轮完整门待核，C 工程门仍未开放；2026-10-05 |
+| A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | 初版 `1ecc6fa` 14 文件 315／0、SSE 13／0及 core 20／0分别保留；独立复审发现 3 项 Important，`3c39531` 修补后必要 8 文件 205／0、类型／文档通过。独立再审、实际窗口及整轮完整门待核，C 工程门仍未开放；2026-10-05 |
 | C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | 待 A+ 门；2026-10-04 |
 | E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 待 C 门；2026-10-04 |
 | D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | 待 E 门；2026-10-04 |
@@ -1176,3 +1176,16 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 - 自查加强已命名的长期约定溢出反例，确认自动召回未装入该条而工具仍能找到；首次固定填充夹具未实际耗满，调整为按现有估算填满后，`pnpm exec vitest run test/main/memory-use.test.ts` 20／0，日志 `/tmp/rgent-v4-Aplus-core-overflow-final.log`。这次仅加强测试，不改变已受验生产代码，不与 315／0 相加。
 
 本包只运行上述必要定向、类型、文档及 diff 核验；未 build、未运行完整测试或 Electron 窗口，未新增窗口专项脚本，未调用付费模型、push 或 CI。实际授权预览、单篇／外篇记忆工具、账本易读结果和退休预览的构建窗口证据由总任务统一接续；Windows、原生输入法、用户视觉和学习质量保持待核。独立复审仍待根任务固定 diff 后执行，不提前开放 C／E／D／Q 或结束当前阶段。
+
+
+包 A+ 独立复审修补（2026-10-05，基线 `54bee5b`，代码受验 `3c39531`）：初版独立 Spec／Quality 均未通过，报告 `/tmp/rgent-v4-Aplus-review-report.md` 的 3 项 Important 如实保留。本次只修对应接线，不用原 315／0 销掉复审问题，也不开放 C。
+
+- 退休重试的原批准对象／修订传入实际 helper，最终读后、原生 CAS 前核验同一绑定，不把第二次读到的新合法旧文件当审批目标。具名反例在第一次 `readSnapshot` 返回原快照后同步换入另一合法 v1 JSON，分别覆盖改字节和同字节新对象；初版均成功并清除替换目标。修补后第二次读检查拒绝，替换次数为零，合法新字节保留。自查追加已批准目标消失的具名反例：带绑定时返回冲突，普通 attach 无旧文件仍允许继续；正常识别、未知格式及已有权限／会话路径保持。
+- 新退休 commit 从生产入口捕获原事件，复用既有可信 frame 校验回调，仅该路径要求 callback，沿现有内部接口进入实际库队列及最终替换前同步检查。反例先建立有效预览和 owner，再以真实库队列等待，等待期间使 owner 失效而库 session 不变；初版给成功，修补后拒绝且原文件保留。生产转发具名反例先失败，修补后实际传入的 callback 在信任失效时拒绝；既有 sender 测试覆盖帧导航／销毁／替换。不泛化其它维护或引入新授权系统。
+- Host 的库来源 metadata 条件改为 `libraryToolsEnabled`；记忆专用 actual outgoing 保留普通正文、只含记忆 schema，不含无法执行的库工具读取要求。外篇真实 outgoing 仍给原获准来源清单及库／记忆工具，范围外来源不进入清单。schema 和 metadata 预算继续按真实 outgoing 计量，冻结的档位不变。
+
+本次红绿证据：`pnpm exec vitest run test/main/vault.test.ts test/main/memory-management.test.ts test/main/agent-host.test.ts`，4 失败／127 通过（`/tmp/rgent-v4-Aplus-fix-red.log`），均为目标缺陷而非夹具错误；生产 callback 的 `pnpm exec vitest run test/main/vault-switch-main.test.ts` 为 1 失败／18 通过（`/tmp/rgent-v4-Aplus-fix-production-owner-red.log`）。最小修补四文件 150／0（`/tmp/rgent-v4-Aplus-fix-green1.log`）。helper 的已批准目标缺失反例为 1 失败／2 通过（`/tmp/rgent-v4-Aplus-fix-missing-red.log`），随后修补该具体早退路径。
+
+最终必要定向：`pnpm exec vitest run test/main/agent-host.test.ts test/main/vault.test.ts test/main/memory-ipc.test.ts test/main/memory-retirement.test.ts test/main/memory-management.test.ts test/main/vault-switch-main.test.ts test/main/ipc-sender.test.ts test/renderer/memory-ui.test.ts`，8 文件 205／0（`/tmp/rgent-v4-Aplus-fix-final-targeted2.log`）；`pnpm exec tsc --noEmit` 无错误、`pnpm docs:check` 12 文件通过（`/tmp/rgent-v4-Aplus-fix-final-types2.log`、`/tmp/rgent-v4-Aplus-fix-final-docs2.log`）。自查缺失路径前的同集合 204／0单独保留，不与205或旧315相加；本次未复跑无新风险的旧完整315集合。证据文档更新另做 docs:check，报告 `/tmp/rgent-v4-Aplus-fix-report.md`。
+
+仅本地提交，无新依赖／IPC／页／分支／worktree／专题文档，无 push、CI、build、完整测试、实际窗口或付费调用。独立再审仍待根任务；实际产品窗口及 Windows、输入法人工、用户视觉、真实学习质量待核保持。C／E／D／Q 未提前施工，当前阶段不变。
