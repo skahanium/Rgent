@@ -68,6 +68,11 @@ const sameReading = (left: ReadingPreference, right: ReadingPreference): boolean
   left.fontSize === right.fontSize && left.lineHeight === right.lineHeight && left.maxWidth === right.maxWidth
 
 const CONFIG_ERRORS: Record<string, string> = {
+  CONNECTION_NOT_FOUND: '这个供应商连接已不存在，请重新配置。',
+  MODEL_NOT_FOUND: '这个模型已不存在，请重新选择或添加。',
+  BAD_PROVIDER: '无法使用这个供应商，请重新选择。',
+  DUPLICATE_MODEL: '这个模型已经存在，无需重复添加。',
+  TOO_MANY_MODELS: '已达到模型数量上限，请先移除不再使用的模型。',
   BAD_MODEL_CONFIG: '本机模型配置文件损坏，请先修复；笔记仍可正常使用。',
   BAD_BASE_URL: '接口地址须为 HTTPS，或本机回环地址的 HTTP。',
   BAD_MODEL_ID: '请填写有效的模型 ID。',
@@ -80,7 +85,9 @@ const CONFIG_ERRORS: Record<string, string> = {
   IO_ERROR: '写入本机配置失败，原配置保持不变。',
   BAD_ASSISTANT: '助手习惯不合法：称呼或说明过长、含控制字符，或语气取值不对。'
 }
-const configErrorText = (error: string): string => CONFIG_ERRORS[error] ?? error
+const configErrorText = (error: string): string => Object.hasOwn(CONFIG_ERRORS, error)
+  ? CONFIG_ERRORS[error]!
+  : '操作未完成，请重试；仍然失败时请检查模型配置。'
 
 export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverlay {
   let overlay: Overlay | null = null

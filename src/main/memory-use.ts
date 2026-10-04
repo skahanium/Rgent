@@ -20,22 +20,28 @@ export const MEMORY_SEARCH_SCHEMA = {
  inputSchema:{type:'object',properties:{query:{type:'string',minLength:1,maxLength:256}},required:['query'],additionalProperties:false}
 } as const
 function terms(text: string): string[] {
-  const found = text.toLocaleLowerCase().match(/[\p{Script=Han}]+|[\p{L}\p{N}_]+/gu) ?? []
+  const found = text.toLocaleLowerCase().match(/[\p{Script=Han}]+|(?:(?!\p{Script=Han})[\p{L}\p{N}_])+/gu) ?? []
   return [...new Set(found.flatMap(word => /\p{Script=Han}/u.test(word) ? [...Array.from(word)].flatMap((c, i, chars) => [...(i+1<chars.length?[c+chars[i+1]]:[]),...(i+2<chars.length?[c+chars[i+1]+chars[i+2]]:[]),...(chars.length===1?[c]:[])]) : [word]))]
+}
+/** Shared lexical ranking; callers retain their own permission and budget checks. */
+export function rankMemoryEntries<T extends Pick<MemoryEntry,'id'|'status'|'content'|'scope'|'updatedAt'>>(entries:readonly T[],prompt:string,near=''):T[]{
+ const promptTerms=terms(prompt),queryTerms=terms(`${prompt}\n${near}`)
+ const phrases=[prompt.trim().toLocaleLowerCase(),...prompt.toLocaleLowerCase().split(/\s+/u)].filter(p=>p.length>1)
+ return entries.filter(e=>e.status==='active').map(entry=>{
+  const haystack=`${entry.content}\n${entry.scope}`.toLocaleLowerCase()
+  const words=new Set(terms(haystack))
+  const matches=(term:string)=>/\p{Script=Han}/u.test(term)?haystack.includes(term):words.has(term)
+  const matched=queryTerms.filter(matches).length,primary=promptTerms.filter(matches).length
+  return {entry,exact:phrases.some(p=>haystack.includes(p))?1:0,primary,coverage:matched/Math.max(1,queryTerms.length),matched}
+ }).filter(x=>x.matched>0).sort((a,b)=>b.primary-a.primary||b.exact-a.exact||b.coverage-a.coverage||b.entry.updatedAt.localeCompare(a.entry.updatedAt)||a.entry.id.localeCompare(b.entry.id)).map(x=>x.entry)
 }
 export function recallMemory(entries: readonly MemoryEntry[], prompt: string, near: string): MemoryRecall {
   const active = entries.filter(e => e.status === 'active')
   const core:MemoryEntry[]=[],omittedCore:string[]=[];let coreCost=0
   for(const e of active.filter(e=>e.layer==='core')){const cost=costOf(memorySection(e));if(coreCost+cost<=2048){core.push(e);coreCost+=cost}else omittedCore.push(e.id)}
-  const query = `${prompt}\n${near.slice(0,256)}`.toLocaleLowerCase(); const queryTerms = terms(query)
-  const phrases = [prompt.trim().toLocaleLowerCase(), ...prompt.toLocaleLowerCase().split(/\s+/u)].filter(p => p.length > 1)
-  const ranked = active.filter(e => e.layer === 'demand').map(entry => {
-    const haystack = `${entry.content}\n${entry.scope}`.toLocaleLowerCase()
-    const matched = queryTerms.filter(t => haystack.includes(t)).length
-    return { entry, exact: phrases.some(p => haystack.includes(p)) ? 1 : 0, coverage: matched / Math.max(1, queryTerms.length), matched }
-  }).filter(x => x.matched > 0).sort((a, b) => b.exact - a.exact || b.coverage - a.coverage || b.entry.updatedAt.localeCompare(a.entry.updatedAt) || a.entry.id.localeCompare(b.entry.id))
+  const ranked = rankMemoryEntries(active.filter(e=>e.layer==='demand'),prompt,near.slice(0,256))
   const demand: MemoryEntry[] = [], omittedDemand: string[] = [...omittedCore]; let size = 0
-  for (const { entry } of ranked) {
+  for (const entry of ranked) {
     const cost = costOf(memorySection(entry)) + 1
     if (demand.length >= 8 || size + cost > 2048) omittedDemand.push(entry.id)
     else { demand.push(entry); size += cost }

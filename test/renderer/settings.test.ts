@@ -349,6 +349,140 @@ describe('settings interface page', () => {
     panel.close()
   })
 
+  it.each(['CONNECTION_NOT_FOUND', 'MODEL_NOT_FOUND', 'BAD_PROVIDER', 'DUPLICATE_MODEL', 'TOO_MANY_MODELS', 'secret internal stack', 'constructor', 'toString', '__proto__'])('shows readable configuration failures without internal detail: %s', async (error) => {
+    const handlers = modelHandlers()
+    handlers.addModel.mockResolvedValue({ ok: false, error })
+    const panel = await openProvider(handlers, 'minimax')
+    buttonByText('添加模型')!.click()
+    await vi.waitFor(() => expect(document.querySelector('.settings-error')?.textContent).toBeTruthy())
+    const message = document.querySelector('.settings-error')!.textContent!
+    expect(message).not.toContain(error)
+    expect(message).toMatch(/[\u4e00-\u9fff]/)
+    panel.close()
+  })
+
+  it('keeps failed and unattempted candidates and publishes partial batch success once', async () => {
+    const config = modelConfig()
+    const updated = modelConfig({ models: [...config.models, { id: 'new', provider: 'minimax', modelId: 'added', contextTokens: 4096 }] })
+    const changed = vi.fn()
+    const handlers = { ...modelHandlers(), onModelConfigChanged: changed }
+    handlers.readModels.mockResolvedValue({ ok: true, models: [
+      { id: 'added', contextTokens: 4096 }, { id: 'existing', contextTokens: 4096 }, { id: 'failed' }, { id: 'later', contextTokens: 4096 }
+    ] })
+    handlers.addModel.mockResolvedValueOnce({ ok: true, config: updated }).mockResolvedValueOnce({ ok: false, error: 'DUPLICATE_MODEL' }).mockResolvedValueOnce({ ok: false, error: 'TOO_MANY_MODELS' })
+    const panel = await openProvider(handlers, 'minimax')
+    buttonByText('读取模型')!.click()
+    await vi.waitFor(() => expect(document.querySelectorAll('.settings-candidate')).toHaveLength(4))
+    const capacity = document.querySelector<HTMLInputElement>('[aria-label="failed 的上下文容量"]')!
+    capacity.value = '8192'; capacity.dispatchEvent(new Event('input'))
+    buttonByText('添加所选（4）')!.click()
+    await vi.waitFor(() => expect(handlers.addModel).toHaveBeenCalledTimes(3))
+    await vi.waitFor(() => expect(document.querySelectorAll('.settings-candidate')).toHaveLength(2))
+    expect([...document.querySelectorAll('.settings-candidate-id')].map(node => node.textContent)).toEqual(['failed', 'later'])
+    expect(document.querySelector<HTMLInputElement>('[aria-label="failed 的上下文容量"]')!.value).toBe('8192')
+    expect(document.querySelector<HTMLInputElement>('.settings-candidate input[type="checkbox"]')!.checked).toBe(true)
+    expect([...document.querySelectorAll('.settings-model-id')].map(node => node.textContent)).toContain('added')
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('.settings-read-panel')!.textContent).toContain('已添加 1 个，已存在 1 个，失败 1 个，未尝试 1 个')
+    panel.close()
+  })
+
+  it('explains an all-existing batch without treating duplicates as failure', async () => {
+    const handlers = modelHandlers()
+    handlers.readModels.mockResolvedValue({ ok: true, models: [{ id: 'existing', contextTokens: 4096 }] })
+    handlers.addModel.mockResolvedValue({ ok: false, error: 'DUPLICATE_MODEL' })
+    const panel = await openProvider(handlers, 'minimax')
+    buttonByText('读取模型')!.click()
+    await vi.waitFor(() => expect(document.querySelectorAll('.settings-candidate')).toHaveLength(1))
+    buttonByText('添加所选（1）')!.click()
+    await vi.waitFor(() => expect(document.querySelector('.settings-read-panel')!.textContent).toContain('已存在的模型无需重复添加。'))
+    expect(document.querySelector('.settings-error')?.textContent).toBe('')
+    panel.close()
+  })
+
+  it('ignores a model-list reply from a previous supplier and request', async () => {
+    const handlers = modelHandlers()
+    let finishOld!: (result: unknown) => void
+    handlers.readModels.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve }))
+      .mockResolvedValueOnce({ ok: true, models: [{ id: 'new-list', contextTokens: 4096 }] })
+    const panel = await openProvider(handlers, 'minimax')
+    buttonByText('读取模型')!.click()
+    document.querySelector<HTMLButtonElement>('.settings-back')!.click()
+    document.querySelector<HTMLButtonElement>('[data-provider="deepseek"]')!.click()
+    const read = document.querySelector<HTMLButtonElement>('.settings-read-row button')!
+    expect(read.disabled).toBe(false)
+    read.click()
+    await vi.waitFor(() => expect(document.querySelector('.settings-candidate-id')?.textContent).toBe('new-list'))
+    finishOld({ ok: true, models: [{ id: 'old-list', contextTokens: 8192 }] })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(document.querySelector('.settings-candidate-id')?.textContent).toBe('new-list')
+    panel.close()
+  })
+
+  it('publishes each saved batch result before a later pending item and ignores its reply after leaving', async () => {
+    const changed = vi.fn()
+    const config = modelConfig()
+    const updated = modelConfig({ models: [...config.models, { id: 'new', provider: 'minimax', modelId: 'saved', contextTokens: 4096 }] })
+    const handlers = { ...modelHandlers(), onModelConfigChanged: changed }
+    handlers.readModels.mockResolvedValue({ ok: true, models: [{ id: 'saved', contextTokens: 4096 }, { id: 'pending', contextTokens: 4096 }] })
+    let finish!: (result: unknown) => void
+    handlers.addModel.mockResolvedValueOnce({ ok: true, config: updated })
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const panel = await openProvider(handlers, 'minimax')
+    buttonByText('读取模型')!.click()
+    await vi.waitFor(() => expect(document.querySelectorAll('.settings-candidate')).toHaveLength(2))
+    buttonByText('添加所选（2）')!.click()
+    await vi.waitFor(() => expect(handlers.addModel).toHaveBeenCalledTimes(2))
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect([...document.querySelectorAll('.settings-model-id')].map(node => node.textContent)).toContain('saved')
+    expect([...document.querySelectorAll('.settings-candidate-id')].map(node => node.textContent)).toEqual(['pending'])
+    ;[...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')].find(node => node.textContent === '界面')!.click()
+    finish({ ok: true, config: updated })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('.settings-page-title')?.textContent).toBe('界面')
+    panel.close()
+  })
+
+  it('does not publish an adding callback after leaving the model page', async () => {
+    const changed = vi.fn()
+    const handlers = { ...modelHandlers(), onModelConfigChanged: changed }
+    handlers.readModels.mockResolvedValue({ ok: true, models: [{ id: 'pending', contextTokens: 4096 }] })
+    let finish!: (result: unknown) => void
+    handlers.addModel.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const panel = await openProvider(handlers, 'minimax')
+    buttonByText('读取模型')!.click()
+    await vi.waitFor(() => expect(document.querySelectorAll('.settings-candidate')).toHaveLength(1))
+    buttonByText('添加所选（1）')!.click()
+    ;[...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')].find(node => node.textContent === '界面')!.click()
+    finish({ ok: true, config: modelConfig() })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(changed).not.toHaveBeenCalled()
+    expect(document.querySelector('.settings-page-title')?.textContent).toBe('界面')
+    panel.close()
+  })
+
+  it('disables batch controls while adding and ignores late callbacks after closing', async () => {
+    const changed = vi.fn()
+    const handlers = { ...modelHandlers(), onModelConfigChanged: changed }
+    handlers.readModels.mockResolvedValue({ ok: true, models: [{ id: 'pending', contextTokens: 4096 }] })
+    let finish!: (result: unknown) => void
+    handlers.addModel.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const panel = await openProvider(handlers, 'minimax')
+    buttonByText('读取模型')!.click()
+    await vi.waitFor(() => expect(document.querySelectorAll('.settings-candidate')).toHaveLength(1))
+    const add = buttonByText('添加所选（1）')!
+    add.click(); add.click()
+    expect(handlers.addModel).toHaveBeenCalledTimes(1)
+    expect([...document.querySelectorAll<HTMLInputElement | HTMLButtonElement>('.settings-read-panel input, .settings-read-panel button')].every(node => node.disabled)).toBe(true)
+    expect(buttonByText('读取模型')!.disabled).toBe(true)
+    panel.close()
+    finish({ ok: true, config: modelConfig() })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(changed).not.toHaveBeenCalled()
+    expect(document.querySelector('.overlay-settings')).toBeNull()
+  })
+
   it('has no set-as-current control and reports a corrupt model configuration', async () => {
     const handlers = modelHandlers()
     const panel = await openModelPage(handlers)

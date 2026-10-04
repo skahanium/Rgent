@@ -72,6 +72,8 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
   let candidateNote = ''
   let candidateTruncated = false
   let reading = false
+  let readRequest = 0
+  let adding = false
   let focusSelector: string | null = null
   let disposed = false
 
@@ -140,6 +142,8 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
     back.textContent = '← 供应商'
     back.setAttribute('aria-label', '返回供应商列表')
     back.addEventListener('click', () => {
+      readRequest++
+      reading = false
       view = { kind: 'list' }
       candidates = null
       candidateNote = ''
@@ -248,16 +252,20 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
     const button = element('button', 'settings-action')
     button.type = 'button'
     button.textContent = reading ? '读取中…' : '读取模型'
-    button.disabled = reading || !hasKey
+    button.disabled = reading || adding || !hasKey
     button.title = hasKey ? '' : '先保存密钥再读取模型'
     button.addEventListener('click', () => {
+      if (disposed || !host.isCurrent() || reading || adding) return
+      const mine = ++readRequest
+      const isReadCurrent = (): boolean => !disposed && host.isCurrent() && mine === readRequest &&
+        view.kind === 'provider' && view.provider === provider
       reading = true
       candidates = null
       candidateNote = ''
       paint()
       void handlers.readModels({ provider }).then((result) => {
+        if (!isReadCurrent()) return
         reading = false
-        if (disposed || !host.isCurrent()) return
         if (!result.ok) { host.showError(host.configErrorText(result.error)); candidates = null; paint(); return }
         candidates = (result.models as ModelListEntry[]).map((entry) => ({
           id: entry.id,
@@ -269,8 +277,8 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
         host.showError('')
         paint()
       }).catch(() => {
+        if (!isReadCurrent()) return
         reading = false
-        if (disposed || !host.isCurrent()) return
         host.showError(host.configErrorText('MODEL_LIST_FAILED'))
         paint()
       })
@@ -302,10 +310,12 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
       const box = element('input')
       box.type = 'checkbox'
       box.checked = candidate.checked
+      box.disabled = adding
       const id = element('span', 'settings-candidate-id')
       id.textContent = candidate.id
       const capacity = element('input')
       capacity.type = 'number'
+      capacity.disabled = adding
       capacity.min = '1'
       capacity.className = 'settings-candidate-capacity'
       capacity.value = candidate.input ?? (candidate.contextTokens !== undefined ? String(candidate.contextTokens) : '')
@@ -313,8 +323,8 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
       capacity.setAttribute('aria-label', `${candidate.id} 的上下文容量`)
       const note = element('span', 'settings-candidate-note')
       note.textContent = candidate.contextTokens !== undefined ? '端点提供' : '须填写'
-      box.addEventListener('change', () => { candidate.checked = box.checked; paint() })
-      capacity.addEventListener('input', () => { candidate.input = capacity.value; refreshAddState() })
+      box.addEventListener('change', () => { if (adding) return; candidate.checked = box.checked; paint() })
+      capacity.addEventListener('input', () => { if (adding) return; candidate.input = capacity.value; refreshAddState() })
       line.append(box, id, capacity, note)
       list.append(line)
     }
@@ -338,37 +348,57 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
     refreshAddState = (): void => {
       const chosen = chosenNow()
       add.textContent = `添加所选${chosen.length ? `（${chosen.length}）` : ''}`
-      add.disabled = chosen.length === 0 || chosen.some((candidate) => capacityOf(candidate) === null)
+      add.disabled = adding || chosen.length === 0 || chosen.some((candidate) => capacityOf(candidate) === null)
     }
     refreshAddState()
     add.addEventListener('click', () => {
-      const pending = chosenNow().map((candidate) => ({ modelId: candidate.id, contextTokens: capacityOf(candidate)! }))
-      candidates = null
-      candidateNote = ''
+      if (disposed || !host.isCurrent() || adding || add.disabled) return
+      const pending = chosenNow()
+      adding = true
+      host.showError('')
+      paint()
       void (async () => {
-        let latest: ModelConfigResult | null = null
-        for (const item of pending) {
-          const result = await handlers.addModel({ provider, ...item }).catch(() => ({ ok: false, error: 'IO_ERROR' }) as ModelConfigResult)
+        let added = 0
+        let existing = 0
+        let failed = 0
+        let attempted = 0
+        for (const candidate of pending) {
+          const result = await handlers.addModel({ provider, modelId: candidate.id, contextTokens: capacityOf(candidate)! })
+            .catch(() => ({ ok: false, error: 'IO_ERROR' }) as ModelConfigResult)
           if (disposed || !host.isCurrent()) return
-          if (!result.ok && result.error !== 'DUPLICATE_MODEL') { host.showError(host.configErrorText(result.error)); latest = result; break }
-          latest = result
+          attempted++
+          if (!result.ok && result.error !== 'DUPLICATE_MODEL') {
+            failed++
+            host.showError(host.configErrorText(result.error))
+            break
+          }
+          if (result.ok) { config = result.config; added++ }
+          else existing++
+          candidates = candidates?.filter(item => item !== candidate) ?? null
+          if (result.ok) host.onChanged?.()
+          paint()
         }
-        if (latest?.ok) { config = latest.config; host.onChanged?.(); focusSelector = '.settings-read-row button' }
+        adding = false
+        candidateNote = `已添加 ${added} 个，已存在 ${existing} 个，失败 ${failed} 个，未尝试 ${pending.length - attempted} 个。${existing ? '已存在的模型无需重复添加。' : ''}`
+        focusSelector = '.settings-read-row button'
         paint()
       })()
     })
     const selectAll = element('button', 'settings-action')
     selectAll.type = 'button'
+    selectAll.disabled = adding
     selectAll.textContent = '全选'
     selectAll.addEventListener('click', () => {
+      if (adding) return
       const all = candidates?.every((candidate) => candidate.checked) !== true
       for (const candidate of candidates ?? []) candidate.checked = all
       paint()
     })
     const cancel = element('button', 'settings-action')
     cancel.type = 'button'
+    cancel.disabled = adding
     cancel.textContent = '取消'
-    cancel.addEventListener('click', () => { candidates = null; candidateNote = ''; paint() })
+    cancel.addEventListener('click', () => { if (adding) return; candidates = null; candidateNote = ''; paint() })
     // 主操作在首位：`.settings-actions` 的首个子元素才是实心按钮
     footer.append(add, selectAll, cancel)
     panel.append(status, footer)
@@ -435,6 +465,9 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
     const hint = element('p', 'settings-hint')
     hint.textContent = '用哪个模型在底栏的模型模块里选择；运行上限在「运行」页调整。'
     body.append(hint)
+    if (adding) {
+      for (const control of body.querySelectorAll<HTMLInputElement | HTMLButtonElement>('button, input')) control.disabled = true
+    }
     if (focusSelector) {
       const target = body.querySelector<HTMLElement>(focusSelector)
       focusSelector = null

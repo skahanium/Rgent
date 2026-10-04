@@ -1,3 +1,4 @@
+import {rankMemoryEntries} from './memory-use.ts'
 import {conservativeTokens} from './context-budget.ts'
 import type {ModelCredential} from './model-config.ts'
 import type {ModelStepInput,ModelStepEvent} from './model-stream.ts'
@@ -194,9 +195,10 @@ export class WorkingMemoryConsolidation{
     }catch{this.assert(job)}
    }
    // Only related, valid committed memory is sent, not the entire vault record.
-   const words=new Set(job.material.prompt.toLowerCase().match(/[\p{L}\p{N}]+/gu)??[])
-   const entries=(await until(()=>job.service.entries(),job.controller.signal)).filter(e=>e.status==='active'&&(e.layer==='core'||[...words].some(w=>e.content.toLowerCase().includes(w)))).slice(0,8)
-   const payload={task:{id:job.material.taskId,status:job.material.status},sources:sources.map(s=>({id:s.id,text:s.text,classification:s.classification,kind:s.kind,attribution:s.relPath})),memory:entries.map(e=>({id:e.id,version:e.version,content:e.content,semantic:e.semantic,scope:e.scope,attribution:e.attribution,updatedAt:e.updatedAt}))}
+   const entries=rankMemoryEntries(await until(()=>job.service.entries(),job.controller.signal),job.material.prompt,sources.map(s=>s.text).join('\n')).slice(0,8)
+   const payload={task:{id:job.material.taskId,status:job.material.status},sources:sources.map(s=>({id:s.id,text:s.text,classification:s.classification,kind:s.kind,attribution:s.relPath})),memory:entries.map(e=>({id:e.id,version:e.version,content:e.content,layer:e.layer,semantic:e.semantic,scope:e.scope,attribution:e.attribution,updatedAt:e.updatedAt}))}
+   // Retain the highest ranked candidates within the existing input limits.
+   while(entries.length&&(Buffer.byteLength(JSON.stringify(payload))+Buffer.byteLength(memoryConsolidationSystem)>32768||conservativeTokens(JSON.stringify(payload))+conservativeTokens(memoryConsolidationSystem)+4096>job.configuration.credential.contextTokens)){entries.pop();payload.memory.pop()}
    let values:unknown[];const draft=await this.response(job,payload,sources,entries)
    try{values=parseMemorySuggestions(draft)}catch{
     if(job.configuration.limits.calls<2)throw Error('MEMORY_OUTPUT_INVALID')

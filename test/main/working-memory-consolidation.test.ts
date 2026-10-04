@@ -12,10 +12,10 @@ vi.mock('electron',()=>({dialog:{showOpenDialog:vi.fn()}}))
 vi.mock('../../src/main/watch.ts',async original=>({...await original<typeof import('../../src/main/watch.ts')>(),watchVault:()=>()=>{}}))
 const cleanups:(()=>Promise<void>)[]=[]
 afterEach(async()=>{for(const clean of cleanups.splice(0))await clean()})
-async function fixture(stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>){
+async function fixture(stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,prompt='以后用中文'){
  const base=await mkdtemp(path.join(os.tmpdir(),'rgent-consolidate-')),root=path.join(base,'vault');await mkdir(root)
  await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
- const marked=markPrompt('/以后用中文',{taskId:'task',range:{start:0,end:6},expectedText:'/以后用中文',promptText:'以后用中文'})
+ const marked=markPrompt('/'+prompt,{taskId:'task',range:{start:0,end:prompt.length+1},expectedText:'/'+prompt,promptText:prompt})
  await writeFile(path.join(root,'a.md'),marked)
  const vault=new VaultSession(base,vi.fn());vault.restore()
  const service=new WorkingMemoryService(vault,()=>null);await service.initialize()
@@ -23,7 +23,7 @@ async function fixture(stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEve
  const engine=new WorkingMemoryConsolidation({service:()=>service,configuration,stream,changed:vi.fn()})
  engine.capture('task')
  let note=await vault.readOpened('a.md')
- await vault.ledgerPrepare('a.md',{taskId:'task',startedAt:new Date().toISOString(),status:'completed',prompt:'以后用中文',answer:'好的'})
+ await vault.ledgerPrepare('a.md',{taskId:'task',startedAt:new Date().toISOString(),status:'completed',prompt,answer:'好的'})
  const result=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'task',answer:'好的'}),note.revision,note)
  await vault.ledgerComplete('a.md','task',result.revision)
  const material=await service.savedMaterial('a.md','task')
@@ -102,4 +102,39 @@ it('a subsequent human edit invalidates batch undo without overwriting the newer
  expect(f.engine.canUndo('task',f.material.materialVersion)).toBe(false)
  await expect(f.engine.undo('task',f.material.materialVersion)).rejects.toThrow('MEMORY_RETRY_UNAVAILABLE')
  expect(f.service.snapshot().record.entries[0]?.content).toBe('人的新措辞')
+})
+
+it('ranks related Chinese demand above eight unrelated core entries and retains candidate metadata',async()=>{
+ let payload:any
+ const f=await fixture(async function*(input){payload=JSON.parse(String(input.messages[0]!.content));yield {type:'text',text:'{"proposals":[]}'};yield {type:'finish',reason:'stop'}})
+ const source=await f.service.sourceForPrompt('a.md','task')
+ for(let i=0;i<8;i++)await f.vault.memoryMutation(store=>store.add(store.read(),{content:`会议预算第${i}项`,layer:'core',scope:'项目乙',sources:[source],semantic:'fact',attribution:'会议纪要',reviewAt:null},true))
+ await f.vault.memoryMutation(store=>store.add(store.read(),{content:'后续中文表达采用正式语气',layer:'demand',scope:'本库',sources:[source],semantic:'standing',attribution:'人的要求',reviewAt:null},true))
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(payload.memory.map((e:any)=>e.content)).toContain('后续中文表达采用正式语气')
+ expect(payload.memory).toHaveLength(1)
+ expect(payload.memory[0]).toMatchObject({layer:'demand',scope:'本库',semantic:'standing',attribution:'人的要求'})
+})
+it('includes the old factual correction target above eight unrelated core memories from an authorized new date',async()=>{
+ let payload:any
+ const f=await fixture(async function*(input){payload=JSON.parse(String(input.messages[0]!.content));yield {type:'text',text:'{"proposals":[]}'};yield {type:'finish',reason:'stop'}},'火星项目交付日期已明确更正为十月三日')
+ const source=await f.service.sourceForPrompt('a.md','task')
+ for(let i=0;i<8;i++)await f.vault.memoryMutation(store=>store.add(store.read(),{content:`音乐节奏训练规则第${i}项`,layer:'core',scope:'音乐训练',sources:[source],semantic:'fact',attribution:'训练记录',reviewAt:null},true))
+ await f.vault.memoryMutation(store=>store.add(store.read(),{content:'火星项目交付日期为十月一日',layer:'core',scope:'火星项目',sources:[source],semantic:'fact',attribution:'旧项目纪要',reviewAt:null},true))
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(payload.memory).toHaveLength(1)
+ expect(payload.sources.some((s:any)=>s.text.includes('明确更正为十月三日'))).toBe(true)
+ expect(payload.memory[0]).toMatchObject({layer:'core',semantic:'fact',content:'火星项目交付日期为十月一日'})
+})
+it('caps related candidates at eight and trims the lowest rank within the existing input byte budget',async()=>{
+ const requests:ModelStepInput[]=[]
+ const f=await fixture(async function*(input){requests.push(input);yield {type:'text',text:'{"proposals":[]}'};yield {type:'finish',reason:'stop'}})
+ const source=await f.service.sourceForPrompt('a.md','task')
+ for(let i=0;i<10;i++)await f.vault.memoryMutation(store=>store.add(store.read(),{content:`中文条目${i}：`+'x'.repeat(4050),layer:'demand',scope:'本库',sources:[source],semantic:'fact',attribution:'人的说明',reviewAt:null},true))
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(requests).toHaveLength(1)
+ const input=requests[0]!,data=JSON.parse(String(input.messages[0]!.content))
+ expect(data.memory.length).toBeGreaterThan(0);expect(data.memory.length).toBeLessThan(8)
+ expect(Buffer.byteLength(String(input.messages[0]!.content))+Buffer.byteLength(input.system!)).toBeLessThanOrEqual(32768)
+ expect(f.service.snapshot().record.jobs[0]?.outcome).toBe('applied')
 })

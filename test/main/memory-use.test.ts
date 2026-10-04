@@ -132,3 +132,40 @@ it('measures top-eight coverage and irrelevant returns on 1000 fixed memories / 
  expect(covered/100).toBeGreaterThanOrEqual(.85)
  expect(irrelevant/Math.max(returned,1)).toBeLessThanOrEqual(.05)
 })
+
+it('reports independent labeled recall quality, no-answer false positives and the lexical semantic gap',async()=>{
+ const {memoryRecallQualityFixture}=await import('../fixtures/memory-recall-quality.ts')
+ const {memories,queries,labels}=memoryRecallQualityFixture(entry)
+ expect(memories).toHaveLength(1000);expect(queries).toHaveLength(100)
+ let recall=0,returned=0,irrelevant=0,noAnswerFalsePositives=0,semanticRecall=0
+ const failedQueries:{id:string;query:string;kind:string;expected:string[];returned:string[]}[]=[]
+ for(const q of queries){
+  const result=recallMemory(memories,q.query,q.near).demand
+  const correct=result.filter(e=>q.relevantIds.includes(e.id)).length
+  if(correct<q.relevantIds.length||result.some(e=>!q.relevantIds.includes(e.id)))failedQueries.push({id:q.id,query:q.query,kind:q.kind,expected:q.relevantIds,returned:result.map(e=>e.id)})
+  if(q.kind==='answered'){recall+=correct/q.relevantIds.length;returned+=result.length;irrelevant+=result.length-correct}
+  else if(q.kind==='no-answer'){noAnswerFalsePositives+=Number(result.length>0);returned+=result.length;irrelevant+=result.length}
+  else {semanticRecall+=correct/q.relevantIds.length;returned+=result.length;irrelevant+=result.length-correct}
+ }
+ const report={labels,meanRecallAt8:(recall+semanticRecall)/labels.answered,lexicalRecallAt8:recall/labels.lexicalAnswered,irrelevantFraction:irrelevant/Math.max(1,returned),noAnswerFalsePositiveRate:noAnswerFalsePositives/labels.noAnswer,pureSemanticRecallAt8:semanticRecall/labels.semanticGap,failedQueries}
+ console.info('Memory recall labeled quality',JSON.stringify(report))
+ expect(report.meanRecallAt8).toBeGreaterThanOrEqual(.85)
+ expect(report.irrelevantFraction).toBeLessThanOrEqual(.05)
+ expect(report.noAnswerFalsePositiveRate).toBe(0)
+})
+
+it('English terms match whole words rather than substrings in another topic',()=>{
+ expect(recallMemory([entry('fiber','fiber transmission measurement','demand')],'comet ion tail','').demand).toEqual([])
+ expect(recallMemory([entry('ion','comet ion tail observations','demand')],'ion','').demand.map(e=>e.id)).toEqual(['ion'])
+})
+it('recalls English identifiers adjacent to Chinese text in either direction',()=>{
+ for(const content of ['供应商OpenAI提供服务','OpenAI供应商提供服务']){
+  expect(recallMemory([entry('mixed',content,'demand')],'OpenAI','').demand.map(e=>e.id)).toEqual(['mixed'])
+ }
+})
+it('shares candidate relevance across layers and the authorized source text, including old factual correction targets',async()=>{
+ const {rankMemoryEntries}=await import('../../src/main/memory-use.ts')
+ const old={...entry('old','火星项目交付日期为十月一日','core'),semantic:'fact' as const,attribution:'旧项目纪要'}
+ const unrelated=Array.from({length:8},(_,i)=>entry(`other-${i}`,'音乐节奏训练规则','core'))
+ expect(rankMemoryEntries([...unrelated,old], '核对最新说明','火星项目交付日期已经改为十月三日。').map(e=>e.id)).toEqual(['old'])
+})
