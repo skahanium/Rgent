@@ -1097,8 +1097,8 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 |---|---|---|
 | A | 打开不写盘，坏账本可读正文，磁盘尾部保护，可信材料三态，共享归档保护与诊断 | `8b5ed9c` 最终 Spec／Quality 复核通过，四项 P1 与诊断 P2 闭合。`47bd095` 范围的 7 文件 181 项、追加 `8b5ed9c` 早退诊断 45 项与类型分别记录，不合并为一次全量；窗口与最终完整门待收口 |
 | B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `e04a02f` 最后实际队列修补独立 Spec／Quality 复核通过（2026-10-05）；定向 13 文件 261／0、类型／文档通过。打开 A+ 串行工程门；全部 B 实际窗口及整轮完整门仍待核，不能据此宣称整库恢复已完整验收 |
-| A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | 初版 `1ecc6fa` 14 文件 315／0、SSE 13／0及 core 20／0分别保留；独立复审发现 3 项 Important，`3c39531` 修补后必要 8 文件 205／0、类型／文档通过。独立再审、实际窗口及整轮完整门待核，C 工程门仍未开放；2026-10-05 |
-| C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | 待 A+ 门；2026-10-04 |
+| A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | `3c39531` 修补后的独立 Spec／Quality 再审通过（2026-10-05），3 项 Important 及目标消失路径闭合；必要 8 文件 205／0、类型／文档通过，打开 C 串行工程门。实际窗口及整轮完整门仍待核；初版 315／0、SSE 13／0及 core 20／0保留原范围 |
+| C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | A+ 工程复审门通过，进入串行施工，尚未交付；2026-10-05 |
 | E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 待 C 门；2026-10-04 |
 | D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | 待 E 门；2026-10-04 |
 | Q | 虚构开发集双策略对照，逐模型停损与证据；不切生产策略、不运行正式评测 | 待 D 门；2026-10-04 |
@@ -1189,3 +1189,5 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 最终必要定向：`pnpm exec vitest run test/main/agent-host.test.ts test/main/vault.test.ts test/main/memory-ipc.test.ts test/main/memory-retirement.test.ts test/main/memory-management.test.ts test/main/vault-switch-main.test.ts test/main/ipc-sender.test.ts test/renderer/memory-ui.test.ts`，8 文件 205／0（`/tmp/rgent-v4-Aplus-fix-final-targeted2.log`）；`pnpm exec tsc --noEmit` 无错误、`pnpm docs:check` 12 文件通过（`/tmp/rgent-v4-Aplus-fix-final-types2.log`、`/tmp/rgent-v4-Aplus-fix-final-docs2.log`）。自查缺失路径前的同集合 204／0单独保留，不与205或旧315相加；本次未复跑无新风险的旧完整315集合。证据文档更新另做 docs:check，报告 `/tmp/rgent-v4-Aplus-fix-report.md`。
 
 仅本地提交，无新依赖／IPC／页／分支／worktree／专题文档，无 push、CI、build、完整测试、实际窗口或付费调用。独立再审仍待根任务；实际产品窗口及 Windows、输入法人工、用户视觉、真实学习质量待核保持。C／E／D／Q 未提前施工，当前阶段不变。
+
+包 A+ 独立再审（2026-10-05，固定范围 `54bee5b..2c07216`，生产代码受验 `3c39531`）：Spec／Quality 均通过。原批准目标传至 helper 最终复读与 CAS；expected 目标消失拒绝，普通 attach 无文件仍允许。原调用帧检查从现有 IPC 捕获至真实队列及替换前，单篇 memory-only 实际 outgoing 不再附加库读取要求。三项 Important 已闭合；报告 `/tmp/rgent-v4-Aplus-fix-rereview.md`。据此仅开放 C 的串行工程施工，不销掉实际 Electron 窗口、整轮完整门、Windows／CI、输入法人工、用户视觉或学习质量待核，也不结束阶段。
