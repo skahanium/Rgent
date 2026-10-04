@@ -5,6 +5,10 @@ import type {ContextChapter,ContextSummary} from './host-context.ts'
 export const SUMMARY_SECTIONS=['主题目标','人的要求','已完成结论','未决与受阻','后续上下文','须查原文事项'] as const
 export const summaryHash=(s:string)=>createHash('sha256').update(s).digest('hex')
 export type SummaryGenerator={modelId:string;connection:string;host:string;time:string;format:1}
+export function validSummaryGenerator(value:unknown):value is SummaryGenerator{
+ if(!value||typeof value!=='object'||Array.isArray(value))return false
+ const g=value as Record<string,unknown>;return Object.keys(g).sort().join()===['connection','format','host','modelId','time'].join()&&g.format===1&&typeof g.modelId==='string'&&typeof g.connection==='string'&&typeof g.host==='string'&&typeof g.time==='string'&&Number.isFinite(Date.parse(g.time))
+}
 export type SummaryBlock={id:string;level:1|2;children:string[];covered:{id:string;hash:string}[];dependencyKey:string;updates:number;text:string;generator:SummaryGenerator}
 export type SummaryResolution={status:'reuse'|'generated'|'partial'|'omitted'|'noop'|'failure';summary:ContextSummary}
 type Cache={version:1;blocks:SummaryBlock[]}
@@ -23,7 +27,7 @@ export class SummaryCache{
   try{const raw=readFileSync(this.file(key));if(raw.length>32768)throw Error();const c=JSON.parse(raw.toString()) as Cache
    if(c.version!==1||!Array.isArray(c.blocks)||c.blocks.length>64)throw Error()
    const ids=new Set(c.blocks.map(b=>b.id));if(ids.size!==c.blocks.length)throw Error()
-   for(const b of c.blocks){if(!/^[a-f0-9]{64}$/.test(b.id)||![1,2].includes(b.level)||!Number.isInteger(b.updates)||b.updates<0||b.updates>4||!validSummaryText(b.text)||!Array.isArray(b.covered)||!b.covered.length||b.covered.some(d=>typeof d.id!=='string'||!/^[a-f0-9]{64}$/.test(d.hash))||!Array.isArray(b.children)||b.children.some(id=>!ids.has(id))||b.level===1&&b.children.length||!b.generator||b.generator.format!==1||typeof b.generator.host!=='string'||typeof b.generator.modelId!=='string'||!Number.isFinite(Date.parse(b.generator.time)))throw Error()}
+   for(const b of c.blocks){if(!/^[a-f0-9]{64}$/.test(b.id)||![1,2].includes(b.level)||!Number.isInteger(b.updates)||b.updates<0||b.updates>4||!validSummaryText(b.text)||!Array.isArray(b.covered)||!b.covered.length||b.covered.some(d=>typeof d.id!=='string'||!/^[a-f0-9]{64}$/.test(d.hash))||!Array.isArray(b.children)||b.children.some(id=>!ids.has(id))||b.level===1&&b.children.length||!validSummaryGenerator(b.generator))throw Error()}
    if(c.blocks.some(b=>b.level===2&&b.children.some(id=>c.blocks.find(x=>x.id===id)?.level!==1)))throw Error()
    return c
   }catch{return {version:1,blocks:[]}}
@@ -47,7 +51,7 @@ export class SummaryCache{
   return cache.blocks.find(b=>b.level===1&&b.updates<4&&b.covered[0]?.id===group.sourceId&&b.covered.length<chapters.length&&b.covered.every(d=>chapters.some(c=>c.sourceId===d.id&&summaryHash(c.text)===d.hash&&summaryDependency(c)===b.dependencyKey)))
  }
  put(key:string,chapters:readonly ContextChapter[],text:string,generator:SummaryGenerator,prior?:SummaryBlock,children:SummaryBlock[]=[]){
-  if(!chapters.length||!validSummaryText(text)||new Set(chapters.map(summaryDependency)).size!==1)throw Error('SUMMARY_FORMAT_INVALID')
+  if(!validSummaryGenerator(generator)||!chapters.length||!validSummaryText(text)||new Set(chapters.map(summaryDependency)).size!==1)throw Error('SUMMARY_FORMAT_INVALID')
   const dependencyKey=summaryDependency(chapters[0]!),covered=chapters.map(c=>({id:c.sourceId,hash:summaryHash(c.text)})),id=summaryHash(JSON.stringify([covered,dependencyKey]))
   if(children.some(b=>b.level!==1)||children.length&&children.flatMap(b=>b.covered.map(d=>d.id)).sort().join()!==covered.map(d=>d.id).sort().join())throw Error('SUMMARY_FORMAT_INVALID')
   const block:SummaryBlock={id,level:children.length?2:1,children:children.map(b=>b.id),covered,dependencyKey,updates:prior?prior.updates+1:0,text,generator}

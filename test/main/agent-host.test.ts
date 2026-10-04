@@ -2,7 +2,7 @@ import {hostLedgerFixture} from './host-ledger-fixture.ts'
 import {ledgerChapters,ledgerTaskFields} from '../../src/main/host-context.ts'
 import {mkdtempSync,rmSync} from 'node:fs'
 import {SummaryCache,summaryHash,SUMMARY_SECTIONS} from '../../src/main/summary-cache.ts'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {createScopedAgentTools} from '../../src/main/scoped-agent-tools.ts'
 import { AgentHost } from '../../src/main/agent-host.ts'
 import { assertLedgerPreserved, partitionSource } from '../../src/markdown/partition.ts'
@@ -572,4 +572,32 @@ it('checks forgetting before derived sends without creating any memory-use permi
  const at=app.source().indexOf('/');expect(await (await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})).done).toEqual({status:'completed'})
  expect(prompts).toHaveLength(1);expect(prompts[0]).not.toContain('FORGOTTEN_WITHOUT_PERMIT');expect(app.history.records().at(-1)!.sentSummaries??[]).toEqual([])
  }finally{rmSync(directory,{recursive:true,force:true})}
+})
+
+vi.mock('electron',()=>({dialog:{showOpenDialog:vi.fn()}}))
+vi.mock('../../src/main/watch.ts',async importOriginal=>({...await importOriginal<typeof import('../../src/main/watch.ts')>(),watchVault:()=>()=>{}}))
+it.each(['missing-connection','extra-field','material-envelope'] as const)('saves actual Vault Host output at the %s production boundary',async boundary=>{
+ const {mkdtemp,mkdir,writeFile,readFile,rm}=await import('node:fs/promises'),{tmpdir}=await import('node:os'),path=await import('node:path')
+ const {VaultSession}=await import('../../src/main/vault.ts'),{serializeStoredVault}=await import('../../src/main/notes-fs.ts'),{TaskMaterialTracker}=await import('../../src/main/host-material.ts')
+ const base=await mkdtemp(path.join(tmpdir(),'rgent-C-host-final-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'正文\n\n/写个回答')
+ const vault=new VaultSession(base,vi.fn());vault.restore();const cache=new SummaryCache(path.join(base,'cache')),key=summaryHash('real-note'),requests:string[]=[],events:unknown[]=[]
+ try{
+  if(boundary==='material-envelope'){
+   const note=await vault.read('a.md'),probe=new TaskMaterialTracker(1024*1024),raw='x'.repeat(262000);probe.body(raw,{start:0,end:raw.length},{...note,relPath:'a.md'});probe.commit();const overhead=Buffer.byteLength(JSON.stringify(probe.snapshot().fragments[0]))-raw.length
+   const material='x'.repeat(262142-overhead);await vault.write('a.md',material+'\n\n/写个回答',note.revision,note)
+  }else{
+   let note=await vault.read('a.md');const marked=markPrompt(note.content,{taskId:'old',range:{start:note.content.indexOf('/'),end:note.content.length},expectedText:'/写个回答',promptText:'写个回答'});await vault.write('a.md',marked,note.revision,note);note=await vault.read('a.md')
+   await vault.ledgerPrepare('a.md',{taskId:'old',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'写个回答',answer:'旧记录。'.repeat(2000)})
+   const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'old',answer:'旧记录。'.repeat(2000)}),note.revision,note);await vault.ledgerComplete('a.md','old',saved.revision)
+   note=await vault.read('a.md');await vault.write('a.md',note.content+'\n\n/写个回答',note.revision,note)
+   cache.put(key,await vault.ledgerContexts('a.md'),SUMMARY_SECTIONS.map(h=>h+'：缓存BAD').join('\n'),{modelId:'cached',connection:'cached',host:'cache.test',time:'2026-01-01T00:00:00Z',format:1})
+   const file=path.join(base,'cache',key+'.json'),bad=JSON.parse(await readFile(file,'utf8'));if(boundary==='missing-connection')delete bad.blocks[0].generator.connection;else bad.blocks[0].generator.extra='unexpected';await writeFile(file,JSON.stringify(bad))
+  }
+  const host=new AgentHost({root:()=>root,session:()=>vault.sessionId(),acceptsObject:(p,b,a)=>vault.acceptsObject(p,b,a),read:p=>vault.read(p),write:(p,c,r,b)=>vault.write(p,c,r,b!),tier:async()=> 'reference',ledger:{prepare:(p,c,v,b)=>{expect(b).toBeDefined();return vault.ledgerPrepare(p,c,v,b)},complete:(p,id,r)=>vault.ledgerComplete(p,id,r),contexts:p=>vault.ledgerContexts(p)},summaries:{cache,key:async()=>key},credential:()=>({provider:'custom',baseURL:'http://127.0.0.1:1234/v1',modelId:'test',contextTokens:boundary==='material-envelope'?1000000:10000,apiKey:'fake'}),limits:()=>({seconds:30,steps:4,tools:0}),stream:async function*(input){requests.push(input.prompt);yield input.prompt.startsWith('仅整理')?SUMMARY_SECTIONS.map(h=>h+'：重建摘要').join('\n'):'完整保存回答'},emit:e=>events.push(e)})
+  const note=await vault.read('a.md'),start=note.content.lastIndexOf('/写个回答'),task=await host.start({...note,relPath:'a.md',expectedRevision:note.revision,range:{start,end:start+5},expectedText:'/写个回答',promptText:'写个回答'})
+  expect(await task.done).toEqual({status:'completed'});expect(host.hasPending()).toBe(false);expect(requests.join('\n')).not.toContain('缓存BAD')
+  const record=await vault.ledgerRecord('a.md',task.id);expect(record.state).toBe('saved');expect(record.chapter?.answer).toBe('完整保存回答');expect(Buffer.byteLength(JSON.stringify(record))).toBeLessThan(2*1024*1024)
+  if(boundary==='material-envelope'){expect(record.chapter?.material?.truncated).toBe(true);expect(Buffer.byteLength(JSON.stringify(record.chapter?.material))).toBeLessThanOrEqual(256*1024)}
+  else{expect(record.chapter?.sentSummaries?.every(s=>s.generators.every(g=>typeof g.connection==='string'&&!('extra' in g)))).toBe(true);expect((await vault.summaryMaterials('a.md',[task.id])).materialIds).toContain(task.id+'/prompt')}
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })

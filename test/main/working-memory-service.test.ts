@@ -165,3 +165,43 @@ it('blocks summary copies derived from forgotten body material UUIDs without all
   expect((await vault.ledgerRecord('a.md','task-body')).chapter?.answer).toBe('依据正文的历史结论');expect((await vault.readOpened('a.md')).content).toContain('正文材料。')
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
+
+it.each(['ledger-forget','body-forget','ledger-watermark','body-watermark','adopted-forget','adopted-watermark'] as const)('blocks a real three-generation %s material chain',async mode=>{
+ const kind=mode.startsWith('ledger')?'ledger':'body'
+ const {TaskMaterialTracker}=await import('../../src/main/host-material.ts')
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-summary-chain-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'正文\n\n')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{
+  const save=async(taskId:string,material?:import('../../src/main/host-material.ts').SentTaskMaterial)=>{
+   let note=await vault.readOpened('a.md'),body=note.content+'/口令'+taskId+'\n\n';const start=note.content.length;body=markPrompt(body,{taskId,range:{start,end:start+('/口令'+taskId).length},expectedText:'/口令'+taskId,promptText:'口令'+taskId});await vault.write('a.md',body,note.revision,note);note=await vault.read('a.md')
+   await vault.ledgerPrepare('a.md',{taskId,startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'口令'+taskId,answer:'回答'+taskId,material})
+   const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId,answer:'回答'+taskId}),note.revision,note);await vault.ledgerComplete('a.md',taskId,saved.revision)
+   if(mode.startsWith('adopted')){const current=await vault.read('a.md');await vault.write('a.md',current.content.replace('<!-- rgent:ai:v1 task-id=\"'+taskId+'\" -->',''),current.revision,current)}
+  }
+  const inherited=async(taskId:string)=>{const note=await vault.read('a.md'),chapters=await vault.ledgerContexts('a.md'),tracker=new TaskMaterialTracker()
+   if(kind==='ledger')tracker.context(note.content,[{kind:'ledger',sourceId:taskId}],{...note,relPath:'a.md'},undefined,chapters)
+   else{const start=note.content.indexOf('回答'+taskId);if(mode.startsWith('adopted')){const {compile}=await import('../../src/markdown/index.ts');const index=compile(note.content).index.blocks.findIndex(b=>b.range.start<=start&&b.range.end>=start+('回答'+taskId).length);tracker.context(note.content,[{kind:'body',sourceId:'body-'+(index+1)}],{...note,relPath:'a.md'},undefined,chapters)}else tracker.body(note.content,{start,end:start+('回答'+taskId).length},{...note,relPath:'a.md'})}
+   tracker.commit();expect(tracker.snapshot().fragments.every(f=>f.taskId===taskId&&f.kind===kind)).toBe(true);expect(tracker.snapshot().fragments.length).toBeGreaterThan(0);return tracker.snapshot()
+  }
+  await save('T0');const service=new WorkingMemoryService(vault,()=>null),source=await service.sourceForPrompt('a.md','T0');const entry=await vault.memoryMutation(s=>s.add(s.read(),{content:'原始口令材料',layer:'core',scope:'本库',sources:[source],semantic:'fact',attribution:'人的口令',reviewAt:null}))
+  await save('T1',await inherited('T0'));await save('T2',await inherited('T1'));expect((await vault.ledgerRecord('a.md','T2')).chapter?.provenance?.version??1).toBe(1)
+  expect((await vault.summaryMaterials('a.md',['T2'])).materialIds).toEqual(expect.arrayContaining(['T0/prompt','T1/prompt','T2/prompt']));expect(await service.summaryAllowed('a.md',['T2'])).toBe(true);
+  if(mode==='ledger-forget'){const child=await vault.ledgerRecord('a.md','T2'),file=path.join(root,'.rgent','ledgers',child.noteId,'T2.json'),original=await readFile(file,'utf8'),bad=JSON.parse(original);bad.chapter.material.fragments[0].hash='0'.repeat(64);await writeFile(file,JSON.stringify(bad));expect(await service.summaryAllowed('a.md',['T2'])).toBe(false);await writeFile(file,original)}
+  await vault.memoryMutation(s=>s.forget(s.read(),entry.id,entry.version));if(mode.endsWith('forget'))expect(await service.summaryAllowed('a.md',['T2'])).toBe(false)
+  await vault.memoryMutation(s=>s.advance(s.read(),source.sequence));expect(vault.memorySnapshot().record.forgotten).toEqual([]);expect((await vault.ledgerRecord('a.md','T2')).sequence).toBeGreaterThan(source.sequence);expect(await service.summaryAllowed('a.md',['T2'])).toBe(false)
+  expect((await vault.ledgerRecord('a.md','T0')).chapter?.answer).toBe('回答T0');expect((await vault.read('a.md')).content).toContain('回答T2')
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+
+it('saves a real Vault answer with the complete material JSON boundary',async()=>{
+ const {TaskMaterialTracker}=await import('../../src/main/host-material.ts')
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-material-boundary-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));const raw='x'.repeat(262000),marked=markPrompt(raw+'\n\n/说明',{taskId:'edge',range:{start:raw.length+2,end:raw.length+5},expectedText:'/说明',promptText:'说明'});await writeFile(path.join(root,'a.md'),marked)
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{
+  const note=await vault.read('a.md'),binding={relPath:'a.md',sessionId:note.sessionId,objectVersion:note.objectVersion,revision:note.revision},probe=new TaskMaterialTracker(1024*1024);probe.body(note.content,{start:0,end:raw.length},binding);probe.commit();const overhead=Buffer.byteLength(JSON.stringify(probe.snapshot().fragments[0]))-raw.length
+  const tracker=new TaskMaterialTracker();tracker.body(note.content,{start:0,end:262142-overhead},binding);tracker.commit()
+  await vault.ledgerPrepare('a.md',{taskId:'edge',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'说明',answer:'边界完整保稿',material:tracker.snapshot()})
+  const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'edge',answer:'边界完整保稿'}),note.revision,note);await vault.ledgerComplete('a.md','edge',saved.revision)
+  const record=await vault.ledgerRecord('a.md','edge');expect(record.state).toBe('saved');expect(record.chapter?.answer).toBe('边界完整保稿');expect(record.chapter?.material?.truncated).toBe(true);expect(Buffer.byteLength(JSON.stringify(record.chapter?.material))).toBeLessThanOrEqual(256*1024)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})

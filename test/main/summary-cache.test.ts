@@ -1,4 +1,4 @@
-import {mkdtempSync,rmSync} from 'node:fs'
+import {mkdtempSync,rmSync,readFileSync,writeFileSync} from 'node:fs'
 import os from 'node:os';import path from 'node:path'
 import {afterEach,it,expect} from 'vitest'
 import {SummaryCache,SUMMARY_SECTIONS,summaryHash} from '../../src/main/summary-cache.ts'
@@ -28,4 +28,10 @@ it('counts JSON escapes and repeated dispatches in the pre-send audit allowance'
  const answer=encodedAnswerPrefix('\\'.repeat(600000));expect(Buffer.byteLength(JSON.stringify(answer))).toBeLessThanOrEqual(ANSWER_JSON_BYTES)
  const envelope={version:1,noteId:'a'.repeat(128),taskId:'t'.repeat(128),sequence:Number.MAX_SAFE_INTEGER,revision:Number.MAX_SAFE_INTEGER,state:'saved',bodyStatus:'present',chapter:{answer,sentSummaries:[snapshot],reservedMetadata:'m'.repeat(TASK_METADATA_RESERVE-64)}}
  expect(Buffer.byteLength(JSON.stringify(envelope))).toBeLessThanOrEqual(TASK_RECORD_BYTES)
+})
+
+it.each(['missing-connection','extra-field'])('discards a corrupt %s generator before selecting any summary',kind=>{
+ const dir=mkdtempSync(path.join(os.tmpdir(),'rgent-summary-generator-'));roots.push(dir);const cache=new SummaryCache(dir),chapters=[{sourceId:'old',text:'old'}];cache.put(key,chapters,text,generator)
+ const file=path.join(dir,key+'.json'),bad=JSON.parse(readFileSync(file,'utf8'));if(kind==='missing-connection')delete bad.blocks[0].generator.connection;else bad.blocks[0].generator.extra='unexpected';writeFileSync(file,JSON.stringify(bad))
+ expect(cache.select(key,chapters,4096,s=>s.length)).toBeUndefined();cache.put(key,chapters,text,generator);expect(cache.select(key,chapters,4096,s=>s.length)?.generators).toEqual([generator])
 })

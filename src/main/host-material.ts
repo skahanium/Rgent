@@ -19,6 +19,10 @@ export type SavedTaskMaterial = {
   material: SentTaskMaterial; sourceDeps: LedgerSource[]; memoryDeps: LedgerMemoryDependency[]
 }
 export type SentTaskMaterial = { fragments: SentFragment[]; truncated: boolean }
+export function validTaskMaterial(value:unknown):value is SentTaskMaterial{
+ if(!value||typeof value!=='object'||Array.isArray(value))return false
+ const m=value as SentTaskMaterial;return Array.isArray(m.fragments)&&m.fragments.length<=512&&typeof m.truncated==='boolean'&&Buffer.byteLength(JSON.stringify(m))<=256*1024
+}
 export type MaterialDependencies = { sources: LedgerSource[]; memories: LedgerMemoryDependency[] }
 const hash = (text: string) => createHash('sha256').update(text).digest('hex')
 /** Bounded evidence of text actually dispatched; never contains model reasoning or whole grant/history copies. */
@@ -26,12 +30,12 @@ export class TaskMaterialTracker {
   private stagedContext: SentFragment[] = []
   private stagedTools: SentFragment[] = []
   private readonly sent = new Map<string, SentFragment>()
-  private size = 0
   private truncated = false
   constructor(private readonly maxBytes = 256 * 1024, private readonly maxFragments = 512) {}
+  private fits(fragments:readonly SentFragment[]) { return fragments.length<=this.maxFragments&&Buffer.byteLength(JSON.stringify({fragments,truncated:false}))<=this.maxBytes }
   private stage(lane: SentFragment[], fragment: SentFragment) {
     // Bound pending as well as committed buffers. A dropped fragment can never become a candidate basis.
-    if (lane.length >= this.maxFragments || Buffer.byteLength(JSON.stringify(lane)) + Buffer.byteLength(JSON.stringify(fragment)) > this.maxBytes) { this.truncated = true; return }
+    if (!this.fits([...lane,fragment])) { this.truncated = true; return }
     lane.push(fragment)
   }
   body(source: string, range: {start: number; end: number}, binding: MaterialBinding, dependencies: MaterialDependencies = {sources:[],memories:[]}, context = false, parsed = compile(source), historical = historicalBodyTasks(parsed)) {
@@ -75,9 +79,8 @@ export class TaskMaterialTracker {
     for (const fragment of [...this.stagedContext, ...(includeTools ? this.stagedTools : [])]) {
       const key = JSON.stringify([fragment.relPath,fragment.objectVersion,fragment.kind,fragment.taskId,fragment.start,fragment.end,fragment.hash])
       if (this.sent.has(key)) continue
-      const cost = Buffer.byteLength(JSON.stringify(fragment))
-      if (this.sent.size >= this.maxFragments || this.size + cost > this.maxBytes) { this.truncated = true; continue }
-      this.sent.set(key,structuredClone(fragment));this.size += cost
+      if (!this.fits([...this.sent.values(),fragment])) { this.truncated = true; continue }
+      this.sent.set(key,structuredClone(fragment))
     }
     this.stagedContext=[];if (includeTools) this.stagedTools=[]
   }

@@ -163,7 +163,7 @@ export class WorkingMemoryService{
   try{
    this.context();const basis=this.vault.memorySnapshot(),record=basis.record
    const forgotten=new Set(record.forgotten.flatMap(f=>f.materialIds))
-   if(forgotten.size||record.watermark>0){const covered=await this.vault.summaryMaterials(relPath,taskIds,[...forgotten].filter(id=>!id.endsWith('/prompt')));this.context();if(covered.ceiling<record.watermark||covered.materialIds.some(id=>forgotten.has(id))||covered.sequences.some(sequence=>sequence<=record.watermark))return false}
+   const covered=await this.vault.summaryMaterials(relPath,taskIds,[...forgotten].filter(id=>!id.endsWith('/prompt')));this.context();if(covered.ceiling<record.watermark||covered.materialIds.some(id=>forgotten.has(id))||record.watermark>0&&covered.sequences.some(sequence=>sequence<=record.watermark))return false
    // A concurrent forget/reset cannot be approved using the earlier control snapshot.
    this.context();return this.vault.memorySnapshot().revision===basis.revision
   }catch{return false}

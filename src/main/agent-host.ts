@@ -1,3 +1,4 @@
+import {validSentSummary} from './ledger-store.ts'
 import {conservativeTokens,summaryAuditFits,encodedAnswerPrefix} from './context-budget.ts'
 import {SummaryCache,summaryGroups,SUMMARY_SECTIONS,validSummaryText,type SummaryGenerator,type SummaryResolution,summaryHash} from './summary-cache.ts'
 import type { ModelMessage, AssistantContent, ToolContent } from 'ai'
@@ -6,7 +7,7 @@ import { createMemoryUsePermit, MEMORY_SEARCH_SCHEMA, type MemoryUsePort, type M
 import type { MemoryContext } from '../shared/memory.ts'
 import { createHash } from 'node:crypto'
 const memoryHash = (text:string) => createHash('sha256').update(text).digest('hex')
-import { TaskMaterialTracker, type SavedTaskMaterial } from './host-material.ts'
+import { validTaskMaterial, TaskMaterialTracker, type SavedTaskMaterial } from './host-material.ts'
 import { encodeLedgerProvenance, historicalContextPolicy } from './ledger-provenance.ts'
 import { READ_ONLY_TOOL_SCHEMAS } from './scoped-agent-tools.ts'
 import { MODEL_STREAM_BOUNDS, type ModelStepEvent, type ToolSchema } from './model-stream.ts'
@@ -408,7 +409,7 @@ export class AgentHost {
         }
         const derivedAllowed=(ids:readonly string[])=>wait(this.deps.summaryAllowed?.(input.relPath,ids)??this.deps.memory?.summaryAllowed?.(input.relPath,ids)??Promise.resolve(true))
         const audit=(value:ContextSummary,chapters:readonly ContextChapter[],nextStep=steps+1):SentSummary=>({step:nextStep,text:value.text,sourceChapterIds:[...value.sourceChapterIds],generators:structuredClone(value.generators??[]),dependencies:value.sourceChapterIds.map(sourceId=>{const c=chapters.find(c=>c.sourceId===sourceId);if(!c||c.eligible===false)throw Error('SOURCE_CHANGED');return {sourceId,hash:summaryHash(c.text),...(c.provenance?{provenance:structuredClone(c.provenance)}:{})}})})
-        const fits=(values:SentSummary[])=>{const all=[...sentSummaries,...values];if(!summaryAuditFits(all))return false;try{encodeLedgerProvenance(recordProvenance(all,true));return true}catch{return false}}
+        const fits=(values:SentSummary[])=>{const all=[...sentSummaries,...values];if(!summaryAuditFits(all)||!all.every(validSentSummary))return false;try{encodeLedgerProvenance(recordProvenance(all,true));return true}catch{return false}}
         const resolveSummary=(candidate:ContextSummary,status:SummaryResolution['status'],chapters:readonly ContextChapter[]):SummaryResolution=>candidate.text&&!fits([audit(candidate,chapters)])?{status:'omitted',summary:{text:'',sourceChapterIds:[]}}:{status,summary:candidate}
         const step = (outgoing: ModelMessage[], withTools: boolean, maxOutputTokens: number, summaries:SentSummary[]=[]): AsyncIterable<ModelStepEvent> => {
           if(!fits(summaries))throw Error('LEDGER_RECORD_LIMIT')
@@ -420,10 +421,11 @@ export class AgentHost {
           const metric={step:steps,estimatedInput:conservativeTokens(system+JSON.stringify(outgoing)+(schemas?JSON.stringify(schemas):'')),actualInput:null as number|null,actualOutput:null as number|null};metrics.push(metric)
           const create = () => {
             if (signal.aborted) throw Error('TASK_CANCELLED')
+            materials.commit(withTools)
+            if(!validTaskMaterial(materials.snapshot()))throw Error('LEDGER_RECORD_LIMIT')
             sentSummaries.push(...structuredClone(summaries))
             scoped?.markSent(withTools)
             memory?.markSent()
-            materials.commit(withTools)
             return this.deps.streamStep
             ? this.deps.streamStep({ ...credential, system, messages: outgoing, ...(schemas ? { tools: schemas } : {}), maxOutputTokens }, signal)
             : textEvents(this.deps.stream({ ...credential, system, prompt: String(outgoing[0]?.content ?? ''), maxOutputTokens }, signal))
@@ -452,7 +454,7 @@ export class AgentHost {
           const plan = buildHostContext({ source, chapters:historicalChapters, prompt: input.promptText, placement: currentPrompt.position, inputBudgetTokens: planBudget, countTokens: conservativeTokens, summary, memory: memory?.recall, ...policy })
           if (plan.status === 'too-large') throw Error(plan.reason)
           if (plan.status === 'needs-summary') {
-            if(!await derivedAllowed(plan.chapters.map(c=>c.taskId??c.sourceId))){summary={text:'',sourceChapterIds:[]};noteTrace('摘要覆盖曾遗忘或已越过学习水位的材料，省略派生历史；原历史保留');continue}
+            if(!await derivedAllowed(plan.chapters.map(c=>c.taskId??c.sourceId))){summary={text:'',sourceChapterIds:[]};noteTrace('摘要覆盖材料曾遗忘、已越过学习水位或无法核验，省略派生历史；原历史保留');continue}
             const cache=this.deps.summaries?.cache,quota=Math.min(8192,Math.floor(planBudget*.3))*.25
             const cached=cache&&summaryKey?cache.select(summaryKey,plan.chapters,quota,conservativeTokens):undefined
             if(cached){const resolution=resolveSummary(cached,cached.sourceChapterIds.length===plan.chapters.length?'reuse':'partial',plan.chapters);summary=resolution.summary;noteTrace(summary.text?`复用${resolution.status==='partial'?'部分':''}历史摘要：${cached.generators?.map(g=>g.modelId+'@'+g.host).join('、')}`:'摘要审计空间不足，省略较旧历史');continue}
