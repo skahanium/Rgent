@@ -163,7 +163,7 @@ flowchart LR
 | 一次性单场授权 | 主进程／Host | `TaskAuthorizationRegistry` 绑定调用方、会话、对象、口令和接收方；`agentStart` 不接受无预览启动。未知动作、范围外读取／写回、失效或重放均拒绝；Host 读、发、写共用校验，可信取消保稿不恢复模型授权。 |
 | 人写盘 ≠ 模型写盘 | IPC | `noteWrite` 只给人的自动写盘与手动保存。`AgentHost` 不得复用这条通道；Host 阶段建立独立模型入口，并与同篇人的写入串行协调。 |
 | 索引重建注册 | 主进程 | `VaultIndex` 同一时刻只保留一个在飞重建；注册位只有仍持有它的那次重建能清。库失效时的 `reset()` 只置脏位、不清注册位，查询必须等到当前世代装好，不得提前返回未建好的索引（`src/main/vault-index.ts`，反例见 `test/main/vault-index.test.ts`）。 |
-| 推理与过程只进账本 | 主进程 | `src/main/model-stream.ts` 把内联 `<think>…</think>` 与供应商的 `reasoning` 通道拆成独立事件，正文通道只收 `text`；`src/main/agent-host.ts` 分开累积推理与过程；包 1 的新结构化账本不再保存推理正文；设备短期区接线在包 2，旧推理随迁移原样保存。正文里出现 `<think>` 按缺陷处理。 |
+| 过程进账本，新推理设备短期保存 | 主进程 | `src/main/model-stream.ts` 把内联 `<think>…</think>` 与供应商的 `reasoning` 通道拆成独立事件，正文通道只收 `text`；`src/main/agent-host.ts` 分开累积推理与过程；新结构化账本不保存推理正文；设备 `reasoning-v2` 临时区已有接线，按任务核验后只读回顾，旧推理随迁移原样保存。正文里出现 `<think>` 按缺陷处理。 |
 | 索引不见账本 | 管线 / 索引 | `partitionSource` 切开锚点（`src/markdown/partition.ts`）。`compile` 和 `VaultIndex` 只吃 `body`。身份标记是机器语法，人搜的语料里把它等长填空格（偏移不变）——搜 `rgent` 不该搜到它，片段里也不该出现。 |
 | 画布不见账本 | 画布 | Tab 拆 `content`（正文）与 `ledger`（`src/renderer/src/tabs.ts`）。编辑器只 `setText(body)`。保存只发送正文，历史由主进程分页提供（长记录分段续读）。账本回顾在当前 tab 内临时只读，入口常驻正文画布右上角；返回正文恢复原位置，不占右侧反链。 |
 | 人搜含禁区 | 索引 | `VaultIndex` 是全量语料，建索引时不按权限过滤。当前人搜是惰性全量 + 子串。模型检索先限定本场对象集合，再复用纯匹配器；不先全库查询再过滤。 |
@@ -171,7 +171,7 @@ flowchart LR
 | 密钥不进库 | 主进程 | Host 最小环已接 Electron `safeStorage`，密文只存应用数据目录；读取 IPC 仅给保存状态，不回传密钥。 |
 | 颜色只有一个来源 | 渲染进程 | 组件一律引用 [前端协议](frontend.md) §语义 token 的角色（`--surface-*`、`--text-*`、`--accent-*`、`--border-*`、`--state-*`、`--ai-*`、`--status-*`）；不在组件里写死色值，也不在 CM6 主题里写死（`src/renderer/src/view/editor.ts` 的主题走 token）。日夜两套值只写在 `src/renderer/src/styles.css` 的 `:root` 与 `[data-theme='night']` 两段里，token 取值用纯 hex，好让对比度测试直接解析。**已知例外**：主进程的窗口外观（`src/main/index.ts` 的启动底色与 Windows 标题栏覆盖层）读不到 CSS token，是同一批值的第二份拷贝，必须与 `--surface-nav` 同步（日 `#f5f6f8` / 夜 `#1d2933`）；改 token 时两处一起改。 |
 | 主题不碰文档 | 渲染进程 | 切主题或跟随系统只改 `document.documentElement.dataset.theme` 与 CM6 的 `darkTheme` facet，**不产生事务、不触发保存、不进撤销栈**（`src/renderer/src/theme.ts`）。 |
-| AI 前缀是显示层 | 画布 | 提问仅在块首行显示一枚 `>`，回答缩进由行装饰 / 类名产生（`src/renderer/src/view/editor.ts`），**不改写正文**；落盘仍走 `composeSource`，`composeSource` 往返必须逐字节不变。参考图里的前缀不是文件内容。 |
+| AI 前缀是显示层 | 画布 | 提问仅在块首行显示一枚 `>`，回答缩进由行装饰 / 类名产生（`src/renderer/src/view/editor.ts`），**不改写正文**；保存只发送正文，旧尾部迁移的 `composeSource` 往返必须逐字节不变。参考图里的前缀不是文件内容。 |
 | 浮层只有一个栈 | 渲染进程 | 同时最多一个模态浮层；打开时焦点进入浮层、关闭回到触发元素；模态期间焦点不落到底层，破坏性选项不是默认焦点。实现在 `src/renderer/src/overlay.ts`，搜索（`search-overlay.ts`）、冲突决策（`conflict.ts`）、选库共用它。 |
 | 冲突预览不是第二条写盘通道 | 渲染进程 | 冲突决策的并排双预览只读渲染（`src/renderer/src/conflict.ts` + `diff.ts`），仍然只有 `noteWrite` 一条写盘通道；通知只作复核信号，串行处理时重新读盘，选择后再次核对 revision，变化则重新展示（`note-reconcile.ts`）。「听窗口 / 听磁盘 / 继续编辑」复用既有分支，Esc 关闭按「继续编辑」结算。普通搜索不能顶掉冲突决策。 |
 | 底栏数据只在渲染层算 | 渲染进程 | 行列与字数由编辑器的 doc、selection 推出（`src/renderer/src/statusbar.ts`），不经 IPC、不落盘；字数只计正文，不含账本与身份标记行。人搜仍用主进程原有索引实现，界面阶段不改索引。 |
