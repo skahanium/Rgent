@@ -10,7 +10,7 @@ import {streamModelStep,type ModelStepInput,type ModelStepEvent} from '../src/ma
 import {memoryConsolidationSystem} from '../src/main/working-memory-consolidation.ts'
 import {MEMORY_QUALITY_CASES} from '../test/fixtures/memory-quality.ts'
 import {runMemoryQualityCase,memorySemanticReviewSystem} from './memory-quality-runner.ts'
-import {EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,recordedQualityReview,V4_RULES,V4_SCREEN,V4_PARENT_MANIFEST,V4_PREFIX,v4Cases,v4Selection,freezeV4,v4Summary,v4DispatchGate,v4ScreenGate,v4ResumeAction,type V4Row,type V4Annotation,type V4Category} from './memory-quality-support.ts'
+import {EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,recordedQualityReview,V4_RULES,V4_SCREEN,V4_PARENT_MANIFEST,V4_PREFIX,v4Cases,v4Selection,v4EvidenceComplete,freezeV4,v4Summary,v4DispatchGate,v4ScreenGate,v4ResumeAction,type V4Row,type V4Annotation,type V4Category} from './memory-quality-support.ts'
 
 const options=JSON.parse(process.env.RGENT_MEMORY_EVAL_OPTIONS??'{}') as {root:string;budget:string;profile:string;report:string;models:string[];pilot:boolean;live:boolean;only?:string;v4?:boolean;freeze?:boolean;diagnose?:boolean;review?:boolean;stop?:string;annotation?:string;screen?:boolean;cases?:string[]}
 app.setName('rgent')
@@ -128,10 +128,11 @@ async function runV4(controller:AbortController,sourceFiles:(dir:string)=>string
  const readRow=(model:any,id:string,arm:V4Row['arm']):V4Row|null=>{
   const k=key(model,id,arm),file=resultFile(k);if(!existsSync(file))return null
   const r=JSON.parse(readFileSync(file,'utf8')),annotation=existsSync(annotationFile(k))?JSON.parse(readFileSync(annotationFile(k),'utf8')):null
+  if(annotation?.review?.evidenceComplete&&!v4EvidenceComplete(r))throw Error('EVALUATION_ANNOTATION_INVALID')
   if(r.frozenHash!==frozenHash||annotation&&(annotation.frozenHash!==frozenHash||annotation.resultHash!==fingerprint(r)))throw Error('EVALUATION_REVISION_CHANGED')
   const receipt=r.result?.receipt,entries=r.result?.entries??[],before=r.result?.before??[]
   const automaticApplied=receipt?.outcome==='applied'&&Array.isArray(receipt.entryIds)&&receipt.entryIds.some((id:string)=>entries.some((e:any)=>e.id===id&&e.status==='active'&&!before.some((old:any)=>old.id===e.id&&old.version===e.version)))
-  return {caseId:id,arm,category:r.result?.experiment?.category??(r.status==='interrupted'?'interrupted':'service'),automaticApplied,calls:r.responses?.length??0,latencyMs:r.latencyMs??0,receiptReason:receipt?.reason,review:annotation?.review??null}
+  return {caseId:id,arm,category:r.result?.experiment?.category??(r.status==='interrupted'?'interrupted':'service'),automaticApplied,controlledFailure:r.result?.controlledFailure,calls:r.responses?.length??0,latencyMs:r.latencyMs??0,receiptReason:receipt?.reason,review:annotation?.review??null}
  }
  const allRows=(model:any)=>cases.flatMap(c=>arms.flatMap(a=>{const r=readRow(model,c.id,a);return r?[r]:[]}))
  const stopFile=(model:any)=>path.join(canonical,'stop-'+model.modelId+'.json')
@@ -146,7 +147,7 @@ async function runV4(controller:AbortController,sourceFiles:(dir:string)=>string
   const row:V4Row={caseId:spec.id,arm:result.arm,category,automaticApplied:false,review:annotation.review}
   if(!v4Summary([row],[spec]).arms[result.arm as V4Row['arm']].valid)throw Error('EVALUATION_ANNOTATION_INVALID')
   // Output/terminal execution evidence cannot be supplied by the annotator.
-  if(annotation.review.evidenceComplete&&(!['valid','safe-empty','semantic-rejected','candidate-rejected'].includes(category)||result.status!=='completed'||!result.result?.receipt||!['applied','rejected'].includes(result.result.receipt.outcome)||result.result.receipt.taskId!==result.result.material?.taskId||result.result.receipt.materialVersion!==result.result.material?.materialVersion||!result.responses.length||result.responses.some((r:any)=>!r.finishReason||r.reason)))throw Error('EVALUATION_ANNOTATION_INVALID')
+  if(annotation.review.evidenceComplete&&!v4EvidenceComplete(result))throw Error('EVALUATION_ANNOTATION_INVALID')
   const target=annotationFile(annotation.key);if(existsSync(target))throw Error('EVALUATION_ANNOTATION_EXISTS')
   writeFileSync(target,JSON.stringify({...annotation,annotator:'coding-agent-semantic-review-not-user-confirmation',rules:fingerprint(V4_RULES),at:new Date().toISOString()},null,2),{flag:'wx',mode:0o600})
  }
@@ -182,7 +183,7 @@ async function runV4(controller:AbortController,sourceFiles:(dir:string)=>string
       catch(e){response.reason=publicError(e);throw e}finally{response.latencyMs=performance.now()-t}
      }
      let result:unknown,error:string|null=null
-     try{result=await runMemoryQualityCase(spec,credential,stream,controller.signal,{strategy:arm})}catch(e){error=publicError(e)}
+     try{result=await runMemoryQualityCase(spec,credential,stream,controller.signal,{strategy:arm})}catch(e){error=publicError(e);result=e&&typeof e==='object'&&'evaluationResult' in e?e.evaluationResult:null}
      const row={status:controller.signal.aborted?'interrupted':'completed',key:k,frozenHash,case:spec,model,arm,startedAt,finishedAt:new Date().toISOString(),latencyMs:performance.now()-started,commit,responses,result:result??null,error,review:null}
      // No provider exceptions, reasoning events or credentials are serialized.
      journal.finish(k,JSON.parse(JSON.stringify(row).replaceAll(credential.apiKey,'[redacted]')))

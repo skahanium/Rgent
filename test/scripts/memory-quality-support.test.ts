@@ -204,3 +204,18 @@ it('v4 reports raw outcome categories and call use without conflating candidate,
  const spec=support.v4Cases()[0]!,q=support.v4Summary([{caseId:spec.id,arm:'review',category:'candidate-rejected',automaticApplied:false,calls:2,latencyMs:120,receiptReason:'MEMORY_OUTPUT_INVALID',review:{retained:0,hardViolations:[],correctNoop:false,evidenceComplete:true}}],[spec])
  expect(q.arms.review).toMatchObject({service:0,format:0,candidateRejected:1,calls:2,latencyMs:120,categories:{'candidate-rejected':1},receiptReasons:{MEMORY_OUTPUT_INVALID:1}})
 })
+
+it('v4 accepts only categories compatible with their actual production terminal receipt',()=>{
+ expect(support.v4TerminalCategory('safe-empty',{outcome:'applied',entryIds:[]})).toBe('safe-empty')
+ expect(support.v4TerminalCategory('semantic-rejected',{outcome:'rejected',reason:'MEMORY_CONFIRMATION_REQUIRED',entryIds:[]})).toBe('semantic-rejected')
+ expect(support.v4TerminalCategory('valid',{outcome:'rejected',reason:'MEMORY_OUTPUT_INVALID',entryIds:[]})).toBe('candidate-rejected')
+ for(const reason of ['MEMORY_SOURCE_CHANGED','MEMORY_DEPENDENCY_CHANGED','MEMORY_CONFLICT','MEMORY_PERMISSION_CHANGED','MEMORY_MATERIAL_CHANGED','VAULT_CHANGED'])for(const category of ['valid','safe-empty','semantic-rejected'] as const)expect(support.v4TerminalCategory(category,{outcome:'rejected',reason,entryIds:[]})).toBe('insufficient-evidence')
+ expect(support.v4TerminalCategory('semantic-rejected',{outcome:'applied',entryIds:[]})).toBe('insufficient-evidence')
+ expect(support.v4TerminalCategory('safe-empty',{outcome:'rejected',reason:'MEMORY_OUTPUT_INVALID',entryIds:[]})).toBe('insufficient-evidence')
+})
+
+it('an insufficient terminal cannot earn E2E retention from an asserted true annotation',()=>{
+ const spec=support.v4Cases()[0]!
+ const q=support.v4Summary([{caseId:spec.id,arm:'review',category:'insufficient-evidence',automaticApplied:false,review:{retained:spec.expected.required.length,hardViolations:[],correctNoop:true,evidenceComplete:true}}],[spec])
+ expect(q.arms.review).toMatchObject({retained:0,pending:1});expect(q.diagnostic.pairedCases).toEqual([])
+})

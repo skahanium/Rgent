@@ -124,6 +124,7 @@ export const V4_RULES={version:1,overall:.95,group:.9,minImprovement:.10,maxAppl
  positiveGroups:['standing','fact','correction'],
  semantics:'required/forbidden是语义原子；人工对实际entries内容、状态、范围、归属、版本逐项标注，不是字符串命中。空结果不代表学会。duplicate/unchanged/conflict单列no-op/拒绝和保留。',
  zeroTolerance:['wrong-attribution','temporary-standing','ambiguous-overwrite','forbidden-content','scope-expansion'],
+ terminalEvidence:'实际receipt决定类别；valid/safe-empty仅applied无reason；semantic-rejected仅rejected/CONFIRMATION_REQUIRED；candidate-rejected仅applied或rejected/OUTPUT_INVALID；来源/权限/会话/材料/提交故障一律insufficient-evidence，排除充分输出并暂停下一pair。完整实际source映射与材料hash/dispatch/核验及真实canLearn留证后才允许充分annotation。已付费整理完成后的受控followup/forget故障保留原paid类别、单列controlledFailure，不代称付费模型失败。',
  categories:['valid','safe-empty','semantic-rejected','candidate-rejected','format','format-repaired-unreviewed','service','interrupted','insufficient-evidence'],
  screening:'实验零容忍即stop；充分输出保留无提升且应用下降即stop；格式或服务导致比较不足则insufficient-evidence。逐例成对标注前不派发下一例。',
  final:'任意零容忍、任意有必留单元组<90%、正向standing/fact/correction总体<95%且较同组基线提升<10pp、全部必留单元总体<95%且较同口径基线提升<10pp、正例自动应用率下降>5pp即stop；完整60例充分标注只证明worth-continuing。',
@@ -144,16 +145,16 @@ export function freezeV4(root:string,manifest:unknown){
 }
 export type V4Category='valid'|'safe-empty'|'semantic-rejected'|'candidate-rejected'|'format'|'format-repaired-unreviewed'|'service'|'interrupted'|'insufficient-evidence'
 export type V4Annotation={retained:number|null;hardViolations:string[];correctNoop:boolean;evidenceComplete:boolean}
-export type V4Row={caseId:string;arm:'baseline'|'review';category:V4Category;automaticApplied:boolean;calls?:number;latencyMs?:number;receiptReason?:string;review:V4Annotation|null}
+export type V4Row={caseId:string;arm:'baseline'|'review';category:V4Category;automaticApplied:boolean;controlledFailure?:string;calls?:number;latencyMs?:number;receiptReason?:string;review:V4Annotation|null}
 export function v4Summary(rows:V4Row[],cases:MemoryQualityCase[],screen=false){
  const summarize=(arm:V4Row['arm'],inputRows=rows)=>{
   const chosen=inputRows.filter(r=>r.arm===arm),groups:Record<string,{required:number;retained:number;rate:number|null}>={}
   let required=0,retained=0,pending=0,applyDenominator=0,automaticApplied=0,service=0,format=0,semanticRejected=0,correctNoop=0
-  let calls=0,latencyMs=0,candidateRejected=0;const categories:Record<string,number>={},receiptReasons:Record<string,number>={}
+  let calls=0,latencyMs=0,candidateRejected=0,controlledFailures=0;const categories:Record<string,number>={},receiptReasons:Record<string,number>={}
   const violations:string[]=[],seen=new Set<string>();let valid=true
   for(const r of chosen){const c=cases.find(c=>c.id===r.caseId);if(!c||seen.has(r.caseId)){valid=false;continue}seen.add(r.caseId)
-   calls+=r.calls??0;latencyMs+=r.latencyMs??0;categories[r.category]=(categories[r.category]??0)+1;if(r.receiptReason)receiptReasons[r.receiptReason]=(receiptReasons[r.receiptReason]??0)+1;if(r.category==='candidate-rejected')candidateRejected++
-   const a=r.review,n=c.expected.required.length,assessed=!!a&&a.evidenceComplete&&a.retained!==null
+   if(r.controlledFailure)controlledFailures++;calls+=r.calls??0;latencyMs+=r.latencyMs??0;categories[r.category]=(categories[r.category]??0)+1;if(r.receiptReason)receiptReasons[r.receiptReason]=(receiptReasons[r.receiptReason]??0)+1;if(r.category==='candidate-rejected')candidateRejected++
+   const a=r.review,n=c.expected.required.length,assessed=!!a&&a.evidenceComplete&&a.retained!==null&&['valid','safe-empty','semantic-rejected','candidate-rejected'].includes(r.category)
    if(a&&(!Number.isSafeInteger(a.retained)&&a.retained!==null||a.retained!==null&&(a.retained<0||a.retained>n)||!Array.isArray(a.hardViolations)||a.hardViolations.some(v=>!V4_RULES.zeroTolerance.includes(v))||typeof a.correctNoop!=='boolean'||typeof a.evidenceComplete!=='boolean'))valid=false
    if(!assessed)pending++
    required+=n;retained+=assessed?a!.retained!:0;const g=groups[c.group]??={required:0,retained:0,rate:null};g.required+=n;g.retained+=assessed?a!.retained!:0
@@ -164,11 +165,11 @@ export function v4Summary(rows:V4Row[],cases:MemoryQualityCase[],screen=false){
   }
   for(const g of Object.values(groups))g.rate=g.required?g.retained/g.required:null
   const positiveGroups=Object.fromEntries(Object.entries(groups).filter(([g])=>V4_RULES.positiveGroups.includes(g))),positiveRequired=Object.values(positiveGroups).reduce((n,g)=>n+g.required,0),positiveRetained=Object.values(positiveGroups).reduce((n,g)=>n+g.retained,0)
-  return {calls,latencyMs,categories,receiptReasons,candidateRejected,positive:{required:positiveRequired,retained:positiveRetained,rate:positiveRequired?positiveRetained/positiveRequired:1,groups:positiveGroups},coverage:seen.size,valid,pending,required,retained,rate:required?retained/required:1,groups,applyDenominator,automaticApplied,applyRate:applyDenominator?automaticApplied/applyDenominator:1,service,format,semanticRejected,correctNoop,violations}
+  return {controlledFailures,calls,latencyMs,categories,receiptReasons,candidateRejected,positive:{required:positiveRequired,retained:positiveRetained,rate:positiveRequired?positiveRetained/positiveRequired:1,groups:positiveGroups},coverage:seen.size,valid,pending,required,retained,rate:required?retained/required:1,groups,applyDenominator,automaticApplied,applyRate:applyDenominator?automaticApplied/applyDenominator:1,service,format,semanticRejected,correctNoop,violations}
  }
  const baseline=summarize('baseline'),review=summarize('review'),arms={baseline,review}
  const coverage=review.coverage,complete=coverage===cases.length&&baseline.coverage===cases.length
- const sufficient=baseline.valid&&review.valid&&!baseline.pending&&!review.pending&&!baseline.service&&!review.service&&!baseline.format&&!review.format&&baseline.coverage===review.coverage&&coverage>0
+ const sufficient=baseline.valid&&review.valid&&!baseline.pending&&!review.pending&&!baseline.service&&!review.service&&!baseline.format&&!review.format&&rows.every(r=>['valid','safe-empty','semantic-rejected','candidate-rejected'].includes(r.category))&&baseline.coverage===review.coverage&&coverage>0
  const improvement=review.positive.rate-baseline.positive.rate,applyDrop=baseline.applyRate-review.applyRate
  let decision:'stop'|'insufficient-evidence'|'continue-review'|'worth-continuing'='continue-review'
  if(review.violations.length)decision='stop'
@@ -196,4 +197,42 @@ export function v4ScreenGate(rows:V4Row[]){
  const screenCases=v4Cases().filter(c=>V4_SCREEN.includes(c.id)),screenRows=rows.filter(r=>V4_SCREEN.includes(r.caseId)),summary=v4Summary(screenRows,screenCases,true)
  if(summary.decision==='stop')throw Error('EVALUATION_MODEL_STOPPED')
  if(!summary.complete||summary.decision==='insufficient-evidence')throw Error('EVALUATION_SCREEN_REVIEW_REQUIRED')
+}
+
+/** Provider JSON is provisional until the actual production job has terminated. */
+export function v4TerminalCategory(category:V4Category,receipt:{outcome:string;reason?:string;entryIds:string[]}|null):V4Category{
+ if(!receipt)return 'insufficient-evidence'
+ if(receipt.outcome==='interrupted')return 'interrupted'
+ if(receipt.outcome==='applied'&&!receipt.reason&&['valid','safe-empty'].includes(category))return category
+ if(category==='semantic-rejected'&&receipt.outcome==='rejected'&&receipt.reason==='MEMORY_CONFIRMATION_REQUIRED')return category
+ if(['valid','candidate-rejected'].includes(category)&&['applied','rejected'].includes(receipt.outcome)&&receipt.reason==='MEMORY_OUTPUT_INVALID')return 'candidate-rejected'
+ if(category==='format-repaired-unreviewed'&&receipt.outcome==='rejected'&&receipt.reason==='MEMORY_CONFIRMATION_REQUIRED')return category
+ if(category==='format'&&receipt.outcome==='rejected'&&['MEMORY_CONFIRMATION_REQUIRED','MEMORY_OUTPUT_INVALID','MEMORY_OUTPUT_TOKEN_LIMIT','MEMORY_OUTPUT_LIMIT'].includes(receipt.reason??''))return category
+ if(category==='service'&&receipt.outcome==='rejected'&&['MEMORY_UNAVAILABLE','MEMORY_DEADLINE'].includes(receipt.reason??''))return category
+ return 'insufficient-evidence'
+}
+/** An annotation supplies semantics, never a missing execution/source proof. */
+export function v4EvidenceComplete(value:unknown):boolean{
+ const obj=(v:unknown):v is Record<string,any>=>!!v&&typeof v==='object'&&!Array.isArray(v)
+ if(!obj(value)||value.status!=='completed'||!obj(value.result)||!Array.isArray(value.responses)||!value.responses.length)return false
+ const r=value.result,category=r.experiment?.category,receipt=r.receipt,material=r.material,evidence=r.evidence
+ if(!['valid','safe-empty','semantic-rejected','candidate-rejected'].includes(category)||!obj(receipt)||v4TerminalCategory(category,receipt as any)!==category||!obj(material)||!obj(evidence))return false
+ if(receipt.taskId!==material.taskId||receipt.materialVersion!==material.materialVersion||fingerprint([material.taskId,material.ledgerHash,material.material])!==material.materialVersion)return false
+ // materialVersion hashes raw JSON bytes; fingerprint hashes JSON once, equivalently here.
+ if(category==='semantic-rejected'&&!(typeof r.experiment.rejectReason==='string'&&r.experiment.rejectReason.trim()))return false
+ if(evidence.learningCheck?.result!==true||!evidence.learningCheck.checkedAt)return false
+ if(!Array.isArray(receipt.entryIds)||!Array.isArray(evidence.sources)||!Array.isArray(evidence.dispatches)||!evidence.dispatches.length||!Array.isArray(evidence.verifications)||value.responses.some((response:any)=>!obj(response)||response.finishReason!=='stop'||response.reason||typeof response.body!=='string'))return false
+ const proofs=new Map(evidence.sources.map((s:any)=>[s.id,s]))
+ for(const [index,dispatch] of evidence.dispatches.entries()){
+  let payload:any;try{payload=JSON.parse(String(value.responses[index]?.input?.messages?.[0]?.content))}catch{return false}
+  const sent=payload?.sources??payload?.material?.sources??[]
+  if(!Array.isArray(sent)||JSON.stringify(sent.map((s:any)=>s.id))!==JSON.stringify(dispatch.sourceIds))return false
+  for(const source of sent){const proof=proofs.get(source.id) as any;if(!proof||proof.text!==source.text||proof.kind!==source.kind||proof.classification!==source.classification||proof.relPath!==source.attribution)return false}
+  if(!dispatch.mapped||!dispatch.finishedAt||!Array.isArray(dispatch.sourceIds))return false
+  for(const id of dispatch.sourceIds){const source=proofs.get(id) as any
+   if(!obj(source)||source.hash!==createHash('sha256').update(String(source.text)).digest('hex')||!Number.isSafeInteger(source.sequence)||source.sequence<1||source.version!==1||source.permissionTier!=='reference'||!['command','human','adopted-ai'].includes(source.classification)||typeof source.objectVersion!=='string'||typeof source.revision!=='string'||typeof source.materialId!=='string'||!Array.isArray(source.sourceDeps)||!Array.isArray(source.memoryDeps)||!evidence.verifications.some((v:any)=>v.id===id&&v.result===true))return false
+  }
+ }
+ if(evidence.verifications.some((v:any)=>proofs.has(v.id)&&v.result===false))return false
+ return evidence.dispatches.length===value.responses.length
 }

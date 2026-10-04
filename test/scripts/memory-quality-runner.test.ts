@@ -1,3 +1,6 @@
+import {WorkingMemoryStore} from '../../src/main/working-memory-store.ts'
+import {createHash} from 'node:crypto'
+import {existsSync} from 'node:fs'
 import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -6,6 +9,7 @@ import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
 import {serializeStoredVault} from '../../src/main/notes-fs.ts'
 import {expect,it,vi} from 'vitest'
 import * as runner from '../../scripts/memory-quality-runner.ts'
+import * as support from '../../scripts/memory-quality-support.ts'
 import {recordedQualityReview,qualitySummary} from '../../scripts/memory-quality-support.ts'
 import {MEMORY_QUALITY_CASES} from '../fixtures/memory-quality.ts'
 import type {ModelStepInput} from '../../src/main/model-stream.ts'
@@ -110,7 +114,80 @@ it('experimental review cannot resend a real body source changed after its first
 })
 
 it('valid JSON with invalid production candidate references is counted as candidate rejection, never a network failure',async()=>{
- const result=await runner.runMemoryQualityCase(sample,credential,async function*(){yield {type:'text',text:JSON.stringify({proposals:[{action:'add',content:'伪来源候选',layer:'demand',scope:'本库',sourceIds:['forged'],semantic:'fact',attribution:'人',reviewAt:null}]})};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'baseline'})
+ let sent:ModelStepInput|undefined;const body=JSON.stringify({proposals:[{action:'add',content:'伪来源候选',layer:'demand',scope:'本库',sourceIds:['forged'],semantic:'fact',attribution:'人',reviewAt:null}]})
+ const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){sent=input;yield {type:'text',text:body};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'baseline'})
  expect(result.entries).toEqual([]);expect(result.experiment?.category).toBe('candidate-rejected')
  expect(result.receipt?.reason).toBe('MEMORY_OUTPUT_INVALID')
+ expect(support.v4EvidenceComplete({status:'completed',result,responses:[{input:{system:sent!.system,messages:sent!.messages},body,finishReason:'stop',reason:null}]})).toBe(true)
+})
+
+it.each(['empty','semantic-rejected'] as const)('retains actual production source identities and recomputable full saved material after cleanup for %s',async mode=>{
+ const requests:ModelStepInput[]=[]
+ const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){requests.push(input);yield {type:'text',text:mode==='semantic-rejected'&&requests.length===2?'{"reject":"无合格新变化"}':'{"proposals":[]}'};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:mode==='empty'?'baseline':'review'})
+ const payload=JSON.parse(String(requests[0]!.messages[0]!.content))
+ expect(result.evidence).toBeDefined()
+ for(const sent of payload.sources){const proof=result.evidence.sources.find((s:any)=>s.id===sent.id)
+  expect(proof).toMatchObject({id:sent.id,text:sent.text,classification:sent.classification,kind:sent.kind,version:1})
+  for(const field of ['objectVersion','revision','permissionTier','hash','materialId','sequence','sourceDeps','memoryDeps'])expect(proof).toHaveProperty(field)
+  expect(proof!.hash).toBe(createHash('sha256').update(proof!.text).digest('hex'))
+  expect(result.evidence.verifications.some((v:any)=>v.id===sent.id&&v.result===true)).toBe(true)
+ }
+ expect(result.evidence.dispatches[0].sourceIds).toEqual(payload.sources.map((s:any)=>s.id))
+ const material=result.material
+ expect(material.origin).toMatchObject({relPath:'fiction.md'})
+ expect(material.materialVersion).toBe(createHash('sha256').update(JSON.stringify([material.taskId,material.ledgerHash,material.material])).digest('hex'))
+ expect(existsSync(result.evidence.root)).toBe(false)
+ expect(JSON.stringify(result.evidence)).not.toContain('private-secret')
+ const proofRow={status:'completed',result,responses:requests.map(input=>({input:{system:input.system,messages:input.messages},body:mode==='semantic-rejected'&&input.system?.includes('语义核对')?'{\"reject\":\"无合格新变化\"}':'{\"proposals\":[]}',finishReason:'stop',reason:null}))}
+ expect(support.v4EvidenceComplete(proofRow)).toBe(true)
+ const mismatched=structuredClone(proofRow),input=JSON.parse(String(mismatched.responses[0]!.input.messages[0]!.content));input.sources[0].id='wrong-actual-id';mismatched.responses[0]!.input.messages[0]!.content=JSON.stringify(input)
+ expect(support.v4EvidenceComplete(mismatched)).toBe(false)
+})
+
+it.each(['source','commit'] as const)('classifies the actual final %s failure after a complete safe-empty output as insufficient evidence',async failure=>{
+ let currentService:WorkingMemoryService|null=null,armed=false;const original=WorkingMemoryService.prototype.verifySource
+ const spy=vi.spyOn(WorkingMemoryService.prototype,'verifySource').mockImplementation(function(this:WorkingMemoryService,source){currentService=this;return original.call(this,source)})
+ const apply=WorkingMemoryStore.prototype.apply,commitSpy=failure==='commit'?vi.spyOn(WorkingMemoryStore.prototype,'apply').mockImplementation(function(this:WorkingMemoryStore,...args){if(armed)throw Error('MEMORY_CONFLICT');return apply.apply(this,args)}):null
+ try{
+  const responses:{input:unknown;body:string;finishReason:string;reason:null}[]=[]
+  const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){responses.push({input:{system:input.system,messages:input.messages},body:'{"proposals":[]}',finishReason:'stop',reason:null});yield {type:'text',text:'{"proposals":[]}'};yield {type:'finish',reason:'stop'};armed=true
+   if(failure==='source'){const vault=currentService!.vault,note=await vault.readOpened('fiction.md');await vault.write('fiction.md',note.content.replace(sample.body,'原事实已实改为另一新事实。'),note.revision,note)}
+  },new AbortController().signal,{strategy:'baseline'})
+  expect(result.receipt).toMatchObject({outcome:'rejected',reason:failure==='source'?'MEMORY_SOURCE_CHANGED':'MEMORY_CONFLICT'})
+  expect(result.experiment?.category).toBe('insufficient-evidence')
+  expect(result.evidence.dispatches).toHaveLength(1)
+  const row={status:'completed',responses,result}
+  expect(support.v4EvidenceComplete(row)).toBe(false)
+  const judgement={caseId:sample.id,arm:'review' as const,category:result.experiment!.category,automaticApplied:false,review:{retained:0,hardViolations:[],correctNoop:true,evidenceComplete:true}}
+  const baseline={...judgement,arm:'baseline' as const}
+  expect(support.v4Summary([baseline,judgement],[sample]).diagnostic.pairedCases).toEqual([])
+  expect(()=>support.v4DispatchGate([{...baseline,caseId:'standing-01'},{...judgement,caseId:'standing-01'}],'correction-01')).toThrow('EVALUATION_INSUFFICIENT_EVIDENCE')
+ }finally{spy.mockRestore();commitSpy?.mockRestore()}
+})
+
+it('keeps the actual paid-input identity and full material when the controlled provider fails',async()=>{
+ const result=await runner.runMemoryQualityCase(sample,credential,async function*(){throw Error('MODEL_REQUEST_FAILED');yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'baseline'})
+ expect(result.experiment?.category).toBe('service');expect(result.evidence.dispatches).toHaveLength(1)
+ expect(result.evidence.dispatches[0]!.sourceIds.every(id=>result.evidence.sources.some(s=>s.id===id))).toBe(true)
+ expect(result.material.materialVersion).toBe(createHash('sha256').update(JSON.stringify([result.material.taskId,result.material.ledgerHash,result.material.material])).digest('hex'))
+})
+
+it('retains paid material and exact source proof if a later controlled follow-up fails before cleanup',async()=>{
+ const original=VaultSession.prototype.readOpened,spy=vi.spyOn(VaultSession.prototype,'readOpened').mockImplementation(function(this:VaultSession,...args){if(args[0]==='followup.md')throw Error('MEMORY_STORAGE_CHANGED');return original.apply(this,args)})
+ try{let failure:any,sent:ModelStepInput|undefined
+  try{await runner.runMemoryQualityCase(sample,credential,async function*(input){sent=input;yield {type:'text',text:'{"proposals":[]}'};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'baseline'})}catch(e){failure=e}
+  expect(failure).toMatchObject({message:'MEMORY_STORAGE_CHANGED',evaluationResult:{experiment:{category:'safe-empty'},controlledFailure:'MEMORY_STORAGE_CHANGED'}})
+  expect(failure.evaluationResult.evidence.sources.length).toBeGreaterThan(0)
+  expect(failure.evaluationResult.material.materialVersion).toBe(createHash('sha256').update(JSON.stringify([failure.evaluationResult.material.taskId,failure.evaluationResult.material.ledgerHash,failure.evaluationResult.material.material])).digest('hex'))
+  expect(existsSync(failure.evaluationResult.evidence.root)).toBe(false)
+  expect(support.v4EvidenceComplete({status:'completed',result:failure.evaluationResult,responses:[{input:{system:sent!.system,messages:sent!.messages},body:'{\"proposals\":[]}',finishReason:'stop',reason:null}]})).toBe(true)
+ }finally{spy.mockRestore()}
+})
+
+it('does not label an actual learning-material rejection hidden behind OUTPUT_INVALID as candidate rejection',async()=>{
+ let armed=false;const original=WorkingMemoryStore.prototype.canLearn,spy=vi.spyOn(WorkingMemoryStore.prototype,'canLearn').mockImplementation(function(this:WorkingMemoryStore,...args){return armed?false:original.apply(this,args)})
+ try{const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){const payload=JSON.parse(String(input.messages[0]!.content));yield {type:'text',text:JSON.stringify({proposals:[{action:'add',content:'本库报告使用蓝鹭术语',layer:'core',scope:'本库',sourceIds:[payload.sources[0].id],semantic:'standing',attribution:'人的口令',reviewAt:null}]})};yield {type:'finish',reason:'stop'};armed=true},new AbortController().signal,{strategy:'baseline'})
+  expect(result.receipt?.reason).toBe('MEMORY_OUTPUT_INVALID');expect(result.experiment?.category).toBe('insufficient-evidence')
+  expect(result.evidence.learningCheck.result).toBe(false)
+ }finally{spy.mockRestore()}
 })

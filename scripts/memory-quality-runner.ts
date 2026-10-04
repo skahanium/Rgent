@@ -19,7 +19,7 @@ import type {ModelStepInput,ModelStepEvent} from '../src/main/model-stream.ts'
 import {createMemoryIpc} from '../src/main/memory-ipc.ts'
 import type {WorkingSource} from '../src/main/working-memory-store.ts'
 import type {SavedTaskMaterial} from '../src/main/host-material.ts'
-import type {V4Category} from './memory-quality-support.ts'
+import {v4TerminalCategory,type V4Category} from './memory-quality-support.ts'
 import type {MemoryQualityCase} from '../test/fixtures/memory-quality.ts'
 
 /** Genuine production saving/consolidation/use in one disposable fictional vault. */
@@ -34,7 +34,29 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
   await writeFile(path.join(root,'fiction.md'),source)
   if(spec.seed){const initialRaw='/'+spec.seed.content;await writeFile(path.join(root,'baseline.md'),spec.seed.content+'\n\n'+markPrompt(initialRaw,{taskId:'initial-'+spec.id,range:{start:0,end:initialRaw.length},expectedText:initialRaw,promptText:spec.seed.content}))}
   vault=new VaultSession(base,()=>{});vault.restore()
-  const session=vault,service=new WorkingMemoryService(session,()=>null);await service.initialize()
+  const session=vault,service=new WorkingMemoryService(session,()=>null)
+  const sourceProofs=new Map<string,WorkingSource>(),sentSourceIds=new Set<string>()
+  const verifications:{id:string;startedAt:string;finishedAt:string;result:boolean;phase:string;reason?:string}[]=[],dispatches:{phase:string;sourceIds:string[];mapped:boolean;startedAt:string;finishedAt?:string}[]=[]
+  let phase='production',actualSourceIds:string[]=[]
+  const learningCheck:{checkedAt:string|null;sourceIds:string[];result:boolean|null;reason:string|null}={checkedAt:null,sourceIds:[],result:null,reason:null}
+  const promptSource=service.sourceForPrompt.bind(service),fragmentSource=service.sourceForFragment.bind(service),verifySource=service.verifySource.bind(service)
+  service.sourceForPrompt=async(...args)=>{const source=await promptSource(...args);sourceProofs.set(source.id,structuredClone(source));return source}
+  service.sourceForFragment=async(...args)=>{const source=await fragmentSource(...args);sourceProofs.set(source.id,structuredClone(source));return source}
+  service.verifySource=async(...args)=>{const startedAt=new Date().toISOString(),verificationPhase=phase
+   try{const result=await verifySource(...args);verifications.push({id:args[0].id,startedAt,finishedAt:new Date().toISOString(),result,phase:verificationPhase});return result}
+   catch(e){verifications.push({id:args[0].id,startedAt,finishedAt:new Date().toISOString(),result:false,phase:verificationPhase,reason:e instanceof Error&&/^[A-Z_]+$/.test(e.message)?e.message:'EVALUATION_VERIFICATION_FAILED'});throw e}
+  }
+  const observedStream=async function*(input:ModelStepInput){
+   let payload:any;try{payload=JSON.parse(String(input.messages[0]?.content))}catch{}
+   const sources:Record<string,unknown>[]=(payload?.sources??payload?.material?.sources??[])
+   const ids=sources.map(s=>String(s.id));ids.forEach(id=>sentSourceIds.add(id))
+   const mapped=sources.every(s=>{const proof=sourceProofs.get(String(s.id));return !!proof&&s.text===proof.text&&s.kind===proof.kind&&s.classification===proof.classification&&s.attribution===proof.relPath})
+   const dispatch={phase:payload?.repair?'format-repair':payload?.material?'semantic-review':'proposal',sourceIds:ids,mapped,startedAt:new Date().toISOString(),finishedAt:undefined as string|undefined};dispatches.push(dispatch)
+   if(!mapped)throw Error('MEMORY_MATERIAL_UNVERIFIED')
+   try{for await(const event of stream(input))yield event}finally{dispatch.finishedAt=new Date().toISOString()}
+  }
+  const evidenceSnapshot=()=>({root,sources:[...sentSourceIds].flatMap(id=>{const source=sourceProofs.get(id);return source?[structuredClone(source)]:[]}),dispatches:structuredClone(dispatches),verifications:structuredClone(verifications),capturedAt:new Date().toISOString(),learningCheck:structuredClone(learningCheck),savedMaterial:experimentalMaterial?structuredClone(experimentalMaterial):null})
+  await service.initialize()
   if(spec.seed){
    const seed=spec.seed,note=await session.readOpened('baseline.md'),seedTask='initial-'+spec.id,tracker=new TaskMaterialTracker()
    tracker.body(note.content,{start:0,end:note.content.length},{relPath:'baseline.md',sessionId:note.sessionId!,objectVersion:note.objectVersion,revision:note.revision});tracker.commit()
@@ -50,20 +72,21 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
   }
   const before=service.snapshot().record.entries
   const experiment:V4Trace={category:'insufficient-evidence',calls:0,rejectReason:null}
-  let experimentalMaterial:SavedTaskMaterial|null=null,experimentalSources:WorkingSource[]|null=null
+  let experimentalMaterial:SavedTaskMaterial|null=null,paidRecord:Record<string,unknown>|null=null
   const recheckExperimental=async()=>{
    if(signal.aborted)throw Error('MEMORY_CANCELLED')
    if(!experimentalMaterial)throw Error('MEMORY_MATERIAL_UNVERIFIED')
    session.assertSession(service.context().sessionId)
    const current=await service.savedMaterial('fiction.md',taskId)
    if(current.materialVersion!==experimentalMaterial.materialVersion)throw Error('MEMORY_MATERIAL_CHANGED')
-   if(!experimentalSources){experimentalSources=[await service.sourceForPrompt('fiction.md',taskId)]
-    for(const f of experimentalMaterial.material.fragments)if(f.classification!=='ai')experimentalSources.push(await service.sourceForFragment(f))}
-   for(const source of experimentalSources)if(!await service.verifySource(source))throw Error('MEMORY_SOURCE_CHANGED')
+   phase='evaluation-dispatch-recheck'
+   try{for(const id of actualSourceIds){const source=sourceProofs.get(id);if(!source||!await service.verifySource(source))throw Error('MEMORY_SOURCE_CHANGED')}
+   }finally{phase='production'}
    for(const entry of before)if(!await service.candidateCurrent(entry))throw Error('MEMORY_DEPENDENCY_CHANGED')
    session.assertSession(service.context().sessionId)
   }
-  const evaluatedStream=options? v4StrategyStream(options.strategy,stream,experiment,recheckExperimental,credential.contextTokens):stream
+  const strategyStream=options? v4StrategyStream(options.strategy,observedStream,experiment,recheckExperimental,credential.contextTokens):observedStream
+  const evaluatedStream=async function*(input:ModelStepInput){const payload=JSON.parse(String(input.messages[0]?.content));actualSourceIds=(payload.sources??[]).map((s:{id:string})=>s.id);for await(const event of strategyStream(input))yield event}
   engine=new WorkingMemoryConsolidation({service:()=>service,configuration:()=>({enabled:true,signature:'fictional-evaluation',credential,limits:{seconds:120,calls:2,tools:0}}),stream:input=>evaluatedStream({...input,signal:AbortSignal.any([input.signal,signal])}),changed:()=>{}})
   const activeEngine=engine,cancel=()=>activeEngine.cancel(undefined,'MEMORY_CANCELLED');signal.addEventListener('abort',cancel,{once:true})
   try{
@@ -78,7 +101,15 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    experimentalMaterial=material
    await engine.handoff(material);await engine.idle()
    const entries=await service.entries(),receipt=service.snapshot().record.jobs.find(j=>j.taskId===taskId)??null
-   if(options&&experiment.category==='valid'&&receipt?.reason==='MEMORY_OUTPUT_INVALID')experiment.category='candidate-rejected'
+   if(options){
+    learningCheck.checkedAt=new Date().toISOString();learningCheck.sourceIds=[...sentSourceIds]
+    try{learningCheck.result=await session.memoryMutation(store=>{const sources=learningCheck.sourceIds.map(id=>sourceProofs.get(id));if(sources.some(s=>!s))return false;return store.canLearn(store.read().record,sources as WorkingSource[])})}
+    catch(e){learningCheck.reason=e instanceof Error&&/^[A-Z_]+$/.test(e.message)?e.message:'EVALUATION_VERIFICATION_FAILED'}
+    experiment.category=v4TerminalCategory(experiment.category,receipt)
+    if(learningCheck.result!==true)experiment.category='insufficient-evidence'
+   }
+   const paidEvidence=evidenceSnapshot()
+   paidRecord={evidence:paidEvidence,experiment:structuredClone(experiment),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},before,entries,receipt,completed:receipt?.outcome==='applied'&&!receipt.reason,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)}}
    const port={context:()=>service.context(),config:()=>({enabled:true,revision:1}),entries:(ids?:readonly string[])=>service.entries(ids)}
    const permit=await createMemoryUsePermit(port,credential,spec.prompt,spec.body)
    const current=await session.read('fiction.md')
@@ -131,7 +162,14 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
      proof.relearningBlocked=calls>0&&validReplay&&originalBasisBlocked&&remaining.length===0&&['applied','rejected'].includes(replayReceipt?.outcome??'')&&replayReceipt?.reason==='MEMORY_OUTPUT_INVALID'
     }finally{signal.removeEventListener('abort',stopReplay);replay.close();await replay.idle()}
    }
-   return {...(options?{experiment}:{}),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,dependencies,followup,forget:proof,material:{taskId:material.taskId,materialVersion:material.materialVersion,status:material.status,fragments:material.material.fragments.map(f=>({classification:f.classification,text:f.text,kind:f.kind}))}}
+   return {evidence:paidEvidence,...(options?{experiment}:{}),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,dependencies,followup,forget:proof,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)}}
+  }catch(e){
+   if(options){const reason=e instanceof Error&&/^[A-Z_]{3,80}$/.test(e.message)?e.message:'EVALUATION_FIXTURE_FAILED'
+    const error=Error(reason)
+    const retained=paidRecord??{evidence:evidenceSnapshot(),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},before,entries:[],receipt:null,completed:false,material:experimentalMaterial?{...structuredClone(experimentalMaterial),fragments:structuredClone(experimentalMaterial.material.fragments)}:null}
+    Object.assign(error,{evaluationResult:paidRecord?{...paidRecord,controlledFailure:reason}:{...retained,experiment:{...experiment,category:'insufficient-evidence'},fixtureFailure:reason}});throw error
+   }
+   throw e
   }finally{signal.removeEventListener('abort',cancel)}
  }finally{engine?.close();await engine?.idle();vault?.dispose();await rm(base,{recursive:true,force:true})}
 }
