@@ -1,4 +1,5 @@
 import { chmod, stat, symlink, mkdtemp, mkdir, readFile, writeFile, rename, unlink, rm } from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -693,5 +694,12 @@ it.each(['forbidden','invalid','revoked','queued','during-check','after-read'] a
   if(change==='after-read'){const read=session.read.bind(session);vi.spyOn(session,'read').mockImplementation(async path=>{const snapshot=await read(path);grant.revoke();return snapshot})}
   await expect(session.prepareTaskSource({...note,relPath:'目录/原篇.md',expectedRevision:note.revision},grant)).rejects.toThrow();await permission
   expect(await readFile(path.join(first,'目录/原篇.md'),'utf8')).toBe(raw);await expect(stat(path.join(first,'.rgent','registry.json'))).rejects.toMatchObject({code:'ENOENT'})
+ }finally{session.dispose()}
+})
+
+it('rechecks permission immediately before stripping the tail when it changes during archival',async()=>{
+ const {session,attach,first}=await setup(),raw='正文\n<!-- rgent:ledger:v1 -->\n旧历史';try{await attach(first);await writeFile(path.join(first,'原篇.md'),raw);const note=await session.readOpened('原篇.md'),grant=await migrationGrant(session,'原篇.md'),fs=secureFsFor(first),replace=fs.replace.bind(fs)
+  vi.spyOn(fs,'replace').mockImplementation((...args)=>{const result=replace(...args);if(args[0].endsWith('/legacy.json'))writeFileSync(path.join(first,'.rgent-permissions'),JSON.stringify({'原篇.md':'forbidden'}));return result})
+  await expect(session.prepareTaskSource({...note,relPath:'原篇.md',expectedRevision:note.revision},grant)).rejects.toThrow('SOURCE_PERMISSION_CHANGED');expect(await readFile(path.join(first,'原篇.md'),'utf8')).toBe(raw);expect((await session.noteStatus('原篇.md',note)).status).toBe('ready')
  }finally{session.dispose()}
 })

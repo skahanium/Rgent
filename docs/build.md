@@ -1095,7 +1095,7 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 
 | 包 | 缺口与反例／完成门 | 状态与受验证据 |
 |---|---|---|
-| A | 打开不写盘，坏账本可读正文，磁盘尾部保护，可信材料三态，共享归档保护与诊断 | 包 A 接线及复审修复，2026-10-04：原 5 文件 107 项及原文／撤销／图片 4 文件 54 项通过记录保留；`5f8cf77` 后四项 P1 与诊断 P2 先补反例，现 7 文件 180 项、类型／文档检查通过；窗口与最终完整门待收口 |
+| A | 打开不写盘，坏账本可读正文，磁盘尾部保护，可信材料三态，共享归档保护与诊断 | 包 A 接线及复审修复，2026-10-04：原 5 文件 107 项及原文／撤销／图片 4 文件 54 项通过记录保留；`5f8cf77` 后四项 P1 与诊断 P2 先补反例，现 7 文件 181 项、类型／文档检查通过；窗口与最终完整门待收口 |
 | B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | 待 A 门；2026-10-04 |
 | A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | 待 B 门；2026-10-04 |
 | C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | 待 A+ 门；2026-10-04 |
@@ -1103,9 +1103,9 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 | D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | 待 E 门；2026-10-04 |
 | Q | 虚构开发集双策略对照，逐模型停损与证据；不切生产策略、不运行正式评测 | 待 D 门；2026-10-04 |
 
-包 A 复审修复（2026-10-04，基线 `5f8cf77`）：必要迁移在实际库队列内核验有效 TaskGrant、来源权限前后快照、对象与整文件修订，最后同步复核授权有效性；grant 的读取依赖不回入该队列。Host 只续接已核验会话、迁移前后对象与修订的成功迁移回执，普通读取不能改 origin proof。任务与人的批次迁移共用迁移提交登记，原子替换前检查绑定容量，替换后立即同步登记 successors／verified／lastWrites，旧 tab 可继续保存。材料三态同时核对 `materials.json` 单元及独立 task 序号、owner 归属与上界；异常拒绝新序号分配，清空／推进在队列实际提交前重核，均不归零。新任务 2 MiB 上限不套到完整旧原文；大历史性能仍由 C 测量，不提前增加索引。记忆页显示既有退休失败和材料登记分类诊断，配置异常不能遮住材料异常；退休重试出口仍待 A+。
+包 A 复审修复（2026-10-04，基线 `5f8cf77`）：必要迁移在实际库队列内核验有效 TaskGrant、来源权限前后快照、对象与整文件修订，最后同步复核授权有效性，并在旧归档写入后、正文原子替换前再次核验 grant 与权限原字节；grant 的读取依赖不回入该队列。Host 只续接已核验会话、迁移前后对象与修订的成功迁移回执，普通读取不能改 origin proof。任务与人的批次迁移共用迁移提交登记，原子替换前检查绑定容量，替换后立即同步登记 successors／verified／lastWrites，旧 tab 可继续保存。材料三态同时核对 `materials.json` 单元及独立 task 序号、owner 归属与上界；异常拒绝新序号分配，清空／推进在队列实际提交前重核，均不归零。新任务 2 MiB 上限不套到完整旧原文；大历史性能仍由 C 测量，不提前增加索引。记忆页显示既有退休失败和材料登记分类诊断，配置异常不能遮住材料异常；退休重试出口仍待 A+。
 
-修复证据：可信迁移、批次绑定、临界区撤权、材料损坏／伪零及控制操作排队反例均有先失败记录；最终定向命令为 `pnpm exec vitest run test/main/agent-host.test.ts test/main/task-authorization.test.ts test/main/vault.test.ts test/main/ledger-store.test.ts test/main/working-memory-service.test.ts test/renderer/memory-ui.test.ts test/shared/memory-errors.test.ts`，180／0，日志 `/tmp/rgent-v4-A-fix-final-targeted.log`；类型及文档检查另记 `/tmp/rgent-v4-A-fix-type.log`、`/tmp/rgent-v4-A-fix-docs.log`。本轮未运行全量、构建窗口或模型调用，Windows 与人工证据保持待核；B 仍待 A 复核门。
+修复证据：可信迁移、批次绑定、临界区撤权、材料损坏／伪零及控制操作排队反例均有先失败记录；最终定向命令为 `pnpm exec vitest run test/main/agent-host.test.ts test/main/task-authorization.test.ts test/main/vault.test.ts test/main/ledger-store.test.ts test/main/working-memory-service.test.ts test/renderer/memory-ui.test.ts test/shared/memory-errors.test.ts`，181／0，日志 `/tmp/rgent-v4-A-fix-final-targeted.log`；类型及文档检查另记 `/tmp/rgent-v4-A-fix-type.log`、`/tmp/rgent-v4-A-fix-docs.log`。本轮未运行全量、构建窗口或模型调用，Windows 与人工证据保持待核；B 仍待 A 复核门。
 
 事实校正：生产 structured context 允许空／部分摘要，撤回“生产自旋”判定；精确缓存复用仍需修。原正式运行未用保留集调提示，但评分晚于运行及旧保留集已被审阅须留档。压缩／清理授权已在合同记忆节，缺口是预览和保护。历史评分与失败不得改写。
 

@@ -209,17 +209,22 @@ export class VaultSession {
       if(policy.raw!==after.raw||policy.revision!==after.revision||tierFor(request.relPath,effectivePermissionEntries(root,after.state.entries))!=='reference')throw Error('SOURCE_PERMISSION_CHANGED')
       grant.assertActive()
       this.assertSession(request.sessionId);this.requireStableStructure()
-      const migrated=this.migrateRegistered(request.relPath,before)
+      const migrated=this.migrateRegistered(request.relPath,before,()=>{
+        grant.assertActive();this.assertSession(request.sessionId);this.requireStableStructure()
+        let raw:string|null
+        try{raw=secureFsFor(root).readText('.rgent-permissions')}catch(error){if(error instanceof Error&&error.message==='ENOENT')raw=null;else throw Error('PERMISSIONS_INVALID')}
+        if(raw!==after.raw)throw Error('SOURCE_PERMISSION_CHANGED')
+      })
       return {previousRevision:before.revision,revision:migrated.revision,sessionId:request.sessionId,previousObjectVersion:before.objectVersion,objectVersion:migrated.objectVersion,migrated:migrated.migrated}
     })
   }
-  private migrateRegistered(relPath:string,before:NoteSnapshot){
+  private migrateRegistered(relPath:string,before:NoteSnapshot,beforeCommit?:()=>void){
     if(partitionSource(before.content).ledger!==null){
       const links=this.successors.get(relPath)
       if(!links?.has(before.objectVersion)&&(links?.size??0)>=8192)throw Error('OBJECT_BINDING_LIMIT')
       this.requireSnapshotCapacity(relPath,'pending-migration',partitionSource(before.content).body,before.objectVersion)
     }
-    return this.ledgerStore!.migrate(relPath,before)
+    return this.ledgerStore!.migrate(relPath,before,beforeCommit)
   }
   private scheduleLedgerCompression(relPath:string,token:string){
     setImmediate(()=>{void this.mutations.run(()=>{

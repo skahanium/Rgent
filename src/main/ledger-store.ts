@@ -236,13 +236,13 @@ export class LedgerStore{
   if(legacy)this.importLegacy(target,legacy)
   for(const chapter of chapters){const record=this.prepare(target,chapter);try{this.complete(target,record.taskId,digest(this.fs.readSnapshot(target).bytes.toString()))}catch{/* copied recovery checkpoint remains pending; never rewrite the body */}}
  }
- migrate(relPath:string,expected?:{objectVersion:string;revision:string}):{body:string;objectVersion:string;revision:string;migrated:boolean}{
+ migrate(relPath:string,expected?:{objectVersion:string;revision:string},beforeCommit?:()=>void):{body:string;objectVersion:string;revision:string;migrated:boolean}{
   const note=this.fs.readSnapshot(relPath),raw=note.bytes.toString('utf8');if(!Buffer.from(raw).equals(note.bytes))throw Error('LEDGER_RECORD_INVALID')
   if(expected&&(note.objectVersion!==expected.objectVersion||digest(raw)!==expected.revision))throw Error('CONFLICT')
   this.owner(relPath);const part=partitionSource(raw)
   if(part.ledger===null)return {body:raw,objectVersion:note.objectVersion,revision:digest(raw),migrated:false}
   this.importLegacy(relPath,part.ledger)
-  this.check();const after=this.fs.replace(relPath,raw,part.body,note.objectVersion);this.saved?.(relPath,note.objectVersion,after,part.body);this.onWrite(relPath,note.objectVersion,after,part.body)
+  this.check();beforeCommit?.();const after=this.fs.replace(relPath,raw,part.body,note.objectVersion);this.saved?.(relPath,note.objectVersion,after,part.body);this.onWrite(relPath,note.objectVersion,after,part.body)
   return {body:part.body,objectVersion:after,revision:digest(part.body),migrated:true}
  }
  contexts(relPath:string):ContextChapter[]{const records:LedgerRecord[]=[];let cursor:string|null=null;do{const p=this.page(relPath,cursor);records.push(...p.records);cursor=p.cursor}while(cursor!==null)
