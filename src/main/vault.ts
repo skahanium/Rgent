@@ -239,8 +239,35 @@ export class VaultSession {
       if(items.length){const result=this.ledgerStore!.maintain(relPath,'compress',items);if(result.failed.length)this.ledgerFailure='LEDGER_CONFLICT';else if(this.ledgerFailure==='LEDGER_CONFLICT')this.ledgerFailure=null}
     }).catch(()=>{if(this.token===token)this.ledgerFailure='LEDGER_CONFLICT'})})
   }
-  async ledgerPrepare(relPath:string,chapter:LedgerChapterWrite,expectedVersion?:number){
-    const token=this.captureSession();return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.prepare(relPath,chapter,expectedVersion)})
+  async ledgerPrepare(relPath:string,chapter:LedgerChapterWrite,expectedVersion?:number,binding?:ObjectBinding & {root:string;expectedRevision:string;grant?:TaskGrant}){
+    const token=this.captureSession(),root=this.requireUsableRoot(),fs=secureFsFor(root)
+    const atCall=binding ? null : fs.readSnapshot(relPath)
+    const proof=binding ?? {root,sessionId:token,objectVersion:atCall!.objectVersion,expectedRevision:revisionOf(atCall!.bytes.toString('utf8'))}
+    return this.mutations.run(async()=>{
+      this.assertSession(proof.sessionId);this.requireStableStructure()
+      if(this.requireUsableRoot()!==proof.root)throw Error('VAULT_CHANGED')
+      const policy=await loadPermissionSnapshot(root)
+      if(policy.state.status!=='ready')throw Error('PERMISSIONS_INVALID')
+      this.assertSession(proof.sessionId);this.requireStableStructure()
+      if(await modelTierFor(root,relPath)!=='reference')throw Error('NOTE_NOT_REFERENCE')
+      this.assertSession(proof.sessionId);this.requireStableStructure()
+      // Grant reads use the direct authorization IO, never re-enter this queue.
+      if(binding?.grant){
+        if(binding.grant.root!==root||binding.grant.sessionId!==proof.sessionId||binding.grant.origin!==relPath)throw Error('INVALID_AUTHORIZATION')
+        await binding.grant.assertLive('write',relPath)
+      }
+      // No awaits from these final checks through LedgerStore.prepare.
+      binding?.grant?.assertActive()
+      this.assertSession(proof.sessionId);this.requireStableStructure()
+      if(this.requireUsableRoot()!==proof.root)throw Error('VAULT_CHANGED')
+      let raw:string|null
+      try{raw=fs.readText('.rgent-permissions')}catch(error){if(error instanceof Error&&error.message==='ENOENT')raw=null;else throw Error('PERMISSIONS_INVALID')}
+      if(raw!==policy.raw)throw Error('SOURCE_PERMISSION_CHANGED')
+      const current=fs.readSnapshot(relPath)
+      if(!this.acceptsObject(relPath,proof.objectVersion,current.objectVersion))throw Error('NOTE_REPLACED')
+      if(revisionOf(current.bytes.toString('utf8'))!==proof.expectedRevision)throw Error('CONFLICT')
+      return this.ledgerStore!.prepare(relPath,chapter,expectedVersion)
+    })
   }
   async ledgerComplete(relPath:string,taskId:string,revision:string){const token=this.captureSession();const result=await this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.complete(relPath,taskId,revision)});this.scheduleLedgerCompression(relPath,token);return result}
   async ledgerKey(relPath:string){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);return this.memoryContext().vaultKey+':'+(this.ledgerStore!.lookupOwner(relPath)?.noteId??'unregistered:'+relPath)})}

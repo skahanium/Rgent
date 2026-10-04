@@ -41,7 +41,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    engine.capture(taskId)
    const note=await session.readOpened('fiction.md'),tracker=new TaskMaterialTracker()
    tracker.body(note.content,{start:0,end:note.content.length},{relPath:'fiction.md',sessionId:note.sessionId!,objectVersion:note.objectVersion,revision:note.revision});tracker.commit()
-   await session.ledgerPrepare('fiction.md',{taskId,startedAt:new Date().toISOString(),status:'completed',prompt:spec.prompt,answer:spec.answer,material:tracker.snapshot()})
+   await session.ledgerPrepare('fiction.md',{taskId,startedAt:new Date().toISOString(),status:'completed',prompt:spec.prompt,answer:spec.answer,material:tracker.snapshot()},undefined,{sessionId:note.sessionId,objectVersion:note.objectVersion,root,expectedRevision:note.revision})
    const saved=await session.write('fiction.md',upsertAiAnswer(note.content,{taskId,answer:spec.answer}),note.revision,note)
    await session.ledgerComplete('fiction.md',taskId,saved.revision)
    const material=await service.savedMaterial('fiction.md',taskId)
@@ -68,7 +68,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
      read:rel=>session.readOpened(rel),write:(rel,text,revision,binding)=>{if(!binding)throw Error('NOTE_REPLACED');return session.write(rel,text,revision,binding)},
      authorize:()=>authorization.consume('quality-evaluator',{...command,previewId:preview.id}),
      tier:modelTierFor,credential:()=>credential,limits:()=>({seconds:120,steps:1,tools:0}),memory:port,
-     ledger:{prepare:(rel,chapter,version)=>session.ledgerPrepare(rel,chapter,version),complete:(rel,id,revision)=>session.ledgerComplete(rel,id,revision),contexts:rel=>session.ledgerContexts(rel)},
+     ledger:{prepare:(rel,chapter,version,binding)=>{if(!binding)throw Error('BAD_REQUEST');return session.ledgerPrepare(rel,chapter,version,binding)},complete:(rel,id,revision)=>session.ledgerComplete(rel,id,revision),contexts:rel=>session.ledgerContexts(rel)},
      stream:async function*(input){sent.push({system:input.system,prompt:input.prompt});yield '受控闭环验证回答；不代表真实模型质量。'},emit:()=>{}})
     const task=await host.start({...command,previewId:preview.id})
     const stop=()=>host.cancel(task.id);signal.addEventListener('abort',stop,{once:true})

@@ -1,4 +1,4 @@
-import { chmod, stat, symlink, mkdtemp, mkdir, readFile, writeFile, rename, unlink, rm } from 'node:fs/promises'
+import { chmod, stat, symlink, link, mkdtemp, mkdir, readFile, writeFile, rename, unlink, rm } from 'node:fs/promises'
 import { writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -787,16 +787,18 @@ it('runs the production recovery coordination with dirty tabs and permits a safe
 })
 
 /** Real session, grant and ledger IO; only the model stream and registry fault are controlled. */
-async function pendingHostRecoveryFixture() {
+async function pendingHostRecoveryFixture(relPath = '原篇.md') {
   const app = await setup()
   const { AgentHost } = await import('../../src/main/agent-host.ts')
   const { VaultStructureGate } = await import('../../src/main/vault-mutation-queue.ts')
-  await writeFile(path.join(app.first, '原篇.md'), '/问\n')
+  await mkdir(path.dirname(path.join(app.first, relPath)), { recursive: true })
+  await writeFile(path.join(app.first, relPath), '/问\n')
   await app.attach(app.first)
-  const note = await app.session.read('原篇.md'), grant = await migrationGrant(app.session, '原篇.md')
+  const note = await app.session.read(relPath), grant = await migrationGrant(app.session, relPath)
   const fs = secureFsFor(app.first), replace = fs.replace.bind(fs), gate = new VaultStructureGate()
   let fail = false, releaseStream = () => {}, streamStarted = () => {}
   let beforeTier: () => Promise<void> = async () => {}
+  let afterTier: () => Promise<void> = async () => {}
   const streamHold = new Promise<void>(resolve => { releaseStream = resolve })
   const started = new Promise<void>(resolve => { streamStarted = resolve })
   vi.spyOn(fs, 'replace').mockImplementation((...args) => {
@@ -813,12 +815,12 @@ async function pendingHostRecoveryFixture() {
       if (gate.blocksWrite(app.first, p)) throw Error('NOTE_BUSY')
       return app.session.write(p, text, revision, binding!)
     },
-    tier: async (root, relPath) => { await beforeTier(); return modelTierFor(root, relPath) }, credential: () => grant.credential, limits: () => grant.limits,
-    ledger: { prepare: (p, chapter, version) => app.session.ledgerPrepare(p, chapter, version), complete: (p, id, revision) => app.session.ledgerComplete(p, id, revision), contexts: p => app.session.ledgerContexts(p) },
+    tier: async (root, relPath) => { await beforeTier(); const tier = await modelTierFor(root, relPath); await afterTier(); return tier }, credential: () => grant.credential, limits: () => grant.limits,
+    ledger: { prepare: (p, chapter, version, binding) => { if (!binding) throw Error('BAD_REQUEST'); return app.session.ledgerPrepare(p, chapter, version, binding) }, complete: (p, id, revision) => app.session.ledgerComplete(p, id, revision), contexts: p => app.session.ledgerContexts(p) },
     stream: async function* () { dispatch(); streamStarted(); await streamHold; fail = true; yield '完整待保存回答' },
     emit: event => { events.push(event) }
   })
-  const input = { ...note, relPath: '原篇.md', expectedRevision: note.revision, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' }
+  const input = { ...note, relPath: relPath, expectedRevision: note.revision, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' }
   const task = await host.start(input)
   void task.done.catch(() => {})
   await started
@@ -827,7 +829,7 @@ async function pendingHostRecoveryFixture() {
     return gate.recover(app.first, deps, run)
   }
   return { ...app, host, task, input, grant, authorize, dispatch, events, recover, gate,
-    repairIO: () => { fail = false }, setBeforeTier: (hook: () => Promise<void>) => { beforeTier = hook },
+    repairIO: () => { fail = false }, setBeforeTier: (hook: () => Promise<void>) => { beforeTier = hook }, setAfterTier: (hook: () => Promise<void>) => { afterTier = hook },
     finishPending: async () => { releaseStream(); await expect(task.done).rejects.toThrow(); expect(host.hasPending()).toBe(true); expect(host.active()).toHaveLength(0) }
   }
 }
@@ -942,5 +944,109 @@ it('does not retry old Host output when the session is superseded as recovery ga
     expect(result.status).toBe('complete'); expect(save).not.toHaveBeenCalled()
     expect(JSON.parse(await readFile(path.join(app.first, '.rgent-lifecycle'), 'utf8')).active).toBeNull()
     expect(app.host.hasPending()).toBe(true); expect(app.dispatch).toHaveBeenCalledTimes(1); expect(app.authorize).toHaveBeenCalledTimes(1)
+  } finally { app.session.dispose() }
+})
+
+
+it.each(['forbidden', 'follow', 'hardlink', 'object', 'session'] as const)('rejects old Host output at queued ledger prepare after %s wins the vault queue', async change => {
+  const relPath = 'scope/原篇.md', app = await pendingHostRecoveryFixture(relPath)
+  let releaseQueue = () => {}
+  try {
+    await app.finishPending(); app.repairIO()
+    const status = await app.session.lifecycleStatus()
+    const noSave = vi.spyOn(app.session, 'ledgerPrepare').mockRejectedValue(Error('IO_ERROR'))
+    await app.recover('resume', () => app.session.ledgerRecoveryResume(status.revision!)); noSave.mockRestore()
+    const fs = secureFsFor(app.first), writes = vi.spyOn(fs, 'replace').mockClear(), before = await readFile(path.join(app.first, relPath), 'utf8')
+    let tiers = 0, enteredPrepare = () => {}, changed: Promise<unknown> = Promise.resolve()
+    const prepareEntered = new Promise<void>(r => { enteredPrepare = r }), queueHold = new Promise<void>(r => { releaseQueue = r })
+    const prepare = app.session.ledgerPrepare.bind(app.session)
+    vi.spyOn(app.session, 'ledgerPrepare').mockImplementation((...args) => { const result = prepare(...args); enteredPrepare(); return result })
+    app.setAfterTier(async () => {
+      // Last Host tier result is already reference; both mutations enter the
+      // real VaultMutationQueue before Host queues its ledger prepare.
+      if (++tiers !== 2) return
+      void app.session.memoryMutation(async () => { await queueHold }).catch(() => {})
+      if (change === 'forbidden' || change === 'follow') changed = app.session.setPermission('scope', change)
+      else changed = app.session.memoryMutation(async () => {
+        if (change === 'hardlink') { await link(path.join(app.first, relPath), path.join(app.first, 'alias.md')); await writeFile(path.join(app.first, '.rgent-permissions'), JSON.stringify({'alias.md':'forbidden'})) }
+        else if (change === 'object') { await rename(path.join(app.first, relPath), path.join(app.first, 'old.md')); await writeFile(path.join(app.first, relPath), before) }
+        else await app.attach(app.second)
+      })
+      void changed.catch(() => {})
+    })
+    const retry = app.host.retryPending(); void retry.catch(() => {}); await prepareEntered
+    releaseQueue(); await changed.catch(() => {})
+    await expect(retry).rejects.toThrow()
+    expect(writes.mock.calls.map(([p]) => p).filter(p => p !== '.rgent-permissions')).toEqual([])
+    expect(await readFile(path.join(app.first, relPath), 'utf8')).toBe(before)
+    expect(app.host.hasPending()).toBe(true); expect(JSON.stringify(app.events)).toContain('完整待保存回答')
+    expect(app.dispatch).toHaveBeenCalledTimes(1); expect(app.authorize).toHaveBeenCalledTimes(1)
+    await expect(app.grant.assertLive('model')).rejects.toThrow()
+  } finally { releaseQueue(); app.session.dispose() }
+})
+
+
+it.each(['permission', 'invalid-permission', 'grant', 'object', 'revision', 'session'] as const)('rechecks %s synchronously after awaited queued prepare grant validation', async change => {
+  const app = await setup()
+  try {
+    await app.attach(app.first)
+    const note = await app.session.read('原篇.md'), grant = await migrationGrant(app.session, '原篇.md')
+    const live = grant.assertLive.bind(grant), writes = vi.spyOn(secureFsFor(app.first), 'replace')
+    vi.spyOn(grant, 'assertLive').mockImplementation(async (...args) => {
+      await live(...args)
+      if (change === 'permission') await writeFile(path.join(app.first, '.rgent-permissions'), JSON.stringify({'原篇.md':'forbidden'}))
+      if (change === 'invalid-permission') await writeFile(path.join(app.first, '.rgent-permissions'), '{bad')
+      if (change === 'grant') grant.revoke()
+      if (change === 'object') { await rename(path.join(app.first, '原篇.md'), path.join(app.first, 'old.md')); await writeFile(path.join(app.first, '原篇.md'), note.content) }
+      if (change === 'revision') await writeFile(path.join(app.first, '原篇.md'), note.content + '人的新稿')
+      if (change === 'session') await app.attach(app.second)
+    })
+    const errors = {permission:'SOURCE_PERMISSION_CHANGED','invalid-permission':'SOURCE_PERMISSION_CHANGED',grant:'AUTHORIZATION_REVOKED',object:'NOTE_REPLACED',revision:'CONFLICT',session:'VAULT_CHANGED'}
+    await expect(app.session.ledgerPrepare('原篇.md', {taskId:'queued-proof',startedAt:new Date().toISOString(),status:'completed',prompt:'问',answer:'旧回答'}, undefined, {...note,root:app.first,expectedRevision:note.revision,grant})).rejects.toThrow(errors[change])
+    expect(grant.assertLive).toHaveBeenCalledTimes(1)
+    expect(writes.mock.calls.map(([p]) => p)).toEqual([])
+    await expect(stat(path.join(app.first, '.rgent', 'registry.json'))).rejects.toMatchObject({code:'ENOENT'})
+  } finally { app.session.dispose() }
+})
+
+
+it.each(['forbidden', 'follow'] as const)('passes active checkpoint proof to the real queue and rejects queued %s permission', async tier => {
+  const relPath = 'scope/原篇.md', app = await pendingHostRecoveryFixture(relPath)
+  try {
+    const prepare = app.session.ledgerPrepare.bind(app.session), writes = vi.spyOn(secureFsFor(app.first), 'replace').mockClear()
+    let changed: Promise<unknown> = Promise.resolve(), first = true
+    const queued = vi.spyOn(app.session, 'ledgerPrepare').mockImplementation((...args) => {
+      if (first) {
+        first = false
+        expect(args[3]).toMatchObject({root:app.first,sessionId:app.input.sessionId,objectVersion:expect.any(String),expectedRevision:expect.any(String),grant:app.grant})
+        changed = app.session.setPermission('scope', tier)
+        void changed.catch(() => {})
+      }
+      return prepare(...args)
+    })
+    await app.finishPending(); await changed
+    expect(queued).toHaveBeenCalledTimes(1)
+    expect(writes.mock.calls.map(([p]) => p).filter(p => p !== '.rgent-permissions')).toEqual([])
+    expect(app.host.hasPending()).toBe(true); expect(JSON.stringify(app.events)).toContain('完整待保存回答')
+    expect(app.dispatch).toHaveBeenCalledTimes(1); expect(app.authorize).toHaveBeenCalledTimes(1)
+    await expect(app.grant.assertLive('model')).rejects.toThrow()
+  } finally { app.session.dispose() }
+})
+
+
+it('rejects an external permission change after queued tier reads without requiring a revoked finalization grant', async () => {
+  const app = await setup()
+  try {
+    await app.attach(app.first)
+    const note = await app.session.read('原篇.md'), fs = secureFsFor(app.first), read = fs.readText.bind(fs), writes = vi.spyOn(fs, 'replace')
+    let permissionReads = 0
+    vi.spyOn(fs, 'readText').mockImplementation(p => {
+      try { return read(p) } finally {
+        if (p === '.rgent-permissions' && ++permissionReads === 2) queueMicrotask(() => writeFileSync(path.join(app.first, '.rgent-permissions'), JSON.stringify({'原篇.md':'forbidden'})))
+      }
+    })
+    await expect(app.session.ledgerPrepare('原篇.md', {taskId:'final-proof',startedAt:new Date().toISOString(),status:'completed',prompt:'问',answer:'旧回答'}, undefined, {...note,root:app.first,expectedRevision:note.revision})).rejects.toThrow('SOURCE_PERMISSION_CHANGED')
+    expect(permissionReads).toBeGreaterThanOrEqual(2)
+    expect(writes.mock.calls.map(([p]) => p)).toEqual([])
   } finally { app.session.dispose() }
 })

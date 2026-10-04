@@ -1113,7 +1113,7 @@ if (ownsInstance) app.whenReady().then(() => {
     memory:{context:()=>vault!.memoryContext(),config:key=>({enabled:modelConfig!.getMemoryConfig(key).vault.enabled,revision:modelConfig!.getVaultMemoryRevision(key)}),entries:ids=>workingService()!.entries(ids)},
     onReasoning:(id,text)=>reasoningStore!.write(vault!.memoryContext().vaultKey,id,text),
     summaries:{cache:contextCache,key:async relPath=>summaryHash(await vault!.ledgerKey(relPath))},
-    ledger:{prepare:(relPath,chapter,version)=>vault!.ledgerPrepare(relPath,chapter,version),complete:(relPath,id,revision)=>vault!.ledgerComplete(relPath,id,revision),contexts:relPath=>vault!.ledgerContexts(relPath)},
+    ledger:{prepare:(relPath,chapter,version,binding)=>{if(!binding)throw Error('BAD_REQUEST');return vault!.ledgerPrepare(relPath,chapter,version,binding)},complete:(relPath,id,revision)=>vault!.ledgerComplete(relPath,id,revision),contexts:relPath=>vault!.ledgerContexts(relPath)},
     assertMemoryAuthorization: input => {
       if (!input.sessionId || input.memoryAuthorizationSignature !== memoryAuthorizationState(input.sessionId).signature) throw Error('STALE_PREVIEW')
     },

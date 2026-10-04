@@ -59,7 +59,7 @@ function toolTraceLine(call: { name: string; input: unknown }, failure?: string)
 
 export type HostDependencies = {
   ledger: {
-    prepare(relPath:string,chapter:LedgerChapterWrite,expectedVersion?:number):Promise<{revision:number}>
+    prepare(relPath:string,chapter:LedgerChapterWrite,expectedVersion:number|undefined,binding:(ObjectBinding & {root:string;expectedRevision:string;grant?:TaskGrant})|undefined):Promise<{revision:number}>
     complete(relPath:string,taskId:string,bodyRevision:string):Promise<unknown>
     contexts(relPath:string):Promise<ContextChapter[]>
   }
@@ -369,7 +369,7 @@ export class AgentHost {
       const checkpoint = async (): Promise<void> => {
         const saving = (async () => {
         await this.rechecking.get(key)
-        {const checkpoint=await this.deps.ledger.prepare(input.relPath,{taskId:id,startedAt,status:'completed',prompt:input.promptText,answer,provenance:{version:1,model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:scoped?.dependencies()??[],tools:scoped?.summary()??[]}},this.ledgerVersions.get(id));this.ledgerVersions.set(id,checkpoint.revision)}
+        {const checkpoint=await this.prepareLedger(root,input.relPath,{taskId:id,startedAt,status:'completed',prompt:input.promptText,answer,provenance:{version:1,model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:scoped?.dependencies()??[],tools:scoped?.summary()??[]}},this.ledgerVersions.get(id),grant);this.ledgerVersions.set(id,checkpoint.revision)}
         const revision = await this.mutateNote(root, input.relPath, (source) => upsertAiAnswer(source, { taskId: id, answer, expectedPreviousAnswer: persisted.answer }))
         persisted.answer = answer
         lastCheckpoint = Date.now()
@@ -631,11 +631,22 @@ export class AgentHost {
     throw new Error('CONFLICT')
   }
 
+  private async prepareLedger(root:string,relPath:string,chapter:LedgerChapterWrite,version:number|undefined,grant?:TaskGrant) {
+    const current = await this.readBound(root, relPath)
+    const binding = this.bindings.get(`${root}\0${relPath}`)
+    // Completion saves use current permission and object proof after the task
+    // grant is revoked; active checkpoints still carry their actual grant.
+    return this.deps.ledger.prepare(relPath, chapter, version, binding ? {
+      root, sessionId: binding.sessionId, objectVersion: binding.objectVersion,
+      expectedRevision: current.revision, ...(grant ? {grant} : {})
+    } : undefined)
+  }
+
   private async finishWrite(root: string, relPath: string, finalSource: LedgerChapterWrite, persisted: { answer: string }, material: {tracker: TaskMaterialTracker; context: MemoryContext | null; handoffAttempted?: boolean}): Promise<string> {
     await this.requirePermission(root, relPath)
     await this.readBound(root, relPath)
     await this.requirePermission(root, relPath)
-    {const pending=await this.deps.ledger.prepare(relPath,finalSource,this.ledgerVersions.get(finalSource.taskId));this.ledgerVersions.set(finalSource.taskId,pending.revision)}
+    {const pending=await this.prepareLedger(root,relPath,finalSource,this.ledgerVersions.get(finalSource.taskId));this.ledgerVersions.set(finalSource.taskId,pending.revision)}
     let bodyRevision=(await this.readBound(root,relPath)).revision
     if (finalSource.answer) {
       bodyRevision=await this.mutateNote(root, relPath, (source) => upsertAiAnswer(source, { taskId: finalSource.taskId, answer: finalSource.answer, expectedPreviousAnswer: persisted.answer }), true)
