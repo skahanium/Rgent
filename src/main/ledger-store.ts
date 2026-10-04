@@ -1,3 +1,4 @@
+import {summaryAuditFits} from './context-budget.ts'
 import {decodeLedgerBytes,compressLedgerBytes} from './ledger-codec.ts'
 import {createHash,randomUUID} from 'node:crypto'
 import type {SecureVaultFs} from './secure-fs.ts'
@@ -17,13 +18,21 @@ type MaterialUnit={id:string;noteId:string;start:number;end:number;sequence:numb
 export type LedgerRecord={version:1;noteId:string;taskId:string;revision:number;state:'pending-body'|'saved'|'legacy'|'cleared';bodyStatus:'present'|'unable-to-verify';chapter:Omit<LedgerChapterWrite,'reasoning'>|null;legacyRaw?:string;legacyReasoning?:string;sequence:number}
 export type LedgerPage={noteId:string;records:LedgerRecord[];cursor:string|null;ownership:'verified'|'unregistered';gaps:string[]}
 export function validOwner(v:unknown):v is LedgerOwner{return obj(v)&&exact(v,['noteId','relPath','objectVersion','bodyRevision','anchors','sequenceCeiling',...('recoveryEvidence'in v?['recoveryEvidence']:[]),...('anchorsTruncated'in v?['anchorsTruncated']:[])])&&id(v.noteId)&&rel(v.relPath)&&typeof v.objectVersion==='string'&&v.objectVersion.length>0&&v.objectVersion.length<512&&typeof v.bodyRevision==='string'&&/^[a-f0-9]{64}$/.test(v.bodyRevision)&&Array.isArray(v.anchors)&&v.anchors.length<=256&&v.anchors.every(id)&&(v.anchorsTruncated===undefined||v.anchorsTruncated===true)&&Number.isSafeInteger(v.sequenceCeiling)&&Number(v.sequenceCeiling)>=0&&(v.recoveryEvidence===undefined||obj(v.recoveryEvidence)&&exact(v.recoveryEvidence,['rootIdentity','attachments'])&&typeof v.recoveryEvidence.rootIdentity==='string'&&/^\d+:\d+$/.test(v.recoveryEvidence.rootIdentity)&&Array.isArray(v.recoveryEvidence.attachments)&&v.recoveryEvidence.attachments.every(a=>obj(a)&&typeof a.relPath==='string'&&!a.relPath.split('/').some(p=>!p||p==='.'||p==='..')&&(a.kind==='dir'&&a.hash===undefined||a.kind==='file'&&typeof a.hash==='string'&&/^[a-f0-9]{64}$/.test(a.hash))))}
+function validSentSummary(value:unknown):value is import('./host-source.ts').SentSummary{
+ if(!obj(value)||!exact(value,['step','text','sourceChapterIds','generators','dependencies'])||!Number.isSafeInteger(value.step)||Number(value.step)<1||typeof value.text!=='string'||!Array.isArray(value.sourceChapterIds)||!value.sourceChapterIds.length||!value.sourceChapterIds.every(id)||new Set(value.sourceChapterIds).size!==value.sourceChapterIds.length||!Array.isArray(value.generators)||value.generators.length>64||!Array.isArray(value.dependencies)||value.dependencies.length!==value.sourceChapterIds.length)return false
+ const covered=value.sourceChapterIds
+ if(value.generators.some(g=>!obj(g)||!exact(g,['modelId','connection','host','time','format'])||g.format!==1||typeof g.modelId!=='string'||typeof g.connection!=='string'||typeof g.host!=='string'||typeof g.time!=='string'||!Number.isFinite(Date.parse(g.time))))return false
+ if(value.dependencies.some(d=>!obj(d)||!exact(d,['sourceId','hash',...('provenance'in d?['provenance']:[])])||!(covered as unknown[]).includes(d.sourceId)||typeof d.hash!=='string'||!/^[a-f0-9]{64}$/.test(d.hash)||d.provenance!==undefined&&ledgerProvenance(encodeLedgerProvenance(d.provenance as LedgerProvenance)).status!=='valid'))return false
+ return new Set(value.dependencies.map(d=>(d as {sourceId:string}).sourceId)).size===value.dependencies.length
+}
 function validChapter(v:unknown):v is LedgerRecord['chapter']{
  if(v===null)return true
  if(!obj(v)||!id(v.taskId)||typeof v.startedAt!=='string'||!Number.isFinite(Date.parse(v.startedAt))||!['completed','cancelled','failed','limit'].includes(String(v.status))||typeof v.prompt!=='string'||typeof v.answer!=='string')return false
- if(Object.keys(v).some(k=>!['taskId','startedAt','status','prompt','answer','reason','provenance','trace','assistant','metrics','summaryGenerators','material'].includes(k)))return false
+ if(Object.keys(v).some(k=>!['taskId','startedAt','status','prompt','answer','reason','provenance','trace','assistant','metrics','summaryGenerators','sentSummaries','material'].includes(k)))return false
  if(v.reason!==undefined&&typeof v.reason!=='string'||v.assistant!==undefined&&typeof v.assistant!=='string'||v.trace!==undefined&&(!Array.isArray(v.trace)||v.trace.some(t=>typeof t!=='string')))return false
  if(v.material!==undefined&&(!obj(v.material)||!Array.isArray(v.material.fragments)||v.material.fragments.length>512||typeof v.material.truncated!=='boolean'||Buffer.byteLength(JSON.stringify(v.material))>256*1024))return false
- if(v.metrics!==undefined&&(!Array.isArray(v.metrics)||v.metrics.length>256||v.metrics.some(m=>!obj(m)||!Number.isSafeInteger(m.step)||!Number.isFinite(m.estimatedInput)||m.actualInput!==null&&!Number.isFinite(m.actualInput)||m.actualOutput!==null&&!Number.isFinite(m.actualOutput))))return false
+ if(v.metrics!==undefined&&(!Array.isArray(v.metrics)||v.metrics.length>1000||v.metrics.some(m=>!obj(m)||!Number.isSafeInteger(m.step)||!Number.isFinite(m.estimatedInput)||m.actualInput!==null&&!Number.isFinite(m.actualInput)||m.actualOutput!==null&&!Number.isFinite(m.actualOutput))))return false
+ if(v.sentSummaries!==undefined&&(!Array.isArray(v.sentSummaries)||!v.sentSummaries.every(validSentSummary)||!summaryAuditFits(v.sentSummaries)))return false
  if(v.summaryGenerators!==undefined&&(!Array.isArray(v.summaryGenerators)||v.summaryGenerators.length>64||v.summaryGenerators.some(g=>!obj(g)||typeof g.modelId!=='string'||typeof g.host!=='string'||g.format!==1)))return false
  if(v.provenance!==undefined){try{const read=ledgerProvenance(encodeLedgerProvenance(v.provenance as LedgerProvenance));if(read.status!=='valid')return false}catch{return false}}
  return true
@@ -245,26 +254,39 @@ export class LedgerStore{
   record.state='saved';record.bodyStatus='present';record.revision++;this.replace(this.path(owner,taskId),JSON.stringify(record));return record
  }
  private displayed(relPath:string,record:LedgerRecord){
+  record=structuredClone(record)
   if(record.state==='saved'&&record.chapter?.answer){try{const body=this.fs.readSnapshot(relPath).bytes.toString();if(upsertAiAnswer(body,{taskId:record.taskId,answer:record.chapter.answer,expectedPreviousAnswer:record.chapter.answer})!==body)record.bodyStatus='unable-to-verify'}catch{record.bodyStatus='unable-to-verify'}}
   return record
  }
+ private decoded=new Map<string,{raw:string;record:LedgerRecord;bytes:number}>()
+ private decodedBytes=0
+ private decode(path:string,raw:string):LedgerRecord{
+  const old=this.decoded.get(path);if(old?.raw===raw)return old.record
+  const record=parseRecord(raw),bytes=Buffer.byteLength(raw)+Buffer.byteLength(JSON.stringify(record))
+  if(old){this.decoded.delete(path);this.decodedBytes-=old.bytes}
+  if(bytes<=16*1024*1024){while(this.decodedBytes+bytes>16*1024*1024){const [key,value]=this.decoded.entries().next().value!;this.decoded.delete(key);this.decodedBytes-=value.bytes}this.decoded.set(path,{raw,record,bytes});this.decodedBytes+=bytes}
+  return record
+ }
+ private orderedRecords(owner:LedgerOwner,ceiling:number){
+  const members=this.fs.list(`.rgent/ledgers/${owner.noteId}`);if(members.some(f=>f.kind!=='file'||!['owner.json','legacy.json','recovery.json','.DS_Store'].includes(f.name)&&(!f.name.endsWith('.json')||!id(f.name.slice(0,-5)))))throw Error('LEDGER_REGISTRY_INVALID')
+  return members.filter(f=>f.kind==='file'&&!['owner.json','legacy.json','recovery.json'].includes(f.name)&&f.name.endsWith('.json')).map(file=>{
+   const p=`.rgent/ledgers/${owner.noteId}/${file.name}`,disk=this.read(p);if(!disk)throw Error('LEDGER_RECORD_INVALID');const record=this.decode(p,disk.raw);if(record.noteId!==owner.noteId||file.name!==record.taskId+'.json')throw Error('LEDGER_RECORD_INVALID');return {record,bytes:Buffer.byteLength(disk.raw)}
+  }).filter(({record})=>record.sequence<=ceiling).sort((a,b)=>this.compare(a.record,b.record))
+ }
+ private compare(a:LedgerRecord,b:LedgerRecord){return b.sequence-a.sequence||(b.chapter?.startedAt??'').localeCompare(a.chapter?.startedAt??'')||b.taskId.localeCompare(a.taskId)}
  page(relPath:string,cursor:string|null=null,maxBytes=128*1024):LedgerPage{
   const owner=this.lookupOwner(relPath),registry=this.registry()
   if(!owner){if(cursor!==null)throw Error('BAD_REQUEST');return {noteId:'',records:[],cursor:null,ownership:'unregistered',gaps:[]}}
   type Boundary=[number,number,string,string]
   let boundary:Boundary|null=null,ceiling=registry.sequence
   if(cursor!==null){try{const value:unknown=JSON.parse(Buffer.from(cursor,'base64url').toString());if(!Array.isArray(value)||value.length!==4||!Number.isSafeInteger(value[0])||!Number.isSafeInteger(value[1])||value[0]<0||value[1]<0||typeof value[2]!=='string'||!id(value[3]))throw Error();boundary=value as Boundary;ceiling=boundary[0]}catch{throw Error('BAD_REQUEST')}}
-  const members=this.fs.list(`.rgent/ledgers/${owner.noteId}`);if(members.some(f=>f.kind!=='file'||!['owner.json','legacy.json','recovery.json','.DS_Store'].includes(f.name)&&(!f.name.endsWith('.json')||!id(f.name.slice(0,-5)))))throw Error('LEDGER_REGISTRY_INVALID')
-  const ordered=members.filter(f=>f.kind==='file'&&!['owner.json','legacy.json','recovery.json'].includes(f.name)&&f.name.endsWith('.json')).map(file=>{
-   const disk=this.read(`.rgent/ledgers/${owner.noteId}/${file.name}`);if(!disk)throw Error('LEDGER_RECORD_INVALID');const record=parseRecord(disk.raw);if(record.noteId!==owner.noteId||file.name!==record.taskId+'.json')throw Error('LEDGER_RECORD_INVALID');return {record,bytes:Buffer.byteLength(disk.raw)}
-  }).filter(({record})=>record.sequence<=ceiling)
-  const compare=(a:LedgerRecord,b:LedgerRecord)=>b.sequence-a.sequence||(b.chapter?.startedAt??'').localeCompare(a.chapter?.startedAt??'')||b.taskId.localeCompare(a.taskId)
-  ordered.sort((a,b)=>compare(a.record,b.record))
+  const ordered=this.orderedRecords(owner,ceiling)
+  const compare=(a:LedgerRecord,b:LedgerRecord)=>this.compare(a,b)
   const eligible=boundary?ordered.filter(({record})=>compare(record,{sequence:boundary![1],chapter:{startedAt:boundary![2]},taskId:boundary![3]} as LedgerRecord)>0):ordered
   const records:LedgerRecord[]=[];let bytes=0
   for(const entry of eligible){if(records.length&&(records.length>=20||bytes+entry.bytes>maxBytes))break;records.push(this.displayed(relPath,entry.record));bytes+=entry.bytes}
   const last=records.at(-1),next=last&&records.length<eligible.length?Buffer.from(JSON.stringify([ceiling,last.sequence,last.chapter?.startedAt??'',last.taskId])).toString('base64url'):null
-  return {noteId:owner.noteId,records,cursor:next,ownership:'verified',gaps:records.filter(r=>r.state==='cleared').map(r=>r.taskId)}
+  return {noteId:owner.noteId,records,cursor:next,ownership:'verified',gaps:records.filter(r=>r.state==='cleared'||r.bodyStatus==='unable-to-verify').map(r=>r.taskId)}
  }
  wirePage(relPath:string,cursor:string|null):import('../shared/ledger.ts').LedgerView{
   let taskId:string|null=null,offset=0,expected:string|null=null,nextPage:string|null=null
@@ -314,15 +336,29 @@ export class LedgerStore{
   this.check();beforeCommit?.();const after=this.fs.replace(relPath,raw,part.body,note.objectVersion);this.saved?.(relPath,note.objectVersion,after,part.body);this.onWrite(relPath,note.objectVersion,after,part.body)
   return {body:part.body,objectVersion:after,revision:digest(part.body),migrated:true}
  }
- contexts(relPath:string):ContextChapter[]{const records:LedgerRecord[]=[];let cursor:string|null=null;do{const p=this.page(relPath,cursor);records.push(...p.records);cursor=p.cursor}while(cursor!==null)
-  return records.reverse().flatMap(r=>this.contextForRecord(r))
+ /** Read existing control identities and known dispatched body ranges; never allocate a unit. */
+ summaryMaterials(relPath:string,taskIds:readonly string[],requiredBodyIds:readonly string[]=[]){
+  const owner=this.requiredOwner(relPath),registry=this.registry(),units=this.materialUnits(),pending=[...taskIds],seen=new Set<string>(),materialIds=new Set<string>(),sequences:number[]=[]
+  const unitIds=new Set(units.map(u=>u.id));if(unitIds.size!==units.length||requiredBodyIds.some(id=>!unitIds.has(id))||units.some(u=>{const o=registry.owners.find(o=>o.noteId===u.noteId);return !o||u.sequence>o.sequenceCeiling||u.sequence>registry.sequence}))throw Error('MEMORY_MATERIAL_UNVERIFIED')
+  while(pending.length){const taskId=pending.pop()!;if(seen.has(taskId))continue;if(seen.size>=100000)throw Error('MEMORY_SOURCE_LIMIT');seen.add(taskId)
+   const record=this.record(owner,taskId);if(!record||!record.chapter||record.state==='cleared'||record.state==='pending-body'||record.sequence>owner.sequenceCeiling||record.sequence>registry.sequence)throw Error('MEMORY_MATERIAL_UNVERIFIED')
+   sequences.push(record.sequence);materialIds.add(taskId+'/prompt')
+   for(const f of record.chapter.material?.fragments??[]){if(f.kind!=='body')continue;const sourceOwner=registry.owners.find(o=>o.relPath===f.relPath);if(!sourceOwner)throw Error('MEMORY_MATERIAL_UNVERIFIED')
+    for(const unit of units)if(unit.noteId===sourceOwner.noteId&&unit.start<f.end&&unit.end>f.start){materialIds.add(unit.id);sequences.push(unit.sequence)}
+   }
+   for(const sent of record.chapter.sentSummaries??[])for(const d of sent.dependencies){if(d.sourceId===taskId)throw Error('MEMORY_MATERIAL_UNVERIFIED');const dependency=this.record(owner,d.sourceId),chapter=dependency&&this.contextForRecord(dependency)[0];if(!chapter||digest(chapter.text)!==d.hash)throw Error('MEMORY_MATERIAL_UNVERIFIED');pending.push(d.sourceId)}
+  }
+  return {materialIds:[...materialIds],sequences,ceiling:registry.sequence}
+ }
+ contexts(relPath:string):ContextChapter[]{const owner=this.lookupOwner(relPath);if(!owner)return []
+  return this.orderedRecords(owner,this.registry().sequence).reverse().flatMap(({record})=>this.contextForRecord(record))
  }
  contextForRecord(r:LedgerRecord):ContextChapter[]{
    if(r.state==='cleared'||r.state==='pending-body')return []
    const c=r.chapter
    if(!c)return [{sourceId:r.taskId,taskId:r.taskId,text:'不可核验的历史记录',fields:{status:'ambiguous' as const},eligible:false}]
    const prefix='口令：\n',separator='\n\n历史回答：\n',text=prefix+c.prompt+separator+c.answer,answerStart=prefix.length+c.prompt.length+separator.length
-   return [{sourceId:r.taskId,taskId:r.taskId,text,fields:{status:'valid' as const,prompt:{start:prefix.length,end:prefix.length+c.prompt.length,text:c.prompt},answer:{start:answerStart,end:text.length,text:c.answer}},provenance:c.provenance,eligible:r.state==='legacy'?!!c.provenance&&!(c.provenance.version===2&&c.provenance.memoryDeps.length>0):true}]
+   return [{sourceId:r.taskId,taskId:r.taskId,text,fields:{status:'valid' as const,prompt:{start:prefix.length,end:prefix.length+c.prompt.length,text:c.prompt},answer:{start:answerStart,end:text.length,text:c.answer}},provenance:c.provenance,summaryDerived:!!c.sentSummaries?.length,eligible:r.state==='legacy'?!!c.provenance&&!(c.provenance.version===2&&c.provenance.memoryDeps.length>0):true}]
  }
 }
 

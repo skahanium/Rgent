@@ -1,5 +1,5 @@
-import {conservativeTokens} from './context-budget.ts'
-import {SummaryCache,summaryGroups,SUMMARY_SECTIONS,validSummaryText,type SummaryGenerator} from './summary-cache.ts'
+import {conservativeTokens,summaryAuditFits,encodedAnswerPrefix} from './context-budget.ts'
+import {SummaryCache,summaryGroups,SUMMARY_SECTIONS,validSummaryText,type SummaryGenerator,type SummaryResolution,summaryHash} from './summary-cache.ts'
 import type { ModelMessage, AssistantContent, ToolContent } from 'ai'
 import type { ScopedAgentTools } from './scoped-agent-tools.ts'
 import { createMemoryUsePermit, MEMORY_SEARCH_SCHEMA, type MemoryUsePort, type MemoryUsePermit } from './memory-use.ts'
@@ -13,7 +13,7 @@ import { MODEL_STREAM_BOUNDS, type ModelStepEvent, type ToolSchema } from './mod
 import { randomUUID } from 'node:crypto'
 import { AgentTasks, type TaskResult, type StopReason } from './agent-tasks.ts'
 import { buildHostContext, type ContextChapter, type ContextSummary } from './host-context.ts'
-import { markPrompt, upsertAiAnswer, type LedgerChapterWrite } from './host-source.ts'
+import { markPrompt, upsertAiAnswer, type LedgerChapterWrite, type SentSummary } from './host-source.ts'
 import { assistantSystemBlock, assistantSummary, type AssistantHabits } from '../shared/assistant.ts'
 import type { ModelCredential, RunLimits } from './model-config.ts'
 import type { SourceRange } from '../markdown/types.ts'
@@ -64,6 +64,8 @@ export type HostDependencies = {
     contexts(relPath:string):Promise<ContextChapter[]>
   }
   summaries?:{cache:SummaryCache;key(relPath:string):Promise<string>}
+  /** Local derived-history proof, independent of creating or enabling a memory-use permit. */
+  summaryAllowed?:(relPath:string,taskIds:readonly string[])=>Promise<boolean>
   root: () => string | null
   authorize?: (input: HostStart) => Promise<TaskGrant>
   assertMemoryAuthorization?: (input: HostStart) => void
@@ -356,15 +358,19 @@ export class AgentHost {
       // 推理只进账本；trace 按发生顺序记这一步做了什么（模型步、工具、失败、收尾）。
       let reasoning = ''
       const trace: string[] = []
-      const noteTrace = (line: string): void => { if (trace.length < 200) trace.push(line) }
+      const noteTrace = (line: string): void => { if (trace.length < 200 && byteCount(JSON.stringify([...trace,line]))<=64*1024) trace.push(line) }
       const persisted = { answer: '' }
       const metrics:NonNullable<LedgerChapterWrite['metrics']>=[]
-      let usedSummaries:SummaryGenerator[]=[]
+      const sentSummaries:SentSummary[]=[]
       let steps = 0
       let attempts = 0
       let outputBytes = 0
       let activity = ''
       const refused = new Map<string, number>()
+      const recordProvenance=(summaries:readonly SentSummary[],includeStaged=false)=>{
+        const inherited=summaries.flatMap(s=>s.dependencies.flatMap(d=>d.provenance?[d.provenance]:[]))
+        return {version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies(includeStaged)??[]),...(scoped?.memoryDependencies?.()??[]),...inherited.flatMap(p=>p.version===2?p.memoryDeps:[])].map(d=>[d.id,d])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:[...new Map([...(scoped?.dependencies()??[]),...inherited.flatMap(p=>p.sources)].map(d=>[d.relPath,d])).values()],sentSources:scoped?.sentSources()??[],tools:[...(scoped?.summary()??[]),...(memorySearchCalls?[{name:'search_memory',outcome:`执行 ${memorySearchCalls} 次，失败 ${memorySearchFailures} 次`}]:[]),...memoryToolOutcomes,...[...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`拒绝 ${label.split(':')[1]} × ${count}`}))]}
+      }
       let lastCheckpoint = 0
       const snapshot = (status: HostEvent['status'], reason?: string, revision?: string): void => {
         this.deps.emit({ ...this.bindings.get(key), id, root, relPath: input.relPath, status, answer, reason, activity, persisted: revision !== undefined, revision })
@@ -372,7 +378,7 @@ export class AgentHost {
       const checkpoint = async (): Promise<void> => {
         const saving = (async () => {
         await this.rechecking.get(key)
-        {const checkpoint=await this.prepareLedger(root,input.relPath,{taskId:id,startedAt,status:'completed',prompt:input.promptText,answer,provenance:{version:1,model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:scoped?.dependencies()??[],tools:scoped?.summary()??[]}},this.ledgerVersions.get(id),grant);this.ledgerVersions.set(id,checkpoint.revision)}
+        {const checkpoint=await this.prepareLedger(root,input.relPath,{taskId:id,startedAt,status:'completed',prompt:input.promptText,answer,sentSummaries,provenance:recordProvenance(sentSummaries)},this.ledgerVersions.get(id),grant);this.ledgerVersions.set(id,checkpoint.revision)}
         const revision = await this.mutateNote(root, input.relPath, (source) => upsertAiAnswer(source, { taskId: id, answer, expectedPreviousAnswer: persisted.answer }))
         persisted.answer = answer
         lastCheckpoint = Date.now()
@@ -386,7 +392,8 @@ export class AgentHost {
         snapshot('running')
         let summary: ContextSummary | undefined
         const summaryKey=this.deps.summaries?await this.deps.summaries.key(input.relPath):null
-        let policySource = ''
+        let summaryBasis = ''
+        let serializationPenalty=0
         let historicalChapters:ContextChapter[]|undefined
         let policy: { allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[] } | undefined
         const messages: ModelMessage[] = []
@@ -399,7 +406,12 @@ export class AgentHost {
           await wait(scoped?.assertCurrent(signal) ?? Promise.resolve())
           await wait(memory?.assertCurrent(credential) ?? Promise.resolve())
         }
-        const step = (outgoing: ModelMessage[], withTools: boolean, maxOutputTokens: number): AsyncIterable<ModelStepEvent> => {
+        const derivedAllowed=(ids:readonly string[])=>wait(this.deps.summaryAllowed?.(input.relPath,ids)??this.deps.memory?.summaryAllowed?.(input.relPath,ids)??Promise.resolve(true))
+        const audit=(value:ContextSummary,chapters:readonly ContextChapter[],nextStep=steps+1):SentSummary=>({step:nextStep,text:value.text,sourceChapterIds:[...value.sourceChapterIds],generators:structuredClone(value.generators??[]),dependencies:value.sourceChapterIds.map(sourceId=>{const c=chapters.find(c=>c.sourceId===sourceId);if(!c||c.eligible===false)throw Error('SOURCE_CHANGED');return {sourceId,hash:summaryHash(c.text),...(c.provenance?{provenance:structuredClone(c.provenance)}:{})}})})
+        const fits=(values:SentSummary[])=>{const all=[...sentSummaries,...values];if(!summaryAuditFits(all))return false;try{encodeLedgerProvenance(recordProvenance(all,true));return true}catch{return false}}
+        const resolveSummary=(candidate:ContextSummary,status:SummaryResolution['status'],chapters:readonly ContextChapter[]):SummaryResolution=>candidate.text&&!fits([audit(candidate,chapters)])?{status:'omitted',summary:{text:'',sourceChapterIds:[]}}:{status,summary:candidate}
+        const step = (outgoing: ModelMessage[], withTools: boolean, maxOutputTokens: number, summaries:SentSummary[]=[]): AsyncIterable<ModelStepEvent> => {
+          if(!fits(summaries))throw Error('LEDGER_RECORD_LIMIT')
           if (++steps > limits.steps) throw Error('MODEL_STEP_LIMIT')
           const schemas = withTools ? toolSchemas : undefined
           if (conservativeTokens(JSON.stringify(outgoing)) + (schemas ? conservativeTokens(JSON.stringify(schemas)) : 0) > budget) throw Error('MODEL_CONTEXT_LIMIT')
@@ -408,6 +420,7 @@ export class AgentHost {
           const metric={step:steps,estimatedInput:conservativeTokens(system+JSON.stringify(outgoing)+(schemas?JSON.stringify(schemas):'')),actualInput:null as number|null,actualOutput:null as number|null};metrics.push(metric)
           const create = () => {
             if (signal.aborted) throw Error('TASK_CANCELLED')
+            sentSummaries.push(...structuredClone(summaries))
             scoped?.markSent(withTools)
             memory?.markSent()
             materials.commit(withTools)
@@ -415,7 +428,7 @@ export class AgentHost {
             ? this.deps.streamStep({ ...credential, system, messages: outgoing, ...(schemas ? { tools: schemas } : {}), maxOutputTokens }, signal)
             : textEvents(this.deps.stream({ ...credential, system, prompt: String(outgoing[0]?.content ?? ''), maxOutputTokens }, signal))
           }
-          return (async function*(){for await(const event of safeModelStep(create,signal,credential.apiKey)){if(event.type==='finish'&&event.usage){metric.actualInput=event.usage.inputTokens;metric.actualOutput=event.usage.outputTokens}yield event}})()
+          return (async function*(){if(summaries.length&&!await derivedAllowed(summaries.flatMap(s=>s.sourceChapterIds)))throw Error('MEMORY_CHANGED');for await(const event of safeModelStep(create,signal,credential.apiKey)){if(event.type==='finish'&&event.usage){metric.actualInput=event.usage.inputTokens;metric.actualOutput=event.usage.outputTokens}yield event}})()
         }
         const addOutput = (text: string) => {
           outputBytes += byteCount(text)
@@ -425,76 +438,89 @@ export class AgentHost {
           await guard()
           const currentSnapshot = await wait(this.readBound(root, input.relPath))
           const source = currentSnapshot.content
-          if (source !== policySource) {
-            historicalChapters=await wait(this.deps.ledger.contexts(input.relPath))
-            policy = scoped ? await wait(scoped.contextPolicy(source, signal,historicalChapters)) : await wait(historicalContextPolicy(source, async () => false, undefined, historicalChapters, dep => memory?.validateDependency(dep) ?? Promise.resolve(false)))
-            policySource = source
-          }
+          historicalChapters=await wait(this.deps.ledger.contexts(input.relPath))
+          for(const chapter of historicalChapters)if(chapter.summaryDerived&&!await derivedAllowed([chapter.taskId??chapter.sourceId]))chapter.eligible=false
+          const basis=summaryHash(JSON.stringify(historicalChapters))
+          if(summaryBasis&&summaryBasis!==basis)summary=undefined
+          summaryBasis=basis
+          // Recheck provenance even when the current note bytes did not change.
+          policy = scoped ? await wait(scoped.contextPolicy(source, signal,historicalChapters)) : await wait(historicalContextPolicy(source, async () => false, undefined, historicalChapters, dep => memory?.validateDependency(dep) ?? Promise.resolve(false)))
           const currentPrompt = promptBlock(source, id)
           if (currentPrompt.text !== submitted.text) throw Error('任务口令已被外部修改')
           const metadata = libraryToolsEnabled ? `\n本场工具来源清单（正文须经工具读取，附件和账本不可读）：${JSON.stringify(grant!.sources.map(s => ({ sourceId: s.sourceId, title: s.title, relPath: s.relPath })))}` : ''
-          const planBudget = budget - conservativeTokens(metadata) - (toolsEnabled ? conservativeTokens(JSON.stringify(toolSchemas)) : 0) - conservativeTokens(JSON.stringify(messages)) - 128
+          const planBudget = budget - conservativeTokens(metadata) - (toolsEnabled ? conservativeTokens(JSON.stringify(toolSchemas)) : 0) - conservativeTokens(JSON.stringify(messages)) - 128 - serializationPenalty
           const plan = buildHostContext({ source, chapters:historicalChapters, prompt: input.promptText, placement: currentPrompt.position, inputBudgetTokens: planBudget, countTokens: conservativeTokens, summary, memory: memory?.recall, ...policy })
           if (plan.status === 'too-large') throw Error(plan.reason)
           if (plan.status === 'needs-summary') {
+            if(!await derivedAllowed(plan.chapters.map(c=>c.taskId??c.sourceId))){summary={text:'',sourceChapterIds:[]};noteTrace('摘要覆盖曾遗忘或已越过学习水位的材料，省略派生历史；原历史保留');continue}
             const cache=this.deps.summaries?.cache,quota=Math.min(8192,Math.floor(planBudget*.3))*.25
             const cached=cache&&summaryKey?cache.select(summaryKey,plan.chapters,quota,conservativeTokens):undefined
-            if(cached&&cached.sourceChapterIds.length===plan.chapters.length){summary=cached;noteTrace(`复用历史摘要：${cached.generators?.map(g=>g.modelId+'@'+g.host).join('、')}`);continue}
+            if(cached){const resolution=resolveSummary(cached,cached.sourceChapterIds.length===plan.chapters.length?'reuse':'partial',plan.chapters);summary=resolution.summary;noteTrace(summary.text?`复用${resolution.status==='partial'?'部分':''}历史摘要：${cached.generators?.map(g=>g.modelId+'@'+g.host).join('、')}`:'摘要审计空间不足，省略较旧历史');continue}
+            const beforeSummarySteps=steps
             const generator:SummaryGenerator={modelId:credential.modelId,connection:credential.connectionId??credential.provider,host:new URL(credential.baseURL).host,time:new Date().toISOString(),format:1}
-            const generated:ContextSummary=cached??{text:'',sourceChapterIds:[],generators:[]}
+            const generated:ContextSummary={text:'',sourceChapterIds:[],generators:[]}
             const prefix=`仅整理下列获准历史，不含推理。输出以下六段，未知写“未确定”，不要输出机器元数据：${SUMMARY_SECTIONS.join('、')}。摘要不是证据，不新增事实。\n`
             if(cache&&summaryKey&&steps<limits.steps-1){const blocks=cache.valid(summaryKey,plan.chapters).filter(b=>b.level===1),siblings=blocks.filter(b=>b.dependencyKey===blocks[0]?.dependencyKey).slice(0,4)
               if(siblings.length>=4){const combined=plan.chapters.filter(c=>siblings.some(b=>b.covered.some(d=>d.id===c.sourceId))),payload=prefix+'合并以下已核验块摘要，保留六段结构：'+JSON.stringify(siblings.map(b=>b.text));let merged=''
-                if(conservativeTokens(JSON.stringify([{role:'user',content:payload}]))<=budget){await guard();scoped?.recordContext(combined.map(c=>({kind:'ledger' as const,sourceId:c.sourceId})));for await(const event of step([{role:'user',content:payload}],false,Math.max(64,Math.min(1024,Math.floor(quota))))){await guard();if(event.type==='text'){addOutput(event.text);merged+=event.text}else if(event.type==='reasoning')addOutput(event.text);else if(event.type==='tool-call')throw Error('MODEL_PROTOCOL_ERROR')}
+                const mergedAudits=siblings.map(b=>audit({text:b.text,sourceChapterIds:b.covered.map(d=>d.id),generators:[b.generator]},combined))
+                if(fits(mergedAudits)&&conservativeTokens(JSON.stringify([{role:'user',content:payload}]))<=budget){await guard();scoped?.recordContext(combined.map(c=>({kind:'ledger' as const,sourceId:c.sourceId})));for await(const event of step([{role:'user',content:payload}],false,Math.max(64,Math.min(1024,Math.floor(quota))),mergedAudits)){await guard();if(event.type==='text'){addOutput(event.text);merged+=event.text}else if(event.type==='reasoning')addOutput(event.text);else if(event.type==='tool-call')throw Error('MODEL_PROTOCOL_ERROR')}
                   if(validSummaryText(merged)){try{cache.put(summaryKey,combined,merged,generator,undefined,siblings)}catch{noteTrace('二级摘要未保存；一级与原历史保持')}}
                 }
               }
             }
             for(const group of summaryGroups(plan.chapters).reverse()){
-              if(group.every(c=>cached?.sourceChapterIds.includes(c.sourceId)))continue
               if(steps>=limits.steps-1)break
               const prior=cache&&summaryKey?cache.prior(summaryKey,group):undefined
               const raw=JSON.stringify(group.map(c=>({id:c.sourceId,material:c.text}))),payload=prefix+(prior?'增量合并；保留仍成立的信息。旧摘要：'+prior.text+'\n':'从原记录重建。\n')+raw
-              if(conservativeTokens(JSON.stringify([{role:'user',content:payload}]))>budget)continue
+              const priorAudits=prior?[audit({text:prior.text,sourceChapterIds:prior.covered.map(d=>d.id),generators:[prior.generator]},group)]:[]
+              if(!fits(priorAudits)||conservativeTokens(JSON.stringify([{role:'user',content:payload}]))>budget)continue
               await guard();const refs=group.map(c=>({kind:'ledger' as const,sourceId:c.sourceId}));scoped?.recordContext(refs)
               if(currentSnapshot.sessionId&&currentSnapshot.objectVersion)materials.context(source,refs,{...currentSnapshot,sessionId:currentSnapshot.sessionId,objectVersion:currentSnapshot.objectVersion,relPath:input.relPath},scoped?.contextDependencies,historicalChapters)
               let text=''
-              for await(const event of step([{role:'user',content:payload}],false,Math.max(64,Math.min(1024,this.outputBudget(credential.contextTokens),Math.floor(quota))))){await guard();if(event.type==='text'){addOutput(event.text);text+=event.text}else if(event.type==='reasoning')addOutput(event.text);else if(event.type==='tool-call')throw Error('MODEL_PROTOCOL_ERROR')}
-              if(!validSummaryText(text)&&steps<limits.steps-1){const repair=prefix+'只修复这份草稿的六段格式，不增添事实：'+text;text='';for await(const event of step([{role:'user',content:repair}],false,1024)){await guard();if(event.type==='text'){addOutput(event.text);text+=event.text}else if(event.type==='reasoning')addOutput(event.text);else if(event.type==='tool-call')throw Error('MODEL_PROTOCOL_ERROR')}}
+              for await(const event of step([{role:'user',content:payload}],false,Math.max(64,Math.min(1024,this.outputBudget(credential.contextTokens),Math.floor(quota))),priorAudits)){await guard();if(event.type==='text'){addOutput(event.text);text+=event.text}else if(event.type==='reasoning')addOutput(event.text);else if(event.type==='tool-call')throw Error('MODEL_PROTOCOL_ERROR')}
+              if(!validSummaryText(text)&&steps<limits.steps-1){const repair=prefix+'只修复这份草稿的六段格式，不增添事实：'+text,repairAudits=[audit({text,sourceChapterIds:group.map(c=>c.sourceId),generators:[generator]},group)];if(!fits(repairAudits)){noteTrace('格式修复审计空间不足，省略旧历史');continue}text='';for await(const event of step([{role:'user',content:repair}],false,1024,repairAudits)){await guard();if(event.type==='text'){addOutput(event.text);text+=event.text}else if(event.type==='reasoning')addOutput(event.text);else if(event.type==='tool-call')throw Error('MODEL_PROTOCOL_ERROR')}}
               if(!validSummaryText(text)){noteTrace('历史摘要格式不合格，保留回答步骤并省略对应历史');continue}
               if((await wait(this.readBound(root,input.relPath))).content!==source){summary=undefined;continue contextLoop}
               if(cache&&summaryKey){try{cache.put(summaryKey,group,text,generator,prior)}catch{noteTrace('摘要缓存未保存；原历史未改动')}}
               if(conservativeTokens(generated.text+'\n'+text)<=quota){generated.text+='\n'+text;generated.sourceChapterIds.push(...group.map(c=>c.sourceId));generated.generators!.push(generator)}
             }
             summary=cache&&summaryKey?cache.select(summaryKey,plan.chapters,quota,conservativeTokens)??generated:generated
-            noteTrace(summary.text?'历史摘要已生成；元数据由程序核验':'历史预算不足，省略较旧历史，保留回答步骤')
+            const resolution=resolveSummary(summary,summary.text?(summary.sourceChapterIds.length===plan.chapters.length?'generated':'partial'):(steps>beforeSummarySteps?'failure':'noop'),plan.chapters)
+            summary=resolution.summary
+            noteTrace(summary.text?'历史摘要已生成；元数据由程序核验':`历史摘要${resolution.status==='failure'?'生成失败':resolution.status==='omitted'?'因审计空间省略':'未新增覆盖'}，省略较旧历史并保留回答步骤`)
             continue
           }
-          usedSummaries=summary?.generators??[]
+          const outgoingAudits=summary&&plan.refs.some(r=>r.kind==='summary')?[audit(summary,historicalChapters??[])]:[]
+          if(!fits(outgoingAudits)){if(!outgoingAudits.length)throw Error('LEDGER_RECORD_LIMIT');summary={text:'',sourceChapterIds:[]};noteTrace('摘要审计空间不足，省略较旧历史');continue}
           const omitted = plan.omitted.bodyBlockNumbers.length || plan.omitted.ledgerChapterIds.length
-            ? `\n省略：正文块 ${plan.omitted.bodyBlockNumbers.join(', ') || '无'}；账本章 ${plan.omitted.ledgerChapterIds.join(', ') || '无'}。` : ''
+            ? `\n省略：正文 ${plan.omitted.bodyBlockNumbers.length} 块；账本 ${plan.omitted.ledgerChapterIds.length} 章。` : ''
           const memoryOmitted = plan.omitted.memoryIds.length ? `\n按需记忆因预算省略 ${plan.omitted.memoryIds.length} 条。` : ''
           if (plan.omitted.memoryIds.length) noteTrace(`按需记忆省略：${plan.omitted.memoryIds.slice(0,8).join('、')}${plan.omitted.memoryIds.length > 8 ? ` 等 ${plan.omitted.memoryIds.length} 条` : ''}（预算）`)
           const outgoing: ModelMessage[] = [{ role: 'user', content: `${plan.content}${omitted}${memoryOmitted}${metadata}` }, ...messages]
+          const serializedCost=conservativeTokens(JSON.stringify(outgoing))+(toolsEnabled?conservativeTokens(JSON.stringify(toolSchemas)):0)
+          if(serializedCost>budget){serializationPenalty+=serializedCost-budget+64;continue}
           if ((await wait(this.readBound(root, input.relPath))).content !== source) { summary = undefined; continue }
           scoped?.recordContext(plan.refs)
           if (currentSnapshot.sessionId && currentSnapshot.objectVersion) materials.context(source, plan.refs, { ...currentSnapshot, sessionId: currentSnapshot.sessionId, objectVersion: currentSnapshot.objectVersion, relPath: input.relPath }, scoped?.contextDependencies,historicalChapters)
           memory?.stage(plan.memoryIds)
+          if(!fits(outgoingAudits)){if(!outgoingAudits.length)throw Error('LEDGER_RECORD_LIMIT');summary={text:'',sourceChapterIds:[]};noteTrace('摘要依赖或审计空间不足，省略较旧历史');continue}
           await guard()
           if ((await wait(this.readBound(root, input.relPath))).content !== source) { summary = undefined; continue }
           await guard()
           const parts: AssistantContent = []
           const calls: Extract<ModelStepEvent, { type: 'tool-call' }>[] = []
           let finishReason: string | undefined
-          for await (const event of step(outgoing, toolsEnabled, this.outputBudget(credential.contextTokens))) {
+          for await (const event of step(outgoing, toolsEnabled, this.outputBudget(credential.contextTokens),outgoingAudits)) {
             if (event.type === 'reasoning') {
               if (finishReason) throw Error('MODEL_PROTOCOL_ERROR')
               if (reasoning.length < 16000) reasoning += event.text
             } else if (event.type === 'text') {
               if (finishReason) throw Error('MODEL_PROTOCOL_ERROR')
-              if (signal.aborted) { answer += event.text; break }
+              if (signal.aborted) { answer = encodedAnswerPrefix(answer+event.text); break }
               await guard(); addOutput(event.text)
-              answer += event.text
+              const candidate=answer+event.text,prefix=encodedAnswerPrefix(candidate)
+              answer=prefix
+              if(prefix!==candidate){snapshot('running');throw Error('MODEL_OUTPUT_LIMIT')}
               parts.push({ type: 'text', text: event.text })
               snapshot('running')
               if (Date.now() - lastCheckpoint > 750) await wait(checkpoint())
@@ -571,13 +597,13 @@ export class AgentHost {
         // Finalize even on cancellation; no generated bytes are lost if a late write conflicts.
         noteTrace(`收尾：${status}${reason ? `（${String(reason)}）` : ''}`)
         try{if(reasoning)this.deps.onReasoning?.(id,reasoning)}catch{noteTrace('短期推理未保存，回答不受影响')}
-        const finalSource = {material:materials.snapshot(),metrics,summaryGenerators:usedSummaries,
+        const finalSource = {material:materials.snapshot(),metrics,sentSummaries,
           taskId: id, startedAt, status, prompt: input.promptText, answer,
           ...(reason ? { reason: String(reason) } : {}),
           ...(reasoning ? { reasoning } : {}),
           ...(trace.length ? { trace } : {}),
           ...(assistantLine ? { assistant: assistantLine } : {}),
-          ...({provenance:{version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies() ?? []),...(scoped?.memoryDependencies?.() ?? [])].map(dep=>[dep.id,dep])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:scoped?.dependencies() ?? [],sentSources:scoped?.sentSources() ?? [],tools:[...(scoped?.summary() ?? []),...(memorySearchCalls?[{name:'search_memory',outcome:`执行 ${memorySearchCalls} 次，失败 ${memorySearchFailures} 次`}]:[]),...memoryToolOutcomes,... [...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`拒绝 ${label.split(':')[1]} × ${count}`}))]}})
+          provenance:recordProvenance(sentSummaries)
         }
         try {
           const revision = await this.finishWrite(root, input.relPath, finalSource, persisted, savedMaterial)

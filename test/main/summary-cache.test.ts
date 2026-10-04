@@ -20,3 +20,12 @@ it('limits incremental updates and preserves disjoint coverage on selection',()=
  const selected=cache.select(key,chapters,4096,s=>s.length)!;expect(new Set(selected.sourceChapterIds).size).toBe(selected.sourceChapterIds.length)
  cache.invalidate(key);expect(cache.select(key,chapters,4096,s=>s.length)).toBeUndefined()
 })
+it('counts JSON escapes and repeated dispatches in the pre-send audit allowance',async()=>{
+ const {summaryAuditFits,encodedAnswerPrefix,ANSWER_JSON_BYTES,TASK_RECORD_BYTES,TASK_METADATA_RESERVE}=await import('../../src/main/context-budget.ts')
+ const snapshot={step:1,text:'\u0000'.repeat(30000),sourceChapterIds:['old'],generators:[generator],dependencies:[{sourceId:'old',hash:summaryHash('old')}]}
+ expect(Buffer.byteLength(snapshot.text)*2).toBeLessThan(252*1024)
+ expect(summaryAuditFits([snapshot])).toBe(true);expect(summaryAuditFits([snapshot,{...snapshot,step:2}])).toBe(false)
+ const answer=encodedAnswerPrefix('\\'.repeat(600000));expect(Buffer.byteLength(JSON.stringify(answer))).toBeLessThanOrEqual(ANSWER_JSON_BYTES)
+ const envelope={version:1,noteId:'a'.repeat(128),taskId:'t'.repeat(128),sequence:Number.MAX_SAFE_INTEGER,revision:Number.MAX_SAFE_INTEGER,state:'saved',bodyStatus:'present',chapter:{answer,sentSummaries:[snapshot],reservedMetadata:'m'.repeat(TASK_METADATA_RESERVE-64)}}
+ expect(Buffer.byteLength(JSON.stringify(envelope))).toBeLessThanOrEqual(TASK_RECORD_BYTES)
+})

@@ -285,6 +285,7 @@ export class VaultSession {
   }
   async ledgerComplete(relPath:string,taskId:string,revision:string){const token=this.captureSession();const result=await this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.complete(relPath,taskId,revision)});this.scheduleLedgerCompression(relPath,token);return result}
   async ledgerKey(relPath:string){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);return this.memoryContext().vaultKey+':'+(this.ledgerStore!.lookupOwner(relPath)?.noteId??'unregistered:'+relPath)})}
+  async summaryMaterials(relPath:string,taskIds:readonly string[],requiredBodyIds:readonly string[]=[]){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.summaryMaterials(relPath,taskIds,requiredBodyIds)}
   async ledgerContexts(relPath:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.contexts(relPath)}
   async ledgerPage(relPath:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);return {...this.ledgerStore!.wirePage(relPath,cursor),...(this.ledgerFailure?{maintenanceError:this.ledgerFailure}:{})}})}
 

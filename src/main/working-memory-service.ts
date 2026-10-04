@@ -158,6 +158,16 @@ export class WorkingMemoryService{
   if(record.state!=='saved'||!record.chapter||!chapter)throw Error('MEMORY_JOB_UNAVAILABLE');const c=record.chapter,material=c.material??{fragments:[],truncated:true},ledgerHash=hash(chapter.text.trimEnd())
   return {taskId,context,origin:{relPath,sessionId:context.sessionId,objectVersion:note.objectVersion,revision:note.revision},status:c.status,prompt:c.prompt,answer:c.answer,ledgerHash,materialVersion:hash(JSON.stringify([taskId,ledgerHash,material])),material,sourceDeps:c.provenance?.sources??[],memoryDeps:c.provenance?.version===2?c.provenance.memoryDeps:[]}
  }
+ /** Derived history obeys forgetting even when the original task never used memory. */
+ async summaryAllowed(relPath:string,taskIds:readonly string[]):Promise<boolean>{
+  try{
+   this.context();const basis=this.vault.memorySnapshot(),record=basis.record
+   const forgotten=new Set(record.forgotten.flatMap(f=>f.materialIds))
+   if(forgotten.size||record.watermark>0){const covered=await this.vault.summaryMaterials(relPath,taskIds,[...forgotten].filter(id=>!id.endsWith('/prompt')));this.context();if(covered.ceiling<record.watermark||covered.materialIds.some(id=>forgotten.has(id))||covered.sequences.some(sequence=>sequence<=record.watermark))return false}
+   // A concurrent forget/reset cannot be approved using the earlier control snapshot.
+   this.context();return this.vault.memorySnapshot().revision===basis.revision
+  }catch{return false}
+ }
  async sourceForPrompt(relPath:string,taskId:string):Promise<WorkingSource>{
   this.context();const note=await this.vault.read(relPath);this.context()
   const record=await this.vault.ledgerRecord(relPath,taskId);this.context()

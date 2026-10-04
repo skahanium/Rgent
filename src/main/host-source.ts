@@ -17,9 +17,19 @@ export interface AnswerWrite {
   expectedPreviousAnswer?: string
 }
 
+/** Exact derived history sent in one model request. Duplicate dispatches remain separate. */
+export type SentSummary = {
+  step: number
+  text: string
+  sourceChapterIds: string[]
+  generators: import('./summary-cache.ts').SummaryGenerator[]
+  dependencies: {sourceId:string;hash:string;provenance?:LedgerProvenance}[]
+}
+
 export interface LedgerChapterWrite {
   material?:import('./host-material.ts').SentTaskMaterial
   metrics?:{step:number;estimatedInput:number;actualInput:number|null;actualOutput:number|null}[]
+  sentSummaries?: SentSummary[]
   summaryGenerators?:import('./summary-cache.ts').SummaryGenerator[]
   taskId: string
   startedAt: string

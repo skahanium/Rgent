@@ -1117,6 +1117,7 @@ if (ownsInstance) app.whenReady().then(() => {
     onTaskMaterialDiscarded:id=>consolidation?.discard(id),
     onTaskMaterialSaved:material=>consolidation!.handoff(material),
     onTaskMaterialResult:result=>{if(result.status!=='handed-off')consolidation?.discard(result.taskId)},
+    summaryAllowed:(relPath,taskIds)=>workingService()!.summaryAllowed(relPath,taskIds),
     memory:{context:()=>vault!.memoryContext(),config:key=>({enabled:modelConfig!.getMemoryConfig(key).vault.enabled,revision:modelConfig!.getVaultMemoryRevision(key)}),entries:ids=>workingService()!.entries(ids)},
     onReasoning:(id,text)=>reasoningStore!.write(vault!.memoryContext().vaultKey,id,text),
     summaries:{cache:contextCache,key:async relPath=>summaryHash(await vault!.ledgerKey(relPath))},

@@ -1,3 +1,4 @@
+import {conservativeTokens} from '../../src/main/context-budget.ts'
 import { describe, expect, it } from 'vitest'
 import { buildHostContext } from '../../src/main/host-context.ts'
 
@@ -160,4 +161,12 @@ it('returns unused summary reservation to complete recent history before request
  const plan=buildHostContext({source:'正文。',chapters,prompt:'继续',placement:3,inputBudgetTokens:1000,countTokens:(s:string)=>s.length})
  expect(plan.status).toBe('ready')
  if(plan.status==='ready')expect(plan.refs.filter(r=>r.kind==='ledger').map(r=>r.sourceId)).toEqual(['task-0','task-1'])
+})
+
+it.each(['中文材料。','English text and identifiers.','```ts\nconst value = "中文";\n```\n'])('reserializes Chinese English and code under each model window: %s',text=>{
+ for(const window of [2048,8192,131072]){
+  const chapters=Array.from({length:30},(_,n)=>({sourceId:'task-'+n,text:text.repeat(40)})),args={source:'落点。\n\n'+text.repeat(20),chapters,prompt:'继续',placement:0,inputBudgetTokens:window,countTokens:conservativeTokens}
+  const first=buildHostContext(args),plan=first.status==='needs-summary'?buildHostContext({...args,summary:{text:'',sourceChapterIds:[]}}):first
+  expect(plan.status).toBe('ready');if(plan.status==='ready')expect(conservativeTokens(plan.content)).toBeLessThanOrEqual(window)
+ }
 })

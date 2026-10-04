@@ -20,7 +20,7 @@ function appFor(steps: ModelStepEvent[][], options: { tools?: number; modelSteps
     validateSources: async () => { if (fault) throw Error(fault) }, assertWriteTarget: () => {}, acknowledgeOrigin: () => {}, revoke: () => { live = false }
   } as unknown as TaskGrant
   const tools = {
-    contextPolicy: async () => ({ allowedLedgerChapterIds: [], excludedAiTaskIds: [] }),
+    contextPolicy: async ():Promise<{allowedLedgerChapterIds:string[];excludedAiTaskIds:string[]}> => ({ allowedLedgerChapterIds: [], excludedAiTaskIds: [] }),
     execute: async (name: string) => { executed.push(name); return { ok: true, text: '工具正文' } },
     assertCurrent: async () => { if (fault) throw Error(fault) }, dependencies: () => [], summary: (): { name: string; outcome: string }[] => [],
     recordContext: () => {}, markSent: () => {}, sentSources: () => []
@@ -200,7 +200,7 @@ describe('Host manual read-only loop', () => {
     expect(provenance.status).toBe('valid')
     if (provenance.status === 'valid') expect(provenance.record.tools).toEqual([
       { name: 'search_library', outcome: 'INVALID_TOOL_ARGUMENTS (1)' },
-      { name: 'search_library', outcome: 'INVALID_TOOL_ARGUMENTS × 1' }
+      { name: 'search_library', outcome: '拒绝 INVALID_TOOL_ARGUMENTS × 1' }
     ])
   })
   it('rejects a tool-calls finish with no calls and never falls back', async () => {
@@ -369,4 +369,55 @@ it('retains the once handoff stamp if a later save notification throws and the t
  expect(callbacks).toEqual([task.id])
  await app.host.retryPending();await Promise.resolve()
  expect(callbacks).toEqual([task.id])
+})
+it('reserves encoded audit space before repeated summary sends and omits old history when it runs out',async()=>{
+ const {mkdtempSync,rmSync}=await import('node:fs'),{SummaryCache,summaryHash,SUMMARY_SECTIONS}=await import('../../src/main/summary-cache.ts')
+ const directory=mkdtempSync('/tmp/rgent-C-audit-'),cache=new SummaryCache(directory),key=summaryHash('note')
+ try{
+ const app=appFor([[call('one'),finish()],[call('two'),finish()],[{type:'text',text:'有效回答'},finish('stop')]])
+ app.deps.summaries={cache,key:async()=>key}
+ const provenance={version:1 as const,model:{provider:'custom',modelId:'old',endpointHost:'localhost'},scope:['a.md'],sources:[],tools:Array.from({length:60},()=>({name:'read_library',outcome:'旧记录\\"'.repeat(130)}))}
+ for(const taskId of ['old-one','old-two'])app.history.seed('a.md',{taskId,startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'旧',answer:'历史。'.repeat(2000),provenance})
+ const chapters=await app.history.ledger.contexts('a.md')
+ app.tools.contextPolicy=async()=>({allowedLedgerChapterIds:chapters.map(c=>c.sourceId),excludedAiTaskIds:[]})
+ const text=SUMMARY_SECTIONS.map(h=>h+'：缓存历史').join('\n'),generator={modelId:'cached-model',connection:'cache',host:'cache.test',time:'2026-01-01T00:00:00Z',format:1 as const}
+ cache.put(key,chapters,text,generator)
+ const task=await app.start();expect(await task.done).toEqual({status:'completed'})
+ const saved=app.history.records().at(-1)!,audit=saved.sentSummaries!
+ expect(audit).toHaveLength(1)
+ expect(audit[0]).toMatchObject({step:1,text,sourceChapterIds:['old-one','old-two'],generators:[generator]})
+ expect(audit[0]!.dependencies.map(d=>d.provenance)).toEqual([provenance,provenance])
+ expect(JSON.stringify(app.messages[0])).toContain('缓存历史');expect(JSON.stringify(app.messages[1])).not.toContain('缓存历史');expect(JSON.stringify(app.messages[2])).not.toContain('缓存历史')
+ expect(Buffer.byteLength(JSON.stringify(saved))).toBeLessThan(2*1024*1024)
+ expect(saved.metrics).toHaveLength(3)
+ }finally{rmSync(directory,{recursive:true,force:true})}
+})
+it('records every actual repeated summary dispatch rather than only its final use',async()=>{
+ const {mkdtempSync,rmSync}=await import('node:fs'),{SummaryCache,summaryHash,SUMMARY_SECTIONS}=await import('../../src/main/summary-cache.ts')
+ const directory=mkdtempSync('/tmp/rgent-C-repeat-'),cache=new SummaryCache(directory),key=summaryHash('note')
+ try{
+ const app=appFor([[call('one'),finish()],[{type:'text',text:'回答'},finish('stop')]])
+ app.deps.summaries={cache,key:async()=>key};app.history.seed('a.md',{taskId:'old',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'旧',answer:'历史。'.repeat(2000)})
+ const chapters=await app.history.ledger.contexts('a.md');app.tools.contextPolicy=async()=>({allowedLedgerChapterIds:['old'],excludedAiTaskIds:[]})
+ const text=SUMMARY_SECTIONS.map(h=>h+'：同一摘要').join('\n');cache.put(key,chapters,text,{modelId:'cached',connection:'cache',host:'cache.test',time:'2026-01-01T00:00:00Z',format:1})
+ expect(await (await app.start()).done).toEqual({status:'completed'});expect(app.history.records().at(-1)!.sentSummaries!.map(s=>[s.step,s.text])).toEqual([[1,text],[2,text]])
+ }finally{rmSync(directory,{recursive:true,force:true})}
+})
+
+it('keeps an earlier summary audit but stops forwarding its derived snapshot after permission shrinks',async()=>{
+ const {mkdtempSync,rmSync}=await import('node:fs'),{SummaryCache,summaryHash,SUMMARY_SECTIONS}=await import('../../src/main/summary-cache.ts')
+ const directory=mkdtempSync('/tmp/rgent-C-scope-'),cache=new SummaryCache(directory),key=summaryHash('note')
+ try{
+ const app=appFor([[call('one'),finish()],[{type:'text',text:'后续回答'},finish('stop')]])
+ app.deps.summaries={cache,key:async()=>key};app.history.seed('a.md',{taskId:'old',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'旧',answer:'历史。'.repeat(2000)})
+ const chapters=await app.history.ledger.contexts('a.md');let policies=0
+ app.tools.contextPolicy=async()=>({allowedLedgerChapterIds:policies++<2?['old']:[],excludedAiTaskIds:[]})
+ const text=SUMMARY_SECTIONS.map(h=>h+'：已撤权历史').join('\n');cache.put(key,chapters,text,{modelId:'cached',connection:'cache',host:'cache.test',time:'2026-01-01T00:00:00Z',format:1})
+ expect(await (await app.start()).done).toEqual({status:'completed'});expect(JSON.stringify(app.messages[0])).toContain('已撤权历史');expect(JSON.stringify(app.messages[1])).not.toContain('已撤权历史');expect(app.history.records().at(-1)!.sentSummaries).toHaveLength(1)
+ }finally{rmSync(directory,{recursive:true,force:true})}
+})
+it('ends a no-progress recording refusal before any model call',async()=>{
+ const app=appFor([[{type:'text',text:'不应发送'},finish('stop')]])
+ app.tools.summary=()=>[{name:'search_library',outcome:'x'.repeat(1025)}]
+ expect(await (await app.start()).done).toEqual({status:'failed',reason:'LEDGER_RECORD_LIMIT'});expect(app.calls()).toBe(0)
 })

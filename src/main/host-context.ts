@@ -10,6 +10,7 @@ export interface ContextChapter {
   taskId?: string
   fields?: LedgerTaskFields
   provenance?: import("./ledger-provenance.ts").LedgerProvenance
+  summaryDerived?: boolean
   eligible?: boolean
 }
 

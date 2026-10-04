@@ -6,6 +6,7 @@ export const SUMMARY_SECTIONS=['主题目标','人的要求','已完成结论','
 export const summaryHash=(s:string)=>createHash('sha256').update(s).digest('hex')
 export type SummaryGenerator={modelId:string;connection:string;host:string;time:string;format:1}
 export type SummaryBlock={id:string;level:1|2;children:string[];covered:{id:string;hash:string}[];dependencyKey:string;updates:number;text:string;generator:SummaryGenerator}
+export type SummaryResolution={status:'reuse'|'generated'|'partial'|'omitted'|'noop'|'failure';summary:ContextSummary}
 type Cache={version:1;blocks:SummaryBlock[]}
 export function summaryDependency(c:ContextChapter){return summaryHash(JSON.stringify(c.provenance??null))}
 export function summaryGroups(chapters:readonly ContextChapter[]):ContextChapter[][]{

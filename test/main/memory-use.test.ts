@@ -186,3 +186,9 @@ it('filters an unused invalid item while allowing the authorized search and cont
  const s=setup();const p=await createMemoryUsePermit(s.port,model,'无关','');s.set([{...entry('core'),status:'paused'},entry('demand','中文项目方案','demand')])
  expect((await p.search('中文')).map(e=>e.id)).toEqual(['demand']);await expect(p.assertCurrent(model)).resolves.toBeUndefined()
 })
+it('preflights staged memory dependencies without attributing an unsent selection as sent',async()=>{
+ const s=setup(),permit=await createMemoryUsePermit(s.port,model,'中文','');permit.stage(['core'])
+ expect(permit.dependencies()).toEqual([]);expect(permit.dependencies(true).map(d=>d.id)).toEqual(['core'])
+ permit.stage(['demand']);expect(permit.dependencies(true).map(d=>d.id)).toEqual(['demand']);expect(permit.dependencies()).toEqual([])
+ permit.markSent();expect(permit.dependencies().map(d=>d.id)).toEqual(['demand'])
+})

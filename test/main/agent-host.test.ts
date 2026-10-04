@@ -1,6 +1,7 @@
 import {hostLedgerFixture} from './host-ledger-fixture.ts'
 import {ledgerChapters,ledgerTaskFields} from '../../src/main/host-context.ts'
-import {SUMMARY_SECTIONS} from '../../src/main/summary-cache.ts'
+import {mkdtempSync,rmSync} from 'node:fs'
+import {SummaryCache,summaryHash,SUMMARY_SECTIONS} from '../../src/main/summary-cache.ts'
 import { describe, expect, it } from 'vitest'
 import {createScopedAgentTools} from '../../src/main/scoped-agent-tools.ts'
 import { AgentHost } from '../../src/main/agent-host.ts'
@@ -22,7 +23,8 @@ function withExistingLedger(): { source: string; range: { start: number; end: nu
 function harness(
   stream: (signal: AbortSignal, prompt: string) => AsyncIterable<string>,
   initial = '前言\n\n/写个回答\n\n后文\n',
-  assistant?: () => import('../../src/shared/assistant.ts').AssistantHabits
+  assistant?: () => import('../../src/shared/assistant.ts').AssistantHabits,
+  extra: Partial<import('../../src/main/agent-host.ts').HostDependencies> = {}
 ) {
   let content = partitionSource(initial).body
   let revision = 1
@@ -33,7 +35,7 @@ function harness(
   const systems: string[] = []
   const history=hostLedgerFixture(()=>{if(failLedgerOnce){failLedgerOnce=false;throw Error('IO_ERROR')}})
   for(const c of ledgerChapters(partitionSource(initial).ledger)){const f=ledgerTaskFields(c.text);if(f.status==='valid')history.seed('a.md',{taskId:c.taskId??c.sourceId,startedAt:new Date().toISOString(),status:'completed',prompt:f.prompt.text,answer:f.answer.text})}
-  const host = new AgentHost({ledger:history.ledger,
+  const host = new AgentHost({...extra,ledger:history.ledger,
     root: () => '/vault',
     read: async () => ({ content, revision: String(revision) }),
     write: async (_relPath, next, expected) => {
@@ -510,4 +512,64 @@ it('library plus memory outgoing retains only the authorized library metadata an
  const app=memoryToolHarness({library:true}),task=await app.run();expect(await task.done).toEqual({status:'completed'})
  const outgoing=JSON.stringify(app.requests[0].messages);expect(Object.keys(app.requests[0].tools!).sort()).toEqual(['read_library','search_library','search_memory'])
  expect(outgoing).toContain('本场工具来源清单');expect(outgoing).toContain('正文须经工具读取');expect(outgoing).toContain('b.md');expect(outgoing).not.toContain('outside.md')
+})
+
+it('reuses a valid partial cache in the production chapters path without another summary call',async()=>{
+ const directory=mkdtempSync('/tmp/rgent-C-cache-'),cache=new SummaryCache(directory),key=summaryHash('note'),prompts:string[]=[]
+ try{
+ const app=harness(async function*(_signal,prompt){prompts.push(prompt);yield '已答'},undefined,undefined,{summaries:{cache,key:async()=>key}})
+ for(const id of ['cached','uncovered'])app.history.seed('a.md',{taskId:id,startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'旧',answer:'旧记录。'.repeat(300),provenance:{version:1,model:{provider:'custom',modelId:id,endpointHost:'localhost'},scope:['a.md'],sources:[],tools:[]}})
+ const chapters=await app.history.ledger.contexts('a.md'),text=SUMMARY_SECTIONS.map(h=>h+'：已有').join('\n')
+ cache.put(key,[chapters[0]!],text,{modelId:'cached-model',host:'cached.example',connection:'cached',time:'2026-01-01T00:00:00Z',format:1})
+ const at=app.source().indexOf('/'),task=await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})
+ expect(await task.done).toEqual({status:'completed'})
+ expect(prompts.filter(p=>p.startsWith('仅整理'))).toHaveLength(0)
+ expect(prompts[0]).toContain(text.split('\n')[0])
+ const record=app.history.records().at(-1)! as import('../../src/main/host-source.ts').LedgerChapterWrite & {sentSummaries?:{step:number;text:string;sourceChapterIds:string[];dependencies:unknown[]}[]}
+ expect(record.sentSummaries).toMatchObject([{step:1,text,sourceChapterIds:['cached']}])
+ expect(record.sentSummaries![0]!.dependencies).toHaveLength(1)
+ }finally{rmSync(directory,{recursive:true,force:true})}
+})
+it('saves a valid visible prefix when control characters exceed the JSON encoded answer allowance',async()=>{
+ const app=harness(async function*(){yield '已有回答';yield '\u0000'.repeat(500000)})
+ const at=app.source().indexOf('/'),task=await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})
+ expect(await task.done).toEqual({status:'failed',reason:'MODEL_OUTPUT_LIMIT'})
+ const saved=app.history.records().at(-1)!
+ expect(saved.answer.startsWith('已有回答')).toBe(true)
+ expect(saved.answer.length).toBeLessThan(500000)
+ expect(Buffer.byteLength(JSON.stringify(saved))).toBeLessThanOrEqual(2*1024*1024)
+ expect(app.host.hasPending('/vault')).toBe(false)
+})
+
+it('ends empty and invalid production summaries with one reserved answer call',async()=>{
+ const prompts:string[]=[];const app=harness(async function*(_signal,prompt){prompts.push(prompt);yield prompt.startsWith('仅整理')?'无有效摘要':'保留回答'})
+ app.history.seed('a.md',{taskId:'old',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'旧',answer:'历史。'.repeat(300)})
+ const at=app.source().indexOf('/');expect(await (await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})).done).toEqual({status:'completed'})
+ expect(prompts.filter(p=>p.startsWith('仅整理'))).toHaveLength(2);expect(prompts.filter(p=>!p.startsWith('仅整理'))).toHaveLength(1);expect(app.history.records().at(-1)!.answer).toBe('保留回答')
+})
+it('fits the serialized omission notice for many historical chapters and still reserves one answer',async()=>{
+ let sends=0;const app=harness(async function*(_signal,prompt){sends++;yield prompt.startsWith('仅整理')?SUMMARY_SECTIONS.map(h=>h+'：概述').join('\n'):'回答完成'})
+ for(let n=0;n<100;n++)app.history.seed('a.md',{taskId:'old-'+n+'-'.repeat(115),startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'旧',answer:'历史。'.repeat(300)})
+ const at=app.source().indexOf('/'),task=await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})
+ expect(await task.done).toEqual({status:'completed'});expect(sends).toBeGreaterThanOrEqual(1);expect(app.history.records().at(-1)!.answer).toBe('回答完成')
+})
+it('omits a ledger answer derived from forgotten raw material even when original memoryDeps are empty',async()=>{
+ const prompts:string[]=[],memory={context:()=>({sessionId:'s',vaultKey:'v'}),config:()=>({enabled:false,revision:0}),entries:async()=>[],summaryAllowed:async(_path:string,ids:readonly string[])=>!ids.includes('derived')}
+ const app=harness(async function*(_signal,prompt){prompts.push(prompt);yield '新回答'},undefined,undefined,{memory})
+ const base={startedAt:'2026-01-01T00:00:00Z',status:'completed' as const,prompt:'原始要求',provenance:{version:2 as const,memoryDeps:[],model:{provider:'custom',modelId:'old',endpointHost:'localhost'},scope:['a.md'],sources:[],tools:[]}}
+ app.history.seed('a.md',{...base,taskId:'original',answer:'原始历史仍可核对'})
+ app.history.seed('a.md',{...base,taskId:'derived',answer:'FORGOTTEN_DERIVED_SNAPSHOT',sentSummaries:[{step:1,text:'已发送摘要副本',sourceChapterIds:['original'],generators:[],dependencies:[{sourceId:'original',hash:summaryHash('原始材料')}]}]})
+ const at=app.source().indexOf('/');expect(await (await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})).done).toEqual({status:'completed'})
+ expect(prompts.at(-1)).not.toContain('FORGOTTEN_DERIVED_SNAPSHOT');expect(prompts.at(-1)).toContain('原始历史仍可核对');expect(app.history.records().find(c=>c.taskId==='derived')!.answer).toBe('FORGOTTEN_DERIVED_SNAPSHOT')
+})
+it('checks forgetting before derived sends without creating any memory-use permit',async()=>{
+ const directory=mkdtempSync('/tmp/rgent-C-no-permit-'),cache=new SummaryCache(directory),key=summaryHash('note'),prompts:string[]=[]
+ try{
+ const extra={summaries:{cache,key:async()=>key},summaryAllowed:async()=>false} as Partial<import('../../src/main/agent-host.ts').HostDependencies>
+ const app=harness(async function*(_signal,prompt){prompts.push(prompt);yield '新回答'},undefined,undefined,extra)
+ app.history.seed('a.md',{taskId:'old',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'原依据',answer:'历史。'.repeat(300)})
+ const chapters=await app.history.ledger.contexts('a.md'),text=SUMMARY_SECTIONS.map(h=>h+'：FORGOTTEN_WITHOUT_PERMIT').join('\n');cache.put(key,chapters,text,{modelId:'cache',host:'cache.test',connection:'cache',time:'2026-01-01T00:00:00Z',format:1})
+ const at=app.source().indexOf('/');expect(await (await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})).done).toEqual({status:'completed'})
+ expect(prompts).toHaveLength(1);expect(prompts[0]).not.toContain('FORGOTTEN_WITHOUT_PERMIT');expect(app.history.records().at(-1)!.sentSummaries??[]).toEqual([])
+ }finally{rmSync(directory,{recursive:true,force:true})}
 })

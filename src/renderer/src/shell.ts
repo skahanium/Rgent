@@ -1463,7 +1463,7 @@ export async function start(root: HTMLElement): Promise<void> {
       try{const result=await window.rgent.ledgerGet({sessionId:captured.sessionId,objectVersion:captured.objectVersion,relPath:captured.relPath,cursor})
         if(!ledgerOpen||current()!==captured||generation!==pageGeneration)return
         if(!result.ok){message.textContent=ledgerErrorText(result.error);if(['LEDGER_REGISTRY_INVALID','LEDGER_OWNERSHIP_UNVERIFIED','LEDGER_RECOVERY_AMBIGUOUS'].includes(result.error)){const repair=document.createElement('button');repair.type='button';repair.className='settings-action';repair.textContent='在笔记库设置中核验与恢复';repair.onclick=()=>settingsOverlay.open('笔记库');ledgerBody.append(repair)}return}
-        const value=result.value;message.textContent=maintenanceFeedback+(value.gaps.length?'部分原始历史已清理。':'')+(value.maintenanceError?'后台维护未完成，历史保留；请重新核对。':'')
+        const value=result.value;message.textContent=maintenanceFeedback+(value.gaps.length?'部分历史存在清理或正文核验缺口。':'')+(value.maintenanceError?'后台维护未完成，历史保留；请重新核对。':'')
         if(value.chunk){const c=value.chunk;if(c.offset===0){chunkText='';chunkHash=c.hash;chunkOffset=0;decoder=new TextDecoder()}
           if(c.offset!==chunkOffset||c.hash!==chunkHash)throw Error('LEDGER_CONFLICT')
           const bytes=Uint8Array.from(atob(c.data),x=>x.charCodeAt(0));chunkOffset+=bytes.length;chunkText+=decoder.decode(bytes,{stream:chunkOffset<c.total})

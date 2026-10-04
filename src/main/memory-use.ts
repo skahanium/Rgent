@@ -5,6 +5,7 @@ import type { ModelCredential } from './model-config.ts'
 import type { LedgerMemoryDependency } from './ledger-provenance.ts'
 
 export type MemoryUsePort = {
+  summaryAllowed?(relPath:string,taskIds:readonly string[]):Promise<boolean>
   context(): MemoryContext
   config(vaultKey: string): { enabled: boolean; revision: number }
   /** Omit IDs only for initial selection; every call revalidates selected IDs and recursive dependencies. */
@@ -71,7 +72,7 @@ export type MemoryUsePermit = {
   validateDependency(dependency: LedgerMemoryDependency): Promise<boolean>
   stage(ids: readonly string[]): void
   markSent(): void
-  dependencies(): LedgerMemoryDependency[]
+  dependencies(includeStaged?:boolean): LedgerMemoryDependency[]
 }
 export async function createMemoryUsePermit(port: MemoryUsePort, receiver: ModelCredential, prompt: string, near: string): Promise<MemoryUsePermit> {
   const context = { ...port.context() };let config:{enabled:boolean;revision:number}
@@ -130,7 +131,7 @@ export async function createMemoryUsePermit(port: MemoryUsePort, receiver: Model
     },
     stage(ids) { staged.clear(); for (const id of required.keys()) if (!sent.has(id)&&!stagedTools.has(id)) required.delete(id); for (const id of ids) { const e = frozen.get(id); if (!e) throw Error('MEMORY_CHANGED'); required.set(id, memoryDependency(e)); staged.add(id) } },
     markSent() { for (const id of [...staged,...stagedTools]) sent.add(id); staged.clear();stagedTools.clear() },
-    dependencies: () => [...sent].map(id => structuredClone(required.get(id)!))
+    dependencies: (includeStaged=false) => [...new Set([...sent,...(includeStaged?[...staged,...stagedTools]:[])])].map(id => structuredClone(required.get(id)!))
   }
   live()
   return permit

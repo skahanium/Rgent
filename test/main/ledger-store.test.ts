@@ -197,3 +197,30 @@ it('does not present an orphan descriptor as unregistered history when the regis
  const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');store.owner('a.md');writeFileSync(path.join(root,'.rgent','registry.json'),JSON.stringify({version:1,owners:[],sequence:0}))
  expect(()=>store.page('a.md')).toThrow('LEDGER_REGISTRY_INVALID');expect(()=>store.owner('a.md')).toThrow('LEDGER_REGISTRY_INVALID')
 })
+it('decodes unchanged historical records once across pages and invalidates an external change',()=>{
+ const {root,fs,store}=fixture();writeFileSync(root+'/a.md','正文');const owner=store.owner('a.md')
+ for(let n=1;n<=42;n++)writeFileSync(root+`/.rgent/ledgers/${owner.noteId}/t${n}.json`,JSON.stringify({version:1,noteId:owner.noteId,taskId:'t'+n,revision:1,state:'legacy',bodyStatus:'unable-to-verify',sequence:0,chapter:{...task,taskId:'t'+n}}))
+ const original=JSON.parse;let decodes=0
+ JSON.parse=((raw,...args)=>{if(typeof raw==='string'&&raw.startsWith('{"version":1,"noteId":'))decodes++;return original(raw,...args)}) as typeof JSON.parse
+ try{const first=store.page('a.md');expect(decodes).toBe(84);decodes=0;store.page('a.md',first.cursor);expect(decodes).toBe(0)
+ const file=root+`/.rgent/ledgers/${owner.noteId}/t9.json`,changed=original(readFileSync(file,'utf8'));changed.chapter.answer='外部改变';writeFileSync(file,JSON.stringify(changed));expect(store.page('a.md').records.find(r=>r.taskId==='t9')?.chapter?.answer).toBe('外部改变');expect(decodes).toBe(2)
+ let reads=0;const read=fs.readSnapshot.bind(fs);fs.readSnapshot=p=>{if(/\/t\d+\.json$/.test(p))reads++;return read(p)};expect(store.contexts('a.md')).toHaveLength(42);expect(reads).toBe(42)
+ }finally{JSON.parse=original}
+})
+it('reports an unverifiable saved body as a read-only gap without changing the record',()=>{
+ const {root,store}=fixture();writeFileSync(root+'/a.md','正文');const r=store.prepare('a.md',task),file=root+`/.rgent/ledgers/${r.noteId}/${r.taskId}.json`
+ const saved={...r,state:'saved',bodyStatus:'present'};writeFileSync(file,JSON.stringify(saved));const before=readFileSync(file,'utf8')
+ const page=store.page('a.md');expect(page.records[0]?.bodyStatus).toBe('unable-to-verify');expect(page.gaps).toContain(task.taskId);expect(readFileSync(file,'utf8')).toBe(before);expect(readFileSync(root+'/a.md','utf8')).toBe('正文')
+})
+it('preserves sent summary copies through gzip and blocks them after forgetting without rewriting old answers',async()=>{
+ const {historicalContextPolicy}=await import('../../src/main/ledger-provenance.ts'),{summaryHash}=await import('../../src/main/summary-cache.ts')
+ const {root,store}=fixture();writeFileSync(root+'/a.md','正文')
+ const dependency={id:'memory',version:1,basisHashes:['a'.repeat(64)],sourceDeps:[{id:'source',version:1,hash:'b'.repeat(64),relPath:'a.md',kind:'body' as const,taskId:null}]},provenance={...task.provenance,version:2 as const,memoryDeps:[dependency]}
+ const sentSummaries=[{step:1,text:'仅审计保留的旧摘要副本',sourceChapterIds:['old'],generators:[{modelId:'old-model',host:'old.test',connection:'old',time:task.startedAt,format:1 as const}],dependencies:[{sourceId:'old',hash:summaryHash('原文'),provenance}]}]
+ const r=store.prepare('a.md',{...task,startedAt:'2026-01-01T00:00:00Z',provenance,sentSummaries}),file=root+`/.rgent/ledgers/${r.noteId}/${r.taskId}.json`;writeFileSync(file,JSON.stringify({...r,state:'saved'}))
+ const preview=store.maintenancePreview('a.md','compress');expect(store.maintain('a.md','compress',preview.records).success).toEqual([task.taskId]);expect(readFileSync(file,'utf8')).toContain('"codec":"gzip"');expect(store.getRecord('a.md',task.taskId).chapter?.sentSummaries).toEqual(sentSummaries)
+ const chapters=store.contexts('a.md');expect(chapters[0]!.text).not.toContain(sentSummaries[0]!.text)
+ expect((await historicalContextPolicy('正文',async()=>true,undefined,chapters,async()=>true)).allowedLedgerChapterIds).toEqual([task.taskId])
+ expect((await historicalContextPolicy('正文',async()=>true,undefined,chapters,async()=>false)).allowedLedgerChapterIds).toEqual([]);expect(store.getRecord('a.md',task.taskId).chapter?.answer).toBe(task.answer)
+ const clear=store.maintenancePreview('a.md','clear');store.maintain('a.md','clear',clear.records);expect(store.getRecord('a.md',task.taskId).chapter).toBeNull()
+})
