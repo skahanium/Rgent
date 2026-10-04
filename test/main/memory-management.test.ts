@@ -1,4 +1,4 @@
-import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises'
+import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises'
 import os from 'node:os';import path from 'node:path'
 import {it,expect,vi} from 'vitest'
 import {VaultSession} from '../../src/main/vault.ts'
@@ -40,4 +40,26 @@ it('a late enabled initialization cannot change config or cancel the new vault e
   await started;await vault.openVerified(b,vaultRootIdentity(b));release();expect((await old).ok).toBe(false)
   expect(setVaultMemory).not.toHaveBeenCalled();expect(cancel).not.toHaveBeenCalled()
  }finally{release?.();vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+
+it('retirement uses the existing single-use preview and leaves unknown or changed bytes intact',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-retire-manage-')),root=path.join(base,'vault');await mkdir(root)
+ const file=path.join(root,'.rgent-memory');await writeFile(file,'unknown bytes');await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{
+  await vault.memoryMutation(()=>{});const service=new WorkingMemoryService(vault,()=>null),ipc=createMemoryIpc({vault:()=>vault,service:()=>service,config:()=>null,recheck:async()=>{}}),sessionId=vault.captureSession()
+  expect((await service.view()).retirement).toBeUndefined()
+  expect(await ipc.handle('owner','maintenance',{sessionId,action:'retire',revision:'a'.repeat(64),objectVersion:'o'})).toEqual({ok:false,error:'MEMORY_RETIREMENT_UNRECOGNIZED'})
+  const legacy=JSON.stringify({version:1,entries:[],forgotten:[],jobs:[],relocations:[]});await writeFile(file,legacy)
+  const view=await service.view();expect(view.retirementFailure).toBe('MEMORY_RETIREMENT_FAILED');expect(view.retirement).toBeDefined()
+  const request={sessionId,action:'retire',revision:view.retirement!.revision,objectVersion:view.retirement!.objectVersion}
+  const preview=await ipc.handle('owner','maintenance',request);if(!preview.ok||!('id'in preview.value))throw Error('preview missing')
+  expect(preview.value.kind).toBe('retire');expect(JSON.stringify(preview.value)).not.toContain(root)
+  await writeFile(file,legacy+' ');expect(await ipc.handle('owner','commit',{sessionId,id:preview.value.id})).toEqual({ok:false,error:'MEMORY_CONFLICT'});expect(await readFile(file,'utf8')).toBe(legacy+' ')
+  expect(await ipc.handle('owner','commit',{sessionId,id:preview.value.id})).toEqual({ok:false,error:'STALE_PREVIEW'})
+  const next=await service.view(),again=await ipc.handle('owner','maintenance',{...request,revision:next.retirement!.revision,objectVersion:next.retirement!.objectVersion});if(!again.ok||!('id'in again.value))throw Error('preview missing')
+  expect(await ipc.handle('foreign','commit',{sessionId,id:again.value.id})).toEqual({ok:false,error:'STALE_PREVIEW'})
+  const fresh=await ipc.handle('owner','maintenance',{...request,revision:next.retirement!.revision,objectVersion:next.retirement!.objectVersion});if(!fresh.ok||!('id'in fresh.value))throw Error('preview missing')
+  const result=await ipc.handle('owner','commit',{sessionId,id:fresh.value.id});expect(result).toMatchObject({ok:true,value:{status:'ready'}});expect(await readFile(file,'utf8')).toBe('<!-- rgent:memory:retired:v2 -->\n');expect(vault.memoryDiagnosis()).toBeNull()
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })

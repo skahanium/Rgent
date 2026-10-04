@@ -5,6 +5,8 @@ export const MEMORY_ERROR_MESSAGES = {
   "MEMORY_INPUT_LIMIT": "本场材料太长，未新增记忆；回答与已有记忆保留，可缩小材料范围后重试。",
   "MEMORY_CONFIG_LIMIT": "记忆设置达到保存上限，本次设置未生效；请在高级维护中检查状态。",
   "MEMORY_RECEIVER_CHANGED": "整理模型或连接已改变，后续发送已停止；请检查模型设置后重试。",
+  "MEMORY_SEARCH_LIMIT": "本场四次记忆检索已用完，这次没有检索；可根据已有结果继续回答。",
+  "MEMORY_RETIREMENT_UNRECOGNIZED": "旧记忆格式无法识别，原文件保留；不能自动清除，请检查原文件。",
   "MEMORY_RETIREMENT_FAILED": "旧记忆未能清除，原文件已保留供检查；不会参与任务，请查看高级维护。",
   "MEMORY_CONFIG_INVALID": "记忆设置无法读取或使用；笔记和回答仍可使用，请检查模型设置或高级维护。",
   "MEMORY_CONFIG_CONFLICT": "记忆设置无法读取或使用；笔记和回答仍可使用，请检查模型设置或高级维护。",

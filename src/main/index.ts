@@ -6,7 +6,7 @@ import { VaultCatalog } from './vault-catalog.ts'
 import { VaultSwitch } from './vault-switch.ts'
 import type { VaultTarget } from '../shared/vault-management.ts'
 import { readFileSync } from 'node:fs'
-import {memoryDependency,sameMemoryDependency} from './memory-use.ts'
+import {memoryDependency,sameMemoryDependency,memorySnapshotSignature} from './memory-use.ts'
 import {historicalContextPolicy} from './ledger-provenance.ts'
 import {WorkingMemoryService} from './working-memory-service.ts'
 import {WorkingMemoryConsolidation} from './working-memory-consolidation.ts'
@@ -496,7 +496,7 @@ function registerIpc(): void {
       const owner = `${event.sender.id}:${event.senderFrame!.routingId}`
       const memory = memoryAuthorizationState(request.sessionId)
       const preview = await authorizations.preview(owner, request)
-      const memorySearch=!!memory.disclosure?.use&&preview.sources.length>1&&!!modelConfig&&!!agentHost?.supportsMemorySearch(modelConfig.credential(request.modelRecordId))&&(await workingService()!.entries().catch(()=>[])).some(e=>e.status==='active')
+      const memorySearch=preview.memory?.search?.available===true
       if (memoryAuthorizationState(request.sessionId).signature !== memory.signature) throw Error('STALE_PREVIEW')
       if (memoryAuthorizationPreviews.size >= 128) memoryAuthorizationPreviews.delete(memoryAuthorizationPreviews.keys().next().value!)
       memoryAuthorizationPreviews.set(`${owner}:${preview.id}`, { sessionId: request.sessionId, signature: memory.signature,search:memorySearch })
@@ -506,7 +506,7 @@ function registerIpc(): void {
       const generators=summaryCache?.valid(summaryHash(await vault!.ledgerKey(request.relPath)),chapters.filter(c=>policy.allowedLedgerChapterIds.includes(c.sourceId))).map(b=>({modelId:b.generator.modelId,host:b.generator.host,time:b.generator.time}))??[]
       vault!.assertSession(request.sessionId)
       if(memoryAuthorizationState(request.sessionId).signature!==memory.signature)throw Error('STALE_PREVIEW')
-      return {ok:true,preview:{...preview,summaryGenerators:generators.slice(0,64),...(memory.disclosure?{memory:{...memory.disclosure,search:{available:memorySearch,calls:memorySearch?4:0,sharedTools:preview.sources.length>1?modelConfig!.getPublic().limits.local.tools:0}}}:{})}}
+      return {ok:true,preview:{...preview,summaryGenerators:generators.slice(0,64)}}
     }
     catch(error){return {ok:false,error:error instanceof Error?error.message:'AUTHORIZATION_FAILED'}}
   })
@@ -1081,10 +1081,17 @@ if (ownsInstance) app.whenReady().then(() => {
     acceptsObject:(relPath,expected,current)=>vault?.acceptsObject(relPath,expected,current)??false,
     ownerValid:owner=>!!mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed() &&
       mainWindow.webContents.getURL()===rendererEntryUrl && owner===`${mainWindow.webContents.id}:${mainWindow.webContents.mainFrame.routingId}`,
-    configuration:(extraReferences, modelRecordId)=>{
+    memoryAuthorization:async request=>{
+      const state=memoryAuthorizationState(request.sessionId)
+      const entries=state.disclosure?.use?await workingService()!.entries().catch(()=>[]):[]
+      const search=!!state.disclosure?.use&&!!modelConfig&&!!agentHost?.supportsMemorySearch(modelConfig.credential(request.modelRecordId))&&entries.some(e=>e.status==='active')
+      if(memoryAuthorizationState(request.sessionId).signature!==state.signature)throw Error('STALE_PREVIEW')
+      return {signature:state.signature+':'+memorySnapshotSignature(entries),snapshotSignature:memorySnapshotSignature(entries),search,disclosure:state.disclosure}
+    },
+    configuration:(extraReferences, modelRecordId,memorySearch)=>{
       if(!modelConfig)throw Error(modelConfigError??'MODEL_CONFIG_UNAVAILABLE')
       const config=modelConfig.getPublic()
-      return {credential:modelConfig.credential(modelRecordId),limits:extraReferences ? config.limits.local : config.limits.none}
+      return {credential:modelConfig.credential(modelRecordId),limits:extraReferences||memorySearch ? config.limits.local : config.limits.none}
     }
   })
   reasoningStore=new ReasoningStore(path.join(app.getPath('userData'),'reasoning-v2'))

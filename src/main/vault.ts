@@ -22,7 +22,7 @@ import { assertLedgerPreserved, composeSource, partitionSource } from '../markdo
 import { compile } from '../markdown/index.ts'
 import { LedgerStore } from './ledger-store.ts'
 import type { LedgerChapterWrite } from './host-source.ts'
-import { retireMemoryFile } from './memory-retirement.ts'
+import { retireMemoryFile,memoryRetirementTarget } from './memory-retirement.ts'
 import type { MemoryContext } from '../shared/memory.ts'
 
 export class VaultSession {
@@ -156,6 +156,20 @@ export class VaultSession {
   }
 
   memoryDiagnosis(): string | null { this.assertCall(); return this.memoryFailure }
+
+  async memoryRetirementPreview(){
+    const sessionId=this.captureSession();await this.lifecycleReady
+    return this.mutations.run(()=>{this.assertSession(sessionId);this.requireStableStructure();const root=this.requireUsableRoot(),target=memoryRetirementTarget(root,()=>{this.assertSession(sessionId);this.requireUsableRoot()});return {...target,root,rootIdentity:this.rootIdentity!,sessionId}})
+  }
+  async memoryRetirementRetry(binding:{sessionId:string;root:string;rootIdentity:string;revision:string;objectVersion:string}){
+    this.assertSession(binding.sessionId);await this.lifecycleReady
+    return this.mutations.run(()=>{
+      const check=()=>{this.assertSession(binding.sessionId);this.requireStableStructure();if(this.requireUsableRoot()!==binding.root||this.rootIdentity!==binding.rootIdentity)throw Error('VAULT_CHANGED')}
+      check();const target=memoryRetirementTarget(binding.root,check)
+      if(target.revision!==binding.revision||target.objectVersion!==binding.objectVersion)throw Error('MEMORY_CONFLICT')
+      try{retireMemoryFile(binding.root,check);check();this.memoryFailure=null}catch(error){this.memoryFailure='MEMORY_RETIREMENT_FAILED';throw error}
+    })
+  }
 
   async tree(): Promise<TreeEntry[]> {
     const token = this.captureSession(); const root = this.requireUsableRoot()

@@ -171,7 +171,7 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
         const result = JSON.parse(body.messages.find((message: { role: string }) => message.role === 'tool').content)
         const hit = result.items.find((item: { relPath: string }) => item.relPath === 'b.md')
         emit({ tool_calls: [{ index: 0, id: 'read', type: 'function', function: { name: 'read_library', arguments: JSON.stringify({ sourceId: hit.sourceId }) } }] }); emit({}, 'tool_calls')
-      } else { emit({ reasoning_content: '隐藏推理' }); emit({ content: '已核对参考原文。' }); emit({}, 'stop') }
+      } else if(requests.length===4){emit({tool_calls:[{index:0,id:'memory',type:'function',function:{name:'search_memory',arguments:'{\"query\":\"火星\"}'}}]});emit({},'tool_calls')} else { emit({ reasoning_content: '隐藏推理' }); emit({ content: '已核对参考原文。' }); emit({}, 'stop') }
       response.end('data: [DONE]\n\n')
     })
   })
@@ -182,7 +182,8 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
   const registry = new TaskAuthorizationRegistry({ root: () => '/vault', session: () => 'session', tree: async () => Object.keys(source).map(relPath => ({ name: relPath, relPath, kind: 'note' as const })), read, tier, acceptsObject: () => false, configuration: () => ({ credential, limits }) })
   let revision = 1
   const history=hostLedgerFixture()
-  const host = new AgentHost({ledger:history.ledger, root: () => '/vault', session: () => 'session', authorize: input => registry.consume('owner', input as AgentStartRequest), read, tier,
+  const memoryEntry:import('../../src/shared/memory.ts').MemoryEntry={id:'memory',version:1,content:'火星计划约定',scope:'仅项目甲',layer:'demand',status:'active',reason:null,updatedAt:'2026-10-05',updateBasis:{kind:'manual',id:'manual',version:1},sources:[{id:'memory-source',version:1,relPath:'outside.md',objectVersion:'out',revision:'a'.repeat(64),permissionTier:'reference',kind:'body',taskId:null,taskMaterialHash:null,classification:'human',start:0,end:2,text:'依据',hash:'b'.repeat(64),basisHash:'c'.repeat(64),sourceDeps:[],memoryDeps:[]}]}
+  const host = new AgentHost({ledger:history.ledger,memory:{context:()=>({sessionId:'session',vaultKey:'v'}),config:()=>({enabled:true,revision:0}),entries:async()=>[structuredClone(memoryEntry)]}, root: () => '/vault', session: () => 'session', authorize: input => registry.consume('owner', input as AgentStartRequest), read, tier,
     write: async (path, content, expected) => { if (expected !== source[path]!.revision) throw Error('CONFLICT'); source[path] = { ...source[path]!, content, revision: String(++revision) }; return { ...source[path]! } },
     credential: () => credential, limits: () => limits, stream: (input, signal) => streamModelText({ ...input, signal }), streamStep: (input, signal) => streamModelStep({ ...input, signal }), createReadOnlyTools: (grant, id) => createScopedAgentTools(grant, id, { read, tier, acceptsObject: () => false }), emit: () => {}
   })
@@ -205,6 +206,18 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
     expect(record.record.sources.map(item => item.relPath)).toEqual(['b.md', 'c.md'])
     expect(record.record.sentSources).toEqual(['b.md'])
   }
+  expect(host.supportsMemorySearch(credential)).toBe(true)
+  expect(host.supportsMemorySearch({...credential,apiKey:'changed-secret'})).toBe(false)
+  source['a.md']={...source['a.md']!,content:source['a.md']!.content+'\n/搜索火星\n',revision:String(++revision)}
+  const current=source['a.md']!,start=current.content.indexOf('/搜索火星')
+  const memoryCommand={...command,references:[],expectedRevision:current.revision,range:{start,end:start+'/搜索火星'.length},expectedText:'/搜索火星',promptText:'搜索火星'}
+  const memoryPreview=await registry.preview('owner',memoryCommand)
+  const memoryTask=await host.start({...memoryCommand,previewId:memoryPreview.id,memorySearchAuthorized:true});expect(await memoryTask.done).toEqual({status:'completed'})
+  expect(requests).toHaveLength(5)
+  expect((requests[3]!.tools as {function:{name:string}}[]).map(t=>t.function.name)).toEqual(['search_memory'])
+  expect(JSON.stringify(requests[4])).toContain('checked-for-this-call');expect(JSON.stringify(requests[4])).toContain('仅项目甲');expect(JSON.stringify(requests[4])).not.toContain('未经本场授权内容')
+  const memoryRecord=history.records().at(-1)!.provenance;expect(memoryRecord?.version).toBe(2);if(memoryRecord?.version===2)expect(memoryRecord.memoryDeps.map(d=>d.id)).toEqual(['memory'])
+
 })
 
 it('splits an inline think block that spans stream deltas', async () => {

@@ -108,7 +108,7 @@ it('degrades initial invalid memory to an ordinary task and never blocks on a fu
 it('memory queries use the frozen snapshot and preserve tool dependencies through context restaging',async()=>{
  const s=setup(),p=await createMemoryUsePermit(s.port,model,'无关口令','')
  s.set([entry('core'),entry('demand','中文项目方案','demand'),entry('new','新增加中文','demand')])
- const result=await p.search('中文');expect(result.map(e=>e.id)).toEqual(['demand'])
+ const result=await p.search('中文');expect(result.map(e=>e.id).sort()).toEqual(['core','demand'])
  p.stage(['core']);await p.assertCurrent(model);p.markSent()
  expect(p.dependencies().map(d=>d.id).sort()).toEqual(['core','demand'])
  s.set([entry('core'),{...entry('demand','中文项目方案','demand'),status:'disabled'}])
@@ -168,4 +168,21 @@ it('shares candidate relevance across layers and the authorized source text, inc
  const old={...entry('old','火星项目交付日期为十月一日','core'),semantic:'fact' as const,attribution:'旧项目纪要'}
  const unrelated=Array.from({length:8},(_,i)=>entry(`other-${i}`,'音乐节奏训练规则','core'))
  expect(rankMemoryEntries([...unrelated,old], '核对最新说明','火星项目交付日期已经改为十月三日。').map(e=>e.id)).toEqual(['old'])
+})
+
+it('searches authorized core overflow as well as demand with one bounded current proof',async()=>{
+ const {conservativeTokens}=await import('../../src/main/context-budget.ts'),filler=entry('filler','')
+ filler.content='别'.repeat(Math.floor((2048-conservativeTokens(memorySection(filler)))/2))
+ const s=setup();s.set([filler,entry('core','中文项目核心'),entry('demand','中文项目方案','demand')]);const p=await createMemoryUsePermit(s.port,model,'无关','')
+ expect(p.recall.core.some(e=>e.id==='core')).toBe(false)
+ expect((await p.search('中文')).map(e=>e.id).sort()).toEqual(['core','demand'])
+})
+it('rejects a previously selected memory dependency whose source became invalid before search continuation',async()=>{
+ const s=setup();const p=await createMemoryUsePermit(s.port,model,'无关','');p.stage(['core']);s.set([{...entry('core'),status:'paused'},entry('demand','中文项目方案','demand')])
+ await expect(p.assertCurrent(model)).rejects.toThrow('MEMORY_CHANGED')
+})
+
+it('filters an unused invalid item while allowing the authorized search and continuation',async()=>{
+ const s=setup();const p=await createMemoryUsePermit(s.port,model,'无关','');s.set([{...entry('core'),status:'paused'},entry('demand','中文项目方案','demand')])
+ expect((await p.search('中文')).map(e=>e.id)).toEqual(['demand']);await expect(p.assertCurrent(model)).resolves.toBeUndefined()
 })

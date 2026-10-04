@@ -34,7 +34,7 @@ function sources(host:HTMLElement,items:MemorySourceView[]):void{
 export type MemoryPreviewHandlers={commit:(request:Omit<MemoryCommitRequest,'sessionId'>)=>Promise<MemoryResult<MemoryView>>;isCurrent:()=>boolean;onDone:(view:MemoryView)=>void;onCancel:()=>void}
 /** Used inline for management and in the existing overlay for a body/ledger selection. */
 export function renderMemoryPreview(host:HTMLElement,preview:MemoryPreview,handlers:MemoryPreviewHandlers):void{
-  const panel=el('section','memory-preview'),heading=el('h3','settings-section-title');heading.textContent=({manual:'记住这段内容',retry:'重新整理这场任务',confirm:'确认记忆内容',undo:'撤销本场记忆变更',watermark:'不再从已有材料学习', 'reset-config':'重置本设备的记忆设置',reset:'清空本库记忆',restore:'恢复使用这条记忆'})[preview.kind];panel.append(heading)
+  const panel=el('section','memory-preview'),heading=el('h3','settings-section-title');heading.textContent=({manual:'记住这段内容',retry:'重新整理这场任务',confirm:'确认记忆内容',undo:'撤销本场记忆变更',watermark:'不再从已有材料学习', 'reset-config':'重置本设备的记忆设置',reset:'清空本库记忆',restore:'恢复使用这条记忆',retire:'清除旧记忆'})[preview.kind];panel.append(heading)
   if(preview.previousContent!==undefined)panel.append(paragraph(`当前内容：${preview.previousContent}`,'memory-source-text'))
   const content=el('textarea');content.rows=4;content.value=preview.content;content.maxLength=4096;content.readOnly=preview.kind!=='manual';content.setAttribute('aria-label','将记住的内容')
   const layer=layerSelect(preview.layer),scope=el('input');scope.value=preview.scope;scope.maxLength=512
@@ -45,7 +45,7 @@ export function renderMemoryPreview(host:HTMLElement,preview:MemoryPreview,handl
   if(preview.limits)panel.append(paragraph(`最多用时 ${preview.limits.seconds} 秒，最多请求模型 ${preview.limits.calls} 次，不调用工具。`))
   const error=paragraph('','settings-error');error.setAttribute('role','alert');error.hidden=true
   const actions=el('div','settings-actions')
-  const confirm=button(({manual:'确认记住',retry:'确认重新整理',confirm:'确认内容',undo:'确认撤销变更',watermark:'确认停止旧材料学习','reset-config':'确认重置记忆设置',reset:'确认清空记忆',restore:'确认恢复使用'})[preview.kind],()=>{
+  const confirm=button(({manual:'确认记住',retry:'确认重新整理',confirm:'确认内容',undo:'确认撤销变更',watermark:'确认停止旧材料学习','reset-config':'确认重置记忆设置',reset:'确认清空记忆',restore:'确认恢复使用',retire:'确认清除旧记忆'})[preview.kind],()=>{
     if(preview.kind==='manual'&&!content.value.trim()){error.textContent='请输入将记住的内容；草稿及预览仍保留。';error.hidden=false;return}
     confirm.disabled=true;error.hidden=true
     const request:Omit<MemoryCommitRequest,'sessionId'>={id:preview.id,...(preview.kind==='manual'?{content:content.value,layer:layer.value as 'core'|'demand',scope:scope.value}:{})}
@@ -55,7 +55,7 @@ export function renderMemoryPreview(host:HTMLElement,preview:MemoryPreview,handl
       else {error.textContent=`${memoryErrorText(result.error)} 本次预览已失效，请重新预览后确认；草稿保留在此。`;error.hidden=false}
     }).catch(()=>{if(handlers.isCurrent()){error.textContent='确认结果未能读取，本次预览已失效；请重新预览，草稿保留在此。';error.hidden=false}})
   })
-  if(preview.kind==='reset'||preview.kind==='reset-config')confirm.classList.add('memory-danger')
+  if(preview.kind==='reset'||preview.kind==='reset-config'||preview.kind==='retire')confirm.classList.add('memory-danger')
   actions.append(confirm,button('取消',handlers.onCancel));panel.append(actions,error);host.append(panel)
 }
 export type MemoryPageHandlers={
@@ -191,10 +191,11 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
   }
   function paintMaintenance():void{
     if(!view)return
-    const signature=JSON.stringify([view.learning,view.diagnosis,view.configDiagnosis,view.status])
+    const signature=JSON.stringify([view.learning,view.diagnosis,view.configDiagnosis,view.status,view.retirementFailure,view.retirement])
     if(maintenance.dataset.signature===signature)return
     maintenance.dataset.signature=signature;maintenance.replaceChildren()
     maintenance.append(paragraph('这些操作只在需要时使用。清空或重置前，会先展示具体影响供你确认。'))
+    if(view.retirementFailure){maintenance.append(paragraph(memoryErrorText(view.retirementFailure)));if(view.retirement)maintenance.append(button('重试清除旧记忆…',()=>void preview(maintenance,()=>handlers.maintenance({action:'retire',revision:view!.retirement!.revision,objectVersion:view!.retirement!.objectVersion}))))}
     if(view.learning){maintenance.append(paragraph('保留现有记忆，阻止已登记的旧材料自动重新生成记忆；之后的新材料与手动“记住”仍可建立记忆。'))
       const range=el('details','memory-technical');range.append(Object.assign(el('summary'),{textContent:'学习范围详情'}),paragraph(`已停止自动学习的材料编号上限：${view.learning.watermark}；目前登记的材料编号上限：${view.learning.nextSequence}。`));maintenance.append(range)
       maintenance.append(button('不再从已有材料学习…',()=>void preview(maintenance,()=>handlers.maintenance({action:'watermark',revision:view!.revision,objectVersion:view!.objectVersion,watermark:view!.learning!.nextSequence}))))}

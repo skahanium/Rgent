@@ -246,3 +246,8 @@ it('leaves an editable human paragraph after a streamed answer at EOF without ch
  expect(answer.endsWith('回答\n\n')).toBe(true)
  expect(upsertAiAnswer(answer,{taskId,answer:'回答更多',expectedPreviousAnswer:'回答'}).endsWith('回答更多\n\n')).toBe(true)
 })
+
+it('localizes memory retrieval in the readable ledger tool summary',()=>{
+ const result=appendLedgerChapter('正文\n',{taskId:'memory-tool',startedAt:'now',status:'completed',prompt:'问',answer:'答',provenance:{version:2,memoryDeps:[],model:{provider:'custom',modelId:'m',endpointHost:'model.test'},scope:['a.md'],sources:[],tools:[{name:'search_memory',outcome:'执行 1 次；m@1；摘要 火星约定'}]}})
+ expect(result).toContain('检索记忆：执行 1 次');expect(result).not.toContain('search_memory：')
+})

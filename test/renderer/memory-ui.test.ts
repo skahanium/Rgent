@@ -249,3 +249,14 @@ it('renders simultaneous invalid memory, retirement failure and invalid material
  const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,status:'invalid',reason:'MEMORY_STORAGE_INVALID',materialStatus:'invalid',retirementFailure:'MEMORY_RETIREMENT_FAILED'}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
  expect(body.textContent).toContain('旧记忆未能清除');expect(body.textContent).toContain('材料登记无法核验');expect(body.textContent).toContain('清空和推进学习进度已停止');expect(body.textContent).not.toContain('MEMORY_RETIREMENT_FAILED');dispose();body.remove()
 })
+
+it('offers a retirement preview for a verified legacy object while keeping unknown files diagnostic',async()=>{
+ for(const retryable of [true,false]){
+  const body=document.createElement('div');document.body.append(body);const maintenance=vi.fn(async()=>({ok:false,error:'MEMORY_CONFLICT'}))
+  const diagnosis={revision:'a'.repeat(64),objectVersion:'old',bytes:50}
+  const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,retirementFailure:'MEMORY_RETIREMENT_FAILED',retirement:retryable?diagnosis:undefined}}),models:async()=>({ok:false,error:'IO_ERROR'}),maintenance} as never);await flush()
+  const retry=Array.from(body.querySelectorAll<HTMLButtonElement>('button')).find(b=>b.textContent==='重试清除旧记忆…');expect(!!retry).toBe(retryable)
+  if(retry){retry.click();await flush();expect(maintenance).toHaveBeenCalledWith({action:'retire',revision:diagnosis.revision,objectVersion:diagnosis.objectVersion})}
+  dispose();body.remove()
+ }
+})

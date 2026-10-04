@@ -28,3 +28,9 @@ it('maintenance cannot add arbitrary paths or reuse an undo preview as a waterma
  expect(parseMemoryRequest('maintenance',{...r,root:'/vault'})).toBeNull()
  expect(parseMemoryRequest('maintenance',{...r,action:'reset-config'})).toBeNull()
 })
+
+it('accepts only a bound retirement maintenance action without widening paths or material choices',()=>{
+ const request={sessionId:'s',action:'retire',revision:'a'.repeat(64),objectVersion:'o'}
+ expect(parseMemoryRequest('maintenance',request)).toEqual(request)
+ for(const change of [{root:'/v'},{relPath:'x.md'},{watermark:1},{taskId:'x'},{revision:null},{objectVersion:null}])expect(parseMemoryRequest('maintenance',{...request,...change})).toBeNull()
+})

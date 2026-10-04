@@ -72,6 +72,7 @@ export type MemoryView = {
   learning?:{watermark:number;nextSequence:number}
   materialStatus?:'verified'|'empty'|'invalid'
   retirementFailure?:string
+  retirement?:{revision:string;objectVersion:string;bytes:number}
   configDiagnosis?: {revision:string|null;bytes:number}
   diagnosis?:{revision:string|null;objectVersion:string|null;bytes:number}
 }
@@ -93,7 +94,7 @@ export type MemoryManualRequest = MemorySessionRequest & {
 }
 export type MemoryJobRequest = MemorySessionRequest & { taskId: string; materialVersion: string }
 export type MemoryPreview = {
-  id: string; sessionId: string; kind: 'manual' | 'restore' | 'confirm' | 'retry'|'watermark'|'reset'|'reset-config'|'undo'
+  id: string; sessionId: string; kind: 'manual' | 'restore' | 'confirm' | 'retry'|'watermark'|'reset'|'reset-config'|'undo'|'retire'
   content: string; layer: MemoryEntry['layer']; scope: string
   sources: MemorySourceView[]; warning: string
   previousContent?: string
@@ -103,4 +104,4 @@ export type MemoryPreview = {
 export type MemoryCommitRequest = MemorySessionRequest & {
   id: string; content?: string; layer?: MemoryEntry['layer']; scope?: string
 }
-export type MemoryMaintenanceRequest=MemorySessionRequest&{action:'watermark'|'reset'|'reset-config'|'undo';taskId?:string;materialVersion?:string;revision:string|null;objectVersion:string|null;watermark?:number}
+export type MemoryMaintenanceRequest=MemorySessionRequest&{action:'watermark'|'reset'|'reset-config'|'undo'|'retire';taskId?:string;materialVersion?:string;revision:string|null;objectVersion:string|null;watermark?:number}

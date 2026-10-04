@@ -435,3 +435,65 @@ it('waits for launching to settle, rejects the now-active task, and never queues
   await app.host.withLedgerRecovery('resume', async () => { ran = true })
   expect(ran).toBe(true)
 })
+
+function memoryToolHarness(options:{calls?:{id:string;name:string;input:unknown}[];verified?:boolean;empty?:boolean;tools?:number;steps?:number;proof?:()=>void|Promise<void>;change?:()=>void}={}){
+ let content='/问\n',revision=1,dispatches=0,proofReads=0,enabled=true,entriesVersion=1,paused=false
+ const history=hostLedgerFixture(),requests:Parameters<NonNullable<import('../../src/main/agent-host.ts').HostDependencies['streamStep']>>[0][]=[]
+ const credential={provider:'custom' as const,baseURL:'https://model.example/v1',modelId:'m',contextTokens:32000,apiKey:'fixture'}
+ const source={id:'s',version:1,relPath:'outside.md',objectVersion:'outside',revision:'a'.repeat(64),permissionTier:'reference' as const,kind:'body' as const,taskId:null,taskMaterialHash:null,classification:'human' as const,start:0,end:2,text:'依据',hash:'b'.repeat(64),basisHash:'c'.repeat(64),sourceDeps:[],memoryDeps:[]}
+ const memory={context:()=>({sessionId:'s',vaultKey:'v'}),config:()=>({enabled,revision:enabled?0:1}),entries:async(ids?:readonly string[])=>{const result=options.empty?[]:[{id:'m',version:entriesVersion,content:'火星计划约定',layer:'demand' as const,scope:'仅项目甲',attribution:'人的约定',status:paused?'paused' as const:'active' as const,reason:null,updatedAt:'2026-10-05',updateBasis:{kind:'manual' as const,id:'manual',version:1},sources:[source]}];if(ids){proofReads++;if(proofReads===1)await options.proof?.()}return result}}
+ const grant={id:'g',root:'/v',sessionId:'s',origin:'a.md',sources:[{sourceId:'origin',relPath:'a.md',title:'a',sessionId:'s',objectVersion:'o',revision:'1',fingerprint:'f',tier:'reference' as const}],credential,limits:{seconds:30,steps:options.steps??12,tools:options.tools??20},assertActive(){},async assertLive(){},async validateSources(){},assertWriteTarget(){},acknowledgeOrigin(){},revoke(){}}
+ const host=new AgentHost({ledger:history.ledger,root:()=>'/v',session:()=> 's',read:async()=>({content,revision:String(revision),sessionId:'s',objectVersion:'o'}),write:async(_path,next,expected)=>{if(expected!==String(revision))throw Error('CONFLICT');content=next;return String(++revision)},tier:async()=> 'reference',credential:()=>credential,limits:()=>grant.limits,authorize:async()=>grant,memory,stream:async function*(){throw Error('OLD_STREAM')},streamStep:async function*(input){requests.push(structuredClone(input));dispatches++;if(dispatches===1){for(const c of options.calls??[{id:'one',name:'search_memory',input:{query:'火星'}}])yield {type:'tool-call',...c};yield {type:'finish',reason:'tool-calls'}}else {options.change?.();yield {type:'text',text:'已答'};yield {type:'finish',reason:'stop'}}},emit:()=>{}})
+ if(options.verified!==false)host.supportsMemorySearch=()=>true
+ const run=()=>host.start({relPath:'a.md',sessionId:'s',objectVersion:'o',expectedRevision:'1',range:{start:0,end:2},expectedText:'/问',promptText:'问',memorySearchAuthorized:true})
+ return {host,history,requests,run,proofReads:()=>proofReads,content:()=>content,off:()=>{enabled=false},forget:()=>{entriesVersion++},pause:()=>{paused=true}}
+}
+it('registers only search_memory for a verified note-only task and records real sent dependencies',async()=>{
+ const app=memoryToolHarness();const task=await app.run();expect(await task.done).toEqual({status:'completed'})
+ expect(Object.keys(app.requests[0].tools!)).toEqual(['search_memory']);expect(JSON.stringify(app.requests[1].messages)).toContain('仅项目甲');expect(JSON.stringify(app.requests[1].messages)).toContain('sourceChecked')
+ const provenance=app.history.records().at(-1)?.provenance;expect(provenance?.version).toBe(2);if(provenance?.version===2)expect(provenance.memoryDeps.map(d=>[d.id,d.version])).toEqual([['m',1]])
+ expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('检索记忆')
+})
+it('refuses invalid parameters and duplicate IDs before spending the four memory executions',async()=>{
+ const calls=[{id:'bad',name:'search_memory',input:{query:''}},{id:'one',name:'search_memory',input:{query:'火星'}},{id:'one',name:'search_memory',input:{query:'火星'}},...['two','three','four','five'].map(id=>({id,name:'search_memory',input:{query:'火星'}}))]
+ const app=memoryToolHarness({calls});const task=await app.run();expect(await task.done).toEqual({status:'completed'})
+ const output=JSON.stringify(app.requests[1].messages);expect(output).toContain('DUPLICATE_TOOL_CALL');expect(output).toContain('INVALID_TOOL_ARGUMENTS');expect(output).toContain('MEMORY_SEARCH_LIMIT')
+ expect(app.history.records().at(-1)?.provenance?.tools?.find(t=>t.name==='search_memory')?.outcome).toContain('执行 4 次')
+})
+it('stops a note-only memory task at the global attempt limit while preserving its ledger',async()=>{
+ const app=memoryToolHarness({tools:1,calls:['one','two'].map(id=>({id,name:'search_memory',input:{query:'火星'}}))});const task=await app.run()
+ expect(await task.done).toEqual({status:'failed',reason:'TOOL_CALL_LIMIT'});expect(app.requests).toHaveLength(1);expect(app.history.records().at(-1)?.status).toBe('failed')
+})
+it.each(['unverified','empty'] as const)('keeps %s note-only tasks in local recall without registering library tools',async mode=>{
+ const app=memoryToolHarness({verified:mode!=='unverified',empty:mode==='empty'});const task=await app.run();expect((await task.done).status).toBe('failed');expect(app.requests[0].tools).toBeUndefined()
+})
+it.each(['off','forget','pause'] as const)('stops the actual continuation before its text when memory changes: %s',async change=>{
+ let mutate=()=>{};const app=memoryToolHarness({change:()=>mutate()});mutate=()=>app[change]();const task=await app.run()
+ expect((await task.done).status).toBe('failed');expect(app.content()).not.toContain('已答')
+})
+
+it('persists bounded memory result identities and excerpts in the ledger tool summary',async()=>{
+ const app=memoryToolHarness();const task=await app.run();await task.done
+ const tools=app.history.records().at(-1)?.provenance?.tools??[]
+ expect(tools.some(t=>t.name==='search_memory'&&t.outcome.includes('m@1')&&t.outcome.includes('火星计划约定'))).toBe(true)
+ expect(tools.every(t=>t.outcome.length<=1024)).toBe(true)
+})
+
+it.each(['off','forget','pause'] as const)('blocks the real next dispatch when a memory proof changes before continuation: %s',async change=>{
+ let mutate=()=>{};const app=memoryToolHarness({proof:()=>mutate()});mutate=()=>app[change]();const task=await app.run()
+ expect((await task.done).status).toBe('failed');expect(app.requests).toHaveLength(1);expect(app.content()).not.toContain('已答')
+})
+it('ignores a late memory result after cancellation without sending a continuation',async()=>{
+ let entered!:()=>void,release!:()=>void;const started=new Promise<void>(r=>entered=r),gate=new Promise<void>(r=>release=r)
+ const app=memoryToolHarness({proof:async()=>{entered();await gate}}),task=await app.run();await started
+ await app.host.cancel(task.id,'user');expect((await task.done).status).toBe('cancelled');release();await new Promise(r=>setTimeout(r,0))
+ expect(app.requests).toHaveLength(1);expect(app.content()).not.toContain('已答')
+})
+it('persists an executed memory search failure and stops later dispatches',async()=>{
+ const app=memoryToolHarness({proof:()=>{throw Error('MEMORY_SOURCE_CHANGED')}}),task=await app.run()
+ expect((await task.done).status).toBe('failed');expect(app.requests).toHaveLength(1)
+ const tools=app.history.records().at(-1)?.provenance?.tools??[];expect(tools.some(t=>t.outcome.includes('失败 1 次'))).toBe(true);expect(tools.some(t=>t.outcome.includes('后续发送停止'))).toBe(true)
+})
+it('enforces the global model step limit after memory retrieval',async()=>{
+ const app=memoryToolHarness({steps:1}),task=await app.run();expect(await task.done).toEqual({status:'failed',reason:'MODEL_STEP_LIMIT'});expect(app.requests).toHaveLength(1)
+})

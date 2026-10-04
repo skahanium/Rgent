@@ -1050,3 +1050,23 @@ it('rejects an external permission change after queued tier reads without requir
     expect(writes.mock.calls.map(([p]) => p)).toEqual([])
   } finally { app.session.dispose() }
 })
+
+it('offers retirement retry only for verified legacy JSON and rejects changed object, revision and session',async()=>{
+ const app=await setup();await app.attach(app.first);await app.session.memoryMutation(()=>{})
+ const legacy=JSON.stringify({version:1,entries:[{content:'old private'}],forgotten:[],jobs:[],relocations:[]}),file=path.join(app.first,'.rgent-memory')
+ await writeFile(file,legacy)
+ const preview=await app.session.memoryRetirementPreview();expect(preview).toMatchObject({sessionId:app.session.sessionId(),root:app.first});expect(JSON.stringify(preview)).not.toContain('old private')
+ await writeFile(file,legacy+' ');await expect(app.session.memoryRetirementRetry(preview)).rejects.toThrow('MEMORY_CONFLICT');expect(await readFile(file,'utf8')).toBe(legacy+' ')
+ const replacement=await app.session.memoryRetirementPreview();await writeFile(file+'.new',legacy+' ');await rename(file+'.new',file);await expect(app.session.memoryRetirementRetry(replacement)).rejects.toThrow('MEMORY_CONFLICT')
+ const fresh=await app.session.memoryRetirementPreview();await app.session.memoryRetirementRetry(fresh);expect(await readFile(file,'utf8')).toBe('<!-- rgent:memory:retired:v2 -->\n');expect(app.session.memoryDiagnosis()).toBeNull()
+ await writeFile(file,'unknown bytes');await expect(app.session.memoryRetirementPreview()).rejects.toThrow('MEMORY_RETIREMENT_UNRECOGNIZED');expect(await readFile(file,'utf8')).toBe('unknown bytes')
+ await writeFile(file,legacy);const stale=await app.session.memoryRetirementPreview();await app.attach(app.second);await expect(app.session.memoryRetirementRetry(stale)).rejects.toThrow('VAULT_CHANGED')
+})
+it('rechecks retirement revision inside the actual vault mutation queue',async()=>{
+ const app=await setup();await app.attach(app.first);await app.session.memoryMutation(()=>{});const file=path.join(app.first,'.rgent-memory'),legacy=JSON.stringify({version:1,entries:[],forgotten:[],jobs:[],relocations:[]});await writeFile(file,legacy)
+ const preview=await app.session.memoryRetirementPreview();let entered!:()=>void,release!:()=>void
+ const began=new Promise<void>(r=>entered=r),blocked=new Promise<void>(r=>release=r)
+ const blocker=app.session.memoryMutation(async()=>{entered();await blocked});await began
+ const retry=app.session.memoryRetirementRetry(preview);await writeFile(file,'unknown changed');release();await blocker
+ await expect(retry).rejects.toThrow('MEMORY_RETIREMENT_UNRECOGNIZED');expect(await readFile(file,'utf8')).toBe('unknown changed')
+})

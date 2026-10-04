@@ -14,7 +14,8 @@ export type AuthorizationDependencies = {
   tier(root: string, path: string): Promise<'reference' | 'follow'>
   acceptsObject(path: string, expected: string, current: string): boolean
   ownerValid?: (owner:string)=>boolean
-  configuration(extraReferences: boolean, modelRecordId: string): AuthorizationConfiguration
+  memoryAuthorization?: (request:AgentCommandRequest)=>Promise<{signature:string;search:boolean;snapshotSignature?:string;disclosure?:AgentAuthorizationPreview['memory']}>
+  configuration(extraReferences: boolean, modelRecordId: string, memorySearch?:boolean): AuthorizationConfiguration
 }
 export interface TaskGrant {
   readonly id: string
@@ -24,6 +25,7 @@ export interface TaskGrant {
   readonly sources: readonly Readonly<AuthorizedSource>[]
   readonly credential: Readonly<ModelCredential>
   readonly limits: Readonly<RunLimits>
+  readonly memorySnapshotSignature?:string
   assertActive(): void
   assertLive(action: AuthorizationAction, path?: string, signal?: AbortSignal): Promise<void>
   validateSources(signal?: AbortSignal): Promise<void>
@@ -31,7 +33,7 @@ export interface TaskGrant {
   acknowledgeOrigin(snapshot: NoteSnapshot): void
   revoke(): void
 }
-type Prepared = { owner: string; request: AgentCommandRequest; modelRecordId: string; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number }
+type Prepared = { owner: string; request: AgentCommandRequest; modelRecordId: string; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number; memory?:{signature:string;search:boolean;snapshotSignature?:string} }
 const digest = (value: unknown): string => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex')
 function command(request: AgentCommandRequest): AgentCommandRequest {
   return {modelRecordId:request.modelRecordId,relPath:request.relPath,sessionId:request.sessionId,objectVersion:request.objectVersion,expectedRevision:request.expectedRevision,
@@ -116,11 +118,13 @@ export class TaskAuthorizationRegistry {
       sources.push({sourceId:randomUUID(),relPath:path,title:noteTitle(path),sessionId:session!,objectVersion:snapshot.objectVersion,revision:snapshot.revision,fingerprint:digest(snapshot.content),tier})
     }
     await verifyOrdinaryNotes(this.deps, [...selected], () => this.checkSession(root, session))
-    const config=structuredClone(this.deps.configuration(sources.length>1, request.modelRecordId))
+    const memory=await this.deps.memoryAuthorization?.(command(request))
+    this.checkSession(root,session)
+    const config=structuredClone(this.deps.configuration(sources.length>1, request.modelRecordId,memory?.search===true))
     const view:AgentAuthorizationPreview={id:randomUUID(),sessionId:session!,origin:request.relPath,sources,
-      recipient:{modelId:config.credential.modelId,host:new URL(config.credential.baseURL).host,provider:config.credential.provider}}
+      recipient:{modelId:config.credential.modelId,host:new URL(config.credential.baseURL).host,provider:config.credential.provider},...(memory?.disclosure?{memory:{...memory.disclosure,search:{available:memory.search,calls:memory.search?4:0,sharedTools:sources.length>1||memory.search?config.limits.tools:0}}}:{})}
     for(const [id,p]of this.previews)if(p.expires<Date.now() || p.owner===owner)this.previews.delete(id)
-    this.previews.set(view.id,{owner,request:command(request),view:structuredClone(view),modelRecordId:request.modelRecordId,root,config,configHash:digest(config),expires:Date.now()+300000})
+    this.previews.set(view.id,{owner,request:command(request),view:structuredClone(view),modelRecordId:request.modelRecordId,root,config,configHash:digest(config),expires:Date.now()+300000,memory:memory?{signature:memory.signature,search:memory.search,snapshotSignature:memory.snapshotSignature}:undefined})
     return structuredClone(view)
   }
 
@@ -135,15 +139,24 @@ export class TaskAuthorizationRegistry {
     this.previews.delete(request.previewId)
     if(!isAuthorizationCommand(request) || request.modelRecordId!==prepared.modelRecordId || digest(command(request))!==digest(prepared.request))throw Error('STALE_AUTHORIZATION')
     this.checkSession(prepared.root,prepared.view.sessionId)
-    if(digest(this.deps.configuration(prepared.view.sources.length>1, prepared.modelRecordId))!==prepared.configHash)throw Error('STALE_AUTHORIZATION')
+    if(digest(this.deps.configuration(prepared.view.sources.length>1, prepared.modelRecordId,prepared.memory?.search===true))!==prepared.configHash)throw Error('STALE_AUTHORIZATION')
+    await this.checkMemory(prepared)
     const grant=new LiveGrant(this.deps,prepared)
     await grant.validateSources()
     this.checkSession(prepared.root,prepared.view.sessionId)
-    if(digest(this.deps.configuration(prepared.view.sources.length>1, prepared.modelRecordId))!==prepared.configHash){
+    if(digest(this.deps.configuration(prepared.view.sources.length>1, prepared.modelRecordId,prepared.memory?.search===true))!==prepared.configHash){
       grant.revoke()
       throw Error('STALE_AUTHORIZATION')
     }
+    try { await this.checkMemory(prepared) } catch(error){grant.revoke();throw error}
+    grant.assertActive()
+    if(digest(this.deps.configuration(prepared.view.sources.length>1,prepared.modelRecordId,prepared.memory?.search===true))!==prepared.configHash){grant.revoke();throw Error('STALE_AUTHORIZATION')}
     return grant
+  }
+  private async checkMemory(prepared:Prepared):Promise<void>{
+    const current=await this.deps.memoryAuthorization?.(prepared.request)
+    if(digest(current?{signature:current.signature,search:current.search,snapshotSignature:current.snapshotSignature}:null)!==digest(prepared.memory??null))throw Error('STALE_AUTHORIZATION')
+    this.checkSession(prepared.root,prepared.view.sessionId)
   }
   private checkSession(root:string,session:string|null):void { if(this.deps.root()!==root || this.deps.session()!==session)throw Error('VAULT_CHANGED') }
 }
@@ -156,10 +169,12 @@ class LiveGrant implements TaskGrant {
   readonly sources: readonly Readonly<AuthorizedSource>[]
   readonly credential: Readonly<ModelCredential>
   readonly limits: Readonly<RunLimits>
+  readonly memorySnapshotSignature?:string
   private live=true
   private readonly owner:string
   private originProof:AuthorizedSource
   constructor(private readonly deps:AuthorizationDependencies,prepared:Prepared){
+    this.memorySnapshotSignature=prepared.memory?.snapshotSignature
     this.owner=prepared.owner;this.id=prepared.view.id;this.root=prepared.root;this.sessionId=prepared.view.sessionId;this.origin=prepared.view.origin
     this.sources=Object.freeze(prepared.view.sources.map(s=>Object.freeze({...s})))
     this.originProof={...this.sources.find(s=>s.relPath===this.origin)!}

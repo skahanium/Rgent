@@ -300,3 +300,13 @@ it('rejects origin receipts after revocation and exposes a synchronous live chec
  const app=setup(),preview=await app.registry.preview('owner',app.request),grant=await app.registry.consume('owner',{...app.request,previewId:preview.id})
  grant.revoke();expect(()=>grant.acknowledgeOrigin(app.records.get('a.md')!)).toThrow('AUTHORIZATION_REVOKED');expect(()=>grant.assertActive()).toThrow('AUTHORIZATION_REVOKED')
 })
+
+it('freezes a note-only memory tool budget before preview and rechecks memory signature on consume',async()=>{
+ const app=setup();let signature='first';let search=true
+ const registry=new TaskAuthorizationRegistry({...app.deps,memoryAuthorization:async()=>({signature,search,disclosure:{use:true,consolidate:false,recipient:null,limits:{seconds:120,calls:2,tools:0}}}),configuration:(library,_model,memory)=>({...app.deps.configuration(),limits:{seconds:30,steps:memory||library?8:4,tools:memory||library?12:0}})})
+ const request={...app.request,references:[]};let p=await registry.preview('owner',request)
+ expect(p.memory?.search).toEqual({available:true,calls:4,sharedTools:12})
+ const grant=await registry.consume('owner',{...request,previewId:p.id});expect(grant.sources).toHaveLength(1);expect(grant.limits.tools).toBe(12)
+ p=await registry.preview('owner',request);signature='changed';await expect(registry.consume('owner',{...request,previewId:p.id})).rejects.toThrow('STALE_AUTHORIZATION')
+ search=false;p=await registry.preview('owner',request);expect(p.memory?.search?.available).toBe(false);expect((await registry.consume('owner',{...request,previewId:p.id})).limits.tools).toBe(0)
+})

@@ -50,10 +50,10 @@ export type HostStart = Partial<ObjectBinding> & {
 
 export /** 过程只记「调了什么、结果如何」，不铺工具返回的正文。 */
 function toolTraceLine(call: { name: string; input: unknown }, failure?: string): string {
-  const label = call.name === 'read_library' ? '读库' : call.name === 'search_library' ? '搜库' : call.name
+  const label = call.name === 'read_library' ? '读库' : call.name === 'search_library' ? '搜库' : call.name==='search_memory'?'检索记忆':call.name
   const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
   const query = typeof input.query === 'string' ? input.query.replace(/\s+/g, ' ').slice(0, 80) : ''
-  const what = label === '搜库' && query ? `${label}「${query}」` : label
+  const what = (label === '搜库'||label==='检索记忆') && query ? `${label}「${query}」` : label
   return `工具 ${what}：${failure ? `未执行（${failure}）` : '已执行'}`
 }
 
@@ -321,16 +321,19 @@ export class AgentHost {
       const nearby = parsedOriginal.index.blocks.filter(b => b.identity !== 'ai' && b.range.end >= input.range.start - 1024 && b.range.start <= input.range.end + 1024).map(b => original.content.slice(b.range.start, b.range.end)).join('\n').slice(0, 2048)
       const memory = this.deps.memory ? await createMemoryUsePermit(this.deps.memory, credential, input.promptText, nearby) : undefined
       this.deps.assertMemoryAuthorization?.(input)
+      if(grant?.memorySnapshotSignature&&memory?.snapshotSignature!==grant.memorySnapshotSignature)throw Error('STALE_PREVIEW')
       if (memory) this.memoryUses.set(key, {permit: memory, credential})
       const materials = new TaskMaterialTracker()
       const savedMaterial = {tracker:materials,context:memory?.context ?? null}
       const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials)
-      const toolsEnabled = Boolean(grant && grant.sources.length > 1)
-      const memorySearchEnabled=input.memorySearchAuthorized===true&&toolsEnabled&&!!memory?.searchable&&!!this.deps.streamStep&&this.supportsMemorySearch(credential)
-      const toolSchemas=memorySearchEnabled?{...READ_ONLY_TOOL_SCHEMAS,search_memory:MEMORY_SEARCH_SCHEMA}:READ_ONLY_TOOL_SCHEMAS
-      let memorySearchCalls=0
+      const libraryToolsEnabled = Boolean(grant && grant.sources.length > 1)
+      const memorySearchEnabled=input.memorySearchAuthorized===true&&!!grant&&!!memory?.searchable&&!!this.deps.streamStep&&this.supportsMemorySearch(credential)
+      const toolsEnabled=libraryToolsEnabled||memorySearchEnabled
+      const toolSchemas={...(libraryToolsEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
+      let memorySearchCalls=0,memorySearchFailures=0
+      const memoryToolOutcomes:{name:string;outcome:string}[]=[]
       let successfulLibraryTool=false
-      if (toolsEnabled && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
+      if (libraryToolsEnabled && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
       if (scoped) this.scoped.set(key, scoped)
       const marked = markPrompt(original.content, { ...input, taskId: id })
       const submitted = promptBlock(marked, id)
@@ -516,7 +519,7 @@ export class AgentHost {
           const results: ToolContent = []
           for (const call of calls) {
             await guard()
-            const registered = call.name === 'read_library' || call.name === 'search_library'||call.name==='search_memory'&&memorySearchEnabled
+            const registered = libraryToolsEnabled&&(call.name === 'read_library' || call.name === 'search_library')||call.name==='search_memory'&&memorySearchEnabled
             const duplicate = usedIds.has(call.id)
             usedIds.add(call.id)
             // Duplicate IDs cannot enter provider messages. A fresh internal refusal ID preserves their order.
@@ -525,21 +528,23 @@ export class AgentHost {
             let reportedByTool = false
             let value: unknown
             if (!failure) {
-              activity = call.name === 'read_library' ? '读库' : '搜库'; snapshot('running')
+              activity = call.name === 'read_library' ? '读库' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
               try {
                 if(call.name==='search_memory'){
-                  if(++memorySearchCalls>4)throw Error('TOOL_CALL_LIMIT')
                   const args=call.input as Record<string,unknown>
-                  if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).join()!=='query'||typeof args.query!=='string')throw Error('INVALID_TOOL_ARGUMENTS')
+                  if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).join()!=='query'||typeof args.query!=='string'||!args.query.trim()||args.query.length>256||/[\x00-\x1f]/.test(args.query))throw Error('INVALID_TOOL_ARGUMENTS')
+                  if(memorySearchCalls>=4)throw Error('MEMORY_SEARCH_LIMIT')
+                  memorySearchCalls++
                   const found=await wait(memory!.search(args.query))
-                  value={items:found.map(e=>({id:e.id,version:e.version,content:e.content,scope:e.scope,semantic:e.semantic,attribution:e.attribution,updatedAt:e.updatedAt,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId}))})),complete:true}
+                  value={items:found.map(e=>({id:e.id,version:e.version,content:e.content,scope:e.scope,semantic:e.semantic,attribution:e.attribution,updatedAt:e.updatedAt,sourceChecked:e.sourceChecked,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId}))})),complete:true}
                 }else{value = await wait(scoped!.execute(call.name, call.input, signal));successfulLibraryTool=true}
               }
               catch (error) {
                 const reason = error instanceof Error ? error.message : 'TOOL_FAILED'
-                if (!['UNKNOWN_TOOL', 'INVALID_TOOL_ARGUMENTS', 'OUTSIDE_TASK_SCOPE', 'INVALID_TOOL_CURSOR', 'SOURCE_METADATA_TOO_LARGE'].includes(reason)) throw error
+                if(call.name==='search_memory'&&!['INVALID_TOOL_ARGUMENTS','MEMORY_SEARCH_LIMIT'].includes(reason)){memorySearchFailures++;memoryToolOutcomes.push({name:'search_memory',outcome:`失败：第 ${memorySearchCalls} 次检索，后续发送停止`});noteTrace(`工具 检索记忆：失败（${reason}）`)}
+                if (!['MEMORY_SEARCH_LIMIT','UNKNOWN_TOOL', 'INVALID_TOOL_ARGUMENTS', 'OUTSIDE_TASK_SCOPE', 'INVALID_TOOL_CURSOR', 'SOURCE_METADATA_TOO_LARGE'].includes(reason)) throw error
                 failure = reason
-                reportedByTool = true
+                reportedByTool = call.name!=='search_memory'
               }
             }
             if (failure && !reportedByTool) {
@@ -547,9 +552,12 @@ export class AgentHost {
               refused.set(label, (refused.get(label) ?? 0) + 1)
             }
             noteTrace(toolTraceLine(call, failure))
+            if(!failure&&call.name==='search_memory'){const items=(value as {items:{id:string;version:number;content:string}[]}).items;const detail=`${items.map(e=>e.id+'@'+e.version).join('、')||'无匹配'}；摘要 ${items.map(e=>e.content.replace(/[\x00-\x1f]/g,' ').replace(/\s+/g,' ').slice(0,48)).join('；').slice(0,320)}`.slice(0,900);memoryToolOutcomes.push({name:'search_memory',outcome:`已执行：${detail}`});noteTrace(`记忆结果：${detail}`)}
             await guard()
             // Refusals never echo unvalidated foreign arguments or remote error text.
             parts.push({ type: 'tool-call', toolCallId: callId, toolName: call.name, input: failure ? {} : call.input })
+            outputBytes+=byteCount(JSON.stringify(failure?{error:failure}:value)??'')
+            if(outputBytes>MODEL_STREAM_BOUNDS.responseBytes)throw Error('MODEL_OUTPUT_LIMIT')
             results.push({ type: 'tool-result', toolCallId: callId, toolName: call.name, output: failure ? { type: 'error-json', value: { error: failure } } : { type: 'json', value: value as import('ai').JSONValue } })
           }
           messages.push({ role: 'assistant', content: parts }, { role: 'tool', content: results })
@@ -569,7 +577,7 @@ export class AgentHost {
           ...(reasoning ? { reasoning } : {}),
           ...(trace.length ? { trace } : {}),
           ...(assistantLine ? { assistant: assistantLine } : {}),
-          ...({provenance:{version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies() ?? []),...(scoped?.memoryDependencies?.() ?? [])].map(dep=>[dep.id,dep])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:scoped?.dependencies() ?? [],sentSources:scoped?.sentSources() ?? [],tools:[...(scoped?.summary() ?? []),...(memorySearchCalls?[{name:'search_memory',outcome:`执行 ${memorySearchCalls} 次`}]:[]),... [...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`${label.split(':')[1]} × ${count}`}))]}})
+          ...({provenance:{version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies() ?? []),...(scoped?.memoryDependencies?.() ?? [])].map(dep=>[dep.id,dep])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:scoped?.dependencies() ?? [],sentSources:scoped?.sentSources() ?? [],tools:[...(scoped?.summary() ?? []),...(memorySearchCalls?[{name:'search_memory',outcome:`执行 ${memorySearchCalls} 次，失败 ${memorySearchFailures} 次`}]:[]),...memoryToolOutcomes,... [...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`拒绝 ${label.split(':')[1]} × ${count}`}))]}})
         }
         try {
           const revision = await this.finishWrite(root, input.relPath, finalSource, persisted, savedMaterial)

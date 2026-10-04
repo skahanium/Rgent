@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto'
 import {conservativeTokens} from './context-budget.ts'
 import type { MemoryContext, MemoryEntry } from '../shared/memory.ts'
 import type { ModelCredential } from './model-config.ts'
@@ -56,11 +57,15 @@ export function sameMemoryDependency(a: LedgerMemoryDependency, b: LedgerMemoryD
   const stable = (d: LedgerMemoryDependency) => JSON.stringify([d.id, d.version, [...d.basisHashes].sort(), d.sourceDeps.map(s => [s.id, s.version, s.hash, s.kind, s.taskId]).sort()])
   return stable(a) === stable(b)
 }
+export function memorySnapshotSignature(entries:readonly MemoryEntry[]):string {
+ return createHash('sha256').update(JSON.stringify(entries.filter(e=>e.status==='active').map(e=>[e.id,e.version,memoryDependency(e)]).sort((a,b)=>String(a[0]).localeCompare(String(b[0]))))).digest('hex')
+}
 export type MemoryUsePermit = {
+  readonly snapshotSignature:string
   readonly context: MemoryContext
   readonly recall: MemoryRecall
   readonly searchable:boolean
-  search(query:string):Promise<MemoryEntry[]>
+  search(query:string):Promise<(MemoryEntry & {sourceChecked:'checked-for-this-call'})[]>
   assertCurrent(receiver: ModelCredential): Promise<void>
   validateDependencies(dependencies: readonly LedgerMemoryDependency[]): Promise<boolean[]>
   validateDependency(dependency: LedgerMemoryDependency): Promise<boolean>
@@ -92,13 +97,15 @@ export async function createMemoryUsePermit(port: MemoryUsePort, receiver: Model
     return valid
   }
   const permit: MemoryUsePermit = {
-    context, recall,searchable:frozen.size>0,
+    context, recall,searchable:frozen.size>0,snapshotSignature:memorySnapshotSignature(entries),
     async search(query){
       if(typeof query!=='string'||!query.trim()||query.length>256||/[\x00-\x1f]/.test(query))throw Error('INVALID_TOOL_ARGUMENTS')
       const valid=await current([...frozen.keys()])
-      const selected=recallMemory([...frozen.values()].filter(e=>valid.get(e.id)?.version===e.version),query,'').demand
+      const eligible=[...frozen.values()].filter(e=>{const now=valid.get(e.id);return !!now&&sameMemoryDependency(memoryDependency(e),memoryDependency(now))})
+      const selected:MemoryEntry[]=[];let cost=0
+      for(const e of rankMemoryEntries(eligible,query)){const next=costOf(memorySection(e))+1;if(selected.length<8&&cost+next<=2048){selected.push(e);cost+=next}}
       for(const e of selected){required.set(e.id,memoryDependency(e));stagedTools.add(e.id)}
-      return structuredClone(selected)
+      return structuredClone(selected).map(e=>({...e,sourceChecked:'checked-for-this-call' as const}))
     },
     async assertCurrent(model) {
       if (JSON.stringify(model) !== receiverKey) { revoked = true; throw Error('MEMORY_RECEIVER_CHANGED') }
