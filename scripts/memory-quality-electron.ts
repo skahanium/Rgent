@@ -7,7 +7,7 @@ import {streamModelStep,type ModelStepInput,type ModelStepEvent} from '../src/ma
 import {memoryConsolidationSystem} from '../src/main/working-memory-consolidation.ts'
 import {MEMORY_QUALITY_CASES} from '../test/fixtures/memory-quality.ts'
 import {runMemoryQualityCase} from './memory-quality-runner.ts'
-import {EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,type ReviewedCase} from './memory-quality-support.ts'
+import {EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,recordedQualityReview} from './memory-quality-support.ts'
 
 const options=JSON.parse(process.env.RGENT_MEMORY_EVAL_OPTIONS??'{}') as {root:string;budget:string;profile:string;report:string;models:string[];pilot:boolean;live:boolean;only?:string}
 app.setName('rgent')
@@ -60,8 +60,8 @@ try{
   }}
   await Promise.all([worker(),worker()])
   if(!readFileSync(path.join(options.profile,'model-config.json')).equals(configBefore))throw Error('EVALUATION_PROFILE_CHANGED')
-  const quality=models.map(model=>{const rows=tasks.filter(t=>t.model.recordId===model.recordId).map(t=>{const row=journal!.read([runtime,model.recordId,t.spec.id,t.repeat].join('/')) as {review?:ReviewedCase['review'];result?:{completed:boolean};status?:string}|null
-   return {caseId:t.spec.id,repeat:t.repeat,review:row?.review?{...row.review,completed:row.review.completed&&row.status==='completed'&&row.result?.completed===true}:null}})
+  const quality=models.map(model=>{const rows=tasks.filter(t=>t.model.recordId===model.recordId).map(t=>{const row=journal!.read([runtime,model.recordId,t.spec.id,t.repeat].join('/'))
+   return {caseId:t.spec.id,repeat:t.repeat,review:recordedQualityReview(row)}})
    return {model,...modelQualitySummary(rows,MEMORY_QUALITY_CASES)}})
   atomicReport(path.join(options.report,'run-summary.json'),{commit,runtime,dataset,promptHash,configuration,pilot:options.pilot,only:options.only??null,finished,expected:tasks.length,calls:journal.calls,models,quality,semanticReview:quality.every(q=>q.pending===0&&q.coverage===q.expected)?'reviewed':'pending',qualityPassed:!options.pilot&&quality.every(q=>q.passed),stopped:controller.signal.aborted,fatal})
   console.log(JSON.stringify({finished,expected:tasks.length,calls:journal.calls,semanticReview:'pending',fatal}))

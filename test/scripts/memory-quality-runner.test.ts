@@ -1,5 +1,6 @@
 import {expect,it,vi} from 'vitest'
 import * as runner from '../../scripts/memory-quality-runner.ts'
+import {recordedQualityReview,qualitySummary} from '../../scripts/memory-quality-support.ts'
 import {MEMORY_QUALITY_CASES} from '../fixtures/memory-quality.ts'
 import type {ModelStepInput} from '../../src/main/model-stream.ts'
 vi.mock('electron',()=>({dialog:{showOpenDialog:vi.fn()}}))
@@ -41,4 +42,15 @@ it('records a corrected version in a genuine next-task ledger and cannot relearn
  expect(result.followup?.sent[0]?.prompt).toContain('石桥项目每两周检查一次。')
  expect(result.forget).toMatchObject({revoked:true,relearningBlocked:true,replay:{attempted:true,calls:1,remaining:[],receipt:{outcome:'applied',reason:'MEMORY_OUTPUT_INVALID'}}})
  expect(paidCalls).toBe(1)
+})
+
+it('scores a genuine terminal format failure as assessed zero while leaving failed negatives pending',async()=>{
+ const responses:{body:string;input:ModelStepInput;reason:null;finishReason:string}[]=[]
+ const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){responses.push({body:'not valid JSON',input,reason:null,finishReason:'stop'});yield {type:'text',text:'not valid JSON'};yield {type:'finish',reason:'stop'}},new AbortController().signal)
+ expect(result.completed).toBe(false);expect(result.receipt?.reason).toBe('MEMORY_OUTPUT_INVALID')
+ const review=recordedQualityReview({status:'completed',responses,result,review:{group:'standing',required:1,retained:0,completed:false,evidenceComplete:true,hardViolations:[]}})!
+ expect(review.evidenceComplete).toBe(true)
+ expect(qualitySummary([review])).toMatchObject({pending:0,required:1,retained:0,serviceFailures:{count:1,reasons:{MEMORY_OUTPUT_INVALID:1}}})
+ expect(qualitySummary([{...review,required:0}])).toMatchObject({pending:1,passed:false})
+ expect(recordedQualityReview({status:'completed',responses,result,review:{...review,evidenceComplete:false}})?.evidenceComplete).toBe(false)
 })
