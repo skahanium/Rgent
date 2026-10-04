@@ -1096,7 +1096,7 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 | 包 | 缺口与反例／完成门 | 状态与受验证据 |
 |---|---|---|
 | A | 打开不写盘，坏账本可读正文，磁盘尾部保护，可信材料三态，共享归档保护与诊断 | `8b5ed9c` 最终 Spec／Quality 复核通过，四项 P1 与诊断 P2 闭合。`47bd095` 范围的 7 文件 181 项、追加 `8b5ed9c` 早退诊断 45 项与类型分别记录，不合并为一次全量；窗口与最终完整门待收口 |
-| B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `bdf0ea2` 本机接线、自查与必要定向已交；2026-10-05 收口记录见下。尚待独立复核及整轮构建窗口／完整门，不开放 A+ |
+| B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `bdf0ea2` 初版已交；`fff8f53` 独立复核发现两项 Important 及一项 Minor，2026-10-05 修补代码 `eacd3cb` 已交，证据见下；仍待独立复审及整轮构建窗口／完整门，不开放 A+ |
 | A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | 待 B 门；2026-10-04 |
 | C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | 待 A+ 门；2026-10-04 |
 | E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 待 C 门；2026-10-04 |
@@ -1120,6 +1120,17 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 必要定向证据：16 文件 498 通过／2 既有平台跳过，命令与输出 `/tmp/rgent-v4-B-targeted-final.log`；随后同 ID 来源隔离对照 1 文件 15／0（`/tmp/rgent-v4-B-source-id-final.log`）、界面与错误文案 3 文件 157／0（`/tmp/rgent-v4-B-ui-errors-final.log`）分别记录，不能相加冒充一次新全量。最终代码类型复核 `/tmp/rgent-v4-B-types-final-current.log` 通过；文档检查 12 文件通过（`/tmp/rgent-v4-B-docs-final.log`）。主要红灯日志为 `/tmp/rgent-v4-B-red1.log`、`/tmp/rgent-v4-B-red-lifecycle.log`、`/tmp/rgent-v4-B-red-memory.log`、`/tmp/rgent-v4-B-red-publication.log`、`/tmp/rgent-v4-B-red-review.log`、`/tmp/rgent-v4-B-red-journal.log`、`/tmp/rgent-v4-B-red-binary.log`、`/tmp/rgent-v4-B-red-anchors.log`、`/tmp/rgent-v4-B-red-prefs-proof.log`、`/tmp/rgent-v4-B-red-materials.log`、`/tmp/rgent-v4-B-red-orphan.log`。测试最初有新增 fixture 导入与类型错误，修正后才取上述受验证据。
 
 本包没有运行完整测试、构建窗口、付费模型或 CI，没有推送。没有新增窗口脚本断言；整轮须补实际构建窗口的“坏登记仍读正文→设置同页预览／取消→确认→批次暂停离库→重开续跑→合格来源恢复／不合格暂停”及稳定偏好重定位断言；DOM 测试不代称窗口证据。Windows、原生输入法人工操作、用户视觉与既有阶段待核项不变。包 B 独立 Spec／Quality 复核及最终门仍由串行总任务接续，不因本机接线自动开放下一包。
+
+包 B 独立复核后的修补（2026-10-05，基线 `fff8f53`，受验代码 `eacd3cb`）：
+
+- **Important 1**：带登记 id 的 workspace 按 id 唯一；仅无 id 的旧行按 path＋root 唯一。同一物理库移除再登记的新 id 不继承旧工作区，首次保存后同版本读回、第二次保存均成功。旧无 id 行只有匹配旧登记及其已核验展示迁移证明才可接续；新登记与随后重定位不认领残留旧行。保留旧行，不吞解析错误、不删除整个工作区文件。
+- **Important 2**：普通保存在库队列中检查未完成账本意图，发布或整库恢复 pending 时拒绝正文替换；坏日志也失败关闭。恢复入口复用现有 structure gate 和 lifecycle flush 通道：预览冻结输入后真实排空保存；确认只等待在途保存并拒绝新增脏稿，要求重新预览；续跑只护稿等待、不把它报告成已保存。随后封住全库正文写入并排空主队列，到意图建立／本批完成才释放。输入保护不阻止正文阅读或批间退出设置，普通 flush 与预览排空按操作令牌区分，旧会话回执不释放新门。
+- 意外发布中断时，已成功正文保存仍给真实身份回执；后续自动保存被拦下，两篇窗口稿可留在内存。显式续跑失败保留草稿、日志和已核验进度；成功后恢复正常保存，再可安全切库。无草稿的批次暂停可直接离库。没有第二份正文存储、强制完成或清坏日志入口；完整切库／关窗协议仍留包 E。
+- **Minor 与反馈**：未登记空账本显示“尚未登记”，已核验空账本才报告已核验。新草稿使确认失效后，设置页退出旧令牌并给重新预览入口；失败续跑重新读取实际进度修订。完整恢复成功清除本次归属发布诊断，其他维护诊断保留。
+
+反例红灯分别是 `/tmp/rgent-v4-B-fix-red-core.log`（5 失败／84 通过）、`/tmp/rgent-v4-B-fix-red-coordination.log`（6／38）、`/tmp/rgent-v4-B-fix-red-lane.log`（2／3）、`/tmp/rgent-v4-B-fix-red-edge.log`（3／78）、`/tmp/rgent-v4-B-fix-red-feedback.log`（2／97）。收敛前必要相关集合为 14 文件 287／0（`/tmp/rgent-v4-B-fix-targeted-final.log`），类型通过；随后 catalog 自查仅移除非必要的登记／移除时迁移写入，最终代码另验 catalog 29／0（`/tmp/rgent-v4-B-fix-catalog-selfcheck.log`）与类型（`/tmp/rgent-v4-B-fix-types-selfcheck.log`），不将此前 287 项写成新代码全量。
+
+追加实际窗口专项 `RGENT_UI_LEDGER_RECOVERY_ONLY=1 pnpm ui:check`：临时库有效 owner 已成／registry 待成意图、实际自动保存拒写、双草稿保留、现有恢复 IPC 续跑及恢复后落盘。脚本只做 `node --check scripts/verify-ui.mjs`，**本包尚未 build 或运行窗口专项**；最终 build 后由总任务执行。此前初版“未加窗口断言”仅说明初版状态。正文可读、设置预览／取消、批次暂停离库／重开、来源状态与偏好重定位仍需整轮窗口核对。必要定向只证明所列协议；Windows、原生输入法、用户视觉及学习质量仍待核，不开放 A+ 或结束阶段。
 
 事实校正：生产 structured context 允许空／部分摘要，撤回“生产自旋”判定；精确缓存复用仍需修。原正式运行未用保留集调提示，但评分晚于运行及旧保留集已被审阅须留档。压缩／清理授权已在合同记忆节，缺口是预览和保护。历史评分与失败不得改写。
 

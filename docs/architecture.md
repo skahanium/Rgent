@@ -79,6 +79,11 @@ flowchart LR
 
 设备 workspace 按登记 id 保存，读取仍检查当前规范路径与根身份。旧 workspace 仅在旧 path＋root 匹配时迁移；展示旧键仅由已核验旧登记提供，新登记不继承同路径残留偏好。恢复设置只消费现有 `ledgerRepair` 的严格动作和 frame／session 预览令牌；没有新增 IPC、页面、权限或对模型的附件读取能力。
 
+2026-10-05 包 B 复核修补（`eacd3cb`）：`VaultSession.write` 在现有 mutation queue 中拒绝 `ledger-publication`／`ledger-repair` pending 或损坏日志下的正文替换。主进程恢复调用统一经 `VaultStructureGate.recover`：冻结窗口输入后，preview 真实保存并排空；commit 只接受无新草稿的原预览；resume 等待在途保存而保留脏 tab。全库写闸封闭后再次排空库队列，随后才读取预览／提交意图／续跑。本次扩展原 lifecycle flush 的严格阶段与 session／operation 令牌，resume 回执只表示护稿就绪，不冒充保存成功。恢复期间草稿仅在原 tab 内存中；失败不覆盖、不清日志，成功后保存原稿再离库。旧会话或旧操作释放不能解开新输入门，完整关闭协议仍属 E。
+
+workspace 的唯一性规则与寻址一致：有 id 行按 id 唯一，无 id 行仅在无 id 集合内按 path＋root 唯一；不同 id 可以保留同一物理根的历史行。旧无 id 迁移要求匹配旧登记及其已核验迁移证明，新登记、重新登记或新登记后的重定位不继承孤立旧行。成功写出的 workspace 可被同版本读回；无吞错、整文件删除或新身份授权。
+
+
 - `.md` 就是笔记。
 - 每篇笔记带一个附件夹，名字与笔记同名。图和 PDF 跟这篇走。引用写全路径，解析走 Markdown 标准相对路径。
 - 权限名单和技能文件跟库走，对文件树隐藏。权限名单的选定路径见下方强制点。
