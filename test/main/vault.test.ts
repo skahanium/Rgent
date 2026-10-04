@@ -4,6 +4,8 @@ import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { dialog } from 'electron'
 import { secureFsFor } from '../../src/main/secure-fs.ts'
+import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
+import { modelTierFor } from '../../src/main/permissions.ts'
 import { VaultSession } from '../../src/main/vault.ts'
 import { markPrompt,upsertAiAnswer } from '../../src/main/host-source.ts'
 import { VaultLifecycle } from '../../src/main/vault-lifecycle.ts'
@@ -17,6 +19,21 @@ import { joinVaultRel, parseVaultMediaUrl, vaultMediaUrl } from '../../src/share
 vi.mock('electron', () => ({ dialog: { showOpenDialog: vi.fn() } }))
 vi.mock('../../src/main/watch.ts', async importOriginal => ({ ...await importOriginal<typeof import('../../src/main/watch.ts')>(), watchVault: vi.fn(() => () => {}) }))
 afterEach(() => { vi.restoreAllMocks() })
+
+async function setup() {
+  const userData = await mkdtemp(path.join(os.tmpdir(), 'rgent-session-'))
+  const first = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+  const second = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
+  await writeFile(path.join(first, '原篇.md'), 'first')
+  await writeFile(path.join(second, '原篇.md'), 'second')
+  const emit = vi.fn()
+  const session = new VaultSession(userData, emit)
+  const attach = async (root: string) => {
+    await writeFile(path.join(userData, 'vault.json'), serializeStoredVault(root))
+    return session.restore()
+  }
+  return { session, emit, attach, first, second }
+}
 
 describe('VaultSession isolation', () => {
   it('opens an unregistered ordinary note without publishing ledger files', async () => {
@@ -36,9 +53,9 @@ describe('VaultSession isolation', () => {
   })
   it('migrates only in explicit task preparation and returns a bound revision receipt',async()=>{
     const {session,attach,first}=await setup(),raw='正文\r\n<!-- rgent:ledger:v1 -->\r\n旧历史\n'
-    try{await attach(first);await writeFile(path.join(first,'原篇.md'),raw);const before=await session.readOpened('原篇.md');const receipt=await session.prepareTaskSource({relPath:'原篇.md',sessionId:before.sessionId,objectVersion:before.objectVersion,expectedRevision:before.revision})
+    try{await attach(first);await writeFile(path.join(first,'原篇.md'),raw);const before=await session.readOpened('原篇.md');const receipt=await session.prepareTaskSource({relPath:'原篇.md',sessionId:before.sessionId,objectVersion:before.objectVersion,expectedRevision:before.revision},await migrationGrant(session,'原篇.md'))
       expect(receipt.previousRevision).toBe(before.revision);expect(receipt.revision).not.toBe(before.revision);expect((await session.readOpened('原篇.md')).content).toBe('正文\r\n');expect(await session.ledgerContexts('原篇.md')).toHaveLength(1)
-      await expect(session.prepareTaskSource({relPath:'原篇.md',sessionId:before.sessionId,objectVersion:before.objectVersion,expectedRevision:before.revision})).rejects.toThrow('CONFLICT')
+      await expect(session.prepareTaskSource({relPath:'原篇.md',sessionId:before.sessionId,objectVersion:before.objectVersion,expectedRevision:before.revision},await migrationGrant(session,'原篇.md'))).rejects.toThrow('CONFLICT')
     }finally{session.dispose()}
   })
   it('keeps an opaque navigation key across restore, current state and picks while separating same-name libraries', async () => {
@@ -167,26 +184,12 @@ describe('VaultSession isolation', () => {
       await writeFile(path.join(first,'.rgent-memory'),'broken fixed memory')
       const diagnosis=session.memoryDiagnostic()
       await expect(session.memoryMutation(store=>store.initialize())).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
-      const reset=await session.memoryReset(diagnosis,0)
+      const reset=await session.memoryReset(diagnosis)
       expect(reset.record.entries).toEqual([])
       expect(await readFile(path.join(first,'.rgent-lifecycle'),'utf8')).toBe(damaged)
       await expect(session.memoryMutation(store=>store.initialize())).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
     }finally{session.dispose()}
   })
-  async function setup() {
-    const userData = await mkdtemp(path.join(os.tmpdir(), 'rgent-session-'))
-    const first = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
-    const second = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
-    await writeFile(path.join(first, '原篇.md'), 'first')
-    await writeFile(path.join(second, '原篇.md'), 'second')
-    const emit = vi.fn()
-    const session = new VaultSession(userData, emit)
-    const attach = async (root: string) => {
-      await writeFile(path.join(userData, 'vault.json'), serializeStoredVault(root))
-      return session.restore()
-    }
-    return { session, emit, attach, first, second }
-  }
 
   it('binds reads to the current session and rejects same-byte external replacements', async () => {
     const { session, attach, first } = await setup()
@@ -667,4 +670,28 @@ it('uses actual native alias resolution for attachment ancestors and rejects mis
     expect(() => check(root, ['.hidden.md'])).toThrow()
     expect(() => check(root, ['linked.md'])).toThrow()
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+async function migrationGrant(session:VaultSession,relPath:string){
+ const note=await session.read(relPath),registry=new TaskAuthorizationRegistry({root:()=>session.root,session:()=>session.sessionId(),tree:()=>session.tree(),read:path=>session.read(path),tier:modelTierFor,assertOrdinaryNotes:paths=>session.requireOrdinaryNotes(paths),acceptsObject:(path,before,after)=>session.acceptsObject(path,before,after),configuration:()=>({credential:{provider:'custom',baseURL:'https://fixture.example/v1',modelId:'fixture',contextTokens:16000,apiKey:'fixture'},limits:{seconds:30,steps:4,tools:0}})})
+ const request={...note,relPath,expectedRevision:note.revision,range:{start:0,end:2},expectedText:note.content.slice(0,2),promptText:'问',modelRecordId:'fixture',references:[]},preview=await registry.preview('owner',request)
+ return registry.consume('owner',{...request,previewId:preview.id})
+}
+it('keeps open tab binding continuous after explicit batch migration and permits its next body save',async()=>{
+ const {session,attach,first}=await setup();try{await attach(first);await writeFile(path.join(first,'原篇.md'),'正文\n<!-- rgent:ledger:v1 -->\n旧历史');const note=await session.readOpened('原篇.md')
+  const batch=await session.ledgerMigrateBatch(null);expect(batch.failures).toEqual([]);const status=await session.noteStatus('原篇.md',note);expect(status.status).toBe('ready');if(status.status!=='ready')throw Error('EXPECTED_READY')
+  await session.write('原篇.md','修改正文\n',status.snapshot.revision,note);expect(await readFile(path.join(first,'原篇.md'),'utf8')).toBe('修改正文\n');expect(await session.ledgerContexts('原篇.md')).toHaveLength(1)
+ }finally{session.dispose()}
+})
+it.each(['forbidden','invalid','revoked','queued','during-check','after-read'] as const)('refuses task migration after authorization changes: %s',async change=>{
+ const {session,attach,first}=await setup(),raw='正文\n<!-- rgent:ledger:v1 -->\n旧历史';try{await attach(first);await mkdir(path.join(first,'目录'));await writeFile(path.join(first,'目录/原篇.md'),raw);const note=await session.readOpened('目录/原篇.md'),grant=await migrationGrant(session,'目录/原篇.md')
+  if(change==='forbidden')await writeFile(path.join(first,'.rgent-permissions'),JSON.stringify({'目录/原篇.md':'forbidden'}))
+  if(change==='invalid')await writeFile(path.join(first,'.rgent-permissions'),'{bad')
+  if(change==='revoked')grant.revoke()
+  const permission=change==='queued'?session.setPermission('目录','forbidden'):Promise.resolve()
+  if(change==='during-check'){const assert=grant.assertLive.bind(grant);vi.spyOn(grant,'assertLive').mockImplementation(async(...args)=>{await assert(...args);await writeFile(path.join(first,'.rgent-permissions'),JSON.stringify({'目录/原篇.md':'forbidden'}))})}
+  if(change==='after-read'){const read=session.read.bind(session);vi.spyOn(session,'read').mockImplementation(async path=>{const snapshot=await read(path);grant.revoke();return snapshot})}
+  await expect(session.prepareTaskSource({...note,relPath:'目录/原篇.md',expectedRevision:note.revision},grant)).rejects.toThrow();await permission
+  expect(await readFile(path.join(first,'目录/原篇.md'),'utf8')).toBe(raw);await expect(stat(path.join(first,'.rgent','registry.json'))).rejects.toMatchObject({code:'ENOENT'})
+ }finally{session.dispose()}
 })

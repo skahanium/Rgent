@@ -7,3 +7,7 @@ it('registers thrown memory codes and maps every public code to bounded Chinese 
  for(const code of MEMORY_ERROR_CODES){expect(memoryErrorText(code)).toMatch(/[\u4e00-\u9fff]/);expect(memoryErrorText(code)).not.toContain(code)}
  expect(memoryErrorText('EIO /private/secret')).not.toContain('secret')
 })
+
+it('registers the material registry diagnosis with the refused control operations and a bounded next step',()=>{
+ expect(MEMORY_ERROR_CODES).toContain('LEDGER_REGISTRY_INVALID');expect(memoryErrorText('LEDGER_REGISTRY_INVALID')).toContain('清空和推进学习进度已停止');expect(memoryErrorText('LEDGER_REGISTRY_INVALID')).toContain('请检查笔记库诊断或高级维护')
+})

@@ -1059,9 +1059,10 @@ if (ownsInstance) app.whenReady().then(() => {
     stream:streamModelStep,changed:context=>{if(vault?.sessionId()===context.sessionId)send(IPC.memoryChanged,context.sessionId)}
   })
   agentHost = new AgentHost({
-    prepareSource:async input=>{
+    prepareSource:async (input,grant)=>{
       if(!input.sessionId||!input.objectVersion||!input.expectedRevision)throw Error('BAD_REQUEST')
-      return vault!.prepareTaskSource({...input,sessionId:input.sessionId,objectVersion:input.objectVersion,expectedRevision:input.expectedRevision})
+      if(!grant)throw Error('INVALID_AUTHORIZATION')
+      return vault!.prepareTaskSource({...input,sessionId:input.sessionId,objectVersion:input.objectVersion,expectedRevision:input.expectedRevision},grant)
     },
     onTaskStarted:id=>consolidation?.capture(id),
     onTaskStartFailed:id=>consolidation?.discard(id),

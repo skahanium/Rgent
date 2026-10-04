@@ -114,6 +114,8 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
   const accept=(value:MemoryView)=>{
     view=value;host.onChanged(value);updateReceiver(value)
     status.textContent=`已保存 · ${value.config.vault.enabled?'已开启':'已关闭'} · ${value.entries.length} 条记忆${value.reason||value.status==='invalid'?` · ${memoryErrorText(value.reason??'MEMORY_UNAVAILABLE')}`:''}`
+    if(value.materialStatus==='invalid'&&value.reason!=='LEDGER_REGISTRY_INVALID')status.textContent+=` · ${memoryErrorText('LEDGER_REGISTRY_INVALID')}`
+    if(value.retirementFailure)status.textContent+=` · ${memoryErrorText(value.retirementFailure)}`
     if(currentDefault){currentDefault.dataset.modelId=value.config.defaultModelId??'';currentDefault.textContent=`已保存：${modelName(value.config.defaultModelId)}`}
     if(currentVault)currentVault.textContent=`已保存：${value.config.vault.enabled?'已开启':'已关闭'} · ${value.config.vault.override.mode==='inherit'?'跟随默认模型':modelName(value.config.vault.override.modelId)}`
     if(!modelSetupChecked||lastModelStatus!==value.config.modelStatus&&value.config.modelStatus!=='ready'){modelPanel.open=value.config.modelStatus!=='ready';modelSetupChecked=true}lastModelStatus=value.config.modelStatus

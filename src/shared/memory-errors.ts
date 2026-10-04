@@ -1,5 +1,6 @@
 /** Registered public memory errors. Internal details never cross this text boundary. */
 export const MEMORY_ERROR_MESSAGES = {
+  "LEDGER_REGISTRY_INVALID": "材料登记无法核验，清空和推进学习进度已停止；已有笔记和记忆保留，请检查笔记库诊断或高级维护。",
   "MEMORY_OUTPUT_INVALID": "部分整理结果无法确认，相关内容没有写入；已通过检查的独立结果可保留，请查看整理记录。",
   "MEMORY_INPUT_LIMIT": "本场材料太长，未新增记忆；回答与已有记忆保留，可缩小材料范围后重试。",
   "MEMORY_CONFIG_LIMIT": "记忆设置达到保存上限，本次设置未生效；请在高级维护中检查状态。",

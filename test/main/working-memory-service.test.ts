@@ -1,4 +1,4 @@
-import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';import os from 'node:os';import path from 'node:path'
+import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';import os from 'node:os';import path from 'node:path'
 import {it,expect,vi} from 'vitest'
 import {VaultSession} from '../../src/main/vault.ts';import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
 import {serializeStoredVault} from '../../src/main/notes-fs.ts';import {markPrompt,upsertAiAnswer} from '../../src/main/host-source.ts'
@@ -71,4 +71,30 @@ it.each(['dependency','unrelated','review'] as const)('rechecks the involved mem
   const entries=await service.entries([leaf.id]);expect(committed).toBe(true)
   expect(entries[0]?.status).toBe(changed==='dependency'?'paused':changed==='review'?'review':'active')
  }finally{vi.restoreAllMocks();vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+
+it.each(['unit','task','malformed'] as const)('keeps local memory and refuses reset and advance against untrusted %s material history',async kind=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-material-controls-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'材料')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{await vault.memoryMutation(s=>s.initialize())
+  if(kind==='task')await vault.ledgerPrepare('a.md',{taskId:'task',startedAt:new Date().toISOString(),status:'completed',prompt:'问',answer:'答'})
+  else await vault.materialUnit('a.md',0,2)
+  if(kind==='malformed')await writeFile(path.join(root,'.rgent','materials.json'),'{bad')
+  else{const file=path.join(root,'.rgent','registry.json'),registry=JSON.parse(await readFile(file,'utf8'));registry.sequence=0;for(const owner of registry.owners){owner.sequenceCeiling=0;await writeFile(path.join(root,'.rgent','ledgers',owner.noteId,'owner.json'),JSON.stringify(owner))}await writeFile(file,JSON.stringify(registry))}
+  const before=vault.memorySnapshot(),service=new WorkingMemoryService(vault,()=>null),view=await service.view()
+  expect(view.materialStatus).toBe('invalid');expect(view.learning).toBeUndefined();expect(view.entries).toEqual([])
+  await expect(service.reset(vault.memoryDiagnostic())).rejects.toThrow('LEDGER_REGISTRY_INVALID');await expect(service.advance(0,before)).rejects.toThrow('LEDGER_REGISTRY_INVALID');expect(vault.memorySnapshot().raw).toBe(before.raw)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+
+it.each(['reset','advance'] as const)('rechecks material validity inside the queued %s control operation',async operation=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-material-queue-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'材料')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{await vault.memoryMutation(s=>s.initialize());await vault.materialUnit('a.md',0,2);const service=new WorkingMemoryService(vault,()=>null),before=vault.memorySnapshot()
+  let entered!:()=>void,release!:()=>void;const started=new Promise<void>(resolve=>entered=resolve),blocked=new Promise<void>(resolve=>release=resolve)
+  const mutation=vault.memoryMutation(async()=>{entered();await blocked;await writeFile(path.join(root,'.rgent','materials.json'),'{bad')});await started
+  const control=operation==='reset'?service.reset(vault.memoryDiagnostic()):service.advance(1,before)
+  // Attach the rejection handler before releasing the earlier queue operation.
+  const rejected=expect(control).rejects.toThrow('LEDGER_REGISTRY_INVALID');release();await mutation;await rejected;expect(vault.memorySnapshot().raw).toBe(before.raw)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })

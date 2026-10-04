@@ -114,10 +114,10 @@ export class WorkingMemoryService{
   })
  }
  async advance(watermark:number,binding:{revision:string|null;objectVersion:string|null}){
-  this.context();const ceiling=this.vault.materialCeiling();if(!Number.isSafeInteger(watermark)||watermark>ceiling)throw Error('BAD_REQUEST')
-  return this.mutate(store=>{const basis=store.read();if(basis.revision!==binding.revision||basis.objectVersion!==binding.objectVersion)throw Error('MEMORY_CONFLICT');basis.record.nextSequence=Math.max(basis.record.nextSequence,ceiling);return store.advance(basis,watermark)})
+  this.context()
+  return this.mutate(store=>{const ceiling=this.vault.materialCeiling();if(!Number.isSafeInteger(watermark)||watermark>ceiling)throw Error('BAD_REQUEST');const basis=store.read();if(basis.revision!==binding.revision||basis.objectVersion!==binding.objectVersion)throw Error('MEMORY_CONFLICT');basis.record.nextSequence=Math.max(basis.record.nextSequence,ceiling);return store.advance(basis,watermark)})
  }
- async reset(binding:{revision:string|null;objectVersion:string|null}){this.context();const ceiling=this.vault.materialCeiling();return this.vault.memoryReset(binding,ceiling)}
+ async reset(binding:{revision:string|null;objectVersion:string|null}){this.context();return this.vault.memoryReset(binding)}
  async manualSource(request:MemoryManualRequest):Promise<WorkingSource>{
   this.context();this.vault.assertSession(request.sessionId);const note=await this.vault.read(request.relPath);this.context()
   if(note.objectVersion!==request.objectVersion||note.revision!==request.revision)throw Error('MEMORY_SOURCE_CHANGED')

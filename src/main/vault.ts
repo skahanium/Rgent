@@ -10,7 +10,8 @@ import { VaultMutationQueue } from './vault-mutation-queue.ts'
 import { VaultLifecycle, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite } from './vault-lifecycle.ts'
 import { isOwnEcho, type RecentWrite } from './echo.ts'
 import { hasHiddenSegment, isNotePath, resolveInVault } from './paths.ts'
-import { effectivePermissionEntries, loadPermissions, loadPermissionSnapshot, setPermission as savePermission, tierFor } from './permissions.ts'
+import { effectivePermissionEntries, loadPermissions, loadPermissionSnapshot, modelTierFor, setPermission as savePermission, tierFor } from './permissions.ts'
+import type { TaskGrant } from './task-authorization.ts'
 import { closeSecureFs, secureFsFor } from './secure-fs.ts'
 import { VaultIndex } from './vault-index.ts'
 import { vaultRootIdentity, watchVault } from './watch.ts'
@@ -190,16 +191,35 @@ export class VaultSession {
     this.assertSession(token);return {...note,content:partitionSource(note.content).body,ledger}
   }
   /** Called only after a task grant or explicit migration, never by opening. */
-  async prepareTaskSource(request:ObjectBinding&{relPath:string;expectedRevision:string}){
+  async prepareTaskSource(request:ObjectBinding&{relPath:string;expectedRevision:string},grant:TaskGrant){
     await this.lifecycleReady;return this.mutations.run(async()=>{
       this.assertSession(request.sessionId);this.requireStableStructure()
+      const root=this.requireUsableRoot()
+      if(!grant||grant.root!==root||grant.sessionId!==request.sessionId||grant.origin!==request.relPath)throw Error('INVALID_AUTHORIZATION')
+      const policy=await loadPermissionSnapshot(root)
+      if(await modelTierFor(root,request.relPath)!=='reference')throw Error('NOTE_NOT_REFERENCE')
+      // Production grant dependencies read snapshots/permissions directly; they
+      // do not enqueue another vault mutation while this queue is held.
+      await grant.assertLive('write',request.relPath)
       const before=await this.read(request.relPath)
       if(!this.acceptsObject(request.relPath,request.objectVersion,before.objectVersion))throw Error('NOTE_REPLACED')
       if(before.revision!==request.expectedRevision)throw Error('CONFLICT')
-      const migrated=this.ledgerStore!.migrate(request.relPath)
-      if(migrated.migrated)await this.recordCommittedWrite({relPath:request.relPath,previousPath:request.relPath,previousObjectVersion:before.objectVersion,objectVersion:migrated.objectVersion,content:migrated.body})
-      this.assertSession(request.sessionId);return {previousRevision:before.revision,revision:migrated.revision}
+      const after=await loadPermissionSnapshot(root)
+      if(policy.state.status!=='ready'||after.state.status!=='ready')throw Error('PERMISSIONS_INVALID')
+      if(policy.raw!==after.raw||policy.revision!==after.revision||tierFor(request.relPath,effectivePermissionEntries(root,after.state.entries))!=='reference')throw Error('SOURCE_PERMISSION_CHANGED')
+      grant.assertActive()
+      this.assertSession(request.sessionId);this.requireStableStructure()
+      const migrated=this.migrateRegistered(request.relPath,before)
+      return {previousRevision:before.revision,revision:migrated.revision,sessionId:request.sessionId,previousObjectVersion:before.objectVersion,objectVersion:migrated.objectVersion,migrated:migrated.migrated}
     })
+  }
+  private migrateRegistered(relPath:string,before:NoteSnapshot){
+    if(partitionSource(before.content).ledger!==null){
+      const links=this.successors.get(relPath)
+      if(!links?.has(before.objectVersion)&&(links?.size??0)>=8192)throw Error('OBJECT_BINDING_LIMIT')
+      this.requireSnapshotCapacity(relPath,'pending-migration',partitionSource(before.content).body,before.objectVersion)
+    }
+    return this.ledgerStore!.migrate(relPath,before)
   }
   private scheduleLedgerCompression(relPath:string,token:string){
     setImmediate(()=>{void this.mutations.run(()=>{
@@ -223,7 +243,7 @@ export class VaultSession {
   memoryDiagnostic(){this.requireUsableRoot();return this.workingMemory!.diagnosis()}
   memorySnapshot(){this.assertCall();return this.workingMemory!.read()}
   /** Explicit diagnostic reset stays reachable during a pending structure recovery; it never clears that journal. */
-  async memoryReset(expected:{revision:string|null;objectVersion:string|null},watermark:number){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);this.requireUsableRoot();return this.workingMemory!.reset(expected,watermark)})}
+  async memoryReset(expected:{revision:string|null;objectVersion:string|null}){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);this.requireUsableRoot();return this.workingMemory!.reset(expected,this.materialCeiling())})}
   async memoryMutation<T>(operation:(store:WorkingMemoryStore)=>T|Promise<T>):Promise<T>{const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();const result=await operation(this.workingMemory!);this.assertSession(token);return result})}
   async ledgerRecord(relPath:string,taskId:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.getRecord(relPath,taskId)}
   async ledgerMaintenancePreview(relPath:string,action:'compress'|'clear'){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintenancePreview(relPath,action)})}
@@ -240,7 +260,7 @@ export class VaultSession {
     const token=this.captureSession(),entries=await this.tree(),paths:string[]=[]
     const walk=(items:TreeEntry[])=>{for(const item of items){if((item.kind==='note'||item.kind==='file')&&item.relPath.toLowerCase().endsWith('.md'))paths.push(item.relPath);if(item.kind==='dir')walk(item.children??[])}}
     walk(entries);paths.sort();const remaining=paths.filter(p=>after===null||p>after),batch=remaining.slice(0,5),failures:{relPath:string;error:string}[]=[],processed:string[]=[]
-    for(const path of batch){this.assertSession(token);try{await this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();this.ledgerStore!.migrate(path)});processed.push(path)}catch{failures.push({relPath:path,error:'LEDGER_MIGRATION_FAILED'})}}
+    for(const path of batch){this.assertSession(token);try{await this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();const before=await this.read(path);this.migrateRegistered(path,before)});processed.push(path)}catch{failures.push({relPath:path,error:'LEDGER_MIGRATION_FAILED'})}}
     return {processed,failures,after:remaining.length>batch.length?batch.at(-1)!:null}
   }
   async read(relPath: string): Promise<NoteSnapshot> {
@@ -337,7 +357,7 @@ export class VaultSession {
     })
   }
 
-  private async recordCommittedWrite(write: CommittedNoteWrite): Promise<void> {
+  private recordCommittedWrite(write: CommittedNoteWrite): void {
     const { relPath, previousPath, previousObjectVersion, objectVersion, content } = write
     if (previousPath !== relPath) this.moveObjectBinding(previousPath, relPath, previousObjectVersion)
     const links = this.successors.get(relPath) ?? new Map<string, string>()
@@ -687,7 +707,9 @@ export class VaultSession {
     this.token = token
     const check = (): void => { this.assertSession(token); this.requireUsableRoot() }
     this.workingMemory=new WorkingMemoryStore(()=>secureFsFor(this.requireUsableRoot()),check)
-    this.ledgerStore=new LedgerStore(()=>secureFsFor(this.requireUsableRoot()),check)
+    this.ledgerStore=new LedgerStore(()=>secureFsFor(this.requireUsableRoot()),check,(relPath,before,after,content)=>{
+      check();this.recordCommittedWrite({relPath,previousPath:relPath,previousObjectVersion:before,objectVersion:after,content})
+    })
     this.ledgerFailure=null
     this.lifecycle = new VaultLifecycle(this.root, this.mutations, token, check, async write => {
       check(); await this.recordCommittedWrite(write)

@@ -230,3 +230,16 @@ it('saves the library model beside its selector through the same combined config
  finish({ok:false,error:'IO_ERROR'});await flush();expect(local.disabled).toBe(false);expect(model.value).toBe('m')
  dispose();body.remove()
 })
+
+it.each(['retirement','material'] as const)('shows the saved library diagnostic and next step for %s',async kind=>{
+ const body=document.createElement('div');document.body.append(body)
+ const value={...view,...(kind==='retirement'?{retirementFailure:'MEMORY_RETIREMENT_FAILED'}:{reason:'LEDGER_REGISTRY_INVALID',materialStatus:'invalid' as const})}
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ expect(body.textContent).toContain(kind==='retirement'?'旧记忆未能清除':'材料登记无法核验');expect(body.textContent).toContain(kind==='retirement'?'原文件已保留':'清空和推进学习进度已停止');dispose();body.remove()
+})
+
+it('shows invalid materials alongside an independent unavailable model configuration',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,reason:'MEMORY_CONFIG_UNAVAILABLE',materialStatus:'invalid'}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ expect(body.textContent).toContain('材料登记无法核验');expect(body.textContent).toContain('记忆设置无法读取');dispose();body.remove()
+})

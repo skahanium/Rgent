@@ -86,3 +86,44 @@ it('compresses in place only after roundtrip and net-saving checks, and clears w
  const clear=store.maintenancePreview('a.md','clear');store.maintain('a.md','clear',clear.records)
  expect(store.getRecord('a.md',task.taskId).chapter).toBeNull();expect(fs.readSnapshot('a.md').bytes.toString()).toBe(body)
 })
+
+it.each(['malformed','null','sequence','owner','duplicate'] as const)('refuses an untrusted material registry: %s',change=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');store.materialUnit('a.md',0,2)
+ const file=path.join(root,'.rgent','materials.json'),materials=JSON.parse(readFileSync(file,'utf8'))
+ if(change==='sequence')materials.units[0].sequence=2
+ if(change==='owner')materials.units[0].noteId='unknown'
+ if(change==='duplicate')materials.units.push({...materials.units[0]})
+ writeFileSync(file,change==='malformed'?'{bad':change==='null'?'null':JSON.stringify(materials))
+ expect(store.materialState()).toEqual({status:'invalid',reason:'LEDGER_REGISTRY_INVALID'});expect(()=>store.materialCeiling()).toThrow('LEDGER_REGISTRY_INVALID')
+})
+it.each(['unit','task'] as const)('checks independent %s sequences even when registry and descriptors claim zero',kind=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');if(kind==='unit')store.materialUnit('a.md',0,2);else store.prepare('a.md',task)
+ const file=path.join(root,'.rgent','registry.json'),registry=JSON.parse(readFileSync(file,'utf8'));registry.sequence=0
+ for(const owner of registry.owners){owner.sequenceCeiling=0;writeFileSync(path.join(root,'.rgent','ledgers',owner.noteId,'owner.json'),JSON.stringify(owner))}writeFileSync(file,JSON.stringify(registry))
+ expect(store.materialState()).toEqual({status:'invalid',reason:'LEDGER_REGISTRY_INVALID'});expect(()=>store.materialCeiling()).toThrow('LEDGER_REGISTRY_INVALID')
+})
+it('verifies positive independent task sequences and legacy zero without changing any bytes',()=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');store.prepare('a.md',task);store.materialUnit('a.md',0,2);const before=readFileSync(path.join(root,'.rgent','registry.json'),'utf8')
+ expect(store.materialState()).toEqual({status:'verified',sequence:2});expect(readFileSync(path.join(root,'.rgent','registry.json'),'utf8')).toBe(before)
+})
+
+it.each(['unit','task'] as const)('refuses new %s allocation rather than reusing a sequence after the registry ceiling is lowered',kind=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');store.prepare('a.md',task)
+ const file=path.join(root,'.rgent','registry.json'),registry=JSON.parse(readFileSync(file,'utf8'));registry.sequence=0
+ for(const owner of registry.owners){owner.sequenceCeiling=0;writeFileSync(path.join(root,'.rgent','ledgers',owner.noteId,'owner.json'),JSON.stringify(owner))}const corrupt=JSON.stringify(registry);writeFileSync(file,corrupt)
+ expect(()=>kind==='unit'?store.materialUnit('a.md',0,2):store.prepare('a.md',{...task,taskId:'new-task'})).toThrow('LEDGER_REGISTRY_INVALID');expect(readFileSync(file,'utf8')).toBe(corrupt)
+})
+
+it('keeps a large exact legacy archive eligible for sequence verification without the new-task size cap',()=>{
+ const {root,store}=fixture(),tail='<!-- rgent:ledger:v1 -->\n'+ '旧'.repeat(800000);writeFileSync(path.join(root,'a.md'),'正文\n'+tail);store.migrate('a.md')
+ expect(store.legacyRaw('a.md')).toBe(tail);expect(store.materialState()).toEqual({status:'verified',sequence:0});expect(store.materialUnit('a.md',0,2).sequence).toBe(1)
+})
+
+it('refuses a new saved task with zero sequence instead of accepting it as legacy history',()=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');const record=store.prepare('a.md',task),file=path.join(root,'.rgent','ledgers',record.noteId,record.taskId+'.json');record.sequence=0;writeFileSync(file,JSON.stringify(record))
+ expect(store.materialState()).toEqual({status:'invalid',reason:'LEDGER_REGISTRY_INVALID'})
+})
+it('refuses a directory hidden behind a reserved legacy record filename',()=>{
+ const {root,fs,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');const owner=store.owner('a.md');fs.createDirectory('.rgent/ledgers/'+owner.noteId+'/legacy.json')
+ expect(store.materialState()).toEqual({status:'invalid',reason:'LEDGER_REGISTRY_INVALID'})
+})

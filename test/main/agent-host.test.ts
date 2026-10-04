@@ -401,3 +401,21 @@ describe('assistant habits in a run', () => {
     expect(app.source()).not.toContain('助手习惯：已应用')
   })
 })
+
+import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
+import { createHash } from 'node:crypto'
+it.each(['valid','revision','object','session'] as const)('continues only a verified migration receipt: %s',async changed=>{
+ const hash=(text:string)=>createHash('sha256').update(text).digest('hex')
+ let content='/问\n<!-- rgent:ledger:v1 -->\n旧历史',objectVersion='old',revision=hash(content)
+ const credential={provider:'custom' as const,baseURL:'https://model.example/v1',modelId:'m',contextTokens:16000,apiKey:'fixture'},limits={seconds:30,steps:4,tools:0}
+ const read=async()=>({content,revision,sessionId:'s',objectVersion})
+ const registry=new TaskAuthorizationRegistry({root:()=>'/v',session:()=>'s',tree:async()=>[{kind:'note',relPath:'a.md',name:'a.md'}],read,tier:async()=> 'reference',acceptsObject:(_path,previous,next)=>previous==='old'&&next==='new',configuration:()=>({credential,limits})})
+ const request={modelRecordId:'m',relPath:'a.md',sessionId:'s',objectVersion,expectedRevision:revision,range:{start:0,end:2},expectedText:'/问',promptText:'问',references:[]}
+ const preview=await registry.preview('owner',request);let writes=0,streams=0
+ const host=new AgentHost({root:()=>'/v',session:()=>'s',acceptsObject:(_path,previous,next)=>previous==='old'&&next==='new',tier:async()=> 'reference',authorize:input=>registry.consume('owner',input as never),prepareSource:async()=>{
+  const previousRevision=revision;content='/问\n';revision=hash(content);objectVersion='new'
+  return {previousRevision,revision:changed==='revision'?'wrong':revision,sessionId:changed==='session'?'other':'s',previousObjectVersion:'old',objectVersion:changed==='object'?'other':'new',migrated:true}
+ },read,write:async(_path,next)=>{writes++;content=next;revision=hash(next);return {revision,sessionId:'s',objectVersion}},credential:()=>credential,limits:()=>limits,stream:async function*(){streams++;yield '回答'},emit:()=>{},ledger:hostLedgerFixture().ledger})
+ if(changed==='valid'){const started=await host.start({...request,previewId:preview.id});await started.done;expect(writes).toBeGreaterThan(0);expect(streams).toBe(1)}
+ else{await expect(host.start({...request,previewId:preview.id})).rejects.toThrow();expect(writes).toBe(0);expect(streams).toBe(0)}
+})

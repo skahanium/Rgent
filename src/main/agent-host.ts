@@ -69,7 +69,7 @@ export type HostDependencies = {
   assertMemoryAuthorization?: (input: HostStart) => void
   session?: () => string | null
   acceptsObject?: (relPath: string, expected: string, current: string) => boolean
-  prepareSource?: (input:HostStart)=>Promise<{previousRevision:string;revision:string}>
+  prepareSource?: (input:HostStart,grant:TaskGrant|undefined)=>Promise<{previousRevision:string;revision:string;sessionId:string;previousObjectVersion:string;objectVersion:string;migrated:boolean}>
   read: (relPath: string) => Promise<{ content: string; revision: string; sessionId?: string; objectVersion?: string }>
   /** This is a main-process-only path, never the renderer noteWrite IPC. */
   write: (relPath: string, content: string, expectedRevision: string, binding?: ObjectBinding) => Promise<string | (ObjectBinding & { revision: string })>
@@ -280,12 +280,20 @@ export class AgentHost {
       const credential = grant?.credential ?? this.deps.credential()
       const limits = grant?.limits ?? this.deps.limits()
       if (grant) encodeLedgerProvenance({ version: 1, model: { provider: credential.provider, modelId: credential.modelId, endpointHost: new URL(credential.baseURL).host }, scope: grant.sources.map(source => source.relPath), sources: [], tools: [], sentSources: [] })
-      const prepared=await this.deps.prepareSource?.(input)
+      const prepared=await this.deps.prepareSource?.(input,grant)
       const original = await this.deps.read(input.relPath)
       if (this.deps.root() !== root) throw new Error('VAULT_CHANGED')
       if (input.sessionId !== undefined && original.sessionId !== input.sessionId) throw new Error('VAULT_CHANGED')
       if (input.objectVersion !== undefined && (!original.objectVersion || !this.matchesObject(input.relPath, input.objectVersion, original.objectVersion))) throw new Error('NOTE_REPLACED')
       if (input.expectedRevision !== undefined && (prepared?prepared.previousRevision!==input.expectedRevision||original.revision!==prepared.revision:original.revision!==input.expectedRevision)) throw new Error('CONFLICT')
+      if (prepared) {
+        if (!grant || prepared.sessionId!==grant.sessionId || original.sessionId!==prepared.sessionId) throw Error('VAULT_CHANGED')
+        if (prepared.objectVersion!==original.objectVersion || !this.matchesObject(input.relPath,input.objectVersion??grant.sources[0]!.objectVersion,prepared.previousObjectVersion)) throw Error('NOTE_REPLACED')
+        if (prepared.revision!==original.revision || prepared.previousRevision!==input.expectedRevision) throw Error('CONFLICT')
+        // The queued migration receipt and the exact post-migration read were both
+        // verified above. Ordinary reads cannot advance the grant's origin proof.
+        if (prepared.migrated) grant.acknowledgeOrigin({...original,sessionId:prepared.sessionId,objectVersion:prepared.objectVersion})
+      }
       if (original.sessionId && original.objectVersion) this.bindings.set(key, { sessionId: original.sessionId, objectVersion: original.objectVersion, originalVersion: input.objectVersion ?? original.objectVersion })
       this.deps.assertMemoryAuthorization?.(input)
       const id = randomUUID()

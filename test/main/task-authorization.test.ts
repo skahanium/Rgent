@@ -295,3 +295,8 @@ it('rejects a run-limit change made during authorization consumption', async () 
   app.onRead(path => { if (path === 'dir/b.md') config.limits.seconds = 181 })
   await expect(registry.consume('a', { ...app.request, previewId: preview.id })).rejects.toThrow('STALE_AUTHORIZATION')
 })
+
+it('rejects origin receipts after revocation and exposes a synchronous live check for the migration commit',async()=>{
+ const app=setup(),preview=await app.registry.preview('owner',app.request),grant=await app.registry.consume('owner',{...app.request,previewId:preview.id})
+ grant.revoke();expect(()=>grant.acknowledgeOrigin(app.records.get('a.md')!)).toThrow('AUTHORIZATION_REVOKED');expect(()=>grant.assertActive()).toThrow('AUTHORIZATION_REVOKED')
+})

@@ -24,6 +24,7 @@ export interface TaskGrant {
   readonly sources: readonly Readonly<AuthorizedSource>[]
   readonly credential: Readonly<ModelCredential>
   readonly limits: Readonly<RunLimits>
+  assertActive(): void
   assertLive(action: AuthorizationAction, path?: string, signal?: AbortSignal): Promise<void>
   validateSources(signal?: AbortSignal): Promise<void>
   assertWriteTarget(path: string): void
@@ -165,8 +166,13 @@ class LiveGrant implements TaskGrant {
     this.credential=Object.freeze({...prepared.config.credential});this.limits=Object.freeze({...prepared.config.limits})
   }
   revoke():void {this.live=false}
+  assertActive():void {
+    if(!this.live||this.deps.ownerValid?.(this.owner)===false)throw Error('AUTHORIZATION_REVOKED')
+    if(this.deps.root()!==this.root||this.deps.session()!==this.sessionId)throw Error('VAULT_CHANGED')
+  }
   assertWriteTarget(path:string):void {if(path!==this.origin)throw Error('OUTSIDE_TASK_SCOPE')}
   acknowledgeOrigin(snapshot:NoteSnapshot):void {
+    this.assertActive()
     if(snapshot.sessionId!==this.sessionId)throw Error('VAULT_CHANGED')
     this.originProof={...this.originProof,objectVersion:snapshot.objectVersion,revision:snapshot.revision,fingerprint:digest(snapshot.content)}
   }
@@ -179,9 +185,8 @@ class LiveGrant implements TaskGrant {
   }
   async validateSources(signal?:AbortSignal):Promise<void>{
     const check = () => {
-      if (!this.live || this.deps.ownerValid?.(this.owner) === false) throw Error('AUTHORIZATION_REVOKED')
+      this.assertActive()
       if (signal?.aborted) throw Error('TASK_CANCELLED')
-      if (this.deps.root() !== this.root || this.deps.session() !== this.sessionId) throw Error('VAULT_CHANGED')
     }
     check()
     try {
@@ -201,7 +206,7 @@ class LiveGrant implements TaskGrant {
           check()
           if (after !== proof.tier) throw Error('SOURCE_PERMISSION_CHANGED')
           if (current.sessionId !== this.sessionId) throw Error('VAULT_CHANGED')
-          // Only a successful Host write receipt may replace this proof. A concurrent
+          // Only a verified Host write or necessary migration receipt replaces this proof. A concurrent
           // verification must restart from it, rather than revoke a legitimate own save.
           if (source.relPath === this.origin && proof !== this.originProof) continue
           if (current.objectVersion !== proof.objectVersion && !this.deps.acceptsObject(proof.relPath, proof.objectVersion, current.objectVersion)) throw Error('SOURCE_REPLACED')
