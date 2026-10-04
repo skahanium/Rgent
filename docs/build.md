@@ -1098,8 +1098,8 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 | A | 打开不写盘，坏账本可读正文，磁盘尾部保护，可信材料三态，共享归档保护与诊断 | `8b5ed9c` 最终 Spec／Quality 复核通过，四项 P1 与诊断 P2 闭合。`47bd095` 范围的 7 文件 181 项、追加 `8b5ed9c` 早退诊断 45 项与类型分别记录，不合并为一次全量；窗口与最终完整门待收口 |
 | B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `e04a02f` 最后实际队列修补独立 Spec／Quality 复核通过（2026-10-05）；定向 13 文件 261／0、类型／文档通过。打开 A+ 串行工程门；全部 B 实际窗口及整轮完整门仍待核，不能据此宣称整库恢复已完整验收 |
 | A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | `3c39531` 修补后的独立 Spec／Quality 再审通过（2026-10-05），3 项 Important 及目标消失路径闭合；必要 8 文件 205／0、类型／文档通过，打开 C 串行工程门。实际窗口及整轮完整门仍待核；初版 315／0、SSE 13／0及 core 20／0保留原范围 |
-| C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | 2026-10-05 `6630f3b` 本机 9 文件 223／0、类型通过；独立审查发现 3 项 Important（完整材料祖先、缓存生成方、材料 JSON 边界），同一施工者已补有效 red 并修补，必要 5 文件 133／0、类型／文档通过。性能与原失败保留；待再次复审、实际窗口和整轮完整门，尚未开放 E |
-| E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 待 C 门；2026-10-04 |
+| C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | `ba385f2` 三项 Important 修补后的独立 Spec／Quality 再审通过（2026-10-05）；必要 5 文件 133／0、类型及文档通过。原 9 文件 223／0、性能及失败保留各自范围；开放 E 串行工程门，实际窗口与整轮完整门仍待收口 |
+| E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | C 工程复审通过，2026-10-05 开放串行施工；尚未验收 |
 | D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | 待 E 门；2026-10-04 |
 | Q | 虚构开发集双策略对照，逐模型停损与证据；不切生产策略、不运行正式评测 | 待 D 门；2026-10-04 |
 
@@ -1220,3 +1220,5 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 - generator 采用缓存 load／put、真实 sentSummary、Host 发送前同一严格 schema（含 connection 与精确字段）；坏设备缓存按空派生重建或省略，不再先发送后真实 ledger prepare 失败。完整 material 对象的 wrapper／数组／逗号及 truncated 状态统一纳入 pending／commit 字节限额，越界沿既有 truncated 语义省掉片段；调用模型前与真实账本使用同一 material 校验，原 finite answer/audit 配额和 B 四参队列 proof／A+ 注册分离保持。
 - red：`pnpm exec vitest run test/main/host-material.test.ts test/main/summary-cache.test.ts test/main/working-memory-service.test.ts` 25 通过／5 失败（`/tmp/rgent-v4-C-fix-red-three.log`）；真实 Host→Vault 两种坏 generator 2 失败／1 通过／45 未选（`...-fix-red-vault.log`）；真实 Vault 临界材料 1 失败／19 未选（`...-fix-red-material-vault.log`），实际 prepare 为 `LEDGER_RECORD_INVALID`。补充原 `6630f3b` ledger 的水位／祖先核验 9 失败／60 未选（`...-fix-red-ancestry-watermark.log`）；合法采纳副本及本任务口令的过度拒绝、无遗忘约束的坏祖先短路也单列修补日志，完整说明见 C 报告。
 - 最终必要命令 `pnpm exec vitest run test/main/agent-host.test.ts test/main/host-material.test.ts test/main/ledger-store.test.ts test/main/summary-cache.test.ts test/main/working-memory-service.test.ts`，5 文件 133／0（`/tmp/rgent-v4-C-fix-green-final.log`）；`pnpm exec tsc --noEmit` 与 `pnpm docs:check` 通过，日志 `...-fix-types-final.log`、`...-fix-docs-final.log`。原页／contexts 性能数据适用原夹具，未重跑无风险性能／全量／build／UI／付费模型；新增祖先复核的重材料成本未测，不把原数字代称新 Host 端到端门。只本地提交，待再次独立复审；E、实际窗口、完整总门及既有平台／人工／质量待核均保持。
+
+包 C 修补独立再审（2026-10-05，固定范围 `6630f3b..ba385f2`）：Spec／Quality 均通过，原三项 Important 闭合，新问题 0。真实 ledger／带任务身份 body 三代祖先与水位、普通保存续接及采纳副本正例、严格缓存生成方 schema、完整材料 JSON 与真实 Vault 保存边界均核对；报告 `/tmp/rgent-v4-C-rereview-report.md`。据此只开放 E 串行工程施工；深链／重材料性能、实际窗口、整轮完整门、Windows／CI、原生输入法人工、用户视觉及正式学习质量仍待核，旧性能数字不代称新 Host 端到端门。
