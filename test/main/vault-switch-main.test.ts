@@ -4,7 +4,7 @@ import path from 'node:path'
 import {afterEach,beforeEach,expect,it,vi} from 'vitest'
 import {IPC} from '../../src/shared/ipc.ts'
 import {VaultCatalog} from '../../src/main/vault-catalog.ts'
-const state=vi.hoisted(()=>({data:'',handles:new Map<string,Function>(),events:new Map<string,Function>(),appEvents:new Map<string,Function>(),window:null as any,host:null as any,launch:Promise.resolve(),active:false,settled:0,stopped:0,watchFailure:'',open:vi.fn(),save:vi.fn(),confirm:vi.fn(),memoryResult:null as Promise<any>|null,rechecks:[] as string[],tasks:[] as {id:string;root:string;relPath:string}[],cancelled:[] as string[],retried:[] as string[]}))
+const state=vi.hoisted(()=>({trusted:true,memoryOwnerCheck:undefined as undefined|(()=>void),data:'',handles:new Map<string,Function>(),events:new Map<string,Function>(),appEvents:new Map<string,Function>(),window:null as any,host:null as any,launch:Promise.resolve(),active:false,settled:0,stopped:0,watchFailure:'',open:vi.fn(),save:vi.fn(),confirm:vi.fn(),memoryResult:null as Promise<any>|null,rechecks:[] as string[],tasks:[] as {id:string;root:string;relPath:string}[],cancelled:[] as string[],retried:[] as string[]}))
 vi.mock('electron',()=>({
  app:{isPackaged:true,getPath:()=>state.data,requestSingleInstanceLock:()=>true,quit:vi.fn(),whenReady:()=>Promise.resolve(),on:(name:string,fn:Function)=>state.appEvents.set(name,fn)},
  BrowserWindow:class{
@@ -16,10 +16,10 @@ vi.mock('electron',()=>({
  ipcMain:{handle:(channel:string,fn:Function)=>state.handles.set(channel,fn),on:(channel:string,fn:Function)=>state.events.set(channel,fn)},
  protocol:{registerSchemesAsPrivileged:vi.fn(),handle:vi.fn()},Menu:{buildFromTemplate:vi.fn(),setApplicationMenu:vi.fn()},nativeTheme:{on:vi.fn(),off:vi.fn()},safeStorage:{},shell:{}
 }))
-vi.mock('../../src/main/ipc-sender.ts',()=>({isTrustedIpcSender:()=>true}))
+vi.mock('../../src/main/ipc-sender.ts',()=>({isTrustedIpcSender:()=>state.trusted}))
 vi.mock('../../src/main/memory-ipc.ts',async original=>{
  const module=await original<typeof import('../../src/main/memory-ipc.ts')>()
- return {...module,createMemoryIpc:(ports:Parameters<typeof module.createMemoryIpc>[0])=>{const ipc=module.createMemoryIpc(ports);return {...ipc,handle:(...args:Parameters<typeof ipc.handle>)=>state.memoryResult??ipc.handle(...args)}}}
+ return {...module,createMemoryIpc:(ports:Parameters<typeof module.createMemoryIpc>[0])=>{const ipc=module.createMemoryIpc(ports);return {...ipc,handle:(...args:Parameters<typeof ipc.handle>)=>{state.memoryOwnerCheck=args[3];return state.memoryResult??ipc.handle(...args)}}}}
 })
 vi.mock('../../src/main/model-config.ts',async original=>({...await original<object>(),createModelConfigStore:()=>{throw Error('UNAVAILABLE')}}))
 vi.mock('../../src/main/watch.ts',async original=>({...await original<object>(),watchVault:(root:string)=>{if(root===state.watchFailure)throw Error('WATCH_INITIALIZATION_FAILED');return ()=>{}}}))
@@ -31,7 +31,7 @@ vi.mock('../../src/main/agent-host.ts',()=>({AgentHost:class{
 let base='',catalog:VaultCatalog,a:string,b:string,c:string
 const invoke=(channel:string,...args:unknown[])=>state.handles.get(channel)!({sender:state.window.webContents,senderFrame:{routingId:1}},...args)
 beforeEach(async()=>{
- vi.resetModules();state.handles.clear();state.events.clear();state.appEvents.clear();state.window=null;state.launch=Promise.resolve();state.active=false;state.settled=0;state.stopped=0;state.watchFailure='';state.memoryResult=null;state.rechecks=[];state.tasks=[];state.cancelled=[];state.retried=[];state.open.mockReset();state.save.mockReset();state.confirm.mockReset();state.confirm.mockResolvedValue({response:1})
+ vi.resetModules();state.trusted=true;state.memoryOwnerCheck=undefined;state.handles.clear();state.events.clear();state.appEvents.clear();state.window=null;state.launch=Promise.resolve();state.active=false;state.settled=0;state.stopped=0;state.watchFailure='';state.memoryResult=null;state.rechecks=[];state.tasks=[];state.cancelled=[];state.retried=[];state.open.mockReset();state.save.mockReset();state.confirm.mockReset();state.confirm.mockResolvedValue({response:1})
  base=fs.mkdtempSync(path.join(os.tmpdir(),'rgent-switch-main-'));state.data=path.join(base,'data');fs.mkdirSync(state.data)
  a=path.join(base,'A');b=path.join(base,'B');c=path.join(base,'C');for(const root of [a,b,c])fs.mkdirSync(root)
  catalog=new VaultCatalog(state.data);catalog.committed(catalog.inspect(a));catalog.register(catalog.inspect(b));catalog.register(catalog.inspect(c))
@@ -159,4 +159,11 @@ it('a new-root watcher notification cannot re-read B for an old image controller
  const old=invoke(IPC.remoteImageGet,{session,args:[{url:'https://image.test/x.png',context:{sessionId:session,noteRelPath:'same.md',objectVersion:'o',revision:'r'},mode:'default'}]}).then(()=>null,(e:Error)=>e.message)
  await started;await invoke(IPC.vaultOpen,catalog.inspect(b).id!);release()
  try{expect(await old).toBe('VAULT_CHANGED');expect(roots).toEqual([fs.realpathSync(a)])}finally{vi.restoreAllMocks()}
+})
+
+it('passes a captured production frame check to the existing memory IPC handler',async()=>{
+ const session=(await invoke(IPC.vaultGet)).sessionId
+ await invoke(IPC.memoryGet,{session,args:[{sessionId:session}]})
+ expect(state.memoryOwnerCheck).toBeTypeOf('function');expect(()=>state.memoryOwnerCheck!()).not.toThrow()
+ state.trusted=false;expect(()=>state.memoryOwnerCheck!()).toThrow('MEMORY_SESSION_CLOSED')
 })

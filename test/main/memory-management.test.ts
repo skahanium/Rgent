@@ -55,11 +55,24 @@ it('retirement uses the existing single-use preview and leaves unknown or change
   const request={sessionId,action:'retire',revision:view.retirement!.revision,objectVersion:view.retirement!.objectVersion}
   const preview=await ipc.handle('owner','maintenance',request);if(!preview.ok||!('id'in preview.value))throw Error('preview missing')
   expect(preview.value.kind).toBe('retire');expect(JSON.stringify(preview.value)).not.toContain(root)
-  await writeFile(file,legacy+' ');expect(await ipc.handle('owner','commit',{sessionId,id:preview.value.id})).toEqual({ok:false,error:'MEMORY_CONFLICT'});expect(await readFile(file,'utf8')).toBe(legacy+' ')
-  expect(await ipc.handle('owner','commit',{sessionId,id:preview.value.id})).toEqual({ok:false,error:'STALE_PREVIEW'})
+  await writeFile(file,legacy+' ');expect(await ipc.handle('owner','commit',{sessionId,id:preview.value.id},()=>{})).toEqual({ok:false,error:'MEMORY_CONFLICT'});expect(await readFile(file,'utf8')).toBe(legacy+' ')
+  expect(await ipc.handle('owner','commit',{sessionId,id:preview.value.id},()=>{})).toEqual({ok:false,error:'STALE_PREVIEW'})
   const next=await service.view(),again=await ipc.handle('owner','maintenance',{...request,revision:next.retirement!.revision,objectVersion:next.retirement!.objectVersion});if(!again.ok||!('id'in again.value))throw Error('preview missing')
-  expect(await ipc.handle('foreign','commit',{sessionId,id:again.value.id})).toEqual({ok:false,error:'STALE_PREVIEW'})
+  expect(await ipc.handle('foreign','commit',{sessionId,id:again.value.id},()=>{})).toEqual({ok:false,error:'STALE_PREVIEW'})
   const fresh=await ipc.handle('owner','maintenance',{...request,revision:next.retirement!.revision,objectVersion:next.retirement!.objectVersion});if(!fresh.ok||!('id'in fresh.value))throw Error('preview missing')
-  const result=await ipc.handle('owner','commit',{sessionId,id:fresh.value.id});expect(result).toMatchObject({ok:true,value:{status:'ready'}});expect(await readFile(file,'utf8')).toBe('<!-- rgent:memory:retired:v2 -->\n');expect(vault.memoryDiagnosis()).toBeNull()
+  const result=await ipc.handle('owner','commit',{sessionId,id:fresh.value.id},()=>{});expect(result).toMatchObject({ok:true,value:{status:'ready'}});expect(await readFile(file,'utf8')).toBe('<!-- rgent:memory:retired:v2 -->\n');expect(vault.memoryDiagnosis()).toBeNull()
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+
+it('retirement commit rechecks the confirming owner after waiting in the actual vault queue',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-retire-owner-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
+ const vault=new VaultSession(base,vi.fn());vault.restore();await vault.memoryMutation(()=>{});const file=path.join(root,'.rgent-memory'),legacy=JSON.stringify({version:1,entries:[],forgotten:[],jobs:[],relocations:[]});await writeFile(file,legacy)
+ let release!:()=>void,entered!:()=>void,current=true,checks=0;const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r),assertOwner=()=>{checks++;if(!current)throw Error('MEMORY_SESSION_CLOSED')}
+ try{
+  const service=new WorkingMemoryService(vault,()=>null),ipc=createMemoryIpc({vault:()=>vault,service:()=>service,config:()=>null,recheck:async()=>{}}),target=await vault.memoryRetirementPreview(),sessionId=target.sessionId
+  const preview=await ipc.handle('owner','maintenance',{sessionId,action:'retire',revision:target.revision,objectVersion:target.objectVersion});if(!preview.ok||!('id'in preview.value))throw Error('preview missing')
+  const blocker=vault.memoryMutation(async()=>{entered();await gate});await started
+  const commit=ipc.handle('owner','commit',{sessionId,id:preview.value.id},assertOwner);await Promise.resolve();const sameSession=vault.captureSession();current=false;release();await blocker
+  expect(await commit).toEqual({ok:false,error:'MEMORY_SESSION_CLOSED'});expect(checks).toBeGreaterThan(0);expect(vault.captureSession()).toBe(sameSession);expect(await readFile(file,'utf8')).toBe(legacy)
+ }finally{release?.();vault.dispose();await rm(base,{recursive:true,force:true})}
 })

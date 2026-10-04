@@ -71,7 +71,7 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
  const clear=()=>previews.clear()
  const hold=(held:Omit<HeldPreview,'expires'>)=>{ports.vault()?.assertSession(held.preview.sessionId);for(const [id,p] of previews)if(p.expires<Date.now())previews.delete(id);if(previews.size>=128)throw Error('MEMORY_QUEUE_FULL');previews.set(held.preview.id,{...held,expires:Date.now()+120000});return {ok:true as const,value:held.preview}}
  const view=async(service:WorkingMemoryService)=>{const value=await service.view();service.vault.assertSession(value.sessionId);value.running=ports.engine?.()?.state()??value.running;for(const job of value.jobs)job.undoable=!!job.materialVersion&&!!ports.engine?.()?.canUndo(job.taskId,job.materialVersion);return {ok:true as const,value}}
- return {clear,async handle(owner:string,op:MemoryOperation,value:unknown):Promise<MemoryResult<MemoryView|MemoryPreview>>{
+ return {clear,async handle(owner:string,op:MemoryOperation,value:unknown,assertOwner?:()=>void):Promise<MemoryResult<MemoryView|MemoryPreview>>{
   try{
    const request=parseMemoryRequest(op,value);if(!request)throw Error('BAD_REQUEST')
    const vault=ports.vault(),service=ports.service();if(!vault||!service)throw Error('NO_VAULT');const session=request.sessionId as string;vault.assertSession(session)
@@ -124,7 +124,7 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
    if(op==='commit'){
     const p=previews.get(request.id as string);previews.delete(request.id as string)
     if(!p||p.owner!==owner||p.expires<Date.now()||p.preview.sessionId!==session)throw Error('STALE_PREVIEW')
-    if(p.preview.kind==='retire'){await vault.memoryRetirementRetry(p.retirement!);vault.assertSession(session);clear();ports.invalidate?.();await ports.recheck(vault,session);vault.assertSession(session);return await view(service)}
+    if(p.preview.kind==='retire'){if(!assertOwner)throw Error('MEMORY_SESSION_CLOSED');await vault.memoryRetirementRetry(p.retirement!,assertOwner);vault.assertSession(session);clear();ports.invalidate?.();await ports.recheck(vault,session);vault.assertSession(session);return await view(service)}
     if(p.preview.kind==='undo'){const engine=ports.engine?.();if(!engine)throw Error('MEMORY_RETRY_UNAVAILABLE');await engine.undo(p.job!.taskId,p.job!.materialVersion);vault.assertSession(session);ports.invalidate?.();await ports.recheck(vault,session);vault.assertSession(session);return await view(service)}
     if(p.preview.kind==='reset-config'){
      if(!config)throw Error('MEMORY_CONFIG_UNAVAILABLE');clear();ports.invalidate?.();config.resetMemoryConfig(p.binding!.revision);await ports.recheck(vault,session);return await view(service)

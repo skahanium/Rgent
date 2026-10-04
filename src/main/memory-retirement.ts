@@ -3,9 +3,10 @@ import { secureFsFor } from './secure-fs.ts'
 export const MEMORY_FILE='.rgent-memory'
 export const RETIRED_MEMORY='<!-- rgent:memory:retired:v2 -->\n'
 /** No old entries are decoded, imported, archived or authorized. Unknown bytes are diagnostic. */
-export function retireMemoryFile(root:string,check:()=>void):void{
+export function retireMemoryFile(root:string,check:()=>void,expected?:{revision:string;objectVersion:string}):void{
  check();const fs=secureFsFor(root);let disk
- try{disk=fs.readSnapshot(MEMORY_FILE)}catch(e){if(e instanceof Error&&e.message==='ENOENT')return;throw e}
+ try{disk=fs.readSnapshot(MEMORY_FILE)}catch(e){if(e instanceof Error&&e.message==='ENOENT'){if(expected)throw Error('MEMORY_CONFLICT');return}throw e}
+ if(expected&&(disk.objectVersion!==expected.objectVersion||createHash('sha256').update(disk.bytes).digest('hex')!==expected.revision))throw Error('MEMORY_CONFLICT')
  const raw=disk.bytes.toString('utf8')
  if(!Buffer.from(raw).equals(disk.bytes))throw Error('MEMORY_RETIREMENT_FAILED')
  if(raw===RETIRED_MEMORY||raw.startsWith('<!-- rgent:memory:v2 '))return

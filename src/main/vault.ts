@@ -161,13 +161,13 @@ export class VaultSession {
     const sessionId=this.captureSession();await this.lifecycleReady
     return this.mutations.run(()=>{this.assertSession(sessionId);this.requireStableStructure();const root=this.requireUsableRoot(),target=memoryRetirementTarget(root,()=>{this.assertSession(sessionId);this.requireUsableRoot()});return {...target,root,rootIdentity:this.rootIdentity!,sessionId}})
   }
-  async memoryRetirementRetry(binding:{sessionId:string;root:string;rootIdentity:string;revision:string;objectVersion:string}){
+  async memoryRetirementRetry(binding:{sessionId:string;root:string;rootIdentity:string;revision:string;objectVersion:string},assertOwner:()=>void){
     this.assertSession(binding.sessionId);await this.lifecycleReady
     return this.mutations.run(()=>{
-      const check=()=>{this.assertSession(binding.sessionId);this.requireStableStructure();if(this.requireUsableRoot()!==binding.root||this.rootIdentity!==binding.rootIdentity)throw Error('VAULT_CHANGED')}
+      const check=()=>{assertOwner();this.assertSession(binding.sessionId);this.requireStableStructure();if(this.requireUsableRoot()!==binding.root||this.rootIdentity!==binding.rootIdentity)throw Error('VAULT_CHANGED')}
       check();const target=memoryRetirementTarget(binding.root,check)
       if(target.revision!==binding.revision||target.objectVersion!==binding.objectVersion)throw Error('MEMORY_CONFLICT')
-      try{retireMemoryFile(binding.root,check);check();this.memoryFailure=null}catch(error){this.memoryFailure='MEMORY_RETIREMENT_FAILED';throw error}
+      try{retireMemoryFile(binding.root,check,binding);check();this.memoryFailure=null}catch(error){this.memoryFailure='MEMORY_RETIREMENT_FAILED';throw error}
     })
   }
 

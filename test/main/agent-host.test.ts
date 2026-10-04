@@ -2,6 +2,7 @@ import {hostLedgerFixture} from './host-ledger-fixture.ts'
 import {ledgerChapters,ledgerTaskFields} from '../../src/main/host-context.ts'
 import {SUMMARY_SECTIONS} from '../../src/main/summary-cache.ts'
 import { describe, expect, it } from 'vitest'
+import {createScopedAgentTools} from '../../src/main/scoped-agent-tools.ts'
 import { AgentHost } from '../../src/main/agent-host.ts'
 import { assertLedgerPreserved, partitionSource } from '../../src/markdown/partition.ts'
 import { appendLedgerChapter, markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
@@ -436,16 +437,17 @@ it('waits for launching to settle, rejects the now-active task, and never queues
   expect(ran).toBe(true)
 })
 
-function memoryToolHarness(options:{calls?:{id:string;name:string;input:unknown}[];verified?:boolean;empty?:boolean;tools?:number;steps?:number;proof?:()=>void|Promise<void>;change?:()=>void}={}){
- let content='/问\n',revision=1,dispatches=0,proofReads=0,enabled=true,entriesVersion=1,paused=false
+function memoryToolHarness(options:{calls?:{id:string;name:string;input:unknown}[];verified?:boolean;empty?:boolean;tools?:number;steps?:number;library?:boolean;proof?:()=>void|Promise<void>;change?:()=>void}={}){
+ let content='单篇普通正文\n\n/问\n',revision=1,dispatches=0,proofReads=0,enabled=true,entriesVersion=1,paused=false
  const history=hostLedgerFixture(),requests:Parameters<NonNullable<import('../../src/main/agent-host.ts').HostDependencies['streamStep']>>[0][]=[]
  const credential={provider:'custom' as const,baseURL:'https://model.example/v1',modelId:'m',contextTokens:32000,apiKey:'fixture'}
  const source={id:'s',version:1,relPath:'outside.md',objectVersion:'outside',revision:'a'.repeat(64),permissionTier:'reference' as const,kind:'body' as const,taskId:null,taskMaterialHash:null,classification:'human' as const,start:0,end:2,text:'依据',hash:'b'.repeat(64),basisHash:'c'.repeat(64),sourceDeps:[],memoryDeps:[]}
  const memory={context:()=>({sessionId:'s',vaultKey:'v'}),config:()=>({enabled,revision:enabled?0:1}),entries:async(ids?:readonly string[])=>{const result=options.empty?[]:[{id:'m',version:entriesVersion,content:'火星计划约定',layer:'demand' as const,scope:'仅项目甲',attribution:'人的约定',status:paused?'paused' as const:'active' as const,reason:null,updatedAt:'2026-10-05',updateBasis:{kind:'manual' as const,id:'manual',version:1},sources:[source]}];if(ids){proofReads++;if(proofReads===1)await options.proof?.()}return result}}
- const grant={id:'g',root:'/v',sessionId:'s',origin:'a.md',sources:[{sourceId:'origin',relPath:'a.md',title:'a',sessionId:'s',objectVersion:'o',revision:'1',fingerprint:'f',tier:'reference' as const}],credential,limits:{seconds:30,steps:options.steps??12,tools:options.tools??20},assertActive(){},async assertLive(){},async validateSources(){},assertWriteTarget(){},acknowledgeOrigin(){},revoke(){}}
- const host=new AgentHost({ledger:history.ledger,root:()=>'/v',session:()=> 's',read:async()=>({content,revision:String(revision),sessionId:'s',objectVersion:'o'}),write:async(_path,next,expected)=>{if(expected!==String(revision))throw Error('CONFLICT');content=next;return String(++revision)},tier:async()=> 'reference',credential:()=>credential,limits:()=>grant.limits,authorize:async()=>grant,memory,stream:async function*(){throw Error('OLD_STREAM')},streamStep:async function*(input){requests.push(structuredClone(input));dispatches++;if(dispatches===1){for(const c of options.calls??[{id:'one',name:'search_memory',input:{query:'火星'}}])yield {type:'tool-call',...c};yield {type:'finish',reason:'tool-calls'}}else {options.change?.();yield {type:'text',text:'已答'};yield {type:'finish',reason:'stop'}}},emit:()=>{}})
+ const grant={id:'g',root:'/v',sessionId:'s',origin:'a.md',sources:[{sourceId:'origin',relPath:'a.md',title:'a',sessionId:'s',objectVersion:'o',revision:'1',fingerprint:'f',tier:'reference' as const},...(options.library?[{sourceId:'external',relPath:'b.md',title:'b',sessionId:'s',objectVersion:'b',revision:'b',fingerprint:'b',tier:'reference' as const}]:[])],credential,limits:{seconds:30,steps:options.steps??12,tools:options.tools??20},assertActive(){},async assertLive(){},async validateSources(){},assertWriteTarget(){},acknowledgeOrigin(){},revoke(){}}
+ const read=async(path:string)=>path==='b.md'?{content:'外篇普通正文',revision:'b',sessionId:'s',objectVersion:'b'}:{content,revision:String(revision),sessionId:'s',objectVersion:'o'}
+ const host=new AgentHost({ledger:history.ledger,...(options.library?{createReadOnlyTools:(grant:import('../../src/main/task-authorization.ts').TaskGrant,id:string)=>createScopedAgentTools(grant,id,{read,tier:async()=> 'reference',acceptsObject:()=>false})}:{}),root:()=>'/v',session:()=> 's',read,write:async(_path,next,expected)=>{if(expected!==String(revision))throw Error('CONFLICT');content=next;return String(++revision)},tier:async()=> 'reference',credential:()=>credential,limits:()=>grant.limits,authorize:async()=>grant,memory,stream:async function*(){throw Error('OLD_STREAM')},streamStep:async function*(input){requests.push(structuredClone(input));dispatches++;if(dispatches===1){for(const c of options.calls??[{id:'one',name:'search_memory',input:{query:'火星'}}])yield {type:'tool-call',...c};yield {type:'finish',reason:'tool-calls'}}else {options.change?.();yield {type:'text',text:'已答'};yield {type:'finish',reason:'stop'}}},emit:()=>{}})
  if(options.verified!==false)host.supportsMemorySearch=()=>true
- const run=()=>host.start({relPath:'a.md',sessionId:'s',objectVersion:'o',expectedRevision:'1',range:{start:0,end:2},expectedText:'/问',promptText:'问',memorySearchAuthorized:true})
+ const run=()=>host.start({relPath:'a.md',sessionId:'s',objectVersion:'o',expectedRevision:'1',range:{start:content.indexOf('/问'),end:content.indexOf('/问')+2},expectedText:'/问',promptText:'问',memorySearchAuthorized:true})
  return {host,history,requests,run,proofReads:()=>proofReads,content:()=>content,off:()=>{enabled=false},forget:()=>{entriesVersion++},pause:()=>{paused=true}}
 }
 it('registers only search_memory for a verified note-only task and records real sent dependencies',async()=>{
@@ -496,4 +498,16 @@ it('persists an executed memory search failure and stops later dispatches',async
 })
 it('enforces the global model step limit after memory retrieval',async()=>{
  const app=memoryToolHarness({steps:1}),task=await app.run();expect(await task.done).toEqual({status:'failed',reason:'MODEL_STEP_LIMIT'});expect(app.requests).toHaveLength(1)
+})
+
+it('memory-only actual outgoing contains the ordinary note context without a library read requirement',async()=>{
+ const app=memoryToolHarness(),task=await app.run();await task.done
+ const outgoing=JSON.stringify(app.requests[0].messages);expect(Object.keys(app.requests[0].tools!)).toEqual(['search_memory'])
+ expect(outgoing).not.toContain('本场工具来源清单');expect(outgoing).not.toContain('正文须经工具读取');expect(outgoing).toContain('单篇普通正文')
+})
+
+it('library plus memory outgoing retains only the authorized library metadata and schemas',async()=>{
+ const app=memoryToolHarness({library:true}),task=await app.run();expect(await task.done).toEqual({status:'completed'})
+ const outgoing=JSON.stringify(app.requests[0].messages);expect(Object.keys(app.requests[0].tools!).sort()).toEqual(['read_library','search_library','search_memory'])
+ expect(outgoing).toContain('本场工具来源清单');expect(outgoing).toContain('正文须经工具读取');expect(outgoing).toContain('b.md');expect(outgoing).not.toContain('outside.md')
 })
