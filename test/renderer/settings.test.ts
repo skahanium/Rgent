@@ -640,7 +640,7 @@ it('refreshes the model options on return without clearing an unsaved memory mod
  panel.close()
 })
 
-it('keeps settings drafts when switching is cancelled and only closes after explicit discard', async () => {
+it('keeps settings drafts when switching is cancelled and keeps the panel through accepted preparation', async () => {
   const save = vi.fn()
   const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async (mode: 'day' | 'night' | 'system') => ({ ok: true, mode }),
     getChromeText: async () => ({ tabs: 'default', sidebar: 'default' }), setChromeText: save } as never)
@@ -656,6 +656,90 @@ it('keeps settings drafts when switching is cancelled and only closes after expl
     expect(save).not.toHaveBeenCalled()
     confirm.mockReturnValue(true)
     expect(panel.prepareVaultChange()).toBe(true)
-    expect(panel.isOpen()).toBe(false)
+    expect(panel.isOpen()).toBe(true)
   } finally { confirm.mockRestore(); panel.close() }
+})
+
+const vaultFlush = async () => { for (let i=0;i<8;i++) await Promise.resolve() }
+function vaultSettings(overrides: Record<string,unknown> = {}) {
+ const catalog = {revision:'r1',diagnostic:null,lastVaultId:'a',activeId:'a',entries:[{id:'a',label:'本库',path:'/a',rootIdentity:'a',pinned:false,lastUsed:1},{id:'b',label:'其它库',path:'/b',rootIdentity:'b',pinned:false,lastUsed:0}]}
+ const vault = {get:async()=>catalog, open:vi.fn(async()=>{}), pick:vi.fn(async()=>{}), change:vi.fn(async(r:{label?:string})=>({...catalog,revision:'r2',entries:catalog.entries.map(e=>e.id==='a'?{...e,label:r.label??e.label}:e)})),...overrides}
+ const panel=createSettingsOverlay({getMode:async()=>'day',setMode:async mode=>({ok:true,mode}),vault})
+ return {panel,vault,go:(name:string)=>[...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')].find(b=>b.textContent===name)!.click()}
+}
+it('routes vault management into an already open settings dialog and defaults ordinary open to interface',async()=>{
+ const {panel}=vaultSettings();panel.open();const dialog=document.querySelector('dialog')!
+ expect(document.querySelector('.settings-page-title')!.textContent).toBe('界面')
+ panel.open('笔记库');await vaultFlush()
+ expect(document.querySelectorAll('dialog')).toHaveLength(1);expect(document.querySelector('dialog')).toBe(dialog)
+ expect([...document.querySelectorAll('.settings-nav button')].map(b=>b.textContent)).toEqual(['笔记库','界面'])
+ expect(document.querySelector('.settings-page-title')!.textContent).toBe('笔记库');panel.close()
+})
+it('guards busy vault operations against Escape, backdrop, direct routing and navigation',async()=>{
+ let reject!:(error:Error)=>void;const pending=new Promise<void>((_,no)=>{reject=no})
+ const {panel,go}=vaultSettings({open:()=>pending});panel.open('笔记库');await vaultFlush()
+ document.querySelector<HTMLButtonElement>('[data-vault-open="b"]')!.click()
+ const dialog=document.querySelector<HTMLDialogElement>('dialog')!
+ dialog.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+ vi.spyOn(dialog,'getBoundingClientRect').mockReturnValue({left:100,top:100,right:700,bottom:600} as DOMRect)
+ dialog.dispatchEvent(new MouseEvent('click',{bubbles:true,detail:1,clientX:20,clientY:20}))
+ go('界面');panel.open('界面');expect(panel.isOpen()).toBe(true);expect(document.querySelector('.settings-page-title')!.textContent).toBe('笔记库')
+ reject(Error('VAULT_SWITCH_CANCELLED'));await vaultFlush();go('界面');expect(document.querySelector('.settings-page-title')!.textContent).toBe('界面');panel.close()
+})
+it('tracks unsaved name locally and stops treating successfully saved names as general settings edits',async()=>{
+ const {panel}=vaultSettings();panel.open('笔记库');await vaultFlush()
+ document.querySelector<HTMLButtonElement>('[data-vault-action="edit-name"]')!.click()
+ const input=document.querySelector<HTMLInputElement>('.vault-settings-name input')!;input.value='已保存名';input.dispatchEvent(new Event('input',{bubbles:true}))
+ const confirm=vi.spyOn(window,'confirm').mockReturnValue(false)
+ try {
+ expect(panel.prepareVaultChange()).toBe(false);expect(confirm).toHaveBeenCalledTimes(1)
+ document.querySelector<HTMLButtonElement>('[data-vault-action="label"]')!.click();await vaultFlush()
+ expect(panel.prepareVaultChange()).toBe(true);expect(confirm).toHaveBeenCalledTimes(1);expect(panel.isOpen()).toBe(true)
+ } finally {confirm.mockRestore();panel.close()}
+})
+
+it('repeated ordinary settings entry and same vault route preserve an active name draft',async()=>{
+ const {panel}=vaultSettings();panel.open('笔记库');await vaultFlush()
+ document.querySelector<HTMLButtonElement>('[data-vault-action="edit-name"]')!.click()
+ const input=document.querySelector<HTMLInputElement>('.vault-settings-name input')!; input.value='新草稿'
+ panel.open();panel.open('笔记库')
+ expect(document.querySelector('.settings-page-title')!.textContent).toBe('笔记库')
+ expect(document.querySelector('.vault-settings-name input')).toBe(input);expect(input.value).toBe('新草稿');panel.close()
+})
+it('reopens the vault page before a delayed prior close without reusing its disposed page',async()=>{
+ Object.defineProperty(HTMLDialogElement.prototype,'close',{configurable:true,value:function(this:HTMLDialogElement){this.removeAttribute('open');setTimeout(()=>this.dispatchEvent(new Event('close')),0)}})
+ const {panel}=vaultSettings();panel.open('笔记库');await vaultFlush();panel.close();panel.open('笔记库');await vaultFlush()
+ expect(document.querySelector('dialog[open] .vault-settings [data-vault-id="a"]')).not.toBeNull()
+ await new Promise(resolve=>setTimeout(resolve,0));expect(panel.isOpen()).toBe(true);panel.close()
+})
+
+it('offers all six available pages with vault management first in workspace',()=>{
+ const {vault}=vaultSettings()
+ const config={providers:[],models:[],defaultModelId:null,limits:{none:{seconds:180,steps:4,tools:0},local:{seconds:300,steps:12,tools:24},network:{seconds:600,steps:20,tools:40}}}
+ const ok=async()=>({ok:true as const,config})
+ const panel=createSettingsOverlay({getMode:async()=>'day',setMode:async mode=>({ok:true,mode}),vault,memory:()=>null,
+ getAssistant:async()=>({ok:true,habits:{address:'',tone:'plain',note:''}}),setAssistant:async habits=>({ok:true,habits}),
+ getConfig:ok,saveProvider:ok,removeProvider:ok,deleteKey:ok,addModel:ok,updateModel:ok,removeModel:ok,readModels:async()=>({ok:true,models:[]}),setLimits:ok})
+ panel.open();expect([...document.querySelectorAll('.settings-nav button')].map(b=>b.textContent)).toEqual(['笔记库','界面','助手','记忆','模型','运行'])
+ expect(document.querySelector('.settings-page-title')!.textContent).toBe('界面');panel.close()
+})
+it('ignores an initial vault receipt after navigating away from its page',async()=>{
+ let resolve!:(value:unknown)=>void;const pending=new Promise(resolvePromise=>{resolve=resolvePromise})
+ const {panel,go}=vaultSettings({get:()=>pending});panel.open('笔记库');await vaultFlush()
+ const body=document.querySelector('.vault-settings')!;const before=body.textContent
+ go('界面');resolve({revision:'later',diagnostic:null,lastVaultId:null,entries:[]});await vaultFlush()
+ expect(document.querySelector('.settings-page-title')!.textContent).toBe('界面');expect(body.textContent).toBe(before);panel.close()
+})
+it('allows the restore owner to close a busy dialog programmatically',async()=>{
+ let resolve!:()=>void;const pending=new Promise<void>(yes=>{resolve=yes})
+ const {panel}=vaultSettings({open:()=>pending});panel.open('笔记库');await vaultFlush()
+ document.querySelector<HTMLButtonElement>('[data-vault-open="b"]')!.click();expect(panel.isOpen()).toBe(true)
+ panel.close();expect(panel.isOpen()).toBe(false);resolve();await vaultFlush();expect(document.querySelector('dialog')).toBeNull()
+})
+it('reports library busy state to native and global entry guards until cancellation settles',async()=>{
+ let reject!:(error:Error)=>void;const pending=new Promise<void>((_,no)=>{reject=no})
+ const {panel}=vaultSettings({open:()=>pending});panel.open('笔记库');await vaultFlush()
+ expect(panel.isBusy).toBeTypeOf('function');expect(panel.isBusy()).toBe(false)
+ document.querySelector<HTMLButtonElement>('[data-vault-open="b"]')!.click();expect(panel.isBusy()).toBe(true)
+ reject(Error('VAULT_SWITCH_CANCELLED'));await vaultFlush();expect(panel.isBusy()).toBe(false);panel.close()
 })

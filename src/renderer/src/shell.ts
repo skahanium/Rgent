@@ -1,4 +1,3 @@
-import { openVaultManager } from './vault-manager.ts'
 import type { VaultWorkspace } from '../../shared/vault-management.ts'
 import type { MemoryView, MemoryManualRequest, MemoryResult } from '../../shared/memory.ts'
 import { memoryErrorText, renderMemoryPreview, ledgerRememberCommand, type MemoryPageHandlers } from './memory-ui.ts'
@@ -137,7 +136,6 @@ export async function start(root: HTMLElement): Promise<void> {
   let memoryReadSerial = 0
   let memoryBusy = false
   let memoryOverlay: ReturnType<typeof openOverlay> | null = null
-  let vaultManager: ReturnType<typeof openOverlay> | null = null
   const ledgerOpenButton = root.querySelector('.ledger-open') as HTMLButtonElement
   const shortcutHint = root.querySelector('.shortcut-hint') as HTMLElement
 
@@ -187,6 +185,7 @@ export async function start(root: HTMLElement): Promise<void> {
   let recoveryState: LifecycleStatus | null = null
   let recoveryOverlay: ReturnType<typeof openLifecycleStatus> | null = null
   let conflictDecisionOpen = false
+  let deferredVaultBodyConflict = false
   let permissionState: PermissionState = { status: 'ready', entries: [] }
   let vaultNameText: string | null = null
   // 声明放在状态区：applyState 会在定义点之前调用 closeVaultPicker，
@@ -197,6 +196,17 @@ export async function start(root: HTMLElement): Promise<void> {
     onOpenNote: (relPath) => void openNote(relPath)
   })
   const settingsOverlay = createSettingsOverlay({
+    vault: {
+      get: () => window.rgent.vaultCatalog(),
+      open: id => changeVault(() => window.rgent.vaultOpen(id)),
+      pick: create => changeVault(() => window.rgent.vaultPick(create)),
+      change: async request => {
+        const view = await window.rgent.vaultCatalogChange(request)
+        const state = await window.rgent.vaultGet()
+        if (state.status === 'ready') { vaultNameText = state.rootName; updateStatus() }
+        return { ...view, activeId: state.status === 'ready' ? state.vaultId ?? null : null }
+      }
+    },
     memory: memoryHandlers,
     getMode: () => window.rgent.themeGet(),
     setMode: (mode) => window.rgent.themeSet(mode),
@@ -217,7 +227,14 @@ export async function start(root: HTMLElement): Promise<void> {
     setDefaultModel: (request) => window.rgent.modelDefaultSet(request),
     setLimits: (request) => window.rgent.modelLimitsSet(request),
     onModelConfigChanged: () => { void refreshModelModule(); void refreshMemory() },
-    onClose: () => { void refreshModelModule(); void refreshMemory() }
+    onClose: () => {
+      void refreshModelModule(); void refreshMemory()
+      const serial = stateSerial
+      if (vaultSession || restoringWorkspace || transitionBusy) return
+      void window.rgent.vaultGet().then(state => {
+        if (serial === stateSerial && !vaultSession && !restoringWorkspace && !transitionBusy && !document.querySelector('dialog[open]') && state.status === 'needs-pick') showVaultPicker(state.reason, state.diagnostic)
+      }).catch(() => {})
+    }
   })
   function memoryHandlers(): MemoryPageHandlers | null {
     const sessionId = vaultSession
@@ -311,11 +328,11 @@ export async function start(root: HTMLElement): Promise<void> {
   })
 
   installShortcuts({
-    onSearch: () => { if (!restoringWorkspace && !transitionBusy && !conflictDecisionOpen) searchOverlay.open() },
-    onSave: () => { if (!restoringWorkspace && !transitionBusy) void flushSave() }
+    onSearch: () => { if (!restoringWorkspace && !transitionBusy && !settingsOverlay.isBusy() && !conflictDecisionOpen) searchOverlay.open() },
+    onSave: () => { if (!restoringWorkspace && !transitionBusy && !settingsOverlay.isBusy()) void flushSave() }
   })
   shortcutHint.textContent = shortcutLabel('k')
-  searchOpen.addEventListener('click', () => { if (!conflictDecisionOpen) searchOverlay.open() })
+  searchOpen.addEventListener('click', () => { if (!conflictDecisionOpen && !settingsOverlay.isBusy()) searchOverlay.open() })
   // 图标在创建处已放入，这里只接线（模板时代那行 prepend 会让齿轮出现两次）
   settingsOpen.addEventListener('click', () => { if (!conflictDecisionOpen) settingsOverlay.open() })
   // 底栏模型模块首次取一次配置；之后由设置页写入与面板关闭时刷新。
@@ -371,15 +388,15 @@ export async function start(root: HTMLElement): Promise<void> {
   ledgerClose.addEventListener('click', () => closeLedger(true))
 
   window.rgent.onMenu(IPC.menuOpenVault, () => {
-    if (restoringWorkspace || transitionBusy) return
-    void chooseVault()
+    if (restoringWorkspace || transitionBusy || settingsOverlay.isBusy()) return
+    showVaultManager()
   })
   window.rgent.onMenu(IPC.menuNewNote, () => {
-    if (restoringWorkspace || transitionBusy) return
+    if (restoringWorkspace || transitionBusy || settingsOverlay.isBusy()) return
     void createNote()
   })
   window.rgent.onMenu(IPC.menuSave, () => {
-    if (restoringWorkspace || transitionBusy) return
+    if (restoringWorkspace || transitionBusy || settingsOverlay.isBusy()) return
     void flushSave()
   })
   window.rgent.onTreeChanged(() => {
@@ -563,6 +580,12 @@ export async function start(root: HTMLElement): Promise<void> {
       read: () => readBoundTab(tab),
       draft: () => tab.relPath === active ? editor.getText() : tab.content,
       choose: async (windowBody, diskBody) => {
+        // A switch is still preparing: replacing its retained settings overlay
+        // would discard settings drafts before a new vault has committed.
+        if (settingsOverlay.isBusy()) {
+          deferredVaultBodyConflict = true
+          return 'continue'
+        }
         conflictDecisionOpen = true
         try {
           return await promptConflict({
@@ -624,6 +647,7 @@ export async function start(root: HTMLElement): Promise<void> {
         showVaultPicker(state.reason, state.diagnostic)
         return
       }
+      if (settingsOverlay.isOpen() && (state.vaultChanged || state.sessionId !== vaultSession)) settingsOverlay.close()
       closeVaultPicker()
       const sessionChanged = !!vaultSession && !!state.sessionId && vaultSession !== state.sessionId
       if (sessionChanged || state.vaultChanged) { settingsOverlay.close(); memoryOverlay?.close(); memorySnapshot = null; memoryBusy = false }
@@ -750,6 +774,7 @@ export async function start(root: HTMLElement): Promise<void> {
 
   async function changeVault(operation: () => Promise<VaultState>): Promise<void> {
     if (restoringWorkspace) throw Error('VAULT_SWITCH_BUSY')
+    deferredVaultBodyConflict = false
     try {
       const state = await operation()
       if(state.cancelled)throw Error('VAULT_SWITCH_CANCELLED')
@@ -758,7 +783,10 @@ export async function start(root: HTMLElement): Promise<void> {
       const state = await window.rgent.vaultGet().catch(()=>null)
       if(state?.status==='ready' && state.sessionId!==vaultSession)await applyState(state)
       syncInteractionGate()
+      if (deferredVaultBodyConflict && error instanceof Error && error.message.includes('UNSAVED_DRAFT')) throw Error('VAULT_SWITCH_BODY_CONFLICT')
       throw error
+    } finally {
+      deferredVaultBodyConflict = false
     }
   }
   async function chooseVault(): Promise<void> {
@@ -769,24 +797,9 @@ export async function start(root: HTMLElement): Promise<void> {
     }
   }
   function showVaultManager(): void {
-    if(vaultManager?.isOpen())return
-    vaultManager=openVaultManager({
-      get:()=>window.rgent.vaultCatalog(),
-      open:id=>changeVault(()=>window.rgent.vaultOpen(id)),
-      pick:create=>changeVault(()=>window.rgent.vaultPick(create)),
-      change:async request=>{
-        const view=await window.rgent.vaultCatalogChange(request)
-        const state=await window.rgent.vaultGet()
-        if(state.status==='ready'){vaultNameText=state.rootName;updateStatus()}
-        return {...view, activeId: state.status === 'ready' ? state.vaultId ?? null : null}
-      }
-    },()=>statusEl.querySelector<HTMLButtonElement>('.status-vault'))
-    vaultManager.root.addEventListener('close', () => {
-      if (vaultSession || document.querySelector('dialog[open]')) return
-      void window.rgent.vaultGet().then(state => {
-        if (!vaultSession && !document.querySelector('dialog[open]') && state.status === 'needs-pick') showVaultPicker(state.reason, state.diagnostic)
-      }).catch(() => {})
-    })
+    if (restoringWorkspace || transitionBusy || settingsOverlay.isBusy()) return
+    closeVaultPicker()
+    settingsOverlay.open('笔记库')
   }
 
   async function showPicker(lost: boolean): Promise<void> {
@@ -1296,8 +1309,7 @@ export async function start(root: HTMLElement): Promise<void> {
         words: tab ? countedWords : 0,
         vaultName: vaultNameText,
         noteOpen: tab != null
-      }, modelModule()),
-      showVaultManager
+      }, modelModule())
     )
     const center = statusEl.querySelector<HTMLElement>('.status-center')
     if (center) { center.hidden = false; if (memoryToggle.parentElement !== center) center.append(memoryToggle) }

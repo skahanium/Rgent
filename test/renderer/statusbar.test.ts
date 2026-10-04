@@ -118,15 +118,15 @@ it('updates the active note change callback even when model options are unchange
   expect(selected).toEqual(['B'])
 })
 
-describe('vault switch entry',()=>{
- it('keeps the library button and keyboard focus when position updates',()=>{
+describe('passive vault status',()=>{
+ it('retains a noninteractive library label when position updates',()=>{
    const host=document.createElement('div');document.body.append(host)
-   const onVault=()=>{}
-   renderStatusbar(host,statusModel({line:1,column:1,words:0,vaultName:'工作库',noteOpen:true}),onVault)
-   const button=host.querySelector<HTMLButtonElement>('button.status-vault')!
-   expect(button).not.toBeNull();button.focus()
-   renderStatusbar(host,statusModel({line:2,column:1,words:0,vaultName:'工作库',noteOpen:true}),onVault)
-   expect(host.querySelector('.status-vault')).toBe(button);expect(document.activeElement).toBe(button)
+   renderStatusbar(host,statusModel({line:1,column:1,words:0,vaultName:'工作库',noteOpen:true}))
+   const label=host.querySelector<HTMLElement>('.status-vault')!
+   expect(label.tagName).toBe('SPAN'); expect(label.hasAttribute('tabindex')).toBe(false)
+   expect(label.hasAttribute('aria-label')).toBe(false); expect(label.onclick).toBeNull()
+   renderStatusbar(host,statusModel({line:2,column:1,words:0,vaultName:'工作库',noteOpen:true}))
+   expect(host.querySelector('.status-vault')).toBe(label)
    host.remove()
  })
 })

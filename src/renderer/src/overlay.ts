@@ -11,6 +11,8 @@ export type OverlayOptions = {
   label: string
   /** 不可 Esc 关闭（选库那种必须给个答复的）。 */
   dismissable?: boolean
+  /** 动态阻止用户关闭；程序提交新状态后仍可 close。 */
+  canDismiss?: () => boolean
   /** 打开时聚焦的元素；不给就找浮层里第一个可聚焦项。 */
   initialFocus?: () => HTMLElement | null
   /** 触发元素消失时，调用方可提供仍可见的返回位置。 */
@@ -49,7 +51,7 @@ export function openOverlay(options: OverlayOptions): Overlay {
   root.addEventListener('cancel', (event) => {
     // Esc 默认会关；不可关闭的浮层拦下它。
     event.preventDefault()
-    if (options.dismissable !== false) overlay.close()
+    if (options.dismissable !== false && options.canDismiss?.() !== false) overlay.close()
   })
 
   // 原生 cancel 会被浮层里的 search 输入框吃掉（它自己用 Esc 清空），
@@ -58,7 +60,7 @@ export function openOverlay(options: OverlayOptions): Overlay {
     if (event.key !== 'Escape') return
     event.preventDefault()
     event.stopPropagation()
-    if (options.dismissable !== false) overlay.close()
+    if (options.dismissable !== false && options.canDismiss?.() !== false) overlay.close()
   })
 
   root.addEventListener('close', () => {

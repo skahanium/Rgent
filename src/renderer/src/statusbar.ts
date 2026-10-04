@@ -160,7 +160,7 @@ function renderModelModule(center: HTMLElement, module: StatusModelModule | unde
   }
 }
 
-export function renderStatusbar(host: HTMLElement, model: StatusModel, onVault?: () => void): void {
+export function renderStatusbar(host: HTMLElement, model: StatusModel): void {
   // 左侧的固定槽位（设置入口）绝对定位、不参与栅格，也不被重绘清空——否则每次
   // 状态更新都会把按钮移除再放回，而移除会夺走焦点。
   const lead = container(host, 'status-lead')
@@ -188,10 +188,7 @@ export function renderStatusbar(host: HTMLElement, model: StatusModel, onVault?:
   dot.setAttribute('role', 'img')
   dot.setAttribute('aria-label', '联网状态：离线')
   dot.title = '离线'
-  const vault = right.querySelector<HTMLButtonElement>('.status-vault') ?? document.createElement('button')
-  vault.type = 'button'
-  vault.onclick = onVault ?? null
-  vault.setAttribute('aria-label', `切换或管理笔记库：${model.vault}`)
+  const vault = right.querySelector<HTMLSpanElement>('.status-vault') ?? document.createElement('span')
   vault.className = 'status-item status-vault'
   vault.textContent = model.vault
   vault.title = model.vault

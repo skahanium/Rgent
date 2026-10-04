@@ -1,6 +1,5 @@
 import type { VaultCatalogEntry, VaultCatalogView } from '../../shared/vault-management'
 import { icon, type IconName } from './icons'
-import { openOverlay, type Overlay } from './overlay'
 
 type Catalog = VaultCatalogView & { activeId?: string | null }
 export type VaultManagerHandlers = {
@@ -16,198 +15,179 @@ export type VaultManagerHandlers = {
   }): Promise<Catalog>
 }
 
-/** 设备库目录的展示入口；文件核验与切换事务仍由调用方执行。 */
-export function openVaultManager(handlers: VaultManagerHandlers, returnFocus?: () => HTMLElement | null): Overlay {
-  const overlay = openOverlay({ label: '笔记库', returnFocus })
-  const root = overlay.root
-  root.classList.add('vault-manager')
+export type VaultManagerPage = { dispose(): void; isDirty(): boolean; isBusy(): boolean }
+
+/** 设置内的设备库目录；文件核验与切换事务仍由调用方执行。 */
+export function mountVaultManager(context: {
+  body: HTMLElement
+  isCurrent(): boolean
+  onBusyChange?: (busy: boolean) => void
+}, handlers: VaultManagerHandlers): VaultManagerPage {
+  const root = context.body
+  root.classList.add('vault-settings')
   let catalog: Catalog | null = null
   let busy = false
+  let disposed = false
   let sequence = 0
-  let managing = false
+  const alive = (): boolean => !disposed && context.isCurrent()
   const rows = new Map<string, ReturnType<typeof createRow>>()
-  const actions: HTMLButtonElement[] = []
-  const heading = element('header', 'vault-manager-heading')
-  heading.append(element('h2', '', '笔记库'))
-  const close = button('关闭', () => overlay.close(), 'close')
-  close.classList.add('vault-manager-close')
-  close.setAttribute('aria-label', '关闭笔记库浮层')
-  heading.append(close)
-  const layout = element('div', 'vault-manager-layout')
-  const shortcuts = element('nav', 'vault-manager-shortcuts')
-  shortcuts.setAttribute('aria-label', '笔记库操作')
-  const open = button('打开现有库', () => { void run('正在打开笔记库…', () => handlers.pick(false), true) }, 'folder')
-  const create = button('创建空库', () => { void run('正在创建空库…', () => handlers.pick(true), true) }, 'folder-plus')
-  const manage = button('管理笔记库', () => {
-    if (busy) return
-    managing = !managing
-    manage.setAttribute('aria-expanded', String(managing))
-    for (const row of rows.values()) row.management.hidden = !managing
-  }, 'settings')
-  manage.setAttribute('aria-expanded', 'false')
-  manage.dataset.vaultAction = 'manage'
-  open.dataset.vaultAction = 'open'
-  create.dataset.vaultAction = 'create'
-  shortcuts.append(open, create, manage, element('p', 'vault-manager-hint', '每次只打开一个笔记库。'))
-  actions.push(open, create, manage)
-  const content = element('main', 'vault-manager-content')
-  const diagnostic = element('p', 'vault-manager-diagnostic')
-  diagnostic.hidden = true
-  diagnostic.setAttribute('role', 'alert')
-  const empty = element('p', 'vault-manager-empty', '正在读取库列表…')
-  const fixed = group('已固定')
-  const recent = group('最近使用')
-  const registered = group('其他已登记库')
-  content.append(diagnostic, empty, fixed.section, recent.section, registered.section)
-  layout.append(shortcuts, content)
-  const status = element('p', 'vault-manager-status')
-  status.setAttribute('role', 'status')
-  status.setAttribute('aria-live', 'polite')
-  root.append(heading, layout, status)
+  const shortcuts = element('div', 'vault-settings-shortcuts')
+  const open = button('打开已有笔记库', () => { void run('正在打开笔记库…', () => handlers.pick(false)) }, 'folder')
+  const create = button('新建笔记库', () => { void run('正在创建空库…', () => handlers.pick(true)) }, 'folder-plus')
+  open.dataset.vaultAction = 'open'; create.dataset.vaultAction = 'create'
+  shortcuts.append(open, create)
+  const diagnostic = element('p', 'vault-settings-diagnostic')
+  diagnostic.hidden = true; diagnostic.setAttribute('role', 'alert')
+  const loading = element('p', 'vault-settings-empty', '正在读取库列表…')
+  const current = element('section', 'vault-settings-active')
+  current.setAttribute('aria-label', '正在使用的笔记库'); current.hidden = true
+  const others = element('section', 'vault-settings-others')
+  const list = element('div', 'vault-settings-list')
+  const empty = element('p', 'vault-settings-empty', '没有其他笔记库。可以打开已有笔记库，或新建笔记库。')
+  others.append(element('h3', '', '其他笔记库'), list, empty); others.hidden = true
+  const status = element('p', 'vault-settings-status')
+  status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite')
+  root.append(shortcuts, diagnostic, loading, current, others, status)
 
   function refreshControls(): void {
     root.setAttribute('aria-busy', String(busy))
-    for (const action of actions) action.disabled = busy
+    open.disabled = busy; create.disabled = busy
     for (const row of rows.values()) {
-      row.open.disabled = busy
-      for (const action of row.management.querySelectorAll<HTMLButtonElement>('button')) action.disabled = busy
+      for (const action of row.root.querySelectorAll<HTMLButtonElement>('button')) action.disabled = busy
+      row.input.disabled = busy
+      row.relocate.disabled = busy || row.entry.id === catalog?.activeId
       row.save.disabled = busy || row.input.value.trim() === row.entry.label || !row.input.value.trim()
     }
   }
-
-  async function run(message: string, operation: () => Promise<void | Catalog>, closes = false): Promise<void> {
-    if (busy || !overlay.isOpen()) return
-    busy = true
+  async function run(message: string, operation: () => Promise<void | Catalog>, savedMessage = '已保存。'): Promise<void> {
+    if (busy || !alive()) return
+    const focused = document.activeElement instanceof HTMLElement && root.contains(document.activeElement) ? document.activeElement : null
+    const selection = focused instanceof HTMLInputElement ? [focused.selectionStart, focused.selectionEnd] as const : null
+    const focusedValue = focused instanceof HTMLInputElement ? focused.value : null
+    busy = true; context.onBusyChange?.(true)
     const ticket = ++sequence
-    status.textContent = message
-    refreshControls()
+    status.textContent = message; refreshControls()
     try {
       const result = await operation()
-      if (!overlay.isOpen() || ticket !== sequence) return
-      if (closes) { overlay.close(); return }
-      if (result) { busy = false; showCatalog(result) }
-      status.textContent = '已保存。'
+      if (!alive() || ticket !== sequence) return
+      if (result) showCatalog(result)
+      status.textContent = result ? savedMessage : ''
     } catch (error) {
-      if (!overlay.isOpen() || ticket !== sequence) return
+      if (!alive() || ticket !== sequence) return
       status.textContent = errorText(error)
     } finally {
-      if (overlay.isOpen() && ticket === sequence) { busy = false; refreshControls() }
+      if (alive() && ticket === sequence) {
+        busy = false; refreshControls(); context.onBusyChange?.(false)
+        if (focused?.isConnected && !focused.closest('[hidden]')) {
+          focused.focus()
+          if (selection && focused instanceof HTMLInputElement && focused.value === focusedValue) focused.setSelectionRange(selection[0], selection[1])
+        } else if (focused && !focused.isConnected) open.focus()
+      }
     }
   }
-
   function change(entry: VaultCatalogEntry, action: 'pin' | 'label' | 'remove' | 'relocate', patch: { pinned?: boolean; label?: string } = {}): void {
     if (!catalog || busy) return
     const request = { id: entry.id, revision: catalog.revision, action, ...patch }
-    void run(action === 'relocate' ? '正在重新定位笔记库…' : '正在保存库列表…', () => handlers.change(request))
+    const savedMessage = action === 'remove' && entry.id === catalog.activeId ? '已从本设备列表移除。当前笔记库仍保持打开；笔记、账本和记忆均保留。' : '已保存。'
+    void run(action === 'relocate' ? '正在重新定位笔记库…' : '正在保存库列表…', () => handlers.change(request), savedMessage)
   }
-
   function createRow(entry: VaultCatalogEntry) {
-    const root = element('article', 'vault-manager-row')
-    root.dataset.vaultId = entry.id
-    const title = element('div', 'vault-manager-row-title')
-    const open = button(entry.label, () => { void run('正在切换笔记库…', () => handlers.open(entry.id), true) }, 'folder')
-    open.classList.add('vault-manager-open')
+    const root = element('article', 'vault-settings-row'); root.dataset.vaultId = entry.id
+    const title = element('div', 'vault-settings-row-title')
+    const labelText = element('strong', 'vault-settings-label', entry.label)
+    const using = element('span', 'vault-settings-current', '正在使用')
+    title.append(icon('folder'), labelText, using)
+    const position = element('p', 'vault-settings-position', entry.path); position.title = entry.path
+    const path = element('details', 'vault-settings-path')
+    path.append(element('summary', '', '查看完整位置'), element('p', '', entry.path))
+    path.addEventListener('click', event => { if (busy && (event.target as HTMLElement).closest('summary')) event.preventDefault() })
+    const actions = element('div', 'vault-settings-row-actions')
+    const open = button('切换', () => { void run('正在切换笔记库…', () => handlers.open(row.entry.id)) })
     open.dataset.vaultOpen = entry.id
-    const current = element('span', 'vault-manager-current', '当前库')
-    title.append(open, current)
-    const path = element('details', 'vault-manager-path')
-    path.append(element('summary', '', '查看位置'), element('p', '', entry.path))
-    const management = element('div', 'vault-manager-management')
-    management.hidden = !managing
-    const form = element('form', 'vault-manager-name')
-    form.noValidate = true
-    const label = element('label', '', '显示名称')
-    const input = document.createElement('input')
-    input.type = 'text'
-    input.value = entry.label
-    input.maxLength = 80
-    label.append(input)
-    const save = button('保存名称', () => {})
-    save.type = 'submit'
-    save.dataset.vaultAction = 'label'
-    form.append(label, save)
-    const rowActions = element('div', 'vault-manager-row-actions')
     const pin = button(entry.pinned ? '取消固定' : '固定', () => change(row.entry, 'pin', { pinned: !row.entry.pinned }))
+    const edit = button('编辑显示名称', () => { if (!busy) { form.hidden = false; input.focus() } })
+    edit.dataset.vaultAction = 'edit-name'; pin.dataset.vaultAction = 'pin'
+    const more = button('更多', () => { if (!busy) { menu.hidden = !menu.hidden; more.setAttribute('aria-expanded', String(!menu.hidden)) } })
+    more.dataset.vaultAction = 'more'; more.setAttribute('aria-expanded', 'false')
+    actions.append(open, pin, edit, more)
+    const menu = element('div', 'vault-settings-menu'); menu.hidden = true
     const relocate = button('重新定位', () => change(row.entry, 'relocate'))
-    const remove = button('移除目录项', () => {
-      if (busy) return
-      confirmation.hidden = false
-      confirm.focus()
-    })
-    pin.dataset.vaultAction = 'pin'
     relocate.dataset.vaultAction = 'relocate'
+    const relocateHint = element('p', 'vault-settings-hint', '正在使用的笔记库需先切换到其他库，再重新定位。')
+    const remove = button('从列表移除', () => { if (!busy) { confirmation.hidden = false; cancelRemove.focus() } })
     remove.dataset.vaultAction = 'remove'
-    rowActions.append(pin, relocate, remove)
-    const confirmation = element('div', 'vault-manager-confirmation')
-    confirmation.hidden = true
-    confirmation.append(element('p', '', '只从本设备的库列表移除此项；库文件、记忆和账本都保留，不会删除。'))
-    const confirm = button('确认移除目录项', () => change(row.entry, 'remove'))
-    confirm.dataset.vaultAction = 'confirm-remove'
-    const cancel = button('取消移除', () => {
-      if (busy) return
-      confirmation.hidden = true
-      remove.focus()
-    })
-    confirmation.append(confirm, cancel)
-    management.append(form, rowActions, confirmation)
-    root.append(title, path, management)
-    const row = { entry, root, open, current, path, input, save, pin, management, confirmation }
-    form.addEventListener('submit', event => {
-      event.preventDefault()
-      if (busy || save.disabled) return
-      change(row.entry, 'label', { label: input.value.trim() })
-    })
+    menu.append(relocate, remove, relocateHint)
+    const form = element('form', 'vault-settings-name'); form.noValidate = true; form.hidden = true
+    const label = element('label', '', '显示名称')
+    const input = document.createElement('input'); input.type = 'text'; input.value = entry.label; input.maxLength = 80
+    label.append(input)
+    const save = button('保存名称', () => {}); save.type = 'submit'; save.dataset.vaultAction = 'label'
+    const cancel = button('取消', () => { if (!busy) { input.value = row.entry.label; form.hidden = true; refreshControls(); edit.focus() } })
+    cancel.dataset.vaultAction = 'cancel-name'
+    form.append(label, save, cancel, element('p', 'vault-settings-hint', '只修改本设备上的显示名称，不会更改文件夹名称。'))
+    const confirmation = element('div', 'vault-settings-confirmation'); confirmation.hidden = true
+    confirmation.append(element('p', '', '只移除此设备上的笔记库登记。笔记、账本和记忆均保留，不会删除。'))
+    const confirm = button('确认从列表移除', () => change(row.entry, 'remove')); confirm.dataset.vaultAction = 'confirm-remove'
+    const cancelRemove = button('取消移除', () => { if (!busy) { confirmation.hidden = true; remove.focus() } }); cancelRemove.dataset.vaultAction = 'cancel-remove'
+    confirmation.append(cancelRemove, confirm)
+    root.append(title, position, path, actions, menu, form, confirmation)
+    const row = { entry, root, labelText, open, using, position, path, actions, pin, edit, more, menu, relocate, relocateHint, form, input, save, confirmation }
+    form.addEventListener('submit', event => { event.preventDefault(); if (!busy && !save.disabled) change(row.entry, 'label', { label: input.value.trim() }) })
     input.addEventListener('input', refreshControls)
     return row
   }
-
   function showCatalog(next: Catalog): void {
-    // Keep existing row and input nodes: completing a save must not replace a newer draft.
     next = { ...next, activeId: next.activeId === undefined ? catalog?.activeId : next.activeId }
     catalog = next
-    const focused = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const ids = new Set(next.entries.map(entry => entry.id))
     for (const [id, row] of rows) if (!ids.has(id)) { row.root.remove(); rows.delete(id) }
-    const ordered = [...next.entries].sort((a, b) => Number(b.pinned) - Number(a.pinned) || (b.lastUsed ?? -1) - (a.lastUsed ?? -1))
-    const groups = [fixed, recent, registered]
-    const lists: HTMLElement[][] = [[], [], []]
+    const ordered = [...next.entries].sort((a,b) => Number(b.pinned)-Number(a.pinned) || (b.lastUsed ?? -1)-(a.lastUsed ?? -1))
+    const otherRows: HTMLElement[] = []
+    current.hidden = !next.entries.some(entry => entry.id === next.activeId)
     for (const entry of ordered) {
       let row = rows.get(entry.id)
       if (!row) { row = createRow(entry); rows.set(entry.id, row) }
-      row.entry = entry
-      row.open.lastChild!.textContent = entry.label
-      row.current.hidden = next.activeId !== entry.id
-      row.current.textContent = next.activeId === entry.id ? '当前库' : ''
+      // Keep both the node and a newer draft. A saved receipt becomes the new baseline.
+      if (row.input.value === row.entry.label) row.input.value = entry.label
+      row.entry = entry; row.labelText.textContent = entry.label
+      const active = entry.id === next.activeId
+      row.root.dataset.vaultCurrent = String(active)
+      row.using.hidden = !active; row.using.textContent = active ? '正在使用' : ''; row.open.hidden = active
+      if (active) row.open.removeAttribute('data-vault-open')
+      else row.open.dataset.vaultOpen = entry.id
+      row.relocateHint.hidden = !active
+      row.relocateHint.textContent = active ? '正在使用的笔记库需先切换到其他库，再重新定位。' : ''
       row.pin.textContent = entry.pinned ? '取消固定' : '固定'
-      row.path.querySelector('p')!.textContent = entry.path
-      lists[entry.pinned ? 0 : entry.lastUsed !== null ? 1 : 2].push(row.root)
+      if (active && row.edit.parentElement !== row.actions) row.actions.insertBefore(row.edit, row.more)
+      else if (!active && row.edit.parentElement !== row.menu) row.menu.prepend(row.edit)
+      if (active && row.pin.parentElement !== row.menu) row.menu.prepend(row.pin)
+      else if (!active && row.pin.parentElement !== row.actions) row.actions.insertBefore(row.pin, row.more)
+      row.position.textContent = entry.path; row.position.title = entry.path; row.path.querySelector('p')!.textContent = entry.path
+      if (active) { if (current.firstElementChild !== row.root) current.replaceChildren(row.root) }
+      else otherRows.push(row.root)
     }
-    groups.forEach((group, index) => {
-      const list = lists[index]
-      group.section.hidden = list.length === 0
-      // Only move rows whose order changed. Unchanged focused inputs stay attached.
-      list.forEach((row, position) => { if (group.list.children[position] !== row) group.list.insertBefore(row, group.list.children[position] ?? null) })
-    })
+    otherRows.forEach((row,index) => { if (list.children[index] !== row) list.insertBefore(row, list.children[index] ?? null) })
+    others.hidden = !!next.diagnostic && !next.entries.length
+    empty.hidden = otherRows.length > 0
     diagnostic.hidden = !next.diagnostic
-    diagnostic.textContent = next.diagnostic ? '库列表无法读取，原记录已保留。可以手动打开现有库；请先核查本设备的库列表。' : ''
-    empty.hidden = next.entries.length > 0 || !!next.diagnostic
-    empty.textContent = next.diagnostic ? '' : '还没有登记笔记库。打开现有库，或创建一个空库。'
+    diagnostic.textContent = next.diagnostic ? '库列表无法读取，原记录已保留。可以手动打开已有笔记库；请先核查本设备的库列表。' : ''
+    loading.hidden = true; loading.textContent = ''
+    if (!next.entries.length && !next.diagnostic) { empty.textContent = '还没有登记笔记库。打开已有笔记库，或新建笔记库。' }
     refreshControls()
-    if (focused?.isConnected && document.activeElement !== focused) focused.focus()
-    else if (focused && !focused.isConnected) manage.focus()
   }
-
-  // Picker cancellation/failure does not replace the catalog. Accept the initial read
-  // until a catalog has been applied, while still ignoring closed or superseded views.
-  void Promise.resolve().then(() => handlers.get()).then(next => {
-    if (overlay.isOpen() && catalog === null) showCatalog(next)
+  // Initial read may finish after a cancelled picker; unloaded pages ignore receipts.
+  void Promise.resolve().then(() => alive() ? handlers.get() : null).then(next => {
+    if (next && alive() && catalog === null) showCatalog(next)
   }, error => {
-    if (!overlay.isOpen() || catalog !== null) return
-    empty.hidden = true
-    diagnostic.hidden = false
-    diagnostic.textContent = `库列表无法读取。${errorText(error)} 可以手动打开现有库。`
+    if (!alive() || catalog !== null) return
+    loading.hidden = true; diagnostic.hidden = false
+    diagnostic.textContent = `库列表无法读取。${errorText(error)} 可以手动打开已有笔记库。`
   })
-  return overlay
+  return {
+    dispose: () => { disposed = true; sequence++; if (busy) context.onBusyChange?.(false); busy = false },
+    isDirty: () => [...rows.values()].some(row => !row.form.hidden && row.input.value.trim() !== row.entry.label),
+    isBusy: () => busy
+  }
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -224,27 +204,21 @@ function button(text: string, click: () => void, glyph?: IconName): HTMLButtonEl
   node.addEventListener('click', click)
   return node
 }
-function group(label: string) {
-  const section = element('section', 'vault-manager-group')
-  const list = element('div', 'vault-manager-list')
-  section.hidden = true
-  section.append(element('h3', '', label), list)
-  return { section, list }
-}
 function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : ''
   if (message.includes('VAULT_SWITCH_CANCELLED')) return ''
+  if (message.includes('VAULT_SWITCH_BODY_CONFLICT')) return '窗口稿与磁盘稿发生冲突，两份均已保留。请先关闭设置，处理正文保存冲突后，再重试切换。'
   if (message.includes('UNSAVED_DRAFT')) return '笔记草稿尚未保存，已留在当前库。请先处理保存问题，再重试切换。'
   if (message.includes('PREVIOUS_TASK_UNSAVED')) return '生成回答尚未保存，已留在原库。请先处理保存问题，再重试切换。'
   if (message.includes('VAULT_TARGET_INVALID')) return '无法打开所选位置。请检查目录是否存在及访问权限后重试。'
-  if (message.includes('VAULT_CATALOG_CONFLICT')) return '库列表已在别处更新。请关闭后重新打开管理，再核对修改。'
+  if (message.includes('VAULT_CATALOG_CONFLICT')) return '库列表已在别处更新。请离开本页后重新进入，再核对修改。'
   if (message.includes('VAULT_TARGET_CHANGED') || message.includes('VAULT_RELOCATE_REQUIRED') || message.includes('VAULT_REPLACED')) return '库的位置或身份发生变化，请重新定位后再打开。'
   if (message.includes('VAULT_CATALOG_INVALID')) return '本设备的库列表损坏，原记录已保留，请先核查。'
   if (message.includes('VAULT_CATALOG_PATCH_INVALID')) return '显示名称无法保存，请填写有效名称后再试。'
   if (message.includes('ACTIVE_VAULT_RELOCATE')) return '当前库正在使用，请先切换到其他库后再重新定位。'
   if (message.includes('VAULT_NESTED')) return '登记的笔记库不能互相包含，请选择独立的目录。'
   if (message.includes('VAULT_ALREADY_REGISTERED')) return '这个笔记库已经登记，请从库列表中打开。'
-  if (message.includes('VAULT_NOT_REGISTERED')) return '库列表已变化，请关闭后重新打开管理再核对。'
+  if (message.includes('VAULT_NOT_REGISTERED')) return '库列表已变化，请离开本页后重新进入再核对。'
   if (message.includes('VAULT_CATALOG_LIMIT')) return '库列表已达到容量上限，请先移除不再需要的目录项。'
   if (message.includes('VAULT_SWITCH_BUSY')) return '正在切换笔记库，请稍后再试。'
   return '操作未完成。请检查笔记库位置与访问权限后再试。'

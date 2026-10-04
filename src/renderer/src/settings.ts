@@ -1,3 +1,4 @@
+import { mountVaultManager, type VaultManagerHandlers, type VaultManagerPage } from './vault-manager.ts'
 import { mountMemoryPage, memoryErrorText, type MemoryPageHandlers } from './memory-ui.ts'
 import type {
   AssistantResult, LimitTier, ModelAddRequest, ModelConfigResult, ModelKeyDeleteRequest, ModelLimitsSetRequest,
@@ -15,6 +16,7 @@ import { modelModuleGroups } from './statusbar.ts'
 import { icon, type IconName } from './icons.ts'
 
 export type SettingsHandlers = {
+  vault?: VaultManagerHandlers
   memory?: () => MemoryPageHandlers | null
 
   getMode: () => Promise<ThemeMode>
@@ -41,11 +43,14 @@ export type SettingsHandlers = {
   onClose?: () => void
 }
 
+type SettingsPage = '笔记库' | '界面' | '助手' | '记忆' | '模型' | '运行'
+
 export type SettingsOverlay = {
   /** 打开设置；可指定落到哪一页（底栏模型模块的「配置」用它直达「模型」页）。 */
-  open: (page?: '界面' | '助手' | '记忆' | '模型' | '运行') => void
+  open: (page?: SettingsPage) => void
   close: () => void
   isOpen: () => boolean
+  isBusy: () => boolean
   prepareVaultChange: () => boolean
 }
 
@@ -80,20 +85,29 @@ const configErrorText = (error: string): string => CONFIG_ERRORS[error] ?? error
 export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverlay {
   let overlay: Overlay | null = null
   let inputsEdited = false
+  let vaultPage: VaultManagerPage | null = null
+  let vaultBusy = false
+  let navigate: ((page: SettingsPage) => void) | null = null
   let request = 0
   let readingSaveSerial = 0
   let chromeTextSaveSerial = 0
 
   const close = (): void => overlay?.close()
-  const open = (page: '界面' | '助手' | '记忆' | '模型' | '运行' = '界面'): void => {
-    if (overlay?.isOpen()) return
+  const open = (page?: SettingsPage): void => {
+    if (overlay?.isOpen()) { if (page && !vaultBusy) navigate?.(page); return }
+    page ??= '界面'
+    // A native close event can arrive after the caller has reopened this dialog.
+    vaultPage?.dispose(); vaultPage = null; vaultBusy = false
     const current = openOverlay({
       label: '设置',
+      canDismiss: () => !vaultBusy,
       initialFocus: () => current.root.querySelector<HTMLElement>('.settings-page-title'),
       onClose: () => {
         if (overlay !== current) return
         request += 1
         overlay = null
+        navigate = null
+        vaultPage?.dispose(); vaultPage = null; vaultBusy = false
         disposeMemoryPage?.()
         disposeMemoryPage = null
         disposeModelPage?.()
@@ -106,11 +120,14 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     overlay = current
     inputsEdited = false
     const root = current.root
-    root.addEventListener('input', () => { inputsEdited = true })
-    root.addEventListener('change', () => { inputsEdited = true })
+    const trackInput = (event: Event): void => {
+      if (!(event.target instanceof Element) || !event.target.closest('.vault-settings')) inputsEdited = true
+    }
+    root.addEventListener('input', trackInput)
+    root.addEventListener('change', trackInput)
     root.classList.add('overlay-settings')
     root.addEventListener('click', (event) => {
-      if (event.target !== root || event.detail === 0) return
+      if (vaultBusy || event.target !== root || event.detail === 0) return
       const bounds = root.getBoundingClientRect()
       if (event.clientX < bounds.left || event.clientX >= bounds.right ||
           event.clientY < bounds.top || event.clientY >= bounds.bottom) close()
@@ -132,7 +149,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       nav.append(label)
     }
     const navButtons = new Map<string, HTMLButtonElement>()
-    const addNav = (name: '界面' | '助手' | '记忆' | '模型' | '运行', graphic: IconName): HTMLButtonElement => {
+    const addNav = (name: SettingsPage, graphic: IconName): HTMLButtonElement => {
       const button = document.createElement('button')
       button.type = 'button'
       button.className = name === '界面' ? 'settings-nav-current' : 'settings-nav-item'
@@ -144,6 +161,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       return button
     }
     navGroup('工作区')
+    if (handlers.vault) addNav('笔记库', 'folder')
     addNav('界面', 'appearance')
     const assistantReady = Boolean(handlers.getAssistant && handlers.setAssistant)
     const modelsReady = modelPageAvailable(handlers) && Boolean(handlers.setLimits)
@@ -182,9 +200,11 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     layout.append(nav, main)
     root.append(layout)
     const themeNodes = [title, intro, group, readingSection]
-    let openedPage: '界面' | '助手' | '记忆' | '模型' | '运行' = page
+    let openedPage: SettingsPage = '界面'
     let themeRequest = 0
-    const setPage = (name: '界面' | '助手' | '记忆' | '模型' | '运行'): void => {
+    const setPage = (name: SettingsPage): void => {
+      if (vaultBusy || !navButtons.has(name) || openedPage === name) return
+      if (name !== '笔记库') { vaultPage?.dispose(); vaultPage = null }
       openedPage = name
       if (name !== '模型') { disposeModelPage?.(); disposeModelPage = null }
       if (name !== '助手') disposeAssistantPage?.()
@@ -193,12 +213,15 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         if (label === name) button.setAttribute('aria-current', 'page')
         else button.removeAttribute('aria-current')
       }
-      if (name === '界面') main.replaceChildren(...themeNodes)
+      if (name === '笔记库') renderVaultPage()
+      else if (name === '界面') main.replaceChildren(...themeNodes)
       else if (name === '助手') renderAssistantPage()
       else if (name === '记忆') renderMemoryPage()
       else if (name === '模型') renderModelPage()
       else void renderRunPage()
     }
+
+    navigate = setPage
 
     const pageFrame = (name: string, description: string): { body: HTMLElement; error: HTMLElement } => {
       const heading = document.createElement('h2')
@@ -240,6 +263,15 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       button.textContent = label
       button.addEventListener('click', click)
       return button
+    }
+
+    function renderVaultPage(): void {
+      if (!handlers.vault || vaultPage) return
+      const { body } = pageFrame('笔记库', '管理这台设备上的笔记库。切换时会保存当前笔记，并恢复目标库上次的工作位置。')
+      vaultPage = mountVaultManager({ body, isCurrent: () => current.isOpen() && openedPage === '笔记库', onBusyChange: busy => {
+        vaultBusy = busy
+        for (const button of navButtons.values()) button.disabled = busy
+      } }, handlers.vault)
     }
 
     let disposeAssistantPage: (() => void) | null = null
@@ -723,8 +755,8 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     if (page !== '界面') setPage(page)
   }
 
-  return { open, close, isOpen: () => overlay?.isOpen() ?? false, prepareVaultChange: () => {
-    if (overlay?.isOpen() && inputsEdited && !window.confirm('切换会关闭设置。如果还有未保存的修改，请先保存；继续将放弃这些修改。是否继续？')) return false
-    close(); return true
+  return { open, close, isOpen: () => overlay?.isOpen() ?? false, isBusy: () => vaultBusy, prepareVaultChange: () => {
+    if (overlay?.isOpen() && (inputsEdited || vaultPage?.isDirty()) && !window.confirm('还有未保存的设置或显示名称。请先保存；继续切换将在新库提交后放弃这些修改。是否继续？')) return false
+    return true
   } }
 }
