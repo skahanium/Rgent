@@ -126,3 +126,81 @@ it('keeps unassessable transport failures pending without calling a null review 
  expect(support.modelQualitySummary(rows,cases)).toMatchObject({valid:true,passed:false,pending:3,coverage:3})
  expect(support.modelQualitySummary(rows.map(r=>({...r,review:{...r.review,retained:-1}})),cases).valid).toBe(false)
 })
+
+it('freezes v4 sixty development cases and six screening identities; subsets never change the universe',()=>{
+ const cases=support.v4Cases()
+ expect(cases).toHaveLength(60);expect(cases.every(c=>!c.heldOut&&Number(c.id.slice(-2))<=6)).toBe(true)
+ expect(support.v4Selection(['standing-01'],true).map(c=>c.id)).toEqual(['standing-01'])
+ expect(()=>support.v4Selection(['standing-09'],false)).toThrow('EVALUATION_CASES_NOT_AUTHORIZED')
+ expect(()=>support.v4Selection(['fact-01'],true)).toThrow('EVALUATION_CASES_NOT_AUTHORIZED')
+ expect(support.V4_RULES.applyDenominator).toContain('add/correct')
+})
+it('charges v4 against the unchanged historical manifest with local and per-model ceilings, including failures',()=>{
+ const budget=dir(),old={old:'formal'},j=new support.EvaluationJournal(dir(),old,1440,budget)
+ j.charge('old');j.close();const original=JSON.parse(readFileSync(path.join(budget,'state.json'),'utf8')).manifest
+ const q=new support.EvaluationJournal(dir(),{q:'frozen'},1440,budget,undefined,{parentManifestHash:original,prefix:'q/',limit:2,perModelLimit:1})
+ q.charge('q/one/case/baseline/0')
+ expect(()=>q.charge('q/one/other/review/0')).toThrow('EVALUATION_MODEL_CALL_LIMIT')
+ q.charge('q/two/case/baseline/0');expect(()=>q.charge('q/three/case/0')).toThrow('EVALUATION_LOCAL_CALL_LIMIT')
+ expect(q.charged('q/one/case/baseline/0')).toBe(1);q.close()
+ expect(JSON.parse(readFileSync(path.join(budget,'state.json'),'utf8')).manifest).toBe(original)
+ const resumed=new support.EvaluationJournal(dir(),{q:'frozen'},1440,budget,undefined,{parentManifestHash:original,prefix:'q/',limit:2,perModelLimit:1})
+ expect(resumed.calls).toBe(3);expect(resumed.localCalls).toBe(2);resumed.close()
+})
+it('freezing is immutable and incomplete reviewed coverage cannot be claimed as sixty-case pass',()=>{
+ const root=dir(),manifest={dataset:'fixed'}
+ support.freezeV4(root,manifest);support.freezeV4(root,manifest)
+ expect(()=>support.freezeV4(root,{dataset:'changed'})).toThrow('EVALUATION_REVISION_CHANGED')
+ const spec=support.v4Cases()[0]!
+ const row={caseId:spec.id,arm:'review' as const,category:'valid' as const,automaticApplied:true,review:{retained:spec.expected.required.length,hardViolations:[],correctNoop:false,evidenceComplete:true}}
+ expect(support.v4Summary([row],support.v4Cases()).worthContinuing).toBe(false)
+ expect(support.v4Summary([row],support.v4Cases()).coverage).toBe(1)
+})
+it('v4 scores semantic rejection and safe empty separately, counts mistaken applied positives, and keeps service denominator',()=>{
+ const cases=support.v4Cases().filter(c=>['standing-01','temporary-01'].includes(c.id))
+ const rows:support.V4Row[]=cases.flatMap(c=>['baseline','review'].map(arm=>({caseId:c.id,arm:arm as 'baseline'|'review',category:c.group==='temporary'?'semantic-rejected' as const:'valid' as const,automaticApplied:c.group==='standing',review:{retained:c.expected.required.length,hardViolations:[],correctNoop:c.group==='temporary',evidenceComplete:true}})))
+ expect(support.v4Summary(rows,cases).arms.review).toMatchObject({service:0,semanticRejected:1,automaticApplied:1,applyDenominator:1,correctNoop:1})
+ rows[1]!.review!.hardViolations.push('wrong-attribution')
+ expect(support.v4Summary(rows,cases).decision).toBe('stop')
+ rows[1]!.category='service';rows[1]!.review={retained:0,hardViolations:[],correctNoop:false,evidenceComplete:false}
+ expect(support.v4Summary(rows,cases).arms.review.retained).toBe(0)
+ expect(support.v4Summary(rows,cases).decision).toBe('insufficient-evidence')
+})
+
+it('v4 resume never dispatches a charged unfinished arm and requires both arms reviewed before a new pair',()=>{
+ expect(support.v4ResumeAction(0,null)).toBe('dispatch')
+ expect(support.v4ResumeAction(1,null)).toBe('charged-unfinished')
+ expect(support.v4ResumeAction(1,{status:'interrupted'})).toBe('done')
+ expect(support.v4ResumeAction(2,{status:'completed'})).toBe('done')
+ const one={caseId:'standing-01',arm:'baseline' as const,category:'valid' as const,automaticApplied:true,review:{retained:2,hardViolations:[],correctNoop:false,evidenceComplete:true}}
+ expect(()=>support.v4DispatchGate([one],'correction-01')).toThrow('EVALUATION_REVIEW_REQUIRED')
+ expect(()=>support.v4DispatchGate([one,{...one,arm:'review',category:'interrupted',review:null}],'correction-01')).toThrow('EVALUATION_REVIEW_REQUIRED')
+ expect(()=>support.v4DispatchGate([one,{...one,arm:'review',review:{...one.review,hardViolations:['wrong-attribution']}}],'correction-01')).toThrow('EVALUATION_MODEL_STOPPED')
+ expect(()=>support.v4DispatchGate([one,{...one,arm:'review'}],'correction-01')).not.toThrow()
+})
+
+it('v4 positive gates use standing fact correction and diagnostics score only paired sufficient outputs',()=>{
+ const cases=support.v4Cases().filter(c=>['standing-01','scope-01'].includes(c.id))
+ const rows: support.V4Row[]=cases.flatMap(c=>['baseline','review'].map(arm=>({caseId:c.id,arm:arm as 'baseline'|'review',category:'valid',automaticApplied:true,review:{retained:arm==='review'&&c.group==='standing'?0:c.expected.required.length,hardViolations:[],correctNoop:false,evidenceComplete:true}})))
+ const q=support.v4Summary(rows,cases)
+ expect(q.arms.review.positive.rate).toBe(0);expect(q.decision).toBe('stop')
+ rows.find(r=>r.caseId==='standing-01'&&r.arm==='review')!.category='service';rows.find(r=>r.caseId==='standing-01'&&r.arm==='review')!.review=null
+ const limited=support.v4Summary(rows,cases)
+ expect(limited.diagnostic.pairedCases).toEqual(['scope-01'])
+ expect(limited.diagnostic.arms.review.rate).toBe(1)
+ expect(limited.arms.review.rate).toBeLessThan(1)
+})
+
+it('v4 remaining development samples require all six screening pairs with sufficient frozen reviews',()=>{
+ expect(()=>support.v4ScreenGate([])).toThrow('EVALUATION_SCREEN_REVIEW_REQUIRED')
+ const cases=support.v4Cases().filter(c=>support.V4_SCREEN.includes(c.id)),rows:support.V4Row[]=cases.flatMap(c=>['baseline','review'].map(arm=>({caseId:c.id,arm:arm as 'baseline'|'review',category:'valid',automaticApplied:!!c.expected.required.length,review:{retained:c.expected.required.length,hardViolations:[],correctNoop:false,evidenceComplete:true}})))
+ expect(()=>support.v4ScreenGate(rows)).not.toThrow()
+ expect(()=>support.v4ScreenGate(rows.slice(1))).toThrow('EVALUATION_SCREEN_REVIEW_REQUIRED')
+ rows[1]!.review!.hardViolations=['forbidden-content']
+ expect(()=>support.v4ScreenGate(rows)).toThrow('EVALUATION_MODEL_STOPPED')
+})
+
+it('v4 reports raw outcome categories and call use without conflating candidate, format and service rejection',()=>{
+ const spec=support.v4Cases()[0]!,q=support.v4Summary([{caseId:spec.id,arm:'review',category:'candidate-rejected',automaticApplied:false,calls:2,latencyMs:120,receiptReason:'MEMORY_OUTPUT_INVALID',review:{retained:0,hardViolations:[],correctNoop:false,evidenceComplete:true}}],[spec])
+ expect(q.arms.review).toMatchObject({service:0,format:0,candidateRejected:1,calls:2,latencyMs:120,categories:{'candidate-rejected':1},receiptReasons:{MEMORY_OUTPUT_INVALID:1}})
+})
