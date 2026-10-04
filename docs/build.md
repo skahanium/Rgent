@@ -1099,8 +1099,8 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 | B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `e04a02f` 最后实际队列修补独立 Spec／Quality 复核通过（2026-10-05）；定向 13 文件 261／0、类型／文档通过。打开 A+ 串行工程门；全部 B 实际窗口及整轮完整门仍待核，不能据此宣称整库恢复已完整验收 |
 | A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | `3c39531` 修补后的独立 Spec／Quality 再审通过（2026-10-05），3 项 Important 及目标消失路径闭合；必要 8 文件 205／0、类型／文档通过，打开 C 串行工程门。实际窗口及整轮完整门仍待核；初版 315／0、SSE 13／0及 core 20／0保留原范围 |
 | C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | `ba385f2` 三项 Important 修补后的独立 Spec／Quality 再审通过（2026-10-05）；必要 5 文件 133／0、类型及文档通过。原 9 文件 223／0、性能及失败保留各自范围；开放 E 串行工程门，实际窗口与整轮完整门仍待收口 |
-| E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 2026-10-05 初版必要 11 文件 204／0；独立复审 Spec❌／Quality Needs fixes（Critical 0／Important 1／Minor 1）。首修 15／0 后再审新增 Important 1，同操作恢复状态误注销查询已补，renderer 20／0、类型／文档通过；待再审及实际窗口／整轮完整门。D 保持未开 |
-| D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | 待 E 门；2026-10-04 |
+| E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | `bf9d71e` 限定独立再审 Spec／Quality 通过（2026-10-05），原迟到查询及真实成对状态通知问题闭合；最终 renderer 20／0、类型／文档通过。初版 204／0与首修 15／0保留各自范围；开放 D 串行工程门，实际窗口／整轮完整门仍待核 |
+| D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | E 独立门通过，进入串行施工；尚未交付，2026-10-05 |
 | Q | 虚构开发集双策略对照，逐模型停损与证据；不切生产策略、不运行正式评测 | 待 D 门；2026-10-04 |
 
 包 A 复审修复（2026-10-04，基线 `5f8cf77`）：必要迁移在实际库队列内核验有效 TaskGrant、来源权限前后快照、对象与整文件修订，最后同步复核授权有效性，并在旧归档写入后、正文原子替换前再次核验 grant 与权限原字节；grant 的读取依赖不回入该队列。Host 只续接已核验会话、迁移前后对象与修订的成功迁移回执，普通读取不能改 origin proof。任务与人的批次迁移共用迁移提交登记，原子替换前检查绑定容量，替换后立即同步登记 successors／verified／lastWrites，旧 tab 可继续保存。材料三态同时核对 `materials.json` 单元及独立 task 序号、owner 归属与上界；异常拒绝新序号分配，清空／推进在队列实际提交前重核，均不归零。新任务 2 MiB 上限不套到完整旧原文；大历史性能仍由 C 测量，不提前增加索引。记忆页显示既有退休失败和材料登记分类诊断，配置异常不能遮住材料异常；退休重试出口仍待 A+。
@@ -1242,3 +1242,5 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 - 本次生产仅修改 renderer shell；main／shared、B、A+ 与 C 无变化，没有重复旧 204 项或全量／构建／UI／付费调用。DOM 证据不能代称实际 Electron 窗口，平台与人工待核项保持，D 未开。
 
 包 E 限定再审修补（2026-10-05，基线 `7099099`，待再审）：再审发现真实 `retryRestore` 先发带 id 的 handoff、紧接同操作无 id 的 changed；首修误注销当前查询，同恢复阶段重复关闭更新亦受影响。新增测试接真实 `VaultSwitch` producer 与 DOM shell，修前正确状态返回仍无 ACK，2 失败／15 未选（`/tmp/rgent-v4-E-rereview-red-order.log`）。消费端改为在更新 transitionId 前核查询发起时绑定的 session／operation，只在新 preparing、新操作或新会话时淘汰；同 restoring 阶段的 changed／closePending 更新保留当前 id，新的 R1／R2 查询代际仍独立。`pnpm exec vitest run test/renderer/vault-close.test.ts` 修后 1 文件 20／0（`...-rereview-green-final.log`），含实际 producer 成对事件、重复两次关闭，以及新 preparing／operation／session 的淘汰正例；`pnpm exec tsc --noEmit`、`pnpm docs:check` 通过（`...-rereview-types-final.log`、`...-rereview-docs-final.log`）。main/shared 未改，无旧 204／全量／构建／UI／付费重复；producer＋DOM 证据仍不是实际系统窗口，D 未开。
+
+包 E 最后限定再审（2026-10-05，`7099099..bf9d71e`）：Spec／Quality 通过，Critical／Important／Minor 均为 0，报告 `/tmp/rgent-v4-E-second-rereview-report.md`。真实 VaultSwitch retryRestore 的 handoff→changed 和重复关闭通知保留当前查询，新的准备／操作／会话及迟到旧查询仍隔离；正确 ACK 后须主进程 release 才解锁。只开放 D 串行工程门；实际 Electron 窗口、系统关闭、强杀 journal、整轮完整门及平台／人工／正式学习质量继续待核，模型调用仍为 0。
