@@ -248,6 +248,32 @@ function readConfig(userData: string): StoredConfig {
   catch { throw new Error('BAD_MODEL_CONFIG') }
 }
 
+function connectionKey(connection: StoredConnection, protection: SecretProtection): string {
+  if (!connection.encryptedKey) throw new Error('NO_API_KEY')
+  if (!protection.isEncryptionAvailable()) throw new Error('ENCRYPTION_UNAVAILABLE')
+  let key: string
+  try { key = protection.decryptString(Buffer.from(connection.encryptedKey, 'base64')) }
+  catch { throw new Error('KEY_DECRYPT_FAILED') }
+  if (!key) throw new Error('KEY_DECRYPT_FAILED')
+  return key
+}
+
+function selectedCredential(config: StoredConfig, protection: SecretProtection, id: string | null): ModelCredential {
+  if (id === null) throw new Error('NO_MODEL_SELECTED')
+  const model = config.models.find(row => row.id === id)
+  if (!model) throw new Error('MODEL_NOT_FOUND')
+  const connection = config.connections.find(row => row.id === model.connectionId)
+  if (!connection) throw new Error('CONNECTION_NOT_FOUND')
+  if (!connection.baseURL) throw new Error('BAD_BASE_URL')
+  return {provider:connection.provider,connectionId:connection.id,baseURL:connection.baseURL,
+    modelId:model.modelId,contextTokens:model.contextTokens,apiKey:connectionKey(connection,protection)}
+}
+
+/** Main-only development evaluation: no migration, memory config access or disk write. */
+export function loadModelCredentialReadOnly(userData: string, protection: SecretProtection, modelRecordId: string): ModelCredential {
+  return selectedCredential(readConfig(userData), protection, modelRecordId)
+}
+
 function writeConfig(userData: string, config: StoredConfig): void {
   const target = path.join(userData, FILE)
   const temporary = path.join(userData, `.model-config-${randomUUID()}.tmp`)
@@ -302,13 +328,7 @@ export function createModelConfigStore(userData: string, protection: SecretProte
     try { return protection.encryptString(value).toString('base64') } catch { throw new Error('KEY_ENCRYPT_FAILED') }
   }
   const decryptKey = (connection: StoredConnection): string => {
-    if (!connection.encryptedKey) throw new Error('NO_API_KEY')
-    if (!protection.isEncryptionAvailable()) throw new Error('ENCRYPTION_UNAVAILABLE')
-    let apiKey: string
-    try { apiKey = protection.decryptString(Buffer.from(connection.encryptedKey, 'base64')) }
-    catch { throw new Error('KEY_DECRYPT_FAILED') }
-    if (!apiKey) throw new Error('KEY_DECRYPT_FAILED')
-    return apiKey
+    return connectionKey(connection, protection)
   }
   const requireBaseURL = (connection: StoredConnection): string => {
     if (!connection.baseURL) throw new Error('BAD_BASE_URL')
@@ -460,17 +480,7 @@ export function createModelConfigStore(userData: string, protection: SecretProte
     },
     /** 默认或单场指定模型：按内部模型记录 ID 解析，失败一律显错，不静默换别的。 */
     credential(modelRecordId: string | null = current.defaultModelId): ModelCredential {
-      if (modelRecordId === null) throw new Error('NO_MODEL_SELECTED')
-      const model = modelOf(current, modelRecordId)
-      const connection = connectionOf(current, model.connectionId)
-      return {
-        provider: connection.provider,
-        connectionId: connection.id,
-        baseURL: requireBaseURL(connection),
-        modelId: model.modelId,
-        contextTokens: model.contextTokens,
-        apiKey: decryptKey(connection)
-      }
+      return selectedCredential(current, protection, modelRecordId)
     },
     /** 「读取模型」用：只取该供应商的端点与密钥，不用默认模型。 */
     providerSecret(provider: unknown): { baseURL: string; apiKey: string } {

@@ -20,6 +20,7 @@
   "include": [
     "src/**/*",
     "test/**/*",
+    "scripts/memory-quality-*.ts",
     "electron.vite.config.ts",
     "vitest.config.ts"
   ]
