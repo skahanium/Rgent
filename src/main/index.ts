@@ -707,13 +707,14 @@ function registerIpc(): void {
         if(owner?.frame!==frame||owner.sessionId!==request.sessionId)throw Error('STALE_PREVIEW')
         if(request.action==='cancel'){current.ledgerRecoveryCancel(request.previewId);return {ok:true}}
       }
-      if(structureGate.isBusy()||agentHost?.active().length||agentHost?.hasPending())throw Error('STRUCTURE_BUSY')
+      if(structureGate.isBusy())throw Error('STRUCTURE_BUSY')
       const context={sessionId:request.sessionId,operationId:randomUUID()}
-      return await structureGate.recover(current.requireUsableRoot(),{
-        assert:()=>current.assertSession(request.sessionId),
+      const root=current.requireUsableRoot()
+      const result=await structureGate.recover(root,{
+        host:agentHost??undefined,action:request.action,
+        isComplete:result=>'status' in result&&result.status==='complete',
+        assert:()=>{if(current!==vault||current.requireUsableRoot()!==root)throw Error('VAULT_CHANGED');current.assertSession(request.sessionId)},
         quiesce:async()=>{
-          await agentHost?.whenLaunchesSettled();current.assertSession(request.sessionId)
-          if(agentHost?.active().length||agentHost?.hasPending())throw Error('STRUCTURE_BUSY')
           consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED');await consolidation?.idle()
         },
         prepare:()=>flushBeforeStructure(win,[],`recovery-${request.action}`,context),
@@ -723,13 +724,14 @@ function registerIpc(): void {
         if(request.action==='preview'){
           const preview=await current.ledgerRecoveryPreview(request.mode)
           if(recoveryPreviewOwners.size>=16)recoveryPreviewOwners.clear()
-          recoveryPreviewOwners.set(preview.id,{frame,sessionId:request.sessionId});return {ok:true as const,value:preview}
+          recoveryPreviewOwners.set(preview.id,{frame,sessionId:request.sessionId});return preview
         }
         // A recovery authorization never carries old sending or background permits.
         authorizations?.clear();memoryIpc.clear();memoryAuthorizationPreviews.clear()
         const result=request.action==='commit'?await current.ledgerRecoveryCommit(request.previewId):await current.ledgerRecoveryResume(request.revision)
-        return {ok:true as const,value:result}
+        return result
       })
+      return {ok:true,value:result}
     }catch(error){const code=error instanceof Error?error.message:'';return {ok:false,error:['BAD_REQUEST','STALE_PREVIEW','STALE_RECOVERY','VAULT_CHANGED','STRUCTURE_BUSY','UNSAVED_DRAFT','PERMISSIONS_INVALID','LEDGER_RECOVERY_AMBIGUOUS','LEDGER_REGISTRY_INVALID','LIFECYCLE_RECOVERY_REQUIRED'].includes(code)?code:'LEDGER_REGISTRY_INVALID'}}
   })
   registerTrustedHandle(IPC.ledgerReasoning,async(_event,value:unknown):Promise<import('../shared/ledger.ts').LedgerReasoningResult>=>{

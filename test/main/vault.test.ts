@@ -785,3 +785,162 @@ it('runs the production recovery coordination with dirty tabs and permits a safe
   expect(await readFile(path.join(first,'原篇.md'),'utf8')).toBe('later draft');expect(await readFile(path.join(first,'other.md'),'utf8')).toBe('other draft')
  }finally{session.dispose()}
 })
+
+/** Real session, grant and ledger IO; only the model stream and registry fault are controlled. */
+async function pendingHostRecoveryFixture() {
+  const app = await setup()
+  const { AgentHost } = await import('../../src/main/agent-host.ts')
+  const { VaultStructureGate } = await import('../../src/main/vault-mutation-queue.ts')
+  await writeFile(path.join(app.first, '原篇.md'), '/问\n')
+  await app.attach(app.first)
+  const note = await app.session.read('原篇.md'), grant = await migrationGrant(app.session, '原篇.md')
+  const fs = secureFsFor(app.first), replace = fs.replace.bind(fs), gate = new VaultStructureGate()
+  let fail = false, releaseStream = () => {}, streamStarted = () => {}
+  let beforeTier: () => Promise<void> = async () => {}
+  const streamHold = new Promise<void>(resolve => { releaseStream = resolve })
+  const started = new Promise<void>(resolve => { streamStarted = resolve })
+  vi.spyOn(fs, 'replace').mockImplementation((...args) => {
+    if (fail && args[0] === '.rgent/registry.json') throw Error('registry unavailable')
+    return replace(...args)
+  })
+  const authorize = vi.fn(async () => grant), dispatch = vi.fn(), events: unknown[] = []
+  const host = new AgentHost({
+    root: () => app.session.requireUsableRoot(), session: () => app.session.sessionId(), authorize,
+    acceptsObject: (p, before, after) => app.session.acceptsObject(p, before, after),
+    prepareSource: (input, permit) => app.session.prepareTaskSource({ ...input, sessionId: input.sessionId!, objectVersion: input.objectVersion!, expectedRevision: input.expectedRevision! }, permit!),
+    read: p => app.session.read(p),
+    write: (p, text, revision, binding) => {
+      if (gate.blocksWrite(app.first, p)) throw Error('NOTE_BUSY')
+      return app.session.write(p, text, revision, binding!)
+    },
+    tier: async (root, relPath) => { await beforeTier(); return modelTierFor(root, relPath) }, credential: () => grant.credential, limits: () => grant.limits,
+    ledger: { prepare: (p, chapter, version) => app.session.ledgerPrepare(p, chapter, version), complete: (p, id, revision) => app.session.ledgerComplete(p, id, revision), contexts: p => app.session.ledgerContexts(p) },
+    stream: async function* () { dispatch(); streamStarted(); await streamHold; fail = true; yield '完整待保存回答' },
+    emit: event => { events.push(event) }
+  })
+  const input = { ...note, relPath: '原篇.md', expectedRevision: note.revision, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' }
+  const task = await host.start(input)
+  void task.done.catch(() => {})
+  await started
+  const recover = <T>(action: 'preview' | 'commit' | 'resume', run: () => Promise<T>, prepare = async () => true, release = () => {}) => {
+    const deps = { host, action, isComplete: (result: T) => !!result && typeof result === 'object' && 'status' in result && result.status === 'complete', assert: () => app.session.assertSession(note.sessionId), quiesce: async () => {}, prepare, drain: () => app.session.idle(), release }
+    return gate.recover(app.first, deps, run)
+  }
+  return { ...app, host, task, input, grant, authorize, dispatch, events, recover, gate,
+    repairIO: () => { fail = false }, setBeforeTier: (hook: () => Promise<void>) => { beforeTier = hook },
+    finishPending: async () => { releaseStream(); await expect(task.done).rejects.toThrow(); expect(host.hasPending()).toBe(true); expect(host.active()).toHaveLength(0) }
+  }
+}
+
+it('blocks active Host work in the production recovery coordinator', async () => {
+  const app = await pendingHostRecoveryFixture()
+  try {
+    await expect(app.recover('resume', async () => 'must not run')).rejects.toThrow('STRUCTURE_BUSY')
+  } finally { await app.finishPending(); app.session.dispose() }
+})
+it('preserves actual Host pending through failed resume, then saves it without a new grant or dispatch', async () => {
+  const app = await pendingHostRecoveryFixture()
+  try {
+    await app.finishPending()
+    const status = await app.session.lifecycleStatus(), journal = await readFile(path.join(app.first, '.rgent-lifecycle'), 'utf8')
+    expect(JSON.parse(journal).active.kind).toBe('ledger-publication')
+    expect(JSON.parse(journal).active.writes[0].receipt).toBeTruthy()
+    expect(JSON.parse(journal).active.writes[1].receipt).toBeUndefined()
+    await expect(app.host.retryPending()).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+    for (const action of ['preview', 'commit'] as const) await expect(app.recover(action, async () => 'must not rebind')).rejects.toThrow('STRUCTURE_BUSY')
+    await expect(app.recover('resume', () => app.session.ledgerRecoveryResume(status.revision!))).rejects.toThrow()
+    expect(app.host.hasPending()).toBe(true)
+    expect(await readFile(path.join(app.first, '.rgent-lifecycle'), 'utf8')).toBe(journal)
+    expect(JSON.stringify(app.events)).toContain('完整待保存回答')
+    app.repairIO()
+    expect((await app.recover('resume', () => app.session.ledgerRecoveryResume(status.revision!))).status).toBe('complete')
+    expect(app.host.hasPending()).toBe(false)
+    expect((await app.session.read('原篇.md')).content).toContain('完整待保存回答')
+    expect(await app.session.ledgerContexts('原篇.md')).toHaveLength(1)
+    expect(app.dispatch).toHaveBeenCalledTimes(1); expect(app.authorize).toHaveBeenCalledTimes(1)
+    await expect(app.grant.assertLive('model')).rejects.toThrow()
+  } finally { app.session.dispose() }
+})
+it('waits for an existing Host retry and rejects new retries and launches throughout recovery', async () => {
+  const app = await pendingHostRecoveryFixture()
+  try {
+    await app.finishPending(); app.repairIO()
+    const status = await app.session.lifecycleStatus()
+    let releaseRetry = () => {}, enteredRetry = () => {}, enteredPrepare = () => {}, releasePrepare = () => {}
+    const retryEntered = new Promise<void>(r => { enteredRetry = r }), retryHold = new Promise<void>(r => { releaseRetry = r })
+    const prepareEntered = new Promise<void>(r => { enteredPrepare = r }), prepareHold = new Promise<void>(r => { releasePrepare = r })
+    app.setBeforeTier(async () => { enteredRetry(); await retryHold })
+    const retry = app.host.retryPending(); void retry.catch(() => {})
+    let recovered = false, prepared = false
+    const recovery = app.recover('resume', async () => { recovered = true; return app.session.ledgerRecoveryResume(status.revision!) }, async () => { prepared = true; enteredPrepare(); await prepareHold; return true })
+    await new Promise<void>(r => setImmediate(r))
+    expect(prepared).toBe(false); expect(recovered).toBe(false); await retryEntered
+    await expect(app.host.retryPending()).rejects.toThrow('STRUCTURE_BUSY')
+    await expect(app.host.start(app.input)).rejects.toThrow('STRUCTURE_BUSY')
+    releaseRetry(); await expect(retry).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED'); await prepareEntered
+    await expect(app.host.retryPending()).rejects.toThrow('STRUCTURE_BUSY')
+    releasePrepare(); expect((await recovery).status).toBe('complete')
+    await app.host.retryPending(); expect(app.host.hasPending()).toBe(false)
+    expect(app.dispatch).toHaveBeenCalledTimes(1); expect(app.authorize).toHaveBeenCalledTimes(1)
+  } finally { app.session.dispose() }
+})
+it.each(['session', 'object', 'permission'] as const)('refuses pending output before any ledger mutation after %s changes', async change => {
+  const app = await pendingHostRecoveryFixture()
+  try {
+    await app.finishPending(); app.repairIO()
+    const status = await app.session.lifecycleStatus()
+    const hold = vi.spyOn(app.session, 'ledgerPrepare').mockRejectedValue(Error('IO_ERROR'))
+    await app.recover('resume', () => app.session.ledgerRecoveryResume(status.revision!))
+    hold.mockRestore()
+    if (change === 'session') await app.attach(app.second)
+    if (change === 'object') { await rename(path.join(app.first, '原篇.md'), path.join(app.first, 'old.md')); await writeFile(path.join(app.first, '原篇.md'), 'replacement') }
+    if (change === 'permission') await writeFile(path.join(app.first, '.rgent-permissions'), JSON.stringify({ '原篇.md': 'forbidden' }))
+    const prepare = vi.spyOn(app.session, 'ledgerPrepare'), before = await readFile(path.join(app.session.root!, '原篇.md'), 'utf8')
+    await expect(app.host.retryPending()).rejects.toThrow()
+    expect(prepare).not.toHaveBeenCalled()
+    expect(await readFile(path.join(app.session.root!, '原篇.md'), 'utf8')).toBe(before)
+    expect(app.host.hasPending()).toBe(true); expect(app.dispatch).toHaveBeenCalledTimes(1); expect(app.authorize).toHaveBeenCalledTimes(1)
+  } finally { app.session.dispose() }
+})
+it('rechecks the session after waiting for an existing retry and releases both recovery gates on failure', async () => {
+  const app = await pendingHostRecoveryFixture()
+  try {
+    await app.finishPending(); app.repairIO()
+    let release = () => {}, entered = () => {}, ran = false
+    const held = new Promise<void>(r => { release = r }), started = new Promise<void>(r => { entered = r })
+    app.setBeforeTier(async () => { entered(); await held })
+    const retry = app.host.retryPending(); void retry.catch(() => {}); await started
+    const recovery = app.recover('resume', async () => { ran = true }); void recovery.catch(() => {})
+    await app.attach(app.second); release()
+    await expect(retry).rejects.toThrow()
+    await expect(recovery).rejects.toThrow('VAULT_CHANGED')
+    expect(ran).toBe(false); expect(app.gate.isBusy()).toBe(false); expect(app.host.hasPending()).toBe(true)
+    await expect(app.host.retryPending()).rejects.toThrow('VAULT_CHANGED')
+    expect(app.dispatch).toHaveBeenCalledTimes(1); expect(app.authorize).toHaveBeenCalledTimes(1)
+  } finally { app.session.dispose() }
+})
+it('keeps successful journal recovery and visible pending when the subsequent Host save fails', async () => {
+  const app = await pendingHostRecoveryFixture()
+  try {
+    await app.finishPending(); app.repairIO()
+    const status = await app.session.lifecycleStatus()
+    const save = vi.spyOn(app.session, 'ledgerPrepare').mockRejectedValue(Error('IO_ERROR'))
+    expect((await app.recover('resume', () => app.session.ledgerRecoveryResume(status.revision!))).status).toBe('complete')
+    expect(save).toHaveBeenCalledTimes(1)
+    expect((await app.session.lifecycleStatus()).status).not.toBe('pending')
+    expect(app.host.hasPending()).toBe(true); expect(JSON.stringify(app.events)).toContain('完整待保存回答')
+    expect(app.dispatch).toHaveBeenCalledTimes(1); expect(app.authorize).toHaveBeenCalledTimes(1)
+    save.mockRestore(); await app.host.retryPending(); expect(app.host.hasPending()).toBe(false)
+  } finally { app.session.dispose() }
+})
+it('does not retry old Host output when the session is superseded as recovery gates release', async () => {
+  const app = await pendingHostRecoveryFixture()
+  try {
+    await app.finishPending(); app.repairIO()
+    const status = await app.session.lifecycleStatus(), save = vi.spyOn(app.session, 'ledgerPrepare')
+    const result = await app.recover('resume', () => app.session.ledgerRecoveryResume(status.revision!), async () => true, () => app.session.dispose())
+    expect(result.status).toBe('complete'); expect(save).not.toHaveBeenCalled()
+    expect(JSON.parse(await readFile(path.join(app.first, '.rgent-lifecycle'), 'utf8')).active).toBeNull()
+    expect(app.host.hasPending()).toBe(true); expect(app.dispatch).toHaveBeenCalledTimes(1); expect(app.authorize).toHaveBeenCalledTimes(1)
+  } finally { app.session.dispose() }
+})

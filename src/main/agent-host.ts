@@ -120,6 +120,7 @@ export class AgentHost {
   private readonly launching = new Set<string>()
   private readonly launchWaiters = new Set<() => void>()
   private readonly retrying = new Map<string, Promise<void>>()
+  private recoveringLedger = false
   private readonly ledgerVersions = new Map<string,number>()
   private readonly verifiedToolReceivers=new Set<string>()
   private readonly pending = new Map<string, { root: string; relPath: string; source: LedgerChapterWrite; persisted: { answer: string }; material: { tracker: TaskMaterialTracker; context: MemoryContext | null; handoffAttempted?: boolean } }>()
@@ -138,6 +139,20 @@ export class AgentHost {
     while (this.launching.size) await new Promise<void>((resolve) => this.launchWaiters.add(resolve))
   }
   hasPending(root?: string): boolean { return [...this.pending.values()].some((item) => !root || item.root === root) }
+  /** Hold generated output in place while an explicit journal recovery runs. */
+  async withLedgerRecovery<T>(action: 'preview' | 'commit' | 'resume', run: () => Promise<T>): Promise<T> {
+    if (this.recoveringLedger || this.active().length) throw Error('STRUCTURE_BUSY')
+    this.recoveringLedger = true
+    try {
+      await this.whenLaunchesSettled()
+      if (this.active().length) throw Error('STRUCTURE_BUSY')
+      // A rejected save is still safely held in pending. Wait for its IO to finish,
+      // without requiring the journal-blocked save to succeed before recovery.
+      await Promise.allSettled([...this.retrying.values()])
+      if (this.active().length || (action !== 'resume' && this.hasPending())) throw Error('STRUCTURE_BUSY')
+      return await run()
+    } finally { this.recoveringLedger = false }
+  }
   /** Internal recovery coordination only; no generated content leaves the Host. */
   pendingPaths(root: string): string[] {
     return [...new Set([...this.pending.values()].filter((item) => item.root === root).map((item) => item.relPath))]
@@ -146,10 +161,12 @@ export class AgentHost {
     for (const [id, item] of this.pending) if (!root || item.root === root) { this.pending.delete(id); this.deps.onTaskMaterialDiscarded?.(id) }
   }
   async retryPending(root?: string, relPath?: string): Promise<void> {
+    if (this.recoveringLedger) throw Error('STRUCTURE_BUSY')
     // 逐项尝试：一篇永久失败不能挡住其他篇的补存。全部试过之后仍抛第一个错误，
     // 调用方继续用 hasPending() 判断是否还有未落盘内容。
     let failure: unknown
     for (const [id, item] of [...this.pending]) {
+      if (this.recoveringLedger) throw Error('STRUCTURE_BUSY')
       if (root && item.root !== root) continue
       if (relPath && item.relPath !== relPath) continue
       let retry = this.retrying.get(id)
@@ -255,6 +272,7 @@ export class AgentHost {
   }
 
   async start(input: HostStart): Promise<{ id: string; done: Promise<TaskResult> }> {
+    if (this.recoveringLedger) throw Error('STRUCTURE_BUSY')
     const root = this.deps.root()
     if (!root) throw new Error('NO_VAULT')
     const key = `${root}\0${input.relPath}`
@@ -614,6 +632,9 @@ export class AgentHost {
   }
 
   private async finishWrite(root: string, relPath: string, finalSource: LedgerChapterWrite, persisted: { answer: string }, material: {tracker: TaskMaterialTracker; context: MemoryContext | null; handoffAttempted?: boolean}): Promise<string> {
+    await this.requirePermission(root, relPath)
+    await this.readBound(root, relPath)
+    await this.requirePermission(root, relPath)
     {const pending=await this.deps.ledger.prepare(relPath,finalSource,this.ledgerVersions.get(finalSource.taskId));this.ledgerVersions.set(finalSource.taskId,pending.revision)}
     let bodyRevision=(await this.readBound(root,relPath)).revision
     if (finalSource.answer) {

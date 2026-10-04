@@ -40,17 +40,31 @@ export class VaultStructureGate {
   }
 
   async recover<T>(root: string, deps: {
+    host?: Pick<import('./agent-host.ts').AgentHost, 'withLedgerRecovery' | 'retryPending'>
+    action?: 'preview' | 'commit' | 'resume'
+    isComplete?: (result: T) => boolean
     assert: () => void; quiesce: () => Promise<void>; prepare: () => Promise<boolean>
     drain: () => Promise<void>; release: () => void
   }, run: () => Promise<T>): Promise<T> {
     this.begin({ root, exact: [], prefixes: [''] })
+    let result: T
     try {
-      await deps.quiesce(); deps.assert()
-      if (!await deps.prepare()) throw Error('UNSAVED_DRAFT')
-      deps.assert(); this.seal()
-      await deps.drain(); deps.assert()
-      const result = await run(); deps.assert(); return result
+      const execute = async () => {
+        deps.assert()
+        await deps.quiesce(); deps.assert()
+        if (!await deps.prepare()) throw Error('UNSAVED_DRAFT')
+        deps.assert(); this.seal()
+        await deps.drain(); deps.assert()
+        const result = await run(); deps.assert(); return result
+      }
+      result = deps.host ? await deps.host.withLedgerRecovery(deps.action ?? 'preview', execute) : await execute()
     } finally { this.finish(); deps.release() }
+    if (deps.action === 'resume' && deps.isComplete?.(result)) {
+      // Saving generated output is a separate outcome. Both gates are open now;
+      // a failed save or superseded session retains pending, not a failed repair.
+      try { deps.assert(); await deps.host?.retryPending(root); deps.assert() } catch { /* keep pending */ }
+    }
+    return result
   }
 
   finish(): void { this.operation = null }

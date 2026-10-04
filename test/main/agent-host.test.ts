@@ -419,3 +419,19 @@ it.each(['valid','revision','object','session'] as const)('continues only a veri
  if(changed==='valid'){const started=await host.start({...request,previewId:preview.id});await started.done;expect(writes).toBeGreaterThan(0);expect(streams).toBe(1)}
  else{await expect(host.start({...request,previewId:preview.id})).rejects.toThrow();expect(writes).toBe(0);expect(streams).toBe(0)}
 })
+
+it('waits for launching to settle, rejects the now-active task, and never queues a new launch during recovery', async () => {
+  const app = harness(async function* (signal) { await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true })) })
+  const source = app.source(), start = source.indexOf('/'), input = { relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' }
+  const launching = app.host.start(input)
+  let ran = false
+  const recovery = app.host.withLedgerRecovery('resume', async () => { ran = true })
+  await expect(app.host.start({ ...input, relPath: 'other.md' })).rejects.toThrow('STRUCTURE_BUSY')
+  const task = await launching
+  await expect(recovery).rejects.toThrow('STRUCTURE_BUSY')
+  expect(ran).toBe(false)
+  app.host.cancel(task.id)
+  await task.done
+  await app.host.withLedgerRecovery('resume', async () => { ran = true })
+  expect(ran).toBe(true)
+})

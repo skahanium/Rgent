@@ -1551,6 +1551,62 @@ async function verifyLedgerRecoveryDrafts(page,nativePage,vault) {
   check('携带脏 tab 通过真实恢复 IPC 续跑、没有预先强制保存',await waitFor(page,`document.querySelector('.vault-settings-recovery')?.textContent.includes('恢复已完成')`))
   check('恢复完成后两篇窗口稿自动保存且编辑恢复',await waitFor(page,`document.querySelectorAll('.tab-dirty').length===0 && document.querySelector('.cm-content')?.getAttribute('contenteditable')==='true'`))
   check('恢复后磁盘保存两篇原窗口稿且意图完成',names.every(name=>readFileSync(path.join(vault,name),'utf8').includes('未保存草稿'))&&JSON.parse(readFileSync(path.join(vault,'.rgent-lifecycle'),'utf8')).active===null)
+  await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))`)
+  await verifyLedgerRecoveryHostPending(page,vault)
+}
+
+/** Real Host pending and real repair IPC. POSIX directory permissions interrupt
+ * registry publication after the owner receipt, using only the disposable vault. */
+async function verifyLedgerRecoveryHostPending(page,vault) {
+  if(process.platform==='win32'){process.stdout.write('Host 发布故障窗口夹具待 Windows 专属注入；不代称通过。\n');return}
+  const relPath='恢复生成.md',answer='恢复后保住的完整生成回答',control=path.join(vault,'.rgent'),mode=statSync(control).mode&0o777
+  let requests=0,sendAnswer=null,responseInFlight=null
+  const server=createHttpServer((request,response)=>{
+    request.resume();request.on('end',()=>{
+      requests++;responseInFlight=response
+      sendAnswer=()=>{
+        chmodSync(control,0o555)
+        response.writeHead(200,{'content-type':'text/event-stream'})
+        for(const [delta,finish_reason] of [[{content:answer},null],[{},'stop']])response.write(`data: ${JSON.stringify({id:'recovery-ui',object:'chat.completion.chunk',created:1,model:'recovery-ui',choices:[{index:0,delta,finish_reason}]})}\n\n`)
+        response.end('data: [DONE]\n\n')
+      }
+    })
+  })
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve))
+  try {
+    writeFileSync(path.join(vault,relPath),'/恢复回答\n')
+    const baseURL=`http://127.0.0.1:${server.address().port}/v1`
+    const started=await page.eval(`(async()=>{
+      const added=await window.rgent.modelProviderSave({provider:'custom',baseURL:${JSON.stringify(baseURL)},modelId:'recovery-ui',contextTokens:16000,newKey:'disposable-recovery-fixture'})
+      if(!added.ok)throw Error('恢复模型夹具配置失败')
+      const model=added.config.models.find(m=>m.provider==='custom'&&m.modelId==='recovery-ui')
+      const note=await window.rgent.noteRead(${JSON.stringify(relPath)}),request={relPath:${JSON.stringify(relPath)},range:{start:0,end:5},expectedText:'/恢复回答',promptText:'恢复回答',sessionId:note.sessionId,objectVersion:note.objectVersion,expectedRevision:note.revision,modelRecordId:model.id,references:[]}
+      globalThis.__pendingRecoveryEvents=[];globalThis.__pendingRecoveryOff=window.rgent.onAgentEvent(e=>globalThis.__pendingRecoveryEvents.push(e))
+      const preview=await window.rgent.agentAuthorizationPreview(request)
+      if(!preview.ok)throw Error('恢复任务授权失败：'+preview.error)
+      return window.rgent.agentStart({...request,previewId:preview.preview.id})
+    })()`)
+    if(!started.ok)throw Error('恢复任务启动失败：'+started.error)
+    for(let i=0;i<50&&!sendAnswer;i++)await sleep(100)
+    if(!sendAnswer)throw Error('受控恢复模型未收到请求')
+    const busy=await page.eval(`(async()=>{const s=await window.rgent.vaultGet();return window.rgent.ledgerRepair({action:'resume',sessionId:s.sessionId,revision:'0'.repeat(64)})})()`)
+    check('生成仍活动时真实恢复 IPC 拒绝',!busy.ok&&busy.error==='STRUCTURE_BUSY')
+    sendAnswer()
+    check('真实 Host 发布失败留下完整待保存回答',await waitFor(page,`(async()=>globalThis.__pendingRecoveryEvents.some(e=>e.id===${JSON.stringify(started.id)}&&e.status==='failed'&&!e.persisted&&e.answer===${JSON.stringify(answer)}) && !(await window.rgent.agentTasks()).length)()`))
+    const journal=JSON.parse(readFileSync(path.join(vault,'.rgent-lifecycle'),'utf8'))
+    check('故障落在 owner 已成而 registry 未成',journal.active?.kind==='ledger-publication'&&!!journal.active.writes[0].receipt&&!journal.active.writes[1].receipt)
+    const resume=`(async()=>{const s=await window.rgent.vaultGet(),status=await window.rgent.lifecycleStatus();return window.rgent.ledgerRepair({action:'resume',sessionId:s.sessionId,revision:status.revision})})()`
+    const failed=await page.eval(resume)
+    check('Host pending 的失败续跑保留日志和回答',!failed.ok&&JSON.parse(readFileSync(path.join(vault,'.rgent-lifecycle'),'utf8')).active!==null)
+    chmodSync(control,mode)
+    const restored=await page.eval(resume)
+    check('Host pending 经真实恢复入口续跑成功',restored.ok&&restored.value?.status==='complete')
+    check('恢复释放后自动补存回答且没有再次派发模型',await waitFor(page,`globalThis.__pendingRecoveryEvents.some(e=>e.id===${JSON.stringify(started.id)}&&e.persisted&&e.answer===${JSON.stringify(answer)})`)&&readFileSync(path.join(vault,relPath),'utf8').includes(answer)&&requests===1)
+  } finally {
+    chmodSync(control,mode);responseInFlight?.end()
+    await page.eval(`globalThis.__pendingRecoveryOff?.();true`)
+    await new Promise(resolve=>server.close(resolve))
+  }
 }
 
 async function verifyModelFeedback(page, nativePage, shot) {

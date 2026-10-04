@@ -1132,6 +1132,14 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 
 追加实际窗口专项 `RGENT_UI_LEDGER_RECOVERY_ONLY=1 pnpm ui:check`：临时库有效 owner 已成／registry 待成意图、实际自动保存拒写、双草稿保留、现有恢复 IPC 续跑及恢复后落盘。脚本只做 `node --check scripts/verify-ui.mjs`，**本包尚未 build 或运行窗口专项**；最终 build 后由总任务执行。此前初版“未加窗口断言”仅说明初版状态。正文可读、设置预览／取消、批次暂停离库／重开、来源状态与偏好重定位仍需整轮窗口核对。必要定向只证明所列协议；Windows、原生输入法、用户视觉及学习质量仍待核，不开放 A+ 或结束阶段。
 
+包 B 二次复核 Host pending 修补（2026-10-05，基线 `358b7dc`）：
+
+- 独立复核指出生产 ledgerRepair 对 inactive pending 的两处忙态检查与 journal 拒绝补存互锁。现由同一 `VaultStructureGate.recover`／Host 恢复门协调：同步拒绝新 retry/start，等待已有 retry／launch 收敛，重核活动任务与会话；仅 resume 允许 pending，preview／commit 继续保护旧输出关联。
+- 真实 VaultSession、AgentHost、TaskGrant 与受控 stream 反例覆盖 owner 已成／registry 未成、补存被 journal 拒绝、失败续跑保留日志／完整输出、成功后补存。恢复完整成功后两门释放并复核当前对象实例／root／session，再沿用 finishWrite 重试；补存失败不回滚恢复或冒称回答已保存。会话／对象／权限变化在首次账本 prepare 前拒写，旧 grant 仍撤销，派发与授权各一次。启动尚未完成、已有补存与恢复互斥、等待中会话变更、释放时会话被替代均有反例。
+- 最终核心红灯 `/tmp/rgent-v4-B-host-red-final.log` 为 6 失败／63 跳过，保存闭环红灯 `/tmp/rgent-v4-B-host-red-resume-save.log` 为 2 失败／68 跳过。首轮夹具误把公开 lifecycle kind 当原始 publication kind，随后前置核验使旧暂停点不可达，均修正后才取上述无超时红灯；初始失败日志保留，不算产品新问题。
+- 必要相关集合命令为 `pnpm exec vitest run test/main/agent-host.test.ts test/main/vault.test.ts test/main/vault-mutation-queue.test.ts test/main/task-authorization.test.ts test/main/agent-authorization.test.ts test/main/memory-ipc.test.ts test/main/ipc-sender.test.ts test/shared/ipc-guard.test.ts test/shared/ipc-channel.test.ts`，9 文件 170／0（`/tmp/rgent-v4-B-host-targeted-final.log`）。类型、文档和窗口脚本语法检查另记 `/tmp/rgent-v4-B-host-types-final.log`、`/tmp/rgent-v4-B-host-docs-final.log`、`/tmp/rgent-v4-B-host-script-final.log`；只证明各自范围。
+- 既有 `RGENT_UI_LEDGER_RECOVERY_ONLY=1 pnpm ui:check` 增加真实 Host／本地受控 HTTP 流反例，以一次性库 POSIX 目录权限注入 registry 发布失败，检查活动任务拒绝、pending 保留、失败续跑和恢复后自动补存及一次派发。只做脚本语法检查，尚未 build 或跑窗口；该权限注入不覆盖 Windows，Windows 专属注入仍待补核。完整测试、构建与窗口由总任务串行接续；没有付费调用、push 或 CI，不开放 A+，阶段和既有人工待核不变。
+
 事实校正：生产 structured context 允许空／部分摘要，撤回“生产自旋”判定；精确缓存复用仍需修。原正式运行未用保留集调提示，但评分晚于运行及旧保留集已被审阅须留档。压缩／清理授权已在合同记忆节，缺口是预览和保护。历史评分与失败不得改写。
 
 实验授权：最多 480 实际调用，从已用 816／1440 的余额 624 扣；60 开发例（每组6）×2模型×2策略×最多2调用，首6关键例筛查最多48包含在480。MiniMax-M3／deepseek-flash 分别报告，不用旧保留集、不追加额度、不运行新正式评测。冻结案例、策略、提示、分类、评分和指纹后调用；无凭据连接诊断不稳则暂停。筛查零容忍即停，正例无改善且应用下降即停，无法判定报证据不足。完整对照逐模型：零容忍／任一正向组低于90%／总体未达95%且提升不到10百分点／正例应用下降超过5百分点，任一则停止策略；服务故障留分母。试验通过只表示值得继续，不发布生产默认；新的正式评测与独立保留集须另行授权。
