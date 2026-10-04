@@ -10,6 +10,7 @@ import {ledgerChapters,ledgerTaskFields,historicalBodyTasks,type ContextChapter}
 import {ledgerProvenance,encodeLedgerProvenance,type LedgerProvenance} from './ledger-provenance.ts'
 import {upsertAiAnswer,type LedgerChapterWrite} from './host-source.ts'
 const digest=(s:string)=>createHash('sha256').update(s).digest('hex')
+function nextRecordRevision(revision:number):number{if(revision>=Number.MAX_SAFE_INTEGER)throw Error('LEDGER_RECORD_LIMIT');return revision+1}
 const fixed='.rgent/registry.json'
 const id=(s:unknown):s is string=>typeof s==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(s)
 const rel=(s:unknown):s is string=>typeof s==='string'&&s.length<=4096&&/\.md$/i.test(s)&&!s.split('/').some(x=>!x||x==='.'||x==='..'||x.startsWith('.'))&&!/[:\\\x00-\x1f]/.test(s)
@@ -208,7 +209,7 @@ export class LedgerStore{
   if(archive&&(action!=='clear'||!originalArchive||digest(originalArchive.raw)!==archive.revision||Buffer.byteLength(originalArchive.raw)!==archive.bytes))throw Error('LEDGER_CONFLICT')
   for(const item of items){try{const r=this.record(owner,item.taskId),disk=this.bases.get(this.path(owner,item.taskId));if(!r||r.revision!==item.revision||r.state==='pending-body'||!disk)throw Error('LEDGER_CONFLICT')
     if(action==='compress'){if(r.state!=='saved'||Date.parse(r.chapter!.startedAt)>=Date.now()-7*86400000)throw Error('BAD_REQUEST');const zipped=compressLedgerBytes(decodeLedgerBytes(disk.raw));if(zipped){this.replace(this.path(owner,r.taskId),zipped.raw);savedBytes+=Buffer.byteLength(disk.raw)-Buffer.byteLength(zipped.raw)}}
-    else {const cleared:LedgerRecord={version:1,noteId:owner.noteId,taskId:r.taskId,revision:r.revision+1,state:'cleared',bodyStatus:'unable-to-verify',chapter:null,sequence:r.sequence};this.replace(this.path(owner,r.taskId),JSON.stringify(cleared));savedBytes+=Buffer.byteLength(disk.raw)-Buffer.byteLength(JSON.stringify(cleared))}
+    else {const cleared:LedgerRecord={version:1,noteId:owner.noteId,taskId:r.taskId,revision:nextRecordRevision(r.revision),state:'cleared',bodyStatus:'unable-to-verify',chapter:null,sequence:r.sequence};this.replace(this.path(owner,r.taskId),JSON.stringify(cleared));savedBytes+=Buffer.byteLength(disk.raw)-Buffer.byteLength(JSON.stringify(cleared))}
     success.push(item.taskId)
    }catch{failed.push(item.taskId)}}
   if(archive&&originalArchive&&!failed.length){let cursor:string|null=null,referenced=false;do{const page=this.page(relPath,cursor);referenced ||= page.records.some(r=>r.legacyRaw!==undefined&&r.state!=='cleared');cursor=page.cursor}while(cursor)
@@ -301,7 +302,7 @@ export class LedgerStore{
   if(previous){
    if(JSON.stringify(previous.chapter)===JSON.stringify(visible))return previous
    if(expectedVersion!==previous.revision||previous.state!=='pending-body'||previous.chapter?.prompt!==chapter.prompt||previous.chapter.startedAt!==chapter.startedAt||JSON.stringify(previous.chapter.provenance?.model)!==JSON.stringify(chapter.provenance?.model))throw Error('LEDGER_TASK_CONFLICT')
-   previous.chapter=visible;previous.revision++;const raw=JSON.stringify(previous);if(Buffer.byteLength(raw)>2*1024*1024)throw Error('LEDGER_RECORD_LIMIT');this.replace(this.path(owner,chapter.taskId),raw);return previous
+   previous.chapter=visible;previous.revision=nextRecordRevision(previous.revision);const raw=JSON.stringify(previous);if(Buffer.byteLength(raw)>2*1024*1024)throw Error('LEDGER_RECORD_LIMIT');this.replace(this.path(owner,chapter.taskId),raw);return previous
   }
   const registry=this.registry(),row=registry.owners.find(o=>o.noteId===owner.noteId)!;registry.sequence++;if(!Number.isSafeInteger(registry.sequence))throw Error('LEDGER_RECORD_LIMIT');row.sequenceCeiling=registry.sequence;this.publish(registry,row)
   const record:LedgerRecord={version:1,noteId:owner.noteId,taskId:chapter.taskId,revision:1,state:'pending-body',bodyStatus:'unable-to-verify',chapter:visible,sequence:registry.sequence}
@@ -313,7 +314,7 @@ export class LedgerStore{
   // The Host write receipt is necessary; identity markers are an additional local check.
   if(record.chapter.answer.trim()){if(blocks.length<1)throw Error('LEDGER_BODY_CHANGED');try{if(upsertAiAnswer(body,{taskId,answer:record.chapter.answer,expectedPreviousAnswer:record.chapter.answer})!==body)throw Error()}catch{throw Error('LEDGER_BODY_CHANGED')}}
   if(record.state==='saved'&&record.bodyStatus==='present')return record
-  record.state='saved';record.bodyStatus='present';record.revision++;this.replace(this.path(owner,taskId),JSON.stringify(record));return record
+  record.state='saved';record.bodyStatus='present';record.revision=nextRecordRevision(record.revision);this.replace(this.path(owner,taskId),JSON.stringify(record));return record
  }
  private displayed(relPath:string,record:LedgerRecord){
   record=structuredClone(record)

@@ -249,3 +249,15 @@ it.each(['valid','ambiguous','wrong-text'] as const)('proves the original task o
  if(kind==='valid')expect(store.summaryMaterials('a.md',['derived']).materialIds).toContain('original/prompt');else expect(()=>store.summaryMaterials('a.md',['derived'])).toThrow('MEMORY_MATERIAL_UNVERIFIED')
  expect(store.getRecord('a.md','derived').chapter?.answer).toBe('新派生回答')
 })
+
+it.each(['prepare','complete','clear'] as const)('preserves a legal terminal task revision when %s needs another version',action=>{
+ const {root,fs,store}=fixture(),marked=markPrompt('/你好',{taskId:task.taskId,range:{start:0,end:3},expectedText:'/你好',promptText:'你好'}),body=upsertAiAnswer(marked,{taskId:task.taskId,answer:task.answer})
+ writeFileSync(path.join(root,'a.md'),body);const original=store.prepare('a.md',task),file=`.rgent/ledgers/${original.noteId}/${task.taskId}.json`,disk=fs.readSnapshot(file)
+ const terminal={...original,...(action==='clear'?{state:'legacy' as const}:{}),revision:Number.MAX_SAFE_INTEGER};fs.replace(file,disk.bytes.toString(),JSON.stringify(terminal),disk.objectVersion)
+ const before=fs.readSnapshot(file)
+ expect(store.getRecord('a.md',task.taskId).revision).toBe(Number.MAX_SAFE_INTEGER)
+ if(action==='prepare')expect(()=>store.prepare('a.md',{...task,answer:'修改回答'},Number.MAX_SAFE_INTEGER)).toThrow('LEDGER_RECORD_LIMIT')
+ else if(action==='complete')expect(()=>store.complete('a.md',task.taskId,awaitHash(body))).toThrow('LEDGER_RECORD_LIMIT')
+ else{const preview=store.maintenancePreview('a.md','clear'),result=store.maintain('a.md','clear',preview.records);expect(result.success).toEqual([]);expect(result.failed).toEqual([task.taskId])}
+ const after=fs.readSnapshot(file);expect(after.bytes).toEqual(before.bytes);expect(after.objectVersion).toBe(before.objectVersion);expect(store.getRecord('a.md',task.taskId).revision).toBe(Number.MAX_SAFE_INTEGER)
+})
