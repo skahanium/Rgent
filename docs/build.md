@@ -1101,7 +1101,7 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 | C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | `ba385f2` 三项 Important 修补后的独立 Spec／Quality 再审通过（2026-10-05）；必要 5 文件 133／0、类型及文档通过。原 9 文件 223／0、性能及失败保留各自范围；开放 E 串行工程门，实际窗口与整轮完整门仍待收口 |
 | E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | `bf9d71e` 限定独立再审 Spec／Quality 通过（2026-10-05），原迟到查询及真实成对状态通知问题闭合；最终 renderer 20／0、类型／文档通过。初版 204／0与首修 15／0保留各自范围；开放 D 串行工程门，实际窗口／整轮完整门仍待核 |
 | D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | `31e8623` 限定独立再审 Spec／Quality 通过（2026-10-05），迟到原文身份、实际队列权限与可撤失败反馈闭合；最终同域 252 通过／2 主动性能未选，类型／文档通过。容量及性能保留原受验范围，开放 Q 工具门；实际窗口与整轮完整门仍待核 |
-| Q | 虚构开发集双策略对照，逐模型停损与证据；不切生产策略、不运行正式评测 | 2026-10-05 初版工具独立复审发现两项 Important；来源完整留证与终态分类统一修补已交，runner／support 2 文件 41／0、类型／文档／语法通过。限定独立再审及总任务工程门后冻结待核；原 37／0 与无网络启动证据保留各自范围，新增付费调用仍为 0 |
+| Q | 虚构开发集双策略对照，逐模型停损与证据；不切生产策略、不运行正式评测 | `742e5bc` 工具统一修补限定独立 Spec／Quality 复审通过（2026-10-05），实际来源证据与终态评分门闭合；必要 runner／support 41／0、类型／文档通过。原 37／0 和无网络启动保留旧范围；实际窗口、最终完整门、冻结与逐对真实实验待核，新增付费调用仍为 0 |
 
 包 A 复审修复（2026-10-04，基线 `5f8cf77`）：必要迁移在实际库队列内核验有效 TaskGrant、来源权限前后快照、对象与整文件修订，最后同步复核授权有效性，并在旧归档写入后、正文原子替换前再次核验 grant 与权限原字节；grant 的读取依赖不回入该队列。Host 只续接已核验会话、迁移前后对象与修订的成功迁移回执，普通读取不能改 origin proof。任务与人的批次迁移共用迁移提交登记，原子替换前检查绑定容量，替换后立即同步登记 successors／verified／lastWrites，旧 tab 可继续保存。材料三态同时核对 `materials.json` 单元及独立 task 序号、owner 归属与上界；异常拒绝新序号分配，清空／推进在队列实际提交前重核，均不归零。新任务 2 MiB 上限不套到完整旧原文；大历史性能仍由 C 测量，不提前增加索引。记忆页显示既有退休失败和材料登记分类诊断，配置异常不能遮住材料异常；退休重试出口仍待 A+。
 
@@ -1292,3 +1292,5 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 - **Important I2**：实际 receipt outcome／reason 决定终态类别。valid／safe-empty 只接 applied 无原因；明确 semantic reject 只接 rejected／MEMORY_CONFIRMATION_REQUIRED，真正 candidate reject 只接 applied 或 rejected／MEMORY_OUTPUT_INVALID。生产来源／依赖／权限／会话／材料／提交故障改为 insufficient-evidence；原输出与调用保留，端到端仍计零分母，不能借人工 true 标注进入充分输出诊断或派发下一 pair。真实只读 canLearn 核验进一步区分 store.apply 折叠为 OUTPUT_INVALID 的材料拒绝与候选格式拒绝。annotation 准入逐项核实际输入映射、完整材料 hash、核验成功、派发终态及允许原因，缺证或不相容终态拒绝；评分本身也不会按 true 标注给 insufficient 行保留分。
 
 必要命令 `pnpm exec vitest run test/scripts/memory-quality-runner.test.ts test/scripts/memory-quality-support.test.ts`：2 文件 **41／0**（`/tmp/rgent-v4-Q-fix-targeted-final.log`）；类型 `/tmp/rgent-v4-Q-fix-types-final.log` 通过，文档检查 `/tmp/rgent-v4-Q-fix-docs-final.log` 12 文件通过，`node --check scripts/check-memory.mjs` 与 diff 检查通过。red 记录 `fix-red-I1`／`fix-red-I2`／`fix-red-terminal`／`fix-red-binding`／`fix-red-failed-evidence`／`fix-red-learning-reason` 保留，首次类型夹具错误及中间 green 记录不冒称最终门。没有重跑 cases、无关全量、产品 build／UI、无网络 Electron 启动、联网诊断或真实模型；累计仍 816／1440、本轮付费 0。独立限定 Spec／Quality 再审、root 窗口整合与完整门先行，随后才冻结／逐 pair live；平台、人工及阶段待核不变。
+
+包 Q 工具限定独立再审（2026-10-05，`ea2f8c1..742e5bc`）：Spec／Quality 通过，Critical／Important／Minor 均为 0（`/tmp/rgent-v4-Q-fix-rereview.md`）。实际发送 ID 的完整来源与材料证明、实际回执／材料门分类、充分证据准入及付费后受控失败分账关闭原 I1／I2；独立审查没有重复测试或调用模型。先完成实际窗口与最终串行工程门，再冻结和真实实验；生产策略、480 额度和所有平台／人工／正式质量待核保持。
