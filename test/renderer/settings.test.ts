@@ -419,7 +419,7 @@ describe('settings interface page', () => {
     panel.close()
   })
 
-  it('publishes each saved batch result before a later pending item and ignores its reply after leaving', async () => {
+  it('publishes each saved batch result before a later pending item and publishes its saved reply globally after leaving', async () => {
     const changed = vi.fn()
     const config = modelConfig()
     const updated = modelConfig({ models: [...config.models, { id: 'new', provider: 'minimax', modelId: 'saved', contextTokens: 4096 }] })
@@ -439,39 +439,41 @@ describe('settings interface page', () => {
     ;[...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')].find(node => node.textContent === '界面')!.click()
     finish({ ok: true, config: updated })
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(changed).toHaveBeenCalledTimes(1)
+    expect(changed).toHaveBeenCalledTimes(2)
     expect(document.querySelector('.settings-page-title')?.textContent).toBe('界面')
     panel.close()
   })
 
-  it('does not publish an adding callback after leaving the model page', async () => {
+  it('publishes successful adding globally after leaving without painting or continuing the batch', async () => {
     const changed = vi.fn()
     const handlers = { ...modelHandlers(), onModelConfigChanged: changed }
-    handlers.readModels.mockResolvedValue({ ok: true, models: [{ id: 'pending', contextTokens: 4096 }] })
+    handlers.readModels.mockResolvedValue({ ok: true, models: [{ id: 'pending', contextTokens: 4096 }, { id: 'later', contextTokens: 4096 }] })
     let finish!: (result: unknown) => void
     handlers.addModel.mockImplementation(() => new Promise(resolve => { finish = resolve }))
     const panel = await openProvider(handlers, 'minimax')
     buttonByText('读取模型')!.click()
-    await vi.waitFor(() => expect(document.querySelectorAll('.settings-candidate')).toHaveLength(1))
-    buttonByText('添加所选（1）')!.click()
+    await vi.waitFor(() => expect(document.querySelectorAll('.settings-candidate')).toHaveLength(2))
+    buttonByText('添加所选（2）')!.click()
     ;[...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')].find(node => node.textContent === '界面')!.click()
     finish({ ok: true, config: modelConfig() })
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(changed).not.toHaveBeenCalled()
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(handlers.addModel).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('.settings-read-panel')).toBeNull()
     expect(document.querySelector('.settings-page-title')?.textContent).toBe('界面')
     panel.close()
   })
 
-  it('disables batch controls while adding and ignores late callbacks after closing', async () => {
+  it('disables batch controls and publishes saved results globally after closing', async () => {
     const changed = vi.fn()
     const handlers = { ...modelHandlers(), onModelConfigChanged: changed }
-    handlers.readModels.mockResolvedValue({ ok: true, models: [{ id: 'pending', contextTokens: 4096 }] })
+    handlers.readModels.mockResolvedValue({ ok: true, models: [{ id: 'pending', contextTokens: 4096 }, { id: 'later', contextTokens: 4096 }] })
     let finish!: (result: unknown) => void
     handlers.addModel.mockImplementation(() => new Promise(resolve => { finish = resolve }))
     const panel = await openProvider(handlers, 'minimax')
     buttonByText('读取模型')!.click()
-    await vi.waitFor(() => expect(document.querySelectorAll('.settings-candidate')).toHaveLength(1))
-    const add = buttonByText('添加所选（1）')!
+    await vi.waitFor(() => expect(document.querySelectorAll('.settings-candidate')).toHaveLength(2))
+    const add = buttonByText('添加所选（2）')!
     add.click(); add.click()
     expect(handlers.addModel).toHaveBeenCalledTimes(1)
     expect([...document.querySelectorAll<HTMLInputElement | HTMLButtonElement>('.settings-read-panel input, .settings-read-panel button')].every(node => node.disabled)).toBe(true)
@@ -479,7 +481,9 @@ describe('settings interface page', () => {
     panel.close()
     finish({ ok: true, config: modelConfig() })
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(changed).not.toHaveBeenCalled()
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(handlers.addModel).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('.settings-read-panel')).toBeNull()
     expect(document.querySelector('.overlay-settings')).toBeNull()
   })
 

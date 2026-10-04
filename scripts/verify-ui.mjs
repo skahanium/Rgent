@@ -1546,6 +1546,7 @@ async function verifyModelFeedback(page, nativePage, shot) {
       f.calls.push(value)
       if(f.mode==='error')return {ok:false,error:f.error}
       if(f.mode==='late'){await new Promise(resolve=>f.release=resolve);return {ok:false,error:'IO_ERROR'}}
+      if(f.mode==='late-success'){await new Promise(resolve=>f.release=resolve);f.config={...f.config,models:[...f.config.models,{id:'feedback-late-record',provider:'custom',modelId:'feedback-late-saved',contextTokens:value.contextTokens}]};return {ok:true,config:f.config}}
       if(value.modelId==='feedback-added'){
         f.config={...f.config,models:[...f.config.models,{id:'feedback-record',provider:'custom',modelId:value.modelId,contextTokens:value.contextTokens}]}
         return {ok:true,config:f.config}
@@ -1597,6 +1598,17 @@ async function verifyModelFeedback(page, nativePage, shot) {
     await nativePage.eval(`globalThis.__modelFeedback.release();globalThis.__modelFeedback.release=null;true`)
     await page.eval(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`)
     check('模型反馈离页后添加失败回执不复活页面或错误',await waitFor(page,`document.querySelector('.settings-page-title')?.textContent==='界面' && !document.querySelector('.settings-read-panel') && !document.querySelector('.settings-error')?.textContent`))
+    await closeSettings();await openModel()
+    await readList()
+    await nativePage.eval(`globalThis.__modelFeedback.mode='late-success';globalThis.__modelFeedback.calls=[];true`)
+    await page.eval(`(()=>{for(const input of document.querySelectorAll('.settings-candidate input[type=number]')){if(!input.value){input.value='8192';input.dispatchEvent(new Event('input'))}}[...document.querySelectorAll('.settings-action')].find(n=>n.textContent==='添加所选（5）').click()})()`)
+    gated=false
+    for(let attempt=0;attempt<60;attempt++){if(await nativePage.eval(`!!globalThis.__modelFeedback.release`)){gated=true;break}await sleep(100)}
+    if(!gated)throw new Error('模型反馈离页成功添加未抵达屏障')
+    await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(n=>n.textContent==='界面').click()`)
+    await nativePage.eval(`globalThis.__modelFeedback.release();globalThis.__modelFeedback.release=null;true`)
+    check('模型反馈离页成功回执刷新全局模型且不复活旧页面',await waitFor(page,`document.querySelector('.settings-page-title')?.textContent==='界面' && !document.querySelector('.settings-read-panel') && [...document.querySelectorAll('.status-model option')].some(n=>n.textContent==='feedback-late-saved')`))
+    check('模型反馈离页成功后停止后续批次',await nativePage.eval(`globalThis.__modelFeedback.calls.length===1`))
     await closeSettings();await openModel()
     await nativePage.eval(`globalThis.__modelFeedback.mode='read-late';true`)
     await page.eval(`document.querySelector('.settings-read-row button').click()`)

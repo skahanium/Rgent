@@ -67,13 +67,16 @@ export function modelQualitySummary(rows:ReviewedCase[],cases:{id:string;group:s
  const expected=new Map(cases.flatMap(c=>[0,1,2].map(repeat=>[c.id+'/'+repeat,c] as const)))
  const seen=new Set<string>();let valid=true
  const judgements:QualityJudgement[]=[]
+ const trials=[0,1,2].map(repeat=>({repeat,judgements:[] as QualityJudgement[],coverage:0}))
  for(const row of rows){
   const key=row.caseId+'/'+row.repeat,c=expected.get(key)
   if(!c||seen.has(key)){valid=false;continue}seen.add(key)
   const r=row.review
   if(r&&(r.group!==c.group||r.required!==c.expected.required.length||!Number.isSafeInteger(r.retained)||r.retained!<0||r.retained!>r.required||typeof r.completed!=='boolean'||!Array.isArray(r.hardViolations)||r.hardViolations.some(v=>typeof v!=='string')))valid=false
-  judgements.push(r??{group:c.group,required:c.expected.required.length,retained:null,completed:false,hardViolations:[]})
+  const judgement=r??{group:c.group,required:c.expected.required.length,retained:null,completed:false,hardViolations:[]}
+  judgements.push(judgement);trials[row.repeat]!.judgements.push(judgement);trials[row.repeat]!.coverage++
  }
  const summary=qualitySummary(judgements)
- return {...summary,passed:valid&&seen.size===expected.size&&summary.passed,coverage:seen.size,expected:expected.size,heldOut:rows.filter(r=>cases.find(c=>c.id===r.caseId)?.heldOut).length,valid}
+ const repeats=trials.map(({repeat,judgements,coverage})=>{const result=qualitySummary(judgements);return {...result,repeat,coverage,expected:cases.length,passed:valid&&coverage===cases.length&&result.passed}})
+ return {...summary,repeats,passed:valid&&seen.size===expected.size&&repeats.every(r=>r.passed),coverage:seen.size,expected:expected.size,heldOut:rows.filter(r=>cases.find(c=>c.id===r.caseId)?.heldOut).length,valid}
 }

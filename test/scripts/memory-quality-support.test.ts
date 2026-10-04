@@ -68,3 +68,16 @@ it('an explicitly authorized recipient correction preserves the old call count',
  expect(readdirSync(root).some(f=>f.startsWith('recipient-transition-'))).toBe(true)
  expect(()=>new support.EvaluationJournal(root,{...next,host:'other.test'},2,root,old)).toThrow('EVALUATION_REVISION_CHANGED')
 })
+
+it('reports each trial and never averages away a failing group',()=>{
+ const cases=Array.from({length:120},(_,i)=>({id:String(i),group:'group-'+Math.floor(i/12),heldOut:i%12>=8,expected:{required:['a']}}))
+ const rows=cases.flatMap((c,i)=>[0,1,2].map(repeat=>({caseId:c.id,repeat,review:{group:c.group,required:1,retained:repeat===0&&i<3?0:1,completed:true,hardViolations:[]}})))
+ const report=support.modelQualitySummary(rows,cases)
+ expect(report.rate).toBeGreaterThan(.95)
+ expect(report.groups['group-0']!.rate).toBeGreaterThan(.9)
+ expect(report.passed).toBe(false)
+ expect(report.repeats.map(r=>r.repeat)).toEqual([0,1,2])
+ expect(report.repeats.map(r=>r.passed)).toEqual([false,true,true])
+ expect(report.repeats[0]!.groups['group-0']!.rate).toBe(.75)
+ expect(report.repeats.map(r=>r.coverage)).toEqual([120,120,120])
+})

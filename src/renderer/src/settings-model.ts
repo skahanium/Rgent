@@ -365,6 +365,7 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
         for (const candidate of pending) {
           const result = await handlers.addModel({ provider, modelId: candidate.id, contextTokens: capacityOf(candidate)! })
             .catch(() => ({ ok: false, error: 'IO_ERROR' }) as ModelConfigResult)
+          if (result.ok) host.onChanged?.()
           if (disposed || !host.isCurrent()) return
           attempted++
           if (!result.ok && result.error !== 'DUPLICATE_MODEL') {
@@ -375,7 +376,6 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
           if (result.ok) { config = result.config; added++ }
           else existing++
           candidates = candidates?.filter(item => item !== candidate) ?? null
-          if (result.ok) host.onChanged?.()
           paint()
         }
         adding = false
