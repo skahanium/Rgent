@@ -4,7 +4,7 @@ import { streamText, tool, jsonSchema, isStepCount, type ModelMessage, type Tool
 export type ToolSchema = { description: string; inputSchema: Parameters<typeof jsonSchema>[0] }
 export type ModelStepEvent =
   | { type: 'text'; text: string }
-  /** 模型自述的思考。它只进账本，不进正文。 */
+  /** 模型自述的思考；新任务仅短期保存，不进入正文、历史摘要或记忆。 */
   | { type: 'reasoning'; text: string }
   | { type: 'tool-call'; id: string; name: string; input: unknown; invalid?: boolean }
   | { type: 'finish'; reason: string; usage?:{inputTokens:number|null;outputTokens:number|null} }
@@ -25,6 +25,17 @@ export const MODEL_STREAM_BOUNDS = { argumentBytes: 65536, callsPerStep: 64, res
 
 const THINK_OPEN = '<think>'
 const THINK_CLOSE = '</think>'
+
+/** Internal diagnostics omit provider messages, bodies, headers, URLs and credentials. */
+function failureDetails(error:unknown){
+  const value=error&&typeof error==='object'?error as {statusCode?:unknown;name?:unknown;cause?:{code?:unknown};responseBody?:unknown}:{}
+  const httpStatus=Number.isInteger(value.statusCode)&&Number(value.statusCode)>=100&&Number(value.statusCode)<=599?Number(value.statusCode):null
+  const type=typeof value.name==='string'&&['AI_APICallError','AI_TypeValidationError','AI_InvalidResponseDataError'].includes(value.name)?value.name:'unknown'
+  const code=typeof value.cause?.code==='string'&&['ENOTFOUND','ECONNRESET','ECONNREFUSED','ETIMEDOUT','CERT_HAS_EXPIRED','UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(value.cause.code)?value.cause.code:null
+  let providerCode:number|null=null
+  if(typeof value.responseBody==='string'&&value.responseBody.length<=32768){try{const v=JSON.parse(value.responseBody) as {base_resp?:{status_code?:unknown}};if(Number.isSafeInteger(v.base_resp?.status_code))providerCode=Number(v.base_resp!.status_code)}catch{}}
+  return {httpStatus,type,code,providerCode}
+}
 
 /** 末尾有多长的一段可能是标签前缀，需要留到下一片再判断。 */
 function heldTail(text: string, tag: string): number {
@@ -119,7 +130,7 @@ export async function* streamModelStep(input: ModelStepInput): AsyncGenerator<Mo
       for (const piece of think.flush()) if (piece.text) yield { type: piece.type, text: piece.text }
       yield { type: 'finish', reason: part.finishReason, usage:{inputTokens:part.totalUsage.inputTokens??null,outputTokens:part.totalUsage.outputTokens??null} }
     } else if (part.type === 'error') {
-      throw Error('MODEL_REQUEST_FAILED')
+      throw Error('MODEL_REQUEST_FAILED',{cause:failureDetails(part.error)})
     } else if (part.type === 'tool-error' && invalidIds.has(part.toolCallId)) {
       // The SDK emits a validation error after an invalid call even without execute.
       // Host already received that attempt and owns its finite refusal.

@@ -1512,6 +1512,110 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   })
 }
 
+async function verifyModelFeedback(page, nativePage, shot) {
+  const longId = '失败候选模型名称用于验证窄窗口省略与容量草稿保留'.repeat(4)
+  const config = await page.eval(`(async()=>{const r=await window.rgent.modelConfigGet();if(!r.ok)throw new Error('模型反馈夹具初读失败');return r.config})()`)
+  const theme = await page.eval(`window.rgent.themeGet()`)
+  const closeSettings = async () => {
+    await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))`)
+    if (!await waitFor(page, `!document.querySelector('.overlay-settings')`)) throw new Error('模型反馈设置未关闭')
+  }
+  const openModel = async () => {
+    await page.eval(`document.querySelector('.settings-open').click()`)
+    await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
+    await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(n=>n.textContent==='模型').click()`)
+    if (!await waitFor(page, `!!document.querySelector('[data-provider="custom"]')`)) throw new Error('模型反馈供应商未就绪')
+    await page.eval(`document.querySelector('[data-provider="custom"]').click()`)
+  }
+  const readList = async () => {
+    await page.eval(`document.querySelector('.settings-read-row button').click()`)
+    if (!await waitFor(page, `document.querySelectorAll('.settings-candidate').length===5`)) throw new Error('模型反馈候选未就绪')
+  }
+  await closeSettings()
+  await nativePage.eval(`(()=>{
+    const ipc=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain
+    const channels=['model-config:get','model-config:model-add','model-config:model-list']
+    const f={old:channels.map(c=>[c,ipc._invokeHandlers.get(c)]),config:${JSON.stringify(config)},longId:${JSON.stringify(longId)},calls:[],mode:'batch',release:null,readRelease:null}
+    globalThis.__modelFeedback=f
+    ipc._invokeHandlers.set(channels[0],async()=>({ok:true,config:f.config}))
+    ipc._invokeHandlers.set(channels[2],async()=>{
+      if(f.mode==='read-late')await new Promise(resolve=>f.readRelease=resolve)
+      return {ok:true,models:[{id:'feedback-added',contextTokens:4096},{id:'feedback-existing',contextTokens:4096},{id:f.longId},{id:'feedback-later',contextTokens:16384},{id:'feedback-unselected',contextTokens:32768}]}
+    })
+    ipc._invokeHandlers.set(channels[1],async(_event,value)=>{
+      f.calls.push(value)
+      if(f.mode==='error')return {ok:false,error:f.error}
+      if(f.mode==='late'){await new Promise(resolve=>f.release=resolve);return {ok:false,error:'IO_ERROR'}}
+      if(value.modelId==='feedback-added'){
+        f.config={...f.config,models:[...f.config.models,{id:'feedback-record',provider:'custom',modelId:value.modelId,contextTokens:value.contextTokens}]}
+        return {ok:true,config:f.config}
+      }
+      if(value.modelId==='feedback-existing')return {ok:false,error:'DUPLICATE_MODEL'}
+      await new Promise(resolve=>f.release=resolve)
+      return {ok:false,error:'TOO_MANY_MODELS'}
+    })
+    return true
+  })()`)
+  try {
+    await openModel()
+    for (const error of ['CONNECTION_NOT_FOUND','MODEL_NOT_FOUND','BAD_PROVIDER','DUPLICATE_MODEL','TOO_MANY_MODELS','constructor']) {
+      await nativePage.eval(`globalThis.__modelFeedback.mode='error';globalThis.__modelFeedback.error=${JSON.stringify(error)};true`)
+      await page.eval(`[...document.querySelectorAll('.settings-action')].find(n=>n.textContent==='添加模型').click()`)
+      check('模型反馈错误 '+error+' 显示易读原因而非内部码',await waitFor(page,`(()=>{const t=document.querySelector('.settings-error')?.textContent;return !!t && /[\u4e00-\u9fff]/.test(t) && !t.includes(${JSON.stringify(error)})})()`))
+    }
+    await nativePage.eval(`globalThis.__modelFeedback.mode='batch';globalThis.__modelFeedback.calls=[];true`)
+    await readList()
+    await page.eval(`(()=>{const rows=[...document.querySelectorAll('.settings-candidate')];const capacity=rows[2].querySelector('input[type=number]');capacity.value='8192';capacity.dispatchEvent(new Event('input'));rows[4].querySelector('input[type=checkbox]').click();const add=[...document.querySelectorAll('.settings-action')].find(n=>n.textContent==='添加所选（4）');add.click();add.click()})()`)
+    let gated = false
+    for (let attempt=0;attempt<60;attempt++) {
+      if (await nativePage.eval(`!!globalThis.__modelFeedback.release`)) { gated=true;break }
+      await sleep(100)
+    }
+    if(!gated)throw new Error('模型反馈批量失败回执未抵达屏障')
+    check('模型反馈成功项在后续回执挂起时已同步且重复项退出候选',await waitFor(page,`document.querySelectorAll('.settings-candidate').length===3 && [...document.querySelectorAll('.settings-model-id')].some(n=>n.textContent==='feedback-added') && [...document.querySelectorAll('.status-model option')].some(n=>n.textContent==='feedback-added')`))
+    check('模型反馈 busy 防重复并禁用读取和候选操作',await nativePage.eval(`globalThis.__modelFeedback.calls.length===3`) && await page.eval(`[...document.querySelectorAll('.settings-form button,.settings-form input')].every(n=>n.disabled)`))
+    await nativePage.eval(`globalThis.__modelFeedback.release();globalThis.__modelFeedback.release=null;true`)
+    check('模型反馈分别报告成功、重复、失败与未尝试',await waitFor(page,`document.querySelector('.settings-read-panel')?.textContent.includes('已添加 1 个，已存在 1 个，失败 1 个，未尝试 1 个')`))
+    check('模型反馈长名称、容量与未勾选草稿保留且结束恢复控件',await page.eval(`(()=>{const rows=[...document.querySelectorAll('.settings-candidate')];return rows[0].querySelector('.settings-candidate-id').textContent===${JSON.stringify(longId)} && rows[0].querySelector('input[type=number]').value==='8192' && rows[0].querySelector('input[type=checkbox]').checked && !rows[2].querySelector('input[type=checkbox]').checked && !document.querySelector('.settings-read-row button').disabled})()`))
+    for(const mode of ['day','night']) {
+      await page.eval(`window.rgent.themeSet('${mode}')`)
+      await waitFor(page,`document.documentElement.dataset.theme==='${mode}'`)
+      for(const [width,height] of [[1200,800],[800,560]]) {
+        await page.call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false})
+        await page.eval(`document.querySelector('.settings-candidate input[type=number]').focus()`)
+        check('模型反馈 '+mode+' '+width+' 无横向溢出且焦点中性',await page.eval(`(()=>{const panel=document.querySelector('.overlay-settings'),form=document.querySelector('.settings-form'),active=document.activeElement,s=getComputedStyle(active),probe=document.createElement('span');probe.style.color='var(--focus-ring)';document.body.append(probe);const neutral=getComputedStyle(probe).color;probe.remove();return panel.scrollWidth<=panel.clientWidth+1 && form.scrollWidth<=form.clientWidth+1 && document.documentElement.scrollWidth<=innerWidth && active.matches('.settings-candidate input[type=number]') && s.outlineStyle!=='none' && s.outlineColor===neutral})()`))
+        await shot(page,'model-feedback-'+mode+'-'+width)
+      }
+    }
+    await page.call('Emulation.clearDeviceMetricsOverride',{})
+    await nativePage.eval(`globalThis.__modelFeedback.mode='late';globalThis.__modelFeedback.calls=[];true`)
+    await page.eval(`[...document.querySelectorAll('.settings-action')].find(n=>n.textContent==='添加所选（2）').click()`)
+    gated=false
+    for(let attempt=0;attempt<60;attempt++){if(await nativePage.eval(`!!globalThis.__modelFeedback.release`)){gated=true;break}await sleep(100)}
+    if(!gated)throw new Error('模型反馈离页添加未抵达屏障')
+    await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(n=>n.textContent==='界面').click()`)
+    await nativePage.eval(`globalThis.__modelFeedback.release();globalThis.__modelFeedback.release=null;true`)
+    await page.eval(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`)
+    check('模型反馈离页后添加失败回执不复活页面或错误',await waitFor(page,`document.querySelector('.settings-page-title')?.textContent==='界面' && !document.querySelector('.settings-read-panel') && !document.querySelector('.settings-error')?.textContent`))
+    await closeSettings();await openModel()
+    await nativePage.eval(`globalThis.__modelFeedback.mode='read-late';true`)
+    await page.eval(`document.querySelector('.settings-read-row button').click()`)
+    gated=false
+    for(let attempt=0;attempt<60;attempt++){if(await nativePage.eval(`!!globalThis.__modelFeedback.readRelease`)){gated=true;break}await sleep(100)}
+    if(!gated)throw new Error('模型反馈离页读取未抵达屏障')
+    await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(n=>n.textContent==='界面').click()`)
+    await nativePage.eval(`globalThis.__modelFeedback.readRelease();globalThis.__modelFeedback.readRelease=null;true`)
+    await page.eval(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`)
+    check('模型反馈离页后读取清单回执不复活旧候选',await waitFor(page,`document.querySelector('.settings-page-title')?.textContent==='界面' && !document.querySelector('.settings-read-panel')`))
+  } finally {
+    await nativePage.eval(`(()=>{const f=globalThis.__modelFeedback;const ipc=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain;for(const [channel,handler]of f.old)ipc._invokeHandlers.set(channel,handler);f.release?.();f.readRelease?.();delete globalThis.__modelFeedback;return true})()`)
+    await closeSettings()
+    await page.eval(`window.rgent.themeSet(${JSON.stringify(theme)})`)
+    await page.call('Emulation.clearDeviceMetricsOverride',{})
+  }
+  await openModel()
+}
+
 async function main() {
   const port = await availablePort()
   let inspectorPort = port
@@ -1550,6 +1654,7 @@ async function main() {
   if (shotDir) mkdirSync(shotDir, { recursive: true })
   const shot = async (page, name) => {
     if (!shotDir) return
+    if (process.env.RGENT_UI_SCREENSHOT_PREFIX && !name.startsWith(process.env.RGENT_UI_SCREENSHOT_PREFIX)) return
     const response = await page.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
     const data = response.result?.data
     if (data) writeFileSync(path.join(shotDir, `${name}.png`), Buffer.from(data, 'base64'))
@@ -2363,6 +2468,7 @@ async function main() {
         document.querySelectorAll('.settings-model-row').length >= 1 &&
         ![...document.querySelectorAll('button')].some((button) => button.textContent.includes('设为当前模型'))
     })()`))
+    await verifyModelFeedback(page,nativePage,shot)
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '助手')?.click() })()`)
     check('助手设置页有称呼、语气与补充说明三项', await waitFor(page, `(() => {
       const address = document.querySelector('.settings-form input')

@@ -60,6 +60,19 @@ describe('model stream adapter', () => {
       for await (const _chunk of streamModelText({ baseURL, modelId: 'test', apiKey: 'fixture-key', prompt: 'hi', signal: new AbortController().signal })) { /* consume */ }
     }).rejects.toThrow()
   })
+  it('retains only numeric HTTP diagnostics, never raw provider messages or request credentials', async () => {
+    const baseURL = await serverFor((_request,response)=>{
+      response.writeHead(401,{'content-type':'application/json'})
+      response.end(JSON.stringify({error:{message:'private-fixture-key and private note'}}))
+    })
+    let error:unknown
+    try{for await(const _event of streamModelStep({baseURL,modelId:'test',apiKey:'private-fixture-key',messages:[{role:'user',content:'private note'}],signal:new AbortController().signal})){}}
+    catch(e){error=e}
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe('MODEL_REQUEST_FAILED')
+    expect((error as Error).cause).toMatchObject({httpStatus:401})
+    expect(JSON.stringify((error as Error).cause)).not.toContain('private')
+  })
 })
 
 

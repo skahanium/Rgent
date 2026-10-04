@@ -38,14 +38,14 @@ try{
    const {model,m,spec,repeat}=tasks[cursor++]!,key=[runtime,model.recordId,spec.id,repeat].join('/')
    if((journal!.read(key) as {status?:string}|null)?.status==='completed'){finished++;continue}
    journal!.write(key,{status:'started',key,model,case:spec,repeat,commit,runtime,dataset,promptHash,startedAt:new Date().toISOString()})
-   const responses:{body:string;usage:unknown;input:unknown;reason:string|null}[]=[]
+   const responses:{body:string;usage:unknown;input:unknown;reason:string|null;failure?:unknown;finishReason?:string}[]=[]
    const publish=(value:unknown)=>journal!.finish(key,JSON.parse(JSON.stringify(value).replaceAll(credentials[m]!.apiKey,'[redacted]')))
    const stream=async function*(input:ModelStepInput):AsyncGenerator<ModelStepEvent>{
     if(!readFileSync(path.join(options.profile,'model-config.json')).equals(configBefore)){fatal='EVALUATION_PROFILE_CHANGED';controller.abort();throw Error(fatal)}
     try{journal!.charge(key)}catch(e){fatal=publicFailure(e);controller.abort();throw e}
-    const response={body:'',usage:null as unknown,input:{system:input.system,messages:input.messages,maxOutputTokens:input.maxOutputTokens},reason:null as string|null};responses.push(response)
-    try{for await(const event of streamModelStep(input)){if(event.type==='text')response.body+=event.text;if(event.type==='finish')response.usage=event.usage??null;yield event}}
-    catch(e){response.reason=publicFailure(e);throw e}
+    const response:{body:string;usage:unknown;input:unknown;reason:string|null;failure?:unknown;finishReason?:string}={body:'',usage:null,input:{system:input.system,messages:input.messages,maxOutputTokens:input.maxOutputTokens},reason:null};responses.push(response)
+    try{for await(const event of streamModelStep(input)){if(event.type==='text')response.body+=event.text;if(event.type==='finish'){response.usage=event.usage??null;response.finishReason=event.reason}yield event}}
+    catch(e){response.reason=publicFailure(e);if(e instanceof Error&&e.message==='MODEL_REQUEST_FAILED')response.failure=e.cause;throw e}
    }
    try{const result=await runMemoryQualityCase(spec,credentials[m]!,stream,controller.signal)
     const row={status:controller.signal.aborted?'interrupted':'completed',key,model,case:spec,repeat,commit,runtime,dataset,promptHash,finishedAt:new Date().toISOString(),responses,result,review:null}

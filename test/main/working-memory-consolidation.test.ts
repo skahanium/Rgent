@@ -53,6 +53,24 @@ it('automatically learns only from saved material, frees permits, and ignores du
  expect(f.service.snapshot().record.jobs[0]?.outcome).toBe('applied');expect(f.engine.state()).toEqual({permits:0,pending:0,active:0})
  await f.engine.handoff(f.material);await f.engine.idle();expect(calls).toBe(1)
 })
+it('rejects a non-ASCII group as a whole while accepting an independent factual proposal',async()=>{
+ const f=await fixture(async function*(input){
+  const base={...suggestion(input),semantic:'fact',layer:'demand',content:'负责人在评审中提出预算需要复核',scope:'评审项目',attribution:'本场口令转述负责人'}
+  yield {type:'text',text:JSON.stringify({proposals:[{...base,group:'项目事实'},{...base,group:'项目事实',content:'预算仍待确认'},{...base,group:'review_fact-1',content:'负责人要求复核预算'}]})};yield {type:'finish',reason:'stop'}
+ },'保存负责人在评审中提出的预算复核事项')
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect((await f.service.entries()).map(e=>e.content)).toEqual(['负责人要求复核预算'])
+ expect(f.service.snapshot().record.jobs[0]?.reason).toBe('MEMORY_OUTPUT_INVALID')
+})
+it('rejects invented correction targets without discarding a factual add that omits group',async()=>{
+ const f=await fixture(async function*(input){
+  const base={...suggestion(input),semantic:'fact',layer:'demand',content:'验收时间需重新确认',scope:'项目验收',attribution:'人的本场说明'}
+  yield {type:'text',text:JSON.stringify({proposals:[{...base,action:'correct',id:'invented-entry',version:1},base]})};yield {type:'finish',reason:'stop'}
+ },'记录验收时间还需重新确认')
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect((await f.service.entries()).map(e=>e.content)).toEqual(['验收时间需重新确认'])
+ expect(f.service.snapshot().record.jobs[0]?.reason).toBe('MEMORY_OUTPUT_INVALID')
+})
 it('a person editing during the model request wins over the late proposal',async()=>{
  let release!:()=>void,entered!:()=>void;const waiting=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r)
  const f=await fixture(async function*(input){entered();await waiting;yield {type:'text',text:JSON.stringify({proposals:[suggestion(input)]})};yield {type:'finish',reason:'stop'}})
