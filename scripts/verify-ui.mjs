@@ -1583,8 +1583,9 @@ async function verifyModelFeedback(page, nativePage, shot) {
       await waitFor(page,`document.documentElement.dataset.theme==='${mode}'`)
       for(const [width,height] of [[1200,800],[800,560]]) {
         await page.call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false})
-        await page.eval(`document.querySelector('.settings-candidate input[type=number]').focus()`)
-        check('模型反馈 '+mode+' '+width+' 无横向溢出且焦点中性',await page.eval(`(()=>{const panel=document.querySelector('.overlay-settings'),form=document.querySelector('.settings-form'),active=document.activeElement,s=getComputedStyle(active),probe=document.createElement('span');probe.style.color='var(--focus-ring)';document.body.append(probe);const neutral=getComputedStyle(probe).color;probe.remove();return panel.scrollWidth<=panel.clientWidth+1 && form.scrollWidth<=form.clientWidth+1 && document.documentElement.scrollWidth<=innerWidth && active.matches('.settings-candidate input[type=number]') && s.outlineStyle!=='none' && s.outlineColor===neutral})()`))
+        await page.eval(`document.querySelector('.settings-candidate input[type=checkbox]').focus()`)
+        await page.key('Tab', 'Tab', 0, 9)
+        check('模型反馈 '+mode+' '+width+' 无横向溢出且焦点中性',await page.eval(`(()=>{const panel=document.querySelector('.overlay-settings'),form=document.querySelector('.settings-form'),active=document.activeElement,s=getComputedStyle(active),probe=document.createElement('span');probe.style.color='var(--focus-ring)';document.body.append(probe);const neutral=getComputedStyle(probe).color;probe.remove();return panel.scrollWidth<=panel.clientWidth+1 && form.scrollWidth<=form.clientWidth+1 && document.documentElement.scrollWidth<=innerWidth && active.matches('.settings-candidate input[type=number]') && s.outlineStyle!=='none' && s.outlineColor===neutral})()`), await page.eval(`(()=>{const active=document.activeElement;return JSON.stringify({viewport:innerWidth,widths:[...document.querySelectorAll('.overlay-settings,.settings-form,.settings-read-panel,.settings-candidates,.settings-candidate')].map(n=>({class:n.className,client:n.clientWidth,scroll:n.scrollWidth})),focus:active?.className,focusVisible:active?.matches(':focus-visible'),outline:getComputedStyle(active).outline})})()`))
         await shot(page,'model-feedback-'+mode+'-'+width)
       }
     }
@@ -2506,6 +2507,8 @@ async function main() {
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '运行')?.click() })()`)
     check('运行设置页提供三档有限上限', await waitFor(page, `document.querySelectorAll('.settings-limit-group').length === 3`))
     await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
+    // dialog.close() 先取消 open，close 事件下一帧才移除节点并归还焦点；先完成关闭再测底栏。
+    if (!await waitFor(page, `!document.querySelector('.overlay-settings')`)) throw new Error('底栏验证前设置未完成关闭')
     const bottomDiagnostics = () => page.eval(`(async () => JSON.stringify({ modal: document.querySelector('dialog[open]')?.className, focus: document.activeElement?.className, center: document.querySelector('.status-center')?.outerHTML, config: await window.rgent.modelConfigGet() }))()`)
     check('底栏候选只列已存密钥的模型，未配置的不出现', await waitFor(page, `(() => {
       const options = [...document.querySelectorAll('.status-model option')].map((option) => option.textContent)
@@ -2529,7 +2532,7 @@ async function main() {
       const center = document.querySelectorAll('.status-center')
       const select = center[0]?.querySelector('.status-model')
       return center.length === 1 && !!select && select.selectedOptions.length === 1 && select.selectedOptions[0].textContent === 'test-override' && select === window.__statusModelControl && document.activeElement === select
-    })()`))
+    })()`), (await bottomDiagnostics()) + ' identity=' + await page.eval(`JSON.stringify({same:document.querySelector('.status-model')===window.__statusModelControl,documentFocus:document.hasFocus()})`))
     await page.eval(`(() => { const select = document.querySelector('.status-model'); const option = [...select.options].find(row => row.textContent === 'test'); select.value = option.value; select.dispatchEvent(new Event('change')) })()`)
     await page.eval(`window.__temporaryModelPreviousTab = document.querySelector('.tab[aria-selected=true]').dataset.rel`)
     writeFileSync(path.join(vault, 'Host 环路.md'), '')

@@ -516,9 +516,9 @@ a[href]:focus-visible,
 .settings-model-add .settings-action { min-height: 34px; padding: 6px 12px; }
 .settings-empty { margin: 0; padding: 16px 14px; border: 1px dashed var(--border-strong); border-radius: var(--radius-md); background: var(--surface-nav); color: var(--text-muted); font-size: 0.8rem; line-height: 1.5; }
 .settings-read-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 16px; }
-.settings-read-panel { display: grid; gap: 10px; margin-top: 12px; padding: 14px 16px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-nav); }
+.settings-read-panel { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 10px; margin-top: 12px; padding: 14px 16px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-nav); }
 .settings-read-head strong { color: var(--text-heading); font-size: 0.82rem; font-weight: 600; }
-.settings-candidates { display: grid; }
+.settings-candidates { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
 .settings-candidate { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 0.8rem; }
 .settings-candidate-id { flex: 1 1 auto; min-width: 0; overflow: hidden; font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .settings-candidate-note { color: var(--text-muted); font-size: 0.7rem; }
