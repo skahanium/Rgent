@@ -119,3 +119,10 @@ it('preserves manually verified retained content from partial applied proposals'
  expect(review).toMatchObject({completed:false,evidenceComplete:true,retained:1})
  expect(support.qualitySummary([review])).toMatchObject({passed:true,retained:1,serviceFailures:{count:1}})
 })
+
+it('keeps unassessable transport failures pending without calling a null review malformed',()=>{
+ const cases=[{id:'negative',group:'ai',heldOut:true,expected:{required:[]}}]
+ const rows=[0,1,2].map(repeat=>({caseId:'negative',repeat,review:{group:'ai',required:0,retained:null,completed:false,evidenceComplete:false,hardViolations:[],failure:'MEMORY_UNAVAILABLE'}}))
+ expect(support.modelQualitySummary(rows,cases)).toMatchObject({valid:true,passed:false,pending:3,coverage:3})
+ expect(support.modelQualitySummary(rows.map(r=>({...r,review:{...r.review,retained:-1}})),cases).valid).toBe(false)
+})

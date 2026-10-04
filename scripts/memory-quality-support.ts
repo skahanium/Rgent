@@ -78,7 +78,7 @@ export function modelQualitySummary(rows:ReviewedCase[],cases:{id:string;group:s
   const key=row.caseId+'/'+row.repeat,c=expected.get(key)
   if(!c||seen.has(key)){valid=false;continue}seen.add(key)
   const r=row.review
-  if(r&&(r.group!==c.group||r.required!==c.expected.required.length||!Number.isSafeInteger(r.retained)||r.retained!<0||r.retained!>r.required||typeof r.completed!=='boolean'||typeof r.evidenceComplete!=='boolean'||!Array.isArray(r.hardViolations)||r.hardViolations.some(v=>typeof v!=='string')))valid=false
+  if(r&&(r.group!==c.group||r.required!==c.expected.required.length||(r.retained!==null&&(!Number.isSafeInteger(r.retained)||r.retained<0||r.retained>r.required))||typeof r.completed!=='boolean'||typeof r.evidenceComplete!=='boolean'||!Array.isArray(r.hardViolations)||r.hardViolations.some(v=>typeof v!=='string')))valid=false
   const judgement=r??{group:c.group,required:c.expected.required.length,retained:null,completed:false,evidenceComplete:false,hardViolations:[]}
   judgements.push(judgement);trials[row.repeat]!.judgements.push(judgement);trials[row.repeat]!.coverage++
  }
