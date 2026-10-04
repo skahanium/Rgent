@@ -8,8 +8,9 @@ import path from 'node:path'
 import {fileURLToPath} from 'node:url'
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'),require=createRequire(import.meta.url)
 const args=process.argv.slice(2).filter(a=>a!=='--'),value=name=>{const i=args.indexOf(name);return i<0?undefined:args[i+1]}
-if(args.includes('--help')){console.log('pnpm memory:check [--live --profile PATH --models ID,ID --report PATH] [--pilot]');process.exit(0)}
-const options={root,budget:path.join(root,'.cache','memory-quality','2026-10-04'),live:args.includes('--live'),pilot:args.includes('--pilot'),profile:value('--profile'),models:(value('--models')??'').split(',').filter(Boolean),report:value('--report')??path.join(root,'out','memory-quality-report')}
+if(args.includes('--help')){console.log('pnpm memory:check [--live --profile PATH --models ID,ID --report PATH] [--pilot] [--only MiniMax-M3|deepseek-flash]');process.exit(0)}
+const options={root,budget:path.join(root,'.cache','memory-quality','2026-10-04'),live:args.includes('--live'),pilot:args.includes('--pilot'),only:value('--only'),profile:value('--profile'),models:(value('--models')??'').split(',').filter(Boolean),report:value('--report')??path.join(root,'out','memory-quality-report')}
+if(options.only&&!['MiniMax-M3','deepseek-flash'].includes(options.only)){console.error('EVALUATION_MODELS_NOT_AUTHORIZED');process.exit(1)}
 if(options.live&&(!options.profile||!options.models.length)){console.error('Explicit profile and model record IDs required.');process.exit(1)}
 mkdirSync(options.report,{recursive:true,mode:0o700})
 const out=path.join(root,'out','memory-evaluation'),pkg=JSON.parse(readFileSync(path.join(root,'package.json'),'utf8'))

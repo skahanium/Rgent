@@ -13,7 +13,7 @@ export class EvaluationJournal {
  private state:{version:1;manifest:string;calls:number;limit:number;dispatches:{key:string;at:string}[]}
  private lock:string
  private readonly token=randomUUID()
- constructor(readonly root:string,readonly manifest:unknown,limit=1440,private readonly budgetRoot=root){
+ constructor(readonly root:string,readonly manifest:unknown,limit=1440,private readonly budgetRoot=root,approvedPreviousManifest?:unknown){
   if(!Number.isSafeInteger(limit)||limit<1||limit>1440)throw Error('EVALUATION_CALL_LIMIT')
   mkdirSync(root,{recursive:true,mode:0o700});mkdirSync(budgetRoot,{recursive:true,mode:0o700});this.lock=path.join(budgetRoot,'writer.lock')
   if(existsSync(this.lock)){
@@ -27,7 +27,11 @@ export class EvaluationJournal {
    const file=path.join(budgetRoot,'state.json');let state:typeof this.state
    if(existsSync(file)){
     try{state=JSON.parse(readFileSync(file,'utf8'));if(state.version!==1||!Number.isSafeInteger(state.calls)||state.calls<0||!Number.isSafeInteger(state.limit)||state.limit!==limit||state.calls>limit||!Array.isArray(state.dispatches)||state.dispatches.length!==state.calls||state.dispatches.some(d=>typeof d.key!=='string'||typeof d.at!=='string'))throw Error()}catch{throw Error('EVALUATION_STATE_INVALID')}
-    if(state.manifest!==fingerprint(manifest))throw Error('EVALUATION_REVISION_CHANGED')
+    if(state.manifest!==fingerprint(manifest)){
+     if(approvedPreviousManifest===undefined||state.manifest!==fingerprint(approvedPreviousManifest))throw Error('EVALUATION_REVISION_CHANGED')
+     atomicReport(path.join(budgetRoot,'recipient-transition-'+fingerprint(manifest)+'.json'),{previous:approvedPreviousManifest,current:manifest,calls:state.calls})
+     state.manifest=fingerprint(manifest)
+    }
    }else{state={version:1,manifest:fingerprint(manifest),calls:0,limit,dispatches:[]}}
    this.state=state;this.save();atomicReport(path.join(root,'manifest.json'),manifest)
   }catch(e){this.close();throw e}

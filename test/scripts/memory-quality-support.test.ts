@@ -59,3 +59,12 @@ it('requires every fixed case and all three trials, rejecting duplicate or misma
  expect(support.modelQualitySummary(rows.map(r=>({...r,review:{...review,required:0}})),cases).passed).toBe(false)
  expect(support.modelQualitySummary(rows.map(r=>({...r,review:null})),cases).pending).toBe(3)
 })
+it('an explicitly authorized recipient correction preserves the old call count',()=>{
+ const root=dir(),old={model:'MiniMax-M3',host:'api.minimax.io'},next={...old,host:'api.minimax.cn'}
+ const j=new support.EvaluationJournal(root,old,2);j.charge('old-call');j.close()
+ const corrected=new support.EvaluationJournal(root,next,2,root,old)
+ expect(corrected.calls).toBe(1);corrected.charge('new-call')
+ expect(()=>corrected.charge('extra')).toThrow('EVALUATION_CALL_LIMIT');corrected.close()
+ expect(readdirSync(root).some(f=>f.startsWith('recipient-transition-'))).toBe(true)
+ expect(()=>new support.EvaluationJournal(root,{...next,host:'other.test'},2,root,old)).toThrow('EVALUATION_REVISION_CHANGED')
+})

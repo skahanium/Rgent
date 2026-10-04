@@ -65,7 +65,7 @@ describe('model configuration', () => {
     const snapshot = createModelConfigStore(root, protection).getPublic()
     expect(snapshot.providers).toEqual([
       { provider: 'deepseek', configured: true, baseURL: 'https://api.deepseek.com', hasKey: false, modelCount: 1 },
-      { provider: 'minimax', configured: true, baseURL: 'https://api.minimax.io/v1', hasKey: false, modelCount: 1 },
+      { provider: 'minimax', configured: true, baseURL: 'https://api.minimax.cn/v1', hasKey: false, modelCount: 1 },
       { provider: 'custom', configured: false, baseURL: '', hasKey: false, modelCount: 0 }
     ])
     expect(snapshot.models.map((model) => [model.provider, model.modelId, model.contextTokens])).toEqual([

@@ -18,8 +18,8 @@ export const MODEL_PRESETS: Record<ModelProvider, ProviderPreset> = {
   },
   minimax: {
     endpoints: [
-      { baseURL: 'https://api.minimax.io/v1', label: '国际站点' },
-      { baseURL: 'https://api.minimaxi.com/v1', label: '国内站点', note: '国内 Token Plan 密钥须用国内站点' }
+      { baseURL: 'https://api.minimax.cn/v1', label: '国内站点', note: '国内 Token Plan 密钥须用国内站点' },
+      { baseURL: 'https://api.minimax.io/v1', label: '国际站点' }
     ],
     modelId: 'MiniMax-M2.7',
     contextTokens: 204800

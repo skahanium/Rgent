@@ -9,7 +9,7 @@ import {MEMORY_QUALITY_CASES} from '../test/fixtures/memory-quality.ts'
 import {runMemoryQualityCase} from './memory-quality-runner.ts'
 import {EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,type ReviewedCase} from './memory-quality-support.ts'
 
-const options=JSON.parse(process.env.RGENT_MEMORY_EVAL_OPTIONS??'{}') as {root:string;budget:string;profile:string;report:string;models:string[];pilot:boolean;live:boolean}
+const options=JSON.parse(process.env.RGENT_MEMORY_EVAL_OPTIONS??'{}') as {root:string;budget:string;profile:string;report:string;models:string[];pilot:boolean;live:boolean;only?:string}
 app.setName('rgent')
 app.setPath('userData',path.join(options.report,'electron-profile'))
 // Electron emits ready after its entry module has finished loading.
@@ -24,14 +24,19 @@ try{
   const credentials=options.models.map(id=>loadModelCredentialReadOnly(options.profile,safeStorage,id))
   if(credentials.length!==2||credentials.map(c=>c.modelId).sort().join(',')!==['MiniMax-M3','deepseek-flash'].sort().join(','))throw Error('EVALUATION_MODELS_NOT_AUTHORIZED')
   const configBefore=readFileSync(path.join(options.profile,'model-config.json'))
-  const runtime=fingerprint([...sourceFiles('src/main'),...sourceFiles('src/markdown'),...sourceFiles('src/shared'),...sourceFiles('scripts'),'scripts/check-memory.mjs'].sort().map(f=>[f,readFileSync(path.join(options.root,f),'utf8')]))
+  const configuration=fingerprint(configBefore.toString('utf8'))
+  const runtime=fingerprint({configuration,files:[...sourceFiles('src/main'),...sourceFiles('src/markdown'),...sourceFiles('src/shared'),...sourceFiles('scripts'),'scripts/check-memory.mjs'].sort().map(f=>[f,readFileSync(path.join(options.root,f),'utf8')])})
   const dataset=fingerprint(MEMORY_QUALITY_CASES),promptHash=fingerprint(memoryConsolidationSystem)
   const commit=execFileSync('git',['rev-parse','HEAD'],{cwd:options.root,encoding:'utf8'}).trim()
   const models=credentials.map((c,i)=>({recordId:options.models[i]!,modelId:c.modelId,connectionId:c.connectionId,host:new URL(c.baseURL).host}))
   const manifest={version:1,authorization:'2026-10-04-memory-quality-package',baseline:'406d31d',dataset,models,maxCalls:1440}
-  journal=new EvaluationJournal(options.report,manifest,1440,options.budget)
+  // The user corrected the domestic MiniMax recipient on 2026-10-04. Retain all
+  // earlier failed calls; this single approved correction never resets the ceiling.
+  const previousManifest={...manifest,models:models.map(m=>m.modelId==='MiniMax-M3'&&m.host==='api.minimax.cn'?{...m,host:'api.minimax.io'}:m)}
+  journal=new EvaluationJournal(options.report,manifest,1440,options.budget,previousManifest)
   const selected=options.pilot?MEMORY_QUALITY_CASES.filter(c=>!c.heldOut).filter((c,i,list)=>list.findIndex(x=>x.group===c.group)===i).concat(MEMORY_QUALITY_CASES.filter(c=>c.group==='standing'&&!c.heldOut).slice(1,3)):MEMORY_QUALITY_CASES
-  const tasks=models.flatMap((model,m)=>selected.flatMap(spec=>Array.from({length:options.pilot?1:3},(_,repeat)=>({model,m,spec,repeat}))))
+  if(options.only&&!models.some(m=>m.modelId===options.only))throw Error('EVALUATION_MODELS_NOT_AUTHORIZED')
+  const tasks=models.flatMap((model,m)=>!options.only||model.modelId===options.only?selected.flatMap(spec=>Array.from({length:options.pilot?1:3},(_,repeat)=>({model,m,spec,repeat}))):[])
   let cursor=0,finished=0,fatal:string|null=null
   const publicFailure=(e:unknown)=>e instanceof Error&&/^[A-Z_]{3,80}$/.test(e.message)?e.message:'EVALUATION_REQUEST_FAILED'
   const worker=async()=>{while(cursor<tasks.length&&!controller.signal.aborted&&!fatal){
@@ -58,7 +63,7 @@ try{
   const quality=models.map(model=>{const rows=tasks.filter(t=>t.model.recordId===model.recordId).map(t=>{const row=journal!.read([runtime,model.recordId,t.spec.id,t.repeat].join('/')) as {review?:ReviewedCase['review'];result?:{completed:boolean};status?:string}|null
    return {caseId:t.spec.id,repeat:t.repeat,review:row?.review?{...row.review,completed:row.review.completed&&row.status==='completed'&&row.result?.completed===true}:null}})
    return {model,...modelQualitySummary(rows,MEMORY_QUALITY_CASES)}})
-  atomicReport(path.join(options.report,'run-summary.json'),{commit,runtime,dataset,promptHash,pilot:options.pilot,finished,expected:tasks.length,calls:journal.calls,models,quality,semanticReview:quality.every(q=>q.pending===0)?'reviewed':'pending',qualityPassed:!options.pilot&&quality.every(q=>q.passed),stopped:controller.signal.aborted,fatal})
+  atomicReport(path.join(options.report,'run-summary.json'),{commit,runtime,dataset,promptHash,configuration,pilot:options.pilot,only:options.only??null,finished,expected:tasks.length,calls:journal.calls,models,quality,semanticReview:quality.every(q=>q.pending===0&&q.coverage===q.expected)?'reviewed':'pending',qualityPassed:!options.pilot&&quality.every(q=>q.passed),stopped:controller.signal.aborted,fatal})
   console.log(JSON.stringify({finished,expected:tasks.length,calls:journal.calls,semanticReview:'pending',fatal}))
   journal.close();app.exit(controller.signal.aborted||fatal?1:0)
  }
