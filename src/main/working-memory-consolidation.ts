@@ -77,6 +77,7 @@ export class WorkingMemoryConsolidation{
  private readonly handoffs=new Map<Promise<void>,{taskId:string;controller:AbortController}>()
  private readonly idleWaiters:(()=>void)[]=[]
  private readonly undoBatches=new Map<string,{service:WorkingMemoryService;sessionId:string;version:string;before:WorkingEntry[];after:{id:string;version:number}[]}>()
+ private readonly failedMaterials=new Map<string,{context:MemoryContext;job:import('../shared/memory.ts').MemoryJobView}>()
  private closed=false
  constructor(private readonly ports:ConsolidationPorts){}
  capture(taskId:string){
@@ -84,8 +85,34 @@ export class WorkingMemoryConsolidation{
   try{if(this.closed||this.permits.size>=128)return;const service=this.ports.service();if(!service)return
    const context=service.context(),configuration=this.ports.configuration(context)
    if(!configuration.enabled||configuration.limits.tools!==0)return
-   service.snapshot();this.permits.set(taskId,{service,context,configuration:structuredClone(configuration)})
+   service.snapshot();this.failedMaterials.delete(taskId);this.permits.set(taskId,{service,context,configuration:structuredClone(configuration)})
   }catch{/* Missing configuration only disables accumulation for this task. */}
+ }
+ async materialResult(result:{sessionId?:string;taskId:string;status:'handed-off'|'unavailable'|'failed';reason?:string}){
+  if(result.status!=='handed-off')await this.materialFailed(result.taskId,result.reason??'MEMORY_MATERIAL_UNVERIFIED',result.sessionId)
+ }
+ failureJobs(){
+  try{const context=this.ports.service()?.context();return [...this.failedMaterials.values()].filter(f=>f.context.sessionId===context?.sessionId&&f.context.vaultKey===context.vaultKey).map(f=>({...f.job}))}catch{return []}
+ }
+ private currentSession(permit:Permit){try{const current=permit.service.context();return !this.closed&&current.sessionId===permit.context.sessionId&&current.vaultKey===permit.context.vaultKey}catch{return false}}
+ private async recordFailure(permit:Permit,taskId:string,reason:string){
+  if(!this.currentSession(permit))return
+  try{
+   const material=await permit.service.savedMaterial(permit.service.vault.ledgerTaskPath(taskId),taskId)
+   if(!this.currentSession(permit))return
+   await permit.service.vault.memoryMutation(store=>{if(!this.currentSession(permit))throw Error('MEMORY_SESSION_CLOSED');return store.receipt(store.read(),{taskId,materialVersion:material.materialVersion,outcome:'rejected',entryIds:[],reason:publicMemoryError(reason)})})
+  }catch{
+   if(!this.currentSession(permit))return
+   this.failedMaterials.set(taskId,{context:permit.context,job:{taskId,materialVersion:null,outcome:'unavailable',reason:'MEMORY_MATERIAL_UNVERIFIED',retryable:false}})
+   while(this.failedMaterials.size>64)this.failedMaterials.delete(this.failedMaterials.keys().next().value!)
+  }
+  this.notify(permit)
+ }
+ async materialFailed(taskId:string,reason:string,sessionId?:string){
+  const permit=this.permits.get(taskId)
+  // No captured learning intent, closed session or late result means no new work/receipt.
+  if(!permit||sessionId!==permit.context.sessionId||!this.currentSession(permit))return
+  this.permits.delete(taskId);await this.recordFailure(permit,taskId,reason)
  }
  discard(taskId:string){this.permits.delete(taskId)}
  disclosure(){const service=this.ports.service();if(!service)throw Error('NO_VAULT');const config=this.ports.configuration(service.context());if(!config.enabled)throw Error('MEMORY_DISABLED');return {signature:config.signature,recipient:{modelId:config.credential.modelId,host:new URL(config.credential.baseURL).host},limits:config.limits}}
@@ -116,6 +143,7 @@ export class WorkingMemoryConsolidation{
  private async performHandoff(material:SavedTaskMaterial,controller:AbortController){
   const permit=this.permits.get(material.taskId);this.permits.delete(material.taskId)
   if(!permit)return
+  try{
   this.assert({...permit,controller})
   if(!material.context||material.context.sessionId!==permit.context.sessionId||material.context.vaultKey!==permit.context.vaultKey)throw Error('MEMORY_MATERIAL_UNVERIFIED')
   const saved=await permit.service.savedMaterial(material.origin.relPath,material.taskId)
@@ -128,6 +156,11 @@ export class WorkingMemoryConsolidation{
   await this.receipt(job,'queued')
   job.timer=setTimeout(()=>{job.controller.abort(Error('MEMORY_DEADLINE'));this.pump()},Math.max(1,job.deadline-Date.now()))
   this.pending.push(job);this.notify(job);this.pump()
+  }catch(e){
+   // The saved task remains authoritative; retry needs fresh disclosure/capture.
+   if(!controller.signal.aborted&&material.context?.sessionId===permit.context.sessionId&&material.context.vaultKey===permit.context.vaultKey)await this.recordFailure(permit,material.taskId,publicMemoryError(e))
+   throw e
+  }
  }
  cancel(taskId?:string,reason='MEMORY_CANCELLED'){
   for(const [id] of this.permits)if(!taskId||id===taskId)this.permits.delete(id)
@@ -142,7 +175,7 @@ export class WorkingMemoryConsolidation{
   for(const entry of b.before)for(const s of entry.sources){if(!await b.service.verifySource(s))throw Error('MEMORY_SOURCE_CHANGED');const parents=await b.service.entries(s.memoryDeps.map(d=>d.id));if(s.memoryDeps.some(d=>!parents.some(e=>e.id===d.id&&e.version===d.version&&e.status==='active')))throw Error('MEMORY_DEPENDENCY_CHANGED')}
   await b.service.vault.memoryMutation(store=>store.undo(store.read(),b.before,b.after,taskId,version));this.undoBatches.delete(taskId)
  }
- close(){this.closed=true;this.cancel(undefined,'MEMORY_SESSION_CLOSED')}
+ close(){this.closed=true;this.failedMaterials.clear();this.cancel(undefined,'MEMORY_SESSION_CLOSED')}
  idle():Promise<void>{return !this.pending.length&&!this.active.size&&!this.handoffs.size?Promise.resolve():new Promise(resolve=>this.idleWaiters.push(resolve))}
  private notify(job:Permit){try{this.ports.changed(job.context)}catch{/* A closed renderer is not a write failure. */}}
  private pump(){
@@ -165,8 +198,7 @@ export class WorkingMemoryConsolidation{
   const dependencies=sources.flatMap(s=>s.memoryDeps)
   const validParents=await until(()=>job.service.entries(dependencies.map(d=>d.id)),job.controller.signal)
   if(dependencies.some(d=>!validParents.some(e=>e.id===d.id&&e.version===d.version&&e.status==='active')))throw Error('MEMORY_DEPENDENCY_CHANGED')
-  const current=await until(()=>job.service.entries(entries.map(e=>e.id)),job.controller.signal)
-  if(entries.some(e=>!current.some(c=>c.id===e.id&&c.version===e.version&&c.status==='active')))throw Error('MEMORY_DEPENDENCY_CHANGED')
+  for(const entry of entries)if(!await until(()=>job.service.candidateCurrent(entry),job.controller.signal))throw Error('MEMORY_DEPENDENCY_CHANGED')
   this.assert(job)
  }
  private async response(job:Job,payload:unknown,sources:WorkingSource[],entries:WorkingEntry[]){
@@ -189,7 +221,7 @@ export class WorkingMemoryConsolidation{
  private async run(job:Job){
   try{
    this.assert(job);await this.receipt(job,'running');this.assert(job)
-   const basis=job.service.snapshot(),sources:WorkingSource[]=[]
+   let basis=job.service.snapshot();const sources:WorkingSource[]=[]
    const prompt=await until(()=>job.service.sourceForPrompt(job.material.origin.relPath,job.material.taskId),job.controller.signal)
    if(Buffer.byteLength(prompt.text)>4096)throw Error('MEMORY_SOURCE_LIMIT');sources.push(prompt)
    for(const fragment of job.material.material.fragments){
@@ -200,8 +232,10 @@ export class WorkingMemoryConsolidation{
     }catch{this.assert(job)}
    }
    // Only related, valid committed memory is sent, not the entire vault record.
-   const entries=rankMemoryEntries(await until(()=>job.service.entries(),job.controller.signal),job.material.prompt,sources.map(s=>s.text).join('\n')).slice(0,8)
-   const payload={task:{id:job.material.taskId,status:job.material.status},sources:sources.map(s=>({id:s.id,text:s.text,classification:s.classification,kind:s.kind,attribution:s.relPath})),memory:entries.map(e=>({id:e.id,version:e.version,content:e.content,layer:e.layer,semantic:e.semantic,scope:e.scope,attribution:e.attribution,updatedAt:e.updatedAt}))}
+   const candidates=await until(()=>job.service.consolidationCandidates(sources),job.controller.signal),byId=new Map(candidates.map(e=>[e.id,e]))
+   const entries=rankMemoryEntries(candidates.map(e=>({...e,status:'active' as const})),job.material.prompt,sources.map(s=>s.text).join('\n')).slice(0,8).map(e=>byId.get(e.id)!)
+   basis=job.service.snapshot()
+   const payload={task:{id:job.material.taskId,status:job.material.status},sources:sources.map(s=>({id:s.id,text:s.text,classification:s.classification,kind:s.kind,attribution:s.relPath})),memory:entries.map(e=>({id:e.id,version:e.version,content:e.content,layer:e.layer,semantic:e.semantic,scope:e.scope,attribution:e.attribution,updatedAt:e.updatedAt,status:e.status,reviewAt:e.reviewAt}))}
    // Retain the highest ranked candidates within the existing input limits.
    while(entries.length&&(Buffer.byteLength(JSON.stringify(payload))+Buffer.byteLength(memoryConsolidationSystem)>32768||conservativeTokens(JSON.stringify(payload))+conservativeTokens(memoryConsolidationSystem)+4096>job.configuration.credential.contextTokens)){entries.pop();payload.memory.pop()}
    let values:unknown[];const draft=await this.response(job,payload,sources,entries)

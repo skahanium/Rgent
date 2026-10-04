@@ -1,3 +1,4 @@
+import type {WorkingRecord,WorkingSnapshot} from './working-memory-store.ts'
 import {validSummaryGenerator} from './summary-cache.ts'
 import {validTaskMaterial} from './host-material.ts'
 import {summaryAuditFits} from './context-budget.ts'
@@ -16,7 +17,7 @@ const obj=(s:unknown):s is Record<string,unknown>=>!!s&&typeof s==='object'&&!Ar
 const exact=(s:Record<string,unknown>,keys:string[])=>Object.keys(s).sort().join()===keys.sort().join()
 export type LedgerOwner={noteId:string;relPath:string;objectVersion:string;bodyRevision:string;anchors:string[];anchorsTruncated?:true;sequenceCeiling:number;recoveryEvidence?:{rootIdentity:string;attachments:{relPath:string;kind:'file'|'dir';hash?:string}[]}}
 type Registry={version:1;owners:LedgerOwner[];sequence:number}
-type MaterialUnit={id:string;noteId:string;start:number;end:number;sequence:number}
+type MaterialUnit={id:string;noteId:string;start:number;end:number;sequence:number;hash?:string}
 export type LedgerRecord={version:1;noteId:string;taskId:string;revision:number;state:'pending-body'|'saved'|'legacy'|'cleared';bodyStatus:'present'|'unable-to-verify';chapter:Omit<LedgerChapterWrite,'reasoning'>|null;legacyRaw?:string;legacyReasoning?:string;sequence:number}
 export type LedgerPage={noteId:string;records:LedgerRecord[];cursor:string|null;ownership:'verified'|'unregistered';gaps:string[]}
 export function validOwner(v:unknown):v is LedgerOwner{return obj(v)&&exact(v,['noteId','relPath','objectVersion','bodyRevision','anchors','sequenceCeiling',...('recoveryEvidence'in v?['recoveryEvidence']:[]),...('anchorsTruncated'in v?['anchorsTruncated']:[])])&&id(v.noteId)&&rel(v.relPath)&&typeof v.objectVersion==='string'&&v.objectVersion.length>0&&v.objectVersion.length<512&&typeof v.bodyRevision==='string'&&/^[a-f0-9]{64}$/.test(v.bodyRevision)&&Array.isArray(v.anchors)&&v.anchors.length<=256&&v.anchors.every(id)&&(v.anchorsTruncated===undefined||v.anchorsTruncated===true)&&Number.isSafeInteger(v.sequenceCeiling)&&Number(v.sequenceCeiling)>=0&&(v.recoveryEvidence===undefined||obj(v.recoveryEvidence)&&exact(v.recoveryEvidence,['rootIdentity','attachments'])&&typeof v.recoveryEvidence.rootIdentity==='string'&&/^\d+:\d+$/.test(v.recoveryEvidence.rootIdentity)&&Array.isArray(v.recoveryEvidence.attachments)&&v.recoveryEvidence.attachments.every(a=>obj(a)&&typeof a.relPath==='string'&&!a.relPath.split('/').some(p=>!p||p==='.'||p==='..')&&(a.kind==='dir'&&a.hash===undefined||a.kind==='file'&&typeof a.hash==='string'&&/^[a-f0-9]{64}$/.test(a.hash))))}
@@ -122,16 +123,67 @@ export class LedgerStore{
   const anchors=[...new Set(parsed.index.markers.flatMap(b=>{const k=parseMarker(body.slice(b.range.start,b.range.end))?.attrs['task-id'];return k?[k]:[]}))].slice(0,256)
   const owner:LedgerOwner={noteId:randomUUID(),relPath,objectVersion:note.objectVersion,bodyRevision:digest(body),anchors,sequenceCeiling:registry.sequence,...(this.rootIdentity?{recoveryEvidence:{rootIdentity:this.rootIdentity(),attachments:this.attachmentEvidence(relPath)}}:{})};registry.owners.push(owner);this.publish(registry,owner);return structuredClone(owner)
  }
- onWrite(relPath:string,before:string,after:string,body:string){const registry=this.registry(),owner=registry.owners.find(o=>o.relPath===relPath&&o.objectVersion===before);if(!owner)return;owner.objectVersion=after;owner.bodyRevision=digest(body);owner.anchors=this.anchors(body);this.publish(registry,owner)}
+ onWrite(relPath:string,before:string,after:string,body:string,previousBody?:string,basis?:WorkingSnapshot){const record=basis?.record,registry=this.registry(),owner=registry.owners.find(o=>o.relPath===relPath&&o.objectVersion===before);if(!owner)return
+  const units=this.materialUnits();let changed=false
+  const keep=new Set(record?.entries.flatMap(e=>e.sources.flatMap(s=>[s.materialId,...(s.basisGroups??[])]))??[]),pending=record?.jobs.some(j=>['queued','running','interrupted'].includes(j.outcome)),removed=new Set<string>(),added:MaterialUnit[]=[]
+  if(previousBody!==undefined&&owner.bodyRevision===digest(previousBody))for(const unit of units.filter(u=>u.noteId===owner.noteId)){
+   // A current owner hash proves this save's before image, never an old unit's birth.
+   // Only an explicitly registered source can supply a missing birth hash.
+   const evidence=record?.entries.flatMap(e=>e.sources).find(s=>s.kind==='body'&&s.taskId===null&&s.relPath===relPath&&s.materialId===unit.id&&s.sequence===unit.sequence&&s.text.length===unit.end-unit.start&&digest(s.text)===s.hash)
+   const text=unit.hash?previousBody.slice(unit.start,unit.end):evidence?.text,start=text?body.indexOf(text):-1
+   if(text&&(!unit.hash||digest(text)===unit.hash)&&previousBody.indexOf(text)>=0&&previousBody.indexOf(text,previousBody.indexOf(text)+1)<0){
+    if(!unit.hash){unit.hash=digest(text);changed=true}
+    if(start>=0&&body.indexOf(text,start+1)<0){if(unit.start!==start){unit.start=start;unit.end=start+text.length;changed=true}}
+    else if(start<0&&record&&unit.sequence<=record.watermark&&!keep.has(unit.id)&&!pending&&this.read('.rgent-permissions')===null){removed.add(unit.id);changed=true}
+   }
+   if(!unit.hash){
+    const old=previousBody.slice(unit.start,unit.end),fresh=body.slice(unit.start,unit.end)
+    if(old&&fresh&&old!==fresh&&!body.includes(old)&&!previousBody.includes(fresh)&&body.indexOf(fresh)===unit.start&&body.indexOf(fresh,unit.start+1)<0)added.push({id:randomUUID(),noteId:owner.noteId,start:unit.start,end:unit.start+fresh.length,sequence:0,hash:digest(fresh)})
+   }
+  }
+  // For an unproven legacy range, an actual inserted/replaced current region may
+  // establish a new identity. Unchanged text shifted by the save never does.
+  if(previousBody!==undefined&&units.some(u=>u.noteId===owner.noteId&&!u.hash)&&body!==previousBody){
+   let start=0,end=body.length,oldEnd=previousBody.length;while(start<Math.min(end,oldEnd)&&body[start]===previousBody[start])start++;while(end>start&&oldEnd>start&&body[end-1]===previousBody[oldEnd-1]){end--;oldEnd--}
+   const fresh=body.slice(start,end);if(fresh&&!previousBody.includes(fresh)&&body.indexOf(fresh)===start&&body.indexOf(fresh,start+1)<0)added.push({id:randomUUID(),noteId:owner.noteId,start,end,sequence:0,hash:digest(fresh)})
+  }
+  for(const unit of added){if(units.some(u=>u.noteId===unit.noteId&&u.start===unit.start&&u.end===unit.end&&u.hash===unit.hash))continue;if(units.length>=100000)throw Error('MEMORY_SOURCE_LIMIT');if(!Number.isSafeInteger(++registry.sequence))throw Error('LEDGER_RECORD_LIMIT');unit.sequence=registry.sequence;owner.sequenceCeiling=registry.sequence;units.push(unit);changed=true}
+  if(removed.size&&!this.memoryBasisCurrent(basis!))removed.clear()
+  if(changed)this.replace('.rgent/materials.json',JSON.stringify({version:1,units:units.filter(u=>!removed.has(u.id))}))
+  owner.objectVersion=after;owner.bodyRevision=digest(body);owner.anchors=this.anchors(body);this.publish(registry,owner)
+ }
  relocate(from:string,to:string,objectVersion:string){const registry=this.registry(),owner=registry.owners.find(o=>o.relPath===from&&o.objectVersion===objectVersion);if(!owner)return;const current=this.fs.readSnapshot(to);if(current.objectVersion!==objectVersion)throw Error('LEDGER_OWNERSHIP_UNVERIFIED');owner.relPath=to;this.publish(registry,owner)}
- materialUnit(relPath:string,start:number,end:number){
+ materialUnit(relPath:string,start:number,end:number,controls:{watermark:number;forgotten:readonly string[]}={watermark:0,forgotten:[]}){
   if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<=start)throw Error('BAD_REQUEST')
   this.materialCeiling()
   const owner=this.owner(relPath),file='.rgent/materials.json',units=this.materialUnits()
-  const known=units.find(u=>u.noteId===owner.noteId&&u.start===start&&u.end===end);if(known)return known
+  const body=this.fs.readSnapshot(relPath).bytes.toString(),text=body.slice(start,end);if(end>body.length||!text)throw Error('BAD_REQUEST');const hash=digest(text)
+  const parents=units.filter(u=>u.noteId===owner.noteId&&u.hash&&u.start>=start&&u.end<=end&&digest(body.slice(u.start,u.end))===u.hash&&body.indexOf(body.slice(u.start,u.end))===u.start&&body.indexOf(body.slice(u.start,u.end),u.start+1)<0)
+  const inherited=(unit:MaterialUnit)=>{const basisGroups=[...new Set(parents.filter(u=>u.id!==unit.id).map(u=>u.id))];if(basisGroups.length>16)throw Error('MEMORY_SOURCE_LIMIT');return {...unit,basisGroups,age:Math.min(unit.sequence,...parents.map(u=>u.sequence))}}
+  const known=units.find(u=>u.noteId===owner.noteId&&u.start===start&&u.end===end&&u.hash===hash);if(known)return inherited(known);if(parents.length>16)throw Error('MEMORY_SOURCE_LIMIT')
+  // Birth offsets of an unhashed old unit may be stale. Unknown is not empty.
+  // A registered new region established by a controlled real edit is an exit.
+  const newRegion=units.some(u=>u.noteId===owner.noteId&&u.hash&&u.start<=start&&u.end>=end&&digest(body.slice(u.start,u.end))===u.hash&&units.filter(p=>p.noteId===owner.noteId&&!p.hash).every(p=>u.sequence>p.sequence))
+  if(!newRegion&&units.some(u=>u.noteId===owner.noteId&&!u.hash&&(u.sequence<=controls.watermark||controls.forgotten.includes(u.id))))throw Error('MEMORY_MATERIAL_UNVERIFIED')
   if(units.length>=100000)throw Error('MEMORY_SOURCE_LIMIT')
   const registry=this.registry();registry.sequence++;if(!Number.isSafeInteger(registry.sequence))throw Error('LEDGER_RECORD_LIMIT');const row=registry.owners.find(o=>o.noteId===owner.noteId)!;row.sequenceCeiling=registry.sequence;this.publish(registry,row)
-  const unit={id:randomUUID(),noteId:owner.noteId,start,end,sequence:registry.sequence};units.push(unit);this.replace(file,JSON.stringify({version:1,units}));return unit
+  const unit={id:randomUUID(),noteId:owner.noteId,start,end,sequence:registry.sequence,hash};units.push(unit);this.replace(file,JSON.stringify({version:1,units}));return inherited(unit)
+ }
+ private memoryBasisCurrent(basis:WorkingSnapshot){try{const disk=this.fs.readSnapshot('.rgent-memory');return disk.objectVersion===basis.objectVersion&&disk.bytes.toString()===basis.raw}catch{return false}}
+ collectMaterials(basis:WorkingSnapshot,allowed:(relPath:string)=>boolean=()=>false,permissionRaw:string|null=null){
+  const record=basis.record;this.materialCeiling()
+  if(record.jobs.some(j=>['queued','running','interrupted'].includes(j.outcome)))return
+  const keep=new Set(record.entries.flatMap(e=>e.sources.flatMap(s=>[s.materialId,...(s.basisGroups??[])]))),units=this.materialUnits(),registry=this.registry(),removed=new Set<string>()
+  let evidence:Map<string,string>|undefined
+  const originals=()=>{if(evidence)return evidence;evidence=new Map<string,string>();for(const owner of registry.owners)for(const {record:task} of this.orderedRecords(owner,registry.sequence))for(const f of task.chapter?.material?.fragments??[]){if(f.kind!=='body'||f.taskId!==null||digest(f.text)!==f.hash)continue;const target=registry.owners.find(o=>o.relPath===f.relPath);if(!target)continue;for(const unit of units.filter(u=>u.noteId===target.noteId&&u.hash)){
+    const text=unit.hash===f.hash?f.text:unit.start>=f.start&&unit.end<=f.end?f.text.slice(unit.start-f.start,unit.end-f.start):'';if(text&&digest(text)===unit.hash)evidence.set(unit.id,text)
+   }}return evidence}
+  for(const owner of registry.owners){const candidates=units.filter(u=>u.noteId===owner.noteId&&u.hash&&u.sequence<=record.watermark&&!keep.has(u.id));if(!candidates.length||!allowed(owner.relPath))continue
+   try{const current=this.lookupOwner(owner.relPath),note=this.fs.readSnapshot(owner.relPath),body=note.bytes.toString();if(!current||digest(body)!==current.bodyRevision)continue
+    for(const unit of candidates){if(digest(body.slice(unit.start,unit.end))===unit.hash)continue;const text=originals().get(unit.id);if(text&&!body.includes(text))removed.add(unit.id)}
+   }catch{/* An unverifiable object or original is retained, never treated as absent. */}
+  }
+  if(removed.size&&this.memoryBasisCurrent(basis)){if((this.read('.rgent-permissions')?.raw??null)!==permissionRaw)throw Error('PERMISSIONS_CHANGED');this.replace('.rgent/materials.json',JSON.stringify({version:1,units:units.filter(u=>!removed.has(u.id))}))}
  }
  maintenancePreview(relPath:string,action:'compress'|'clear'){
   const owner=this.requiredOwner(relPath);let cursor:string|null=null,totalBytes=0;const records:{taskId:string;revision:number;bytes:number}[]=[],legacyIds:string[]=[]
@@ -160,7 +212,7 @@ export class LedgerStore{
  private materialUnits():MaterialUnit[]{
   const disk=this.read('.rgent/materials.json');if(!disk)return []
   try{if(Buffer.byteLength(disk.raw)>8*1024*1024)throw Error();const v:unknown=JSON.parse(disk.raw)
-   if(!obj(v)||!exact(v,['version','units'])||v.version!==1||!Array.isArray(v.units)||v.units.length>100000||v.units.some(u=>!obj(u)||!exact(u,['id','noteId','start','end','sequence'])||!id(u.id)||!id(u.noteId)||!Number.isSafeInteger(u.start)||!Number.isSafeInteger(u.end)||Number(u.start)<0||Number(u.end)<=Number(u.start)||!Number.isSafeInteger(u.sequence)||Number(u.sequence)<1))throw Error()
+   if(!obj(v)||!exact(v,['version','units'])||v.version!==1||!Array.isArray(v.units)||v.units.length>100000||v.units.some(u=>!obj(u)||!exact(u,['id','noteId','start','end','sequence',...('hash'in u?['hash']:[])])||u.hash!==undefined&&(typeof u.hash!=='string'||!/^[a-f0-9]{64}$/.test(u.hash))||!id(u.id)||!id(u.noteId)||!Number.isSafeInteger(u.start)||!Number.isSafeInteger(u.end)||Number(u.start)<0||Number(u.end)<=Number(u.start)||!Number.isSafeInteger(u.sequence)||Number(u.sequence)<1))throw Error()
    return v.units as MaterialUnit[]
   }catch{throw Error('LEDGER_REGISTRY_INVALID')}
  }
@@ -170,7 +222,7 @@ export class LedgerStore{
    const verifySequence=(noteId:string,sequence:number)=>{const owner=owners.get(noteId);if(!owner||sequence>owner.sequenceCeiling||sequence>registry.sequence||sequence>0&&sequences.has(sequence))throw Error('LEDGER_REGISTRY_INVALID');if(sequence>0)sequences.add(sequence)}
    for(const owner of owners.values())if(owner.sequenceCeiling>registry.sequence)throw Error('LEDGER_REGISTRY_INVALID')
    for(const unit of this.materialUnits()){
-    const range=JSON.stringify([unit.noteId,unit.start,unit.end]);if(unitIds.has(unit.id)||unitRanges.has(range))throw Error('LEDGER_REGISTRY_INVALID');unitIds.add(unit.id);unitRanges.add(range);verifySequence(unit.noteId,unit.sequence)
+    const range=JSON.stringify([unit.noteId,unit.start,unit.end,unit.hash??null]);if(unitIds.has(unit.id)||unitRanges.has(range))throw Error('LEDGER_REGISTRY_INVALID');unitIds.add(unit.id);unitRanges.add(range);verifySequence(unit.noteId,unit.sequence)
    }
    let count=0;const dirs=this.fs.list('.rgent/ledgers');if(dirs.length>100000)throw Error('LEDGER_REGISTRY_INVALID')
    const found=new Set<string>()
@@ -223,7 +275,7 @@ export class LedgerStore{
    }
   }
   if(new Set(owners.map(o=>o.noteId)).size!==owners.length||new Set(owners.map(o=>o.relPath)).size!==owners.length||new Set(owners.map(o=>o.objectVersion)).size!==owners.length)throw Error('LEDGER_RECOVERY_AMBIGUOUS')
-  const unitIds=new Set<string>(),ranges=new Set<string>();for(const unit of this.materialUnits()){const owner=owners.find(o=>o.noteId===unit.noteId),range=JSON.stringify([unit.noteId,unit.start,unit.end]);if(!owner||unit.sequence>owner.sequenceCeiling||sequences.has(unit.sequence)||unitIds.has(unit.id)||ranges.has(range))throw Error('LEDGER_REGISTRY_INVALID');sequences.add(unit.sequence);unitIds.add(unit.id);ranges.add(range)}
+  const unitIds=new Set<string>(),ranges=new Set<string>();for(const unit of this.materialUnits()){const owner=owners.find(o=>o.noteId===unit.noteId),range=JSON.stringify([unit.noteId,unit.start,unit.end,unit.hash??null]);if(!owner||unit.sequence>owner.sequenceCeiling||sequences.has(unit.sequence)||unitIds.has(unit.id)||ranges.has(range))throw Error('LEDGER_REGISTRY_INVALID');sequences.add(unit.sequence);unitIds.add(unit.id);ranges.add(range)}
   let registered:Registry|null=null;try{registered=this.registry()}catch{/* Explicit reconstruction can repair malformed registry bytes. */}
   if(registered){for(const old of registered.owners){const evidence=owners.find(o=>o.noteId===old.noteId);if(!evidence||JSON.stringify(evidence)!==JSON.stringify(old))throw Error('LEDGER_REGISTRY_INVALID')}}
   return {owners,sequence:Math.max(registered?.sequence??0,...owners.map(o=>o.sequenceCeiling))}
@@ -335,11 +387,11 @@ export class LedgerStore{
   this.owner(relPath);const part=partitionSource(raw)
   if(part.ledger===null)return {body:raw,objectVersion:note.objectVersion,revision:digest(raw),migrated:false}
   this.importLegacy(relPath,part.ledger)
-  this.check();beforeCommit?.();const after=this.fs.replace(relPath,raw,part.body,note.objectVersion);this.saved?.(relPath,note.objectVersion,after,part.body);this.onWrite(relPath,note.objectVersion,after,part.body)
+  this.check();beforeCommit?.();const after=this.fs.replace(relPath,raw,part.body,note.objectVersion);this.saved?.(relPath,note.objectVersion,after,part.body);this.onWrite(relPath,note.objectVersion,after,part.body,raw)
   return {body:part.body,objectVersion:after,revision:digest(part.body),migrated:true}
  }
  /** Read existing control identities and known dispatched body ranges; never allocate a unit. */
- summaryMaterials(relPath:string,taskIds:readonly string[],requiredBodyIds:readonly string[]=[],acceptsObject:(path:string,before:string,after:string)=>boolean=(_p,b,a)=>b===a){
+ summaryMaterials(relPath:string,taskIds:readonly string[],requiredBodyIds:readonly string[]=[],watermark=0,acceptsObject:(path:string,before:string,after:string)=>boolean=(_p,b,a)=>b===a){
   const registry=this.registry(),units=this.materialUnits(),pending:{relPath:string;taskId:string}[]=[],queued=new Set<string>(),seen=new Set<string>(),bodyContexts=new Map<string,ContextChapter[]>(),materialIds=new Set<string>(),sequences:number[]=[]
   const queue=(path:string,taskId:string)=>{const key=path+'\0'+taskId;if(queued.has(key))return;if(queued.size>=100000)throw Error('MEMORY_SOURCE_LIMIT');queued.add(key);pending.push({relPath:path,taskId})};for(const taskId of taskIds)queue(relPath,taskId)
   const unitIds=new Set(units.map(u=>u.id));if(unitIds.size!==units.length||requiredBodyIds.some(id=>!unitIds.has(id))||units.some(u=>{const o=registry.owners.find(o=>o.noteId===u.noteId);return !o||u.sequence>o.sequenceCeiling||u.sequence>registry.sequence}))throw Error('MEMORY_MATERIAL_UNVERIFIED')
@@ -348,8 +400,25 @@ export class LedgerStore{
    const record=read(at.relPath,at.taskId)
    sequences.push(record.sequence);materialIds.add(at.taskId+'/prompt')
    for(const f of record.chapter!.material?.fragments??[]){
+    if(digest(f.text)!==f.hash)throw Error('MEMORY_MATERIAL_UNVERIFIED')
     const sourceOwner=this.requiredOwner(f.relPath);if(!acceptsObject(f.relPath,f.objectVersion,sourceOwner.objectVersion))throw Error('MEMORY_MATERIAL_UNVERIFIED')
-    if(f.kind==='body')for(const unit of units)if(unit.noteId===sourceOwner.noteId&&unit.start<f.end&&unit.end>f.start){materialIds.add(unit.id);sequences.push(unit.sequence)}
+    let matchedBody=false,provenBodyBeforeTask=false;const matchedUnits=new Set<string>()
+    if(f.kind==='body')for(const unit of units)if(unit.noteId===sourceOwner.noteId&&(unit.start<f.end&&unit.end>f.start||unit.hash===f.hash&&unit.end-unit.start===f.text.length)){
+     if(unit.hash&&unit.hash!==f.hash){if(unit.start>=f.start&&unit.end<=f.end){if(digest(f.text.slice(unit.start-f.start,unit.end-f.start))!==unit.hash)continue}else continue}
+     if(!unit.hash&&(requiredBodyIds.includes(unit.id)||unit.sequence<=watermark)){
+      // A later hash-proven unit may prove genuinely new material, never an old task.
+      const replacement=units.find(u=>u.noteId===unit.noteId&&u.hash&&u.sequence>unit.sequence&&u.sequence<=record.sequence&&u.hash===f.hash&&u.end-u.start===f.text.length)
+      if(replacement)continue
+     }
+     materialIds.add(unit.id);sequences.push(unit.sequence);matchedBody=true;matchedUnits.add(unit.id);if(unit.sequence<=record.sequence)provenBodyBeforeTask=true
+    }
+    if(f.kind==='body'&&f.taskId===null){
+     for(const prior of units.filter(u=>u.noteId===sourceOwner.noteId&&requiredBodyIds.includes(u.id)&&!matchedUnits.has(u.id))){
+      const replacement=units.some(u=>u.noteId===prior.noteId&&u.hash===f.hash&&u.end-u.start===f.text.length&&u.sequence>prior.sequence&&u.sequence<=record.sequence)
+      if(!replacement)throw Error('MEMORY_MATERIAL_UNVERIFIED')
+     }
+     if(watermark>0&&(!matchedBody||!provenBodyBeforeTask))throw Error('MEMORY_MATERIAL_UNVERIFIED')
+    }
     if(f.kind==='ledger'||f.taskId!==null){
      if(!f.taskId||!Number.isSafeInteger(f.start)||!Number.isSafeInteger(f.end)||f.start<0||f.end<=f.start||digest(f.text)!==f.hash)throw Error('MEMORY_MATERIAL_UNVERIFIED')
      const ownPrompt=f.kind==='body'&&f.relPath===at.relPath&&f.taskId===at.taskId&&f.classification==='command',ancestor=ownPrompt?record:read(f.relPath,f.taskId),chapter=this.contextForRecord(ancestor)[0],fields=chapter?.fields,field=fields?.status==='valid'?(f.classification==='command'?fields.prompt:f.classification==='ai'?fields.answer:undefined):undefined

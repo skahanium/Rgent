@@ -70,7 +70,7 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
  const previews=new Map<string,HeldPreview>()
  const clear=()=>previews.clear()
  const hold=(held:Omit<HeldPreview,'expires'>)=>{ports.vault()?.assertSession(held.preview.sessionId);for(const [id,p] of previews)if(p.expires<Date.now())previews.delete(id);if(previews.size>=128)throw Error('MEMORY_QUEUE_FULL');previews.set(held.preview.id,{...held,expires:Date.now()+120000});return {ok:true as const,value:held.preview}}
- const view=async(service:WorkingMemoryService)=>{const value=await service.view();service.vault.assertSession(value.sessionId);value.running=ports.engine?.()?.state()??value.running;for(const job of value.jobs)job.undoable=!!job.materialVersion&&!!ports.engine?.()?.canUndo(job.taskId,job.materialVersion);return {ok:true as const,value}}
+ const view=async(service:WorkingMemoryService)=>{const value=await service.view();service.vault.assertSession(value.sessionId);value.running=ports.engine?.()?.state()??value.running;value.jobs.push(...(ports.engine?.()?.failureJobs?.()??[]));for(const job of value.jobs)job.undoable=!!job.materialVersion&&!!ports.engine?.()?.canUndo(job.taskId,job.materialVersion);return {ok:true as const,value}}
  return {clear,async handle(owner:string,op:MemoryOperation,value:unknown,assertOwner?:()=>void):Promise<MemoryResult<MemoryView|MemoryPreview>>{
   try{
    const request=parseMemoryRequest(op,value);if(!request)throw Error('BAD_REQUEST')
@@ -119,7 +119,7 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
     if(actual.revision!==binding.revision||actual.objectVersion!==binding.objectVersion)throw Error('MEMORY_CONFLICT')
     const watermark=action==='watermark'?request.watermark as number:vault.materialCeiling()
     if(action==='watermark'&&(watermark<service.snapshot().record.watermark||watermark>vault.materialCeiling()))throw Error('BAD_REQUEST')
-    return hold({owner,binding,watermark,preview:{id:randomUUID(),sessionId:session,kind:action,content:action==='reset'?'删除本库全部记忆并关闭记忆开关，阻止此前已登记的材料自动重新生成记忆。':'停止从截至本次预览已登记的旧材料自动学习。',layer:'demand',scope:'本库',sources:[],warning:action==='reset'?'原笔记与账本保留，删除的记忆不保留可恢复副本。重新开启后只从新材料自动学习，也可手动“记住”；外部备份及已发送内容不会被清除。':'保留现有记忆，阻止截至本次预览已登记的材料自动重新生成记忆。之后的新材料及手动“记住”仍可建立记忆。'}})
+    return hold({owner,binding,watermark,preview:{id:randomUUID(),sessionId:session,kind:action,content:action==='reset'?'删除本库全部记忆并关闭记忆开关，阻止此前已登记的材料自动重新生成记忆。':'停止从截至本次预览已登记的旧材料自动学习。',layer:'demand',scope:'本库',sources:[],warning:action==='reset'?'原笔记与账本保留，删除的记忆不保留可恢复副本。重新开启后只从新材料自动学习，也可手动“记住”；外部备份及已发送内容不会被清除。':'保留现有记忆，阻止截至本次预览已登记的材料自动重新生成记忆。之后的新材料及手动“记住”仍可建立记忆。原文仍可核验、身份未知，或有效／争议／进行中／中断待重试整理引用的材料会保留；达到登记上限会暂停新增。恢复未完成时须先继续核验。'}})
    }
    if(op==='commit'){
     const p=previews.get(request.id as string);previews.delete(request.id as string)

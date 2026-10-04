@@ -1,4 +1,4 @@
-import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';import os from 'node:os';import path from 'node:path'
+import {mkdtempSync,writeFileSync,appendFileSync,rmSync} from 'node:fs';import os from 'node:os';import path from 'node:path'
 import {it,expect,afterEach} from 'vitest'
 import {WorkingMemoryStore} from '../../src/main/working-memory-store.ts'
 import {secureFsFor,closeSecureFs} from '../../src/main/secure-fs.ts'
@@ -49,4 +49,40 @@ it('diagnoses invalid storage without opening it, and requires exact bytes/objec
  d=fs.readSnapshot('.rgent-memory');fs.replace('.rgent-memory',d.bytes.toString(),'new corrupt',d.objectVersion)
  expect(()=>store.reset(diagnosis,4)).toThrow('MEMORY_CONFLICT')
  store.reset(store.diagnosis(),4);expect(store.read().record.watermark).toBe(4);expect(store.canLearn(store.read().record,[source(3)])).toBe(false)
+})
+
+import {encodeWorkingMemory,type WorkingRecord} from '../../src/main/working-memory-store.ts'
+const entryRecord=(count:number,long=false):WorkingRecord=>({version:2,identity:'fixture',revision:1,nextSequence:count,watermark:0,forgotten:[],jobs:[],entries:Array.from({length:count},(_,i)=>({id:long?'E'.repeat(253)+String(i).padStart(3,'0'):'entry-'+i,version:1,content:'事实'+i,layer:'demand',scope:'库',sources:[{...source(i+1),revision:'',taskMaterialHash:null,materialId:long?'M'.repeat(253)+String(i).padStart(3,'0'):'material-'+i}],semantic:'fact',attribution:'人',reviewAt:null,status:'active',reason:null,updatedAt:'2026-01-01T00:00:00Z',updateBasis:{kind:'manual',id:'manual',version:1}}))})
+it('forgets 1000 longest legal identities serially beyond the old control wall',()=>{
+ const {root,store}=fixture(),record=entryRecord(1000,true);writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record));expect(Buffer.byteLength(encodeWorkingMemory(record))).toBeLessThan(2*1024*1024)
+ const started=performance.now();for(const e of record.entries)store.forget(store.read(),e.id,e.version)
+ const final=store.read();expect(final.record.entries).toEqual([]);expect(final.record.forgotten).toHaveLength(1000);expect(Buffer.byteLength(final.raw!)).toBeLessThanOrEqual(2*1024*1024);appendFileSync('/tmp/rgent-v4-D-capacity-numbers.jsonl',JSON.stringify({kind:'serial-1000',initialBytes:Buffer.byteLength(encodeWorkingMemory(record)),finalBytes:Buffer.byteLength(final.raw!),ms:Number((performance.now()-started).toFixed(2))})+'\n')
+},120000)
+it('forget closes pending target chains as well as recursive evidence dependencies',()=>{
+ const {root,store}=fixture(),record=entryRecord(4);record.entries[1]!.pendingTarget={id:record.entries[0]!.id,version:1};record.entries[2]!.pendingTarget={id:record.entries[1]!.id,version:1};record.entries[3]!.sources[0]!.memoryDeps=[{id:record.entries[2]!.id,version:1}];writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record))
+ store.forget(store.read(),record.entries[0]!.id,1);expect(store.read().record.entries).toEqual([])
+})
+it('a legal terminal numerical revision still allows verified forget by byte CAS',()=>{
+ const {root,store}=fixture(),record=entryRecord(1);record.revision=Number.MAX_SAFE_INTEGER;writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record));const before=store.read();store.forget(before,'entry-0',1);const after=store.read();expect(after.record.revision).toBe(Number.MAX_SAFE_INTEGER);expect(after.revision).not.toBe(before.revision);expect(after.record.entries).toEqual([])
+})
+it('ordinary writes stop before exhausting all remaining forget revisions',()=>{
+ const {root,store}=fixture(),record=entryRecord(1);record.revision=Number.MAX_SAFE_INTEGER-1;writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record));const basis=store.read();expect(()=>store.edit(basis,'entry-0',1,{content:'新事实'})).toThrow('MEMORY_FILE_LIMIT');expect(store.read().raw).toBe(basis.raw)
+})
+it('a near-full legal control region stays readable and forget never hits a separate metadata wall',()=>{
+ const {root,store}=fixture(),record=entryRecord(1,true),block={materialIds:['M'.repeat(256)],entryIds:[{id:'F'.repeat(256),version:Number.MAX_SAFE_INTEGER}],through:1};let lo=0,hi=4000
+ while(lo<hi){const mid=Math.ceil((lo+hi)/2);record.forgotten=Array.from({length:mid},()=>structuredClone(block));if(Buffer.byteLength(encodeWorkingMemory(record))<=2*1024*1024-64)lo=mid;else hi=mid-1}
+ record.forgotten=Array.from({length:lo},()=>structuredClone(block));const raw=encodeWorkingMemory(record);writeFileSync(path.join(root,'.rgent-memory'),raw);expect(Buffer.byteLength(raw)).toBeGreaterThan(2*1024*1024-1024);store.forget(store.read(),record.entries[0]!.id,1);expect(store.read().record.entries).toEqual([])
+})
+it('ordinary growth pauses on an existing unreserved full body but a real reduction and 1000-entry closure stay available',()=>{
+ const {root,store}=fixture(),record=entryRecord(1000);for(const e of record.entries){e.content='x'.repeat(800);if(e.id!=='entry-0')e.pendingTarget={id:'entry-0',version:1}}
+ const raw=encodeWorkingMemory(record);expect(Buffer.byteLength(raw)).toBeLessThanOrEqual(2*1024*1024);expect(Buffer.byteLength(raw)).toBeGreaterThan(2*1024*1024-256*1024);writeFileSync(path.join(root,'.rgent-memory'),raw)
+ expect(()=>store.edit(store.read(),'entry-1',1,{content:'x'.repeat(900)})).toThrow('MEMORY_FILE_LIMIT');store.edit(store.read(),'entry-1',1,{content:'缩短'});const before=store.read(),started=performance.now();store.forget(before,'entry-0',1);const after=store.read();expect(after.record.entries).toEqual([]);appendFileSync('/tmp/rgent-v4-D-capacity-numbers.jsonl',JSON.stringify({kind:'closure-1000',initialBytes:Buffer.byteLength(before.raw!),finalBytes:Buffer.byteLength(after.raw!),ms:Number((performance.now()-started).toFixed(2))})+'\n')
+})
+it('a capacity-rejected automatic proposal records the real capacity reason while preserving existing entries',()=>{
+ const {root,store}=fixture(),record=entryRecord(999);for(const e of record.entries)e.content='x'.repeat(800);writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record));const result=store.apply(store.read(),[[{action:'add',input:{content:'新事实',layer:'demand',scope:'库',sources:[source(1000)],semantic:'fact',attribution:'人',reviewAt:null}}]],{taskId:'capacity-job',materialVersion:'a'.repeat(64),outcome:'applied',entryIds:[]});expect(result.rejected).toBe(1);expect(result.snapshot.record.jobs.at(-1)?.reason).toBe('MEMORY_FILE_LIMIT');expect(result.snapshot.record.entries).toHaveLength(999)
+})
+
+it('validates contained identity groups strictly and retains all longest legal IDs in forget constraints',()=>{
+ const {store}=fixture(),groups=Array.from({length:16},(_,i)=>('group'+i).padEnd(256,'x')),input={content:'派生条目',layer:'demand' as const,scope:'库',sources:[{...source(),basisGroups:groups}],semantic:'fact' as const,attribution:'人',reviewAt:null};const entry=store.add(store.read(),input);store.forget(store.read(),entry.id,1);expect(store.read().record.forgotten[0]?.materialIds).toEqual(expect.arrayContaining(groups));expect(store.canLearn(store.read().record,[{...source(2),basisGroups:[groups[0]!]}])).toBe(false)
+ for(const bad of ['not-array',Array(17).fill('a'),['..'],['duplicate','duplicate'],['x'.repeat(257)]])expect(()=>store.add(store.read(),{...input,sources:[{...source(2),basisGroups:bad as string[]}]})).toThrow('BAD_MEMORY_EDIT')
 })

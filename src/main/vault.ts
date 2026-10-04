@@ -285,11 +285,11 @@ export class VaultSession {
   }
   async ledgerComplete(relPath:string,taskId:string,revision:string){const token=this.captureSession();const result=await this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.complete(relPath,taskId,revision)});this.scheduleLedgerCompression(relPath,token);return result}
   async ledgerKey(relPath:string){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);return this.memoryContext().vaultKey+':'+(this.ledgerStore!.lookupOwner(relPath)?.noteId??'unregistered:'+relPath)})}
-  async summaryMaterials(relPath:string,taskIds:readonly string[],requiredBodyIds:readonly string[]=[]){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.summaryMaterials(relPath,taskIds,requiredBodyIds,(p,b,a)=>this.acceptsObject(p,b,a))}
+  async summaryMaterials(relPath:string,taskIds:readonly string[],requiredBodyIds:readonly string[]=[],watermark=0){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.summaryMaterials(relPath,taskIds,requiredBodyIds,watermark,(p,b,a)=>this.acceptsObject(p,b,a))}
   async ledgerContexts(relPath:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.contexts(relPath)}
   async ledgerPage(relPath:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);return {...this.ledgerStore!.wirePage(relPath,cursor),...(this.ledgerFailure?{maintenanceError:this.ledgerFailure}:{})}})}
 
-  async materialUnit(relPath:string,start:number,end:number){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.materialUnit(relPath,start,end)})}
+  async materialUnit(relPath:string,start:number,end:number){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();const record=this.workingMemory!.read().record;return this.ledgerStore!.materialUnit(relPath,start,end,{watermark:record.watermark,forgotten:record.forgotten.flatMap(f=>f.materialIds)})})}
   materialCeiling(){const state=this.materialState();if(state.status==='invalid')throw Error(state.reason);return state.sequence}
   materialState(){this.requireUsableRoot();const state=this.ledgerStore!.materialState();if(state.status==='invalid')return state;try{const record=this.workingMemory!.read().record;if(state.sequence<record.nextSequence||state.sequence<record.watermark)return {status:'invalid' as const,reason:'LEDGER_REGISTRY_INVALID'}}catch{/* Invalid memory remains diagnosable and explicitly resettable only against a verified material ceiling. */}return state}
   ledgerTaskPath(taskId:string){this.requireUsableRoot();return this.ledgerStore!.taskPath(taskId)}
@@ -297,7 +297,8 @@ export class VaultSession {
   memorySnapshot(){this.assertCall();return this.workingMemory!.read()}
   /** Explicit diagnostic reset stays reachable during a pending structure recovery; it never clears that journal. */
   async memoryReset(expected:{revision:string|null;objectVersion:string|null}){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);this.requireUsableRoot();if(this.lifecycle?.status().operation?.kind==='ledger-repair')throw Error('LIFECYCLE_RECOVERY_REQUIRED');return this.workingMemory!.reset(expected,this.materialCeiling())})}
-  async memoryMutation<T>(operation:(store:WorkingMemoryStore)=>T|Promise<T>):Promise<T>{const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();const result=await operation(this.workingMemory!);this.assertSession(token);return result})}
+  async memoryMutation<T>(operation:(store:WorkingMemoryStore)=>T|Promise<T>,collect=false):Promise<T>{const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();const result=await operation(this.workingMemory!);this.assertSession(token);if(collect){const root=this.requireUsableRoot(),permission=await loadPermissionSnapshot(root);this.assertSession(token);const entries=permission.state.status==='ready'?effectivePermissionEntries(root,permission.state.entries):null;this.ledgerStore!.collectMaterials(this.workingMemory!.read(),p=>entries!==null&&tierFor(p,entries)!=='forbidden',permission.raw)}return result})}
+  ledgerContextForRecord(record:import('./ledger-store.ts').LedgerRecord){this.requireUsableRoot();return this.ledgerStore!.contextForRecord(record)}
   async ledgerRecord(relPath:string,taskId:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.getRecord(relPath,taskId)}
   async ledgerMaintenancePreview(relPath:string,action:'compress'|'clear'){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintenancePreview(relPath,action)})}
   async ledgerMaintenanceCommit(relPath:string,action:'compress'|'clear',items:readonly {taskId:string;revision:number}[],archive?:{revision:string;bytes:number}){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintain(relPath,action,items,archive)})}
@@ -365,7 +366,7 @@ export class VaultSession {
         const entryValid=(id:string,version:number,seen=new Set<string>()):boolean=>{
           if(seen.has(id))return false;seen.add(id)
           const entry=memory!.record.entries.find(e=>e.id===id&&e.version===version)
-          return !!entry&&entry.status==='active'&&(!entry.reviewAt||Date.parse(entry.reviewAt)>Date.now())&&entry.sources.length>0&&entry.sources.every(source=>sourceResults.get(entry.id+'\0'+source.id)?.valid&&source.memoryDeps.every(dep=>entryValid(dep.id,dep.version,new Set(seen))))
+          return !!entry&&(entry.status==='active'||entry.status==='paused'&&['MEMORY_SOURCE_CHANGED','MEMORY_DEPENDENCY_CHANGED'].includes(entry.reason??''))&&(!entry.reviewAt||Date.parse(entry.reviewAt)>Date.now())&&entry.sources.length>0&&entry.sources.every(source=>sourceResults.get(entry.id+'\0'+source.id)?.valid&&source.memoryDeps.every(dep=>entryValid(dep.id,dep.version,new Set(seen))))
         }
         for(const entry of memory.record.entries){const patch:MemoryRecoveryPatch={id:entry.id,version:entry.version,pause:!entryValid(entry.id,entry.version),sources:[]}
           for(const source of entry.sources){const result=sourceResults.get(entry.id+'\0'+source.id)!,depsValid=source.memoryDeps.every(dep=>entryValid(dep.id,dep.version)),valid=result.valid&&depsValid
@@ -513,12 +514,14 @@ export class VaultSession {
     for (const [previous, next] of links) if (next === previousObjectVersion) links.set(previous, objectVersion)
     links.set(previousObjectVersion, objectVersion)
     this.successors.set(relPath, links)
+    const previousContent=this.verified.get(relPath)?.get(previousObjectVersion)?.content
     const revision = revisionOf(content)
     this.verified.get(relPath)?.delete(previousObjectVersion)
     this.remember(relPath, { content, revision, objectVersion, sessionId: this.captureSession() })
     this.lastWrites.set(relPath, { revision, objectVersion, at: Date.now() })
     this.index.markDirty()
-    try { this.ledgerStore?.onWrite(relPath,previousObjectVersion,objectVersion,content) } catch { this.ledgerFailure='LEDGER_OWNERSHIP_UNVERIFIED';this.emit('tree:changed') }
+    let materialControls:import('./working-memory-store.ts').WorkingSnapshot|undefined;try{materialControls=this.workingMemory?.read()}catch{/* Unverified memory controls cannot authorize identity GC. */}
+    try { this.ledgerStore?.onWrite(relPath,previousObjectVersion,objectVersion,content,previousContent,materialControls) } catch { this.ledgerFailure='LEDGER_OWNERSHIP_UNVERIFIED';this.emit('tree:changed') }
   }
 
   /** Move only bindings that lead to the explicitly verified filesystem object. */

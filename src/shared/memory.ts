@@ -28,7 +28,7 @@ export type MemorySource = {
   hash: string
   /** Stable across controlled saves, offsets and relocation. */
   basisHash: string
-  /** Textless identity of whole classified units; excludes offsets, paths and task IDs. */
+  /** Textless IDs of explicitly proven contained material units, at most 16; no semantic equivalence or send authorization. */
   basisGroups?: string[]
   sourceDeps: MemoryWholeSource[]
   memoryDeps: MemoryDependency[]

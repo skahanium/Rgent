@@ -42,7 +42,10 @@ export class WorkingMemoryService{
     this.vault.assertSession(context.sessionId)
     if(record.state==='cleared')return !recovery // the retained memory is independently licensed; raw cleanup is not forgetting
     if(record.state!=='saved')return false
-    const chapter=(recovery?await recovery.contexts():await this.vault.ledgerContexts(source.relPath)).find(c=>c.taskId===source.taskId);this.vault.assertSession(context.sessionId);if(!chapter||chapter.eligible===false)return false;raw=chapter.text
+    const chapter=(recovery?await recovery.contexts():this.vault.ledgerContextForRecord(record)).find(c=>c.taskId===source.taskId);this.vault.assertSession(context.sessionId);if(!chapter||chapter.eligible===false||chapter.fields?.status!=='valid'||source.classification!=='command')return false;raw=chapter.text
+    const field=chapter.fields.prompt;let start=source.start
+    if(raw.slice(start,source.end)!==source.text){start=raw.indexOf(source.text);if(start<0||raw.indexOf(source.text,start+1)>=0)return false}
+    if(start<field.start||start+source.text.length>field.end)return false
    }else{
     const parsed=compile(note.content);if(parsed.stale)return false;raw=parsed.partition.body
     let start=source.start;if(raw.slice(source.start,source.end)!==source.text){start=raw.indexOf(source.text);if(start<0||raw.indexOf(source.text,start+1)>=0)return false}
@@ -74,11 +77,24 @@ export class WorkingMemoryService{
     return !!parent&&(!parent.reviewAt||Date.parse(parent.reviewAt)>Date.now())&&dependenciesCurrent(parent,new Set(seen))
    }))
   }
-  return result.filter(e=>current.some(now=>now.id===e.id&&now.version===e.version)).map(e=>{
+  const checked=result.filter(e=>current.some(now=>now.id===e.id&&now.version===e.version)).map(e=>{
    if(e.status==='active'&&e.reviewAt&&Date.parse(e.reviewAt)<=Date.now()){e.status='review';e.reason='MEMORY_CONFIRMATION_REQUIRED'}
    if(e.status==='active'&&!dependenciesCurrent(e)){e.status='paused';e.reason='MEMORY_DEPENDENCY_CHANGED'}
    return e
   })
+  if(checked.some(e=>e.status!==current.find(c=>c.id===e.id)?.status))await this.mutate(store=>store.reconcile(store.read(),checked)).catch(()=>{})
+  return checked
+ }
+ async consolidationCandidates(sources:readonly WorkingSource[]):Promise<WorkingEntry[]>{
+  const all=await this.entries(),candidates:WorkingEntry[]=[]
+  for(const e of all){if(e.status==='active'){candidates.push(e);continue}
+   if(['review','obsolete','disputed','deferred'].includes(e.status)&&sources.some(s=>!e.sources.some(old=>old.materialId===s.materialId))&&await this.verifyEntry(e,all))candidates.push(e)
+  }
+  return candidates
+ }
+ async candidateCurrent(entry:WorkingEntry):Promise<boolean>{
+  const all=this.snapshot().record.entries,now=all.find(e=>e.id===entry.id&&e.version===entry.version&&e.status===entry.status)
+  return !!now&&(now.status!=='active'||!now.reviewAt||Date.parse(now.reviewAt)>Date.now())&&await this.verifyEntry(now,all)
  }
  private async verifyEntry(entry:WorkingEntry,all:WorkingEntry[],seen=new Set<string>()):Promise<boolean>{
   if(seen.has(entry.id))return false;seen.add(entry.id)
@@ -96,7 +112,7 @@ export class WorkingMemoryService{
   let retirement:MemoryView['retirement']
   if(this.vault.memoryDiagnosis())try{const target=await this.vault.memoryRetirementPreview();retirement={revision:target.revision,objectVersion:target.objectVersion,bytes:target.bytes}}catch{/* Unknown legacy bytes remain preserved and cannot be retried. */}
   let basis:WorkingSnapshot,entries:WorkingEntry[]
-  try{basis=this.snapshot();entries=await this.entries()}catch(e){this.vault.assertSession(context.sessionId);const materials=this.vault.materialState(),retirementFailure=this.vault.memoryDiagnosis();return {sessionId:context.sessionId,revision:null,objectVersion:null,config:cfg,recipient:credential?{modelId:credential.modelId,host:new URL(credential.baseURL).host}:null,status:'invalid',reason:e instanceof Error?e.message:'MEMORY_STORAGE_INVALID',materialStatus:materials.status,...(retirementFailure?{retirementFailure,...(retirement?{retirement}:{})}:{}),entries:[],jobs:[],running:{permits:0,pending:0,active:0},diagnosis:this.vault.memoryDiagnostic(),...(configDiagnosis?{configDiagnosis}:{})}}
+  try{basis=this.snapshot();entries=await this.entries();basis=this.snapshot()}catch(e){this.vault.assertSession(context.sessionId);const materials=this.vault.materialState(),retirementFailure=this.vault.memoryDiagnosis();return {sessionId:context.sessionId,revision:null,objectVersion:null,config:cfg,recipient:credential?{modelId:credential.modelId,host:new URL(credential.baseURL).host}:null,status:'invalid',reason:e instanceof Error?e.message:'MEMORY_STORAGE_INVALID',materialStatus:materials.status,...(retirementFailure?{retirementFailure,...(retirement?{retirement}:{})}:{}),entries:[],jobs:[],running:{permits:0,pending:0,active:0},diagnosis:this.vault.memoryDiagnostic(),...(configDiagnosis?{configDiagnosis}:{})}}
   const materials=this.vault.materialState(),retirementFailure=this.vault.memoryDiagnosis()
   return {sessionId:context.sessionId,revision:basis.revision,objectVersion:basis.objectVersion,config:cfg,recipient:credential?{modelId:credential.modelId,host:new URL(credential.baseURL).host}:null,status:'ready',...(configError?{reason:configError}:materials.status==='invalid'?{reason:materials.reason}:{}),materialStatus:materials.status,...(retirementFailure?{retirementFailure,...(retirement?{retirement}:{})}:{}),entries:entries.map(e=>({...e,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId,text:s.text,classification:s.classification}))})),jobs:basis.record.jobs.map(j=>({...j,retryable:materials.status!=='invalid'&&['interrupted','rejected'].includes(j.outcome)&&cfg.vault.enabled&&!!credential})),running:{permits:0,pending:0,active:0},...(materials.status!=='invalid'?{learning:{watermark:basis.record.watermark,nextSequence:Math.max(basis.record.nextSequence,materials.sequence)}}:{}),diagnosis:this.vault.memoryDiagnostic(),...(configDiagnosis?{configDiagnosis}:{})}
  }
@@ -118,7 +134,7 @@ export class WorkingMemoryService{
  }
  async advance(watermark:number,binding:{revision:string|null;objectVersion:string|null}){
   this.context()
-  return this.mutate(store=>{const ceiling=this.vault.materialCeiling();if(!Number.isSafeInteger(watermark)||watermark>ceiling)throw Error('BAD_REQUEST');const basis=store.read();if(basis.revision!==binding.revision||basis.objectVersion!==binding.objectVersion)throw Error('MEMORY_CONFLICT');basis.record.nextSequence=Math.max(basis.record.nextSequence,ceiling);return store.advance(basis,watermark)})
+  return this.vault.memoryMutation(store=>{const ceiling=this.vault.materialCeiling();if(!Number.isSafeInteger(watermark)||watermark>ceiling)throw Error('BAD_REQUEST');const basis=store.read();if(basis.revision!==binding.revision||basis.objectVersion!==binding.objectVersion)throw Error('MEMORY_CONFLICT');basis.record.nextSequence=Math.max(basis.record.nextSequence,ceiling);return store.advance(basis,watermark)},true)
  }
  async reset(binding:{revision:string|null;objectVersion:string|null}){this.context();return this.vault.memoryReset(binding)}
  async manualSource(request:MemoryManualRequest):Promise<WorkingSource>{
@@ -145,16 +161,16 @@ export class WorkingMemoryService{
  async sourceForFragment(fragment:import('./host-material.ts').SentFragment):Promise<WorkingSource>{
   this.context()
   if(fragment.classification==='ai')throw Error('MEMORY_SOURCE_UNCONFIRMED')
-  let materialId:string,sequence:number
+  let materialId:string,sequence:number,basisGroups:string[]|undefined
   if(fragment.kind==='ledger'){if(!fragment.taskId)throw Error('MEMORY_MATERIAL_UNVERIFIED');const r=await this.vault.ledgerRecord(fragment.relPath,fragment.taskId);if(r.state!=='saved'||r.sequence<1)throw Error('MEMORY_MATERIAL_UNVERIFIED');materialId=fragment.taskId+'/prompt';sequence=r.sequence}
-  else{const u=await this.vault.materialUnit(fragment.relPath,fragment.start,fragment.end);materialId=u.id;sequence=u.sequence}
-  const source:WorkingSource={id:randomUUID(),version:1,relPath:fragment.relPath,objectVersion:fragment.objectVersion,revision:fragment.revision,permissionTier:fragment.permissionTier,kind:fragment.kind,taskId:fragment.taskId,taskMaterialHash:null,classification:fragment.classification==='command'?'command':'human',start:fragment.start,end:fragment.end,text:fragment.text,hash:fragment.hash,basisHash:hash(materialId),materialId,sequence,sourceDeps:fragment.sourceDeps.map(d=>({...d,permissionTier:'reference' as const})),memoryDeps:fragment.memoryDeps.map(d=>({id:d.id,version:d.version}))}
+  else{const u=await this.vault.materialUnit(fragment.relPath,fragment.start,fragment.end);materialId=u.id;sequence=u.age;basisGroups=u.basisGroups}
+  const source:WorkingSource={id:randomUUID(),version:1,relPath:fragment.relPath,objectVersion:fragment.objectVersion,revision:fragment.revision,permissionTier:fragment.permissionTier,kind:fragment.kind,taskId:fragment.taskId,taskMaterialHash:null,classification:fragment.classification==='command'?'command':'human',start:fragment.start,end:fragment.end,text:fragment.text,hash:fragment.hash,basisHash:hash(materialId),materialId,sequence,...(basisGroups?.length?{basisGroups}:{}),sourceDeps:fragment.sourceDeps.map(d=>({...d,permissionTier:'reference' as const})),memoryDeps:fragment.memoryDeps.map(d=>({id:d.id,version:d.version}))}
   if(!await this.verifySource(source))throw Error('MEMORY_SOURCE_CHANGED');this.context();return source
  }
  async savedMaterial(relPath:string,taskId:string):Promise<import('./host-material.ts').SavedTaskMaterial>{
   const context=this.context(),record=await this.vault.ledgerRecord(relPath,taskId);this.context()
   const note=await this.vault.read(relPath);this.context()
-  const chapter=(await this.vault.ledgerContexts(relPath)).find(c=>c.taskId===taskId);this.context()
+  const chapter=this.vault.ledgerContextForRecord(record).find(c=>c.taskId===taskId);this.context()
   if(record.state!=='saved'||!record.chapter||!chapter)throw Error('MEMORY_JOB_UNAVAILABLE');const c=record.chapter,material=c.material??{fragments:[],truncated:true},ledgerHash=hash(chapter.text.trimEnd())
   return {taskId,context,origin:{relPath,sessionId:context.sessionId,objectVersion:note.objectVersion,revision:note.revision},status:c.status,prompt:c.prompt,answer:c.answer,ledgerHash,materialVersion:hash(JSON.stringify([taskId,ledgerHash,material])),material,sourceDeps:c.provenance?.sources??[],memoryDeps:c.provenance?.version===2?c.provenance.memoryDeps:[]}
  }
@@ -163,7 +179,7 @@ export class WorkingMemoryService{
   try{
    this.context();const basis=this.vault.memorySnapshot(),record=basis.record
    const forgotten=new Set(record.forgotten.flatMap(f=>f.materialIds))
-   const covered=await this.vault.summaryMaterials(relPath,taskIds,[...forgotten].filter(id=>!id.endsWith('/prompt')));this.context();if(covered.ceiling<record.watermark||covered.materialIds.some(id=>forgotten.has(id))||record.watermark>0&&covered.sequences.some(sequence=>sequence<=record.watermark))return false
+   const covered=await this.vault.summaryMaterials(relPath,taskIds,[...forgotten].filter(id=>!id.endsWith('/prompt')),record.watermark);this.context();if(covered.ceiling<record.watermark||covered.materialIds.some(id=>forgotten.has(id))||record.watermark>0&&covered.sequences.some(sequence=>sequence<=record.watermark))return false
    // A concurrent forget/reset cannot be approved using the earlier control snapshot.
    this.context();return this.vault.memorySnapshot().revision===basis.revision
   }catch{return false}
@@ -171,7 +187,7 @@ export class WorkingMemoryService{
  async sourceForPrompt(relPath:string,taskId:string):Promise<WorkingSource>{
   this.context();const note=await this.vault.read(relPath);this.context()
   const record=await this.vault.ledgerRecord(relPath,taskId);this.context()
-  const chapter=(await this.vault.ledgerContexts(relPath)).find(c=>c.taskId===taskId);this.context()
+  const chapter=this.vault.ledgerContextForRecord(record).find(c=>c.taskId===taskId);this.context()
   if(record.state!=='saved'||!record.chapter||!chapter||chapter.fields?.status!=='valid'||record.sequence<1)throw Error('MEMORY_MATERIAL_UNVERIFIED')
   const field=chapter.fields.prompt,text=field.text,id=randomUUID()
   const provenance=record.chapter.provenance

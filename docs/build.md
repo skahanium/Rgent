@@ -1100,7 +1100,7 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 | A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | `3c39531` 修补后的独立 Spec／Quality 再审通过（2026-10-05），3 项 Important 及目标消失路径闭合；必要 8 文件 205／0、类型／文档通过，打开 C 串行工程门。实际窗口及整轮完整门仍待核；初版 315／0、SSE 13／0及 core 20／0保留原范围 |
 | C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | `ba385f2` 三项 Important 修补后的独立 Spec／Quality 再审通过（2026-10-05）；必要 5 文件 133／0、类型及文档通过。原 9 文件 223／0、性能及失败保留各自范围；开放 E 串行工程门，实际窗口与整轮完整门仍待收口 |
 | E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | `bf9d71e` 限定独立再审 Spec／Quality 通过（2026-10-05），原迟到查询及真实成对状态通知问题闭合；最终 renderer 20／0、类型／文档通过。初版 204／0与首修 15／0保留各自范围；开放 D 串行工程门，实际窗口／整轮完整门仍待核 |
-| D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | E 独立门通过，进入串行施工；尚未交付，2026-10-05 |
+| D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | 本机实现与容量／身份自查已交，必要定向及类型／文档证据见下；待独立 Spec／Quality 复审，Q 未开（2026-10-05） |
 | Q | 虚构开发集双策略对照，逐模型停损与证据；不切生产策略、不运行正式评测 | 待 D 门；2026-10-04 |
 
 包 A 复审修复（2026-10-04，基线 `5f8cf77`）：必要迁移在实际库队列内核验有效 TaskGrant、来源权限前后快照、对象与整文件修订，最后同步复核授权有效性，并在旧归档写入后、正文原子替换前再次核验 grant 与权限原字节；grant 的读取依赖不回入该队列。Host 只续接已核验会话、迁移前后对象与修订的成功迁移回执，普通读取不能改 origin proof。任务与人的批次迁移共用迁移提交登记，原子替换前检查绑定容量，替换后立即同步登记 successors／verified／lastWrites，旧 tab 可继续保存。材料三态同时核对 `materials.json` 单元及独立 task 序号、owner 归属与上界；异常拒绝新序号分配，清空／推进在队列实际提交前重核，均不归零。新任务 2 MiB 上限不套到完整旧原文；大历史性能仍由 C 测量，不提前增加索引。记忆页显示既有退休失败和材料登记分类诊断，配置异常不能遮住材料异常；退休重试出口仍待 A+。
@@ -1244,3 +1244,16 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 包 E 限定再审修补（2026-10-05，基线 `7099099`，待再审）：再审发现真实 `retryRestore` 先发带 id 的 handoff、紧接同操作无 id 的 changed；首修误注销当前查询，同恢复阶段重复关闭更新亦受影响。新增测试接真实 `VaultSwitch` producer 与 DOM shell，修前正确状态返回仍无 ACK，2 失败／15 未选（`/tmp/rgent-v4-E-rereview-red-order.log`）。消费端改为在更新 transitionId 前核查询发起时绑定的 session／operation，只在新 preparing、新操作或新会话时淘汰；同 restoring 阶段的 changed／closePending 更新保留当前 id，新的 R1／R2 查询代际仍独立。`pnpm exec vitest run test/renderer/vault-close.test.ts` 修后 1 文件 20／0（`...-rereview-green-final.log`），含实际 producer 成对事件、重复两次关闭，以及新 preparing／operation／session 的淘汰正例；`pnpm exec tsc --noEmit`、`pnpm docs:check` 通过（`...-rereview-types-final.log`、`...-rereview-docs-final.log`）。main/shared 未改，无旧 204／全量／构建／UI／付费重复；producer＋DOM 证据仍不是实际系统窗口，D 未开。
 
 包 E 最后限定再审（2026-10-05，`7099099..bf9d71e`）：Spec／Quality 通过，Critical／Important／Minor 均为 0，报告 `/tmp/rgent-v4-E-second-rereview-report.md`。真实 VaultSwitch retryRestore 的 handoff→changed 和重复关闭通知保留当前查询，新的准备／操作／会话及迟到旧查询仍隔离；正确 ACK 后须主进程 release 才解锁。只开放 D 串行工程门；实际 Electron 窗口、系统关闭、强杀 journal、整轮完整门及平台／人工／正式学习质量继续待核，模型调用仍为 0。
+
+
+包 D 本机实现（2026-10-05，基线 `77d0298`，待独立复审）：移除 256 KiB 控制硬墙，整文件 2 MiB 不变。普通写精算当前编码和所有当前条目逐次遗忘上界，包含最长合法 ID、继承依据、safe integer 数值及额外 16 KiB；旧满正文／满控制文件可遗忘与真减量，普通写容量不足时保存 rejected 原因。pendingTarget 和 memoryDeps 多层闭包删除内容／来源／相关回执。数值修订预留遗忘次数，旧 MAX_SAFE_INTEGER 仅允许核验遗忘／减量的数值饱和，hash＋对象 CAS 仍变化；普通恢复 patch 不绕普通门。复核期 review 与来源暂停真实提交，已到 obsolete／disputed／deferred 的内容只在新获准依据下进入语义复核。
+
+材料沿已有登记加可选原字节 hash，受控唯一原文续接原 ID／分配号，实改获得新身份。旧 owner 当前正文不是旧无 hash 单元的出生证明；不明旧单元保留并关闭旧链学习，真实受控新内容有登记出口。扩大选区包含可核验旧子单位，完整继承最多 16 个 basisGroups 和最早年龄；actual unit.sequence 保持单调分配，超限拒绝不截断。水位约束合并独立于材料 GC：仍在正文的原文、未知身份、有效／争议／进行中／中断恢复引用保留，只有明确不存在且无引用、对象／权限可核验才回收。保留项可阻止达到登记上限后的新增，不声称无限回收。坏材料文件不阻断人的正常正文写入，不覆盖 raw；新学习／水位仍拒绝，已有记忆按独立来源／许可核验。
+
+真实 Host 的 onTaskMaterialResult 失败接到原 consolidation 与 memoryChanged/get；只有当前已授权整理意图才报告。版本可重新核验则持久 rejected、受控披露重试；不可核验则最多 64 个仅当前会话 unavailable／null 版本、不可重试。自查真实 Vault 重绑期间迟到 handoff catch 的旧失败原会写入新会话，已 red 后修补当前会话及队列内重核；关闭／晚到／无整理意图不复活回执。普通前台回答保存不因整理反馈失败而失效。
+
+- 有效 red 日志：容量与 pendingTarget `/tmp/rgent-v4-D-store-red.log`，分类／review／交接 `/tmp/rgent-v4-D-service-red.log`，语义复核 `/tmp/rgent-v4-D-semantic-red.log`，真实 Host 失败 `/tmp/rgent-v4-D-real-host-red.log`，容量 rejected `/tmp/rgent-v4-D-capacity-receipt-red.log`，移动摘要／旧无 hash 学习 `/tmp/rgent-v4-D-moved-summary-red.log`、`...-legacy-learning-red.log`，GC 原文保留／扩大选区／旧 owner 历史 `/tmp/rgent-v4-D-final-identity-red.log`（3 失败），实际换会话迟到 handoff `/tmp/rgent-v4-D-handoff-late-red-final.log`（1 失败）。初始过大夹具、反例超时、重复 `-t` 命令和旧 service 读取新会话的夹具错误分别保留，不当产品有效 red。
+- 必要相关集合 12 文件 329／0（`/tmp/rgent-v4-D-targeted-final.log`），适用最后迟到 handoff 修补之前；随后同域 3 文件 32／0（`...-handoff-final-green.log`）。最终同 12 文件使用 `-t '^(?!forgets 1000 longest legal identities)'` 排除已经证明且未改变的慢遗忘反例，329 通过／1 主动未选（`...-targeted-current.log`），不是平台跳过或全量；最长 ID 串行 1000 遗忘已单独通过，29.70 秒累计，文件 1,951,986→776,052 字节。一次 1000 条依赖闭包遗忘最后为 26.63 毫秒（前次同范围 15.49 毫秒，独立测量）、1,902,175→61,292 字节。真编码证明及各边界完整命令在 `/tmp/rgent-v4-D-report.md`；不是千条逐次遗忘的批次权限。
+- body／ledger 千条分别核启动、召回、发送前已选 8 条复核、管理。真实快照读字节／文件读取与来源解码数字 `/tmp/rgent-v4-D-cost-numbers.jsonl`，最后探针 `...-performance-final.log`；指定 record 的程序 prompt 字段取代每来源 contexts 全历史扫描，原 command 移入 answer 后 entries／恢复／C 摘要都拒绝，原历史和无关回执正例保留。原 ledger 全历史基线测量外层 120 秒截尾、子测试超时，最后子进程 138.88 秒退出；阶段捕获召回 44.10 秒／1,001,000 个 ledger 读取、发送已选 8 条 0.84 秒／8008 个、管理 48.36 秒／1,002,000 个，不能称基线通过，未再次放大测量。指定记录后仍有同步管理成本、逐条原文件／权限及递归核验；不使用来源缓存或新增索引。
+
+类型、文档和最后文案定向分别记录 `...-types-final.log`、`...-docs-final.log`、`...-copy-final.log`。本包没有运行全量、build、实际窗口、真实模型、push 或 CI；付费调用 0，Q 未开。Windows、双平台 CI、系统关闭／强杀、原生输入法人工、用户视觉和正式学习质量仍待总任务统一门，不因本机定向通过结束阶段。

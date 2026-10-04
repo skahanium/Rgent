@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto'
-import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';import os from 'node:os';import path from 'node:path'
+import {mkdtemp,mkdir,writeFile,readFile,appendFile,rm} from 'node:fs/promises';import os from 'node:os';import path from 'node:path'
 import {it,expect,vi} from 'vitest'
 import {VaultSession} from '../../src/main/vault.ts';import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
 import {serializeStoredVault} from '../../src/main/notes-fs.ts';import {markPrompt,upsertAiAnswer} from '../../src/main/host-source.ts'
@@ -101,10 +101,10 @@ it.each(['reset','advance'] as const)('rechecks material validity inside the que
 })
 
 it.each(['empty','verified','invalid'] as const)('preserves retirement and real %s material diagnosis when an unknown old JSON memory causes an early invalid view',async materialStatus=>{
- const base=await mkdtemp(path.join(os.tmpdir(),'rgent-retirement-view-')),root=path.join(base,'vault'),unknown=JSON.stringify({version:99,entries:[]});await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'材料');await writeFile(path.join(root,'.rgent-memory'),unknown)
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-retirement-view-')),root=path.join(base,'vault'),unknown=JSON.stringify({version:99,entries:[]});await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'材料');if(materialStatus!=='empty'){const seed=new VaultSession(base,vi.fn());seed.restore();try{await seed.readOpened('a.md');await seed.materialUnit('a.md',0,2)}finally{seed.dispose()}}await writeFile(path.join(root,'.rgent-memory'),unknown)
  const vault=new VaultSession(base,vi.fn());vault.restore()
  try{await vault.readOpened('a.md');expect(vault.memoryDiagnosis()).toBe('MEMORY_RETIREMENT_FAILED')
-  if(materialStatus!=='empty')await vault.materialUnit('a.md',0,2)
+  // Existing material diagnostics predate the damaged memory; never allocate from invalid controls.
   if(materialStatus==='invalid')await writeFile(path.join(root,'.rgent','materials.json'),'{bad')
   expect(vault.materialState().status).toBe(materialStatus)
   const view=await new WorkingMemoryService(vault,()=>null).view();expect(view.status).toBe('invalid');expect(view.reason).toBe('MEMORY_STORAGE_INVALID');expect(view.retirementFailure).toBe('MEMORY_RETIREMENT_FAILED');expect(view.materialStatus).toBe(materialStatus);expect(view.learning).toBeUndefined();expect(await readFile(path.join(root,'.rgent-memory'),'utf8')).toBe(unknown)
@@ -186,7 +186,9 @@ it.each(['ledger-forget','body-forget','ledger-watermark','body-watermark','adop
   await save('T0');const service=new WorkingMemoryService(vault,()=>null),source=await service.sourceForPrompt('a.md','T0');const entry=await vault.memoryMutation(s=>s.add(s.read(),{content:'原始口令材料',layer:'core',scope:'本库',sources:[source],semantic:'fact',attribution:'人的口令',reviewAt:null}))
   await save('T1',await inherited('T0'));await save('T2',await inherited('T1'));expect((await vault.ledgerRecord('a.md','T2')).chapter?.provenance?.version??1).toBe(1)
   expect((await vault.summaryMaterials('a.md',['T2'])).materialIds).toEqual(expect.arrayContaining(['T0/prompt','T1/prompt','T2/prompt']));expect(await service.summaryAllowed('a.md',['T2'])).toBe(true);
-  if(mode==='ledger-forget'){const child=await vault.ledgerRecord('a.md','T2'),file=path.join(root,'.rgent','ledgers',child.noteId,'T2.json'),original=await readFile(file,'utf8'),bad=JSON.parse(original);bad.chapter.material.fragments[0].hash='0'.repeat(64);await writeFile(file,JSON.stringify(bad));expect(await service.summaryAllowed('a.md',['T2'])).toBe(false);await writeFile(file,original)}
+  if(mode==='ledger-forget'){const child=await vault.ledgerRecord('a.md','T2'),file=path.join(root,'.rgent','ledgers',child.noteId,'T2.json'),original=await readFile(file,'utf8'),bad=JSON.parse(original);bad.chapter.material.fragments[0].hash='0'.repeat(64);await writeFile(file,JSON.stringify(bad));expect(await service.summaryAllowed('a.md',['T2'])).toBe(false);await writeFile(file,original)
+   const ancestor=await vault.ledgerRecord('a.md','T0'),ancestorFile=path.join(root,'.rgent','ledgers',ancestor.noteId,'T0.json'),ancestorRaw=await readFile(ancestorFile,'utf8'),moved=JSON.parse(ancestorRaw);moved.chapter.answer=moved.chapter.prompt;moved.chapter.prompt='无关新口令';await writeFile(ancestorFile,JSON.stringify(moved));expect(await service.summaryAllowed('a.md',['T2'])).toBe(false);expect((await vault.ledgerRecord('a.md','T0')).chapter?.answer).toBe('口令T0');await writeFile(ancestorFile,ancestorRaw);expect(await service.summaryAllowed('a.md',['T2'])).toBe(true)
+  }
   await vault.memoryMutation(s=>s.forget(s.read(),entry.id,entry.version));if(mode.endsWith('forget'))expect(await service.summaryAllowed('a.md',['T2'])).toBe(false)
   await vault.memoryMutation(s=>s.advance(s.read(),source.sequence));expect(vault.memorySnapshot().record.forgotten).toEqual([]);expect((await vault.ledgerRecord('a.md','T2')).sequence).toBeGreaterThan(source.sequence);expect(await service.summaryAllowed('a.md',['T2'])).toBe(false)
   expect((await vault.ledgerRecord('a.md','T0')).chapter?.answer).toBe('回答T0');expect((await vault.read('a.md')).content).toContain('回答T2')
@@ -203,5 +205,104 @@ it('saves a real Vault answer with the complete material JSON boundary',async()=
   await vault.ledgerPrepare('a.md',{taskId:'edge',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'说明',answer:'边界完整保稿',material:tracker.snapshot()})
   const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'edge',answer:'边界完整保稿'}),note.revision,note);await vault.ledgerComplete('a.md','edge',saved.revision)
   const record=await vault.ledgerRecord('a.md','edge');expect(record.state).toBe('saved');expect(record.chapter?.answer).toBe('边界完整保稿');expect(record.chapter?.material?.truncated).toBe(true);expect(Buffer.byteLength(JSON.stringify(record.chapter?.material))).toBeLessThanOrEqual(256*1024)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+
+it('body material continuity follows unique unchanged text while substantive edits get a new identity',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-material-identity-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'原始材料\n')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{const service=new WorkingMemoryService(vault,()=>null);let note=await vault.readOpened('a.md');const first=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:4})
+  await vault.write('a.md','开头\n原始材料\n',note.revision,note);note=await vault.read('a.md');const moved=await service.manualSource({...note,relPath:'a.md',kind:'body',start:3,end:7});expect(moved.materialId).toBe(first.materialId)
+  await vault.write('a.md','开头\n修改材料\n',note.revision,note);note=await vault.read('a.md');const changed=await service.manualSource({...note,relPath:'a.md',kind:'body',start:3,end:7});expect(changed.materialId).not.toBe(first.materialId);expect(changed.sequence).toBeGreaterThan(first.sequence)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+it('ledger evidence moved from command to answer pauses memory and cannot recover command classification',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-ledger-classification-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),markPrompt('/长期要求',{taskId:'classified',range:{start:0,end:5},expectedText:'/长期要求',promptText:'长期要求'}))
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{const note=await vault.readOpened('a.md');await vault.ledgerPrepare('a.md',{taskId:'classified',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'长期要求',answer:'好'});const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'classified',answer:'好'}),note.revision,note);await vault.ledgerComplete('a.md','classified',saved.revision)
+  const service=new WorkingMemoryService(vault,()=>null),source=await service.sourceForPrompt('a.md','classified');await vault.memoryMutation(s=>s.add(s.read(),{content:'长期要求',layer:'core',scope:'库',sources:[source],semantic:'standing',attribution:'人',reviewAt:null}))
+  const record=await vault.ledgerRecord('a.md','classified'),file=path.join(root,'.rgent','ledgers',record.noteId,'classified.json');record.chapter!.prompt='无关';record.chapter!.answer='长期要求';await writeFile(file,JSON.stringify(record))
+  expect(await service.verifySource(source)).toBe(false);expect(await service.verifySource(source,{unique:true,record:async()=>record,contexts:async()=>await vault.ledgerContexts('a.md')})).toBe(false);expect((await service.entries())[0]?.status).toBe('paused')
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+it('review expiration is a committed lifecycle state that stays pending until explicit confirmation',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-review-state-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'原始材料')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{const note=await vault.readOpened('a.md'),service=new WorkingMemoryService(vault,()=>null),source=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:4});await vault.memoryMutation(s=>s.add(s.read(),{content:'待复核事实',layer:'demand',scope:'库',sources:[source],semantic:'fact',attribution:'人',reviewAt:'2020-01-01T00:00:00Z'}));await service.entries();expect(service.snapshot().record.entries[0]?.status).toBe('review')
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+
+it('watermark merges covered blocks independently of active material references and later collects unreferenced units',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-material-gc-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'共享材料\n无引用材料')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{const service=new WorkingMemoryService(vault,()=>null),note=await vault.readOpened('a.md'),s=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:4}),unreferenced=await vault.materialUnit('a.md',5,10)
+  const first=await vault.memoryMutation(store=>store.add(store.read(),{content:'遗忘条目',layer:'demand',scope:'库',sources:[s],semantic:'fact',attribution:'人',reviewAt:null})),retained=await vault.memoryMutation(store=>store.add(store.read(),{content:'有效条目',layer:'demand',scope:'库',sources:[s],semantic:'fact',attribution:'人',reviewAt:null}))
+  await vault.memoryMutation(store=>store.forget(store.read(),first.id,1));await service.advance(unreferenced.sequence,service.snapshot());expect(service.snapshot().record.forgotten).toEqual([])
+  let units=JSON.parse(await readFile(path.join(root,'.rgent','materials.json'),'utf8')).units;expect(units.map((u:any)=>u.id)).toContain(s.materialId);expect(units.map((u:any)=>u.id)).toContain(unreferenced.id);expect(vault.materialCeiling()).toBe(unreferenced.sequence)
+  await vault.memoryMutation(store=>store.forget(store.read(),retained.id,1));await service.advance(unreferenced.sequence,service.snapshot());units=JSON.parse(await readFile(path.join(root,'.rgent','materials.json'),'utf8')).units;expect(units.map((u:any)=>u.id)).toEqual(expect.arrayContaining([s.materialId,unreferenced.id]));expect(vault.materialCeiling()).toBe(unreferenced.sequence)
+  const current=await vault.read('a.md');await vault.write('a.md','真正新内容',current.revision,current);await service.advance(unreferenced.sequence,service.snapshot());units=JSON.parse(await readFile(path.join(root,'.rgent','materials.json'),'utf8')).units;expect(units.map((u:any)=>u.id)).not.toContain(s.materialId);expect(units.map((u:any)=>u.id)).not.toContain(unreferenced.id)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+it.each(['hash','legacy','moved-excerpt'] as const)('same-position genuinely new body material is allowed while known forgotten ancestry stays blocked (%s)',async mode=>{
+ const {TaskMaterialTracker}=await import('../../src/main/host-material.ts')
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-material-summary-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'落点\n');await writeFile(path.join(root,'b.md'),'原始材料')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{const service=new WorkingMemoryService(vault,()=>null);let b=await vault.readOpened('b.md');const s=await service.manualSource({...b,relPath:'b.md',kind:'body',start:0,end:4});if(mode==='moved-excerpt'){await vault.write('b.md',b.content+'\n其他材料',b.revision,b);b=await vault.read('b.md')}const e=await vault.memoryMutation(store=>store.add(store.read(),{content:'原材料记忆',layer:'demand',scope:'库',sources:[s],semantic:'fact',attribution:'人',reviewAt:null}))
+  const save=async(taskId:string)=>{const tracker=new TaskMaterialTracker();tracker.body(b.content,{start:0,end:mode==='moved-excerpt'?b.content.length:4},{...b,relPath:'b.md'});tracker.commit();let note=await vault.readOpened('a.md');const body=markPrompt(note.content+'\n/'+taskId,{taskId,range:{start:note.content.length+1,end:note.content.length+taskId.length+2},expectedText:'/'+taskId,promptText:taskId});await vault.write('a.md',body,note.revision,note);note=await vault.read('a.md');await vault.ledgerPrepare('a.md',{taskId,startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:taskId,answer:'派生回答',material:tracker.snapshot()});const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId,answer:'派生回答'}),note.revision,note);await vault.ledgerComplete('a.md',taskId,saved.revision)}
+  await save('old-task');if(mode==='moved-excerpt'){await vault.write('b.md','开头\n'+b.content,b.revision,b);b=await vault.read('b.md')}if(mode==='legacy'){const file=path.join(root,'.rgent','materials.json'),data=JSON.parse(await readFile(file,'utf8'));delete data.units[0].hash;await writeFile(file,JSON.stringify(data))}
+  await service.forget({sessionId:service.context().sessionId,revision:service.snapshot().revision,objectVersion:service.snapshot().objectVersion,id:e.id,version:1});if(mode==='legacy')await expect(service.manualSource({...b,relPath:'b.md',kind:'body',start:0,end:4})).rejects.toThrow('MEMORY_MATERIAL_UNVERIFIED');await vault.write('b.md','新证材料',b.revision,b);b=await vault.read('b.md');const newer=await service.manualSource({...b,relPath:'b.md',kind:'body',start:0,end:4});expect(newer.materialId).not.toBe(s.materialId);await save('new-task')
+  expect(await service.summaryAllowed('a.md',['old-task'])).toBe(false);expect(await service.summaryAllowed('a.md',['new-task'])).toBe(true)
+  await service.advance(s.sequence,service.snapshot());expect(await service.summaryAllowed('a.md',['old-task'])).toBe(false);expect(await service.summaryAllowed('a.md',['new-task'])).toBe(true);expect((await vault.ledgerRecord('a.md','old-task')).chapter?.answer).toBe('派生回答')
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+
+it.each(['body','ledger'] as const)('measures 1000 %s sources through startup, recall, dispatch and management without full-history source scans',async kind=>{
+ const {encodeWorkingMemory}=await import('../../src/main/working-memory-store.ts')
+ const {secureFsFor}=await import('../../src/main/secure-fs.ts'),{recallMemory,createMemoryUsePermit}=await import('../../src/main/memory-use.ts')
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-memory-cost-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),markPrompt('/以后用中文',{taskId:'task',range:{start:0,end:6},expectedText:'/以后用中文',promptText:'以后用中文'}))
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{let note=await vault.readOpened('a.md');await vault.ledgerPrepare('a.md',{taskId:'task',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'以后用中文',answer:'好'});const written=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'task',answer:'好'}),note.revision,note)
+  await vault.ledgerComplete('a.md','task',written.revision);note=await vault.read('a.md');const service=new WorkingMemoryService(vault,()=>null),start=note.content.indexOf('以后用中文'),source=kind==='ledger'?await service.sourceForPrompt('a.md','task'):await service.manualSource({...note,relPath:'a.md',kind:'body',start,end:start+5})
+  if(kind==='ledger'){const first=await vault.ledgerRecord('a.md','task');for(let i=1;i<1000;i++){const r=structuredClone(first);r.taskId='task-'+i;r.sequence=i+1;r.chapter!.taskId=r.taskId;await writeFile(path.join(root,'.rgent','ledgers',first.noteId,r.taskId+'.json'),JSON.stringify(r))}
+   const file=path.join(root,'.rgent','registry.json'),registry=JSON.parse(await readFile(file,'utf8'));registry.sequence=1000;registry.owners[0].sequenceCeiling=1000;await writeFile(file,JSON.stringify(registry));await writeFile(path.join(root,'.rgent','ledgers',first.noteId,'owner.json'),JSON.stringify(registry.owners[0]))}
+  const record:import('../../src/main/working-memory-store.ts').WorkingRecord={version:2,identity:'cost',revision:1,nextSequence:kind==='ledger'?1000:source.sequence,watermark:0,forgotten:[],jobs:[],entries:Array.from({length:1000},(_,i)=>({id:'entry-'+i,version:1,status:'active',reason:null,content:'中文要求第'+i+'项',layer:'demand',scope:'库',semantic:'standing',attribution:'人',reviewAt:null,updatedAt:'2026-01-01T00:00:00Z',updateBasis:{kind:'manual',id:'cost',version:1},sources:[{...source,id:'source-'+i,...(kind==='ledger'?{taskId:i?'task-'+i:'task',materialId:(i?'task-'+i:'task')+'/prompt',sequence:i+1}:{})}]}))};await writeFile(path.join(root,'.rgent-memory'),encodeWorkingMemory(record))
+  const codec=await import('../../src/main/ledger-codec.ts'),decode=vi.spyOn(codec,'decodeLedgerBytes'),bodyDecode=vi.spyOn(vault,'read');const fs=secureFsFor(root),read=fs.readSnapshot.bind(fs);let reads=0,bytes=0,ledgerReads=0,bodyReads=0;vi.spyOn(fs,'readSnapshot').mockImplementation(p=>{const r=read(p);reads++;bytes+=r.bytes.length;if(p.startsWith('.rgent/ledgers/')&&!p.endsWith('/owner.json'))ledgerReads++;if(p.endsWith('.md'))bodyReads++;return r});const contexts=vi.spyOn(vault,'ledgerContexts'),measure=async(label:string,op:()=>unknown|Promise<unknown>)=>{reads=0;bytes=0;ledgerReads=0;bodyReads=0;decode.mockClear();bodyDecode.mockClear();const t=performance.now();await op();await appendFile('/tmp/rgent-v4-D-cost-numbers.jsonl',JSON.stringify({kind,label,ms:Number((performance.now()-t).toFixed(2)),reads,bytes,ledgerReads,bodyReads,ledgerDecodes:decode.mock.calls.length,bodyDecodes:bodyDecode.mock.calls.length})+'\n')}
+  await measure('startup',()=>service.snapshot());await measure('recall',async()=>{const all=await service.entries();expect(all.filter(e=>e.status==='active')).toHaveLength(1000);expect(recallMemory(all,'中文要求','').demand.length).toBeGreaterThan(0)})
+  const receiver={provider:'custom' as const,modelId:'model',baseURL:'https://example.test/v1',apiKey:'test',contextTokens:32768},permit=await createMemoryUsePermit({context:()=>service.context(),config:()=>({enabled:true,revision:1}),entries:ids=>service.entries(ids)},receiver,'中文要求','');permit.stage(permit.recall.demand.map(e=>e.id));permit.markSent()
+  await measure('dispatch-selected',()=>permit.assertCurrent(receiver));await measure('management',()=>service.view());expect(contexts).not.toHaveBeenCalled()
+  await writeFile(path.join(root,'.rgent-permissions'),JSON.stringify({'a.md':'forbidden'}));await expect(permit.assertCurrent(receiver)).rejects.toThrow('MEMORY_CHANGED')
+ }finally{vi.restoreAllMocks();vault.dispose();await rm(base,{recursive:true,force:true})}
+},30000)
+it('damaged material control bytes do not block ordinary note saving or become empty controls',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-material-save-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'原始材料')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{const service=new WorkingMemoryService(vault,()=>null),note=await vault.readOpened('a.md');await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:4});const file=path.join(root,'.rgent','materials.json'),bad='{bad material controls';await writeFile(file,bad)
+  const saved=await vault.write('a.md','原始材料\n普通正文已保存',note.revision,note);expect((await vault.read('a.md')).revision).toBe(saved.revision);expect((await vault.read('a.md')).content).toContain('普通正文已保存');expect(await readFile(file,'utf8')).toBe(bad);expect(vault.materialState().status).toBe('invalid')
+  await expect(vault.materialUnit('a.md',0,4)).rejects.toThrow('LEDGER_REGISTRY_INVALID');await expect(service.advance(1,service.snapshot())).rejects.toThrow('LEDGER_REGISTRY_INVALID');expect(await readFile(file,'utf8')).toBe(bad)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+it.each(['queued','running','interrupted'] as const)('watermark keeps material referenced by a %s job and retains its blocking explanation',async outcome=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-material-job-reference-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'原始材料')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{const unit=await vault.materialUnit('a.md',0,4),service=new WorkingMemoryService(vault,()=>null);await vault.memoryMutation(s=>{const basis=s.read();basis.record.nextSequence=unit.sequence;return s.receipt(basis,{taskId:'protected',materialVersion:'a'.repeat(64),entryIds:[],outcome,...(outcome==='interrupted'?{reason:'MEMORY_INTERRUPTED'}:{})})});await service.advance(unit.sequence,service.snapshot())
+  expect(JSON.parse(await readFile(path.join(root,'.rgent','materials.json'),'utf8')).units[0]?.id).toBe(unit.id);expect(service.snapshot().record.jobs[0]?.outcome).toBe(outcome)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+
+it('larger body fragments inherit known forgotten subunits and their oldest age after watermark merging',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-material-contained-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'原始材料');const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{const service=new WorkingMemoryService(vault,()=>null);let note=await vault.readOpened('a.md');const old=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:4}),entry=await vault.memoryMutation(s=>s.add(s.read(),{content:'旧约定',layer:'demand',scope:'库',sources:[old],semantic:'fact',attribution:'人',reviewAt:null}));await vault.memoryMutation(s=>s.forget(s.read(),entry.id,1));await vault.write('a.md','原始材料\n真正新内容',note.revision,note);note=await vault.read('a.md')
+  const larger=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:10});expect(larger.materialId).not.toBe(old.materialId);expect(larger.basisGroups).toContain(old.materialId);expect(larger.sequence).toBe(old.sequence);expect(vault.memorySnapshot().record.forgotten[0]?.materialIds).toContain(old.materialId);expect(await vault.memoryMutation(s=>s.canLearn(s.read().record,[larger]))).toBe(false)
+  await service.advance(old.sequence,service.snapshot());expect(service.snapshot().record.forgotten).toEqual([]);expect(await vault.memoryMutation(s=>s.canLearn(s.read().record,[larger]))).toBe(false);const same=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:4});expect(same.materialId).toBe(old.materialId);expect(await vault.memoryMutation(s=>s.canLearn(s.read().record,[same]))).toBe(false)
+  const newer=await service.manualSource({...note,relPath:'a.md',kind:'body',start:5,end:10});expect(newer.sequence).toBeGreaterThan(old.sequence);expect(await vault.memoryMutation(s=>s.canLearn(s.read().record,[newer]))).toBe(true)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+it('legacy controlled owner updates do not prove an unhashed unit birth or permit shifted forgotten text to learn again',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-material-legacy-history-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'原始材料');const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{const service=new WorkingMemoryService(vault,()=>null);let note=await vault.readOpened('a.md');const old=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:4}),entry=await vault.memoryMutation(s=>s.add(s.read(),{content:'旧约定',layer:'demand',scope:'库',sources:[old],semantic:'fact',attribution:'人',reviewAt:null}));await vault.memoryMutation(s=>s.forget(s.read(),entry.id,1));const file=path.join(root,'.rgent','materials.json'),legacy=JSON.parse(await readFile(file,'utf8'));delete legacy.units[0].hash
+  // Reproduce the old implementation: a controlled body save updates owner evidence,
+  // while the previous unhashed material registration stays at its birth offsets.
+  await vault.write('a.md','开头\n原始材料',note.revision,note);await writeFile(file,JSON.stringify(legacy));note=await vault.read('a.md');await vault.write('a.md',note.content+'\n备注',note.revision,note);note=await vault.read('a.md');expect(JSON.parse(await readFile(file,'utf8')).units.find((u:any)=>u.id===old.materialId).hash).toBeUndefined();await expect(service.manualSource({...note,relPath:'a.md',kind:'body',start:3,end:7})).rejects.toThrow('MEMORY_MATERIAL_UNVERIFIED')
+  await vault.write('a.md','真正新内容',note.revision,note);note=await vault.read('a.md');const fresh=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:4});expect(fresh.materialId).not.toBe(old.materialId);expect(fresh.sequence).toBeGreaterThan(old.sequence);expect(await vault.memoryMutation(s=>s.canLearn(s.read().record,[fresh]))).toBe(true)
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
