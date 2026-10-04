@@ -259,8 +259,12 @@ it('retains settings drafts and explains how to resolve a deferred body conflict
  expect(overlay.root.textContent).not.toContain('VAULT_SWITCH_BODY_CONFLICT')
 })
 it('shows recovery authorization in the existing vault page and supports paused progress',async()=>{
- const root=document.createElement('div');document.body.append(root);const repair=vi.fn(async(request:import('../../src/shared/ledger.ts').LedgerRepairRequest):Promise<import('../../src/shared/ledger.ts').LedgerRepairResult>=>request.action==='preview'?{ok:true,value:{id:'preview',sessionId:'session',mode:'restore',canCommit:true,warning:'确认授权新关联，不证明同一物理文件',rows:[{noteId:'n',relPath:'a.md',outcome:'history-only',reasons:['附件证明不足'],sources:[]}]}}:{ok:true,value:{status:'pending',revision:'revision',processed:4,total:6}})
- const page=mountVaultManager({body:root,isCurrent:()=>true},{get:async()=>({...view([entry('a')]),activeId:'a'}),open:async()=>{},pick:async()=>{},change:async()=>view([]),recovery:{state:async()=>({sessionId:'session',status:'ready',revision:null,items:[]}),repair}})
+ const root=document.createElement('div');document.body.append(root);let pending=false
+ const repair=vi.fn(async(request:import('../../src/shared/ledger.ts').LedgerRepairRequest):Promise<import('../../src/shared/ledger.ts').LedgerRepairResult>=>{
+  if(request.action==='preview')return {ok:true,value:{id:'preview',sessionId:'session',mode:'restore',canCommit:true,warning:'确认授权新关联，不证明同一物理文件',rows:[{noteId:'n',relPath:'a.md',outcome:'history-only',reasons:['附件证明不足'],sources:[]}]}}
+  pending=true;return {ok:true,value:{status:'pending',revision:'revision',processed:4,total:6}}
+ })
+ const page=mountVaultManager({body:root,isCurrent:()=>true},{get:async()=>({...view([entry('a')]),activeId:'a'}),open:async()=>{},pick:async()=>{},change:async()=>view([]),recovery:{state:async()=>({sessionId:'session',status:pending?'pending':'ready',revision:pending?'revision':null,items:[],...(pending?{operation:{kind:'ledger-repair',source:'',target:''}}:{})}),repair}})
  await flush();const click=(text:string)=>[...root.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent===text)!.click()
  click('预览整库恢复');await flush();expect(root.textContent).toContain('不证明同一物理文件');expect(root.textContent).toContain('附件证明不足')
  click('确认授权新关联');await flush();expect(repair).toHaveBeenLastCalledWith({sessionId:'session',action:'commit',previewId:'preview'});expect(root.textContent).toContain('可暂停并离开本库');expect(page.isBusy()).toBe(false)
@@ -286,4 +290,30 @@ it('offers a fresh preview after dirty commit fails and refreshes actual pending
  expect([...root.querySelectorAll('button')].some(b=>b.textContent==='预览整库恢复')).toBe(true);expect(root.textContent).toContain('重新预览')
  pending=true;click('预览整库恢复');await flush();click('确认授权新关联');await flush();click('核验并继续一批');await flush()
  expect(repair).toHaveBeenLastCalledWith({sessionId:'session',action:'resume',revision:'latest'})
+})
+
+it('keeps a new pending journal visible after the preceding recovery completed',async()=>{
+ const root=document.createElement('div');document.body.append(root)
+ let revision='old-journal'
+ const state=vi.fn(async()=>({sessionId:'session',status:'pending' as const,revision,operation:{kind:'ledger-repair' as const,source:'',target:''},items:[]}))
+ const repair=vi.fn(async():Promise<import('../../src/shared/ledger.ts').LedgerRepairResult>=>{
+  revision='new-publication';return {ok:true,value:{status:'complete',revision:null,processed:2,total:2}}
+ })
+ mountVaultManager({body:root,isCurrent:()=>true},{get:async()=>view([]),open:async()=>{},pick:async()=>{},change:async()=>view([]),recovery:{state,repair}})
+ await flush()
+ const resume=()=>[...root.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent==='核验并继续一批')
+ resume()!.click();await flush()
+ expect(root.querySelector('.vault-settings-recovery')!.textContent).not.toContain('恢复已完成')
+ expect(resume()).toBeDefined();expect(state).toHaveBeenCalledTimes(2)
+ resume()!.click();await flush()
+ expect(repair).toHaveBeenLastCalledWith({sessionId:'session',action:'resume',revision:'new-publication'})
+})
+
+it('does not declare recovery complete when its current status cannot be read',async()=>{
+ const root=document.createElement('div');document.body.append(root);let calls=0
+ const state=async()=>{if(calls++)throw Error('status unavailable');return {sessionId:'session',status:'pending' as const,revision:'old',operation:{kind:'ledger-repair' as const,source:'',target:''},items:[]}}
+ mountVaultManager({body:root,isCurrent:()=>true},{get:async()=>view([]),open:async()=>{},pick:async()=>{},change:async()=>view([]),recovery:{state,repair:async()=>({ok:true,value:{status:'complete',revision:null,processed:1,total:1}})}})
+ await flush();[...root.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent==='核验并继续一批')!.click();await flush()
+ expect(root.querySelector('.vault-settings-recovery')!.textContent).not.toContain('恢复已完成')
+ expect(root.textContent).toContain('恢复状态无法读取')
 })

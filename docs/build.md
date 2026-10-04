@@ -1140,6 +1140,8 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 - 必要相关集合命令为 `pnpm exec vitest run test/main/agent-host.test.ts test/main/vault.test.ts test/main/vault-mutation-queue.test.ts test/main/task-authorization.test.ts test/main/agent-authorization.test.ts test/main/memory-ipc.test.ts test/main/ipc-sender.test.ts test/shared/ipc-guard.test.ts test/shared/ipc-channel.test.ts`，9 文件 170／0（`/tmp/rgent-v4-B-host-targeted-final.log`）。类型、文档和窗口脚本语法检查另记 `/tmp/rgent-v4-B-host-types-final.log`、`/tmp/rgent-v4-B-host-docs-final.log`、`/tmp/rgent-v4-B-host-script-final.log`；只证明各自范围。
 - 既有 `RGENT_UI_LEDGER_RECOVERY_ONLY=1 pnpm ui:check` 增加真实 Host／本地受控 HTTP 流反例，以一次性库 POSIX 目录权限注入 registry 发布失败，检查活动任务拒绝、pending 保留、失败续跑和恢复后自动补存及一次派发。只做脚本语法检查，尚未 build 或跑窗口；该权限注入不覆盖 Windows，Windows 专属注入仍待补核。完整测试、构建与窗口由总任务串行接续；没有付费调用、push 或 CI，不开放 A+，阶段和既有人工待核不变。
 
+包 B 恢复反馈补核（2026-10-05，基线 `94e981b`）：独立复审代理在完成最后报告前遇到账户额度限制，不记为通过。其已指出的具名问题由总任务复现：成功恢复之后的待保存回答补存再次中断，库页却以旧回执合成 ready；另有当前状态读取失败仍显示完成。两条反例在 `/tmp/rgent-v4-B-feedback-red.log` 真实失败。修补后库页读取当前 lifecycle 状态，保留新意图的续跑入口；状态不可读则诊断，不使用旧成功回执覆盖。定向 `pnpm exec vitest run test/renderer/vault-manager.test.ts` 为 39／0（`/tmp/rgent-v4-B-feedback-green.log`），类型检查通过（`/tmp/rgent-v4-B-feedback-types.log`）。旧暂停进度夹具改为返回实际 pending 状态，原断言保留；构建窗口及最终独立复核尚未通过，不开放 A+。
+
 事实校正：生产 structured context 允许空／部分摘要，撤回“生产自旋”判定；精确缓存复用仍需修。原正式运行未用保留集调提示，但评分晚于运行及旧保留集已被审阅须留档。压缩／清理授权已在合同记忆节，缺口是预览和保护。历史评分与失败不得改写。
 
 实验授权：最多 480 实际调用，从已用 816／1440 的余额 624 扣；60 开发例（每组6）×2模型×2策略×最多2调用，首6关键例筛查最多48包含在480。MiniMax-M3／deepseek-flash 分别报告，不用旧保留集、不追加额度、不运行新正式评测。冻结案例、策略、提示、分类、评分和指纹后调用；无凭据连接诊断不稳则暂停。筛查零容忍即停，正例无改善且应用下降即停，无法判定报证据不足。完整对照逐模型：零容忍／任一正向组低于90%／总体未达95%且提升不到10百分点／正例应用下降超过5百分点，任一则停止策略；服务故障留分母。试验通过只表示值得继续，不发布生产默认；新的正式评测与独立保留集须另行授权。

@@ -62,7 +62,18 @@ export function mountVaultManager(context: {
     if(!alive()||state&&state.sessionId!==request.sessionId)return
     if(state)recoveryState=state
     showRecovery();throw Error(result.error==='UNSAVED_DRAFT'?'RECOVERY_UNSAVED_DRAFT':result.error)
-  }if(result.value&&'rows'in result.value){recoveryPreview=result.value;showRecovery()}else if(result.value&&'processed'in result.value){const progress=result.value;recoveryPreview=null;recoveryState={...recoveryState!,status:progress.status==='complete'?'ready':'pending',revision:progress.revision,operation:progress.status==='complete'?undefined:{kind:'ledger-repair',source:'',target:''}};showRecovery();recoveryMessage.textContent=progress.status==='complete'?'恢复已完成。账本和合格来源已核验；未通过的来源仍暂停。':`已核验 ${progress.processed} / ${progress.total} 项。可暂停并离开本库，进度保留；如有窗口稿，请先继续恢复，再保存后离库。`}}
+  }if(result.value&&'rows'in result.value){recoveryPreview=result.value;showRecovery()}else if(result.value&&'processed'in result.value){
+    const progress=result.value;recoveryPreview=null
+    // Completing one intent may trigger a pending-answer save which creates a
+    // different intent. The current lifecycle, not the previous receipt, owns UI state.
+    const state=await handlers.recovery!.state().catch(()=>null)
+    if(!alive()||state&&state.sessionId!==request.sessionId)return
+    recoveryState=state??{sessionId:request.sessionId,status:'invalid',revision:null,items:[]}
+    showRecovery()
+    if(!state)recoveryMessage.textContent='本次操作已返回，但当前恢复状态无法读取。请重新打开本页检查；已有回答和恢复记录保留。'
+    else if(progress.status==='complete'&&state.status==='ready')recoveryMessage.textContent='恢复已完成。账本和合格来源已核验；未通过的来源仍暂停。'
+    else if(progress.status==='pending'&&state.status==='pending'&&state.revision===progress.revision)recoveryMessage.textContent=`已核验 ${progress.processed} / ${progress.total} 项。可暂停并离开本库，进度保留；如有窗口稿，请先继续恢复，再保存后离库。`
+  }}
   function showRecovery(){
     recovery.hidden=!recoveryState;recoveryRows.replaceChildren();recoveryActions.replaceChildren();if(!recoveryState)return
     const sessionId=recoveryState.sessionId
