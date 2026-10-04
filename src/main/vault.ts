@@ -289,7 +289,15 @@ export class VaultSession {
   async ledgerContexts(relPath:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.contexts(relPath)}
   async ledgerPage(relPath:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);return {...this.ledgerStore!.wirePage(relPath,cursor),...(this.ledgerFailure?{maintenanceError:this.ledgerFailure}:{})}})}
 
-  async materialUnit(relPath:string,start:number,end:number){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();const record=this.workingMemory!.read().record;return this.ledgerStore!.materialUnit(relPath,start,end,{watermark:record.watermark,forgotten:record.forgotten.flatMap(f=>f.materialIds)})})}
+  async materialUnit(relPath:string,start:number,end:number,proof?:Pick<import('./host-material.ts').SentFragment,'text'|'hash'|'objectVersion'|'classification'>){const token=this.captureSession();return this.mutations.run(async()=>{
+    this.assertSession(token);this.requireStableStructure();let check:()=>void=()=>this.assertSession(token)
+    if(proof){const root=this.requireUsableRoot(),fs=secureFsFor(root);verifyOrdinaryNotes(root,[relPath]);const permission=await loadPermissionSnapshot(root)
+      if(permission.state.status!=='ready'||tierFor(fs.resolve(relPath).map(c=>c.name).join('/'),effectivePermissionEntries(root,permission.state.entries))==='forbidden')throw Error('MEMORY_SOURCE_CHANGED')
+      try{if(!await modelTierFor(root,relPath))throw Error('MEMORY_SOURCE_CHANGED')}catch{throw Error('MEMORY_SOURCE_CHANGED')}
+      check=()=>{this.assertSession(token);this.requireStableStructure();let raw:string|null=null;try{raw=fs.readText('.rgent-permissions')}catch(e){if(!(e instanceof Error&&e.message==='ENOENT'))throw Error('MEMORY_SOURCE_CHANGED')}if(raw!==permission.raw)throw Error('MEMORY_SOURCE_CHANGED')}
+    }
+    check();const record=this.workingMemory!.read().record;return this.ledgerStore!.materialUnit(relPath,start,end,{watermark:record.watermark,forgotten:record.forgotten.flatMap(f=>f.materialIds)},proof,(p,b,a)=>this.acceptsObject(p,b,a),check)
+  })}
   materialCeiling(){const state=this.materialState();if(state.status==='invalid')throw Error(state.reason);return state.sequence}
   materialState(){this.requireUsableRoot();const state=this.ledgerStore!.materialState();if(state.status==='invalid')return state;try{const record=this.workingMemory!.read().record;if(state.sequence<record.nextSequence||state.sequence<record.watermark)return {status:'invalid' as const,reason:'LEDGER_REGISTRY_INVALID'}}catch{/* Invalid memory remains diagnosable and explicitly resettable only against a verified material ceiling. */}return state}
   ledgerTaskPath(taskId:string){this.requireUsableRoot();return this.ledgerStore!.taskPath(taskId)}

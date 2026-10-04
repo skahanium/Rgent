@@ -82,7 +82,7 @@ export class WorkingMemoryConsolidation{
  constructor(private readonly ports:ConsolidationPorts){}
  capture(taskId:string){
   this.discard(taskId)
-  try{if(this.closed||this.permits.size>=128)return;const service=this.ports.service();if(!service)return
+  try{if(this.closed||this.permits.size+this.handoffs.size>=128)return;const service=this.ports.service();if(!service)return
    const context=service.context(),configuration=this.ports.configuration(context)
    if(!configuration.enabled||configuration.limits.tools!==0)return
    service.snapshot();this.failedMaterials.delete(taskId);this.permits.set(taskId,{service,context,configuration:structuredClone(configuration)})
@@ -94,25 +94,25 @@ export class WorkingMemoryConsolidation{
  failureJobs(){
   try{const context=this.ports.service()?.context();return [...this.failedMaterials.values()].filter(f=>f.context.sessionId===context?.sessionId&&f.context.vaultKey===context.vaultKey).map(f=>({...f.job}))}catch{return []}
  }
- private currentSession(permit:Permit){try{const current=permit.service.context();return !this.closed&&current.sessionId===permit.context.sessionId&&current.vaultKey===permit.context.vaultKey}catch{return false}}
- private async recordFailure(permit:Permit,taskId:string,reason:string){
-  if(!this.currentSession(permit))return
+ private async recordFailure(permit:Permit&{controller:AbortController;deadline:number},taskId:string,reason:string){
+  try{this.assert(permit)}catch{return}
   try{
-   const material=await permit.service.savedMaterial(permit.service.vault.ledgerTaskPath(taskId),taskId)
-   if(!this.currentSession(permit))return
-   await permit.service.vault.memoryMutation(store=>{if(!this.currentSession(permit))throw Error('MEMORY_SESSION_CLOSED');return store.receipt(store.read(),{taskId,materialVersion:material.materialVersion,outcome:'rejected',entryIds:[],reason:publicMemoryError(reason)})})
-  }catch{
-   if(!this.currentSession(permit))return
-   this.failedMaterials.set(taskId,{context:permit.context,job:{taskId,materialVersion:null,outcome:'unavailable',reason:'MEMORY_MATERIAL_UNVERIFIED',retryable:false}})
+   const material=await until(()=>permit.service.savedMaterial(permit.service.vault.ledgerTaskPath(taskId),taskId),permit.controller.signal)
+   this.assert(permit)
+   await until(()=>permit.service.vault.memoryMutation(store=>{this.assert(permit);return store.receipt(store.read(),{taskId,materialVersion:material.materialVersion,outcome:'rejected',entryIds:[],reason:publicMemoryError(reason)})}),permit.controller.signal)
+  }catch(error){
+   try{this.assert(permit)}catch{return}
+   this.failedMaterials.set(taskId,{context:permit.context,job:{taskId,materialVersion:null,outcome:'unavailable',reason:publicMemoryError(error),retryable:false}})
    while(this.failedMaterials.size>64)this.failedMaterials.delete(this.failedMaterials.keys().next().value!)
   }
-  this.notify(permit)
+  try{this.assert(permit);this.notify(permit)}catch{/* Cancellation after a valid receipt never creates another result. */}
  }
  async materialFailed(taskId:string,reason:string,sessionId?:string){
   const permit=this.permits.get(taskId)
-  // No captured learning intent, closed session or late result means no new work/receipt.
-  if(!permit||sessionId!==permit.context.sessionId||!this.currentSession(permit))return
-  this.permits.delete(taskId);await this.recordFailure(permit,taskId,reason)
+  // No captured learning intent or late result means no new work/receipt.
+  if(!permit||sessionId!==permit.context.sessionId)return
+  this.permits.delete(taskId)
+  return this.materialWork(permit,taskId,work=>this.recordFailure(work,taskId,reason))
  }
  discard(taskId:string){this.permits.delete(taskId)}
  disclosure(){const service=this.ports.service();if(!service)throw Error('NO_VAULT');const config=this.ports.configuration(service.context());if(!config.enabled)throw Error('MEMORY_DISABLED');return {signature:config.signature,recipient:{modelId:config.credential.modelId,host:new URL(config.credential.baseURL).host},limits:config.limits}}
@@ -134,20 +134,24 @@ export class WorkingMemoryConsolidation{
   if(!config.enabled)throw Error('MEMORY_DISABLED')
   if(config.signature!==job.configuration.signature)throw Error('MEMORY_PERMISSION_CHANGED')
  }
- handoff(material:SavedTaskMaterial):Promise<void>{
-  const controller=new AbortController()
-  const promise=this.performHandoff(material,controller).finally(()=>{this.handoffs.delete(promise);this.pump()})
-  this.handoffs.set(promise,{taskId:material.taskId,controller})
-  return promise
+ private materialWork(permit:Permit,taskId:string,operation:(work:Permit&{controller:AbortController;deadline:number})=>Promise<void>):Promise<void>{
+  const controller=new AbortController(),deadline=Date.now()+permit.configuration.limits.seconds*1000
+  const timer=setTimeout(()=>controller.abort(Error('MEMORY_DEADLINE')),Math.max(1,deadline-Date.now()))
+  // Register before the first proof runs so cancellation/idle owns every wait.
+  const promise=Promise.resolve().then(()=>operation({...permit,controller,deadline})).finally(()=>{clearTimeout(timer);this.handoffs.delete(promise);this.pump()})
+  this.handoffs.set(promise,{taskId,controller});return promise
  }
- private async performHandoff(material:SavedTaskMaterial,controller:AbortController){
+ handoff(material:SavedTaskMaterial):Promise<void>{
   const permit=this.permits.get(material.taskId);this.permits.delete(material.taskId)
-  if(!permit)return
+  return permit?this.materialWork(permit,material.taskId,work=>this.performHandoff(material,work)):Promise.resolve()
+ }
+ private async performHandoff(material:SavedTaskMaterial,permit:Permit&{controller:AbortController;deadline:number}){
+  const controller=permit.controller
   try{
-  this.assert({...permit,controller})
+  this.assert(permit)
   if(!material.context||material.context.sessionId!==permit.context.sessionId||material.context.vaultKey!==permit.context.vaultKey)throw Error('MEMORY_MATERIAL_UNVERIFIED')
-  const saved=await permit.service.savedMaterial(material.origin.relPath,material.taskId)
-  this.assert({...permit,controller})
+  const saved=await until(()=>permit.service.savedMaterial(material.origin.relPath,material.taskId),controller.signal)
+  this.assert(permit)
   if(saved.materialVersion!==material.materialVersion)throw Error('MEMORY_MATERIAL_CHANGED')
   const previous=permit.service.snapshot().record.jobs.find(j=>j.taskId===material.taskId&&j.materialVersion===material.materialVersion)
   if(previous?.outcome==='applied'||previous?.outcome==='queued'||previous?.outcome==='running')return

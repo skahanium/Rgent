@@ -23,3 +23,7 @@ it('distinguishes an unregistered empty ledger from verified ownership',async()=
  expect(ledgerEmptyText('unregistered')).toContain('尚未登记');expect(ledgerEmptyText('unregistered')).not.toContain('已核验')
  expect(ledgerEmptyText('verified')).toContain('已核验本篇归属')
 })
+
+it('explains output token, byte/proposal and queue limits separately from storage reserve exhaustion',()=>{
+ for(const [code,reason] of [['MEMORY_OUTPUT_TOKEN_LIMIT','输出'],['MEMORY_OUTPUT_LIMIT','输出'],['MEMORY_QUEUE_FULL','队列']]){const text=memoryErrorText(code);expect(text).toContain(reason);expect(text).not.toMatch(/遗忘空间|修订计数|普通修改已暂停/);expect(text).toMatch(/重试|再试/)}expect(memoryErrorText('MEMORY_FILE_LIMIT')).toContain('遗忘空间')
+})

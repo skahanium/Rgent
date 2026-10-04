@@ -1257,3 +1257,14 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 - body／ledger 千条分别核启动、召回、发送前已选 8 条复核、管理。真实快照读字节／文件读取与来源解码数字 `/tmp/rgent-v4-D-cost-numbers.jsonl`，最后探针 `...-performance-final.log`；指定 record 的程序 prompt 字段取代每来源 contexts 全历史扫描，原 command 移入 answer 后 entries／恢复／C 摘要都拒绝，原历史和无关回执正例保留。原 ledger 全历史基线测量外层 120 秒截尾、子测试超时，最后子进程 138.88 秒退出；阶段捕获召回 44.10 秒／1,001,000 个 ledger 读取、发送已选 8 条 0.84 秒／8008 个、管理 48.36 秒／1,002,000 个，不能称基线通过，未再次放大测量。指定记录后仍有同步管理成本、逐条原文件／权限及递归核验；不使用来源缓存或新增索引。
 
 类型、文档和最后文案定向分别记录 `...-types-final.log`、`...-docs-final.log`、`...-copy-final.log`。本包没有运行全量、build、实际窗口、真实模型、push 或 CI；付费调用 0，Q 未开。Windows、双平台 CI、系统关闭／强杀、原生输入法人工、用户视觉和正式学习质量仍待总任务统一门，不因本机定向通过结束阶段。
+
+
+包 D 独立复审统一修补（2026-10-05，基线 `84cf7fd`，待限定再审）：初版独立 Spec／Quality 未通过，I1／I2 两项 Important 与 M1／M2 两项 Minor 如实保留（`/tmp/rgent-v4-D-review-report.md`）。此次仍唯一串行 writer，不开放 Q。
+
+- 晚到 body fragment 将原 text／hash／object／classification 传入现有材料登记，实际库队列先核当前权限与真实别名门，再在同一快照唯一定位原文、取得旧身份／完整父依据及最早年龄；返回实际范围，发布前复核正文 raw＋对象及权限 raw。forgotten／watermark／包含依据不被旧偏移重新分配年龄绕过，合法移位与真正新独立内容保留。真实目录权限及硬链接别名在登记前生效时拒绝，正文读取为 0，材料状态仍 empty；当前真实别名门抛错，不宣称 null 可达。
+- 新 materialFailed 与 handoff 复用既有 handoffs／controller／截止时间，失败工作接入 cancel／idle；每个等待后、真实 store.receipt 队列内及会话 unavailable／通知前核 enabled、signature、session 与取消状态。performHandoff.catch 保留同一取消证明。持久失败容量不足的仅会话结果按真实 MEMORY_FILE_LIMIT 分类，未知版本仍 null／不可重试；当前失败和普通保存正例保持。
+- 原报告“释放容量不自动晋升 deferred”错误已更正：纯容量 deferred 仍沿旧来源、依赖、reviewAt 和容量自动重核；不同新材料进入非 active 语义候选是另一入口，没有删除旧自动行为。OUTPUT_TOKEN_LIMIT／OUTPUT_LIMIT／QUEUE_FULL 恢复真实输出／字节提议数／16 pending 队列说明，只有 FILE_LIMIT 说明遗忘预留与数值余量。合法终态不能持久 review 时本次召回安全过滤、原 raw 保留，不能扩称所有合法状态必持久降级。
+- 有效初版 red 3 文件 15 失败／66 未选（`/tmp/rgent-v4-D-fix-red.log`），最小 green 同范围 15／0（`...-fix-green1.log`）；真实输出、队列及终态 2 文件 4／0（`...-fix-output-terminal-green.log`）。目录权限实际队列 red 1 失败、正文读 13 次（`...-fix-permission-red-final.log`）；最后原文身份、目录权限及实际先落盘硬链接 7／0（`...-fix-permission-alias-green-final.log`）。初版文件权限 setter／未 await 及硬链接夹具入队错序、随后临时库清理失败单列保留，不能作产品有效 red；没有因此改权限基础架构。
+- 最终必要命令：`pnpm exec vitest run test/main/working-memory-service.test.ts test/main/working-memory-consolidation.test.ts test/main/memory-use.test.ts test/main/ledger-store.test.ts test/main/vault.test.ts test/main/memory-ipc.test.ts test/main/working-memory-session.test.ts test/shared/memory-errors.test.ts -t '^(?!measures 1000)'`，8 文件 252 通过／2 主动未选（`...-fix-targeted-final2.log`）；未选是旧 body／ledger 千条性能，不是平台 skip。`pnpm exec tsc --noEmit` 无错误（`...-fix-types-final2.log`），最终文档／diff 见 `...-fix-docs-final.log`、`...-fix-diff-final.log`。完整追加报告 `/tmp/rgent-v4-D-report.md`；此前 329、容量与性能数字保留原适用范围，不与本次相加；新增登记复核成本未重测。
+
+本次未改容量编码／终态／恢复 patch 规则，未重跑千条慢例、原 329、性能、全量、build、实际 UI 或付费调用。无新增格式／依赖／IPC／页／分支／worktree／专题文档，仅本地提交、不推送／CI。D 仍待固定 diff 再审，Q 未开；当前阶段、全部平台人工与真实质量待核保持。

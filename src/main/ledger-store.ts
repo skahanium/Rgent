@@ -153,21 +153,29 @@ export class LedgerStore{
   owner.objectVersion=after;owner.bodyRevision=digest(body);owner.anchors=this.anchors(body);this.publish(registry,owner)
  }
  relocate(from:string,to:string,objectVersion:string){const registry=this.registry(),owner=registry.owners.find(o=>o.relPath===from&&o.objectVersion===objectVersion);if(!owner)return;const current=this.fs.readSnapshot(to);if(current.objectVersion!==objectVersion)throw Error('LEDGER_OWNERSHIP_UNVERIFIED');owner.relPath=to;this.publish(registry,owner)}
- materialUnit(relPath:string,start:number,end:number,controls:{watermark:number;forgotten:readonly string[]}={watermark:0,forgotten:[]}){
-  if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<=start)throw Error('BAD_REQUEST')
+ materialUnit(relPath:string,start:number,end:number,controls:{watermark:number;forgotten:readonly string[]}={watermark:0,forgotten:[]},proof?:Pick<import('./host-material.ts').SentFragment,'text'|'hash'|'objectVersion'|'classification'>,acceptsObject:(path:string,before:string,after:string)=>boolean=(_p,b,a)=>b===a,beforeUse:()=>void=()=>{}){
+  beforeUse();if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<=start)throw Error('BAD_REQUEST')
   this.materialCeiling()
-  const owner=this.owner(relPath),file='.rgent/materials.json',units=this.materialUnits()
-  const body=this.fs.readSnapshot(relPath).bytes.toString(),text=body.slice(start,end);if(end>body.length||!text)throw Error('BAD_REQUEST');const hash=digest(text)
+  beforeUse();const note=this.fs.readSnapshot(relPath),body=note.bytes.toString()
+  if(proof){
+   if(!proof.text||proof.text.length!==end-start||digest(proof.text)!==proof.hash||proof.classification==='ai'||!acceptsObject(relPath,proof.objectVersion,note.objectVersion))throw Error('MEMORY_SOURCE_CHANGED')
+   const parsed=compile(body);if(parsed.stale)throw Error('MEMORY_SOURCE_CHANGED');const raw=parsed.partition.body
+   if(raw.slice(start,end)!==proof.text){start=raw.indexOf(proof.text);if(start<0||raw.indexOf(proof.text,start+1)>=0)throw Error('MEMORY_SOURCE_CHANGED');end=start+proof.text.length}
+   const block=parsed.index.blocks.find(b=>b.range.start<=start&&b.range.end>=end);if(!block||block.identity==='ai'||proof.classification==='command'&&block.identity!=='command')throw Error('MEMORY_SOURCE_CHANGED')
+  }
+  beforeUse();const owner=this.owner(relPath),file='.rgent/materials.json',units=this.materialUnits(),text=body.slice(start,end);if(end>body.length||!text)throw Error('BAD_REQUEST');const hash=digest(text)
+  const current=()=>{beforeUse();const next=this.fs.readSnapshot(relPath);if(next.objectVersion!==note.objectVersion||!next.bytes.equals(note.bytes))throw Error('MEMORY_SOURCE_CHANGED')}
+  current()
   const parents=units.filter(u=>u.noteId===owner.noteId&&u.hash&&u.start>=start&&u.end<=end&&digest(body.slice(u.start,u.end))===u.hash&&body.indexOf(body.slice(u.start,u.end))===u.start&&body.indexOf(body.slice(u.start,u.end),u.start+1)<0)
   const inherited=(unit:MaterialUnit)=>{const basisGroups=[...new Set(parents.filter(u=>u.id!==unit.id).map(u=>u.id))];if(basisGroups.length>16)throw Error('MEMORY_SOURCE_LIMIT');return {...unit,basisGroups,age:Math.min(unit.sequence,...parents.map(u=>u.sequence))}}
-  const known=units.find(u=>u.noteId===owner.noteId&&u.start===start&&u.end===end&&u.hash===hash);if(known)return inherited(known);if(parents.length>16)throw Error('MEMORY_SOURCE_LIMIT')
+  const known=units.find(u=>u.noteId===owner.noteId&&u.start===start&&u.end===end&&u.hash===hash);if(known){current();return inherited(known)}if(parents.length>16)throw Error('MEMORY_SOURCE_LIMIT')
   // Birth offsets of an unhashed old unit may be stale. Unknown is not empty.
   // A registered new region established by a controlled real edit is an exit.
   const newRegion=units.some(u=>u.noteId===owner.noteId&&u.hash&&u.start<=start&&u.end>=end&&digest(body.slice(u.start,u.end))===u.hash&&units.filter(p=>p.noteId===owner.noteId&&!p.hash).every(p=>u.sequence>p.sequence))
   if(!newRegion&&units.some(u=>u.noteId===owner.noteId&&!u.hash&&(u.sequence<=controls.watermark||controls.forgotten.includes(u.id))))throw Error('MEMORY_MATERIAL_UNVERIFIED')
   if(units.length>=100000)throw Error('MEMORY_SOURCE_LIMIT')
-  const registry=this.registry();registry.sequence++;if(!Number.isSafeInteger(registry.sequence))throw Error('LEDGER_RECORD_LIMIT');const row=registry.owners.find(o=>o.noteId===owner.noteId)!;row.sequenceCeiling=registry.sequence;this.publish(registry,row)
-  const unit={id:randomUUID(),noteId:owner.noteId,start,end,sequence:registry.sequence,hash};units.push(unit);this.replace(file,JSON.stringify({version:1,units}));return inherited(unit)
+  const registry=this.registry();registry.sequence++;if(!Number.isSafeInteger(registry.sequence))throw Error('LEDGER_RECORD_LIMIT');const row=registry.owners.find(o=>o.noteId===owner.noteId)!;row.sequenceCeiling=registry.sequence;current();this.publish(registry,row)
+  const unit={id:randomUUID(),noteId:owner.noteId,start,end,sequence:registry.sequence,hash};units.push(unit);current();this.replace(file,JSON.stringify({version:1,units}));return inherited(unit)
  }
  private memoryBasisCurrent(basis:WorkingSnapshot){try{const disk=this.fs.readSnapshot('.rgent-memory');return disk.objectVersion===basis.objectVersion&&disk.bytes.toString()===basis.raw}catch{return false}}
  collectMaterials(basis:WorkingSnapshot,allowed:(relPath:string)=>boolean=()=>false,permissionRaw:string|null=null){

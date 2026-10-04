@@ -254,4 +254,9 @@ v4 C 独立审查修补：派生历史门递归核实际 ledger 与带任务身�
 
 材料登记复用现有 units 可选 SHA-256；受控前后正文中唯一原字节才能移动原 ID／分配号，实改登记新 ID／分配号。当前 owner 不是旧无 hash 单元的出生证据；只允许已登记 WorkingSource 的明确 materialId／原文 hash 补证，其他未知旧单位保留。受控实改可登记确证的新区域，不把原文移动算新材料。扩大选区显式继承可核验旧子单位的 basisGroups，数组严格最多 16 个合法 ID，超过拒绝不截断；WorkingSource.sequence 表达本材料与明确父依据的最早年龄，registry unit.sequence 始终是实际单调分配号。当前正文可重放原文保留最小 ID／hash／分配号；只有 covered、无条目或依据组引用、无进行中／中断恢复任务，并由受控 before／after 或已登记原任务 fragment 证明原文不存在、对象与权限可核验时才回收。未知和歧义不当不存在，保留项达到登记上限会暂停新增。hash 是原字节身份线索，不能代证语义同一或发送许可；遗忘不删除笔记／账本原文及其可重放 hash，也不留新的正文副本。
 
-账本来源直接核已验证的指定 record 生成字段，command 只能续接 prompt，移到 answer 的唯一文本不能通过；恢复和 C 派生摘要沿同字段核验。千条来源管理仍逐条核原文／权限，未引入来源缓存或磁盘索引。过期 review 与来源／依赖暂停状态真实提交；obsolete、disputed、deferred 的既有状态可由新获准且来源可核验的材料进入语义复核，不自动恢复旧内容。Host 保存后的材料失败沿原 onTaskMaterialResult→consolidation→memoryChanged/get 接线：当前已授权整理意图且版本重新核验成功才持久 rejected，可重新披露并重试当前材料；版本不可核验只保留最多 64 个当前会话 unavailable，无版本、不可重试。关闭／换会话／晚到回执不得发布到新会话，普通任务保存不依赖这条整理反馈成功。
+账本来源直接核已验证的指定 record 生成字段，command 只能续接 prompt，移到 answer 的唯一文本不能通过；恢复和 C 派生摘要沿同字段核验。千条来源管理仍逐条核原文／权限，未引入来源缓存或磁盘索引。过期 review 与来源／依赖暂停在行政写容量／修订门允许时真实提交，提交失败仍按本次核验过滤；obsolete、disputed、deferred 的既有状态可由新获准且来源可核验的材料进入语义复核，纯容量 deferred 的旧来源自动重核保持。Host 保存后的材料失败沿原 onTaskMaterialResult→consolidation→memoryChanged/get 接线：当前已授权整理意图且版本重新核验成功才持久 rejected，可重新披露并重试当前材料；版本不可核验只保留最多 64 个当前会话 unavailable，无版本、不可重试。关闭／换会话／晚到回执不得发布到新会话，普通任务保存不依赖这条整理反馈成功。
+
+
+v4 D 独立复审统一修补（2026-10-05，基线 `84cf7fd`，待限定再审）：body fragment 的原文／hash／对象及分类在已有库队列实际登记时核验，先定位当前唯一区间，再用同一真实快照取得或分配 unit 与完整父依据；读／发布前复读字节与对象，不先按旧偏移登记另一段文本。队列实际执行时重核当前来源权限与真实别名，权限原字节在正文读取与登记发布前再核，入队前的旧许可不能继续生效；来源唯一受控移位、旧水位年龄与新独立材料出口保留。材料失败反馈复用已有 handoffs 集合／controller／时限，cancel／idle 包含这项等待；每次等待后、receipt 实际队列及仅会话反馈前调用当前 session／enabled／signature／controller 核验。取消或撤销不新增失败，已合法历史回执保留；存储失败按实际错误分类，不把容量拒绝说成来源无法核验。
+
+纯容量 deferred 在 edit／forget／整理完成后仍自动重核旧来源、依赖、reviewAt 与空余 token 容量，满足时可恢复 active；它不同于非 active 内容凭新材料进入语义候选复核。reconcile 降级一般会持久提交，合法满文件或数值终态可能拒绝非减量行政写；此时仅本次核验结果安全过滤，raw 保留，不能宣称所有合法状态均已持久 review／paused。没有新增格式／代际或强制 reset。

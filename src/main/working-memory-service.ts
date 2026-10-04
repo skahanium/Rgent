@@ -161,10 +161,10 @@ export class WorkingMemoryService{
  async sourceForFragment(fragment:import('./host-material.ts').SentFragment):Promise<WorkingSource>{
   this.context()
   if(fragment.classification==='ai')throw Error('MEMORY_SOURCE_UNCONFIRMED')
-  let materialId:string,sequence:number,basisGroups:string[]|undefined
+  let materialId:string,sequence:number,basisGroups:string[]|undefined,start=fragment.start,end=fragment.end
   if(fragment.kind==='ledger'){if(!fragment.taskId)throw Error('MEMORY_MATERIAL_UNVERIFIED');const r=await this.vault.ledgerRecord(fragment.relPath,fragment.taskId);if(r.state!=='saved'||r.sequence<1)throw Error('MEMORY_MATERIAL_UNVERIFIED');materialId=fragment.taskId+'/prompt';sequence=r.sequence}
-  else{const u=await this.vault.materialUnit(fragment.relPath,fragment.start,fragment.end);materialId=u.id;sequence=u.age;basisGroups=u.basisGroups}
-  const source:WorkingSource={id:randomUUID(),version:1,relPath:fragment.relPath,objectVersion:fragment.objectVersion,revision:fragment.revision,permissionTier:fragment.permissionTier,kind:fragment.kind,taskId:fragment.taskId,taskMaterialHash:null,classification:fragment.classification==='command'?'command':'human',start:fragment.start,end:fragment.end,text:fragment.text,hash:fragment.hash,basisHash:hash(materialId),materialId,sequence,...(basisGroups?.length?{basisGroups}:{}),sourceDeps:fragment.sourceDeps.map(d=>({...d,permissionTier:'reference' as const})),memoryDeps:fragment.memoryDeps.map(d=>({id:d.id,version:d.version}))}
+  else{const u=await this.vault.materialUnit(fragment.relPath,fragment.start,fragment.end,fragment);materialId=u.id;sequence=u.age;basisGroups=u.basisGroups;start=u.start;end=u.end}
+  const source:WorkingSource={id:randomUUID(),version:1,relPath:fragment.relPath,objectVersion:fragment.objectVersion,revision:fragment.revision,permissionTier:fragment.permissionTier,kind:fragment.kind,taskId:fragment.taskId,taskMaterialHash:null,classification:fragment.classification==='command'?'command':'human',start,end,text:fragment.text,hash:fragment.hash,basisHash:hash(materialId),materialId,sequence,...(basisGroups?.length?{basisGroups}:{}),sourceDeps:fragment.sourceDeps.map(d=>({...d,permissionTier:'reference' as const})),memoryDeps:fragment.memoryDeps.map(d=>({id:d.id,version:d.version}))}
   if(!await this.verifySource(source))throw Error('MEMORY_SOURCE_CHANGED');this.context();return source
  }
  async savedMaterial(relPath:string,taskId:string):Promise<import('./host-material.ts').SavedTaskMaterial>{
