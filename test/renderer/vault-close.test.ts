@@ -109,3 +109,89 @@ it('an old restore completion cannot acknowledge or unlock a newer restoration g
  await vi.waitFor(()=>expect(api.vaultTransitionDone).toHaveBeenCalledWith({id:'second',sessionId:'second',outcome:'ready'}))
  expect(api.vaultTransitionDone).toHaveBeenCalledTimes(1);expect(root.querySelector('.tab')?.textContent).toContain('second')
 })
+
+async function diagnosedPositionWithNotes() {
+ api.vaultWorkspaceGet=async()=>({version:1,tabs:[{relPath:'one.md'},{relPath:'two.md'}],active:'one.md',sidebarHidden:true,treeScroll:0,resourceScroll:0})
+ api.noteRead=async(relPath:string)=>({content:relPath,revision:'r',objectVersion:relPath,sessionId:'old'})
+ api.lifecycleStatus=async()=>{throw Error('lifecycle unavailable')}
+ await start(root)
+ expect(root.querySelector<HTMLElement>('.workspace-recovery')!.hidden).toBe(false)
+ return root.querySelector<HTMLButtonElement>('.workspace-recovery button')!
+}
+it('manual restore button immediately protects the query, bounds it and retains new same-session editing and reading after timeout',async()=>{
+ const button=await diagnosedPositionWithNotes();let resolve!:(value:any)=>void
+ api.vaultGet=()=>new Promise(r=>{resolve=r});vi.useFakeTimers();try{
+ button.click();expect(root.inert).toBe(true)
+ await vi.advanceTimersByTimeAsync(10_001);expect(root.inert).toBe(false)
+ const second=[...root.querySelectorAll<HTMLButtonElement>('.tab')].find(b=>b.textContent?.includes('two'))!;second.click()
+ editorHarness.text='new same-session draft';editorHarness.change!('new same-session draft')
+ resolve({status:'ready',rootName:'old',sessionId:'old',vaultChanged:true});await vi.advanceTimersByTimeAsync(1)
+ expect(editorHarness.text).toBe('new same-session draft');expect(root.querySelector('.tab[aria-selected="true"]')?.textContent).toContain('two')
+ expect(root.querySelectorAll('.tab')).toHaveLength(2);expect(root.inert).toBe(false)
+ }finally{vi.useRealTimers()}
+})
+it.each(['success','failure'] as const)('late manual restore query %s cannot reset a new vault draft or replace its notice',async outcome=>{
+ const button=await diagnosedPositionWithNotes();let resolve!:(value:any)=>void,reject!:(value:any)=>void
+ api.vaultGet=()=>new Promise((yes,no)=>{resolve=yes;reject=no});vi.useFakeTimers();try{
+ button.click();await vi.advanceTimersByTimeAsync(10_001)
+ api.vaultGet=async()=>({status:'ready',rootName:'new',sessionId:'new',vaultChanged:true})
+ api.lifecycleStatus=async()=>({status:'ready',sessionId:'new'})
+ api.vaultWorkspaceGet=async()=>({version:1,tabs:[{relPath:'new.md'}],active:'new.md',sidebarHidden:true,treeScroll:0,resourceScroll:0})
+ api.noteRead=async(relPath:string)=>({content:'new body',revision:'r',objectVersion:relPath,sessionId:'new'})
+ handlers.onVaultTransition(true,'new',{busy:true,session:'new',phase:'restoring',restoreId:'new'})
+ await vi.advanceTimersByTimeAsync(1);expect(api.vaultTransitionDone).toHaveBeenCalledWith({id:'new',sessionId:'new',outcome:'ready'})
+ handlers.onVaultTransition(false,'new',{busy:false,session:'new',phase:'idle'})
+ editorHarness.text='new vault draft';editorHarness.change!('new vault draft')
+ const notice=root.querySelector('.status-host-notice')?.textContent,positions=api.vaultWorkspaceSave.mock.calls.length
+ if(outcome==='success')resolve({status:'ready',rootName:'old',sessionId:'old',vaultChanged:true});else reject(Error('old query failure'))
+ await vi.advanceTimersByTimeAsync(1)
+ expect(editorHarness.text).toBe('new vault draft');expect(root.querySelector('.tab')?.textContent).toContain('new')
+ expect(root.querySelector('.status-host-notice')?.textContent).toBe(notice);expect(root.inert).toBe(false);expect(api.vaultWorkspaceSave.mock.calls.length).toBe(positions)
+ }finally{vi.useRealTimers()}
+})
+it.each(['success','failure'] as const)('a newer native restore id retires an older still-pending query %s immediately',async outcome=>{
+ await start(root);let firstResolve!:(value:any)=>void,firstReject!:(value:any)=>void,secondResolve!:(value:any)=>void
+ let reads=0;api.vaultGet=()=>++reads===1?new Promise((yes,no)=>{firstResolve=yes;firstReject=no}):new Promise(yes=>{secondResolve=yes})
+ handlers.onVaultTransition(true,'old',{busy:true,session:'old',phase:'restoring',restoreId:'R1'})
+ handlers.onVaultTransition(true,'old',{busy:true,session:'old',phase:'restoring',restoreId:'R2'})
+ const notice=root.querySelector('.status-host-notice')?.textContent
+ const next={status:'ready',rootName:'old',sessionId:'old'}
+ if(outcome==='success')firstResolve(next);else firstReject(Error('old native query failure'))
+ await Promise.resolve();await Promise.resolve();await Promise.resolve()
+ expect(api.vaultTransitionDone).not.toHaveBeenCalled();expect(root.querySelector('.status-host-notice')?.textContent).toBe(notice);expect(root.inert).toBe(true)
+ secondResolve(next)
+ await vi.waitFor(()=>expect(api.vaultTransitionDone).toHaveBeenCalledWith({id:'R2',sessionId:'old',outcome:'ready'}))
+ expect(api.vaultTransitionDone).toHaveBeenCalledTimes(1)
+ handlers.onVaultTransition(false,'old',{busy:false,session:'old',phase:'idle'});expect(root.inert).toBe(false)
+})
+it('a current manual query failure retains drafts and its enabled button can retry successfully',async()=>{
+ const button=await diagnosedPositionWithNotes()
+ editorHarness.text='protected existing draft';editorHarness.change!('protected existing draft')
+ api.vaultGet=async()=>{throw Error('query failed')};button.click()
+ await vi.waitFor(()=>expect(root.inert).toBe(false));expect(editorHarness.text).toBe('protected existing draft');expect(root.querySelector<HTMLElement>('.workspace-recovery')!.hidden).toBe(false)
+ api.vaultGet=async()=>({status:'ready',rootName:'old',sessionId:'old',vaultChanged:true})
+ api.lifecycleStatus=async()=>({status:'ready',sessionId:'old'});button.click();expect(root.inert).toBe(true)
+ await vi.waitFor(()=>expect(root.inert).toBe(false))
+ expect(editorHarness.text).toBe('protected existing draft');expect(root.querySelectorAll('.tab')).toHaveLength(2);expect(root.querySelector<HTMLElement>('.workspace-recovery')!.hidden).toBe(true)
+ expect(api.vaultTransitionDone).not.toHaveBeenCalled()
+})
+it('a manual query returning another session diagnoses the mismatch without adopting it or resetting existing drafts',async()=>{
+ const button=await diagnosedPositionWithNotes();editorHarness.text='old draft';editorHarness.change!('old draft')
+ api.vaultGet=async()=>({status:'ready',rootName:'unexpected',sessionId:'other',vaultChanged:true});button.click()
+ await vi.waitFor(()=>expect(root.inert).toBe(false))
+ expect(editorHarness.text).toBe('old draft');expect(root.querySelectorAll('.tab')).toHaveLength(2);expect(root.querySelector('.tab[aria-selected="true"]')?.textContent).toContain('one')
+ expect(root.querySelector<HTMLElement>('.workspace-recovery')!.hidden).toBe(false)
+})
+it('native query timeout keeps the main transition gate and a new id can recover while late failure stays retired',async()=>{
+ await start(root);let reject!:(error:Error)=>void;api.vaultGet=()=>new Promise((_,no)=>{reject=no})
+ vi.useFakeTimers();try{
+ handlers.onVaultTransition(true,'old',{busy:true,session:'old',phase:'restoring',restoreId:'timeout-query'})
+ await vi.advanceTimersByTimeAsync(10_001);expect(root.inert).toBe(true);expect(api.vaultTransitionDone).not.toHaveBeenCalled()
+ api.vaultGet=async()=>({status:'ready',rootName:'old',sessionId:'old'})
+ handlers.onVaultTransition(true,'old',{busy:true,session:'old',phase:'restoring',restoreId:'retry-query'})
+ await vi.advanceTimersByTimeAsync(1);expect(api.vaultTransitionDone).toHaveBeenCalledWith({id:'retry-query',sessionId:'old',outcome:'ready'})
+ handlers.onVaultTransition(false,'old',{busy:false,session:'old',phase:'idle'});const notice=root.querySelector('.status-host-notice')?.textContent
+ reject(Error('late timeout rejection'));await vi.advanceTimersByTimeAsync(1)
+ expect(root.inert).toBe(false);expect(root.querySelector('.status-host-notice')?.textContent).toBe(notice);expect(api.vaultTransitionDone).toHaveBeenCalledTimes(1)
+ }finally{vi.useRealTimers()}
+})

@@ -1099,7 +1099,7 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 | B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `e04a02f` 最后实际队列修补独立 Spec／Quality 复核通过（2026-10-05）；定向 13 文件 261／0、类型／文档通过。打开 A+ 串行工程门；全部 B 实际窗口及整轮完整门仍待核，不能据此宣称整库恢复已完整验收 |
 | A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | `3c39531` 修补后的独立 Spec／Quality 再审通过（2026-10-05），3 项 Important 及目标消失路径闭合；必要 8 文件 205／0、类型／文档通过，打开 C 串行工程门。实际窗口及整轮完整门仍待核；初版 315／0、SSE 13／0及 core 20／0保留原范围 |
 | C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | `ba385f2` 三项 Important 修补后的独立 Spec／Quality 再审通过（2026-10-05）；必要 5 文件 133／0、类型及文档通过。原 9 文件 223／0、性能及失败保留各自范围；开放 E 串行工程门，实际窗口与整轮完整门仍待收口 |
-| E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 2026-10-05 本机接线及对照自查，必要 11 文件 204／0、类型／文档通过；待独立 Spec／Quality 复审及实际窗口／整轮完整门。D 保持未开 |
+| E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 2026-10-05 初版必要 11 文件 204／0；独立复审 Spec❌／Quality Needs fixes（Critical 0／Important 1／Minor 1）。恢复查询两项已修补，renderer 15／0、类型／文档通过；待再审及实际窗口／整轮完整门。D 保持未开 |
 | D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | 待 E 门；2026-10-04 |
 | Q | 虚构开发集双策略对照，逐模型停损与证据；不切生产策略、不运行正式评测 | 待 D 门；2026-10-04 |
 
@@ -1233,3 +1233,10 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 - 最终必要命令：`pnpm exec vitest run test/main/vault-close.test.ts test/main/vault-switch.test.ts test/main/vault-switch-main.test.ts test/main/vault-catalog.test.ts test/main/ipc-sender.test.ts test/shared/flush.test.ts test/shared/ipc-guard.test.ts test/shared/ipc-channel.test.ts test/renderer/vault-close.test.ts test/renderer/vault-manager.test.ts test/renderer/settings.test.ts`，11 文件 204／0（`/tmp/rgent-v4-E-targeted-final-current.log`）；`pnpm exec tsc --noEmit`（`...-types-final-current.log`）通过。文档检查另记 `...-docs-final.log`，完整报告 `/tmp/rgent-v4-E-report.md`。测试覆盖工作区 false／抛错、原生准备关闭、提交重复关闭、确认丢失重试、慢 tab／超时诊断、迟到旧完成、新根诊断、设置展开／焦点保留与两份正文冲突。
 
 本包只本地提交；没有全量、构建、真实 Electron 窗口、模型、推送或 CI。原生外观／实际鼠标关窗、Windows、输入法人工、用户视觉及学习质量继续待核，定向不代称整轮门。独立 Spec／Quality 复审由串行总任务接续，D／Q 尚未开，不结束库内记忆阶段。
+
+包 E 独立复审修补（2026-10-05，初版 `f71261c`，待再审）：
+
+- 复审发现手动恢复按钮在查询前未取得保护门，旧查询可在新库／同会话新编辑后重置草稿；原生 R1／R2 同时未返回查询时共用旧读取代际，旧成功或失败可抢先应用或覆盖新提示。原 findings 与初版 204 项证据保留，不能以初版通过销掉复审缺口。
+- 手动按钮与原生恢复事件复用同一查询入口，触发时立即保护交互并绑定原 session、独立查询代际、当前 restoreId 和状态读取代际。10 秒查询超时保留窗口稿、原位置与明确重试提示；新恢复 id／权威状态立即淘汰旧 query、catch 与 finally，旧查询不能应用状态或释放新门。同会话查询不重放提交标记；原生查询失败不伪造恢复确认，主进程既有有限重试／明确退出路径保持。
+- 修补前真实按钮及事件入口 red：`pnpm exec vitest run test/renderer/vault-close.test.ts -t 'manual restore|newer native restore'`，5 失败／7 未选，日志 `/tmp/rgent-v4-E-fix-red-query.log`。修后 `pnpm exec vitest run test/renderer/vault-close.test.ts`，1 文件 15／0，日志 `/tmp/rgent-v4-E-fix-green-final.log`；含当前查询正常恢复、失败保稿后按钮再试、会话不符诊断、超时保稿与原生新 id 重试，以及迟到成功／失败隔离。`pnpm exec tsc --noEmit`、`pnpm docs:check` 通过，日志 `/tmp/rgent-v4-E-fix-types-final.log`、`/tmp/rgent-v4-E-fix-docs-final.log`。首轮类型窄化失败不计有效 green。
+- 本次生产仅修改 renderer shell；main／shared、B、A+ 与 C 无变化，没有重复旧 204 项或全量／构建／UI／付费调用。DOM 证据不能代称实际 Electron 窗口，平台与人工待核项保持，D 未开。

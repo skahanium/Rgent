@@ -113,7 +113,7 @@ export async function start(root: HTMLElement): Promise<void> {
   const copyButton = root.querySelector('.note-save-copy') as HTMLButtonElement
   const discardButton = root.querySelector('.note-discard') as HTMLButtonElement
   const workspaceRecovery = root.querySelector('.workspace-recovery') as HTMLElement
-  workspaceRecovery.querySelector('button')!.addEventListener('click',()=>{if(!restoringWorkspace&&!transitionBusy)void window.rgent.vaultGet().then(applyState).catch(()=>{hostNotice='无法核验当前库，原位置记录和窗口稿已保留。请恢复库后重试。';workspaceRecovery.querySelector('span')!.textContent=hostNotice;updateStatus()})})
+  workspaceRecovery.querySelector('button')!.addEventListener('click',()=>{if(!restoringWorkspace&&!transitionBusy)void queryRestoreState()})
   const editorHostEl = root.querySelector('.editor-host') as HTMLElement
   const emptyEl = root.querySelector('.empty') as HTMLElement
   const outlineEl = root.querySelector('.outline') as HTMLElement
@@ -158,6 +158,9 @@ export async function start(root: HTMLElement): Promise<void> {
   // The gate starts before the initial vaultGet, and belongs to one apply call.
   let restoringWorkspace = true
   let stateSerial = 0
+  let restoreQuerySerial=0
+  let restoreQueryPending=false
+  let currentRestoreId:string|null=null
   let transitionBusy = false
   let transitionId:string|null=null
   let releasedSession: string | null | undefined
@@ -418,6 +421,7 @@ export async function start(root: HTMLElement): Promise<void> {
   })
   // The release may name the new mount before its ready reply reaches applyState.
   window.rgent.onVaultTransition((busy,session,state)=>{
+    if(busy&&!state.restoreId&&restoreQueryPending){restoreQuerySerial++;restoreQueryPending=false;currentRestoreId=null;restoringWorkspace=false}
     transitionId=busy?(state.operationId??transitionId):null
     releasedSession = !busy && session !== vaultSession ? session : undefined
     transitionBusy = busy || releasedSession !== undefined
@@ -427,10 +431,7 @@ export async function start(root: HTMLElement): Promise<void> {
       updateStatus()
     }
     syncInteractionGate()
-    if(state.restoreId){
-      const serial=stateSerial
-      void window.rgent.vaultGet().then(next=>{if(serial===stateSerial&&next.sessionId===session)return applyState({...next,restoreId:state.restoreId})}).catch(()=>{hostNotice='无法核验新库，交接保护仍保持。请在关闭提示中重试恢复。';updateStatus()})
-    }
+    if(state.restoreId)void queryRestoreState(state.restoreId,session)
   })
   window.rgent.onLifecycleFlushRequest((id, cleanUnavailablePaths, phase, context) => {
     if (phase?.startsWith('recovery-')) {
@@ -643,7 +644,40 @@ export async function start(root: HTMLElement): Promise<void> {
 
   await applyState(await window.rgent.vaultGet())
 
+  /** Query ownership starts at the gesture/event, before vaultGet can yield. */
+  async function queryRestoreState(restoreId?:string, targetSession?:string|null):Promise<void> {
+    const query=++restoreQuerySerial,serial=++stateSerial,sourceSession=vaultSession
+    const expectedSession=restoreId?targetSession:sourceSession
+    currentRestoreId=restoreId??null;restoreQueryPending=true;restoringWorkspace=true
+    vaultEpoch++
+    if(workspaceTimer!==null){clearTimeout(workspaceTimer);workspaceTimer=null}
+    syncInteractionGate()
+    const current=()=>root.isConnected&&restoreQueryPending&&query===restoreQuerySerial&&serial===stateSerial&&
+      vaultSession===sourceSession&&currentRestoreId===(restoreId??null)
+    let timer:ReturnType<typeof setTimeout>|undefined
+    try{
+      const next=await Promise.race([window.rgent.vaultGet(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('WORKSPACE_QUERY_TIMEOUT')),10_000)})])
+      if(!current())return
+      if((next.sessionId??null)!==expectedSession)throw Error('VAULT_CHANGED')
+      // Same-session retries must not replay a commit flag over retained drafts.
+      if(timer){clearTimeout(timer);timer=undefined}
+      const state=next.status==='ready'?{...next,vaultChanged:next.sessionId!==sourceSession&&next.vaultChanged}:next
+      await applyState({...state,...(restoreId?{restoreId}:{})})
+    }catch{
+      if(!current())return
+      hostNotice=restoreId?'无法核验新库，交接保护仍保持。请在关闭提示中重试恢复。':'当前库位置核验未完成，原位置记录和窗口稿已保留。请重试恢复位置。'
+      workspaceRecovery.querySelector('span')!.textContent=hostNotice;workspaceRecovery.hidden=false;updateStatus()
+    }finally{
+      if(timer)clearTimeout(timer)
+      if(current()){
+        restoreQuerySerial++;restoreQueryPending=false;currentRestoreId=null
+        restoringWorkspace=false;syncInteractionGate()
+      }
+    }
+  }
+
   async function applyState(state: VaultState): Promise<void> {
+    restoreQuerySerial++;restoreQueryPending=false;currentRestoreId=state.restoreId??null
     const serial = ++stateSerial
     let cleanupSerial=serial, diagnosed=false
     let restoreTimer:ReturnType<typeof setTimeout>|undefined
