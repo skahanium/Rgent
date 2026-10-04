@@ -1097,7 +1097,7 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 |---|---|---|
 | A | 打开不写盘，坏账本可读正文，磁盘尾部保护，可信材料三态，共享归档保护与诊断 | `8b5ed9c` 最终 Spec／Quality 复核通过，四项 P1 与诊断 P2 闭合。`47bd095` 范围的 7 文件 181 项、追加 `8b5ed9c` 早退诊断 45 项与类型分别记录，不合并为一次全量；窗口与最终完整门待收口 |
 | B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `e04a02f` 最后实际队列修补独立 Spec／Quality 复核通过（2026-10-05）；定向 13 文件 261／0、类型／文档通过。打开 A+ 串行工程门；全部 B 实际窗口及整轮完整门仍待核，不能据此宣称整库恢复已完整验收 |
-| A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | B 代码复审门通过，当前串行施工；2026-10-05 |
+| A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | `1ecc6fa` 本机接线及自查已交；14 文件 315／0、类型／文档通过，本机受控 SSE 2 文件 13／0；长期约定溢出加强反例另记 20／0，不相加。独立复核、实际窗口及整轮完整门待核，C 工程门仍未开放；2026-10-05 |
 | C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | 待 A+ 门；2026-10-04 |
 | E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 待 C 门；2026-10-04 |
 | D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | 待 E 门；2026-10-04 |
@@ -1158,3 +1158,21 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 最终先定向后串行 docs:check、完整 test、build、构建 ui:check。另记窗口、容量、恢复和性能证据。Windows、对应双平台 CI、原生输入法人工操作、用户视觉与正式学习质量分别待核，不结束阶段。
 
 包 B 最后独立复核（2026-10-05，受验 `e04a02f`，证据文档 `38e80fa`）：具名审查固定 `62d60a9..38e80fa`，Spec／Quality 均通过；实际 Host checkpoint／补存、生产与评测端口四参转发、队列内完整别名权限及最后同步绑定检查已闭合。审查未重复运行验证，未更改代码；报告 `/tmp/rgent-v4-B-queued-rereview.md`。A+ 工程施工门开放，B 真实窗口与整轮完整门仍待后续统一构建，全部平台／人工／质量待核项保持。
+
+
+包 A+ 本机接线与自查（2026-10-05，基线 `2bb4520`，代码受验 `1ecc6fa`）：
+
+- 预览在配置工具档之前核验记忆使用许可、有效非空快照及接收方本会话真实工具往返回执（含凭据摘要）；registry 冻结工具档和记忆签名，consume 在来源核验前后重核，Host 创建使用快照再核验。单篇只注册 `search_memory`，原 sources 不增加；外篇工具仍按原清单限定。协议未验证或空库使用本机召回，预算不升级。
+- 合法参数、唯一有效 call ID 且已注册才计记忆执行，最多四次；第五次在全局额度允许时返回拒绝，不调用检索。全局尝试、响应字节与模型步数仍限制任务。固定快照搜索相关的全部获准条目，包括未自动装入的长期约定，有界八条／2048 token；当前来源失效的未使用条目被过滤，实际返回或发送依赖改变则停止真实后续。返回归属、来源位置与本次核验状态，不承诺事实永久有效。
+- 账本 trace 和 tools 均记录“检索记忆”的执行／拒绝／失败、条目版本和有界结果摘要，memoryDeps 续接实际发送依赖。保留包 B 生产与评测 ledger prepare 四参绑定，未回退到无绑定。
+- 退休失败诊断沿用记忆页高级维护与已有 preview／commit：只对已识别的旧版对象提供一次性清除预览，绑定 owner、session、根身份、对象和整文件修订，在实际库队列临界区重核并 CAS；未知格式、替换对象、修订变化、会话迟到均保留原字节。原笔记／账本和设备设置保留，不保留旧记忆副本、不复活旧执行，不自动改变开关。共享错误码与易读文案接线，无新 IPC、页、依赖或存储实体。
+
+证据与失败保留：
+
+- 首轮 `memory-use / task-authorization / agent-host` 红灯 11 失败／78 通过，日志 `/tmp/rgent-v4-Aplus-search-red.log`；其中 Host 夹具缺少 session、全集任意失效都撤销的预期过宽，已纠正，不将它们当产品缺陷。修正夹具后用原 HEAD Host 重验，实际注册／执行限额／全局尝试反例 3 失败／27 通过，日志 `/tmp/rgent-v4-Aplus-host-red.log`；最小修补后同三文件 90／0。
+- 退休 typed action、对象／修订／会话、队列重核及已识别才显示入口，红灯 4 失败／120 通过，日志 `/tmp/rgent-v4-Aplus-retire-red.log`；首轮绿灯夹具在 attach 后未等初始化，目标被原自动退休处理，保留该失败；等既有队列收口后 4 文件 126／0。ledger 持久摘要反例红 1 失败／30 通过、易读工具名反例红 1 失败／31 通过，分别见 `/tmp/rgent-v4-Aplus-ledger-red.log`、`/tmp/rgent-v4-Aplus-label-red.log`；其后搜索与账本相关 5 文件 125／0。
+- 必要相关集合：`pnpm exec vitest run test/main/agent-host.test.ts test/main/agent-host-binding.test.ts test/main/memory-use.test.ts test/main/task-authorization.test.ts test/main/scoped-agent-tools.test.ts test/main/host-source.test.ts test/main/vault.test.ts test/main/memory-retirement.test.ts test/main/memory-ipc.test.ts test/main/memory-management.test.ts test/main/working-memory-service.test.ts test/renderer/memory-ui.test.ts test/renderer/authorization-popover.test.ts test/shared/memory-errors.test.ts`，14 文件 315／0，日志 `/tmp/rgent-v4-Aplus-final-targeted.log`；`pnpm exec tsc --noEmit` 无错误，`pnpm docs:check` 12 文件通过，日志 `/tmp/rgent-v4-Aplus-final-types.log`、`/tmp/rgent-v4-Aplus-final-docs.log`。来源证明期间的变更夹具先发生在结果快照前，允许过滤失效条目，预期拒绝过宽；改为核验回执产生后变更，核对下一次派发确实为零，不扩大 required 集合。
+- 本机 SSE：`pnpm exec vitest run test/main/model-stream.test.ts test/main/memory-management.test.ts` 首轮沙箱禁止 `127.0.0.1` 监听，10 失败／3 通过，原日志 `/tmp/rgent-v4-Aplus-integration-green.log`；允许本机受控监听后同命令 2 文件 13／0，日志 `/tmp/rgent-v4-Aplus-integration-green-unsandboxed.log`。既有三篇真实 SSE 工具往返之后，同一 Host 的单篇派发只含记忆工具；凭据变化不复用旧协议回执。无真实模型调用。
+- 自查加强已命名的长期约定溢出反例，确认自动召回未装入该条而工具仍能找到；首次固定填充夹具未实际耗满，调整为按现有估算填满后，`pnpm exec vitest run test/main/memory-use.test.ts` 20／0，日志 `/tmp/rgent-v4-Aplus-core-overflow-final.log`。这次仅加强测试，不改变已受验生产代码，不与 315／0 相加。
+
+本包只运行上述必要定向、类型、文档及 diff 核验；未 build、未运行完整测试或 Electron 窗口，未新增窗口专项脚本，未调用付费模型、push 或 CI。实际授权预览、单篇／外篇记忆工具、账本易读结果和退休预览的构建窗口证据由总任务统一接续；Windows、原生输入法、用户视觉和学习质量保持待核。独立复审仍待根任务固定 diff 后执行，不提前开放 C／E／D／Q 或结束当前阶段。
