@@ -81,7 +81,7 @@ flowchart LR
 
 2026-10-05 包 B 复核修补（`eacd3cb`）：`VaultSession.write` 在现有 mutation queue 中拒绝 `ledger-publication`／`ledger-repair` pending 或损坏日志下的正文替换。主进程恢复调用统一经 `VaultStructureGate.recover`：冻结窗口输入后，preview 真实保存并排空；commit 只接受无新草稿的原预览；resume 等待在途保存而保留脏 tab。全库写闸封闭后再次排空库队列，随后才读取预览／提交意图／续跑。本次扩展原 lifecycle flush 的严格阶段与 session／operation 令牌，resume 回执只表示护稿就绪，不冒充保存成功。恢复期间草稿仅在原 tab 内存中；失败不覆盖、不清日志，成功后保存原稿再离库。旧会话或旧操作释放不能解开新输入门，完整关闭协议仍属 E。
 
-2026-10-05 包 B Host 待保存恢复修补：`VaultStructureGate.recover` 统一持有 Host 恢复门，建立时立即拒绝新启动与新补存，等待已登记补存和启动收敛后重核活动状态及当前会话。只有显式 resume 接受已结束任务的 pending；preview／commit 仍拒绝，避免重新关联旧回答。失败保留输出和 journal；续跑完整完成后先释放两门，再在当前 VaultSession、根与会话仍匹配时调用既有补存。恢复成功和补存失败分别处理，失败仍保留 pending；不新建 grant、不重派发模型。`finishWrite` 在首次账本 prepare 前复核当前权限与原对象绑定，后续正文继续沿用 CAS 和对象连续性校验。完整关闭／切库协议仍留 E。
+2026-10-05 包 B Host 待保存恢复修补：`VaultStructureGate.recover` 统一持有 Host 恢复门，建立时立即拒绝新启动与新补存，等待已登记补存和启动收敛后重核活动状态及当前会话。只有显式 resume 接受已结束任务的 pending；preview／commit 仍拒绝，避免重新关联旧回答。失败保留输出和 journal；续跑完整完成后先释放两门，再在当前 VaultSession、根与会话仍匹配时调用既有补存。恢复成功和补存失败分别处理，失败仍保留 pending；不新建 grant、不重派发模型。Host 的流式 checkpoint 与 `finishWrite` 均把根、原会话、有效对象及整文件修订传入现有内部 prepare 端口；生产与虚构评测入口明确转发该绑定。`VaultSession.ledgerPrepare` 在实际 mutation queue 内复用完整 `modelTierFor`（包括同对象别名保护），流式 checkpoint 另核实际 TaskGrant；所有等待结束后同步复核 grant 存活、会话、根、生命周期、权限原字节、对象连续性和正文修订，随后同步调用 `LedgerStore.prepare`。已结束任务补存不携带已撤销 grant，仍须通过当前权限与绑定；没有新授权或模型发送。后续正文继续沿用 CAS 和对象连续性校验。完整关闭／切库协议仍留 E。
 
 workspace 的唯一性规则与寻址一致：有 id 行按 id 唯一，无 id 行仅在无 id 集合内按 path＋root 唯一；不同 id 可以保留同一物理根的历史行。旧无 id 迁移要求匹配旧登记及其已核验迁移证明，新登记、重新登记或新登记后的重定位不继承孤立旧行。成功写出的 workspace 可被同版本读回；无吞错、整文件删除或新身份授权。
 

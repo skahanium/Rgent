@@ -1096,7 +1096,7 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 | 包 | 缺口与反例／完成门 | 状态与受验证据 |
 |---|---|---|
 | A | 打开不写盘，坏账本可读正文，磁盘尾部保护，可信材料三态，共享归档保护与诊断 | `8b5ed9c` 最终 Spec／Quality 复核通过，四项 P1 与诊断 P2 闭合。`47bd095` 范围的 7 文件 181 项、追加 `8b5ed9c` 早退诊断 45 项与类型分别记录，不合并为一次全量；窗口与最终完整门待收口 |
-| B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `bdf0ea2` 初版已交；`fff8f53` 独立复核发现两项 Important 及一项 Minor，2026-10-05 修补代码 `eacd3cb` 已交，证据见下；仍待独立复审及整轮构建窗口／完整门，不开放 A+ |
+| B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `bdf0ea2` 初版与 `eacd3cb` 复核修补已交；2026-10-05 追加 Host 账本实际队列边界修补代码 `e04a02f`，证据见下；仍待独立复审及整轮构建窗口／完整门，不开放 A+ |
 | A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | 待 B 门；2026-10-04 |
 | C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | 待 A+ 门；2026-10-04 |
 | E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 待 C 门；2026-10-04 |
@@ -1141,6 +1141,15 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 - 既有 `RGENT_UI_LEDGER_RECOVERY_ONLY=1 pnpm ui:check` 增加真实 Host／本地受控 HTTP 流反例，以一次性库 POSIX 目录权限注入 registry 发布失败，检查活动任务拒绝、pending 保留、失败续跑和恢复后自动补存及一次派发。只做脚本语法检查，尚未 build 或跑窗口；该权限注入不覆盖 Windows，Windows 专属注入仍待补核。完整测试、构建与窗口由总任务串行接续；没有付费调用、push 或 CI，不开放 A+，阶段和既有人工待核不变。
 
 包 B 恢复反馈补核（2026-10-05，基线 `94e981b`）：独立复审代理在完成最后报告前遇到账户额度限制，不记为通过。其已指出的具名问题由总任务复现：成功恢复之后的待保存回答补存再次中断，库页却以旧回执合成 ready；另有当前状态读取失败仍显示完成。两条反例在 `/tmp/rgent-v4-B-feedback-red.log` 真实失败。修补后库页读取当前 lifecycle 状态，保留新意图的续跑入口；状态不可读则诊断，不使用旧成功回执覆盖。定向 `pnpm exec vitest run test/renderer/vault-manager.test.ts` 为 39／0（`/tmp/rgent-v4-B-feedback-green.log`），类型检查通过（`/tmp/rgent-v4-B-feedback-types.log`）。旧暂停进度夹具改为返回实际 pending 状态，原断言保留；构建窗口及最终独立复核尚未通过，不开放 A+。
+
+包 B 最后写入边界修补（2026-10-05，基线 `62d60a9`，受验代码 `e04a02f`）：
+
+- 具名复审指出最后 Host 权限预检与 prepare 实际执行间仍有排队空档。保留原 Host 预检，流式 checkpoint 与完成／补存共同传入根、会话、有效对象及整文件修订；生产 index、虚构评测 Host 端口和真实集成夹具均明确转发第四内部参数，缺绑定拒绝。评测直接保存也传现有笔记绑定，不携带正文副本。
+- 实际 `VaultSession.ledgerPrepare` 库队列内复用完整 `modelTierFor`，包括同对象硬链接／别名权限保护；流式保存核验实际 grant，授权依赖只读核验不回入库队列。全部等待后同步复核 grant、会话／根／生命周期、权限原字节、对象连续性及正文修订，再同步调用原 `LedgerStore.prepare`。已撤销 grant 不用于结束任务补存，仍按当前保存权限和原绑定拒写；未新建 grant、重发模型或改变恢复 journal。
+- 真实 Host／VaultSession／TaskGrant 反例：最后 tier 已读到 reference，人的禁止触碰／必须遵循修改先排入同一队列，之后 prepare 执行，旧代码写 owner／registry／任务回答；有效红灯 `/tmp/rgent-v4-B-queued-red-final.log` 为 2 失败／2 通过／71 跳过。同对象别名红灯 `/tmp/rgent-v4-B-queued-red-hardlink.log` 为 1 失败／75 跳过。追加 grant 等待后权限／坏名单／撤销／对象／正文修订／会话及实际 checkpoint 两例，以仅恢复旧 prepare 方法的基线对照取得 8 失败／76 跳过（`/tmp/rgent-v4-B-queued-red-extra-baseline.log`）；无 grant 的完成保存等待期间外部改权限对照为 1 失败／84 跳过（`/tmp/rgent-v4-B-queued-red-finalization.log`）。拒写时控制文件与回答未发布、完整输出仍 pending、授权和派发各一次；原恢复成功补存、晚到结果及未受影响保存断言保留。
+- 中间定向 8 文件 221／0（`/tmp/rgent-v4-B-queued-targeted-first.log`）与边界分支 15／0（含 1 条既有 migration queued，`/tmp/rgent-v4-B-queued-green-all-boundaries.log`）分别记录。最终代码必要集合为 `pnpm exec vitest run test/main/agent-host.test.ts test/main/vault.test.ts test/main/ledger-store.test.ts test/main/task-authorization.test.ts test/main/agent-authorization.test.ts test/main/agent-tool-loop.test.ts test/main/host-material.test.ts test/main/vault-mutation-queue.test.ts test/main/working-memory-service.test.ts test/main/working-memory-session.test.ts test/main/working-memory-consolidation.test.ts test/main/vault-switch-binding.test.ts test/scripts/memory-quality-runner.test.ts`，13 文件 261／0（`/tmp/rgent-v4-B-queued-targeted-current.log`）；受控 runner 最后独立 4／0（`/tmp/rgent-v4-B-queued-runner-final.log`）。类型通过（`/tmp/rgent-v4-B-queued-types-final-fixed.log`）。早期 spy 复用历史与 session 回执的夹具错误、追加 hardlink 误插旧测试导致的类型错误保留原日志，不计产品新失败；类型错误修正后才复跑最终集合。
+
+本次仅定向、类型及文档核验，文档检查 `/tmp/rgent-v4-B-queued-docs-final.log`；未运行完整测试、build、窗口、真实模型、push 或 CI。实际窗口仍由总任务统一构建后串行验证，不以本次内存／磁盘夹具代称 Electron 窗口证据；独立复审未通过前不开放 A+。Windows、原生输入法、用户视觉与真实学习质量待核项保持，当前阶段与模型预算未改。
 
 事实校正：生产 structured context 允许空／部分摘要，撤回“生产自旋”判定；精确缓存复用仍需修。原正式运行未用保留集调提示，但评分晚于运行及旧保留集已被审阅须留档。压缩／清理授权已在合同记忆节，缺口是预览和保护。历史评分与失败不得改写。
 
