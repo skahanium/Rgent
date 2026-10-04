@@ -252,6 +252,7 @@ function errorText(error: unknown): string {
   if(Object.hasOwn(LEDGER_ERROR_MESSAGES,message))return ledgerErrorText(message)
   if(message.includes('STALE_PREVIEW')||message.includes('STALE_RECOVERY'))return '文件、附件或权限已改变，恢复已停止；已核验进度保留，请核查后重试。'
   if (message.includes('VAULT_SWITCH_CANCELLED')) return ''
+  if (message.includes('VAULT_SWITCH_TIMEOUT')) return '切换准备未在时限内完成，仍留在当前库。窗口稿和设置修改已保留；请重试，或先处理保存与任务问题。'
   if (message.includes('VAULT_SWITCH_BODY_CONFLICT')) return '窗口稿与磁盘稿发生冲突，两份均已保留。请先关闭设置，处理正文保存冲突后，再重试切换。'
   if (message==='RECOVERY_UNSAVED_DRAFT') return '窗口稿已保留。请先关闭设置处理保存问题，再重新预览；如恢复尚未完成，请先继续恢复，完成后保存草稿。'
   if (message.includes('UNSAVED_DRAFT')) return '笔记草稿尚未保存，已留在当前库。请先处理保存问题，再重试切换。'

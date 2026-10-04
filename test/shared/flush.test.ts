@@ -119,3 +119,11 @@ it('allows only the preview owner to drain drafts while other flushes remain blo
  release();await hold;await gate.handle('recovery-release',context,deps)
  await gate.handle('recovery-resume',context,deps);expect(gate.maySave('s',context.operationId)).toBe(false)
 })
+
+it('workspace saving reports false and thrown disk failures, preventing a successful draft flush',async()=>{
+ const {saveWorkspacePosition}=await import('../../src/shared/flush.ts');const notice=()=>{},done:Array<{ok:boolean}>=[]
+ for(const write of [async()=>false,async()=>{throw Error('disk')}]){
+  await reportFlush(async()=>{const workspace=await saveWorkspacePosition(write,notice);const body=true;return workspace&&body},value=>done.push(value))
+ }
+ expect(done).toEqual([{ok:false},{ok:false}]);expect(await saveWorkspacePosition(async()=>true,notice)).toBe(true)
+})

@@ -93,3 +93,12 @@ it('accepts only the explicit ledger recovery actions and rejects renderer-suppl
  expect(parseLedgerRepairRequest({sessionId:'session',registryRevision:null})).toBeNull()
  expect(parseLedgerRepairRequest({sessionId:'session',action:'resume',revision:'bad'})).toBeNull()
 })
+
+it('strictly parses restore receipts and transition metadata without accepting extra actions',async()=>{
+ const {parseVaultRestoreReceipt,parseVaultTransition}=await import('../../src/shared/vault-management.ts')
+ const receipt={id:'current',sessionId:'session',outcome:'diagnosed'}
+ expect(parseVaultRestoreReceipt(receipt)).toEqual(receipt)
+ for(const value of [{...receipt,force:true},{...receipt,outcome:'discard'},{...receipt,id:''},{...receipt,sessionId:42},[],null])expect(parseVaultRestoreReceipt(value)).toBeNull()
+ expect(parseVaultTransition({busy:true,session:'s',phase:'restoring',operationId:'op',restoreId:'r'})).not.toBeNull()
+ for(const value of [{busy:true,session:'s',restoreId:'r'},{busy:true,session:'s',phase:'force'},{busy:true,session:'s',phase:'restoring',restoreId:'r',force:true}])expect(parseVaultTransition(value)).toBeNull()
+})

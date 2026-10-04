@@ -201,6 +201,7 @@ describe('embedded vault settings page', () => {
 
   it.each([
     ['UNSAVED_DRAFT', '笔记草稿尚未保存，已留在当前库。请先处理保存问题，再重试切换。'],
+    ['VAULT_SWITCH_TIMEOUT', '切换准备未在时限内完成，仍留在当前库。窗口稿和设置修改已保留；请重试，或先处理保存与任务问题。'],
     ['PREVIOUS_TASK_UNSAVED', '生成回答尚未保存，已留在原库。请先处理保存问题，再重试切换。'],
     ['VAULT_TARGET_INVALID', '无法打开所选位置。请检查目录是否存在及访问权限后重试。']
   ])('keeps the overlay and provides recovery steps for %s', async (code, message) => {

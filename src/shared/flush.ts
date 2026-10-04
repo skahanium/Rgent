@@ -108,3 +108,10 @@ export class RecoveryDraftGate {
     return current() && (phase === 'recovery-resume' || !deps.dirty())
   }
 }
+
+/** A failed position write must remain a failure even when the body saved. */
+export async function saveWorkspacePosition(write: () => Promise<boolean>, failed: () => void): Promise<boolean> {
+  try { if (await write()) return true } catch { /* Report the same protected failure as a false reply. */ }
+  failed()
+  return false
+}

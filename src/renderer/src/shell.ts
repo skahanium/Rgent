@@ -4,7 +4,7 @@ import type { MemoryView, MemoryManualRequest, MemoryResult } from '../../shared
 import { memoryErrorText, renderMemoryPreview, ledgerRememberCommand, type MemoryPageHandlers } from './memory-ui.ts'
 import { IPC, type AgentEvent, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type PublicModelConfig, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
-import { RecoveryDraftGate, reportFlush } from '../../shared/flush.ts'
+import { RecoveryDraftGate, reportFlush, saveWorkspacePosition } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
 import { openLifecycleStatus, promptNewNote, promptText } from './dialogs.ts'
 import { promptConflict } from './conflict.ts'
@@ -85,6 +85,7 @@ export async function start(root: HTMLElement): Promise<void> {
             <div class="ledger-body"></div>
           </div>
           <div class="note-unavailable" role="status" hidden><span></span><button type="button" class="note-recheck">重新核验</button><button type="button" class="note-save-copy">另存为新笔记</button><button type="button" class="note-discard">明确舍弃并关页</button></div>
+          <p class="workspace-recovery" role="status" hidden><span></span><button type="button">重试恢复位置</button></p>
           <div class="editor-host"></div>
           <nav class="outline" aria-label="标题索引" hidden></nav>
           <div class="outline-tooltip" hidden></div>
@@ -111,6 +112,8 @@ export async function start(root: HTMLElement): Promise<void> {
   const unavailableEl = root.querySelector('.note-unavailable') as HTMLElement
   const copyButton = root.querySelector('.note-save-copy') as HTMLButtonElement
   const discardButton = root.querySelector('.note-discard') as HTMLButtonElement
+  const workspaceRecovery = root.querySelector('.workspace-recovery') as HTMLElement
+  workspaceRecovery.querySelector('button')!.addEventListener('click',()=>{if(!restoringWorkspace&&!transitionBusy)void window.rgent.vaultGet().then(applyState).catch(()=>{hostNotice='无法核验当前库，原位置记录和窗口稿已保留。请恢复库后重试。';workspaceRecovery.querySelector('span')!.textContent=hostNotice;updateStatus()})})
   const editorHostEl = root.querySelector('.editor-host') as HTMLElement
   const emptyEl = root.querySelector('.empty') as HTMLElement
   const outlineEl = root.querySelector('.outline') as HTMLElement
@@ -156,6 +159,7 @@ export async function start(root: HTMLElement): Promise<void> {
   let restoringWorkspace = true
   let stateSerial = 0
   let transitionBusy = false
+  let transitionId:string|null=null
   let releasedSession: string | null | undefined
   root.inert = true
   let workspaceTimer: number | null = null
@@ -410,13 +414,23 @@ export async function start(root: HTMLElement): Promise<void> {
     void showPicker(true)
   })
   window.rgent.onFlushRequest(() => {
-    void reportFlush(async()=>{await saveWorkspace();return flushSave()}, (payload) => window.rgent.flushDone(payload))
+    void reportFlush(async()=>{const workspace=await saveWorkspace();const body=await flushSave();return workspace&&body}, (payload) => window.rgent.flushDone(payload))
   })
   // The release may name the new mount before its ready reply reaches applyState.
-  window.rgent.onVaultTransition((busy,session)=>{
+  window.rgent.onVaultTransition((busy,session,state)=>{
+    transitionId=busy?(state.operationId??transitionId):null
     releasedSession = !busy && session !== vaultSession ? session : undefined
     transitionBusy = busy || releasedSession !== undefined
+    if(busy&&state.phase){
+      hostNotice=state.phase==='preparing'?'正在准备切换笔记库。':state.phase==='committing'?'正在提交新库绑定。':'正在恢复新库工作区。'
+      if(state.closePending)hostNotice+='关闭请求已登记，将在当前交接结束后处理。'
+      updateStatus()
+    }
     syncInteractionGate()
+    if(state.restoreId){
+      const serial=stateSerial
+      void window.rgent.vaultGet().then(next=>{if(serial===stateSerial&&next.sessionId===session)return applyState({...next,restoreId:state.restoreId})}).catch(()=>{hostNotice='无法核验新库，交接保护仍保持。请在关闭提示中重试恢复。';updateStatus()})
+    }
   })
   window.rgent.onLifecycleFlushRequest((id, cleanUnavailablePaths, phase, context) => {
     if (phase?.startsWith('recovery-')) {
@@ -431,12 +445,13 @@ export async function start(root: HTMLElement): Promise<void> {
       })().catch(()=>window.rgent.lifecycleFlushDone(id,false))
       return
     }
+    if(context&&(!transitionBusy||context.operationId!==transitionId||(context.sessionId||null)!==vaultSession)){window.rgent.lifecycleFlushDone(id,false);return}
     if (phase === 'settings') { window.rgent.lifecycleFlushDone(id, !restoringWorkspace && settingsOverlay.prepareVaultChange()); return }
     if (phase === 'freeze') { if(restoringWorkspace || editor.view.compositionStarted){window.rgent.lifecycleFlushDone(id,false);return} releasedSession=undefined;transitionBusy=true;syncInteractionGate(); window.rgent.lifecycleFlushDone(id,true);return }
     const workspaceSave = saveWorkspace()
     const flush = cleanUnavailablePaths.length
       ? Promise.resolve(saveInFlight).then(() => performFlushSave(cleanUnavailablePaths)) : flushSave()
-    void Promise.all([workspaceSave,flush]).then(([,ok]) => window.rgent.lifecycleFlushDone(id, ok), () => window.rgent.lifecycleFlushDone(id, false))
+    void Promise.all([workspaceSave,flush]).then(([workspace,ok]) => window.rgent.lifecycleFlushDone(id, workspace&&ok), () => window.rgent.lifecycleFlushDone(id, false))
   })
   window.rgent.onNoteRelocated(({ moved, sessionId }) => {
     if (sessionId && sessionId !== vaultSession) return
@@ -630,14 +645,19 @@ export async function start(root: HTMLElement): Promise<void> {
 
   async function applyState(state: VaultState): Promise<void> {
     const serial = ++stateSerial
+    let cleanupSerial=serial, diagnosed=false
+    let restoreTimer:ReturnType<typeof setTimeout>|undefined
     restoringWorkspace = true
     // Consume the release only after this restore owns the interaction gate.
     if (releasedSession !== undefined && state.sessionId === releasedSession) { releasedSession=undefined;transitionBusy=false }
     if (workspaceTimer !== null) { clearTimeout(workspaceTimer);workspaceTimer=null }
     syncInteractionGate()
     vaultEpoch += 1
-    try {
+    workspaceRecovery.hidden=true
+    const restore = async () => {
       if (state.status === 'needs-pick') {
+        diagnosed=true
+        if(state.restoreId&&state.sessionId!==undefined&&state.sessionId!==vaultSession){resetSession();vaultSession=state.sessionId}
         if (tabs.length) {
           for (const tab of tabs) markUnavailable(tab, 'unavailable')
           hostNotice = ROOT_UNAVAILABLE_NOTICE
@@ -646,7 +666,7 @@ export async function start(root: HTMLElement): Promise<void> {
           return
         }
         settingsOverlay.close(); memoryOverlay?.close(); memorySnapshot = null; memoryBusy = false
-        vaultSession = null
+        vaultSession = state.sessionId ?? null
         const ok = await flushSave()
         if (serial !== stateSerial) return
         if (!ok && tabs.some((tab) => tab.dirty)) {
@@ -678,19 +698,36 @@ export async function start(root: HTMLElement): Promise<void> {
       }
       fileBrowser.setVault(state.navigationKey ?? null,state.legacyNavigationKey)
       sidebarSizer.refresh()
-      await refreshLifecycle()
+      if(!await refreshLifecycle())diagnosed=true
       if (serial !== stateSerial) return
-      await refreshTree()
+      if(!await refreshTree())diagnosed=true
       if (serial !== stateSerial) return
       if (vaultSession && restoredSession !== vaultSession) {
         const session = vaultSession
         const restored = await restoreWorkspace(session, serial)
         if (serial !== stateSerial || session !== vaultSession) return
         if (restored) restoredSession = session
+        else diagnosed=true
       }
-      if (state.diagnostic) { hostNotice = state.diagnostic; updateStatus() }
+      if (state.diagnostic) { diagnosed=true;hostNotice = state.diagnostic; updateStatus() }
+    }
+    try {
+      await Promise.race([restore(),new Promise<never>((_,reject)=>{restoreTimer=setTimeout(()=>reject(Error('WORKSPACE_RESTORE_TIMEOUT')),10_000)})])
+    } catch {
+      if(serial!==stateSerial)return
+      // Invalidate every pending tree/note/position continuation before releasing input.
+      cleanupSerial=++stateSerial;vaultEpoch++;restoredSession=null;diagnosed=true
     } finally {
-      if (serial === stateSerial) { restoringWorkspace=false;syncInteractionGate() }
+      if(restoreTimer)clearTimeout(restoreTimer)
+      if(cleanupSerial===stateSerial){
+        if(diagnosed){
+          hostNotice=(state.diagnostic?state.diagnostic+' ':'')+'工作区恢复未完整确认，已保留原位置记录和窗口稿。请重试恢复位置；关闭时仍须核对保存结果。'
+          workspaceRecovery.querySelector('span')!.textContent=hostNotice
+          workspaceRecovery.hidden=false;updateStatus()
+        }
+        restoringWorkspace=false;syncInteractionGate()
+        if(state.restoreId)await window.rgent.vaultTransitionDone({id:state.restoreId,sessionId:state.sessionId??null,outcome:diagnosed?'diagnosed':'ready'}).catch(()=>false)
+      }
     }
   }
 
@@ -707,11 +744,11 @@ export async function start(root: HTMLElement): Promise<void> {
     return {version:1,tabs:tabs.map(t=>({relPath:t.relPath,selection:t.selection,scrollTop:t.scrollTop})),active,
       sidebarHidden:treePanel.classList.contains('is-collapsed'),...fileBrowser.workspaceScroll()}
   }
-  async function saveWorkspace(): Promise<void> {
-    if (!vaultSession || restoringWorkspace || restoredSession !== vaultSession) return
+  async function saveWorkspace(): Promise<boolean> {
+    if (restoringWorkspace || vaultSession && restoredSession !== vaultSession) return false
+    if (!vaultSession) return true
     const session = vaultSession
-    try { await window.rgent.vaultWorkspaceSave(session,workspaceSnapshot()) }
-    catch { if (session === vaultSession) { hostNotice = '工作区位置未保存，笔记编辑不受影响。请检查本机存储。'; updateStatus() } }
+    return saveWorkspacePosition(()=>window.rgent.vaultWorkspaceSave(session,workspaceSnapshot()),()=>{if(session===vaultSession){hostNotice='工作区位置未保存，已留在当前库。请检查本机存储后重试保存或切换。';updateStatus()}})
   }
   function scheduleWorkspace(): void {
     if (restoringWorkspace || !vaultSession || restoredSession !== vaultSession) return
@@ -869,28 +906,29 @@ export async function start(root: HTMLElement): Promise<void> {
     overlay.root.append(card)
   }
 
-  async function refreshTree(): Promise<void> {
+  async function refreshTree(): Promise<boolean> {
     const token = ++treeRefreshToken
     const epoch = vaultEpoch
     try {
       const [nextTree, nextPermissions] = await Promise.all([window.rgent.treeList(), window.rgent.permissionsGet()])
-      if (epoch !== vaultEpoch || token !== treeRefreshToken) return
+      if (epoch !== vaultEpoch || token !== treeRefreshToken) return false
       tree = nextTree
       permissionState = nextPermissions
       fileBrowser.update(tree, active)
     } catch {
-      if (epoch !== vaultEpoch || token !== treeRefreshToken) return
+      if (epoch !== vaultEpoch || token !== treeRefreshToken) return false
       permissionState = { status: 'invalid', error: '无法读取目录或权限名单' }
       fileBrowser.fail('目录暂时无法读取，已保留浏览位置。请恢复笔记库后重试。')
       paintPermissionWarning()
       syncEditorHost()
-      return
+      return false
     }
     // A tree listing cannot prove that a missing object is safe to discard.
     // Retain even clean tabs and their verified ledger until object inspection
     // offers explicit recovery/save-copy or the person discards the draft.
     paintTree()
     syncEditorHost()
+    return true
   }
 
   async function refreshLifecycle(): Promise<LifecycleStatus | null> {

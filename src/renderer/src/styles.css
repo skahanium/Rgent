@@ -1925,3 +1925,8 @@ a[href]:focus-visible,
   .vault-settings-row-title { flex-wrap: wrap; }
   .vault-settings-current { margin-left: 24px; flex-basis: 100%; }
 }
+
+/* 恢复诊断占用既有画布提示区域，不覆盖保稿操作。 */
+.workspace-recovery { display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; margin: .5rem 1rem; padding: .75rem 1rem; border: 1px solid var(--border-subtle); border-radius: .5rem; background: var(--surface-overlay); font: .8rem var(--font-ui); }
+.workspace-recovery[hidden] { display: none; }
+.workspace-recovery > span { flex: 1 1 14rem; }

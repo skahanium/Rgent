@@ -4,7 +4,7 @@ import { parseStoredVault } from './notes-fs.ts'
 import { boundArguments, isVaultChannel, isVaultEvent } from '../shared/vault-binding.ts'
 import { VaultCatalog } from './vault-catalog.ts'
 import { VaultSwitch } from './vault-switch.ts'
-import type { VaultTarget } from '../shared/vault-management.ts'
+import { parseVaultRestoreReceipt, type VaultTarget } from '../shared/vault-management.ts'
 import { readFileSync } from 'node:fs'
 import {memoryDependency,sameMemoryDependency,memorySnapshotSignature} from './memory-use.ts'
 import {historicalContextPolicy} from './ledger-provenance.ts'
@@ -207,6 +207,16 @@ async function settleHostBeforeClose(win: BrowserWindow): Promise<boolean> {
   return true
 }
 
+function requestWindowClose(win: BrowserWindow): void {
+  if (cancellingForClose || win.isDestroyed()) return
+  if (agentHost?.active().length || agentHost?.hasPending()) {
+    cancellingForClose = true
+    void settleHostBeforeClose(win).then(proceed => {
+      if (proceed && !win.isDestroyed()) runCloseAction(closeFlow.request(), win)
+    }).finally(() => { cancellingForClose = false })
+  } else runCloseAction(closeFlow.request(), win)
+}
+
 function runCloseAction(action: CloseAction, win: BrowserWindow, stalled = false): void {
   if (action === 'none') return
   if (action !== 'flush') clearFlushTimer()
@@ -323,13 +333,8 @@ function createWindow(): void {
     event.preventDefault()
     const win = mainWindow
     if (!win) return
-    if (cancellingForClose) return
-    if (agentHost?.active().length || agentHost?.hasPending()) {
-      cancellingForClose = true
-      void settleHostBeforeClose(win).then((proceed) => {
-        if (proceed && !win.isDestroyed()) runCloseAction(closeFlow.request(), win)
-      }).finally(() => { cancellingForClose = false })
-    } else runCloseAction(closeFlow.request(), win)
+    if (vaultSwitch?.requestClose()) return
+    requestWindowClose(win)
   })
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -613,9 +618,14 @@ function registerIpc(): void {
       return { ok: false, error: 'IO_ERROR' }
     }
   })
+  registerTrustedHandle(IPC.vaultTransition, (event, value: unknown) => {
+    const receipt = parseVaultRestoreReceipt(value)
+    if (!receipt) throw Error('BAD_REQUEST')
+    return vaultSwitch?.restored(event.senderFrame, receipt, vault?.sessionId() ?? null) ?? false
+  })
   registerTrustedHandle(IPC.vaultGet, () => visibleVaultState())
   registerTrustedHandle(IPC.vaultCatalog, () => ({...vaultCatalog!.view(), activeId:activeTarget?.id ?? null}))
-  registerTrustedHandle(IPC.vaultCatalogChange, async (_event, request: unknown) => {
+  registerTrustedHandle(IPC.vaultCatalogChange, async (event, request: unknown) => {
     const r = request as Record<string, unknown>
     if (!r || typeof r !== 'object' || typeof r.revision !== 'string' || typeof r.id !== 'string' || !['label','pin','remove','relocate'].includes(String(r.action))) throw Error('BAD_REQUEST')
     if (vaultSwitch?.busy) throw Error('VAULT_SWITCH_BUSY')
@@ -626,19 +636,20 @@ function registerIpc(): void {
       const id = r.id, revision = r.revision
       if (activeTarget?.id === r.id) throw Error('ACTIVE_VAULT_RELOCATE')
       if (structureGate.isBusy()) throw Error('STRUCTURE_BUSY')
-      return vaultSwitch!.select(async () => {
+      return vaultSwitch!.select(async (_run, current) => {
         const session = vault?.sessionId()
         const chosen = await dialog.showOpenDialog(mainWindow!, {title:'重新定位笔记库',properties:['openDirectory']})
+        current()
         if (chosen.canceled || !chosen.filePaths[0]) return vaultCatalog!.view()
         if (vault?.sessionId() !== session) throw Error('VAULT_CHANGED')
         if (structureGate.isBusy()) throw Error('STRUCTURE_BUSY')
         if (activeTarget?.id === id) throw Error('ACTIVE_VAULT_RELOCATE')
         return vaultCatalog!.relocate(id, vaultCatalog!.inspect(chosen.filePaths[0]), revision)
-      })
+      }, event.senderFrame)
     }
     throw Error('BAD_REQUEST')
   })
-  registerTrustedHandle(IPC.vaultOpen, async (_event, id: unknown) => {
+  registerTrustedHandle(IPC.vaultOpen, async (event, id: unknown) => {
     if (typeof id !== 'string') throw Error('BAD_REQUEST')
     if (vaultSwitch?.busy) throw Error('VAULT_SWITCH_BUSY')
     const entry = vaultCatalog!.view().entries.find(item => item.id === id)
@@ -646,7 +657,7 @@ function registerIpc(): void {
     const target = vaultCatalog!.inspect(entry.path)
     if (target.rootIdentity !== entry.rootIdentity) throw Error('VAULT_TARGET_CHANGED')
     if (activeTarget?.rootIdentity === target.rootIdentity && activeTarget.path === target.path) return visibleVaultState()
-    return vaultSwitch!.run(target)
+    return vaultSwitch!.run(target, event.senderFrame)
   })
   registerTrustedHandle(IPC.vaultWorkspaceGet, (_event, session: unknown) => {
     if (!vault || typeof session !== 'string') throw Error('VAULT_CHANGED')
@@ -659,18 +670,20 @@ function registerIpc(): void {
     if (activeTarget) vaultCatalog!.saveWorkspace(activeTarget, workspace)
     return true
   })
-  registerTrustedHandle(IPC.vaultPick, async (_event, create: unknown) => {
+  registerTrustedHandle(IPC.vaultPick, async (event, create: unknown) => {
     if (!vault || !vaultSwitch) return { status: 'needs-pick', reason: 'first-run' }
     if (vaultSwitch.busy || structureGate.isBusy()) throw Error('VAULT_SWITCH_BUSY')
-    return vaultSwitch.select(async run => {
+    return vaultSwitch.select(async (run, current) => {
       const session = vault?.sessionId()
       let chosen: string | undefined
       if (create === true) {
         const result = await dialog.showSaveDialog(mainWindow!, {title:'创建空笔记库',buttonLabel:'创建笔记库',defaultPath:'新笔记库'})
+        current()
         if (result.canceled) return {...visibleVaultState(),cancelled:true}
         chosen = result.filePath
       } else {
         const result = await dialog.showOpenDialog(mainWindow!, {title:'打开笔记库',properties:['openDirectory','createDirectory']})
+        current()
         if (result.canceled || !result.filePaths[0]) return {...visibleVaultState(),cancelled:true}
         chosen = result.filePaths[0]
       }
@@ -681,7 +694,7 @@ function registerIpc(): void {
       if (!vaultCatalog!.view().diagnostic) vaultCatalog!.register(target)
       if (activeTarget?.rootIdentity === target.rootIdentity && activeTarget.path === target.path) return visibleVaultState()
       return run(target)
-    })
+    }, event.senderFrame)
   })
   registerTrustedHandle(IPC.treeList, async () => vault?.tree() ?? [])
   registerTrustedHandle(IPC.ledgerMaintenance,async(event,value:unknown)=>{
@@ -1039,28 +1052,33 @@ if (ownsInstance) app.whenReady().then(() => {
       if (current.rootIdentity !== target.rootIdentity) throw Error('VAULT_TARGET_CHANGED')
       if (structureGate.isBusy()) throw Error('STRUCTURE_BUSY')
     },
-    prepare: async () => {
-      if (mainWindow && !await flushBeforeStructure(mainWindow, [], 'settings')) throw Error('VAULT_SWITCH_CANCELLED')
-      await agentHost?.whenLaunchesSettled()
+    prepare: async (_target, current) => {
+      const context={sessionId:vault?.sessionId()??'',operationId:vaultSwitch!.operationId}
+      if (mainWindow && !await flushBeforeStructure(mainWindow, [], 'settings', context)) throw Error('VAULT_SWITCH_CANCELLED')
+      current()
+      await agentHost?.whenLaunchesSettled(); current()
       if (agentHost?.active().length && mainWindow) {
         const choice = await dialog.showMessageBox(mainWindow, {type:'question', title:'切换笔记库', message:'停止当前任务并切换笔记库？', detail:'已经生成的回答会保存。切换后不会自动重新启动这些任务。', buttons:['留在当前库','停止任务并切换'], defaultId:0, cancelId:0})
+        current()
         if (choice.response !== 1) throw Error('VAULT_SWITCH_CANCELLED')
       }
-      if (mainWindow && !await flushBeforeStructure(mainWindow, [], 'freeze')) throw Error('VAULT_SWITCH_CANCELLED')
+      if (mainWindow && !await flushBeforeStructure(mainWindow, [], 'freeze', context)) throw Error('VAULT_SWITCH_CANCELLED')
+      current()
       const previous = vault?.root
       consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED')
-      await consolidation?.idle()
+      await consolidation?.idle(); current()
       if (previous) {
         try { await agentHost?.cancelAll('vault-change', previous) } catch {}
-        await agentHost?.retryPending(previous)
-        await agentHost?.whenLaunchesSettled()
+        current()
+        await agentHost?.retryPending(previous); current()
+        await agentHost?.whenLaunchesSettled(); current()
         consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED')
-        await consolidation?.idle()
+        await consolidation?.idle(); current()
         if (agentHost?.active().length) throw Error('OTHER_TASK_RUNNING')
         if (agentHost?.hasPending(previous)) throw Error('PREVIOUS_TASK_UNSAVED')
       }
     },
-    flush: async () => !vault?.root || !!mainWindow && await flushBeforeStructure(mainWindow),
+    flush: async () => !vault?.root || !!mainWindow && await flushBeforeStructure(mainWindow,[],undefined,{sessionId:vault?.sessionId()??'',operationId:vaultSwitch!.operationId}),
     commit: async target => {
       const state = await vault!.openVerified(target.path, target.rootIdentity)
       activeTarget = target
@@ -1071,7 +1089,30 @@ if (ownsInstance) app.whenReady().then(() => {
       catch { if (state.status === 'ready') state.diagnostic = '库已打开，但设备库目录未保存。请检查本机存储后重试。' }
       return state.status === 'ready' ? {...visibleVaultState(), vaultChanged:state.vaultChanged, ...(state.diagnostic?{diagnostic:state.diagnostic}:{})} as VaultState : state
     },
-    release: () => send(IPC.vaultTransition, {busy:false,session:vault?.sessionId()??null})
+    changed: (phase, closePending, operationId) => send(IPC.vaultTransition, {busy:phase!=='idle',session:vault?.sessionId()??null,phase,closePending,operationId}),
+    handoff: (state, id, _owner, retry) => {
+      const sessionId=vault?.sessionId()??null
+      const result:VaultState=state.status==='ready'?{...state,restoreId:id,sessionId:sessionId!}:{...state,restoreId:id,sessionId}
+      if (retry) send(IPC.vaultTransition,{busy:true,session:sessionId,phase:'restoring',restoreId:id})
+      return {result,sessionId}
+    },
+    close: () => { if(mainWindow)requestWindowClose(mainWindow) },
+    stalled: (phase,ticket) => {
+      const win=mainWindow
+      if(!win||win.isDestroyed())return
+      void dialog.showMessageBox(win,{type:'warning',title:'笔记库交接没有完成',
+        message:phase==='restoring'?'新库已提交，但工作区恢复尚未确认。':'新库提交仍未完成，当前操作保持保护。',
+        detail:'原库保存结果与库内恢复记录保留。可以重试核验，或取消关闭并保留窗口。明确放弃关闭不会续跑任务或恢复许可。',
+        buttons:[phase==='restoring'?'重试恢复':'继续等待核验','取消关闭并保留窗口','明确放弃未保存修改并退出应用'],defaultId:0,cancelId:1,noLink:true
+      }).then(({response})=>{
+        if(win.isDestroyed()||!vaultSwitch?.isCurrentStall(ticket)||vaultSwitch.phase!==phase)return
+        if(response===2){quitting=true;runCloseAction('close',win);return}
+        if(response===1)vaultSwitch.cancelClose()
+        if(phase==='restoring')vaultSwitch.retryRestore(win.webContents.mainFrame)
+        else vaultSwitch.continueWaiting()
+      }).catch(()=>{if(vaultSwitch?.isCurrentStall(ticket)){vaultSwitch.cancelClose();vaultSwitch.continueWaiting()}})
+    },
+    release: () => send(IPC.vaultTransition, {busy:false,session:vault?.sessionId()??null,phase:'idle'})
   })
   authorizations = new TaskAuthorizationRegistry({
     root:()=>{try{return vault?.requireUsableRoot()??null}catch{return null}},

@@ -1099,7 +1099,7 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 | B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `e04a02f` 最后实际队列修补独立 Spec／Quality 复核通过（2026-10-05）；定向 13 文件 261／0、类型／文档通过。打开 A+ 串行工程门；全部 B 实际窗口及整轮完整门仍待核，不能据此宣称整库恢复已完整验收 |
 | A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | `3c39531` 修补后的独立 Spec／Quality 再审通过（2026-10-05），3 项 Important 及目标消失路径闭合；必要 8 文件 205／0、类型／文档通过，打开 C 串行工程门。实际窗口及整轮完整门仍待核；初版 315／0、SSE 13／0及 core 20／0保留原范围 |
 | C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | `ba385f2` 三项 Important 修补后的独立 Spec／Quality 再审通过（2026-10-05）；必要 5 文件 133／0、类型及文档通过。原 9 文件 223／0、性能及失败保留各自范围；开放 E 串行工程门，实际窗口与整轮完整门仍待收口 |
-| E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | C 工程复审通过，2026-10-05 开放串行施工；尚未验收 |
+| E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 2026-10-05 本机接线及对照自查，必要 11 文件 204／0、类型／文档通过；待独立 Spec／Quality 复审及实际窗口／整轮完整门。D 保持未开 |
 | D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | 待 E 门；2026-10-04 |
 | Q | 虚构开发集双策略对照，逐模型停损与证据；不切生产策略、不运行正式评测 | 待 D 门；2026-10-04 |
 
@@ -1222,3 +1222,14 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 - 最终必要命令 `pnpm exec vitest run test/main/agent-host.test.ts test/main/host-material.test.ts test/main/ledger-store.test.ts test/main/summary-cache.test.ts test/main/working-memory-service.test.ts`，5 文件 133／0（`/tmp/rgent-v4-C-fix-green-final.log`）；`pnpm exec tsc --noEmit` 与 `pnpm docs:check` 通过，日志 `...-fix-types-final.log`、`...-fix-docs-final.log`。原页／contexts 性能数据适用原夹具，未重跑无风险性能／全量／build／UI／付费模型；新增祖先复核的重材料成本未测，不把原数字代称新 Host 端到端门。只本地提交，待再次独立复审；E、实际窗口、完整总门及既有平台／人工／质量待核均保持。
 
 包 C 修补独立再审（2026-10-05，固定范围 `6630f3b..ba385f2`）：Spec／Quality 均通过，原三项 Important 闭合，新问题 0。真实 ledger／带任务身份 body 三代祖先与水位、普通保存续接及采纳副本正例、严格缓存生成方 schema、完整材料 JSON 与真实 Vault 保存边界均核对；报告 `/tmp/rgent-v4-C-rereview-report.md`。据此只开放 E 串行工程施工；深链／重材料性能、实际窗口、整轮完整门、Windows／CI、原生输入法人工、用户视觉及正式学习质量仍待核，旧性能数字不代称新 Host 端到端门。
+
+
+包 E 本机接线与对照自查（2026-10-05，基线 `5a18d18`）：
+
+- `VaultSwitch` 扩展既有协调器，持有准备、提交、工作区恢复阶段与一个延后关闭请求。真实 `BrowserWindow.close` 先交它处理；准备期关闭取消切换意图，收敛当前保稿后走原关闭协议；提交／恢复期不并发 flush。异步准备每步返回后复核失效代际，30 秒未收敛返回超时保护，迟到 freeze／保存请求核对当前 session 与 operation。目标、对象、队列及 Host pending 校验保持，B 的恢复与 journal 不被清空。
+- 新库回执带恢复 id；既有 `vaultTransition` 增加严格回执动作，原主 frame＋id＋当前 session 全部匹配才释放，ready 与 diagnosed 分开。渲染完整恢复目录及全部 tab，10 秒超时使旧读失效并保留原位置记录，画布提供诊断与重试；主进程 30 秒确认未到仍持门，通过原生选择重试、取消关闭保留窗口或明确放弃未保存修改并退出应用，旧对话框决定不能作用新门。故障不伪造 restoredSession，也不持久化正文稿、任务或许可。
+- `saveWorkspace` 明确布尔结果，false／抛错与正文保存结果一起交回主进程，不吞异常后继续切换成功。无库保存为真实 no-op，恢复未完整确认不能把部分位置写回。设置输入、展开、焦点与窗口稿保留；真实正文冲突沿既有双稿核验和忙态继续编辑分支。
+- 有效行为 red：真实 shell 工作区写入 false 仍回 `{ok:true}`（`/tmp/rgent-v4-E-red-shell.log`，1 失败）；原协调器 commit 回执后 busy=false（`...-red-handoff.log`，1 失败／9 未选）；旧 freeze 释放后重锁 root（`...-red-late-guards.log` 中具名 shell 反例）。以原 `5a18d18` 主进程代码回放，真实 native close 钩子在准备等待时并发发一次 flush（`...-red-native-baseline-clean.log`，1 失败／2 未选）；该钩子测试使用模拟 Electron API 与真实临时 Vault／Catalog，不是系统窗口人工操作。新根诊断失去实际 session 造成 root 保持 inert 的反例在 `...-shell-edges-first.log`，随后修复。复用相同 routing id 的新主 frame 接受旧回执（`...-red-frame-identity.log`，1 失败／3 未选）后改为精确 frame 对象绑定，原生重试用新 id 绑定当前 frame；准备超时无具体保稿／重试文案（`...-red-timeout-copy.log`，1 失败／39 未选）亦已补齐。API 缺失、测试夹具缺 backlinks／noteInspect、类型错误与假时钟注册先后问题分别保留，不能用作产品有效 red。
+- 最终必要命令：`pnpm exec vitest run test/main/vault-close.test.ts test/main/vault-switch.test.ts test/main/vault-switch-main.test.ts test/main/vault-catalog.test.ts test/main/ipc-sender.test.ts test/shared/flush.test.ts test/shared/ipc-guard.test.ts test/shared/ipc-channel.test.ts test/renderer/vault-close.test.ts test/renderer/vault-manager.test.ts test/renderer/settings.test.ts`，11 文件 204／0（`/tmp/rgent-v4-E-targeted-final-current.log`）；`pnpm exec tsc --noEmit`（`...-types-final-current.log`）通过。文档检查另记 `...-docs-final.log`，完整报告 `/tmp/rgent-v4-E-report.md`。测试覆盖工作区 false／抛错、原生准备关闭、提交重复关闭、确认丢失重试、慢 tab／超时诊断、迟到旧完成、新根诊断、设置展开／焦点保留与两份正文冲突。
+
+本包只本地提交；没有全量、构建、真实 Electron 窗口、模型、推送或 CI。原生外观／实际鼠标关窗、Windows、输入法人工、用户视觉及学习质量继续待核，定向不代称整轮门。独立 Spec／Quality 复审由串行总任务接续，D／Q 尚未开，不结束库内记忆阶段。

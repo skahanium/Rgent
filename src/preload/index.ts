@@ -1,3 +1,4 @@
+import { parseVaultTransition, type VaultTransition, type VaultRestoreReceipt } from '../shared/vault-management.ts'
 import type { LifecycleFlushPhase, RecoveryFlushContext } from '../shared/flush.ts'
 import { boundEvent, isVaultChannel, isVaultEvent } from '../shared/vault-binding.ts'
 import type { MemorySessionRequest, MemoryConfigRequest, MemoryManualRequest, MemoryCommitRequest, MemoryItemRequest, MemoryEditRequest, MemoryJobRequest, MemoryResult, MemoryView, MemoryPreview } from '../shared/memory.ts'
@@ -88,7 +89,8 @@ const api = {
   memoryJobCancel: (request: MemoryJobRequest): Promise<MemoryResult<MemoryView>> => invoke(IPC.memoryJobCancel, request),
   vaultGet: (): Promise<VaultState> => invoke(IPC.vaultGet),
   vaultPick: (create = false): Promise<VaultState> => invoke(IPC.vaultPick, create),
-  onVaultTransition: (handler: (busy:boolean,session:string|null)=>void):(()=>void) => subscribe(IPC.vaultTransition, value=>{if(value && typeof value === 'object'){const v=value as {busy:unknown;session:unknown};if(typeof v.busy === 'boolean' && (v.session===null||typeof v.session==='string'))handler(v.busy,v.session)}}),
+  onVaultTransition: (handler: (busy:boolean,session:string|null,state:VaultTransition)=>void):(()=>void) => subscribe(IPC.vaultTransition,value=>{const state=parseVaultTransition(value);if(state)handler(state.busy,state.session,state)}),
+  vaultTransitionDone: (receipt:VaultRestoreReceipt):Promise<boolean> => invoke(IPC.vaultTransition,receipt),
   vaultCatalog: (): Promise<import('../shared/vault-management.ts').VaultCatalogView & {activeId?:string|null}> => invoke(IPC.vaultCatalog),
   vaultCatalogChange: (request: {id:string;revision:string;action:'pin'|'label'|'remove'|'relocate';pinned?:boolean;label?:string}): Promise<import('../shared/vault-management.ts').VaultCatalogView> => invoke(IPC.vaultCatalogChange, request),
   vaultOpen: (id:string): Promise<VaultState> => invoke(IPC.vaultOpen, id),
@@ -155,7 +157,14 @@ const api = {
         const c = context as Record<string, unknown>
         if (Object.keys(c).sort().join() !== 'operationId,sessionId' || typeof c.sessionId !== 'string' || !c.sessionId || typeof c.operationId !== 'string' || !c.operationId) return
         handler(id, paths, phase as LifecycleFlushPhase, c as RecoveryFlushContext)
-      } else if (phase === undefined || phase === 'settings' || phase === 'freeze') handler(id, paths, phase)
+      } else if (phase === undefined || phase === 'settings' || phase === 'freeze') {
+        if(context!==undefined){
+          if(!context||typeof context!=='object'||Array.isArray(context))return
+          const c=context as Record<string,unknown>
+          if(Object.keys(c).sort().join()!=='operationId,sessionId'||typeof c.sessionId!=='string'||c.sessionId.length>128||typeof c.operationId!=='string'||!c.operationId||c.operationId.length>128)return
+          handler(id,paths,phase,c as RecoveryFlushContext)
+        }else handler(id, paths, phase)
+      }
     }),
   lifecycleFlushDone: (id: string, ok: boolean): void => { ipcRenderer.send(IPC.lifecycleFlushDone, { id, ok }) },
   onNoteExternalChange: (handler: (payload: NotePayload) => void): (() => void) =>
