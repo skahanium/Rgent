@@ -521,7 +521,7 @@ a[href]:focus-visible,
 .settings-candidates { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
 .settings-candidate { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 0.8rem; }
 .settings-candidate-id { flex: 1 1 auto; min-width: 0; overflow: hidden; font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.settings-candidate-note { color: var(--text-muted); font-size: 0.7rem; }
+.settings-candidate-note { flex: 0 0 auto; white-space: nowrap; color: var(--text-muted); font-size: 0.7rem; }
 .settings-hint { margin: 8px 0 0; color: var(--text-muted); font-size: 0.74rem; line-height: 1.5; }
 .settings-actions { margin-top: 12px; }
 
