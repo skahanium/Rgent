@@ -98,3 +98,14 @@ it.each(['reset','advance'] as const)('rechecks material validity inside the que
   const rejected=expect(control).rejects.toThrow('LEDGER_REGISTRY_INVALID');release();await mutation;await rejected;expect(vault.memorySnapshot().raw).toBe(before.raw)
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
+
+it.each(['empty','verified','invalid'] as const)('preserves retirement and real %s material diagnosis when an unknown old JSON memory causes an early invalid view',async materialStatus=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-retirement-view-')),root=path.join(base,'vault'),unknown=JSON.stringify({version:99,entries:[]});await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'材料');await writeFile(path.join(root,'.rgent-memory'),unknown)
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{await vault.readOpened('a.md');expect(vault.memoryDiagnosis()).toBe('MEMORY_RETIREMENT_FAILED')
+  if(materialStatus!=='empty')await vault.materialUnit('a.md',0,2)
+  if(materialStatus==='invalid')await writeFile(path.join(root,'.rgent','materials.json'),'{bad')
+  expect(vault.materialState().status).toBe(materialStatus)
+  const view=await new WorkingMemoryService(vault,()=>null).view();expect(view.status).toBe('invalid');expect(view.reason).toBe('MEMORY_STORAGE_INVALID');expect(view.retirementFailure).toBe('MEMORY_RETIREMENT_FAILED');expect(view.materialStatus).toBe(materialStatus);expect(view.learning).toBeUndefined();expect(await readFile(path.join(root,'.rgent-memory'),'utf8')).toBe(unknown)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})

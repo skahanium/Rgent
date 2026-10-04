@@ -243,3 +243,9 @@ it('shows invalid materials alongside an independent unavailable model configura
  const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,reason:'MEMORY_CONFIG_UNAVAILABLE',materialStatus:'invalid'}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
  expect(body.textContent).toContain('材料登记无法核验');expect(body.textContent).toContain('记忆设置无法读取');dispose();body.remove()
 })
+
+it('renders simultaneous invalid memory, retirement failure and invalid materials received from the diagnostic view',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,status:'invalid',reason:'MEMORY_STORAGE_INVALID',materialStatus:'invalid',retirementFailure:'MEMORY_RETIREMENT_FAILED'}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ expect(body.textContent).toContain('旧记忆未能清除');expect(body.textContent).toContain('材料登记无法核验');expect(body.textContent).toContain('清空和推进学习进度已停止');expect(body.textContent).not.toContain('MEMORY_RETIREMENT_FAILED');dispose();body.remove()
+})
