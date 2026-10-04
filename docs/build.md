@@ -1095,8 +1095,8 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 
 | 包 | 缺口与反例／完成门 | 状态与受验证据 |
 |---|---|---|
-| A | 打开不写盘，坏账本可读正文，磁盘尾部保护，可信材料三态，共享归档保护与诊断 | 包 A 接线及复审修复，2026-10-04：原 5 文件 107 项及原文／撤销／图片 4 文件 54 项通过记录保留；`5f8cf77` 后四项 P1 与诊断 P2 先补反例，现 7 文件 181 项、类型／文档检查通过；窗口与最终完整门待收口 |
-| B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | 待 A 门；2026-10-04 |
+| A | 打开不写盘，坏账本可读正文，磁盘尾部保护，可信材料三态，共享归档保护与诊断 | `8b5ed9c` 最终 Spec／Quality 复核通过，四项 P1 与诊断 P2 闭合。`47bd095` 范围的 7 文件 181 项、追加 `8b5ed9c` 早退诊断 45 项与类型分别记录，不合并为一次全量；窗口与最终完整门待收口 |
+| B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `bdf0ea2` 本机接线、自查与必要定向已交；2026-10-05 收口记录见下。尚待独立复核及整轮构建窗口／完整门，不开放 A+ |
 | A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | 待 B 门；2026-10-04 |
 | C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | 待 A+ 门；2026-10-04 |
 | E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 待 C 门；2026-10-04 |
@@ -1105,7 +1105,21 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 
 包 A 复审修复（2026-10-04，基线 `5f8cf77`）：必要迁移在实际库队列内核验有效 TaskGrant、来源权限前后快照、对象与整文件修订，最后同步复核授权有效性，并在旧归档写入后、正文原子替换前再次核验 grant 与权限原字节；grant 的读取依赖不回入该队列。Host 只续接已核验会话、迁移前后对象与修订的成功迁移回执，普通读取不能改 origin proof。任务与人的批次迁移共用迁移提交登记，原子替换前检查绑定容量，替换后立即同步登记 successors／verified／lastWrites，旧 tab 可继续保存。材料三态同时核对 `materials.json` 单元及独立 task 序号、owner 归属与上界；异常拒绝新序号分配，清空／推进在队列实际提交前重核，均不归零。新任务 2 MiB 上限不套到完整旧原文；大历史性能仍由 C 测量，不提前增加索引。记忆页显示既有退休失败和材料登记分类诊断，配置异常不能遮住材料异常；退休重试出口仍待 A+。
 
-修复证据：可信迁移、批次绑定、临界区撤权、材料损坏／伪零及控制操作排队反例均有先失败记录；最终定向命令为 `pnpm exec vitest run test/main/agent-host.test.ts test/main/task-authorization.test.ts test/main/vault.test.ts test/main/ledger-store.test.ts test/main/working-memory-service.test.ts test/renderer/memory-ui.test.ts test/shared/memory-errors.test.ts`，181／0，日志 `/tmp/rgent-v4-A-fix-final-targeted.log`；类型及文档检查另记 `/tmp/rgent-v4-A-fix-type.log`、`/tmp/rgent-v4-A-fix-docs.log`。本轮未运行全量、构建窗口或模型调用，Windows 与人工证据保持待核；B 仍待 A 复核门。
+修复证据：可信迁移、批次绑定、临界区撤权、材料损坏／伪零及控制操作排队反例均有先失败记录；最终定向命令为 `pnpm exec vitest run test/main/agent-host.test.ts test/main/task-authorization.test.ts test/main/vault.test.ts test/main/ledger-store.test.ts test/main/working-memory-service.test.ts test/renderer/memory-ui.test.ts test/shared/memory-errors.test.ts`，181／0，日志 `/tmp/rgent-v4-A-fix-final-targeted.log`；类型及文档检查另记 `/tmp/rgent-v4-A-fix-type.log`、`/tmp/rgent-v4-A-fix-docs.log`。本轮未运行全量、构建窗口或模型调用，Windows 与人工证据保持待核。其后 `8b5ed9c` 最终 Spec／Quality 复核通过；追加早退诊断 45 项及类型检查独立于上述 181 项，不能合并声称新全量。
+
+
+包 B 本机接线与自查（批准日期 2026-10-04；收口记录日期 2026-10-05；代码受验 `bdf0ea2`）：
+
+- 正常 registry 仍为归属权威。查看、历史上下文和授权摘要键均只读；正常未登记篇返回无历史，孤立 owner、缺失描述、矛盾登记及未知账本成员保留诊断。重建仅恢复原描述，不换对象；重复 noteId／路径／任务锚点拒绝合并，不选择“较新”数据。
+- 普通 owner→registry 发布与整库恢复共用 `.rgent-lifecycle` 的严格操作联合。普通发布记录两份控制文件预期版本、当前正文对象／修订、根和权限及逐步回执；整库记录完整成员、对象、原始字节摘要与权限。owner 已成／registry 未成、registry 已成／回执未成均按实际文件续接；缺 owner、外部冲突或权限变化保留日志并停止。
+- 现有 `ledgerRepair` 通道承载主进程 frame／session 绑定的预览、取消、确认与续跑令牌。整库恢复明确是人的新关联授权，不是物理同一性证明；同根替换篇拒绝，旧 root／附件证明不足只恢复历史。附件摘要直接取原始字节；任务锚点描述上限 256，超量明确标记截断且只恢复历史，不限制正文或任务数。
+- 合格记忆来源复用现有 `verifySource`，额外严格唯一对应，逐条核验分类、当前权限、来源依赖及递归记忆依赖的版本／到期状态。按条目与来源隔离核验结果；跨条目同 ID 的合格项不会覆盖不合格项。日志仅保存关联元数据补丁，不复制正文或记忆文本；不合格来源保持暂停。许可、临时模型、旧任务和本库开关不复活。
+- 恢复每批最多四项控制文件；重启只显示进度，不自动续跑。每批与完成前重读对象、完整树和权限，预览前后也比较完整快照。批间可暂停、退出设置或切库，原记录不清空；正文可读，任务、结构操作及整理写入受门禁保护。原笔记库页提供预览、确认、取消和继续一批，账本诊断导向同页，迟到回执不回填已离开的页面。
+- workspace 与侧栏展示按设备登记 id 续接，访问仍核验当前 root／path；旧 workspace 只按旧 path＋root 匹配迁移。旧展示键仅由旧已核验登记提供，同路径重新登记的新 id 不接旧偏好。相关新错误 `LEDGER_RECOVERY_AMBIGUOUS` 已登记共享文案与反向门，未知错误只给有界中文提示。
+
+必要定向证据：16 文件 498 通过／2 既有平台跳过，命令与输出 `/tmp/rgent-v4-B-targeted-final.log`；随后同 ID 来源隔离对照 1 文件 15／0（`/tmp/rgent-v4-B-source-id-final.log`）、界面与错误文案 3 文件 157／0（`/tmp/rgent-v4-B-ui-errors-final.log`）分别记录，不能相加冒充一次新全量。最终代码类型复核 `/tmp/rgent-v4-B-types-final-current.log` 通过；文档检查 12 文件通过（`/tmp/rgent-v4-B-docs-final.log`）。主要红灯日志为 `/tmp/rgent-v4-B-red1.log`、`/tmp/rgent-v4-B-red-lifecycle.log`、`/tmp/rgent-v4-B-red-memory.log`、`/tmp/rgent-v4-B-red-publication.log`、`/tmp/rgent-v4-B-red-review.log`、`/tmp/rgent-v4-B-red-journal.log`、`/tmp/rgent-v4-B-red-binary.log`、`/tmp/rgent-v4-B-red-anchors.log`、`/tmp/rgent-v4-B-red-prefs-proof.log`、`/tmp/rgent-v4-B-red-materials.log`、`/tmp/rgent-v4-B-red-orphan.log`。测试最初有新增 fixture 导入与类型错误，修正后才取上述受验证据。
+
+本包没有运行完整测试、构建窗口、付费模型或 CI，没有推送。没有新增窗口脚本断言；整轮须补实际构建窗口的“坏登记仍读正文→设置同页预览／取消→确认→批次暂停离库→重开续跑→合格来源恢复／不合格暂停”及稳定偏好重定位断言；DOM 测试不代称窗口证据。Windows、原生输入法人工操作、用户视觉与既有阶段待核项不变。包 B 独立 Spec／Quality 复核及最终门仍由串行总任务接续，不因本机接线自动开放下一包。
 
 事实校正：生产 structured context 允许空／部分摘要，撤回“生产自旋”判定；精确缓存复用仍需修。原正式运行未用保留集调提示，但评分晚于运行及旧保留集已被审阅须留档。压缩／清理授权已在合同记忆节，缺口是预览和保护。历史评分与失败不得改写。
 
