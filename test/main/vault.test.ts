@@ -19,6 +19,28 @@ vi.mock('../../src/main/watch.ts', async importOriginal => ({ ...await importOri
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('VaultSession isolation', () => {
+  it('opens an unregistered ordinary note without publishing ledger files', async () => {
+    const {session,attach,first}=await setup()
+    try{await attach(first);const note=await session.readOpened('原篇.md');expect(note.content).toBe('first');await new Promise<void>(r=>setImmediate(r));await expect(stat(path.join(first,'.rgent','registry.json'))).rejects.toMatchObject({code:'ENOENT'})}finally{session.dispose()}
+  })
+  it('reads editable body despite a broken registry and preserves a mixed-line-ending legacy tail on save',async()=>{
+    const {session,attach,first}=await setup(),tail='<!-- rgent:ledger:v1 -->\r\n不可解析历史\n末尾\r',body='\ufeff正文\r\n\n'
+    try{await attach(first);await writeFile(path.join(first,'原篇.md'),body+tail);await mkdir(path.join(first,'.rgent'),{recursive:true});await writeFile(path.join(first,'.rgent','registry.json'),'{bad')
+      const opened=await session.readOpened('原篇.md');expect(opened.content).toBe(body);expect(opened.ledger?.status).toBe('invalid');expect(await readFile(path.join(first,'原篇.md'),'utf8')).toBe(body+tail)
+      await session.write('原篇.md','\ufeff修改\r\n\n',opened.revision,opened);expect(await readFile(path.join(first,'原篇.md'),'utf8')).toBe('\ufeff修改\r\n\n'+tail);expect(await readFile(path.join(first,'.rgent','registry.json'),'utf8')).toBe('{bad')
+    }finally{session.dispose()}
+  })
+  it('does not hide an external legacy-tail change behind a body-only save',async()=>{
+    const {session,attach,first}=await setup(),raw='正文\n<!-- rgent:ledger:v1 -->\n旧记录'
+    try{await attach(first);await writeFile(path.join(first,'原篇.md'),raw);const note=await session.readOpened('原篇.md');await writeFile(path.join(first,'原篇.md'),raw+'外部追加');await expect(session.write('原篇.md','修改\n',note.revision,note)).rejects.toThrow('CONFLICT');expect(await readFile(path.join(first,'原篇.md'),'utf8')).toBe(raw+'外部追加')}finally{session.dispose()}
+  })
+  it('migrates only in explicit task preparation and returns a bound revision receipt',async()=>{
+    const {session,attach,first}=await setup(),raw='正文\r\n<!-- rgent:ledger:v1 -->\r\n旧历史\n'
+    try{await attach(first);await writeFile(path.join(first,'原篇.md'),raw);const before=await session.readOpened('原篇.md');const receipt=await session.prepareTaskSource({relPath:'原篇.md',sessionId:before.sessionId,objectVersion:before.objectVersion,expectedRevision:before.revision})
+      expect(receipt.previousRevision).toBe(before.revision);expect(receipt.revision).not.toBe(before.revision);expect((await session.readOpened('原篇.md')).content).toBe('正文\r\n');expect(await session.ledgerContexts('原篇.md')).toHaveLength(1)
+      await expect(session.prepareTaskSource({relPath:'原篇.md',sessionId:before.sessionId,objectVersion:before.objectVersion,expectedRevision:before.revision})).rejects.toThrow('CONFLICT')
+    }finally{session.dispose()}
+  })
   it('keeps an opaque navigation key across restore, current state and picks while separating same-name libraries', async () => {
     const userData = await mkdtemp(path.join(os.tmpdir(), 'rgent-navigation-'))
     const first = path.join(userData, 'first', '笔记库')

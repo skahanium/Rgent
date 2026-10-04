@@ -4,8 +4,8 @@ import { DEFAULT_STAGES, type Partition } from './types.ts'
 import { extensionsFor } from './stages/registry.ts'
 
 /**
- * 账本锚点。账本写在同一文件最末尾，正文永远在前。
- * 带 v1 是为了日后换格式时能被检测出来，而不是被误读。
+ * 旧尾部账本的兼容锚点。新任务写独立账本；未迁移尾部不进入编辑器。
+ * 保留 v1 边界用于精确迁移和正文保存时的磁盘原文保护。
  */
 export const LEDGER_ANCHOR = '<!-- rgent:ledger:v1 -->'
 

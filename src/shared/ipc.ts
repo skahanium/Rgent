@@ -217,7 +217,7 @@ export type PermissionState =
   | { status: 'invalid'; error: string }
 export type SetPermissionRequest = { relPath: string; tier: PermissionTier }
 
-export type NoteSnapshot = { content: string; revision: string; objectVersion: string; sessionId: string }
+export type NoteSnapshot = { content: string; revision: string; objectVersion: string; sessionId: string; ledger?:{status:'verified'|'unregistered'|'unmigrated'|'invalid';reason?:string;next:'none'|'migrate'|'repair'} }
 export type SaveCopyPreviewRequest = ObjectBinding & {
   source: string
   body: string

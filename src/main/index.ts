@@ -92,7 +92,7 @@ const memoryIpc = createMemoryIpc({
 })
 let cancellingForClose = false
 const memoryAuthorizationPreviews = new Map<string, { sessionId: string; signature: string;search:boolean }>()
-const maintenancePreviews=new Map<string,{sessionId:string;objectVersion:string;relPath:string;action:'compress'|'clear';records:{taskId:string;revision:number}[]}>()
+const maintenancePreviews=new Map<string,{sessionId:string;objectVersion:string;relPath:string;action:'compress'|'clear';records:{taskId:string;revision:number}[];archive?:{revision:string;bytes:number}}>()
 function memoryAuthorizationState(sessionId: string) {
   vault?.assertSession(sessionId)
   if (!vault || !modelConfig) return { signature: 'unavailable', disclosure: undefined }
@@ -688,8 +688,8 @@ function registerIpc(): void {
       if(!current)throw Error();current.assertSession(r.sessionId);if(structureGate.isBusy()||agentHost?.active().length||agentHost?.hasPending())throw Error('STRUCTURE_BUSY')
       const note=await current.read(r.relPath);current.assertSession(r.sessionId);if(!current.acceptsObject(r.relPath,r.objectVersion,note.objectVersion))throw Error('NOTE_REPLACED')
       const owner=`${event.sender.id}:${event.senderFrame!.routingId}`
-      if(r.previewId){const key=owner+':'+r.previewId,preview=maintenancePreviews.get(key);maintenancePreviews.delete(key);if(!preview||preview.sessionId!==r.sessionId||preview.objectVersion!==r.objectVersion||preview.relPath!==r.relPath||preview.action!==r.action)throw Error('STALE_PREVIEW');return {ok:true,value:await current.ledgerMaintenanceCommit(preview.relPath,preview.action,preview.records)}}
-      const preview=await current.ledgerMaintenancePreview(r.relPath,r.action as 'compress'|'clear');current.assertSession(r.sessionId);const id=randomUUID();if(maintenancePreviews.size>=128)maintenancePreviews.delete(maintenancePreviews.keys().next().value!);maintenancePreviews.set(owner+':'+id,{sessionId:r.sessionId,objectVersion:r.objectVersion,relPath:r.relPath,action:r.action as 'compress'|'clear',records:preview.records});return {ok:true,value:{id,...preview}}
+      if(r.previewId){const key=owner+':'+r.previewId,preview=maintenancePreviews.get(key);maintenancePreviews.delete(key);if(!preview||preview.sessionId!==r.sessionId||preview.objectVersion!==r.objectVersion||preview.relPath!==r.relPath||preview.action!==r.action)throw Error('STALE_PREVIEW');return {ok:true,value:await current.ledgerMaintenanceCommit(preview.relPath,preview.action,preview.records,preview.archive)}}
+      const preview=await current.ledgerMaintenancePreview(r.relPath,r.action as 'compress'|'clear');current.assertSession(r.sessionId);const id=randomUUID();if(maintenancePreviews.size>=128)maintenancePreviews.delete(maintenancePreviews.keys().next().value!);maintenancePreviews.set(owner+':'+id,{sessionId:r.sessionId,objectVersion:r.objectVersion,relPath:r.relPath,action:r.action as 'compress'|'clear',records:preview.records,archive:preview.archive});return {ok:true,value:{id,...preview}}
     }catch{return {ok:false,error:'LEDGER_UNAVAILABLE'}}
   })
   registerTrustedHandle(IPC.ledgerRepair,async(_event,value:unknown)=>{try{if(!value||typeof value!=='object'||Array.isArray(value))throw Error();const r=value as Record<string,unknown>;if(Object.keys(r).sort().join()!=='registryRevision,sessionId'||typeof r.sessionId!=='string'||r.registryRevision!==null&&(typeof r.registryRevision!=='string'||!/^[a-f0-9]{64}$/.test(r.registryRevision)))throw Error();if(!vault)throw Error();vault.assertSession(r.sessionId);if(structureGate.isBusy()||agentHost?.active().length)throw Error();await vault.ledgerRepair(r.registryRevision as string|null);return {ok:true}}catch{return {ok:false,error:'LEDGER_REGISTRY_INVALID'}}})
@@ -1059,6 +1059,10 @@ if (ownsInstance) app.whenReady().then(() => {
     stream:streamModelStep,changed:context=>{if(vault?.sessionId()===context.sessionId)send(IPC.memoryChanged,context.sessionId)}
   })
   agentHost = new AgentHost({
+    prepareSource:async input=>{
+      if(!input.sessionId||!input.objectVersion||!input.expectedRevision)throw Error('BAD_REQUEST')
+      return vault!.prepareTaskSource({...input,sessionId:input.sessionId,objectVersion:input.objectVersion,expectedRevision:input.expectedRevision})
+    },
     onTaskStarted:id=>consolidation?.capture(id),
     onTaskStartFailed:id=>consolidation?.discard(id),
     onTaskMaterialDiscarded:id=>consolidation?.discard(id),

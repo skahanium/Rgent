@@ -1318,6 +1318,11 @@ export async function start(root: HTMLElement): Promise<void> {
     memoryToggle.title = memorySnapshot ? `当前库记忆${memorySnapshot.config.vault.enabled ? '开启' : '关闭'}${memorySnapshot.status === 'invalid' ? ' · 存储不可用，请查看设置' : ''}` : '当前库记忆不可用，请查看设置'
     memoryToggle.setAttribute('aria-label', memoryToggle.title)
     const left = statusEl.querySelector('.status-left')
+    if(left&&tab?.ledgerStatus&&['invalid','unmigrated'].includes(tab.ledgerStatus.status)){
+      const diagnostic=document.createElement('button');diagnostic.type='button';diagnostic.className='status-item'
+      diagnostic.textContent=tab.ledgerStatus.status==='unmigrated'?'旧历史尚未迁移 · 查看':'历史需要检查 · 查看'
+      diagnostic.title='正文仍可编辑；查看账本诊断和恢复步骤';diagnostic.onclick=()=>{if(!ledgerOpen)toggleLedger()};left.append(diagnostic)
+    }
     const recentMemory=memorySnapshot?.jobs.filter(j=>j.outcome==='applied').at(-1),changedCount=recentMemory?.entryIds?.length??0
     memoryChange.hidden=changedCount===0;memoryChange.textContent=`记忆 +${changedCount} · 查看`;memoryChange.title='本场新增或更新记忆；在记忆页查看、编辑或预览撤销';if(left&&memoryChange.parentElement!==left)left.append(memoryChange)
     // 只在还没放进固定槽位时移动它：稳定的父子关系才保得住焦点。
@@ -1685,6 +1690,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const part = partitionSource(source.content)
     tab.content = part.body
     tab.ledger = part.ledger
+    tab.ledgerStatus = source.ledger
     tab.saved = part.body
     tab.revision = source.revision
     tab.sessionId = source.sessionId

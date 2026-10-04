@@ -8,7 +8,7 @@ export type LedgerMigrationResult={ok:true;value:{processed:string[];after:strin
 export type LedgerRepairRequest={sessionId:string;registryRevision:string|null}
 
 export type LedgerMaintenanceRequest={sessionId:string;objectVersion:string;relPath:string;action:'compress'|'clear';previewId?:string}
-export type LedgerMaintenanceResult={ok:true;value:{id:string;records:{taskId:string;revision:number;bytes:number}[];totalBytes:number;warning:string}|{success:string[];failed:string[];savedBytes:number}}|{ok:false;error:string}
+export type LedgerMaintenanceResult={ok:true;value:{id:string;records:{taskId:string;revision:number;bytes:number}[];totalBytes:number;warning:string;archive?:{revision:string;bytes:number}}|{success:string[];failed:string[];savedBytes:number;archiveCleared?:boolean}}|{ok:false;error:string}
 
 export type LedgerReasoningRequest={sessionId:string;objectVersion:string;relPath:string;taskId:string}
 export type LedgerReasoningResult={ok:true;text:string|null}|{ok:false;error:string}

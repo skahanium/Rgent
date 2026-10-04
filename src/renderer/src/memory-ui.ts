@@ -81,7 +81,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
   const status=paragraph('正在读取记忆…','memory-status-line'),statusHead=el('div','memory-card-heading')
   const heading=el('h3');heading.textContent='本库记忆'
   const refresh=button('',()=>void mutate(handlers.get,refresh));refresh.classList.add('memory-refresh');refresh.append(icon('refresh'));refresh.setAttribute('aria-label','刷新状态');refresh.title='刷新状态'
-  statusHead.append(heading,refresh);statusCard.append(statusHead,status)
+  statusHead.append(heading,refresh);statusCard.append(statusHead,status,paragraph('自动学习质量尚未通过验证。AI 可能遗漏或错误整理信息；请在重要任务中核对原材料，你可以查看、修改或遗忘记忆。','settings-hint memory-quality-status'))
   const items=el('section','memory-card memory-entries');items.dataset.memorySection='entries'
   const fold=(title:string,section:string)=>{const d=el('details','memory-card memory-fold');d.dataset.memorySection=section;const summary=el('summary');summary.textContent=title;d.append(summary);return d}
   const modelPanel=fold('模型设置','models'),jobsPanel=fold('最近整理记录','jobs'),maintenancePanel=fold('高级维护','maintenance')

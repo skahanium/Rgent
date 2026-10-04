@@ -8,6 +8,7 @@ export type Tab = {
   content: string
   /** 旁路账本，画布不碰。没有锚点时为 null。 */
   ledger: string | null
+  ledgerStatus?:import('../../shared/ipc.ts').NoteSnapshot['ledger']
   /** 上次成功写盘时的正文。 */
   saved: string
   /** 上次读盘或成功写盘的整文件修订值。 */

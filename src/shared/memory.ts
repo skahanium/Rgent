@@ -70,6 +70,8 @@ export type MemoryView = {
   entries: MemoryEntryView[]; jobs: MemoryJobView[]
   running: { permits: number; pending: number; active: number }
   learning?:{watermark:number;nextSequence:number}
+  materialStatus?:'verified'|'empty'|'invalid'
+  retirementFailure?:string
   configDiagnosis?: {revision:string|null;bytes:number}
   diagnosis?:{revision:string|null;objectVersion:string|null;bytes:number}
 }

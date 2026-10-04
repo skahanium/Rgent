@@ -14,7 +14,7 @@ import { effectivePermissionEntries, loadPermissions, loadPermissionSnapshot, se
 import { closeSecureFs, secureFsFor } from './secure-fs.ts'
 import { VaultIndex } from './vault-index.ts'
 import { vaultRootIdentity, watchVault } from './watch.ts'
-import { assertLedgerPreserved, partitionSource } from '../markdown/partition.ts'
+import { assertLedgerPreserved, composeSource, partitionSource } from '../markdown/partition.ts'
 import { LedgerStore } from './ledger-store.ts'
 import type { LedgerChapterWrite } from './host-source.ts'
 import { retireMemoryFile } from './memory-retirement.ts'
@@ -186,15 +186,20 @@ export class VaultSession {
 
   async readOpened(relPath:string):Promise<NoteSnapshot> {
     const token=this.captureSession(); await this.lifecycleReady; this.assertSession(token)
-    await this.mutations.run(async()=>{
-      this.assertSession(token);this.requireStableStructure()
-      const before=await readNoteSnapshot(this.requireUsableRoot(),relPath)
-      const migrated=this.ledgerStore!.migrate(relPath)
-      if(migrated.migrated)await this.recordCommittedWrite({relPath,previousPath:relPath,previousObjectVersion:before.objectVersion,objectVersion:migrated.objectVersion,content:migrated.body})
+    const note=await this.read(relPath),ledger=this.ledgerStore!.inspectOwner(relPath)
+    this.assertSession(token);return {...note,content:partitionSource(note.content).body,ledger}
+  }
+  /** Called only after a task grant or explicit migration, never by opening. */
+  async prepareTaskSource(request:ObjectBinding&{relPath:string;expectedRevision:string}){
+    await this.lifecycleReady;return this.mutations.run(async()=>{
+      this.assertSession(request.sessionId);this.requireStableStructure()
+      const before=await this.read(request.relPath)
+      if(!this.acceptsObject(request.relPath,request.objectVersion,before.objectVersion))throw Error('NOTE_REPLACED')
+      if(before.revision!==request.expectedRevision)throw Error('CONFLICT')
+      const migrated=this.ledgerStore!.migrate(request.relPath)
+      if(migrated.migrated)await this.recordCommittedWrite({relPath:request.relPath,previousPath:request.relPath,previousObjectVersion:before.objectVersion,objectVersion:migrated.objectVersion,content:migrated.body})
+      this.assertSession(request.sessionId);return {previousRevision:before.revision,revision:migrated.revision}
     })
-    const note=await this.read(relPath)
-    this.scheduleLedgerCompression(relPath,token)
-    return note
   }
   private scheduleLedgerCompression(relPath:string,token:string){
     setImmediate(()=>{void this.mutations.run(()=>{
@@ -206,13 +211,14 @@ export class VaultSession {
   async ledgerPrepare(relPath:string,chapter:LedgerChapterWrite,expectedVersion?:number){
     const token=this.captureSession();return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.prepare(relPath,chapter,expectedVersion)})
   }
-  async ledgerComplete(relPath:string,taskId:string,revision:string){const token=this.captureSession();return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.complete(relPath,taskId,revision)})}
+  async ledgerComplete(relPath:string,taskId:string,revision:string){const token=this.captureSession();const result=await this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.complete(relPath,taskId,revision)});this.scheduleLedgerCompression(relPath,token);return result}
   async ledgerKey(relPath:string){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);return this.memoryContext().vaultKey+':'+this.ledgerStore!.owner(relPath).noteId})}
   async ledgerContexts(relPath:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.contexts(relPath)}
   async ledgerPage(relPath:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);return {...this.ledgerStore!.wirePage(relPath,cursor),...(this.ledgerFailure?{maintenanceError:this.ledgerFailure}:{})}})}
 
   async materialUnit(relPath:string,start:number,end:number){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.materialUnit(relPath,start,end)})}
-  materialCeiling(){this.requireUsableRoot();return this.ledgerStore!.materialCeiling()}
+  materialCeiling(){const state=this.materialState();if(state.status==='invalid')throw Error(state.reason);return state.sequence}
+  materialState(){this.requireUsableRoot();const state=this.ledgerStore!.materialState();if(state.status==='invalid')return state;try{const record=this.workingMemory!.read().record;if(state.sequence<record.nextSequence||state.sequence<record.watermark)return {status:'invalid' as const,reason:'LEDGER_REGISTRY_INVALID'}}catch{/* Invalid memory remains diagnosable and explicitly resettable only against a verified material ceiling. */}return state}
   ledgerTaskPath(taskId:string){this.requireUsableRoot();return this.ledgerStore!.taskPath(taskId)}
   memoryDiagnostic(){this.requireUsableRoot();return this.workingMemory!.diagnosis()}
   memorySnapshot(){this.assertCall();return this.workingMemory!.read()}
@@ -221,7 +227,7 @@ export class VaultSession {
   async memoryMutation<T>(operation:(store:WorkingMemoryStore)=>T|Promise<T>):Promise<T>{const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();const result=await operation(this.workingMemory!);this.assertSession(token);return result})}
   async ledgerRecord(relPath:string,taskId:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.getRecord(relPath,taskId)}
   async ledgerMaintenancePreview(relPath:string,action:'compress'|'clear'){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintenancePreview(relPath,action)})}
-  async ledgerMaintenanceCommit(relPath:string,action:'compress'|'clear',items:readonly {taskId:string;revision:number}[]){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintain(relPath,action,items)})}
+  async ledgerMaintenanceCommit(relPath:string,action:'compress'|'clear',items:readonly {taskId:string;revision:number}[],archive?:{revision:string;bytes:number}){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintain(relPath,action,items,archive)})}
   ledgerRegistryRevision(){this.assertCall();return this.ledgerStore?.registryRevision()??null}
   async ledgerRepair(expected:string|null){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();this.ledgerStore!.repairRegistry(expected)})}
   async ledgerImage(relPath:string,taskId:string,revision:number,field:'prompt'|'answer'){
@@ -234,7 +240,7 @@ export class VaultSession {
     const token=this.captureSession(),entries=await this.tree(),paths:string[]=[]
     const walk=(items:TreeEntry[])=>{for(const item of items){if((item.kind==='note'||item.kind==='file')&&item.relPath.toLowerCase().endsWith('.md'))paths.push(item.relPath);if(item.kind==='dir')walk(item.children??[])}}
     walk(entries);paths.sort();const remaining=paths.filter(p=>after===null||p>after),batch=remaining.slice(0,5),failures:{relPath:string;error:string}[]=[],processed:string[]=[]
-    for(const path of batch){this.assertSession(token);try{await this.readOpened(path);processed.push(path)}catch{failures.push({relPath:path,error:'LEDGER_MIGRATION_FAILED'})}}
+    for(const path of batch){this.assertSession(token);try{await this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();this.ledgerStore!.migrate(path)});processed.push(path)}catch{failures.push({relPath:path,error:'LEDGER_MIGRATION_FAILED'})}}
     return {processed,failures,after:remaining.length>batch.length?batch.at(-1)!:null}
   }
   async read(relPath: string): Promise<NoteSnapshot> {
@@ -312,7 +318,10 @@ export class VaultSession {
         this.requireUsableRoot()
         if (binding && !this.acceptsObject(relPath, binding.objectVersion, current.objectVersion)) throw new Error('NOTE_REPLACED')
         if (current.revision !== expectedRevision) throw new Error('CONFLICT')
-        assertLedgerPreserved(content, partitionSource(current.content).ledger)
+        const tail=partitionSource(current.content).ledger
+        if(partitionSource(content).ledger!==null)throw new Error('LEDGER_BOUNDARY_INVALID')
+        content=composeSource(content,tail)
+        assertLedgerPreserved(content,tail)
         const links = this.successors.get(relPath) ?? new Map<string, string>()
         if (!links.has(current.objectVersion) && links.size >= 8192) throw new Error('OBJECT_BINDING_LIMIT')
         this.requireSnapshotCapacity(relPath, 'pending-save', content, current.objectVersion)

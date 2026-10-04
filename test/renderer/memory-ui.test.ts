@@ -5,6 +5,11 @@ import type { MemoryEntryView, MemoryView } from '../../src/shared/memory.ts'
 const view:MemoryView={sessionId:'session',revision:null,objectVersion:null,config:{defaultModelId:null,limits:{seconds:120,calls:2,tools:0},vault:{enabled:false,override:{mode:'inherit'}},effectiveModelId:null,modelStatus:'missing'},recipient:null,status:'ready',entries:[],jobs:[],running:{permits:0,pending:0,active:0}}
 const flush=()=>new Promise(resolve=>setTimeout(resolve,0))
 describe('memory page drafts',()=>{
+  it('discloses unverified learning quality without changing the saved library switch',async()=>{
+    const body=document.createElement('div');document.body.append(body);const save=vi.fn()
+    const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,config:{...view.config,vault:{...view.config.vault,enabled:true}}}}),models:async()=>({ok:false,error:'IO_ERROR'}),save} as never)
+    await flush();expect(body.textContent).toContain('自动学习质量尚未通过验证');expect(body.querySelector<HTMLInputElement>('[data-memory="vault-enabled"]')?.checked).toBe(true);expect(save).not.toHaveBeenCalled();dispose();body.remove()
+  })
   it('saves default and vault separately; a failed save preserves the draft and current value',async()=>{
     const body=document.createElement('div');document.body.append(body)
     const save=vi.fn(async()=>({ok:false,error:'IO_ERROR'}))

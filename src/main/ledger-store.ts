@@ -45,6 +45,20 @@ export class LedgerStore{
   try{const v:unknown=JSON.parse(disk.raw);if(!obj(v)||!exact(v,['version','owners','sequence'])||v.version!==1||!Number.isSafeInteger(v.sequence)||Number(v.sequence)<0||!Array.isArray(v.owners)||v.owners.length>100000||!v.owners.every(validOwner)||new Set(v.owners.map(o=>o.noteId)).size!==v.owners.length||new Set(v.owners.map(o=>o.relPath)).size!==v.owners.length||new Set(v.owners.map(o=>o.objectVersion)).size!==v.owners.length)throw Error();return v as Registry}catch{throw Error('LEDGER_REGISTRY_INVALID')}
  }
  private publish(registry:Registry,owner:LedgerOwner){this.read(`.rgent/ledgers/${owner.noteId}/owner.json`);this.dirs(['.rgent','ledgers',owner.noteId]);this.replace(`.rgent/ledgers/${owner.noteId}/owner.json`,JSON.stringify(owner));this.replace(fixed,JSON.stringify(registry))}
+ /** Read-only inspection. Opening a note never grants publication or migration. */
+ inspectOwner(relPath:string):import('../shared/ipc.ts').NoteSnapshot['ledger']{
+  try{const note=this.fs.readSnapshot(relPath),registry=this.registry(),owner=registry.owners.find(o=>o.relPath===relPath)
+   if(!this.read(fixed))this.assertNoMaterialHistory()
+   if(owner&&owner.objectVersion!==note.objectVersion)throw Error('LEDGER_OWNERSHIP_UNVERIFIED')
+   if(owner){const descriptor=this.read(`.rgent/ledgers/${owner.noteId}/owner.json`);if(!descriptor||descriptor.raw!==JSON.stringify(owner))throw Error('LEDGER_REGISTRY_INVALID')}
+   if(partitionSource(note.bytes.toString()).ledger!==null)return {status:'unmigrated',next:'migrate'}
+   return {status:owner?'verified':'unregistered',next:'none'}
+  }catch(e){return {status:'invalid',reason:e instanceof Error?e.message:'LEDGER_STORAGE_INVALID',next:'repair'}}
+ }
+ private assertNoMaterialHistory(){
+  try{if(this.fs.list('.rgent/ledgers').some(f=>f.name!=='.DS_Store'))throw Error('LEDGER_REGISTRY_INVALID')}catch(e){if(!(e instanceof Error&&e.message==='ENOENT'))throw e}
+  if(this.read('.rgent/materials.json'))throw Error('LEDGER_REGISTRY_INVALID')
+ }
  owner(relPath:string):LedgerOwner{
   if(!rel(relPath))throw Error('BAD_PATH');this.check();const note=this.fs.readSnapshot(relPath),registry=this.registry()
   const same=registry.owners.filter(o=>o.objectVersion===note.objectVersion)
@@ -70,22 +84,31 @@ export class LedgerStore{
   const unit={id:randomUUID(),noteId:owner.noteId,start,end,sequence:registry.sequence};units.push(unit);this.replace(file,JSON.stringify({version:1,units}));return unit
  }
  maintenancePreview(relPath:string,action:'compress'|'clear'){
-  const owner=this.owner(relPath);let cursor:string|null=null,totalBytes=0;const records:{taskId:string;revision:number;bytes:number}[]=[]
+  const owner=this.owner(relPath);let cursor:string|null=null,totalBytes=0;const records:{taskId:string;revision:number;bytes:number}[]=[],legacyIds:string[]=[]
   do{const page=this.page(relPath,cursor);for(const r of page.records){const d=this.read(this.path(owner,r.taskId))!;totalBytes+=Buffer.byteLength(d.raw);if(records.length<20&&r.state!=='pending-body'&&r.state!=='cleared'&&(action==='clear'||r.state==='saved'&&Date.parse(r.chapter!.startedAt)<Date.now()-7*86400000&&!d.raw.includes('"codec":"gzip"')))records.push({taskId:r.taskId,revision:r.revision,bytes:Buffer.byteLength(d.raw)})}cursor=page.cursor}while(cursor)
-  return {records,totalBytes,warning:action==='clear'?'只清理列出的已完成历史，不修改正文或自动遗忘已学记忆。原始材料清理后不能重建对应摘要。':'核验无损往返与净节省后替换同一记录；不保留双表示。'}
+  if(action==='clear'){let c:string|null=null;do{const p=this.page(relPath,c);legacyIds.push(...p.records.filter(r=>r.legacyRaw!==undefined&&r.state!=='cleared').map(r=>r.taskId));c=p.cursor}while(c)}
+  const disk=this.read(`.rgent/ledgers/${owner.noteId}/legacy.json`);if(disk)totalBytes+=Buffer.byteLength(disk.raw)
+  const archive=action==='clear'&&disk&&legacyIds.length&&legacyIds.every(id=>records.some(r=>r.taskId===id))?{revision:digest(disk.raw),bytes:Buffer.byteLength(disk.raw)}:undefined
+  return {records,totalBytes,...(archive?{archive}:{}),warning:action==='clear'?'只清理列出的已完成历史，不修改正文或自动遗忘已学记忆。原始材料清理后不能重建对应摘要。'+(archive?'本次同时清除全部关联任务共享的旧归档，包括未解析内容。':disk?'共享旧归档仍保留历史内容；本次不清除共享归档。':''):'核验无损往返与净节省后替换同一记录；不保留双表示。'}
  }
- maintain(relPath:string,action:'compress'|'clear',items:readonly {taskId:string;revision:number}[]){
+ maintain(relPath:string,action:'compress'|'clear',items:readonly {taskId:string;revision:number}[],archive?:{revision:string;bytes:number}){
   if(items.length>20||new Set(items.map(i=>i.taskId)).size!==items.length)throw Error('BAD_REQUEST')
-  const owner=this.owner(relPath),success:string[]=[],failed:string[]=[];let savedBytes=0
+  const owner=this.owner(relPath),success:string[]=[],failed:string[]=[];let savedBytes=0,archiveCleared=false
+  const archivePath=`.rgent/ledgers/${owner.noteId}/legacy.json`,originalArchive=archive?this.read(archivePath):null
+  if(archive&&(action!=='clear'||!originalArchive||digest(originalArchive.raw)!==archive.revision||Buffer.byteLength(originalArchive.raw)!==archive.bytes))throw Error('LEDGER_CONFLICT')
   for(const item of items){try{const r=this.record(owner,item.taskId),disk=this.bases.get(this.path(owner,item.taskId));if(!r||r.revision!==item.revision||r.state==='pending-body'||!disk)throw Error('LEDGER_CONFLICT')
     if(action==='compress'){if(r.state!=='saved'||Date.parse(r.chapter!.startedAt)>=Date.now()-7*86400000)throw Error('BAD_REQUEST');const zipped=compressLedgerBytes(decodeLedgerBytes(disk.raw));if(zipped){this.replace(this.path(owner,r.taskId),zipped.raw);savedBytes+=Buffer.byteLength(disk.raw)-Buffer.byteLength(zipped.raw)}}
-    else {if(r.legacyRaw){const archive=this.read(`.rgent/ledgers/${owner.noteId}/legacy.json`);if(archive)this.replace(`.rgent/ledgers/${owner.noteId}/legacy.json`,JSON.stringify({version:1,raw:'<!-- rgent:ledger:v1 -->\n',hash:digest('<!-- rgent:ledger:v1 -->\n')}))}const cleared:LedgerRecord={version:1,noteId:owner.noteId,taskId:r.taskId,revision:r.revision+1,state:'cleared',bodyStatus:'unable-to-verify',chapter:null,sequence:r.sequence};this.replace(this.path(owner,r.taskId),JSON.stringify(cleared));savedBytes+=Buffer.byteLength(disk.raw)-Buffer.byteLength(JSON.stringify(cleared))}
+    else {const cleared:LedgerRecord={version:1,noteId:owner.noteId,taskId:r.taskId,revision:r.revision+1,state:'cleared',bodyStatus:'unable-to-verify',chapter:null,sequence:r.sequence};this.replace(this.path(owner,r.taskId),JSON.stringify(cleared));savedBytes+=Buffer.byteLength(disk.raw)-Buffer.byteLength(JSON.stringify(cleared))}
     success.push(item.taskId)
    }catch{failed.push(item.taskId)}}
-  return {success,failed,savedBytes}
+  if(archive&&originalArchive&&!failed.length){let cursor:string|null=null,referenced=false;do{const page=this.page(relPath,cursor);referenced ||= page.records.some(r=>r.legacyRaw!==undefined&&r.state!=='cleared');cursor=page.cursor}while(cursor)
+   if(!referenced){const raw='<!-- rgent:ledger:v1 -->\n',stub=JSON.stringify({version:1,raw,hash:digest(raw)});try{this.replace(archivePath,stub);archiveCleared=true;savedBytes+=Buffer.byteLength(originalArchive.raw)-Buffer.byteLength(stub)}catch{failed.push('legacy-archive')}}
+  }
+  return {success,failed,savedBytes,archiveCleared}
  }
  registryRevision(){return this.read(fixed)?.raw?digest(this.bases.get(fixed)!.raw):null}
- materialCeiling(){return this.registry().sequence}
+ materialState():{status:'verified'|'empty';sequence:number}|{status:'invalid';reason:string}{try{const registry=this.registry();if(!this.read(fixed)){this.assertNoMaterialHistory();return {status:'empty',sequence:0}}if(registry.owners.some(o=>o.sequenceCeiling>registry.sequence))throw Error('LEDGER_REGISTRY_INVALID');return {status:'verified',sequence:registry.sequence}}catch{return {status:'invalid',reason:'LEDGER_REGISTRY_INVALID'}}}
+ materialCeiling(){const state=this.materialState();if(state.status==='invalid')throw Error(state.reason);return state.sequence}
  taskPath(taskId:string){if(!id(taskId))throw Error('BAD_REQUEST');const matches=this.registry().owners.filter(o=>this.read(this.path(o,taskId))!==null);if(matches.length!==1)throw Error('MEMORY_JOB_UNAVAILABLE');return matches[0]!.relPath}
  repairRegistry(expected:string|null){if(this.registryRevision()!==expected)throw Error('LEDGER_CONFLICT');this.rebuildRegistry()}
  rebuildRegistry(){this.check();const owners:LedgerOwner[]=[];for(const dir of this.fs.list('.rgent/ledgers')){if(dir.kind!=='dir'||!id(dir.name))throw Error('LEDGER_REGISTRY_INVALID');const raw=this.read(`.rgent/ledgers/${dir.name}/owner.json`);if(!raw)throw Error('LEDGER_REGISTRY_INVALID');let owner:unknown;try{owner=JSON.parse(raw.raw)}catch{throw Error('LEDGER_REGISTRY_INVALID')};if(!validOwner(owner)||owner.noteId!==dir.name)throw Error('LEDGER_REGISTRY_INVALID');owners.push(owner)}

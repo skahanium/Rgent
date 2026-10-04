@@ -1,4 +1,4 @@
-import {mkdtempSync,readFileSync,rmSync,writeFileSync,renameSync} from 'node:fs'
+import {mkdtempSync,readFileSync,rmSync,writeFileSync,renameSync,unlinkSync} from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {afterEach,expect,it} from 'vitest'
@@ -9,6 +9,20 @@ const roots:string[]=[]
 const fixture=()=>{const root=mkdtempSync(path.join(os.tmpdir(),'rgent-ledger-v2-'));roots.push(root);const fs=secureFsFor(root);return {root,fs,store:new LedgerStore(fs,()=>{})}}
 afterEach(()=>roots.splice(0).forEach(r=>{closeSecureFs(r);rmSync(r,{recursive:true,force:true})}))
 const task={taskId:'task-1',startedAt:'2026-10-03T00:00:00.000Z',status:'completed' as const,prompt:'你好',answer:'回答',provenance:{version:1 as const,model:{provider:'custom',modelId:'fixture',endpointHost:'localhost'},scope:['a.md'],sources:[],tools:[]}}
+it('does not treat missing material registry as sequence zero when history exists',()=>{
+ const {root,fs,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');store.prepare('a.md',task)
+ unlinkSync(path.join(root,'.rgent','registry.json'))
+ expect(()=>store.materialCeiling()).toThrow('LEDGER_REGISTRY_INVALID')
+})
+it('clears one legacy record without replacing a shared original archive',()=>{
+ const {root,store}=fixture();const source=appendLedgerChapter(appendLedgerChapter('正文\n',task),{...task,taskId:'task-2',answer:'另一个回答'})
+ writeFileSync(path.join(root,'a.md'),source);store.migrate('a.md');const archive=store.legacyRaw('a.md'),preview=store.maintenancePreview('a.md','clear'),record=preview.records.find(r=>r.taskId===task.taskId)!
+ expect(preview.warning).toContain('共享');store.maintain('a.md','clear',[record]);expect(store.legacyRaw('a.md')).toBe(archive);expect(store.getRecord('a.md','task-2').chapter?.answer).toBe('另一个回答')
+})
+it('clears a shared archive only with the whole preview and matching archive revision',()=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),appendLedgerChapter(appendLedgerChapter('正文\n',task),{...task,taskId:'task-2'}));store.migrate('a.md');const preview=store.maintenancePreview('a.md','clear')
+ expect(preview.archive).toBeDefined();expect(preview.warning).toContain('全部');const result=store.maintain('a.md','clear',preview.records,preview.archive);expect(result.archiveCleared).toBe(true);expect(store.legacyRaw('a.md')).toBe('<!-- rgent:ledger:v1 -->\n')
+})
 it('binds only continuous objects; Finder copy starts new history and replacement is unknown',()=>{
  const {root,fs,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文')
  const owner=store.owner('a.md');store.prepare('a.md',task)
