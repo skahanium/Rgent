@@ -1099,7 +1099,7 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 | B | registry 登记与 owner 证据分工；整库恢复显式授权、附件／权限必检、多文件中断及暂停退出 | `e04a02f` 最后实际队列修补独立 Spec／Quality 复核通过（2026-10-05）；定向 13 文件 261／0、类型／文档通过。打开 A+ 串行工程门；全部 B 实际窗口及整轮完整门仍待核，不能据此宣称整库恢复已完整验收 |
 | A+ | search_memory 单篇注册、四次限额／全局安全额度、结果来源状态与账本依赖，退休失败出口 | `3c39531` 修补后的独立 Spec／Quality 再审通过（2026-10-05），3 项 Important 及目标消失路径闭合；必要 8 文件 205／0、类型／文档通过，打开 C 串行工程门。实际窗口及整轮完整门仍待核；初版 315／0、SSE 13／0及 core 20／0保留原范围 |
 | C | 部分摘要复用、实际发送副本／依赖、统一预算；100／1000／10000 历史性能先测后索引 | `ba385f2` 三项 Important 修补后的独立 Spec／Quality 再审通过（2026-10-05）；必要 5 文件 133／0、类型及文档通过。原 9 文件 223／0、性能及失败保留各自范围；开放 E 串行工程门，实际窗口与整轮完整门仍待收口 |
-| E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 2026-10-05 初版必要 11 文件 204／0；独立复审 Spec❌／Quality Needs fixes（Critical 0／Important 1／Minor 1）。恢复查询两项已修补，renderer 15／0、类型／文档通过；待再审及实际窗口／整轮完整门。D 保持未开 |
+| E | 工作区保存失败阻止切换、提交期延后关闭、完整恢复门、草稿／迟到回执 | 2026-10-05 初版必要 11 文件 204／0；独立复审 Spec❌／Quality Needs fixes（Critical 0／Important 1／Minor 1）。首修 15／0 后再审新增 Important 1，同操作恢复状态误注销查询已补，renderer 20／0、类型／文档通过；待再审及实际窗口／整轮完整门。D 保持未开 |
 | D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | 待 E 门；2026-10-04 |
 | Q | 虚构开发集双策略对照，逐模型停损与证据；不切生产策略、不运行正式评测 | 待 D 门；2026-10-04 |
 
@@ -1240,3 +1240,5 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 - 手动按钮与原生恢复事件复用同一查询入口，触发时立即保护交互并绑定原 session、独立查询代际、当前 restoreId 和状态读取代际。10 秒查询超时保留窗口稿、原位置与明确重试提示；新恢复 id／权威状态立即淘汰旧 query、catch 与 finally，旧查询不能应用状态或释放新门。同会话查询不重放提交标记；原生查询失败不伪造恢复确认，主进程既有有限重试／明确退出路径保持。
 - 修补前真实按钮及事件入口 red：`pnpm exec vitest run test/renderer/vault-close.test.ts -t 'manual restore|newer native restore'`，5 失败／7 未选，日志 `/tmp/rgent-v4-E-fix-red-query.log`。修后 `pnpm exec vitest run test/renderer/vault-close.test.ts`，1 文件 15／0，日志 `/tmp/rgent-v4-E-fix-green-final.log`；含当前查询正常恢复、失败保稿后按钮再试、会话不符诊断、超时保稿与原生新 id 重试，以及迟到成功／失败隔离。`pnpm exec tsc --noEmit`、`pnpm docs:check` 通过，日志 `/tmp/rgent-v4-E-fix-types-final.log`、`/tmp/rgent-v4-E-fix-docs-final.log`。首轮类型窄化失败不计有效 green。
 - 本次生产仅修改 renderer shell；main／shared、B、A+ 与 C 无变化，没有重复旧 204 项或全量／构建／UI／付费调用。DOM 证据不能代称实际 Electron 窗口，平台与人工待核项保持，D 未开。
+
+包 E 限定再审修补（2026-10-05，基线 `7099099`，待再审）：再审发现真实 `retryRestore` 先发带 id 的 handoff、紧接同操作无 id 的 changed；首修误注销当前查询，同恢复阶段重复关闭更新亦受影响。新增测试接真实 `VaultSwitch` producer 与 DOM shell，修前正确状态返回仍无 ACK，2 失败／15 未选（`/tmp/rgent-v4-E-rereview-red-order.log`）。消费端改为在更新 transitionId 前核查询发起时绑定的 session／operation，只在新 preparing、新操作或新会话时淘汰；同 restoring 阶段的 changed／closePending 更新保留当前 id，新的 R1／R2 查询代际仍独立。`pnpm exec vitest run test/renderer/vault-close.test.ts` 修后 1 文件 20／0（`...-rereview-green-final.log`），含实际 producer 成对事件、重复两次关闭，以及新 preparing／operation／session 的淘汰正例；`pnpm exec tsc --noEmit`、`pnpm docs:check` 通过（`...-rereview-types-final.log`、`...-rereview-docs-final.log`）。main/shared 未改，无旧 204／全量／构建／UI／付费重复；producer＋DOM 证据仍不是实际系统窗口，D 未开。

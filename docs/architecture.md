@@ -238,6 +238,8 @@ workspace 的唯一性规则与寻址一致：有 id 行按 id 唯一，无 id �
 
 渲染恢复查询由手动按钮与原生事件共用，开始查询即取得保护门并核原会话、独立查询代际、状态代际和当前 restoreId；查询另有 10 秒期限。新的恢复事件或权威状态即失效旧查询，旧成功／catch／finally 不得应用状态、清稿、覆盖诊断或解锁新门。同会话重试剥离提交标记，查询失败不发送虚构恢复确认；原生交接门与既有明确退出协议保持主进程权威。
 
+同一次 retryRestore 的 handoff 先于 changed；后续无 restoreId 的 restoring／closePending 更新不能注销当前查询。消费端在更新 transitionId 前核查询发起时的 session／operation 绑定，新 preparing、新操作或新会话才淘汰，新的 restoreId 仍立即建立独立读取代际。
+
 本轮受验提交及平台证据见[施工图](build.md#单窗口多库管理)，不能将单机窗口检查视为 Windows 或用户视觉确认。
 
 2026-10-05 A+ 退休失败出口沿用 memory maintenance preview／commit，严格动作扩展为 `retire`。只识别固定 `.rgent-memory` 的旧 v1 JSON 结构，预览不解码、导入或公开旧条目；主进程持有一次性 frame／session 预览及根身份、对象、整文件修订，库队列实际提交前同步重核，原生 CAS 替换后读回退役标记。未知格式、对象／字节变化及会话迟到均保留原文件。记忆 view 携带可重试的有界诊断，未知格式只显示影响与下一步；旧执行及旧许可不会复活。实际窗口仍留整轮统一门。

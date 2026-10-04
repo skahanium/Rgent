@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import {beforeEach,afterEach,it,expect,vi} from 'vitest'
 import {start} from '../../src/renderer/src/shell.ts'
+import {VaultSwitch} from '../../src/main/vault-switch.ts'
 const editorHarness=vi.hoisted(()=>({text:'',change:null as ((text:string)=>void)|null}))
 vi.mock('../../src/renderer/src/view/editor.ts',()=>({mountEditor:(_root:HTMLElement,change:(text:string)=>void)=>{editorHarness.change=change;
  const dom=document.createElement('div'),scrollDOM=document.createElement('div');let text=''
@@ -194,4 +195,39 @@ it('native query timeout keeps the main transition gate and a new id can recover
  reject(Error('late timeout rejection'));await vi.advanceTimersByTimeAsync(1)
  expect(root.inert).toBe(false);expect(root.querySelector('.status-host-notice')?.textContent).toBe(notice);expect(api.vaultTransitionDone).toHaveBeenCalledTimes(1)
  }finally{vi.useRealTimers()}
+})
+
+it.each([false,true])('actual retryRestore handoff then changed preserves the pending query with repeated close %s',async close=>{
+ await start(root)
+ const next={status:'ready' as const,sessionId:'old',rootName:'old'}
+ const events:any[]=[]
+ const flow=new VaultSwitch<string,typeof next>({check:()=>{},prepare:async()=>{},flush:async()=>true,commit:async()=>next,
+  release:()=>handlers.onVaultTransition(false,'old',{busy:false,session:'old',phase:'idle'}),
+  changed:(phase,closePending,operationId)=>{const event={busy:true,session:'old',phase,closePending,operationId};events.push(event);handlers.onVaultTransition(true,'old',event)},
+  handoff:(result,id,_owner,retry)=>{if(retry){const event={busy:true,session:'old',phase:'restoring',restoreId:id};events.push(event);handlers.onVaultTransition(true,'old',event)}return{result,sessionId:'old'}}})
+ // The initial commit receipt was lost; main is still holding restoration.
+ await flow.run('old','frame');events.length=0
+ let finish!:(value:typeof next)=>void;api.vaultGet=()=>new Promise(resolve=>{finish=resolve})
+ expect(flow.retryRestore()).toBe(true)
+ const id=events[0].restoreId
+ expect(events.slice(0,2)).toEqual([{busy:true,session:'old',phase:'restoring',restoreId:id},
+  {busy:true,session:'old',phase:'restoring',closePending:false,operationId:flow.operationId}])
+ if(close){expect(flow.requestClose()).toBe(true);expect(flow.requestClose()).toBe(true);expect(events.at(-1).closePending).toBe(true)}
+ expect(root.inert).toBe(true);finish(next)
+ await vi.waitFor(()=>expect(api.vaultTransitionDone).toHaveBeenCalledWith({id,sessionId:'old',outcome:'ready'}))
+ expect(api.vaultTransitionDone).toHaveBeenCalledTimes(1);expect(root.inert).toBe(true)
+ expect(flow.restored('frame',{id,sessionId:'old',outcome:'ready'},'old')).toBe(true);expect(root.inert).toBe(false)
+})
+
+it.each(['preparing','operation','session'] as const)('a proven new %s update retires a pending query without releasing its new gate',async change=>{
+ await start(root);let finish!:(value:any)=>void;api.vaultGet=()=>new Promise(resolve=>{finish=resolve})
+ handlers.onVaultTransition(true,'old',{busy:true,session:'old',phase:'preparing',operationId:'O1'})
+ handlers.onVaultTransition(true,'old',{busy:true,session:'old',phase:'restoring',restoreId:'R1'})
+ const session=change==='session'?'new':'old'
+ handlers.onVaultTransition(true,session,{busy:true,session,phase:change==='preparing'?'preparing':'restoring',operationId:change==='operation'?'O2':'O1'})
+ const notice=root.querySelector('.status-host-notice')?.textContent
+ finish({status:'ready',rootName:'old',sessionId:'old'})
+ await Promise.resolve();await Promise.resolve();await Promise.resolve()
+ expect(api.vaultTransitionDone).not.toHaveBeenCalled();expect(root.inert).toBe(true);expect(root.querySelector('.status-host-notice')?.textContent).toBe(notice)
+ handlers.onVaultTransition(false,'old',{busy:false,session:'old',phase:'idle'});expect(root.inert).toBe(false)
 })

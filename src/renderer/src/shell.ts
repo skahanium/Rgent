@@ -160,6 +160,8 @@ export async function start(root: HTMLElement): Promise<void> {
   let stateSerial = 0
   let restoreQuerySerial=0
   let restoreQueryPending=false
+  let restoreQuerySession:string|null|undefined
+  let restoreQueryOperationId:string|null=null
   let currentRestoreId:string|null=null
   let transitionBusy = false
   let transitionId:string|null=null
@@ -421,7 +423,13 @@ export async function start(root: HTMLElement): Promise<void> {
   })
   // The release may name the new mount before its ready reply reaches applyState.
   window.rgent.onVaultTransition((busy,session,state)=>{
-    if(busy&&!state.restoreId&&restoreQueryPending){restoreQuerySerial++;restoreQueryPending=false;currentRestoreId=null;restoringWorkspace=false}
+    if(busy&&!state.restoreId&&restoreQueryPending){
+      // A restoring/closePending update belongs to the same query, unless its binding changed.
+      const superseded=state.phase==='preparing'||session!==restoreQuerySession||
+        !!(state.operationId&&restoreQueryOperationId&&state.operationId!==restoreQueryOperationId)
+      if(superseded){restoreQuerySerial++;restoreQueryPending=false;currentRestoreId=null;restoringWorkspace=false}
+      else if(state.operationId)restoreQueryOperationId??=state.operationId
+    }
     transitionId=busy?(state.operationId??transitionId):null
     releasedSession = !busy && session !== vaultSession ? session : undefined
     transitionBusy = busy || releasedSession !== undefined
@@ -648,6 +656,7 @@ export async function start(root: HTMLElement): Promise<void> {
   async function queryRestoreState(restoreId?:string, targetSession?:string|null):Promise<void> {
     const query=++restoreQuerySerial,serial=++stateSerial,sourceSession=vaultSession
     const expectedSession=restoreId?targetSession:sourceSession
+    restoreQuerySession=expectedSession;restoreQueryOperationId=transitionId
     currentRestoreId=restoreId??null;restoreQueryPending=true;restoringWorkspace=true
     vaultEpoch++
     if(workspaceTimer!==null){clearTimeout(workspaceTimer);workspaceTimer=null}
