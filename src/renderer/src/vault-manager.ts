@@ -1,8 +1,12 @@
+import { LEDGER_ERROR_MESSAGES, ledgerErrorText } from '../../shared/ledger-errors.ts'
+import type { LedgerRepairRequest, LedgerRepairResult, LedgerRecoveryView } from '../../shared/ledger.ts'
+import type { LifecycleStatus } from '../../shared/ipc.ts'
 import type { VaultCatalogEntry, VaultCatalogView } from '../../shared/vault-management'
 import { icon, type IconName } from './icons'
 
 type Catalog = VaultCatalogView & { activeId?: string | null }
 export type VaultManagerHandlers = {
+  recovery?: {state():Promise<LifecycleStatus>;repair(request:LedgerRepairRequest):Promise<LedgerRepairResult>}
   get(): Promise<Catalog>
   open(id: string): Promise<void>
   pick(create: boolean): Promise<void>
@@ -48,10 +52,32 @@ export function mountVaultManager(context: {
   const status = element('p', 'vault-settings-status')
   status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite')
   root.append(shortcuts, diagnostic, loading, current, others, status)
+  const recovery = element('section','vault-settings-recovery');recovery.hidden=true
+  const recoveryMessage=element('p','vault-settings-hint'),recoveryRows=element('ul',''),recoveryActions=element('div','vault-settings-shortcuts')
+  recovery.append(element('h3','','账本登记与整库恢复'),recoveryMessage,recoveryRows,recoveryActions);root.append(recovery)
+  let recoveryState:LifecycleStatus|null=null,recoveryPreview:LedgerRecoveryView|null=null
+  const repair=async(request:LedgerRepairRequest)=>{const result=await handlers.recovery!.repair(request);if(!alive())return;if(!result.ok)throw Error(result.error);if(result.value&&'rows'in result.value){recoveryPreview=result.value;showRecovery()}else if(result.value&&'processed'in result.value){const progress=result.value;recoveryPreview=null;recoveryState={...recoveryState!,status:progress.status==='complete'?'ready':'pending',revision:progress.revision,operation:progress.status==='complete'?undefined:{kind:'ledger-repair',source:'',target:''}};showRecovery();recoveryMessage.textContent=progress.status==='complete'?'恢复已完成。账本和合格来源已核验；未通过的来源仍暂停。':`已核验 ${progress.processed} / ${progress.total} 项。可暂停并离开本库，进度保留。`}}
+  function showRecovery(){
+    recovery.hidden=!recoveryState;recoveryRows.replaceChildren();recoveryActions.replaceChildren();if(!recoveryState)return
+    const sessionId=recoveryState.sessionId
+    if(recoveryPreview){const preview=recoveryPreview;recoveryMessage.textContent=preview.warning
+      for(const row of preview.rows){const item=element('li','',`${row.relPath} · ${{associate:'可建立新关联','history-only':'只恢复历史，来源暂停',refused:'拒绝'}[row.outcome]}${row.reasons.length?'：'+row.reasons.join('；'):''}`);for(const source of row.sources)item.append(element('p','vault-settings-hint',`${source.status==='verified'?'来源核验通过':'来源暂停'}：${source.reason}`));recoveryRows.append(item)}
+      const confirm=button(preview.mode==='restore'?'确认授权新关联':'确认重建原登记',()=>{void run('正在核验恢复…',()=>repair({sessionId,action:'commit',previewId:preview.id}))});confirm.disabled=!preview.canCommit;confirm.dataset.recoveryRefused=String(!preview.canCommit)
+      const cancel=button('取消恢复预览',()=>{void run('取消预览…',async()=>{await repair({sessionId,action:'cancel',previewId:preview.id});if(alive()){recoveryPreview=null;showRecovery()}})})
+      recoveryActions.append(cancel,confirm)
+    }else if(recoveryState.status!=='ready'){
+      recoveryMessage.textContent=recoveryState.status==='invalid'?'恢复记录无法核验，原记录保留。可以退出本页或切换笔记库。':recoveryState.operation?.kind==='ledger-repair'?'整库恢复已暂停，可核验并继续一批，或离开本库。正文可读；任务、结构操作和整理写入暂停。':'文件操作尚未完成，请先核验现有恢复记录。'
+      if(recoveryState.status==='pending'&&recoveryState.operation?.kind==='ledger-repair'&&recoveryState.revision){const revision=recoveryState.revision;recoveryActions.append(button('核验并继续一批',()=>{void run('正在续接恢复…',()=>repair({sessionId,action:'resume',revision}))}))}
+    }else{recoveryMessage.textContent='登记损坏可先重建原描述；整库复制或恢复后，须预览并明确授权新关联。单篇复制仍是新笔记。'
+      for(const [mode,label]of [['rebuild','预览重建登记'],['restore','预览整库恢复']]as const)recoveryActions.append(button(label,()=>{void run('正在核验整库…',()=>repair({sessionId,action:'preview',mode}))}))
+    }
+  }
+  if(handlers.recovery)void handlers.recovery.state().then(state=>{if(alive()){recoveryState=state;showRecovery()}},()=>{if(alive()){recovery.hidden=false;recoveryMessage.textContent='当前库的恢复状态无法读取，请重新打开本页。'}})
 
   function refreshControls(): void {
     root.setAttribute('aria-busy', String(busy))
     open.disabled = busy; create.disabled = busy
+    for(const action of recoveryActions.querySelectorAll<HTMLButtonElement>('button'))action.disabled=busy||action.dataset.recoveryRefused==='true'
     for (const row of rows.values()) {
       for (const action of row.root.querySelectorAll<HTMLButtonElement>('button')) action.disabled = busy
       row.input.disabled = busy
@@ -206,6 +232,8 @@ function button(text: string, click: () => void, glyph?: IconName): HTMLButtonEl
 }
 function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : ''
+  if(Object.hasOwn(LEDGER_ERROR_MESSAGES,message))return ledgerErrorText(message)
+  if(message.includes('STALE_PREVIEW')||message.includes('STALE_RECOVERY'))return '文件、附件或权限已改变，恢复已停止；已核验进度保留，请核查后重试。'
   if (message.includes('VAULT_SWITCH_CANCELLED')) return ''
   if (message.includes('VAULT_SWITCH_BODY_CONFLICT')) return '窗口稿与磁盘稿发生冲突，两份均已保留。请先关闭设置，处理正文保存冲突后，再重试切换。'
   if (message.includes('UNSAVED_DRAFT')) return '笔记草稿尚未保存，已留在当前库。请先处理保存问题，再重试切换。'

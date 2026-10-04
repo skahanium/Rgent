@@ -1,3 +1,6 @@
+import { validOwner, validLedgerPublication, inspectLedgerPublication, recoverLedgerPublication, type LedgerPublication } from './ledger-store.ts'
+import { applyMemoryRecovery, type MemoryRecoveryPatch } from './working-memory-store.ts'
+import { vaultRootIdentity } from './watch.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import { collectNotePaths } from '../shared/vault-rel.ts'
 import { compile } from '../markdown/index.ts'
@@ -41,7 +44,10 @@ type PendingMove = {
   permissionAfter: string | null
   repairLinks: boolean
 }
-type Journal = { version: 1; active: PendingMove | null }
+export type RepairWrite={path:string;before:string|null;beforeId:string|null;after:string;receipt?:string}
+export type MemoryRecoveryPlan={beforeHash:string;beforeId:string;afterHash:string;patches:MemoryRecoveryPatch[];receipt?:string}
+export type PendingLedgerRepair={kind:'ledger-repair';rootIdentity:string;sessionId:string;mode:'rebuild'|'restore';fingerprints:Fingerprint[];writes:RepairWrite[];permissionRaw:string|null;memory?:MemoryRecoveryPlan}
+type Journal = { version: 1; active: PendingMove | PendingLedgerRepair | LedgerPublication | null }
 
 function validPath(relPath: string, allowHidden = false): boolean {
   if (!relPath || relPath.startsWith('/') || relPath.includes('\\') || (!allowHidden && hasHiddenSegment(relPath))) return false
@@ -83,10 +89,15 @@ export class VaultLifecycle {
     catch { return { ...base, status: 'invalid', reason: 'journal-unreadable' } }
     if (bytes === null) return base
     base.revision = hash(bytes)
-    let active: PendingMove | null
+    let active: Journal['active']
     try { active = parseJournal(journalText(bytes)).active }
     catch { return { ...base, status: 'invalid', reason: 'journal-invalid' } }
     if (!active) return base
+    if(active.kind==='ledger-publication'){let blocked=false;try{inspectLedgerPublication(secureFsFor(this.root),active,this.assertCurrent)}catch{blocked=true};return {...base,status:'pending',operation:{kind:'ledger-repair',source:active.relPath,target:active.relPath},reason:blocked?'object-changed':'recovery-required',items:active.writes.map(w=>({from:w.path,to:w.path,state:blocked?'blocked':w.receipt?'moved':'source'}))}}
+    if(active.kind==='ledger-repair'){
+      let blocked=false;try{this.verifyRepair(active)}catch{blocked=true}
+      return {...base,status:'pending',operation:{kind:'ledger-repair',source:'',target:''},reason:blocked?'object-changed':'recovery-required',items:active.writes.map(w=>({from:w.path,to:w.path,state:blocked?'blocked':w.receipt?'moved':'source'}))}
+    }
     const inspection = this.inspectObjects(active)
     let reason: LifecycleStatus['reason'] = inspection.blocked ? 'object-changed' : 'recovery-required'
     try { if (!this.policyMatches(active)) reason = 'policy-changed' }
@@ -99,7 +110,7 @@ export class VaultLifecycle {
   recoveryScope(revision: string): { moved: RelocationMove[]; relPaths: string[] } {
     this.assertCurrent()
     const { active } = this.journalAtRevision(revision)
-    if (!active) throw new Error('STALE_RECOVERY')
+    if (!active || active.kind!=='move') throw new Error('STALE_RECOVERY')
     return { moved: active.intent.moves, relPaths: [...new Set([
       ...active.intent.moves.flatMap((move) => [move.from, move.to]),
       ...active.linkRepairs.flatMap((link) => [link.relPath, link.newPath])
@@ -110,7 +121,7 @@ export class VaultLifecycle {
     return this.queue.run(() => {
       this.assertCurrent()
       const { active, raw } = this.journalAtRevision(revision)
-      if (!active || raw === null) throw new Error('STALE_RECOVERY')
+      if (!active || active.kind!=='move' || raw === null) throw new Error('STALE_RECOVERY')
       return this.recoverMove(active, raw)
     })
   }
@@ -257,8 +268,65 @@ export class VaultLifecycle {
       const bytes = this.readJournalBytes()
       const raw = bytes === null ? null : journalText(bytes)
       const active = parseJournal(raw).active
-      return active && raw !== null ? this.recoverMove(active, raw) : null
+      return active?.kind==='move' && raw !== null ? this.recoverMove(active, raw) : null
     })
+  }
+
+  /** Explicit whole-library authorization creates this plan; startup never commits it. */
+  prepareRepair(mode:'rebuild'|'restore',writes:RepairWrite[],permissionRaw:string|null,memory?:MemoryRecoveryPlan):PendingLedgerRepair{
+    this.assertCurrent();if(this.loadJournal().active)throw Error('LIFECYCLE_RECOVERY_REQUIRED')
+    return {kind:'ledger-repair',rootIdentity:vaultRootIdentity(this.root),sessionId:this.sessionId,mode,fingerprints:this.repairTree(),writes,permissionRaw,...(memory?{memory}: {})}
+  }
+  private repairTree():Fingerprint[]{
+    return secureFsFor(this.root).list().filter(e=>e.name!==JOURNAL&&!(e.name==='.DS_Store'&&e.kind==='file')).sort((a,b)=>a.name.localeCompare(b.name)).flatMap(e=>this.fingerprintTree(e.name)).sort((a,b)=>a.relPath.localeCompare(b.relPath))
+  }
+  private verifyRepair(active:PendingLedgerRepair):void{
+    this.assertCurrent();if(vaultRootIdentity(this.root)!==active.rootIdentity||this.readOptional(PERMISSIONS)!==active.permissionRaw)throw Error('STALE_RECOVERY')
+    const current=this.repairTree(),expected=new Map(active.fingerprints.map(f=>[f.relPath,f]))
+    for(const file of current){
+      const prior=expected.get(file.relPath),write=active.writes.find(w=>w.path===file.relPath)
+      if(file.relPath==='.rgent-memory'&&active.memory){const m=active.memory;if(!(file.id===m.beforeId&&file.hash===m.beforeHash&&!m.receipt||file.hash===m.afterHash&&(!m.receipt||m.receipt===file.id)))throw Error('STALE_RECOVERY')}
+      else if(write){const raw=this.readOptional(write.path);if(file.kind!=='file'||!(raw===write.before&&file.id===write.beforeId&&!write.receipt||raw===write.after&&(!write.receipt||write.receipt===file.id)))throw Error('STALE_RECOVERY')}
+      else if(!prior||JSON.stringify(file)!==JSON.stringify(prior))throw Error('STALE_RECOVERY')
+      expected.delete(file.relPath)
+    }
+    for(const prior of expected.values())if(!active.writes.some(w=>w.path===prior.relPath&&w.before===null))throw Error('STALE_RECOVERY')
+    for(const write of active.writes)if(!current.some(f=>f.relPath===write.path)&&write.before!==null)throw Error('STALE_RECOVERY')
+  }
+  async commitRepair(plan:PendingLedgerRepair){return this.queue.run(()=>{
+    this.assertCurrent();if(!validRepair(plan))throw Error('LIFECYCLE_RECOVERY_REQUIRED');if(plan.sessionId!==this.sessionId||this.loadJournal().active)throw Error('STALE_PREVIEW')
+    this.verifyRepair(plan);const raw=this.saveJournal({version:1,active:plan});return this.runRepairBatch(plan,raw)
+  })}
+  async resumeRepair(revision:string){return this.queue.run(()=>{
+    this.assertCurrent();const {active,raw}=this.journalAtRevision(revision)
+    if(active?.kind==='ledger-publication'&&raw){recoverLedgerPublication(secureFsFor(this.root),active,this.assertCurrent);return {status:'complete' as const,revision:null,processed:2,total:2}}
+    if(active?.kind!=='ledger-repair'||!raw)throw Error('STALE_RECOVERY')
+    this.verifyRepair(active);return this.runRepairBatch(active,raw)
+  })}
+  private runRepairBatch(active:PendingLedgerRepair,raw:string){
+    // A bounded batch returns control so the person can pause and leave the vault.
+    this.verifyRepair(active);let budget=4
+    for(const write of active.writes){
+      if(write.receipt)continue
+      if(!budget--)break
+      this.verifyRepair(active)
+      const fs=secureFsFor(this.root),disk=this.readOptional(write.path)
+      if(disk!==write.after)fs.replace(write.path,write.before,write.after,write.beforeId??undefined)
+      this.assertCurrent();const saved=fs.readSnapshot(write.path)
+      if(saved.bytes.toString()!==write.after)throw Error('STALE_RECOVERY')
+      write.receipt=saved.objectVersion;raw=this.saveJournal({version:1,active},raw)
+      this.verifyRepair(active)
+    }
+    this.verifyRepair(active)
+    if(active.memory&&!active.memory.receipt&&active.writes.every(w=>w.receipt)&&budget>0){
+      const m=active.memory,fs=secureFsFor(this.root),disk=fs.readSnapshot('.rgent-memory'),rawMemory=disk.bytes.toString()
+      if(hash(disk.bytes)!==m.afterHash){const next=applyMemoryRecovery(rawMemory,m.patches);if(hash(Buffer.from(next))!==m.afterHash)throw Error('STALE_RECOVERY');fs.replace('.rgent-memory',rawMemory,next,m.beforeId)}
+      this.assertCurrent();const saved=fs.readSnapshot('.rgent-memory');if(hash(saved.bytes)!==m.afterHash)throw Error('STALE_RECOVERY')
+      m.receipt=saved.objectVersion;raw=this.saveJournal({version:1,active},raw);this.verifyRepair(active)
+    }
+    const processed=active.writes.filter(w=>w.receipt).length+Number(!!active.memory?.receipt),total=active.writes.length+Number(!!active.memory)
+    if(processed===total){this.saveJournal({version:1,active:null},raw);return {status:'complete' as const,revision:null,processed,total}}
+    return {status:'pending' as const,revision:hash(Buffer.from(raw)),processed,total}
   }
 
   private async recoverMove(active: PendingMove, raw: string): Promise<{ moved: RelocationMove[]; unrepaired: string[] }> {
@@ -545,7 +613,7 @@ function parseJournal(raw: string | null): Journal {
   try {
     const parsed: unknown = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object' || (parsed as Journal).version !== 1 ||
-        !('active' in parsed) || ((parsed as Journal).active !== null && !validPending((parsed as Journal).active))) {
+        !('active' in parsed) || ((parsed as Journal).active !== null && !validPending((parsed as Journal).active)&&!validRepair((parsed as Journal).active)&&!validLedgerPublication((parsed as Journal).active))) {
       throw new Error('BAD_JOURNAL')
     }
     return parsed as Journal
@@ -556,6 +624,38 @@ function journalText(bytes: Buffer): string {
   const raw = bytes.toString('utf8')
   if (!Buffer.from(raw).equals(bytes)) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
   return raw
+}
+
+function validRepair(value:unknown):value is PendingLedgerRepair{
+ try{
+  if(!value||typeof value!=='object')return false
+  const p=value as PendingLedgerRepair,exact=(v:object,keys:string[])=>Object.keys(v).sort().join()===keys.sort().join()
+  const digest=(raw:string)=>hash(Buffer.from(raw)),sha=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v)
+  if(!exact(p,['kind','rootIdentity','sessionId','mode','fingerprints','writes','permissionRaw',...(p.memory?['memory']:[])])||p.kind!=='ledger-repair'||!/^\d+:\d+$/.test(p.rootIdentity)||typeof p.sessionId!=='string'||!['rebuild','restore'].includes(p.mode)||!validPermissionRaw(p.permissionRaw)||!Array.isArray(p.fingerprints)||!Array.isArray(p.writes)||p.writes.length>100001||p.fingerprints.length>200000)return false
+  if(!p.fingerprints.every(f=>f&&exact(f,['relPath','id','kind',...(f.hash?['hash']:[])])&&validPath(f.relPath,true)&&typeof f.id==='string'&&['file','dir'].includes(f.kind)&&(f.kind==='dir'?f.hash===undefined:sha(f.hash)))||new Set(p.fingerprints.map(f=>f.relPath)).size!==p.fingerprints.length)return false
+  const files=new Map(p.fingerprints.map(f=>[f.relPath,f]))
+  if(p.memory){
+    const m=p.memory,original=files.get('.rgent-memory')
+    if(p.mode!=='restore'||!exact(m,['beforeHash','beforeId','afterHash','patches',...(m.receipt?['receipt']:[])])||!sha(m.beforeHash)||!sha(m.afterHash)||m.beforeId!==original?.id||m.beforeHash!==original?.hash||m.receipt!==undefined&&typeof m.receipt!=='string'||!Array.isArray(m.patches)||m.patches.length>1000)return false
+    if(!m.patches.every(e=>e&&exact(e,['id','version','pause','sources'])&&typeof e.id==='string'&&Number.isSafeInteger(e.version)&&e.version>0&&typeof e.pause==='boolean'&&Array.isArray(e.sources)&&e.sources.length<=16&&e.sources.every(s=>s&&exact(s,['id','objectVersion','revision','deps'])&&typeof s.id==='string'&&typeof s.objectVersion==='string'&&sha(s.revision)&&Array.isArray(s.deps)&&s.deps.length<=16&&s.deps.every(d=>d&&exact(d,['relPath','objectVersion'])&&validPath(d.relPath)&&typeof d.objectVersion==='string'&&files.get(d.relPath)?.id===d.objectVersion))))return false
+    if(new Set(m.patches.map(e=>e.id)).size!==m.patches.length)return false
+  }
+  if(!p.writes.every(w=>w&&exact(w,['path','before','beforeId','after',...(w.receipt?['receipt']:[])])&&/^\.rgent\/(registry\.json|ledgers\/[A-Za-z0-9_-]{1,128}\/owner\.json)$/.test(w.path)&&(w.before===null&&w.beforeId===null||typeof w.before==='string'&&typeof w.beforeId==='string')&&typeof w.after==='string'&&Buffer.byteLength(w.after)<=8*1024*1024&&(w.receipt===undefined||typeof w.receipt==='string')&&(w.before===null?!files.has(w.path):files.get(w.path)?.id===w.beforeId&&files.get(w.path)?.hash===digest(w.before)))||new Set(p.writes.map(w=>w.path)).size!==p.writes.length)return false
+  const registry=p.writes.find(w=>w.path==='.rgent/registry.json')
+  for(const w of p.writes.filter(w=>w.path!=='.rgent/registry.json')){
+    if(p.mode!=='restore'||!registry||w.before===null)return false
+    const before=JSON.parse(w.before),after=JSON.parse(w.after)
+    if(!validOwner(before)||!validOwner(after)||w.path!==`.rgent/ledgers/${after.noteId}/owner.json`||JSON.stringify({...after,objectVersion:before.objectVersion,...(before.recoveryEvidence?{recoveryEvidence:before.recoveryEvidence}:{})})!==JSON.stringify(before))return false
+    if(files.get(after.relPath)?.id!==after.objectVersion||files.get(after.relPath)?.hash!==after.bodyRevision||after.recoveryEvidence&&(after.recoveryEvidence.rootIdentity!==p.rootIdentity||JSON.stringify(after.recoveryEvidence.attachments)!==JSON.stringify(before.recoveryEvidence?.attachments)))return false
+  }
+  if(registry){
+    const next=JSON.parse(registry.after)
+    if(!next||!exact(next,['version','owners','sequence'])||next.version!==1||!Number.isSafeInteger(next.sequence)||next.sequence<0||!Array.isArray(next.owners)||!next.owners.every(validOwner)||new Set(next.owners.map((o:import('./ledger-store.ts').LedgerOwner)=>o.noteId)).size!==next.owners.length||new Set(next.owners.map((o:import('./ledger-store.ts').LedgerOwner)=>o.relPath)).size!==next.owners.length)return false
+    for(const owner of next.owners){const file=`.rgent/ledgers/${owner.noteId}/owner.json`,write=p.writes.find(w=>w.path===file);if(owner.sequenceCeiling>next.sequence||(write?write.after!==JSON.stringify(owner):files.get(file)?.hash!==digest(JSON.stringify(owner))))return false}
+    const ownerFiles=p.fingerprints.filter(f=>/^\.rgent\/ledgers\/[^/]+\/owner\.json$/.test(f.relPath));if(ownerFiles.length!==next.owners.length)return false
+  }
+  return true
+ }catch{return false}
 }
 
 function validPending(value: unknown): value is PendingMove {

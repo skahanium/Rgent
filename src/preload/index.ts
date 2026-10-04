@@ -64,7 +64,7 @@ async function invoke(channel: string, ...args: unknown[]): Promise<any> {
 const menuChannels = [IPC.menuOpenVault, IPC.menuNewNote, IPC.menuSave] as const
 
 const api = {
-  ledgerRepair:(request:import('../shared/ledger.ts').LedgerRepairRequest):Promise<{ok:true}|{ok:false;error:string}>=>invoke(IPC.ledgerRepair,request),
+  ledgerRepair:(request:import('../shared/ledger.ts').LedgerRepairRequest):Promise<import('../shared/ledger.ts').LedgerRepairResult>=>invoke(IPC.ledgerRepair,request),
   ledgerMaintenance:(request:import('../shared/ledger.ts').LedgerMaintenanceRequest):Promise<import('../shared/ledger.ts').LedgerMaintenanceResult>=>invoke(IPC.ledgerMaintenance,request),
   ledgerReasoning:(request:import('../shared/ledger.ts').LedgerReasoningRequest):Promise<import('../shared/ledger.ts').LedgerReasoningResult>=>invoke(IPC.ledgerReasoning,request),
   ledgerGet:(request:import('../shared/ledger.ts').LedgerRequest):Promise<import('../shared/ledger.ts').LedgerResult>=>invoke(IPC.ledgerGet,request),

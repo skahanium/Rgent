@@ -198,7 +198,7 @@ export type ChromeTextSetResult = { ok: true; preference: import('./reading-pref
 
 export type VaultState =
   | { status: 'needs-pick'; reason: 'first-run' | 'missing'; sessionId?: string | null; cancelled?: boolean; diagnostic?: string }
-  | { status: 'ready'; rootName: string; vaultChanged?: boolean; sessionId?: string; navigationKey?: string; diagnostic?: string; vaultId?: string; cancelled?: boolean }
+  | { status: 'ready'; rootName: string; vaultChanged?: boolean; sessionId?: string; navigationKey?: string; legacyNavigationKey?:string; diagnostic?: string; vaultId?: string; cancelled?: boolean }
 
 export type TreeEntry = {
   name: string
@@ -257,7 +257,7 @@ export type LifecycleStatus = {
   sessionId: string
   status: 'ready' | 'pending' | 'invalid'
   revision: string | null
-  operation?: { kind: 'note' | 'folder'; source: string; target: string }
+  operation?: { kind: 'note' | 'folder' | 'ledger-repair'; source: string; target: string }
   items: { from: string; to: string; state: 'source' | 'moved' | 'blocked' }[]
   reason?: LifecycleReason
 }

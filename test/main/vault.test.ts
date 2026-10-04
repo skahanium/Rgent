@@ -703,3 +703,49 @@ it('rechecks permission immediately before stripping the tail when it changes du
   await expect(session.prepareTaskSource({...note,relPath:'原篇.md',expectedRevision:note.revision},grant)).rejects.toThrow('SOURCE_PERMISSION_CHANGED');expect(await readFile(path.join(first,'原篇.md'),'utf8')).toBe(raw);expect((await session.noteStatus('原篇.md',note)).status).toBe('ready')
  }finally{session.dispose()}
 })
+it('previews and explicitly restores a copied library while rejecting same-root note replacement',async()=>{
+ const {session,attach,first,second}=await setup();const {LedgerStore}=await import('../../src/main/ledger-store.ts');const {vaultRootIdentity}=await import('../../src/main/watch.ts');const {cp}=await import('node:fs/promises')
+ try{await attach(first);const store=new LedgerStore(secureFsFor(first),()=>{},undefined,()=>vaultRootIdentity(first));store.owner('原篇.md')
+  const fs=secureFsFor(first),note=fs.readSnapshot('原篇.md');fs.replace('原篇.md','first','first',note.objectVersion)
+  const refused=await session.ledgerRecoveryPreview('restore');expect(refused.rows[0].outcome).toBe('refused');expect(refused.canCommit).toBe(false)
+  // A new explicit library copy has a distinct root and a complete descriptor tree.
+  await cp(first,second,{recursive:true,force:true});await attach(second)
+  const preview=await session.ledgerRecoveryPreview('restore');expect(preview.canCommit).toBe(true);expect(preview.rows[0].outcome).toBe('associate')
+  expect((await session.readOpened('原篇.md')).ledger?.status).toBe('invalid')
+  const result=await session.ledgerRecoveryCommit(preview.id);expect(result.status).toBe('complete');expect((await session.readOpened('原篇.md')).ledger?.status).toBe('verified')
+  await expect(session.ledgerRecoveryCommit(preview.id)).rejects.toThrow('STALE_PREVIEW')
+ }finally{session.dispose()}
+})
+it('rejects recovery preview when attachment subtree no longer matches recorded evidence',async()=>{
+ const {session,attach,first,second}=await setup();const {LedgerStore}=await import('../../src/main/ledger-store.ts');const {vaultRootIdentity}=await import('../../src/main/watch.ts');const {cp}=await import('node:fs/promises')
+ try{await mkdir(path.join(first,'原篇'));await writeFile(path.join(first,'原篇','asset.txt'),'original');const store=new LedgerStore(secureFsFor(first),()=>{},undefined,()=>vaultRootIdentity(first));store.owner('原篇.md')
+  await cp(first,second,{recursive:true,force:true});await writeFile(path.join(second,'原篇','extra.txt'),'new');await attach(second)
+  const preview=await session.ledgerRecoveryPreview('restore');expect(preview.rows[0].outcome).toBe('refused');expect(preview.rows[0].reasons).toContain('附件子树与历史证据不同')
+ }finally{session.dispose()}
+})
+it('rejects recovery when the source changes after evidence reading but before preview capture',async()=>{
+ const {session,attach,first,second}=await setup();const {LedgerStore}=await import('../../src/main/ledger-store.ts');const {vaultRootIdentity}=await import('../../src/main/watch.ts');const {cp}=await import('node:fs/promises')
+ try{const store=new LedgerStore(secureFsFor(first),()=>{},undefined,()=>vaultRootIdentity(first));store.owner('原篇.md');await cp(first,second,{recursive:true,force:true});await attach(second)
+  const fs=secureFsFor(second),read=fs.readSnapshot.bind(fs);let changed=false
+  vi.spyOn(fs,'readSnapshot').mockImplementation(p=>{const d=read(p);if(p==='原篇.md'&&!changed){changed=true;writeFileSync(path.join(second,'原篇.md'),'external change')}return d})
+  await expect(session.ledgerRecoveryPreview('restore')).rejects.toThrow('STALE_PREVIEW')
+ }finally{session.dispose()}
+})
+it('keeps a multi-note copied-library recovery resumable after leaving and reopening the library',async()=>{
+ const {session,attach,first,second}=await setup();const {LedgerStore}=await import('../../src/main/ledger-store.ts');const {vaultRootIdentity}=await import('../../src/main/watch.ts');const {cp}=await import('node:fs/promises')
+ try{const store=new LedgerStore(secureFsFor(first),()=>{},undefined,()=>vaultRootIdentity(first));store.owner('原篇.md');for(let n=0;n<5;n++){await writeFile(path.join(first,`note${n}.md`),`body${n}`);store.owner(`note${n}.md`)}
+  await cp(first,second,{recursive:true,force:true});await attach(second);const preview=await session.ledgerRecoveryPreview('restore'),progress=await session.ledgerRecoveryCommit(preview.id)
+  expect(progress.status).toBe('pending');await expect(modelTierFor(second,'原篇.md')).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED');expect((await session.readOpened('原篇.md')).content).toBe('first')
+  await expect(session.memoryMutation(s=>s.initialize())).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED');await attach(first);await attach(second)
+  const status=await session.lifecycleStatus();expect(status.status).toBe('pending');expect(status.revision).toBe(progress.revision)
+  const done=await session.ledgerRecoveryResume(status.revision!);expect(done.status).toBe('complete');expect((await session.readOpened('原篇.md')).ledger?.status).toBe('verified')
+ }finally{session.dispose()}
+})
+it('keeps old descriptors as history only and rejects same-body template ambiguity',async()=>{
+ const {session,attach,first,second}=await setup();const {LedgerStore}=await import('../../src/main/ledger-store.ts');const {cp}=await import('node:fs/promises')
+ try{new LedgerStore(secureFsFor(first),()=>{}).owner('原篇.md');await cp(first,second,{recursive:true,force:true});await attach(second)
+  const historical=await session.ledgerRecoveryPreview('restore');expect(historical.rows[0].outcome).toBe('history-only')
+  await writeFile(path.join(second,'另一个模板.md'),'first');const ambiguous=await session.ledgerRecoveryPreview('restore');expect(ambiguous.canCommit).toBe(false)
+  expect(ambiguous.rows[0].reasons).toContain('同正文材料不能唯一对应')
+ }finally{session.dispose()}
+})

@@ -6,6 +6,8 @@ export interface VaultCatalogEntry {
   rootIdentity: string
   pinned: boolean
   lastUsed: number | null
+  displayVersion?: 2
+  legacyDisplayKey?: string
 }
 export interface VaultCatalogView {
   entries: VaultCatalogEntry[]

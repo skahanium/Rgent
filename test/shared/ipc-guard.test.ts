@@ -86,3 +86,10 @@ describe('ipc payload guards', () => {
     }
   })
 })
+import {parseLedgerRepairRequest} from '../../src/shared/ledger.ts'
+it('accepts only the explicit ledger recovery actions and rejects renderer-supplied plans',()=>{
+ expect(parseLedgerRepairRequest({sessionId:'session',action:'preview',mode:'restore'})).toEqual({sessionId:'session',action:'preview',mode:'restore'})
+ expect(parseLedgerRepairRequest({sessionId:'session',action:'commit',previewId:'token',writes:[]})).toBeNull()
+ expect(parseLedgerRepairRequest({sessionId:'session',registryRevision:null})).toBeNull()
+ expect(parseLedgerRepairRequest({sessionId:'session',action:'resume',revision:'bad'})).toBeNull()
+})

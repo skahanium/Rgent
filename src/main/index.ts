@@ -1,3 +1,4 @@
+import { parseLedgerRepairRequest } from '../shared/ledger.ts'
 import { parseStoredVault } from './notes-fs.ts'
 import { boundArguments, isVaultChannel, isVaultEvent } from '../shared/vault-binding.ts'
 import { VaultCatalog } from './vault-catalog.ts'
@@ -113,6 +114,7 @@ function visibleVaultState(): VaultState {
     const entry = vaultCatalog?.view().entries.find(e=>e.rootIdentity===activeTarget!.rootIdentity && e.path===activeTarget!.path)
     state.rootName = entry?.label ?? activeTarget.label
     state.vaultId = entry?.id
+    if(entry){const keys=vaultCatalog!.displayKeys({...activeTarget,id:entry.id});state.navigationKey=keys.key;state.legacyNavigationKey=keys.legacy}
   }
   // A temporarily inaccessible root retains its mount for draft recovery.
   // Availability must not be interpreted as an authoritative unmount.
@@ -692,7 +694,38 @@ function registerIpc(): void {
       const preview=await current.ledgerMaintenancePreview(r.relPath,r.action as 'compress'|'clear');current.assertSession(r.sessionId);const id=randomUUID();if(maintenancePreviews.size>=128)maintenancePreviews.delete(maintenancePreviews.keys().next().value!);maintenancePreviews.set(owner+':'+id,{sessionId:r.sessionId,objectVersion:r.objectVersion,relPath:r.relPath,action:r.action as 'compress'|'clear',records:preview.records,archive:preview.archive});return {ok:true,value:{id,...preview}}
     }catch{return {ok:false,error:'LEDGER_UNAVAILABLE'}}
   })
-  registerTrustedHandle(IPC.ledgerRepair,async(_event,value:unknown)=>{try{if(!value||typeof value!=='object'||Array.isArray(value))throw Error();const r=value as Record<string,unknown>;if(Object.keys(r).sort().join()!=='registryRevision,sessionId'||typeof r.sessionId!=='string'||r.registryRevision!==null&&(typeof r.registryRevision!=='string'||!/^[a-f0-9]{64}$/.test(r.registryRevision)))throw Error();if(!vault)throw Error();vault.assertSession(r.sessionId);if(structureGate.isBusy()||agentHost?.active().length)throw Error();await vault.ledgerRepair(r.registryRevision as string|null);return {ok:true}}catch{return {ok:false,error:'LEDGER_REGISTRY_INVALID'}}})
+  const recoveryPreviewOwners=new Map<string,{frame:string;sessionId:string}>()
+  registerTrustedHandle(IPC.ledgerRepair,async(event,value:unknown):Promise<import('../shared/ledger.ts').LedgerRepairResult>=>{
+    const request=parseLedgerRepairRequest(value),current=vault,win=mainWindow
+    if(!request||!current||!win)return {ok:false,error:'BAD_REQUEST'}
+    let ownsGate=false
+    try{
+      current.assertSession(request.sessionId)
+      const frame=`${event.sender.id}:${event.senderFrame!.routingId}`
+      if(request.action==='commit'||request.action==='cancel'){
+        const owner=recoveryPreviewOwners.get(request.previewId);recoveryPreviewOwners.delete(request.previewId)
+        if(owner?.frame!==frame||owner.sessionId!==request.sessionId)throw Error('STALE_PREVIEW')
+        if(request.action==='cancel'){current.ledgerRecoveryCancel(request.previewId);return {ok:true}}
+      }
+      if(structureGate.isBusy()||agentHost?.active().length||agentHost?.hasPending())throw Error('STRUCTURE_BUSY')
+      structureGate.begin({root:current.requireUsableRoot(),exact:[],prefixes:[]});ownsGate=true
+      await agentHost?.whenLaunchesSettled();current.assertSession(request.sessionId)
+      if(agentHost?.active().length||agentHost?.hasPending())throw Error('STRUCTURE_BUSY')
+      consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED');await consolidation?.idle()
+      if(!await flushBeforeStructure(win))throw Error('UNSAVED_DRAFT')
+      current.assertSession(request.sessionId)
+      if(request.action==='preview'){
+        const preview=await current.ledgerRecoveryPreview(request.mode)
+        if(recoveryPreviewOwners.size>=16)recoveryPreviewOwners.clear()
+        recoveryPreviewOwners.set(preview.id,{frame,sessionId:request.sessionId});return {ok:true,value:preview}
+      }
+      // A recovery authorization never carries old sending or background permits.
+      authorizations?.clear();memoryIpc.clear();memoryAuthorizationPreviews.clear()
+      const result=request.action==='commit'?await current.ledgerRecoveryCommit(request.previewId):await current.ledgerRecoveryResume(request.revision)
+      current.assertSession(request.sessionId);return {ok:true,value:result}
+    }catch(error){const code=error instanceof Error?error.message:'';return {ok:false,error:['BAD_REQUEST','STALE_PREVIEW','STALE_RECOVERY','VAULT_CHANGED','STRUCTURE_BUSY','UNSAVED_DRAFT','PERMISSIONS_INVALID','LEDGER_RECOVERY_AMBIGUOUS','LEDGER_REGISTRY_INVALID','LIFECYCLE_RECOVERY_REQUIRED'].includes(code)?code:'LEDGER_REGISTRY_INVALID'}}
+    finally{if(ownsGate)structureGate.finish()}
+  })
   registerTrustedHandle(IPC.ledgerReasoning,async(_event,value:unknown):Promise<import('../shared/ledger.ts').LedgerReasoningResult>=>{
     const current=vault
     try{
@@ -967,7 +1000,7 @@ if (ownsInstance) app.whenReady().then(() => {
   try { modelConfig = createModelConfigStore(app.getPath('userData'), safeStorage) }
   catch (error) { modelConfigError = error instanceof Error ? error.message : 'MODEL_CONFIG_UNAVAILABLE' }
   vaultCatalog = new VaultCatalog(app.getPath('userData'))
-  vault = new VaultSession(app.getPath('userData'), send)
+  vault = new VaultSession(app.getPath('userData'), send, undefined,(root,identity)=>vaultCatalog?.view().entries.find(e=>e.path===root&&e.rootIdentity===identity)?.id??null)
   const catalog = vaultCatalog.view()
   if (catalog.diagnostic) startupVaultState = {status:'needs-pick',reason:'missing',diagnostic:'设备库目录记录无法读取。原记录已保留，请检查本机存储；仍可手动打开笔记库。'}
   try {

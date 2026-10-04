@@ -127,3 +127,73 @@ it('refuses a directory hidden behind a reserved legacy record filename',()=>{
  const {root,fs,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');const owner=store.owner('a.md');fs.createDirectory('.rgent/ledgers/'+owner.noteId+'/legacy.json')
  expect(store.materialState()).toEqual({status:'invalid',reason:'LEDGER_REGISTRY_INVALID'})
 })
+it('reads unregistered history without publishing ownership',()=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文')
+ expect(store.page('a.md').records).toEqual([]);expect(store.contexts('a.md')).toEqual([])
+ expect(store.registryRevision()).toBeNull()
+})
+it('does not let a registered query hide a missing descriptor or unknown ledger member',()=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');const owner=store.owner('a.md')
+ writeFileSync(path.join(root,'.rgent','ledgers',owner.noteId,'surprise.txt'),'unknown')
+ expect(()=>store.page('a.md')).toThrow('LEDGER_REGISTRY_INVALID')
+ unlinkSync(path.join(root,'.rgent','ledgers',owner.noteId,'surprise.txt'));unlinkSync(path.join(root,'.rgent','ledgers',owner.noteId,'owner.json'))
+ expect(()=>store.page('a.md')).toThrow('LEDGER_REGISTRY_INVALID')
+ expect(()=>store.rebuildRegistry()).toThrow('LEDGER_REGISTRY_INVALID')
+})
+it('recovery preview binds all descriptors and rejects ambiguous task anchors',()=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');store.owner('a.md');store.prepare('a.md',task)
+ writeFileSync(path.join(root,'b.md'),'另一篇');store.owner('b.md');store.prepare('b.md',task)
+ expect(()=>store.recoveryOwners()).toThrow('LEDGER_RECOVERY_AMBIGUOUS')
+})
+it('rebuild preserves registered history if a descriptor is missing',()=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');const owner=store.owner('a.md');const before=store.registryRevision()
+ unlinkSync(path.join(root,'.rgent','ledgers',owner.noteId,'owner.json'))
+ expect(()=>store.rebuildRegistry()).toThrow('LEDGER_REGISTRY_INVALID');expect(store.registryRevision()).toBe(before)
+})
+it('hashes raw attachment bytes and detects distinct invalid UTF-8 content',()=>{
+ const {root,fs,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');fs.createDirectory('a');writeFileSync(path.join(root,'a','binary.bin'),Buffer.from([0x80]))
+ const before=store.attachmentEvidence('a.md');writeFileSync(path.join(root,'a','binary.bin'),Buffer.from([0x81]))
+ expect(store.attachmentEvidence('a.md')).not.toEqual(before)
+})
+it('keeps a durable publication intent if owner succeeds and registry fails',()=>{
+ const {root,fs,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文')
+ const replace=fs.replace.bind(fs);let fail=true
+ fs.replace=(p,b,a,id)=>{if(p==='.rgent/registry.json'&&fail){fail=false;throw Error('fixture interruption')}return replace(p,b,a,id)}
+ expect(()=>store.owner('a.md')).toThrow('fixture interruption')
+ const journal=JSON.parse(readFileSync(path.join(root,'.rgent-lifecycle'),'utf8'));expect(journal.active.kind).toBe('ledger-publication')
+ expect(()=>store.page('a.md')).toThrow('LEDGER_REGISTRY_INVALID')
+ store.resumePublication(awaitHash(readFileSync(path.join(root,'.rgent-lifecycle'),'utf8')))
+ expect(store.page('a.md').ownership).toBe('verified');expect(JSON.parse(readFileSync(path.join(root,'.rgent-lifecycle'),'utf8')).active).toBeNull()
+})
+it('refuses contradictory registered owner evidence without selecting the latest descriptor',()=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');const owner=store.owner('a.md');const file=path.join(root,'.rgent','ledgers',owner.noteId,'owner.json')
+ writeFileSync(file,JSON.stringify({...owner,sequenceCeiling:owner.sequenceCeiling+1}))
+ expect(()=>store.recoveryOwners()).toThrow('LEDGER_REGISTRY_INVALID')
+ expect(()=>store.owner('a.md')).toThrow('LEDGER_REGISTRY_INVALID')
+})
+it('keeps finite owner anchors readable beyond 256 task markers without limiting the body',()=>{
+ const {root,store}=fixture();const body=Array.from({length:257},(_,n)=>`<!-- rgent:prompt:v1 task-id="task-${n}" -->\n/任务${n}\n\n`).join('')
+ writeFileSync(path.join(root,'a.md'),body);expect(()=>store.owner('a.md')).not.toThrow();const owner=store.lookupOwner('a.md')!
+ expect(owner.anchors.length).toBeLessThanOrEqual(256);expect(owner.anchorsTruncated).toBe(true);expect(readFileSync(path.join(root,'a.md'),'utf8')).toBe(body)
+})
+it.each(['registry-receipt','permission-change','owner-missing','registry-conflict'] as const)('verifies actual publication state at %s',stage=>{
+ const {root,fs,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');const owner=store.owner('a.md'),old=fs.readSnapshot('a.md'),next=fs.replace('a.md','正文','新正文',old.objectVersion)
+ const replace=fs.replace.bind(fs);let fail=true
+ fs.replace=(p,b,a,id)=>{if(p==='.rgent-lifecycle'&&fail){const active=JSON.parse(a).active;if(active?.kind==='ledger-publication'&&active.writes[1].receipt){fail=false;throw Error('receipt interruption')}}return replace(p,b,a,id)}
+ expect(()=>store.onWrite('a.md',old.objectVersion,next,'新正文')).toThrow('receipt interruption')
+ if(stage==='permission-change')writeFileSync(path.join(root,'.rgent-permissions'),JSON.stringify({'a.md':'forbidden'}))
+ if(stage==='owner-missing')unlinkSync(path.join(root,'.rgent','ledgers',owner.noteId,'owner.json'))
+ if(stage==='registry-conflict')writeFileSync(path.join(root,'.rgent','registry.json'),JSON.stringify({version:1,sequence:0,owners:[]}))
+ const revision=awaitHash(readFileSync(path.join(root,'.rgent-lifecycle'),'utf8'))
+ if(stage==='registry-receipt'){store.resumePublication(revision);expect(store.lookupOwner('a.md')?.objectVersion).toBe(next)}
+ else{expect(()=>store.resumePublication(revision)).toThrow('STALE_RECOVERY');expect(JSON.parse(readFileSync(path.join(root,'.rgent-lifecycle'),'utf8')).active).not.toBeNull()}
+})
+it('rejects a reconstructed registry with orphan material units',()=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');store.materialUnit('a.md',0,2)
+ const file=path.join(root,'.rgent','materials.json'),value=JSON.parse(readFileSync(file,'utf8'));value.units[0].noteId='missing-owner';writeFileSync(file,JSON.stringify(value))
+ expect(()=>store.recoveryOwners()).toThrow('LEDGER_REGISTRY_INVALID')
+})
+it('does not present an orphan descriptor as unregistered history when the registry lacks its row',()=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');store.owner('a.md');writeFileSync(path.join(root,'.rgent','registry.json'),JSON.stringify({version:1,owners:[],sequence:0}))
+ expect(()=>store.page('a.md')).toThrow('LEDGER_REGISTRY_INVALID');expect(()=>store.owner('a.md')).toThrow('LEDGER_REGISTRY_INVALID')
+})

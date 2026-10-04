@@ -1,3 +1,4 @@
+import { ledgerErrorText } from '../../shared/ledger-errors.ts'
 import type { VaultWorkspace } from '../../shared/vault-management.ts'
 import type { MemoryView, MemoryManualRequest, MemoryResult } from '../../shared/memory.ts'
 import { memoryErrorText, renderMemoryPreview, ledgerRememberCommand, type MemoryPageHandlers } from './memory-ui.ts'
@@ -197,6 +198,7 @@ export async function start(root: HTMLElement): Promise<void> {
   })
   const settingsOverlay = createSettingsOverlay({
     vault: {
+      recovery:{state:()=>window.rgent.lifecycleStatus(),repair:async request=>{const result=await window.rgent.ledgerRepair(request);await refreshLifecycle();return result}},
       get: () => window.rgent.vaultCatalog(),
       open: id => changeVault(() => window.rgent.vaultOpen(id)),
       pick: create => changeVault(() => window.rgent.vaultPick(create)),
@@ -660,7 +662,7 @@ export async function start(root: HTMLElement): Promise<void> {
         // Never send an old tab's path through noteWrite after the new root is active.
         resetSession()
       }
-      fileBrowser.setVault(state.navigationKey ?? null)
+      fileBrowser.setVault(state.navigationKey ?? null,state.legacyNavigationKey)
       sidebarSizer.refresh()
       await refreshLifecycle()
       if (serial !== stateSerial) return
@@ -886,6 +888,7 @@ export async function start(root: HTMLElement): Promise<void> {
   async function showRecoveryStatus(): Promise<void> {
     const status = await refreshLifecycle()
     if (!status || conflictDecisionOpen) return
+    if(status.operation?.kind==='ledger-repair'){settingsOverlay.open('笔记库');return}
     recoveryOverlay?.close()
     const epoch = vaultEpoch
     recoveryOverlay = openLifecycleStatus(status, async (request) => {
@@ -1408,7 +1411,7 @@ export async function start(root: HTMLElement): Promise<void> {
     })
   }
 
-  const ledgerErrorText=(code:string)=>({LEDGER_OWNERSHIP_UNVERIFIED:'这份历史的归属待核验，未自动认领。',LEDGER_REGISTRY_INVALID:'账本登记损坏，历史没有被当成空记录；请检查恢复状态。',LEDGER_RECORD_INVALID:'账本记录无法核验，原字节保持。',NOTE_REPLACED:'笔记对象已替换，历史归属待核验。'} as Record<string,string>)[code]??'账本暂时无法核验；原记录保留，请稍后重新查看。'
+
   function toggleLedger(): void {
     if (ledgerOpen) {
       closeLedger(true)
@@ -1438,7 +1441,7 @@ export async function start(root: HTMLElement): Promise<void> {
       if(loading||!captured.sessionId||!captured.objectVersion)return;loading=true;load.disabled=true;const generation=pageGeneration
       try{const result=await window.rgent.ledgerGet({sessionId:captured.sessionId,objectVersion:captured.objectVersion,relPath:captured.relPath,cursor})
         if(!ledgerOpen||current()!==captured||generation!==pageGeneration)return
-        if(!result.ok){message.textContent=ledgerErrorText(result.error);if(result.error==='LEDGER_REGISTRY_INVALID'&&result.registryRevision!==undefined){const repair=document.createElement('button');repair.type='button';repair.className='settings-action';repair.textContent='从归属描述重建登记';repair.onclick=async()=>{repair.disabled=true;const r=await window.rgent.ledgerRepair({sessionId:captured.sessionId!,registryRevision:result.registryRevision!});if(!ledgerOpen||current()!==captured)return;if(r.ok){repair.remove();cursor=null;void fetchPage()}else{message.textContent=ledgerErrorText(r.error);repair.disabled=false}};ledgerBody.append(repair)}return}
+        if(!result.ok){message.textContent=ledgerErrorText(result.error);if(['LEDGER_REGISTRY_INVALID','LEDGER_OWNERSHIP_UNVERIFIED','LEDGER_RECOVERY_AMBIGUOUS'].includes(result.error)){const repair=document.createElement('button');repair.type='button';repair.className='settings-action';repair.textContent='在笔记库设置中核验与恢复';repair.onclick=()=>settingsOverlay.open('笔记库');ledgerBody.append(repair)}return}
         const value=result.value;message.textContent=maintenanceFeedback+(value.gaps.length?'部分原始历史已清理。':'')+(value.maintenanceError?'后台维护未完成，历史保留；请重新核对。':'')
         if(value.chunk){const c=value.chunk;if(c.offset===0){chunkText='';chunkHash=c.hash;chunkOffset=0;decoder=new TextDecoder()}
           if(c.offset!==chunkOffset||c.hash!==chunkHash)throw Error('LEDGER_CONFLICT')

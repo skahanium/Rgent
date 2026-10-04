@@ -27,7 +27,7 @@ export class WorkingMemoryService{
  async initialize(){return this.mutate(store=>store.initialize())}
  async interruptOutstanding(){return this.mutate(store=>store.interrupted(store.read()))}
  snapshot(){this.context();return this.vault.memorySnapshot()}
- async verifySource(source:WorkingSource):Promise<boolean>{
+ async verifySource(source:WorkingSource,recovery?:{record:()=>Promise<import('./ledger-store.ts').LedgerRecord>;contexts:()=>Promise<import('./host-context.ts').ContextChapter[]>;unique:true}):Promise<boolean>{
   const context=this.context()
   if(hash(source.text)!==source.hash)return false
   try{const root=this.vault.requireUsableRoot(),classified=await modelTierFor(root,source.relPath)
@@ -38,17 +38,18 @@ export class WorkingMemoryService{
    for(const dep of source.sourceDeps){requireOrdinaryNotes(root,[dep.relPath]);const status=await modelTierFor(root,dep.relPath);this.vault.assertSession(context.sessionId);if(!status)return false;const original=await this.vault.read(dep.relPath);this.vault.assertSession(context.sessionId);if(!this.vault.acceptsObject(dep.relPath,dep.objectVersion,original.objectVersion)||bodyFingerprint(original.content)!==dep.bodyHash)return false}
    let raw:string
    if(source.kind==='ledger'){
-    if(!source.taskId)return false;const record=await this.vault.ledgerRecord(source.relPath,source.taskId)
+    if(!source.taskId)return false;const record=recovery?await recovery.record():await this.vault.ledgerRecord(source.relPath,source.taskId)
     this.vault.assertSession(context.sessionId)
-    if(record.state==='cleared')return true // the retained memory is independently licensed; raw cleanup is not forgetting
+    if(record.state==='cleared')return !recovery // the retained memory is independently licensed; raw cleanup is not forgetting
     if(record.state!=='saved')return false
-    const chapter=(await this.vault.ledgerContexts(source.relPath)).find(c=>c.taskId===source.taskId);this.vault.assertSession(context.sessionId);if(!chapter||chapter.eligible===false)return false;raw=chapter.text
+    const chapter=(recovery?await recovery.contexts():await this.vault.ledgerContexts(source.relPath)).find(c=>c.taskId===source.taskId);this.vault.assertSession(context.sessionId);if(!chapter||chapter.eligible===false)return false;raw=chapter.text
    }else{
     const parsed=compile(note.content);if(parsed.stale)return false;raw=parsed.partition.body
     let start=source.start;if(raw.slice(source.start,source.end)!==source.text){start=raw.indexOf(source.text);if(start<0||raw.indexOf(source.text,start+1)>=0)return false}
     const block=parsed.index.blocks.find(b=>b.range.start<=start&&b.range.end>=start+source.text.length)
     if(!block||block.identity==='ai'||source.classification==='command'&&block.identity!=='command')return false
    }
+   if(recovery){const first=raw.indexOf(source.text);if(first<0||raw.indexOf(source.text,first+1)>=0)return false}
    if(raw.slice(source.start,source.end)===source.text&&hash(source.text)===source.hash)return true
    const first=raw.indexOf(source.text);return first>=0&&raw.indexOf(source.text,first+1)<0&&hash(source.text)===source.hash
   }catch{return false}

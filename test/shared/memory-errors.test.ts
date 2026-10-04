@@ -11,3 +11,10 @@ it('registers thrown memory codes and maps every public code to bounded Chinese 
 it('registers the material registry diagnosis with the refused control operations and a bounded next step',()=>{
  expect(MEMORY_ERROR_CODES).toContain('LEDGER_REGISTRY_INVALID');expect(memoryErrorText('LEDGER_REGISTRY_INVALID')).toContain('清空和推进学习进度已停止');expect(memoryErrorText('LEDGER_REGISTRY_INVALID')).toContain('请检查笔记库诊断或高级维护')
 })
+import {LEDGER_ERROR_CODES,ledgerErrorText} from '../../src/shared/ledger-errors.ts'
+it('registers ledger recovery errors and keeps unknown diagnostics bounded',()=>{
+ const thrown=readdirSync('src/main').filter(f=>f.endsWith('.ts')).flatMap(f=>[...readFileSync('src/main/'+f,'utf8').matchAll(/(?:Error|throwError)\(['"](LEDGER_[A-Z_]+)/g)].map(m=>m[1]!)).filter(code=>!['LEDGER_BOUNDARY_INVALID','LEDGER_PROVENANCE_LIMIT','LEDGER_BASIS_UNAVAILABLE'].includes(code)) // Existing Host and lifecycle contracts own these three codes.
+ for(const code of thrown)expect(LEDGER_ERROR_CODES,code).toContain(code)
+ for(const code of LEDGER_ERROR_CODES)expect(ledgerErrorText(code)).toMatch(/[\u4e00-\u9fff]/)
+ expect(ledgerErrorText('private /secret/path')).not.toContain('/secret')
+})

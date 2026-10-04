@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto'
 import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';import os from 'node:os';import path from 'node:path'
 import {it,expect,vi} from 'vitest'
 import {VaultSession} from '../../src/main/vault.ts';import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
@@ -107,5 +108,22 @@ it.each(['empty','verified','invalid'] as const)('preserves retirement and real 
   if(materialStatus==='invalid')await writeFile(path.join(root,'.rgent','materials.json'),'{bad')
   expect(vault.materialState().status).toBe(materialStatus)
   const view=await new WorkingMemoryService(vault,()=>null).view();expect(view.status).toBe('invalid');expect(view.reason).toBe('MEMORY_STORAGE_INVALID');expect(view.retirementFailure).toBe('MEMORY_RETIREMENT_FAILED');expect(view.materialStatus).toBe(materialStatus);expect(view.learning).toBeUndefined();expect(await readFile(path.join(root,'.rgent-memory'),'utf8')).toBe(unknown)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+it('restores uniquely verified sources only after explicit copied-library association',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-memory-recovery-')),root=path.join(base,'vault'),copy=path.join(base,'copy');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
+ const body=markPrompt('/以后用中文',{taskId:'restore-task',range:{start:0,end:6},expectedText:'/以后用中文',promptText:'以后用中文'});await writeFile(path.join(root,'a.md'),body)
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{const note=await vault.readOpened('a.md');await vault.ledgerPrepare('a.md',{taskId:'restore-task',startedAt:new Date().toISOString(),status:'completed',prompt:'以后用中文',answer:'好的'})
+  const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'restore-task',answer:'好的'}),note.revision,note);await vault.ledgerComplete('a.md','restore-task',saved.revision)
+  const service=new WorkingMemoryService(vault,()=>null),source=await service.sourceForPrompt('a.md','restore-task')
+  await vault.memoryMutation(store=>store.add(store.read(),{content:'以后用中文',layer:'core',scope:'本库',sources:[source],semantic:'standing',attribution:'人的口令',reviewAt:null}))
+  const invalidBodySource={...source,id:source.id,kind:'body' as const,text:'好的',hash:createHash('sha256').update('好的').digest('hex'),start:(await vault.read('a.md')).content.indexOf('好的'),end:(await vault.read('a.md')).content.indexOf('好的')+2}
+  await vault.memoryMutation(store=>store.add(store.read(),{content:'不能恢复的未采纳来源',layer:'core',scope:'本库',sources:[invalidBodySource],semantic:'standing',attribution:'旧来源',reviewAt:null}))
+  const {cp}=await import('node:fs/promises');await cp(root,copy,{recursive:true});await writeFile(path.join(base,'vault.json'),serializeStoredVault(copy));vault.restore()
+  const recovered=new WorkingMemoryService(vault,()=>null);expect((await recovered.entries())[0].status).toBe('paused')
+  const preview=await vault.ledgerRecoveryPreview('restore');expect(preview.rows[0].sources[0].status).toBe('verified');expect(preview.rows[0].sources.filter(s=>s.id===source.id).map(s=>s.status)).toEqual(['verified','paused'])
+  let result=await vault.ledgerRecoveryCommit(preview.id);while(result.status==='pending')result=await vault.ledgerRecoveryResume(result.revision!)
+  const invalid=(await recovered.entries()).find(e=>e.content==='不能恢复的未采纳来源')!;expect(invalid.status).toBe('paused');expect(invalid.sources[0].objectVersion).not.toBe((await vault.read('a.md')).objectVersion);expect((await recovered.entries())[0].status).toBe('active');expect((await recovered.entries())[0].sources[0].objectVersion).toBe((await vault.read('a.md')).objectVersion)
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })

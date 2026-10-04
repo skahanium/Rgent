@@ -8,7 +8,7 @@ const LIMIT = 128
 const MAX_FILE_BYTES = 4_194_304
 const CONTROL = /[\x00-\x1f\x7f-\x9f]/
 interface CatalogData { version: 1; entries: VaultCatalogEntry[]; lastVaultId: string | null }
-interface WorkspaceData { version: 1; entries: Array<{ path: string; rootIdentity: string; workspace: VaultWorkspace }> }
+interface WorkspaceData { version: 1; entries: Array<{ id?: string; path: string; rootIdentity: string; workspace: VaultWorkspace }> }
 interface Snapshot { raw: string | null; revision: string; unreadable: boolean }
 
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value) }
@@ -70,7 +70,8 @@ function parseCatalog(source: Snapshot): CatalogData | null {
     for (const item of value.entries) {
       if (!object(item) || !text(item.id, 128) || !label(item.label) || !rootPath(item.path) || !identity(item.rootIdentity) || typeof item.pinned !== 'boolean' || !(item.lastUsed === null || (typeof item.lastUsed === 'number' && Number.isSafeInteger(item.lastUsed) && item.lastUsed >= 0))) return null
       if (entries.some(entry => entry.id === item.id || entry.rootIdentity === item.rootIdentity || nested(entry.path, item.path as string) || nested(item.path as string, entry.path))) return null
-      entries.push({ id: item.id, label: item.label, path: item.path, rootIdentity: item.rootIdentity, pinned: item.pinned, lastUsed: item.lastUsed })
+      if(item.displayVersion!==undefined&&item.displayVersion!==2||item.legacyDisplayKey!==undefined&&(typeof item.legacyDisplayKey!=='string'||!/^[a-f0-9]{64}$/.test(item.legacyDisplayKey)))return null
+      entries.push({ ...(item.displayVersion===2?{displayVersion:2 as const}:{}),...(typeof item.legacyDisplayKey==='string'?{legacyDisplayKey:item.legacyDisplayKey}:{}), id: item.id, label: item.label, path: item.path, rootIdentity: item.rootIdentity, pinned: item.pinned, lastUsed: item.lastUsed })
     }
     if (value.lastVaultId !== null && !(typeof value.lastVaultId === 'string' && entries.some(entry => entry.id === value.lastVaultId))) return null
     return { version: 1, entries, lastVaultId: value.lastVaultId as string | null }
@@ -84,8 +85,9 @@ function parseWorkspaces(source: Snapshot): WorkspaceData | null {
     if (!object(value) || value.version !== 1 || !Array.isArray(value.entries) || value.entries.length > LIMIT) return null
     const entries: WorkspaceData['entries'] = []
     for (const item of value.entries) {
-      if (!object(item) || !rootPath(item.path) || !identity(item.rootIdentity) || !object(item.workspace) || item.workspace.version !== 1 || entries.some(entry => entry.path === item.path && entry.rootIdentity === item.rootIdentity)) return null
-      entries.push({ path: item.path, rootIdentity: item.rootIdentity, workspace: workspaceValue(item.workspace) })
+      if (!object(item) || item.id !== undefined && !text(item.id,128) || !rootPath(item.path) || !identity(item.rootIdentity) || !object(item.workspace) || item.workspace.version !== 1 || entries.some(entry => entry.path === item.path && entry.rootIdentity === item.rootIdentity)) return null
+      if(item.id!==undefined&&entries.some(entry=>entry.id===item.id))return null
+      entries.push({ ...(item.id?{id:item.id as string}:{}), path: item.path, rootIdentity: item.rootIdentity, workspace: workspaceValue(item.workspace) })
     }
     return { version: 1, entries }
   } catch { return null }
@@ -131,7 +133,7 @@ export class VaultCatalog {
   private checked(target: VaultTarget): VaultTarget {
     if (!object(target) || !rootPath(target.path) || !identity(target.rootIdentity) || !label(target.label) || !(target.id === null || text(target.id, 128))) throw new Error('VAULT_TARGET_INVALID')
     const current = this.inspect(target.path)
-    if (current.path !== target.path || current.rootIdentity !== target.rootIdentity) throw new Error('VAULT_REPLACED')
+    if (current.path !== target.path || current.rootIdentity !== target.rootIdentity || target.id !== null && current.id !== target.id) throw new Error('VAULT_REPLACED')
     return target
   }
   private writable(revision?: string): { source: Snapshot; data: CatalogData } {
@@ -156,16 +158,16 @@ export class VaultCatalog {
     this.checked(target)
     const existing = this.compatible(data.entries, target)
     if (target.id !== null && existing?.id !== target.id) throw new Error('VAULT_REPLACED')
-    if (existing) return existing
+    if (existing) {if(!existing.displayVersion){existing.displayVersion=2;existing.legacyDisplayKey=createHash('sha256').update(existing.path).digest('hex')}return existing}
     if (data.entries.length >= LIMIT) throw new Error('VAULT_CATALOG_LIMIT')
-    const result = { id: randomUUID(), label: target.label, path: target.path, rootIdentity: target.rootIdentity, pinned: false, lastUsed: null }
+    const result = { id: randomUUID(), label: target.label, path: target.path, rootIdentity: target.rootIdentity, pinned: false, lastUsed: null, displayVersion:2 as const }
     data.entries.push(result)
     return result
   }
   register(target: VaultTarget): VaultCatalogEntry {
     const { source, data } = this.writable(); const length = data.entries.length
     const entry = this.entry(data, target)
-    if (length !== data.entries.length) this.save(this.file, data, source, 'VAULT_CATALOG_CONFLICT', () => { this.checked(target) })
+    if (length !== data.entries.length || JSON.stringify(data)!==source.raw) this.save(this.file, data, source, 'VAULT_CATALOG_CONFLICT', () => { this.checked(target) })
     return { ...entry }
   }
   update(id: string, patch: { label?: string; pinned?: boolean }, revision: string): VaultCatalogView {
@@ -194,6 +196,8 @@ export class VaultCatalog {
     const entry = data.entries.find(item => item.id === id)
     if (!entry) throw new Error('VAULT_NOT_REGISTERED')
     if (this.compatible(data.entries, target, id)) throw new Error('VAULT_ALREADY_REGISTERED')
+    this.migrateWorkspaceId(entry)
+    if(!entry.displayVersion){entry.displayVersion=2;if(entry.rootIdentity===target.rootIdentity)entry.legacyDisplayKey=createHash('sha256').update(entry.path).digest('hex')}
     entry.path = target.path; entry.rootIdentity = target.rootIdentity; entry.lastUsed = null
     if (data.lastVaultId === id) data.lastVaultId = null
     this.save(this.file, data, source, 'VAULT_CATALOG_CONFLICT', () => { this.checked(target) })
@@ -205,21 +209,34 @@ export class VaultCatalog {
     this.save(this.file, data, source, 'VAULT_CATALOG_CONFLICT', () => { this.checked(target) })
     return { ...entry }
   }
+  private migrateWorkspaceId(entry: VaultCatalogEntry): void {
+    const source=snapshot(this.workspaceFile),data=parseWorkspaces(source)
+    if(!data)throw Error('VAULT_WORKSPACE_INVALID')
+    const legacy=data.entries.find(item=>!item.id&&item.path===entry.path&&item.rootIdentity===entry.rootIdentity)
+    if(legacy){legacy.id=entry.id;this.save(this.workspaceFile,data,source,'VAULT_WORKSPACE_CONFLICT')}
+  }
+  displayKeys(target:VaultTarget):{key:string;legacy?:string}{
+    this.checked(target)
+    const entry=this.view().entries.find(e=>e.path===target.path&&e.rootIdentity===target.rootIdentity)
+    if(!entry)throw Error('VAULT_NOT_REGISTERED')
+    return {key:createHash('sha256').update('catalog:'+entry.id).digest('hex'),...(!entry.displayVersion?{legacy:createHash('sha256').update(entry.path).digest('hex')}:entry.legacyDisplayKey?{legacy:entry.legacyDisplayKey}:{})}
+  }
   workspace(target: VaultTarget): VaultWorkspace | null {
     this.checked(target)
     const data = parseWorkspaces(snapshot(this.workspaceFile))
-    return data?.entries.find(item => item.path === target.path && item.rootIdentity === target.rootIdentity)?.workspace ?? null
+    return data?.entries.find(item => item.id ? item.id === this.inspect(target.path).id : item.path === target.path && item.rootIdentity === target.rootIdentity)?.workspace ?? null
   }
   saveWorkspace(target: VaultTarget, value: unknown): void {
     this.checked(target)
     const source = snapshot(this.workspaceFile); const data = parseWorkspaces(source)
     if (!data) throw new Error('VAULT_WORKSPACE_INVALID')
     const workspace = workspaceValue(value)
-    const existing = data.entries.find(item => item.path === target.path && item.rootIdentity === target.rootIdentity)
-    if (existing) existing.workspace = workspace
+    const id=this.inspect(target.path).id
+    const existing = data.entries.find(item => item.id ? item.id === id : item.path === target.path && item.rootIdentity === target.rootIdentity)
+    if (existing) { existing.workspace = workspace; if(id)existing.id=id }
     else {
       if (data.entries.length >= LIMIT) throw new Error('VAULT_WORKSPACE_LIMIT')
-      data.entries.push({ path: target.path, rootIdentity: target.rootIdentity, workspace })
+      data.entries.push({ ...(id?{id}:{}), path: target.path, rootIdentity: target.rootIdentity, workspace })
     }
     this.save(this.workspaceFile, data, source, 'VAULT_WORKSPACE_CONFLICT', () => { this.checked(target) })
   }

@@ -190,3 +190,9 @@ describe('split file browser', () => {
     expect(onOpenNote).toHaveBeenCalledWith('工作/会议.md')
   })
 })
+it('migrates only the main-verified legacy display key and isolates a different registered id',()=>{
+ const {browser}=setup('legacy');browser.setPreferredWidth(310)
+ browser.setVault('stable','legacy');expect(browser.preferredWidth).toBe(310)
+ browser.setVault('another');expect(browser.preferredWidth).toBeNull()
+ browser.setVault('stable');expect(browser.preferredWidth).toBe(310)
+})

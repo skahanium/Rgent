@@ -1,4 +1,7 @@
-import {WorkingMemoryStore,type WorkingSnapshot} from './working-memory-store.ts'
+import { WorkingMemoryService } from './working-memory-service.ts'
+import { bodyFingerprint } from './ledger-provenance.ts'
+import { collectNotePaths } from '../shared/vault-rel.ts'
+import {WorkingMemoryStore,applyMemoryRecovery,type MemoryRecoveryPatch,type WorkingSource,type WorkingSnapshot} from './working-memory-store.ts'
 import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -16,6 +19,7 @@ import { closeSecureFs, secureFsFor } from './secure-fs.ts'
 import { VaultIndex } from './vault-index.ts'
 import { vaultRootIdentity, watchVault } from './watch.ts'
 import { assertLedgerPreserved, composeSource, partitionSource } from '../markdown/partition.ts'
+import { compile } from '../markdown/index.ts'
 import { LedgerStore } from './ledger-store.ts'
 import type { LedgerChapterWrite } from './host-source.ts'
 import { retireMemoryFile } from './memory-retirement.ts'
@@ -55,7 +59,8 @@ export class VaultSession {
   constructor(
     private userData: string,
     private emit: (channel: string, payload?: unknown) => void,
-    private beforeChange: (previousRoot: string) => Promise<void> = async () => {}
+    private beforeChange: (previousRoot: string) => Promise<void> = async () => {},
+    private catalogIdentity?:(root:string,identity:string)=>string|null
   ) {}
 
   private stateFile(): string {
@@ -139,7 +144,8 @@ export class VaultSession {
     const canonical = realpathSync.native(root)
     if (vaultRootIdentity(canonical) !== this.rootIdentity) throw new Error('NOTE_UNREADABLE')
     this.requireUsableRoot()
-    return createHash('sha256').update(canonical).digest('hex')
+    const id=this.catalogIdentity?.(canonical,this.rootIdentity!)
+    return createHash('sha256').update(id?'catalog:'+id:JSON.stringify([canonical,this.rootIdentity])).digest('hex')
   }
 
   /** Main-process identity; includes the actual root object, unlike navigation preferences. */
@@ -237,7 +243,7 @@ export class VaultSession {
     const token=this.captureSession();return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.prepare(relPath,chapter,expectedVersion)})
   }
   async ledgerComplete(relPath:string,taskId:string,revision:string){const token=this.captureSession();const result=await this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.complete(relPath,taskId,revision)});this.scheduleLedgerCompression(relPath,token);return result}
-  async ledgerKey(relPath:string){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);return this.memoryContext().vaultKey+':'+this.ledgerStore!.owner(relPath).noteId})}
+  async ledgerKey(relPath:string){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);return this.memoryContext().vaultKey+':'+(this.ledgerStore!.lookupOwner(relPath)?.noteId??'unregistered:'+relPath)})}
   async ledgerContexts(relPath:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.contexts(relPath)}
   async ledgerPage(relPath:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);return {...this.ledgerStore!.wirePage(relPath,cursor),...(this.ledgerFailure?{maintenanceError:this.ledgerFailure}:{})}})}
 
@@ -248,13 +254,105 @@ export class VaultSession {
   memoryDiagnostic(){this.requireUsableRoot();return this.workingMemory!.diagnosis()}
   memorySnapshot(){this.assertCall();return this.workingMemory!.read()}
   /** Explicit diagnostic reset stays reachable during a pending structure recovery; it never clears that journal. */
-  async memoryReset(expected:{revision:string|null;objectVersion:string|null}){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);this.requireUsableRoot();return this.workingMemory!.reset(expected,this.materialCeiling())})}
+  async memoryReset(expected:{revision:string|null;objectVersion:string|null}){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);this.requireUsableRoot();if(this.lifecycle?.status().operation?.kind==='ledger-repair')throw Error('LIFECYCLE_RECOVERY_REQUIRED');return this.workingMemory!.reset(expected,this.materialCeiling())})}
   async memoryMutation<T>(operation:(store:WorkingMemoryStore)=>T|Promise<T>):Promise<T>{const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);this.requireStableStructure();const result=await operation(this.workingMemory!);this.assertSession(token);return result})}
   async ledgerRecord(relPath:string,taskId:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.getRecord(relPath,taskId)}
   async ledgerMaintenancePreview(relPath:string,action:'compress'|'clear'){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintenancePreview(relPath,action)})}
   async ledgerMaintenanceCommit(relPath:string,action:'compress'|'clear',items:readonly {taskId:string;revision:number}[],archive?:{revision:string;bytes:number}){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.maintain(relPath,action,items,archive)})}
   ledgerRegistryRevision(){this.assertCall();return this.ledgerStore?.registryRevision()??null}
-  async ledgerRepair(expected:string|null){const token=this.captureSession();return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();this.ledgerStore!.repairRegistry(expected)})}
+  private readonly ledgerRecoveryPreviews=new Map<string,{view:import('../shared/ledger.ts').LedgerRecoveryView;plan:import('./vault-lifecycle.ts').PendingLedgerRepair}>()
+  async ledgerRecoveryPreview(mode:'rebuild'|'restore'):Promise<import('../shared/ledger.ts').LedgerRecoveryView>{
+    const token=this.captureSession();await this.lifecycleReady
+    return this.mutations.run(async()=>{
+      this.assertSession(token);this.requireStableStructure()
+      const root=this.requireUsableRoot(),fs=secureFsFor(root),ledger=this.ledgerStore!
+      let permissionRaw:string|null=null;try{permissionRaw=fs.readText('.rgent-permissions')}catch(e){if(!(e instanceof Error&&e.message==='ENOENT'))throw e}
+      const captured=this.lifecycle!.prepareRepair(mode,[],permissionRaw),reconstruction=ledger.recoveryOwners()
+      const permissions=await loadPermissionSnapshot(root);if(permissions.state.status!=='ready')throw Error('PERMISSIONS_INVALID')
+      const effective=effectivePermissionEntries(root,permissions.state.entries),rootIdentity=vaultRootIdentity(root)
+      const rows:import('../shared/ledger.ts').LedgerRecoveryRow[]=[],writes:import('./vault-lifecycle.ts').RepairWrite[]=[]
+      const next=structuredClone(reconstruction),snapshots=new Map<string,{bytes:Buffer;objectVersion:string}>()
+      const bodies=new Map<string,number>()
+      for(const relPath of collectNotePaths(await listVaultTree(root))){const note=fs.readSnapshot(relPath);snapshots.set(relPath,note);const hash=revisionOf(note.bytes.toString());bodies.set(hash,(bodies.get(hash)??0)+1)}
+      const addWrite=(file:string,after:string)=>{let before:string|null=null,beforeId:string|null=null;try{const disk=fs.readSnapshot(file);before=disk.bytes.toString();beforeId=disk.objectVersion}catch(e){if(!(e instanceof Error&&e.message==='ENOENT'))throw e}if(before!==after)writes.push({path:file,before,beforeId,after})}
+      let memory:WorkingSnapshot|null=null;try{memory=this.workingMemory!.read()}catch{/* Stored memory remains untouched and unavailable. */}
+      const anyContinuous=reconstruction.owners.some(owner=>snapshots.get(owner.relPath)?.objectVersion===owner.objectVersion)
+      for(const owner of next.owners){
+        const row:import('../shared/ledger.ts').LedgerRecoveryRow={noteId:owner.noteId,relPath:owner.relPath,outcome:mode==='rebuild'?'history-only':'associate',reasons:[],sources:[]};rows.push(row)
+        if(mode==='rebuild'){row.reasons.push('只重建原登记描述，不建立新的文件关联');continue}
+        const refuse=(reason:string)=>{row.outcome='refused';row.reasons.push(reason)}
+        const note=snapshots.get(owner.relPath)
+        if(!note){refuse('登记路径缺失');continue}
+        const body=note.bytes.toString(),evidence=owner.recoveryEvidence,attachments=ledger.attachmentEvidence(owner.relPath)
+        if(tierFor(owner.relPath,effective)==='forbidden'||attachments.some(a=>tierFor(a.relPath,effective)==='forbidden'))refuse('当前笔记或附件权限禁止关联')
+        try{verifyOrdinaryNotes(root,[owner.relPath])}catch{refuse('路径已成为其他笔记的附件')}
+        if(revisionOf(body)!==owner.bodyRevision)refuse('正文修订与历史证据不同')
+        const anchors=ledger.anchors(body)
+        if(JSON.stringify(anchors)!==JSON.stringify([...owner.anchors].sort())||anchors.some(anchor=>!ledger.recoveryRecord(owner,anchor)))refuse('历史任务锚点不能唯一对应')
+        if(owner.anchorsTruncated||ledger.anchors(body,Infinity).length>256){if(row.outcome!=='refused')row.outcome='history-only';row.reasons.push('有限锚点描述不包含全部任务；只恢复历史，来源暂停')}
+        if(!anchors.length&&(bodies.get(revisionOf(body))??0)>1)refuse('同正文材料不能唯一对应')
+        if(evidence){
+          if(evidence.rootIdentity===rootIdentity&&note.objectVersion!==owner.objectVersion)refuse('同一库根中的替换篇不能借整库恢复继承')
+          if(JSON.stringify(attachments)!==JSON.stringify(evidence.attachments))refuse('附件子树与历史证据不同')
+        }else{
+          if(row.outcome!=='refused')row.outcome='history-only'
+          row.reasons.push('旧描述缺少库根和附件历史证明；只恢复历史，记忆来源暂停')
+          if(anyContinuous&&note.objectVersion!==owner.objectVersion)refuse('仅部分登记对象改变，不能证明整库恢复范围')
+        }
+        if(row.outcome==='refused')continue
+        owner.objectVersion=note.objectVersion
+        // Explicit human association is recorded as a new baseline, never physical continuity.
+        if(evidence)owner.recoveryEvidence={rootIdentity,attachments}
+        addWrite(`.rgent/ledgers/${owner.noteId}/owner.json`,JSON.stringify(owner))
+      }
+      let memoryPlan:import('./vault-lifecycle.ts').MemoryRecoveryPlan|undefined
+      if(mode==='restore'&&memory?.raw){
+        const service=new WorkingMemoryService(this,()=>null),patches:MemoryRecoveryPatch[]=[],sourceResults=new Map<string,{candidate:WorkingSource;valid:boolean;reason:string}>()
+        for(const entry of memory.record.entries)for(const source of entry.sources){
+          const row=rows.find(r=>r.relPath===source.relPath),owner=reconstruction.owners.find(o=>o.relPath===source.relPath),note=snapshots.get(source.relPath),candidate=structuredClone(source)
+          let valid=!!row&&row.outcome==='associate'&&!!note,reason=valid?'已逐条核验原文、分类及来源依赖':'归属或历史附件证明不足，来源暂停'
+          if(valid){
+            candidate.objectVersion=note!.objectVersion;candidate.revision=revisionOf(note!.bytes.toString())
+            for(const dep of candidate.sourceDeps){const depRow=rows.find(r=>r.relPath===dep.relPath),original=snapshots.get(dep.relPath);if(!original||depRow?.outcome!=='associate'||bodyFingerprint(original.bytes.toString())!==dep.bodyHash){valid=false;break}dep.objectVersion=original.objectVersion}
+            if(valid)valid=await service.verifySource(candidate,{unique:true,record:async()=>{const r=ledger.recoveryRecord(owner!,source.taskId??'');if(!r)throw Error('LEDGER_RECORD_INVALID');return r},contexts:async()=>{const r=ledger.recoveryRecord(owner!,source.taskId??'');return r?ledger.contextForRecord(r):[]}})
+            if(!valid)reason='当前原文、分类、权限或来源依赖不满足唯一核验'
+          }
+          const uniqueId=entry.sources.filter(s=>s.id===source.id).length===1
+          sourceResults.set(entry.id+'\0'+source.id,{candidate,valid:valid&&uniqueId,reason:uniqueId?reason:'同一条目包含重复来源标识，来源暂停'})
+        }
+        const entryValid=(id:string,version:number,seen=new Set<string>()):boolean=>{
+          if(seen.has(id))return false;seen.add(id)
+          const entry=memory!.record.entries.find(e=>e.id===id&&e.version===version)
+          return !!entry&&entry.status==='active'&&(!entry.reviewAt||Date.parse(entry.reviewAt)>Date.now())&&entry.sources.length>0&&entry.sources.every(source=>sourceResults.get(entry.id+'\0'+source.id)?.valid&&source.memoryDeps.every(dep=>entryValid(dep.id,dep.version,new Set(seen))))
+        }
+        for(const entry of memory.record.entries){const patch:MemoryRecoveryPatch={id:entry.id,version:entry.version,pause:!entryValid(entry.id,entry.version),sources:[]}
+          for(const source of entry.sources){const result=sourceResults.get(entry.id+'\0'+source.id)!,depsValid=source.memoryDeps.every(dep=>entryValid(dep.id,dep.version)),valid=result.valid&&depsValid
+            rows.find(r=>r.relPath===source.relPath)?.sources.push({id:source.id,status:valid?'verified':'paused',reason:depsValid?result.reason:'记忆依赖版本、分类或到期状态无法核验'})
+            if(valid)patch.sources.push({id:source.id,objectVersion:result.candidate.objectVersion,revision:result.candidate.revision,deps:result.candidate.sourceDeps.map(d=>({relPath:d.relPath,objectVersion:d.objectVersion}))})
+          }
+          patches.push(patch)
+        }
+        const after=applyMemoryRecovery(memory.raw,patches);memoryPlan={beforeHash:revisionOf(memory.raw),beforeId:memory.objectVersion!,afterHash:revisionOf(after),patches}
+      }
+      addWrite('.rgent/registry.json',JSON.stringify({version:1,...next}))
+      this.assertSession(token);this.requireStableStructure()
+      const after=await loadPermissionSnapshot(root);if(after.raw!==permissions.raw||after.revision!==permissions.revision)throw Error('STALE_PREVIEW')
+      const id=randomUUID(),view:import('../shared/ledger.ts').LedgerRecoveryView={id,sessionId:token,mode,rows,canCommit:rows.length>0&&!rows.some(r=>r.outcome==='refused'),warning:mode==='restore'?'确认表示授权为本库建立新的对象关联，不证明是同一物理文件。仅逐条核验合格的记忆来源可续接，其余继续暂停；许可、临时模型、旧任务与本库开关不会恢复。提交后可分批核验并暂停离库。':'仅按完整归属描述重建登记；不重新绑定文件，不恢复许可或记忆来源。'}
+      const plan=this.lifecycle!.prepareRepair(mode,writes,permissions.raw,memoryPlan)
+      if(captured.permissionRaw!==permissions.raw||JSON.stringify(captured.fingerprints)!==JSON.stringify(plan.fingerprints))throw Error('STALE_PREVIEW')
+      if(this.ledgerRecoveryPreviews.size>=4)this.ledgerRecoveryPreviews.clear()
+      this.ledgerRecoveryPreviews.set(id,{view,plan});return structuredClone(view)
+    })
+  }
+  ledgerRecoveryCancel(id:string){this.assertCall();this.ledgerRecoveryPreviews.delete(id)}
+  async ledgerRecoveryCommit(id:string){
+    const token=this.captureSession(),prepared=this.ledgerRecoveryPreviews.get(id)
+    this.ledgerRecoveryPreviews.delete(id)
+    if(!prepared||prepared.view.sessionId!==token||!prepared.view.canCommit)throw Error('STALE_PREVIEW')
+    const result=await this.lifecycle!.commitRepair(prepared.plan);this.assertSession(token);this.lifecycleError=null;if(result.status==='complete')this.resetMemoryReader();return result
+  }
+  private resetMemoryReader(){const token=this.captureSession();this.workingMemory=new WorkingMemoryStore(()=>secureFsFor(this.requireUsableRoot()),()=>{this.assertSession(token);this.requireUsableRoot()})}
+  async ledgerRecoveryResume(revision:string){const token=this.captureSession();await this.lifecycleReady;const result=await this.lifecycle!.resumeRepair(revision);this.assertSession(token);this.lifecycleError=null;if(result.status==='complete')this.resetMemoryReader();return result}
   async ledgerImage(relPath:string,taskId:string,revision:number,field:'prompt'|'answer'){
     const token=this.captureSession();await this.lifecycleReady;this.assertSession(token)
     const record=this.ledgerStore!.getRecord(relPath,taskId)
@@ -438,7 +536,7 @@ export class VaultSession {
       const view: SaveCopyPreviewView = { id: randomUUID(), sessionId: request.sessionId, source: request.source,
         target: request.target, draftVersion: request.draftVersion, pendingTaskIds: chapters.map((chapter) => chapter.taskId),
         warning: '另存创建新笔记归属，保留窗口正文及本预览列出的旧账本恢复材料和待保存任务记录；原账本不移动，不复制附件、不重启任务。' }
-      this.copyPreviews.clear()
+      this.copyPreviews.clear();this.ledgerRecoveryPreviews.clear()
       this.copyPreviews.set(view.id, { view: { ...view, pendingTaskIds: [...view.pendingTaskIds] }, request: { ...request }, content,
         bodyHash: revisionOf(request.body), basisHash: revisionOf(basis.content), pendingHash: revisionOf(JSON.stringify(chapters)), parentIdentity })
       return view
@@ -679,7 +777,7 @@ export class VaultSession {
     this.verified.clear()
     this.successors.clear()
     this.latestObjects.clear()
-    this.copyPreviews.clear()
+    this.copyPreviews.clear();this.ledgerRecoveryPreviews.clear()
     if (this.root) closeSecureFs(this.root)
     this.root = null
     this.rootIdentity = null
@@ -701,7 +799,7 @@ export class VaultSession {
     this.verified.clear()
     this.successors.clear()
     this.latestObjects.clear()
-    this.copyPreviews.clear()
+    this.copyPreviews.clear();this.ledgerRecoveryPreviews.clear()
     if (this.root) closeSecureFs(this.root)
     this.root = path.resolve(root)
     this.rootIdentity = vaultRootIdentity(this.root)
@@ -714,7 +812,7 @@ export class VaultSession {
     this.workingMemory=new WorkingMemoryStore(()=>secureFsFor(this.requireUsableRoot()),check)
     this.ledgerStore=new LedgerStore(()=>secureFsFor(this.requireUsableRoot()),check,(relPath,before,after,content)=>{
       check();this.recordCommittedWrite({relPath,previousPath:relPath,previousObjectVersion:before,objectVersion:after,content})
-    })
+    },()=>this.rootIdentity!,()=>this.captureSession())
     this.ledgerFailure=null
     this.lifecycle = new VaultLifecycle(this.root, this.mutations, token, check, async write => {
       check(); await this.recordCommittedWrite(write)
@@ -723,6 +821,7 @@ export class VaultSession {
     this.lifecycleReady = this.lifecycle.recover().then((result) => {
       if (this.token !== token) return
       if (result) this.emitRelocation(result)
+      if(this.lifecycle?.status().status!=='ready')return
       try { check(); retireMemoryFile(this.root!, check) } catch { this.memoryFailure = 'MEMORY_RETIREMENT_FAILED' }
       return this.mutations.run(()=>{try{check();const basis=this.workingMemory!.read();if(basis.raw)this.workingMemory!.interrupted(basis)}catch{/* Local memory diagnosis remains accessible; do not block ordinary notes. */}})
     }).catch((error: unknown) => {
@@ -780,7 +879,7 @@ export class VaultSession {
     this.stopWatch?.(); this.stopWatch = null
     if (this.debounce) clearTimeout(this.debounce)
     this.debounce = null
-    this.changedNotes.clear(); this.copyPreviews.clear()
+    this.changedNotes.clear(); this.copyPreviews.clear();this.ledgerRecoveryPreviews.clear()
     if (this.root) closeSecureFs(this.root)
     this.index.reset()
     if (notify) this.emit('vault:lost')

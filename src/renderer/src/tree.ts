@@ -21,7 +21,7 @@ export type FileBrowser = {
   captureScroll(): void
   workspaceScroll(): {treeScroll:number;resourceScroll:number}
   restoreWorkspaceScroll(treeScroll:number, resourceScroll:number): void
-  setVault(key: string | null): void
+  setVault(key: string | null, legacyKey?:string): void
   update(entries: TreeEntry[], active: string | null): void
   setActive(path: string | null): void
   fail(message: string): void
@@ -257,11 +257,12 @@ export function createFileBrowser(host: HTMLElement, options: BrowserOptions): F
       else return
       save()
     },
-    setVault(key) {
+    setVault(key,legacyKey) {
       const next = key ? `rgent:file-browser:v1:${key}` : null
       if (next === storageKey) return
       rememberScroll(); save()
       if (storageKey) sessions.set(storageKey, { folder: folderScroll, resources: resourceScroll })
+      if(next&&legacyKey){try{const legacy=`rgent:file-browser:v1:${legacyKey}`;if(localStorage.getItem(next)===null&&localStorage.getItem(legacy)!==null)localStorage.setItem(next,JSON.stringify(readPreference(legacy)))}catch{/* Display preferences are best effort. */}}
       storageKey = next; state = next ? readPreference(next) : defaults()
       folderScroll = (next && sessions.get(next)?.folder) || 0
       resourceScroll = (next && sessions.get(next)?.resources) || new Map()

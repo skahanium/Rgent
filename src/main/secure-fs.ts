@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module'
-import { realpathSync } from 'node:fs'
+import { realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -27,9 +27,12 @@ const binding = createRequire(import.meta.url)(nativeFile) as NativeBinding
 
 export class SecureVaultFs {
   private handle: unknown
+  readonly rootIdentity: string
 
   constructor(root: string) {
-    this.handle = binding.openRoot(realpathSync(root))
+    const canonical=realpathSync(root),stat=statSync(canonical,{bigint:true})
+    this.rootIdentity=`${stat.dev}:${stat.ino}`
+    this.handle = binding.openRoot(canonical)
   }
 
   list(relDir = ''): NativeEntry[] {

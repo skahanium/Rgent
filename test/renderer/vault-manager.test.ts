@@ -258,3 +258,21 @@ it('retains settings drafts and explains how to resolve a deferred body conflict
  expect(overlay.root.querySelector('[role="status"]')!.textContent).toBe('窗口稿与磁盘稿发生冲突，两份均已保留。请先关闭设置，处理正文保存冲突后，再重试切换。')
  expect(overlay.root.textContent).not.toContain('VAULT_SWITCH_BODY_CONFLICT')
 })
+it('shows recovery authorization in the existing vault page and supports paused progress',async()=>{
+ const root=document.createElement('div');document.body.append(root);const repair=vi.fn(async(request:import('../../src/shared/ledger.ts').LedgerRepairRequest):Promise<import('../../src/shared/ledger.ts').LedgerRepairResult>=>request.action==='preview'?{ok:true,value:{id:'preview',sessionId:'session',mode:'restore',canCommit:true,warning:'确认授权新关联，不证明同一物理文件',rows:[{noteId:'n',relPath:'a.md',outcome:'history-only',reasons:['附件证明不足'],sources:[]}]}}:{ok:true,value:{status:'pending',revision:'revision',processed:4,total:6}})
+ const page=mountVaultManager({body:root,isCurrent:()=>true},{get:async()=>({...view([entry('a')]),activeId:'a'}),open:async()=>{},pick:async()=>{},change:async()=>view([]),recovery:{state:async()=>({sessionId:'session',status:'ready',revision:null,items:[]}),repair}})
+ await flush();const click=(text:string)=>[...root.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent===text)!.click()
+ click('预览整库恢复');await flush();expect(root.textContent).toContain('不证明同一物理文件');expect(root.textContent).toContain('附件证明不足')
+ click('确认授权新关联');await flush();expect(repair).toHaveBeenLastCalledWith({sessionId:'session',action:'commit',previewId:'preview'});expect(root.textContent).toContain('可暂停并离开本库');expect(page.isBusy()).toBe(false)
+ page.dispose()
+})
+it('cancels an uncommitted recovery and ignores its late preview after leaving the page',async()=>{
+ const root=document.createElement('div');document.body.append(root);let release!:(value:import('../../src/shared/ledger.ts').LedgerRepairResult)=>void
+ const preview={ok:true as const,value:{id:'preview',sessionId:'session',mode:'restore' as const,canCommit:true,warning:'新关联',rows:[]}}
+ let late=false;const repair=vi.fn(async(r:import('../../src/shared/ledger.ts').LedgerRepairRequest):Promise<import('../../src/shared/ledger.ts').LedgerRepairResult>=>r.action==='preview'?(late?await new Promise(resolve=>{release=resolve}):preview):{ok:true})
+ const page=mountVaultManager({body:root,isCurrent:()=>true},{get:async()=>view([]),open:async()=>{},pick:async()=>{},change:async()=>view([]),recovery:{state:async()=>({sessionId:'session',status:'ready',revision:null,items:[]}),repair}})
+ await flush();const click=(text:string)=>[...root.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent===text)!.click()
+ click('预览整库恢复');await flush();click('取消恢复预览');await flush();expect(repair).toHaveBeenLastCalledWith({sessionId:'session',action:'cancel',previewId:'preview'})
+ late=true;click('预览整库恢复');await flush();page.dispose();const before=root.textContent;release(preview);await flush();expect(root.textContent).toBe(before)
+ expect(repair.mock.calls.some(([request])=>request.action==='commit')).toBe(false)
+})

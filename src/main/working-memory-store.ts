@@ -157,3 +157,16 @@ export class WorkingMemoryStore{
  }
  relocate(basis:WorkingSnapshot,from:string,to:string,objectVersion:string){const record=structuredClone(basis.record);let changed=false;for(const e of record.entries)for(const s of e.sources)if(s.relPath===from&&s.objectVersion===objectVersion){s.relPath=to;changed=true}return changed?this.commit(basis,record):basis}
 }
+
+/** Metadata-only association patches; the lifecycle journal never copies source text. */
+export type MemoryRecoveryPatch={id:string;version:number;pause:boolean;sources:{id:string;objectVersion:string;revision:string;deps:{relPath:string;objectVersion:string}[]}[]}
+export function applyMemoryRecovery(raw:string,patches:MemoryRecoveryPatch[]):string{
+ const record=parseWorkingMemory(raw)
+ for(const patch of patches){const entry=record.entries.find(e=>e.id===patch.id&&e.version===patch.version);if(!entry)throw Error('MEMORY_CHANGED')
+  for(const update of patch.sources){const source=entry.sources.find(s=>s.id===update.id);if(!source)throw Error('MEMORY_SOURCE_CHANGED');source.objectVersion=update.objectVersion;source.revision=update.revision
+   for(const dep of update.deps){const prior=source.sourceDeps.find(d=>d.relPath===dep.relPath);if(!prior)throw Error('MEMORY_SOURCE_CHANGED');prior.objectVersion=dep.objectVersion}
+  }
+  if(patch.pause&&entry.status==='active'){entry.status='paused';entry.reason='MEMORY_SOURCE_CHANGED'}
+ }
+ record.revision++;return encodeWorkingMemory(record)
+}
