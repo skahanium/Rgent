@@ -1366,6 +1366,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   check('返回 A 恢复两篇 tab、活动篇与侧栏',await switching && await waitFor(page,`document.querySelectorAll('.tab').length===2 && document.querySelector('.tab[aria-selected="true"]')?.textContent.includes('同名') && document.querySelector('.tree-panel')?.classList.contains('is-collapsed')`))
   const position=await page.eval(`(()=>{const view=document.querySelector('.cm-content').cmTile.root.view;return {anchor:view.state.selection.main.anchor,head:view.state.selection.main.head,top:view.scrollDOM.scrollTop}})()`)
   check('恢复选区与阅读位置',position.anchor===30 && position.head===34 && position.top>200,JSON.stringify(position))
+  await verifyV4NativeRestoreProducer(page,nativePage,switchTo,profile,vault)
   await page.eval(`document.querySelector('.cm-content').cmTile.root.view.dispatch({selection:{anchor:0},changes:{from:0,insert:'切换前的新输入\\n'}})`)
   check('有未保存输入时切换 B 成功',await switchTo('vault-b','写作库 B'))
   check('切换前新输入已保存在 A，不写入 B',readFileSync(path.join(vault,'同名.md'),'utf8').startsWith('切换前的新输入')&&!readFileSync(path.join(sibling,'同名.md'),'utf8').includes('切换前的新输入'))
@@ -1948,6 +1949,67 @@ async function verifyV4ConsolidationRetry(page,nativePage,vault,shot) {
     check('重新披露后整理完成且未重新生成已保存回答',await waitFor(page,`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(id)}&&j.outcome==='applied')})()`,20000)&&requests===3&&readFileSync(path.join(vault,'V4整理.md'),'utf8').includes('V4整理已保存回答'))
     await v4CloseSettings(page)
   }finally{await new Promise(resolve=>server.close(resolve))}
+}
+
+/** Two real 30s main watchdogs exercise native retry producers and closePending.
+ * Hold existing IPC receipts, never manufacture transition messages or restore IDs. */
+async function verifyV4NativeRestoreProducer(page,nativePage,switchTo,profile,vault) {
+  process.stdout.write('\nv4 E：原生关闭与实际 R1/R2 恢复 producer（保留两次 30 秒等待）\n')
+  await switchTo('vault-b','写作库 B')
+  await page.eval(`(()=>{globalThis.__nativeRestoreEvents=[];globalThis.__nativeRestoreOff=window.rgent.onVaultTransition((busy,session,state)=>globalThis.__nativeRestoreEvents.push({...state,time:Date.now()}));globalThis.__nativeRestoreFlushes=0;globalThis.__nativeRestoreFlushOff=window.rgent.onFlushRequest(()=>globalThis.__nativeRestoreFlushes++)})()`)
+  const workspaceBefore=readFileSync(path.join(profile,'vault-workspaces.json'),'utf8')
+  await nativePage.eval(`(()=>{
+    const e=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron'),ipc=e.ipcMain;
+    const g={old:new Map(),held:[],dialogs:[],release:false,query:false,workspace:false,oldDialog:e.dialog.showMessageBox,start:Date.now()};globalThis.__nativeRestore=g;
+    for(const channel of ['vault:workspace-get','vault:get','vault:transition']){
+      const old=ipc._invokeHandlers.get(channel);g.old.set(channel,old);
+      ipc._invokeHandlers.set(channel,async(...args)=>{
+        if(channel==='vault:transition'){
+          const receipt=args[1];
+          if(!g.release){const result=await new Promise(resolve=>g.held.push({channel,receipt,resolve}));if(result==='released'){const value=await old(...args);g.ackResults??=[];g.ackResults.push({receipt,value});return value}}
+          return old(...args)
+        }
+        const value=await old(...args);
+        if(!g.release&&(channel==='vault:get'&&g.query||channel==='vault:workspace-get'&&!g.workspace)){
+          if(channel==='vault:workspace-get')g.workspace=true;
+          await new Promise(resolve=>g.held.push({channel,resolve}));
+        }
+        return value
+      })
+    }
+    e.dialog.showMessageBox=(...args)=>{const options=args.at(-1);if(options.title==='笔记库交接没有完成')return new Promise(resolve=>g.dialogs.push({resolve,time:Date.now(),options}));return g.oldDialog(...args)};
+    return true
+  })()`)
+  try{
+    // Start the actual catalog switch without waiting for the target restoration.
+    await v4Settings(page);await page.eval(`document.querySelector('[data-vault-open="vault-a"]').click()`)
+    for(let n=0;n<80&&!await nativePage.eval('globalThis.__nativeRestore.workspace');n++)await sleep(100)
+    if(!await nativePage.eval('globalThis.__nativeRestore.workspace'))throw Error('原生 R1 未进入真实工作区读取')
+    await nativePage.eval(`globalThis.__rgentTestWindow.close();globalThis.__rgentTestWindow.close();true`)
+    check('真实提交后重复原生关闭仅登记延后、不并发普通flush',await page.eval(`document.querySelector('#app').inert===true && globalThis.__nativeRestoreEvents.filter(e=>e.phase==='restoring'&&e.closePending&&!e.restoreId).length>=2 && globalThis.__nativeRestoreFlushes===0`)&&await nativePage.eval(`!globalThis.__rgentTestWindow.isDestroyed()`))
+    process.stdout.write('等待第一个真实主进程 30 秒恢复 watchdog…\n')
+    for(let n=0;n<350&&!await nativePage.eval('globalThis.__nativeRestore.dialogs.length>=1');n++)await sleep(100)
+    check('真实恢复 watchdog 的原生弹窗没有缩短产品期限',await nativePage.eval(`globalThis.__nativeRestore.dialogs.length>=1 && globalThis.__nativeRestore.dialogs[0].time-globalThis.__nativeRestore.start>=29000`))
+    if(!await nativePage.eval('globalThis.__nativeRestore.dialogs.length>=1'))throw Error('主进程恢复 watchdog 没有触发')
+    await nativePage.eval(`(()=>{const g=globalThis.__nativeRestore;g.query=true;g.dialogs[0].resolve({response:1});return true})()`)
+    if(!await waitFor(page,`globalThis.__nativeRestoreEvents.some(e=>e.restoreId)`))throw Error('真实原生取消关闭/重试未发 R2')
+    for(let n=0;n<80&&!await nativePage.eval(`globalThis.__nativeRestore.held.some(h=>h.channel==='vault:get')`);n++)await sleep(100)
+    check('原生 retryRestore 真实 R2 handoff 后同 restoring 无ID通知不取消查询',await page.eval(`(()=>{const list=globalThis.__nativeRestoreEvents,index=list.findIndex(e=>e.restoreId);return index>=0&&list.slice(index+1).some(e=>e.phase==='restoring'&&!e.restoreId)&&document.querySelector('#app').inert===true})()`))
+    await nativePage.eval(`globalThis.__rgentTestWindow.close();globalThis.__rgentTestWindow.close();true`)
+    check('R2 查询中重复原生关闭通知仍保当前恢复和原工作区',await page.eval(`document.querySelector('#app').inert===true && globalThis.__nativeRestoreFlushes===0`)&&readFileSync(path.join(profile,'vault-workspaces.json'),'utf8')===workspaceBefore)
+    await nativePage.eval(`(()=>{const g=globalThis.__nativeRestore;for(const h of g.held.filter(h=>h.channel==='vault:transition'))h.resolve('released');return true})()`)
+    await sleep(250)
+    check('R1 真实迟到诊断回执不能释放 R2 或提前关闭窗口',await nativePage.eval(`!globalThis.__rgentTestWindow.isDestroyed() && globalThis.__nativeRestore.ackResults?.some(r=>r.value===false)`)&&await page.eval(`document.querySelector('#app').inert===true`))
+    process.stdout.write('等待第二个真实主进程 30 秒恢复 watchdog，取消关闭后完成新恢复…\n')
+    for(let n=0;n<350&&!await nativePage.eval('globalThis.__nativeRestore.dialogs.length>=2');n++)await sleep(100)
+    if(!await nativePage.eval('globalThis.__nativeRestore.dialogs.length>=2'))throw Error('R2 原生重试 watchdog 没有触发')
+    await nativePage.eval(`(()=>{const g=globalThis.__nativeRestore;g.release=true;g.dialogs[1].resolve({response:1});for(const h of g.held)h.resolve('released');return true})()`)
+    check('真实 R3 重新核验后解除门、取消关闭保留唯一窗口和完整目标位置',await waitFor(page,`document.querySelector('#app').inert===false && document.querySelectorAll('.tab').length===2 && document.querySelector('.tab[aria-selected=true]')?.dataset.rel==='同名.md' && globalThis.__nativeRestoreEvents.some(e=>!e.busy)`,14000)&&await nativePage.eval(`!globalThis.__rgentTestWindow.isDestroyed()`))
+    check('原生恢复完成仍从当前根访问目标正文',await page.eval(`window.rgent.noteRead('同名.md').then(n=>n.content.includes('A 段落'))`)&&readFileSync(path.join(vault,'同名.md'),'utf8').includes('A 段落'))
+  }finally{
+    await nativePage.eval(`(()=>{const e=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron'),g=globalThis.__nativeRestore;g.release=true;for(const [channel,old]of g.old)e.ipcMain._invokeHandlers.set(channel,old);for(const h of g.held)h.resolve('released');for(const d of g.dialogs)d.resolve({response:1});e.dialog.showMessageBox=g.oldDialog;return true})()`)
+    await page.eval(`globalThis.__nativeRestoreOff?.();globalThis.__nativeRestoreFlushOff?.();true`)
+  }
 }
 
 /** Disposable recovery counterexample. Native fixture creates a valid owner-complete,
