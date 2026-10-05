@@ -1601,6 +1601,10 @@ async function v4Shots(page, shot, name, selector = '.settings-main') {
       await page.call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false})
       await page.eval(`document.querySelector(${JSON.stringify(selector)})?.scrollIntoView({block:'nearest'});new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`)
       check(`${name} ${mode} ${width}px 不横向溢出`,await page.eval(`document.documentElement.scrollWidth<=innerWidth+1 && [...document.querySelectorAll(${JSON.stringify(selector)})].every(n=>n.scrollWidth<=n.clientWidth+1)`))
+      if(name==='workspace-retry'){
+        const visible=await page.eval(`(()=>{const banner=document.querySelector('.workspace-recovery'),text=banner.querySelector('span'),button=banner.querySelector('button'),range=document.createRange();range.selectNodeContents(text);const lines=[...range.getClientRects()],rect=n=>{const r=n.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}},hits=[];const exposed=(r,node)=>r.width>0&&r.height>0&&r.left>=0&&r.top>=0&&r.right<=innerWidth&&r.bottom<=innerHeight&&[[(r.left+r.right)/2,r.top+1],[(r.left+r.right)/2,(r.top+r.bottom)/2],[(r.left+r.right)/2,r.bottom-1],[r.left+1,(r.top+r.bottom)/2],[r.right-1,(r.top+r.bottom)/2]].every(([x,y])=>{const hit=document.elementFromPoint(x,y);hits.push({x,y,hit:hit?.className||hit?.tagName});return !!hit&&node.contains(hit)});return {ok:!banner.hidden&&!!text.textContent&&lines.length>0&&lines.every(r=>exposed(r,text))&&!button.disabled&&exposed(button.getBoundingClientRect(),button),banner:rect(banner),empty:rect(document.querySelector('.empty')),text:lines.map(r=>({x:r.x,y:r.y,width:r.width,height:r.height})),button:rect(button),hits}})()`)
+        check(`${name} ${mode} ${width}px 提示全文与重试按钮可见且未被空页覆盖`,visible.ok,visible.ok?'':JSON.stringify(visible))
+      }
       await shot(page,`v4-${name}-${mode}-${width}`)
     }
   }
