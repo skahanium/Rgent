@@ -1466,9 +1466,23 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   const second=spawn(electron,['.',`--user-data-dir=${profile}`,'--no-sandbox','--disable-gpu'],{cwd:root,env:{...process.env,ELECTRON_RUN_AS_NODE:undefined},stdio:'ignore'})
   const exited=await new Promise(resolve=>{const timer=setTimeout(()=>{second.kill('SIGTERM');resolve(false)},6000);second.on('exit',code=>{clearTimeout(timer);resolve(code===0)})})
   check('第二次启动只唤起原窗口且退出',exited && await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').BrowserWindow.getAllWindows().length===1`))
-  await nativePage.eval(`setTimeout(()=>process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').app.exit(0),10);true`)
+  // Complete a real committed switch with a pending native close, then restart this same profile.
+  await switchTo('vault-a','研究库 A')
+  const closeEvidence=path.join(profile,'v4-native-close-evidence.json')
+  await nativePage.eval(`(()=>{const e=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron'),fs=process.getBuiltinModule('fs'),win=globalThis.__rgentTestWindow,ipc=e.ipcMain,g={events:[],acks:[],closed:0},send=win.webContents.send,ack=ipc._invokeHandlers.get('vault:transition');globalThis.__readyNativeClose=g;win.webContents.send=function(channel,...args){g.events.push({channel,value:args[0],time:Date.now()});return send.call(this,channel,...args)};ipc._invokeHandlers.set('vault:transition',async(...args)=>{const result=await ack(...args);g.acks.push({receipt:args[1]?.args?.[0]??args[1],result,time:Date.now()});return result});win.once('closed',()=>{g.closed++;fs.writeFileSync(${JSON.stringify(closeEvidence)},JSON.stringify(g));e.app.quit()});return true})()`)
+  await holdV4Receipt(nativePage,'vault:workspace-get')
+  try{
+    await openLibrarySettings();await page.eval(`document.querySelector('[data-vault-open="vault-b"]').click()`);await v4ReceiptSeen(nativePage)
+    await nativePage.eval(`globalThis.__rgentTestWindow.close();globalThis.__rgentTestWindow.close();true`)
+    check('最后真实提交恢复门持有唯一延后关闭，不发并发flush',await nativePage.eval(`globalThis.__readyNativeClose.closed===0&&!globalThis.__rgentTestWindow.isDestroyed()&&globalThis.__readyNativeClose.events.filter(e=>e.channel==='app:flush-request').length===0`)&&await page.eval(`document.querySelector('#app').inert===true`))
+  }finally{await releaseV4Receipt(nativePage)}
+  for(let n=0;n<100&&!existsSync(closeEvidence);n++)await sleep(100)
+  if(!existsSync(closeEvidence))throw Error('目标 ready 后原生关闭没有完成')
+  const completedClose=JSON.parse(readFileSync(closeEvidence,'utf8')),accepted=completedClose.acks.filter(a=>a.result===true&&a.receipt.outcome==='ready'),flushes=completedClose.events.filter(e=>e.channel==='app:flush-request')
+  check('真实 ready 回执后仅一次关闭flush和一次窗口关闭退出',completedClose.closed===1&&accepted.length===1&&flushes.length===1&&completedClose.events.some(e=>e.channel==='vault:transition'&&e.value.busy===false&&e.time<=flushes[0].time))
   nativePage.close();page.close()
   await new Promise((resolve,reject)=>{if(child.exitCode!==null)return resolve();const t=setTimeout(()=>reject(new Error('原窗口进程退出超时')),6000);child.once('exit',()=>{clearTimeout(t);resolve()})})
+  check('原生成功关闭流程真实进程正常退出',child.exitCode===0)
   const restart=async(assertion)=>{
     const port=await availablePort()
     const processRun=spawn(electron,['.',`--user-data-dir=${profile}`,'--no-sandbox','--disable-gpu','--disable-renderer-backgrounding','--disable-background-timer-throttling',`--remote-debugging-port=${port}`],{cwd:root,env:{...process.env,ELECTRON_RUN_AS_NODE:undefined},stdio:'ignore'})
@@ -1615,11 +1629,15 @@ async function verifyV4ReadOnly(page, nativePage, vault, shot) {
   await page.call('Input.insertText',{text:'保存增量'})
   check('正常保存保留 BOM、混合换行和旧机器尾部原字节',await waitFor(page,`!document.querySelector('.tab-dirty')`)&&readFileSync(path.join(vault,cases[1][0]),'utf8')==='\ufeff保存增量'+cases[1][1].slice(1))
   if(process.platform!=='win32'){
-    const mode=statSync(vault).mode&0o777;chmodSync(vault,0o500)
+    const mode=statSync(vault).mode&0o777,before=readFileSync(path.join(vault,cases[1][0]));
+    await nativePage.eval(`(()=>{const ipc=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain,old=ipc._invokeHandlers.get('note:write');globalThis.__v4DeniedWrite={old,results:[]};ipc._invokeHandlers.set('note:write',async(...args)=>{const result=await old(...args);globalThis.__v4DeniedWrite.results.push({request:args[1]?.args?.[0]??args[1],result});return result});return true})()`);chmodSync(vault,0o500)
     try{
       await page.call('Input.insertText',{text:'拒写保留稿'})
-      check('实际权限拒写保留窗口稿和未保存标志',await waitFor(page,`!!document.querySelector('.tab-dirty') && document.querySelector('.cm-content')?.textContent.includes('拒写保留稿')`)&&!readFileSync(path.join(vault,cases[1][0]),'utf8').includes('拒写保留稿'))
-    }finally{chmodSync(vault,mode)}
+      for(let n=0;n<100&&!await nativePage.eval(`globalThis.__v4DeniedWrite.results.some(r=>r.request?.relPath===${JSON.stringify(cases[1][0])}&&r.request.content.includes('拒写保留稿')&&r.result.ok===false)`);n++)await sleep(100)
+      check('权限仍拒写时真实 noteWrite 已返回失败',await nativePage.eval(`globalThis.__v4DeniedWrite.results.some(r=>r.request?.relPath===${JSON.stringify(cases[1][0])}&&r.request.content.includes('拒写保留稿')&&r.result.ok===false&&typeof r.result.error==='string')`))
+      await page.eval(`new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`)
+      check('实际权限拒写保留窗口稿和未保存标志',await waitFor(page,`!!document.querySelector('.tab[aria-selected=true] .tab-dirty') && document.querySelector('.cm-content')?.textContent.includes('拒写保留稿')`)&&readFileSync(path.join(vault,cases[1][0])).equals(before))
+    }finally{chmodSync(vault,mode);await nativePage.eval(`(()=>{const ipc=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain;ipc._invokeHandlers.set('note:write',globalThis.__v4DeniedWrite.old);return true})()`)}
     await page.eval(`document.querySelector('.note-recheck')?.click()`)
     await nativePage.eval(`globalThis.__rgentTestWindow.webContents.send('menu:save');true`)
     await waitFor(page,`!document.querySelector('.tab-dirty')`)
@@ -1640,16 +1658,39 @@ async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
       if(!p.ok)throw Error(p.error);const r=await window.rgent.memoryPreviewCommit({sessionId:n.sessionId,id:p.value.id,content:'备份记忆 '+name,layer:'demand',scope:'虚构备份'});if(!r.ok)throw Error(r.error);ids.push(r.value.entries.find(e=>e.content==='备份记忆 '+name).id)
     }return {state,ids,catalog:await window.rgent.vaultCatalog()}
   })()`)
+  // Actual local receiver and consumed/unused authorizations establish a non-default old state.
+  let oldCalls=0
+  const oldReceiver=createHttpServer((request,response)=>{let raw='';request.on('data',c=>raw+=c);request.on('end',()=>{oldCalls++;const r=JSON.parse(raw),answer=r.model==='v4-backup-memory'?JSON.stringify({proposals:[]}):'旧授权真实回答';response.writeHead(200,{'content-type':'text/event-stream'});response.end(`data: ${JSON.stringify({choices:[{index:0,delta:{content:answer},finish_reason:null}]})}\n\ndata: ${JSON.stringify({choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\ndata: [DONE]\n\n`)})})
+  const copy=vault+'-复制',parking=vault+'-停靠'
+  await new Promise(resolve=>oldReceiver.listen(0,'127.0.0.1',resolve))
+  try{
+  const oldState=await page.eval(`(async()=>{
+    const a=await window.rgent.modelProviderSave({provider:'custom',baseURL:'http://127.0.0.1:${oldReceiver.address().port}/v1',modelId:'v4-backup-default',contextTokens:50000,newKey:'v4-backup-key'});if(!a.ok)throw Error(a.error);
+    const b=await window.rgent.modelAdd({provider:'custom',modelId:'v4-backup-temporary',contextTokens:50000});if(!b.ok)throw Error(b.error);
+    const c=await window.rgent.modelAdd({provider:'custom',modelId:'v4-backup-memory',contextTokens:50000});if(!c.ok)throw Error(c.error);
+    const models=c.config.models,base=models.find(m=>m.modelId==='v4-backup-default').id,temporary=models.find(m=>m.modelId==='v4-backup-temporary').id,memory=models.find(m=>m.modelId==='v4-backup-memory').id;
+    if(!(await window.rgent.modelDefaultSet({modelId:base})).ok)throw Error('旧默认模型设置失败');
+    const state=await window.rgent.vaultGet();for(const request of [{target:'default',modelId:memory},{target:'vault',vault:{enabled:true,override:{mode:'inherit'}}}]){const r=await window.rgent.memoryConfigSave({...request,sessionId:state.sessionId});if(!r.ok)throw Error(r.error)}
+    const n=await window.rgent.noteRead(${JSON.stringify(names[2])}),w=await window.rgent.noteWrite({relPath:n.relPath??${JSON.stringify(names[2])},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,content:n.content+'\\n/旧授权任务\\n'});if(!w.ok)throw Error(w.error);
+    const saved=await window.rgent.noteRead(${JSON.stringify(names[2])}),start=saved.content.indexOf('/旧授权任务'),request={relPath:${JSON.stringify(names[2])},sessionId:saved.sessionId,objectVersion:saved.objectVersion,expectedRevision:saved.revision,range:{start,end:start+6},expectedText:'/旧授权任务',promptText:'旧授权任务',modelRecordId:temporary,references:[]};
+    const preview=await window.rgent.agentAuthorizationPreview(request);if(!preview.ok)throw Error(preview.error);const task=await window.rgent.agentStart({...request,previewId:preview.preview.id});if(!task.ok)throw Error(task.error);return {base,temporary,memory,consumed:{...request,previewId:preview.preview.id},taskId:task.id}
+  })()`)
+  if(!await v4TaskDone(page,names[2],oldState.taskId))throw Error('旧真实授权任务未完成')
+  if(!await waitFor(page,`(async()=>{const m=await window.rgent.memoryGet({sessionId:${JSON.stringify(seeded.state.sessionId)}});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(oldState.taskId)}&&j.outcome==='applied')})()`))throw Error('旧库学习开关没有实际进入整理')
+  const unused=await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(names[3])}),content=n.content+'\\n/旧未用授权\\n',w=await window.rgent.noteWrite({relPath:${JSON.stringify(names[3])},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,content});if(!w.ok)throw Error(w.error);const saved=await window.rgent.noteRead(${JSON.stringify(names[3])}),start=saved.content.indexOf('/旧未用授权'),r={relPath:${JSON.stringify(names[3])},sessionId:saved.sessionId,objectVersion:saved.objectVersion,expectedRevision:saved.revision,range:{start,end:start+6},expectedText:'/旧未用授权',promptText:'旧未用授权',modelRecordId:${JSON.stringify(oldState.temporary)},references:[]},p=await window.rgent.agentAuthorizationPreview(r);if(!p.ok)throw Error(p.error);return {...r,previewId:p.preview.id}})()`)
+  check('复制前实际学习开启、旧授权已消费并有未用旧许可',oldCalls>=2&&oldState.consumed.previewId!==unused.previewId&&await page.eval(`window.rgent.memoryGet({sessionId:${JSON.stringify(seeded.state.sessionId)}}).then(m=>m.ok&&m.value.config.vault.enabled)`))
   // Persist insufficient historical evidence on one descriptor in the original disposable vault.
   // Copy then changes every native object; no production in-memory state is substituted.
   const rpath=path.join(vault,'.rgent','registry.json'),registry=JSON.parse(readFileSync(rpath,'utf8'))
   const insufficient=registry.owners.find(o=>o.relPath===names[1]);delete insufficient.recoveryEvidence
   writeFileSync(path.join(vault,'.rgent','ledgers',insufficient.noteId,'owner.json'),JSON.stringify(insufficient));writeFileSync(rpath,JSON.stringify(registry))
   await v4OpenNote(page,names[0]);await v4OpenNote(page,names[1]);await v4OpenNote(page,names[0])
-  await page.eval(`(()=>{const v=document.querySelector('.cm-content').cmTile.root.view;v.dispatch({selection:{anchor:4,head:8}});if(document.querySelector('.tree-toggle').getAttribute('aria-expanded')==='true')document.querySelector('.tree-toggle').click()})()`)
+  await page.eval(`(()=>{const v=document.querySelector('.cm-content').cmTile.root.view;v.dispatch({selection:{anchor:4,head:8}});if(document.querySelector('.tree-toggle').getAttribute('aria-expanded')!=='true')document.querySelector('.tree-toggle').click();const h=document.querySelector('.sidebar-resizer');h.dispatchEvent(new KeyboardEvent('keydown',{key:'Home',bubbles:true}));for(let i=0;i<11;i++)h.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}))})()`)
+  mkdirSync(path.join(vault,'恢复浏览目录'));writeFileSync(path.join(vault,'恢复浏览目录','浏览.md'),'复制恢复浏览正文');if(!await waitFor(page,`!!document.querySelector('.tree-select[data-path="恢复浏览目录"]')`)||!await selectBrowserFolder(page,'恢复浏览目录'))throw Error('旧库实际浏览位置未建立');check('复制前侧栏真实展开280px并浏览不同于根的目录',await page.eval(`!document.querySelector('.tree-panel').classList.contains('is-collapsed')&&document.querySelector('.sidebar-resizer').getAttribute('aria-valuenow')==='280'&&document.querySelector('.resource-path').textContent==='恢复浏览目录'`))
+  await page.eval(`(()=>{const select=document.querySelector('.status-model');select.value=${JSON.stringify(oldState.temporary)};select.dispatchEvent(new Event('change',{bubbles:true}))})()`);check('复制前本篇使用不同于设备默认的临时模型',await waitFor(page,`document.querySelector('.status-model').value===${JSON.stringify(oldState.temporary)}`))
   await sleep(750)
   const oldSession=seeded.state.sessionId,catalogId=seeded.catalog.entries.find(e=>e.path===realpathSync.native(vault)).id
-  const copy=vault+'-复制',parking=vault+'-停靠';cpSync(vault,copy,{recursive:true});mkdirSync(parking)
+  cpSync(vault,copy,{recursive:true});mkdirSync(parking)
   writeFileSync(path.join(parking,'停靠.md'),'停靠正文')
   const chooseRoot=async target=>{
     await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;globalThis.__v4OldDialog??=d.showOpenDialog;d.showOpenDialog=async()=>({canceled:false,filePaths:[${JSON.stringify(target)}]});return true})()`)
@@ -1657,14 +1698,14 @@ async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
     if(!await waitFor(page,`!document.querySelector('.overlay-settings') && document.querySelector('#app').inert===false`))throw Error('切库未完成')
   }
   const switchId=async id=>{await v4Settings(page);await page.eval(`document.querySelector('[data-vault-open="${id}"]').click()`);if(!await waitFor(page,`!document.querySelector('.overlay-settings') && document.querySelector('#app').inert===false`))throw Error('登记切库未完成')}
-  try{
     await chooseRoot(parking)
     await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showOpenDialog=async()=>({canceled:false,filePaths:[${JSON.stringify(copy)}]});true`)
     await v4Settings(page);await page.eval(`document.querySelector('[data-vault-id="${catalogId}"] [data-vault-action="more"]').click();document.querySelector('[data-vault-id="${catalogId}"] [data-vault-action="relocate"]').click()`)
     if(!await waitFor(page,`document.querySelector('.vault-settings')?.getAttribute('aria-busy')==='false' && document.querySelector('[data-vault-id="${catalogId}"] .vault-settings-path')?.textContent.includes('复制')`))throw Error('备份重新定位失败')
     await v4CloseSettings(page);await switchId(catalogId)
     const moved=await page.eval(`window.rgent.vaultGet()`)
-    check('同 catalogID 新根实际恢复 tabs、光标及侧栏',moved.vaultId===catalogId&&moved.sessionId!==oldSession&&await page.eval(`document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(names[0])} && document.querySelector('.cm-content').cmTile.root.view.state.selection.main.anchor===4 && document.querySelector('.tree-panel').classList.contains('is-collapsed')`))
+    check('同 catalogID 新根实际恢复 tabs、光标及侧栏',moved.vaultId===catalogId&&moved.sessionId!==oldSession&&await page.eval(`document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(names[0])} && document.querySelector('.cm-content').cmTile.root.view.state.selection.main.anchor===4 && !document.querySelector('.tree-panel').classList.contains('is-collapsed') && document.querySelector('.sidebar-resizer').getAttribute('aria-valuenow')==='280' && document.querySelector('.resource-path').textContent==='恢复浏览目录'`))
+    check('重新定位后本篇临时模型复位设备默认',await page.eval(`document.querySelector('.status-model').value===${JSON.stringify(oldState.base)}`))
     const newNote=await page.eval(`window.rgent.noteRead(${JSON.stringify(names[0])})`)
     check('新根重新核验，旧正文对象不作连续性证明',newNote.objectVersion!==registry.owners.find(o=>o.relPath===names[0]).objectVersion&&readFileSync(path.join(copy,'备份来源0','原始附件.bin')).equals(attachment))
     await v4Settings(page)
@@ -1692,13 +1733,16 @@ async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
       }
     }
     check('实际分批完成合格来源续接、不足来源继续暂停',await page.eval(`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.entries.find(e=>e.id===${JSON.stringify(seeded.ids[0])})?.status==='active'&&m.value.entries.find(e=>e.id===${JSON.stringify(seeded.ids[1])})?.status==='paused'&&!m.value.config.vault.enabled&&!(await window.rgent.agentTasks()).length})()`)&&JSON.parse(readFileSync(path.join(copy,'.rgent-lifecycle'),'utf8')).active===null)
+    const replay=await page.eval(`(async()=>{const current=await window.rgent.noteRead(${JSON.stringify(names[3])});return Promise.all([window.rgent.agentStart(${JSON.stringify(oldState.consumed)}),window.rgent.agentStart(${JSON.stringify(unused)}),window.rgent.agentStart({...${JSON.stringify(unused)},sessionId:current.sessionId,objectVersion:current.objectVersion,expectedRevision:current.revision})])})()`)
+    check('恢复后旧已消费/未用授权ID及换新会话重放全拒绝，必须新预览',replay.every(r=>r.ok===false&&['STALE_PREVIEW','INVALID_AUTHORIZATION'].includes(r.error))&&oldCalls===2)
     check('整库恢复保留全部笔记及附件原始字节',names.every(name=>readFileSync(path.join(copy,name)).equals(readFileSync(path.join(vault,name))))&&readFileSync(path.join(copy,'备份来源0','原始附件.bin')).equals(attachment))
     await v4CloseSettings(page);await chooseRoot(parking)
     await v4Settings(page);await page.eval(`document.querySelector('[data-vault-id="${catalogId}"] [data-vault-action="more"]').click();document.querySelector('[data-vault-id="${catalogId}"] [data-vault-action="remove"]').click();document.querySelector('[data-vault-id="${catalogId}"] [data-vault-action="confirm-remove"]').click()`)
     await waitFor(page,`!document.querySelector('[data-vault-id="${catalogId}"]')`);await v4CloseSettings(page);await chooseRoot(copy)
     const readded=await page.eval('window.rgent.vaultGet()')
-    check('移除再登记新ID不接旧tabs、光标及侧栏偏好',readded.vaultId!==catalogId&&await page.eval(`document.querySelectorAll('.tab').length===0 && document.querySelector('.tree-panel').classList.contains('is-collapsed')`))
-  }finally{await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;if(globalThis.__v4OldDialog)d.showOpenDialog=globalThis.__v4OldDialog;return true})()`)}
+    check('移除再登记新ID不接旧tabs、光标及侧栏偏好',readded.vaultId!==catalogId&&await page.eval(`document.querySelectorAll('.tab').length===0 && document.querySelector('.tree-panel').classList.contains('is-collapsed') && document.querySelector('.resource-path').textContent==='笔记库'`))
+    await page.eval(`document.querySelector('.tree-toggle').click()`);check('新登记侧栏实际展开使用默认宽度而非旧280px',await waitFor(page,`document.querySelector('.sidebar-resizer').getAttribute('aria-valuenow')==='224'`));check('新登记访问当前根正文',await page.eval(`window.rgent.noteRead(${JSON.stringify(names[0])}).then(n=>n.sessionId===${JSON.stringify(readded.sessionId)}&&n.content.includes('唯一来源0'))`))
+  }finally{await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;if(globalThis.__v4OldDialog)d.showOpenDialog=globalThis.__v4OldDialog;return true})()`);await new Promise(resolve=>oldReceiver.close(resolve))}
   return copy
 }
 
@@ -1845,14 +1889,15 @@ async function verifyV4FullMemory(page,nativePage,vault,shot) {
     for(const e of meta.entries)e.content='满容量需遗忘条目'+e.id+'x'.repeat(low)
     const full=encodeV4Memory(meta);if(Buffer.byteLength(full)<=2*1024*1024-256*1024||Buffer.byteLength(full)>2*1024*1024)throw Error('合法满容量夹具未满足边界')
     writeFileSync(memoryFile,full)
-    const beforeNotes=namesBytes(vault),beforeRegistry=readFileSync(path.join(vault,'.rgent','registry.json'))
+    const beforeNotes=namesBytes(vault),beforeRegistry=readFileSync(path.join(vault,'.rgent','registry.json')),beforeLedgers=vaultFileSnapshot(path.join(vault,'.rgent','ledgers'))
+    // Only .rgent-memory/jobs may change here; every owner/task/legacy byte and native identity is protected.
     await switchRoot(vault);await v4Settings(page,'记忆')
     check('合法满容量记忆页仍可查看且学习质量警示持续',await waitFor(page,`document.querySelectorAll('.memory-entry').length===1000 && document.querySelector('.memory-quality-status')?.textContent.includes('尚未通过验证')`),`${Buffer.byteLength(full)} bytes`)
     await page.eval(`document.querySelector('.memory-entry').open=true`);await v4Click(page,'.memory-entry button','删除并遗忘')
     check('满容量遗忘真实页预览明确保留原笔记与账本',await waitFor(page,`document.querySelector('.memory-forget-warning')?.textContent.includes('原笔记与账本不变')`))
     await v4Shots(page,shot,'full-memory-forget','.settings-main')
     await v4Click(page,'.memory-entry button','确认删除并遗忘')
-    check('真实确认后 pendingTarget 千条闭包全移除、原文账本不变',await waitFor(page,`document.querySelectorAll('.memory-entry').length===0`)&&namesBytes(vault)===beforeNotes&&readFileSync(path.join(vault,'.rgent','registry.json')).equals(beforeRegistry))
+    check('真实确认后 pendingTarget 千条闭包全移除、原文账本不变',await waitFor(page,`document.querySelectorAll('.memory-entry').length===0`)&&namesBytes(vault)===beforeNotes&&readFileSync(path.join(vault,'.rgent','registry.json')).equals(beforeRegistry)&&vaultFileSnapshot(path.join(vault,'.rgent','ledgers'))===beforeLedgers)
     const after=readFileSync(memoryFile,'utf8'),data=JSON.parse(Buffer.from(/^<!-- rgent:memory:v2 data="([A-Za-z0-9_-]+)"/.exec(after)[1],'base64url').toString())
     check('满容量遗忘不保留已删除正文、约束阻止闭包重学',!after.includes('满容量需遗忘条目')&&data.entries.length===0&&data.forgotten.some(f=>f.entryIds.length===1000)&&data.forgotten.some(f=>sourceEntry.sources.every(s=>f.materialIds.includes(s.materialId))))
     check('遗忘后质量警示和人的开关保持可见',await page.eval(`document.querySelector('.memory-quality-status').textContent.includes('尚未通过验证') && !!document.querySelector('[data-memory="vault-enabled"]')`))
@@ -1930,7 +1975,7 @@ async function verifyV4Retirement(page,nativePage,vault,shot) {
 }
 
 async function verifyV4ConsolidationRetry(page,nativePage,vault,shot) {
-  process.stdout.write('\nv4 D：已保存回答的整理失败与真实重试（不代称 handoff 故障）\n')
+  process.stdout.write('\nv4 D：整理模型失败与独立 Host 材料交接故障的真实重试\n')
   let requests=0,memoryAttempts=0
   const server=createHttpServer((request,response)=>{let raw='';request.on('data',chunk=>raw+=chunk);request.on('end',()=>{
     const r=JSON.parse(raw);requests++;if(r.model==='v4-consolidation-memory'&&++memoryAttempts===1){response.writeHead(503,{'content-type':'application/json'});response.end(JSON.stringify({error:{message:'受控临时整理失败'}}));return}const answer=r.model==='v4-consolidation-memory'?JSON.stringify({proposals:[]}):'V4整理已保存回答'
@@ -1948,6 +1993,35 @@ async function verifyV4ConsolidationRetry(page,nativePage,vault,shot) {
     await v4Click(page,'.memory-preview button','确认重新整理')
     check('重新披露后整理完成且未重新生成已保存回答',await waitFor(page,`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(id)}&&j.outcome==='applied')})()`,20000)&&requests===3&&readFileSync(path.join(vault,'V4整理.md'),'utf8').includes('V4整理已保存回答'))
     await v4CloseSettings(page)
+    // A condition breakpoint only schedules a real disposable disk fault after ledger.complete.
+    // It never replaces Host saving, material versions, or the original result consumer.
+    const bundle=path.join(root,'out','main','index.js'),lines=readFileSync(bundle,'utf8').split('\n'),handoffLine=lines.findIndex(line=>/const saved = await this\.readBound\(root, [A-Za-z0-9_]+\);/.test(line))
+    if(handoffLine<0)throw Error('构建 Host 材料核验位置无法定位')
+    const localPath=/this\.readBound\(root, ([A-Za-z0-9_]+)\)/.exec(lines[handoffLine])[1],materialRel='V4交接.md',materialFile=path.join(vault,materialRel),parkedFile=materialFile+'.交接故障暂存'
+    let breakpoint
+    await nativePage.call('Debugger.enable',{})
+    try{
+      await nativePage.eval(`globalThis.__v4HandoffFault={fired:0,results:[],file:${JSON.stringify(materialFile)},parked:${JSON.stringify(parkedFile)}};true`)
+      const condition=`(()=>{const g=globalThis.__v4HandoffFault;if(root===${JSON.stringify(realpathSync.native(vault))}&&${localPath}===${JSON.stringify(materialRel)}&&g.fired===0){const fs=process.getBuiltinModule('fs');g.host=this;g.old=this.deps.onTaskMaterialResult;g.before=fs.readFileSync(g.file).toString('base64');const stat=fs.statSync(g.file);g.id=stat.dev+':'+stat.ino;g.fired++;fs.renameSync(g.file,g.parked);this.deps.onTaskMaterialResult=result=>{fs.renameSync(g.parked,g.file);g.results.push(result);this.deps.onTaskMaterialResult=g.old;return g.old(result)}}return false})()`
+      const installed=await nativePage.call('Debugger.setBreakpointByUrl',{urlRegex:'out.main.index[.]js$',lineNumber:handoffLine,condition});breakpoint=installed.result?.breakpointId
+      if(!breakpoint||!installed.result.locations.length)throw Error('Host 实际构建脚本条件断点未绑定')
+      const handoffId=await v4Task(page,vault,materialRel,'V4保存完成后材料核验故障',models.answer)
+      check('真实回答保存完成后 Host 材料核验确实失败且原对象已恢复',await v4TaskDone(page,materialRel,handoffId)&&await nativePage.eval(`(()=>{const g=globalThis.__v4HandoffFault,fs=process.getBuiltinModule('fs');return g.fired===1&&g.results.length===1&&g.results[0].taskId===${JSON.stringify(handoffId)}&&g.results[0].status==='unavailable'&&typeof g.results[0].reason==='string'&&fs.statSync(g.file).dev+':'+fs.statSync(g.file).ino===g.id&&fs.readFileSync(g.file).toString('base64')===g.before&&!fs.existsSync(g.parked)})()`))
+      check('Host 交接失败由真实版本形成独立 rejected、未调用整理模型',await waitFor(page,`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(handoffId)}&&j.outcome==='rejected'&&typeof j.materialVersion==='string'&&j.retryable)})()`)&&requests===4&&memoryAttempts===2)
+      const savedAnswer=readFileSync(materialFile)
+      await v4Settings(page,'记忆');await page.eval(`document.querySelector('[data-memory-section="jobs"]').open=true`)
+      check('材料交接失败的现有页面回执与恢复入口可见',await waitFor(page,`document.querySelector('.memory-job[data-task-id="${handoffId}"] .memory-job-result')?.textContent.includes('没有写入')&&[...document.querySelectorAll('.memory-job[data-task-id="${handoffId}"] button')].some(b=>b.textContent==='重新整理…'&&!b.disabled)`))
+      await v4Click(page,`.memory-job[data-task-id="${handoffId}"] button`,'重新整理…')
+      check('材料交接重试须重新披露真实接收方',await waitFor(page,`document.querySelector('.memory-preview')?.textContent.includes('v4-consolidation-memory')`));await v4Shots(page,shot,'handoff-retry','.settings-main')
+      await v4Click(page,'.memory-preview button','确认重新整理')
+      check('交接故障受控重试完成且保存回答原字节不重复生成',await waitFor(page,`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(handoffId)}&&j.outcome==='applied')})()`,20000)&&requests===5&&memoryAttempts===3&&readFileSync(materialFile).equals(savedAnswer))
+      await v4CloseSettings(page)
+    }finally{
+      try{
+        if(breakpoint)await nativePage.call('Debugger.removeBreakpoint',{breakpointId:breakpoint})
+        await nativePage.eval(`(()=>{const g=globalThis.__v4HandoffFault,fs=process.getBuiltinModule('fs');if(g){if(fs.existsSync(g.parked)){if(fs.existsSync(g.file))throw Error('故障恢复目标已存在');fs.renameSync(g.parked,g.file)}if(g.host&&g.old)g.host.deps.onTaskMaterialResult=g.old}return true})()`)
+      }finally{await nativePage.call('Debugger.disable',{})}
+    }
   }finally{await new Promise(resolve=>server.close(resolve))}
 }
 
@@ -1955,6 +2029,29 @@ async function verifyV4ConsolidationRetry(page,nativePage,vault,shot) {
  * Hold existing IPC receipts, never manufacture transition messages or restore IDs. */
 async function verifyV4NativeRestoreProducer(page,nativePage,switchTo,profile,vault) {
   process.stdout.write('\nv4 E：原生关闭与实际 R1/R2 恢复 producer（保留两次 30 秒等待）\n')
+  if(process.platform!=='win32'){
+    const mode=statSync(vault).mode&0o777,before=readFileSync(path.join(vault,'同名.md'))
+    await nativePage.eval(`(()=>{const e=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron');globalThis.__preparingClose={oldDialog:e.dialog.showMessageBox,dialogs:[]};e.dialog.showMessageBox=(...args)=>{const o=args.at(-1);if(o.title==='笔记尚未保存'){globalThis.__preparingClose.dialogs.push(o);return Promise.resolve({response:1})}return globalThis.__preparingClose.oldDialog(...args)};return true})()`)
+    await page.eval(`globalThis.__preparingCloseEvents=[];globalThis.__preparingCloseOff=window.rgent.onVaultTransition((busy,session,state)=>globalThis.__preparingCloseEvents.push({...state}));globalThis.__preparingCloseFlushes=0;globalThis.__preparingCloseFlushOff=window.rgent.onFlushRequest(()=>globalThis.__preparingCloseFlushes++)`)
+    await holdV4Receipt(nativePage,'note:write');chmodSync(vault,0o500)
+    try{
+      await page.eval(`document.querySelector('.cm-content').cmTile.root.view.dispatch({changes:{from:0,insert:'原生准备期保留稿\\n'}})`);await v4ReceiptSeen(nativePage)
+      await v4Settings(page);await page.eval(`document.querySelector('[data-vault-open="vault-b"]').click()`)
+      if(!await waitFor(page,`globalThis.__preparingCloseEvents.some(e=>e.phase==='preparing')`))throw Error('原生准备期未进入真实切库')
+      await nativePage.eval(`globalThis.__rgentTestWindow.close();globalThis.__rgentTestWindow.close();true`)
+      check('原生 preparing 关闭登记真实取消且已有 dirty 稿不并发普通flush',await page.eval(`globalThis.__preparingCloseEvents.some(e=>e.phase==='preparing'&&e.closePending)&&globalThis.__preparingCloseFlushes===0&&!!document.querySelector('.tab-dirty')`))
+      await releaseV4Receipt(nativePage)
+      for(let n=0;n<100&&!await nativePage.eval('globalThis.__preparingClose.dialogs.length===1');n++)await sleep(100)
+      check('真实拒写后继续编辑取消原生关闭、原库和 dirty 稿完整保留',await nativePage.eval(`globalThis.__preparingClose.dialogs.length===1&&!globalThis.__rgentTestWindow.isDestroyed()`)&&await waitFor(page,`document.querySelector('#app').inert===false&&document.querySelector('.status-vault').textContent==='研究库 A'&&document.querySelector('.cm-content').textContent.includes('原生准备期保留稿')&&!!document.querySelector('.tab-dirty')`)&&readFileSync(path.join(vault,'同名.md')).equals(before))
+    }finally{
+      chmodSync(vault,mode);await releaseV4Receipt(nativePage)
+      await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showMessageBox=globalThis.__preparingClose.oldDialog;true`)
+      await page.eval(`globalThis.__preparingCloseOff?.();globalThis.__preparingCloseFlushOff?.();true`)
+    }
+    if(await page.eval(`!!document.querySelector('.overlay-settings')`))await v4CloseSettings(page)
+    await nativePage.eval(`globalThis.__rgentTestWindow.webContents.send('menu:save');true`)
+    check('取消 preparing 后恢复权限可沿原保存入口落盘保留稿',await waitFor(page,`!document.querySelector('.tab-dirty')`)&&readFileSync(path.join(vault,'同名.md'),'utf8').includes('原生准备期保留稿'))
+  }else process.stdout.write('  · Windows preparing 原生拒写夹具仍待核，不记通过\n')
   await switchTo('vault-b','写作库 B')
   await page.eval(`(()=>{globalThis.__nativeRestoreEvents=[];globalThis.__nativeRestoreOff=window.rgent.onVaultTransition((busy,session,state)=>globalThis.__nativeRestoreEvents.push({...state,time:Date.now()}));globalThis.__nativeRestoreFlushes=0;globalThis.__nativeRestoreFlushOff=window.rgent.onFlushRequest(()=>globalThis.__nativeRestoreFlushes++)})()`)
   const workspaceBefore=readFileSync(path.join(profile,'vault-workspaces.json'),'utf8')

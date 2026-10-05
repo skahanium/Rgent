@@ -1103,6 +1103,16 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 | D | 满容量可遗忘的编码空间证明、pendingTarget 派生、材料身份与水位回收、生命周期 | `31e8623` 限定独立再审 Spec／Quality 通过（2026-10-05），迟到原文身份、实际队列权限与可撤失败反馈闭合；最终同域 252 通过／2 主动性能未选，类型／文档通过。容量及性能保留原受验范围，开放 Q 工具门；实际窗口与整轮完整门仍待核 |
 | Q | 虚构开发集双策略对照，逐模型停损与证据；不切生产策略、不运行正式评测 | `742e5bc` 工具统一修补限定独立 Spec／Quality 复审通过（2026-10-05），实际来源证据与终态评分门闭合；必要 runner／support 41／0、类型／文档通过。原 37／0 和无网络启动保留旧范围；实际窗口、最终完整门、冻结与逐对真实实验待核，新增付费调用仍为 0 |
 
+
+窗口准备与限定复核（2026-10-05；初版 `dcee30d`、原生 producer 追加 `a4d82a1`、本修波基线 `eed0071`）：
+
+- 初版接线不等于实际验收。`1acd6dd..a4d82a1` 固定差异独立复核 **Spec／Quality 均 FAIL，5 项 Important**（`/tmp/rgent-v4-window-review.md`）：权限拒写在真实保存前即可通过；缺 preparing 原生关闭保稿及 ready 后真实关闭；整理模型 503 不证明 Host 材料交接失败；满容量遗忘没有比较隐藏原始账本；复制恢复没有可区分的旧许可／临时模型／学习开关及侧栏前态。旧 `dcee30d`／`a4d82a1` 的上述缺口与未运行记录保留，不以新准备代码回写 PASS。
+- 同一唯一 writer 统一补现有 `verify-ui.mjs`：拒写持续至原 `noteWrite` 真失败回执及 dirty 保稿；真实 preparing 关闭取消切换、拒写后选择继续编辑，再恢复权限保存；多库专项收尾在真实 committed 恢复门内登记关闭，目标 ready 后一次 flush／一次 `window.closed`，经 `app.quit` 正常退出后续接同 profile 重启。既有两次 30 秒 watchdog、R1／R2／R3 和原断言保留，没有伪造恢复 id 或替换生产协调器。
+- 材料故障只在虚构临时篇真实完成账本保存后，通过已有 native inspector 条件断点暂移该原对象；Host 真读取失败时原对象移回，再交原 `onTaskMaterialResult` 消费者真实核验版本、失败页回执、重新披露及重试。503 仍为独立整理模型失败夹具；若未知版本或断点没有实际命中会失败，不猜可重试版本。满容量遗忘直接比较 `.rgent/ledgers` 整子树文件集合、任务／legacy／owner 原字节及身份／mtime，并保留笔记附件和 registry 对照；只有独立记忆／整理回执允许变化。
+- 复制前在 localhost 接收方实际消费任务授权、留一个未用授权 id、开启且完成一次真实整理，另设置不同于设备默认的临时模型；恢复后重放旧 id（含当前正确篇对象／会话）须拒绝。旧 catalogID 使用展开 280px 与普通子目录浏览，重新定位实际续接；移除重登记的新 ID 须无旧 tabs、收起、根浏览，实际展开默认 224px 并从当前根读正文。
+- 本修波只做脚本及内嵌表达式语法、diff 与必要文档检查；语法自查发现新增 B 夹具的两处 `page.eval` 换行少一层转义，已修正，首次失败保留 `/tmp/rgent-v4-window-fix-embedded-syntax-first-failure.log`。原初版 Ledger MAX 修补及 53 项定向证据沿原报告，未重复测试或改生产账本代码。新脚本全部为**已接待实际验证**；新窗口条数、截图与首次运行首因尚未取得。
+- 最终门仍由总任务串行执行 docs→完整测试→build→`RGENT_UI_V4_ONLY=1`→`RGENT_UI_MULTI_VAULT_ONLY=1`→原完整功能窗口；仅本地提交，无 push／CI／paid、新依赖／页面／IPC／分支／worktree／专题文档，不读改正常 profile 或真实库。Windows 原生拒写、对应 CI、输入法人工、用户视觉及正式质量全部仍待核，当前阶段不变。
+
 包 A 复审修复（2026-10-04，基线 `5f8cf77`）：必要迁移在实际库队列内核验有效 TaskGrant、来源权限前后快照、对象与整文件修订，最后同步复核授权有效性，并在旧归档写入后、正文原子替换前再次核验 grant 与权限原字节；grant 的读取依赖不回入该队列。Host 只续接已核验会话、迁移前后对象与修订的成功迁移回执，普通读取不能改 origin proof。任务与人的批次迁移共用迁移提交登记，原子替换前检查绑定容量，替换后立即同步登记 successors／verified／lastWrites，旧 tab 可继续保存。材料三态同时核对 `materials.json` 单元及独立 task 序号、owner 归属与上界；异常拒绝新序号分配，清空／推进在队列实际提交前重核，均不归零。新任务 2 MiB 上限不套到完整旧原文；大历史性能仍由 C 测量，不提前增加索引。记忆页显示既有退休失败和材料登记分类诊断，配置异常不能遮住材料异常；退休重试出口仍待 A+。
 
 修复证据：可信迁移、批次绑定、临界区撤权、材料损坏／伪零及控制操作排队反例均有先失败记录；最终定向命令为 `pnpm exec vitest run test/main/agent-host.test.ts test/main/task-authorization.test.ts test/main/vault.test.ts test/main/ledger-store.test.ts test/main/working-memory-service.test.ts test/renderer/memory-ui.test.ts test/shared/memory-errors.test.ts`，181／0，日志 `/tmp/rgent-v4-A-fix-final-targeted.log`；类型及文档检查另记 `/tmp/rgent-v4-A-fix-type.log`、`/tmp/rgent-v4-A-fix-docs.log`。本轮未运行全量、构建窗口或模型调用，Windows 与人工证据保持待核。其后 `8b5ed9c` 最终 Spec／Quality 复核通过；追加早退诊断 45 项及类型检查独立于上述 181 项，不能合并声称新全量。
