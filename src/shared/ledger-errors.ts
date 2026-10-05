@@ -15,6 +15,6 @@ export const LEDGER_ERROR_MESSAGES:Record<string,string>={
 }
 export const LEDGER_ERROR_CODES=Object.keys(LEDGER_ERROR_MESSAGES)
 
-export const ledgerErrorText=(code:string):string=>LEDGER_ERROR_MESSAGES[code]??'账本暂时无法核验；原记录保留，请在笔记库设置中检查恢复状态。'
+export const ledgerErrorText=(code:string):string=>(Object.hasOwn(LEDGER_ERROR_MESSAGES,code)?LEDGER_ERROR_MESSAGES[code]:undefined)??'账本暂时无法核验；原记录保留，请在笔记库设置中检查恢复状态。'
 
 export const ledgerEmptyText=(ownership:'verified'|'unregistered'):string=>ownership==='unregistered'?'本篇尚未登记，目前没有任务记录。':'已核验本篇归属，目前没有任务记录。'

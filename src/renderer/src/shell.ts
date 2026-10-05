@@ -1231,6 +1231,7 @@ export async function start(root: HTMLElement): Promise<void> {
         relPath,
         content: part.body,
         ledger: part.ledger,
+        ledgerStatus: source.ledger,
         saved: part.body,
         revision: source.revision,
         objectVersion: source.objectVersion, sessionId: source.sessionId,
@@ -1556,7 +1557,7 @@ export async function start(root: HTMLElement): Promise<void> {
           if(chunkOffset===c.total){renderRecord(JSON.parse(chunkText));chunkText='';chunkHash=null}else message.textContent=`长记录已读取 ${chunkOffset}／${c.total} 字节，继续加载可读完整记录。`
         }
         value.records.forEach(renderRecord);cursor=value.cursor;load.hidden=cursor===null
-        if(!ledgerBody.querySelector('details')&&!value.chunk&&cursor===null)message.textContent=ledgerEmptyText(value.ownership)
+        if(!ledgerBody.querySelector('details')&&!value.chunk&&cursor===null)message.textContent=value.ownership==='unregistered'&&captured.ledgerStatus?.status==='unmigrated'?'旧历史尚未迁移。点击“迁移库内旧账本”后可回顾；原记录保留。':ledgerEmptyText(value.ownership)
       }catch{if(ledgerOpen&&current()===captured&&generation===pageGeneration)message.textContent='账本读取未完成，保留已有回顾；请关闭后重新核对。'}
       finally{if(generation===pageGeneration){loading=false;load.disabled=false}}
     }

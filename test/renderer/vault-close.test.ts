@@ -285,3 +285,20 @@ it('ledger review shows persisted generation, reuse, omission and actual model s
  expect(JSON.stringify(records)).toBe(originalAudit)
  expect(renderReadOnlyMarkdown).toHaveBeenCalledWith(expect.anything(),'原始旧历史')
 })
+
+it('unmigrated legacy history is diagnosed without claiming no history or silently migrating',async()=>{
+ api.vaultWorkspaceGet=async()=>({version:1,tabs:[{relPath:'old.md'}],active:'old.md',sidebarHidden:true,treeScroll:0,resourceScroll:0})
+ api.noteRead=async()=>({content:'original body',revision:'r',objectVersion:'object',sessionId:'old',ledger:{status:'unmigrated',next:'migrate'}})
+ api.ledgerGet=vi.fn(async()=>({ok:true,value:{noteId:'',records:[],gaps:[],cursor:null,ownership:'unregistered'}}))
+ api.ledgerMigrate=vi.fn();api.noteWrite=vi.fn()
+ await start(root);root.querySelector<HTMLButtonElement>('.ledger-open')!.click()
+ await vi.waitFor(()=>expect(api.ledgerGet).toHaveBeenCalled())
+ const review=root.querySelector('.ledger-body')!
+ expect(review.textContent).toContain('旧历史尚未迁移')
+ expect(review.textContent).toContain('迁移库内旧账本')
+ expect(review.textContent).toContain('原记录保留')
+ expect(review.textContent).not.toContain('目前没有任务记录')
+ expect(review.querySelectorAll('details')).toHaveLength(0)
+ expect(api.ledgerMigrate).not.toHaveBeenCalled();expect(api.noteWrite).not.toHaveBeenCalled()
+ expect(editorHarness.text).toBe('original body')
+})

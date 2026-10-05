@@ -1033,7 +1033,7 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
       document.querySelector('.cm-line.md-h1')?.textContent.includes('原文坐标') &&
       [...document.querySelectorAll('.outline-mark')].some((node) => node.getAttribute('aria-label')?.includes('图片标题')) &&
       !!document.querySelector('.md-image-slot button')
-  })()`) === true && readFileSync(path.join(vault, name), 'utf8') === body)
+  })()`) === true && readFileSync(path.join(vault, name)).equals(Buffer.from(original)))
   await probe('图片出口核验使用原文范围并拒绝AI自动加载及错位范围', async () => {
     const proof = await page.eval(`(async () => {
       const note = await window.rgent.noteRead(${JSON.stringify(name)})
@@ -1053,13 +1053,13 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
   await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ changes: { from: ${editAt}, insert: '改' }, selection: { anchor: ${editAt + 1} }, userEvent: 'input.type' }); view.focus() })()`)
   await page.key('s', 'KeyS', modifier, 83)
   const edited = body.replace('原文字节。', '原文字节。改')
-  check('编辑保存只增加输入字符，BOM与所有原换行保留', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(edited)})()`))
+  check('编辑保存只增加输入字符，BOM与所有原换行保留', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(edited)})()`) && readFileSync(path.join(vault,name)).equals(Buffer.from(edited+ledger)))
   await page.key('z', 'KeyZ', modifier, 90)
   await page.key('s', 'KeyS', modifier, 83)
-  check('真实键盘撤销恢复原文完整字节', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(body)})()`))
+  check('真实键盘撤销恢复原文完整字节', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(body)})()`) && readFileSync(path.join(vault,name)).equals(Buffer.from(original)))
   await page.key(process.platform === 'darwin' ? 'Z' : 'y', process.platform === 'darwin' ? 'KeyZ' : 'KeyY', process.platform === 'darwin' ? modifier | 8 : modifier, process.platform === 'darwin' ? 90 : 89)
   await page.key('s', 'KeyS', modifier, 83)
-  check('真实键盘重做保持混合换行与BOM', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(edited)})()`))
+  check('真实键盘重做保持混合换行与BOM', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(edited)})()`) && readFileSync(path.join(vault,name)).equals(Buffer.from(edited+ledger)))
   await page.key('z', 'KeyZ', modifier, 90)
   await page.key('s', 'KeyS', modifier, 83)
   await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(body)})()`)
@@ -1067,7 +1067,7 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
   await page.eval(`(() => { const marker = document.querySelector('.rgent-marker-ai'); marker?.querySelector('.rgent-marker-more-toggle')?.click(); [...(marker?.querySelectorAll('button') ?? [])].find((button) => button.textContent === '上移一段')?.click() })()`)
   await page.key('s', 'KeyS', modifier, 83)
   const swapped = body.replace(`原文字节。\n\n${ai}`, `${ai}\n\n原文字节。`)
-  check('身份块搬移保留图、尾文、分隔与账本字节', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(swapped)})()`))
+  check('身份块搬移保留图、尾文、分隔与账本字节', await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(swapped)})()`) && readFileSync(path.join(vault,name)).equals(Buffer.from(swapped+ledger)))
   await page.key('z', 'KeyZ', modifier, 90)
   await page.key('s', 'KeyS', modifier, 83)
   await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(body)})()`)
@@ -2731,14 +2731,26 @@ async function main() {
       })()`)) === true
     )
     await probe('账本复用阅读呈现且正文不含账本', async () => {
-      const before = readFileSync(path.join(vault, '研究记录.md'), 'utf8')
+      const original = readFileSync(path.join(vault, '研究记录.md'))
       await page.eval(`document.querySelector('.ledger-open')?.click()`)
-    await waitFor(page, `!!document.querySelector('.ledger-body details')`)
-    await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
-    await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`)
-      const state = JSON.parse(await page.eval(`(() => JSON.stringify({ heading: document.querySelector('.ledger-body h2')?.textContent, strong: document.querySelector('.ledger-body strong')?.textContent, editor: document.querySelector('.cm-content')?.innerText, outline: [...document.querySelectorAll('.outline-mark')].map((n) => n.title), editable: !!document.querySelector('.ledger-body [contenteditable]') }))()`))
+      // Opening only reads. Use the existing human migration action before
+      // expecting imported history; prove both the exact body and archived tail.
+      if(!await waitFor(page,`document.querySelector('.ledger-body')?.textContent.includes('旧历史尚未迁移') && document.querySelector('.ledger-body')?.textContent.includes('原记录保留') && !document.querySelector('.ledger-body')?.textContent.includes('目前没有任务记录') && [...document.querySelectorAll('.ledger-body button')].some(n=>n.textContent==='迁移库内旧账本'&&!n.disabled)`))throw Error('旧账本未展示实际迁移入口')
+      const unmigrated=await page.eval(`(async()=>{const n=await window.rgent.noteRead('研究记录.md');const h=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:'研究记录.md'});return n.ledger?.status==='unmigrated'&&h.ok&&h.value.ownership==='unregistered'&&h.value.records.length===0})()`)
+      if(!unmigrated||!original.equals(Buffer.from(initialWithLedger))||!readFileSync(path.join(vault,'研究记录.md')).equals(original))throw Error('只读打开旧账本改变了原文件或登记前态')
+      await page.eval(`[...document.querySelectorAll('.ledger-body button')].find(n=>n.textContent==='迁移库内旧账本').click()`)
+      if(!await waitFor(page,`document.querySelector('.ledger-body')?.textContent.includes('本批已迁移') && document.querySelector('.ledger-body')?.textContent.includes('0 篇待核验')`))throw Error('显式旧账本迁移未完成')
+      const migrated=await page.eval(`(async()=>{const n=await window.rgent.noteRead('研究记录.md');return window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:'研究记录.md'})})()`)
+      if(!migrated.ok||migrated.value.ownership!=='verified'||!migrated.value.records.length)throw Error('显式迁移未保存可回顾的旧账本')
+      const archive=JSON.parse(readFileSync(path.join(vault,'.rgent','ledgers',migrated.value.noteId,'legacy.json'),'utf8')),tail=initialWithLedger.slice((note+'\n').length)
+      const before=readFileSync(path.join(vault,'研究记录.md')),migrationPreserved=before.equals(Buffer.from(note+'\n'))&&Buffer.from(archive.raw).equals(Buffer.from(tail))&&archive.hash===createHash('sha256').update(tail).digest('hex')
+      await page.eval(`document.querySelector('.ledger-close').click();document.querySelector('.ledger-open').click()`)
+      if(!await waitFor(page, `!!document.querySelector('.ledger-body details')`))throw Error('显式迁移后没有真实回顾记录')
+      await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
+      if(!await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`))throw Error('旧账本记录没有呈现内容')
+      const state = JSON.parse(await page.eval(`(() => JSON.stringify({ heading: document.querySelector('.ledger-body h2')?.textContent, strong: document.querySelector('.ledger-body strong')?.textContent, editor: document.querySelector('.cm-content')?.innerText, outline: [...document.querySelectorAll('.outline-mark')].map((n) => n.getAttribute('aria-label')), editable: !!document.querySelector('.ledger-body [contenteditable]') }))()`))
       await page.eval(`document.querySelector('.ledger-close')?.click()`)
-      return { ok: state.heading === '第一场' && state.strong === '账本结论' && !state.editor?.includes('账本结论') && !state.outline.includes('第一场') && !state.editable && readFileSync(path.join(vault, '研究记录.md'), 'utf8') === before, detail: JSON.stringify({ heading: state.heading, strong: state.strong, outline: state.outline }) }
+      return { ok: migrationPreserved && state.heading === '第一场' && state.strong === '账本结论' && !state.editor?.includes('账本结论') && !state.outline.includes('第一场') && !state.editable && readFileSync(path.join(vault, '研究记录.md')).equals(before), detail: JSON.stringify({ heading: state.heading, strong: state.strong, outline: state.outline, migrationPreserved }) }
     })
 
     await page.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] })

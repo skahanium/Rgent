@@ -18,6 +18,10 @@ it('registers ledger recovery errors and keeps unknown diagnostics bounded',()=>
  for(const code of LEDGER_ERROR_CODES)expect(ledgerErrorText(code)).toMatch(/[\u4e00-\u9fff]/)
  expect(ledgerErrorText('private /secret/path')).not.toContain('/secret')
 })
+it('unknown ledger diagnostics never resolve inherited object members',()=>{
+ const fallback=ledgerErrorText('unknown ledger failure')
+ for(const code of ['constructor','toString','__proto__','hasOwnProperty'])expect(ledgerErrorText(code)).toBe(fallback)
+})
 it('distinguishes an unregistered empty ledger from verified ownership',async()=>{
  const {ledgerEmptyText}=await import('../../src/shared/ledger-errors.ts')
  expect(ledgerEmptyText('unregistered')).toContain('尚未登记');expect(ledgerEmptyText('unregistered')).not.toContain('已核验')
