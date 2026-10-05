@@ -1264,12 +1264,15 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
     await page.eval(`window.rgent.noteRead('同名.md').catch(()=>null)`)
     if(!await waitFor(page,`document.querySelector('#app').inert===false && document.querySelector('.note-unavailable')?.hidden===false`))throw Error('原库暂失未进入新状态')
   } finally { renameSync(movedRoot,vault) }
-  await holdReceipt('lifecycle:status')
   try {
     await nativePage.eval(`(()=>{const e=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron');globalThis.__generationOldDialog=e.dialog.showOpenDialog;e.dialog.showOpenDialog=async()=>({canceled:false,filePaths:[${JSON.stringify(vault)}]});e.BrowserWindow.getAllWindows()[0].webContents.send('menu:open-vault');return true})()`)
-    await waitFor(page,`!!document.querySelector('[data-vault-action="open"]')`)
+    // The library page also reads lifecycle state during initialization. Hold only
+    // after that real query completes, so this receipt belongs to the new restore.
+    if(!await waitFor(page,`document.querySelector('.vault-settings')?.getAttribute('aria-busy')==='false' && document.querySelector('.vault-settings-recovery')?.textContent.includes('登记损坏可先重建原描述') && !!document.querySelector('[data-vault-action="open"]:not(:disabled)')`))throw Error('恢复代际夹具库页未完成真实初始化')
+    await holdReceipt('lifecycle:status')
     await page.eval(`document.querySelector('[data-vault-action="open"]').click()`)
     await gateSeen()
+    if(!await waitFor(page,`document.querySelector('#app').inert===true && document.querySelectorAll('.tab').length===1`))throw Error('新代际真实恢复未进入当前保护门')
     await nativePage.eval(`(()=>{const gate=globalThis.__olderWorkspaceGate;process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain._invokeHandlers.set(gate.channel,gate.old);gate.release();return true})()`)
     await sleep(250)
     check('同会话旧恢复迟到不加tab也不解除新恢复门',await page.eval(`document.querySelector('#app').inert===true && document.querySelectorAll('.tab').length===1`))
@@ -1292,6 +1295,10 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   check('取消选库后恢复原操作焦点',await page.eval(`document.activeElement?.getAttribute('data-vault-action')==='open'`))
   check('取消选库保持旧会话、选区和设置页',await page.eval(`(async()=>{const view=document.querySelector('.cm-content').cmTile.root.view;return (await window.rgent.vaultGet()).sessionId===globalThis.__oldSession && view.state.selection.main.anchor===30 && !!document.querySelector('.vault-settings')})()`))
   await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showOpenDialog=globalThis.__oldOpenDialog;true`)
+  // Re-selecting this same root committed a newer catalog revision while the
+  // existing page retained its snapshot. Follow its CAS diagnosis: re-enter the
+  // page before testing a fresh successful edit; never silently rebase its draft.
+  await closeLibrarySettings();await openLibrarySettings()
   await holdReceipt('vault:catalog-change')
   try {
   await page.eval(`(()=>{const r=document.querySelector('[data-vault-id="vault-b"]');if(r.querySelector('[data-vault-action="more"]').getAttribute('aria-expanded')!=='true')r.querySelector('[data-vault-action="more"]').click();r.querySelector('[data-vault-action="edit-name"]').click();r.querySelector('input').value='写作库 B · 长名称工作资料';r.querySelector('input').dispatchEvent(new Event('input',{bubbles:true}));r.querySelector('[data-vault-action="label"]').click()})()`)
@@ -1357,6 +1364,8 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   check('旧库媒体地址不重新解释为新库同名图片',images.old===410 && images.current===200 && images.last===66,JSON.stringify(images))
   const denied=await page.eval(`window.rgent.noteWrite({relPath:'同名.md',content:'跨库伪造',sessionId:globalThis.__oldSession,objectVersion:globalThis.__oldNote.objectVersion,expectedRevision:globalThis.__oldNote.revision})`)
   check('旧会话写请求被拒绝且 B 未改变',!denied.ok && denied.error==='VAULT_CHANGED' && readFileSync(path.join(sibling,'同名.md'),'utf8').includes('只属于 B'))
+  await openLibrarySettings()
+  if(!await waitFor(page,`document.querySelector('.vault-settings-recovery')?.textContent.includes('登记损坏可先重建原描述')`))throw Error('慢目标夹具库页未完成真实初始化')
   await holdReceipt('lifecycle:status')
   const switching=switchTo('vault-a','研究库 A')
   try {
@@ -1467,7 +1476,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   const exited=await new Promise(resolve=>{const timer=setTimeout(()=>{second.kill('SIGTERM');resolve(false)},6000);second.on('exit',code=>{clearTimeout(timer);resolve(code===0)})})
   check('第二次启动只唤起原窗口且退出',exited && await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').BrowserWindow.getAllWindows().length===1`))
   // Complete a real committed switch with a pending native close, then restart this same profile.
-  await switchTo('vault-a','研究库 A')
+  await switchTo('vault-a','研究资料 · 长期记忆、项目建设与多库工作区的完整记录')
   const closeEvidence=path.join(profile,'v4-native-close-evidence.json')
   await nativePage.eval(`(()=>{const e=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron'),fs=process.getBuiltinModule('fs'),win=globalThis.__rgentTestWindow,ipc=e.ipcMain,g={events:[],acks:[],closed:0},send=win.webContents.send,ack=ipc._invokeHandlers.get('vault:transition');globalThis.__readyNativeClose=g;win.webContents.send=function(channel,...args){g.events.push({channel,value:args[0],time:Date.now()});return send.call(this,channel,...args)};ipc._invokeHandlers.set('vault:transition',async(...args)=>{const result=await ack(...args);g.acks.push({receipt:args[1]?.args?.[0]??args[1],result,time:Date.now()});return result});win.once('closed',()=>{g.closed++;fs.writeFileSync(${JSON.stringify(closeEvidence)},JSON.stringify(g));e.app.quit()});return true})()`)
   await holdV4Receipt(nativePage,'vault:workspace-get')
@@ -2073,8 +2082,18 @@ async function verifyV4NativeRestoreProducer(page,nativePage,switchTo,profile,va
       await page.eval(`globalThis.__preparingCloseOff?.();globalThis.__preparingCloseFlushOff?.();true`)
     }
     if(await page.eval(`!!document.querySelector('.overlay-settings')`))await v4CloseSettings(page)
-    await nativePage.eval(`globalThis.__rgentTestWindow.webContents.send('menu:save');true`)
-    check('取消 preparing 后恢复权限可沿原保存入口落盘保留稿',await waitFor(page,`!document.querySelector('.tab-dirty')`)&&readFileSync(path.join(vault,'同名.md'),'utf8').includes('原生准备期保留稿'))
+    // The real permission rejection is NOTE_UNREADABLE and retains the draft
+    // behind the existing identity gate. Recheck before retrying the human save.
+    if(await page.eval(`document.querySelector('.note-unavailable')?.hidden===false`))await page.eval(`document.querySelector('.note-recheck').click()`)
+    if(!await waitFor(page,`document.querySelector('.note-unavailable')?.hidden===true`))throw Error('preparing 拒写稿尚未通过真实重新核验')
+    let saved=false
+    for(let n=0;n<40;n++){
+      await nativePage.eval(`globalThis.__rgentTestWindow.webContents.send('menu:save');true`)
+      if(await waitFor(page,`!document.querySelector('.tab-dirty')`,300)){saved=true;break}
+    }
+    const retained=Buffer.from('原生准备期保留稿\n'+before.toString())
+    check('取消 preparing 后恢复权限可沿原保存入口落盘保留稿',saved&&readFileSync(path.join(vault,'同名.md')).equals(retained))
+    if(!saved||!readFileSync(path.join(vault,'同名.md')).equals(retained))throw Error('preparing 取消后的原窗口稿未真实完整保存')
   }else process.stdout.write('  · Windows preparing 原生拒写夹具仍待核，不记通过\n')
   await switchTo('vault-b','写作库 B')
   await page.eval(`(()=>{globalThis.__nativeRestoreEvents=[];globalThis.__nativeRestoreOff=window.rgent.onVaultTransition((busy,session,state)=>globalThis.__nativeRestoreEvents.push({...state,time:Date.now()}));globalThis.__nativeRestoreFlushes=0;globalThis.__nativeRestoreFlushOff=window.rgent.onFlushRequest(()=>globalThis.__nativeRestoreFlushes++)})()`)
