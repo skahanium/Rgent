@@ -263,7 +263,9 @@ it('ledger review shows persisted generation, reuse, omission and actual model s
  api.vaultWorkspaceGet=async()=>({version:1,tabs:[{relPath:'one.md'}],active:'one.md',sidebarHidden:true,treeScroll:0,resourceScroll:0})
  api.noteRead=async()=>({content:'original',revision:'r',objectVersion:'object',sessionId:'old'})
  const traces=['历史摘要已生成；元数据由程序核验','复用部分历史摘要：model@localhost','省略派生历史；原历史保留']
- api.ledgerGet=async()=>({ok:true,value:{records:[...traces.map((trace,i)=>({taskId:'task-'+i,revision:1,chapter:{startedAt:'2026-10-05',status:'completed',prompt:'原口令'+i,answer:'原回答'+i,trace:[trace],metrics:[{step:i+1}]}})),{taskId:'legacy',revision:1,legacyRaw:'原始旧历史'}],gaps:[],cursor:null}})
+ const provenance={model:{modelId:'model',endpointHost:'localhost'},sources:[],tools:[{name:'search_memory',outcome:'执行 4 次，失败 0 次'},{name:'search_memory',outcome:'已执行：entry@7；摘要 有界原文 拒绝 MEMORY_SEARCH_LIMIT × 2'},{name:'search_memory',outcome:'拒绝 MEMORY_SEARCH_LIMIT × 2'},{name:'search_library',outcome:'拒绝 MEMORY_SEARCH_LIMIT × 2'}]}
+ const records=[...traces.map((trace,i)=>({taskId:'task-'+i,revision:1,chapter:{startedAt:'2026-10-05',status:'completed',prompt:'原口令'+i,answer:'原回答'+i,trace:[trace,'工具 检索记忆「原查询 ：未执行（MEMORY_SEARCH_LIMIT）」：未执行（MEMORY_SEARCH_LIMIT）'],metrics:[{step:i+1}],provenance}})),{taskId:'legacy',revision:1,legacyRaw:'原始旧历史'}],originalAudit=JSON.stringify(records)
+ api.ledgerGet=async()=>({ok:true,value:{records,gaps:[],cursor:null}})
  await start(root);root.querySelector<HTMLButtonElement>('.ledger-open')!.click()
  await vi.waitFor(()=>expect(root.querySelectorAll('.ledger-body details')).toHaveLength(4))
  for(const detail of root.querySelectorAll<HTMLDetailsElement>('.ledger-body details')){detail.open=true;detail.dispatchEvent(new Event('toggle'))}
@@ -272,5 +274,14 @@ it('ledger review shows persisted generation, reuse, omission and actual model s
   expect(detail?.textContent).toContain(traces[i]);expect(detail?.textContent).toContain('第 '+(i+1)+' 步');expect(detail?.textContent).toContain('原口令'+i)
   expect(renderReadOnlyMarkdown).toHaveBeenCalledWith(expect.anything(),'原回答'+i,expect.anything())
  }
+ expect(root.querySelector('.ledger-body')!.textContent).toContain('本场四次记忆检索已用完')
+ expect(root.querySelector('.ledger-body')!.textContent).toContain('未执行次数：2')
+ expect(root.querySelector('.ledger-body')!.textContent).toContain('执行 4 次，失败 0 次')
+ expect(root.querySelector('.ledger-body')!.textContent).toContain('entry@7；摘要 有界原文 拒绝 MEMORY_SEARCH_LIMIT × 2')
+ expect(root.querySelector('.ledger-body')!.textContent).toContain('原查询 ：未执行（MEMORY_SEARCH_LIMIT）')
+ expect(root.querySelector('.ledger-body')!.textContent).not.toContain('检索记忆 拒绝 MEMORY_SEARCH_LIMIT × 2')
+ expect(root.querySelector('.ledger-body')!.textContent).not.toContain('」：未执行（MEMORY_SEARCH_LIMIT）')
+ expect(root.querySelector('.ledger-body')!.textContent).toContain('search_library 拒绝 MEMORY_SEARCH_LIMIT × 2')
+ expect(JSON.stringify(records)).toBe(originalAudit)
  expect(renderReadOnlyMarkdown).toHaveBeenCalledWith(expect.anything(),'原始旧历史')
 })
