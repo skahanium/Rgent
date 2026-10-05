@@ -1113,6 +1113,11 @@ Host 的运行上限、任务跨 tab 路由、固定验收样例和工具边界�
 - 本修波只做脚本及内嵌表达式语法、diff 与必要文档检查；语法自查发现新增 B 夹具的两处 `page.eval` 换行少一层转义，已修正，首次失败保留 `/tmp/rgent-v4-window-fix-embedded-syntax-first-failure.log`。原初版 Ledger MAX 修补及 53 项定向证据沿原报告，未重复测试或改生产账本代码。新脚本全部为**已接待实际验证**；新窗口条数、截图与首次运行首因尚未取得。
 - 最终门仍由总任务串行执行 docs→完整测试→build→`RGENT_UI_V4_ONLY=1`→`RGENT_UI_MULTI_VAULT_ONLY=1`→原完整功能窗口；仅本地提交，无 push／CI／paid、新依赖／页面／IPC／分支／worktree／专题文档，不读改正常 profile 或真实库。Windows 原生拒写、对应 CI、输入法人工、用户视觉及正式质量全部仍待核，当前阶段不变。
 
+
+窗口准备修波限定再审（2026-10-05，固定 `eed0071..0ff55fe`）：Spec／Quality 静态通过，新问题 0，报告 `/tmp/rgent-v4-window-fix-rereview.md`。五项区别前态与原消费者接线已核对，实际窗口仍待验，295 个内嵌语法检查不作窗口证据。
+
+最终工程门首轮（2026-10-05，代码 `0ff55fe`）：文档 12 文件通过（`/tmp/rgent-v4-final-docs.log`）；完整 `pnpm test` 为 97 文件中 96 通过／1 失败，1492 通过／2 失败／2 既有平台跳过，40.00 秒（`/tmp/rgent-v4-final-test.log`）。两失败仅在 `save-copy.test.ts` 仍向新保存接口回传合成尾部；根任务对照 A 的正文单独提交合同，改为只传正文，保留未完成 Markdown 拒绝吸收旧尾部及完整 CRLF 原文断言，不改变生产写入或放宽保护。必要定向该文件 20／0（`/tmp/rgent-v4-final-save-copy-fix.log`），不能与首轮数字相加冒充完整通过。完整门、构建、实际窗口及真实实验继续接续，既有失败原文保留。
+
 包 A 复审修复（2026-10-04，基线 `5f8cf77`）：必要迁移在实际库队列内核验有效 TaskGrant、来源权限前后快照、对象与整文件修订，最后同步复核授权有效性，并在旧归档写入后、正文原子替换前再次核验 grant 与权限原字节；grant 的读取依赖不回入该队列。Host 只续接已核验会话、迁移前后对象与修订的成功迁移回执，普通读取不能改 origin proof。任务与人的批次迁移共用迁移提交登记，原子替换前检查绑定容量，替换后立即同步登记 successors／verified／lastWrites，旧 tab 可继续保存。材料三态同时核对 `materials.json` 单元及独立 task 序号、owner 归属与上界；异常拒绝新序号分配，清空／推进在队列实际提交前重核，均不归零。新任务 2 MiB 上限不套到完整旧原文；大历史性能仍由 C 测量，不提前增加索引。记忆页显示既有退休失败和材料登记分类诊断，配置异常不能遮住材料异常；退休重试出口仍待 A+。
 
 修复证据：可信迁移、批次绑定、临界区撤权、材料损坏／伪零及控制操作排队反例均有先失败记录；最终定向命令为 `pnpm exec vitest run test/main/agent-host.test.ts test/main/task-authorization.test.ts test/main/vault.test.ts test/main/ledger-store.test.ts test/main/working-memory-service.test.ts test/renderer/memory-ui.test.ts test/shared/memory-errors.test.ts`，181／0，日志 `/tmp/rgent-v4-A-fix-final-targeted.log`；类型及文档检查另记 `/tmp/rgent-v4-A-fix-type.log`、`/tmp/rgent-v4-A-fix-docs.log`。本轮未运行全量、构建窗口或模型调用，Windows 与人工证据保持待核。其后 `8b5ed9c` 最终 Spec／Quality 复核通过；追加早退诊断 45 项及类型检查独立于上述 181 项，不能合并声称新全量。
