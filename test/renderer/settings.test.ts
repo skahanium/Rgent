@@ -819,6 +819,9 @@ it('guards busy vault operations against Escape, backdrop, direct routing and na
  document.querySelector<HTMLButtonElement>('[data-vault-open="b"]')!.click()
  const dialog=document.querySelector<HTMLDialogElement>('dialog')!
  dialog.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+ // Disabling the focused action can leave Chromium focus on the document body.
+ for(let n=0;n<2;n++){const escape=new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true});document.body.dispatchEvent(escape);expect(escape.defaultPrevented).toBe(true)}
+ for(const init of [{isComposing:true},{keyCode:229}]){const escape=new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true,...init});document.body.dispatchEvent(escape);expect(escape.defaultPrevented).toBe(false)}
  vi.spyOn(dialog,'getBoundingClientRect').mockReturnValue({left:100,top:100,right:700,bottom:600} as DOMRect)
  dialog.dispatchEvent(new MouseEvent('click',{bubbles:true,detail:1,clientX:20,clientY:20}))
  go('界面');panel.open('界面');expect(panel.isOpen()).toBe(true);expect(document.querySelector('.settings-page-title')!.textContent).toBe('笔记库')

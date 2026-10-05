@@ -86,3 +86,25 @@ it('validates contained identity groups strictly and retains all longest legal I
  const {store}=fixture(),groups=Array.from({length:16},(_,i)=>('group'+i).padEnd(256,'x')),input={content:'派生条目',layer:'demand' as const,scope:'库',sources:[{...source(),basisGroups:groups}],semantic:'fact' as const,attribution:'人',reviewAt:null};const entry=store.add(store.read(),input);store.forget(store.read(),entry.id,1);expect(store.read().record.forgotten[0]?.materialIds).toEqual(expect.arrayContaining(groups));expect(store.canLearn(store.read().record,[{...source(2),basisGroups:[groups[0]!]}])).toBe(false)
  for(const bad of ['not-array',Array(17).fill('a'),['..'],['duplicate','duplicate'],['x'.repeat(257)]])expect(()=>store.add(store.read(),{...input,sources:[{...source(2),basisGroups:bad as string[]}]})).toThrow('BAD_MEMORY_EDIT')
 })
+
+it('uses the last protected receipt slot without retaining zero-capacity terminal receipts',()=>{
+ const {root,store}=fixture(),record=entryRecord(0)
+ record.jobs=Array.from({length:255},(_,i)=>({taskId:'interrupted-'+i,materialVersion:'a'.repeat(64),outcome:'interrupted' as const,entryIds:[]}))
+ record.jobs.push({taskId:'old-rejection',materialVersion:'a'.repeat(64),outcome:'rejected',entryIds:[]})
+ writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record))
+ const protectedJobs=structuredClone(record.jobs.slice(0,255))
+ store.receipt(store.read(),{taskId:'new-queued',materialVersion:'b'.repeat(64),outcome:'queued',entryIds:[]})
+ const jobs=store.read().record.jobs
+ expect(jobs).toHaveLength(256);expect(jobs.slice(0,255)).toEqual(protectedJobs)
+ expect(jobs.at(-1)?.taskId).toBe('new-queued');expect(jobs.some(j=>j.taskId==='old-rejection')).toBe(false)
+})
+it('keeps all 256 interrupted receipts when a new queued job or failure arrives',()=>{
+ const {root,store}=fixture(),record=entryRecord(0)
+ record.jobs=Array.from({length:256},(_,i)=>({taskId:'interrupted-'+i,materialVersion:'a'.repeat(64),outcome:'interrupted' as const,entryIds:[]}))
+ writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record))
+ const basis=store.read()
+ expect(()=>store.receipt(basis,{taskId:'new-job',materialVersion:'b'.repeat(64),outcome:'queued',entryIds:[]})).toThrow('MEMORY_QUEUE_FULL')
+ expect(store.read().raw).toBe(basis.raw)
+ store.receipt(store.read(),{taskId:'new-job',materialVersion:'b'.repeat(64),outcome:'rejected',reason:'MEMORY_QUEUE_FULL',entryIds:[]})
+ expect(store.read().record.jobs).toEqual(record.jobs)
+})

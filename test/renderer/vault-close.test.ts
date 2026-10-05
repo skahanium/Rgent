@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import {beforeEach,afterEach,it,expect,vi} from 'vitest'
 import {start} from '../../src/renderer/src/shell.ts'
+import {renderReadOnlyMarkdown} from '../../src/renderer/src/view/read-only.ts'
 import {VaultSwitch} from '../../src/main/vault-switch.ts'
 const editorHarness=vi.hoisted(()=>({text:'',change:null as ((text:string)=>void)|null}))
 vi.mock('../../src/renderer/src/view/editor.ts',()=>({mountEditor:(_root:HTMLElement,change:(text:string)=>void)=>{editorHarness.change=change;
  const dom=document.createElement('div'),scrollDOM=document.createElement('div');let text=''
  return {view:{dom,contentDOM:dom,scrollDOM,compositionStarted:false},getText:()=>editorHarness.text,setText:(v:string)=>{text=v;editorHarness.text=v},setReadOnly:()=>{},setTheme:()=>{},setActiveTaskIds:()=>{},setNoteHost:()=>{},onStateChange:()=>{},focus:()=>{},selectionRange:()=>({anchor:0,head:0}),selectionInfo:()=>({line:1,column:1}),headings:()=>[],viewport:()=>({from:0,to:0}),caret:()=>0,markers:()=>[]}
 }}))
-vi.mock('../../src/renderer/src/view/read-only.ts',()=>({renderReadOnlyMarkdown:()=>{},disposeReadOnlyImages:()=>{}}))
+vi.mock('../../src/renderer/src/view/read-only.ts',()=>({renderReadOnlyMarkdown:vi.fn(),disposeReadOnlyImages:()=>{}}))
 let handlers:Record<string,Function>,api:any,root:HTMLElement
 beforeEach(()=>{
  handlers={};vi.stubGlobal('ResizeObserver',class{observe(){}disconnect(){}})
@@ -230,4 +231,46 @@ it.each(['preparing','operation','session'] as const)('a proven new %s update re
  await Promise.resolve();await Promise.resolve();await Promise.resolve()
  expect(api.vaultTransitionDone).not.toHaveBeenCalled();expect(root.inert).toBe(true);expect(root.querySelector('.status-host-notice')?.textContent).toBe(notice)
  handlers.onVaultTransition(false,'old',{busy:false,session:'old',phase:'idle'});expect(root.inert).toBe(false)
+})
+
+it('resumes automatic draft saving when the latest lifecycle query completes after recovery release',async()=>{
+ api.vaultWorkspaceGet=async()=>({version:1,tabs:[{relPath:'one.md'}],active:'one.md',sidebarHidden:true,treeScroll:0,resourceScroll:0})
+ api.noteRead=async()=>({content:'original',revision:'before',objectVersion:'object',sessionId:'old'})
+ api.noteInspect=async()=>({status:'ready',snapshot:await api.noteRead()})
+ api.noteWrite=vi.fn(async()=>({ok:true,revision:'after',objectVersion:'saved',sessionId:'old'}))
+ await start(root);vi.useFakeTimers()
+ try{
+  editorHarness.text='retained draft';editorHarness.change!('retained draft')
+  api.lifecycleStatus=async()=>({status:'pending',sessionId:'old',operation:{kind:'ledger-repair'}})
+  handlers.onTreeChanged();await vi.advanceTimersByTimeAsync(0)
+  const context={sessionId:'old',operationId:'resume'}
+  handlers.onLifecycleFlushRequest('hold',[],'recovery-resume',context);await vi.advanceTimersByTimeAsync(0)
+  expect(api.lifecycleFlushDone).toHaveBeenCalledWith('hold',true)
+  let releaseStatus!:(v:any)=>void,latestStatus!:(v:any)=>void
+  api.lifecycleStatus=vi.fn().mockImplementationOnce(()=>new Promise(r=>{releaseStatus=r})).mockImplementationOnce(()=>new Promise(r=>{latestStatus=r})).mockResolvedValue({status:'ready',sessionId:'old'})
+  handlers.onLifecycleFlushRequest('release',[],'recovery-release',context)
+  handlers.onTreeChanged()
+  releaseStatus({status:'ready',sessionId:'old'});await vi.advanceTimersByTimeAsync(0)
+  expect(api.noteWrite).not.toHaveBeenCalled()
+  latestStatus({status:'ready',sessionId:'old'});await vi.advanceTimersByTimeAsync(801)
+  expect(api.noteWrite).toHaveBeenCalledWith(expect.objectContaining({content:'retained draft',sessionId:'old',objectVersion:'object'}))
+  expect(root.querySelector('.tab-dirty')).toBeNull()
+ }finally{vi.useRealTimers()}
+})
+
+
+it('ledger review shows persisted generation, reuse, omission and actual model step numbers beside the original history',async()=>{
+ api.vaultWorkspaceGet=async()=>({version:1,tabs:[{relPath:'one.md'}],active:'one.md',sidebarHidden:true,treeScroll:0,resourceScroll:0})
+ api.noteRead=async()=>({content:'original',revision:'r',objectVersion:'object',sessionId:'old'})
+ const traces=['历史摘要已生成；元数据由程序核验','复用部分历史摘要：model@localhost','省略派生历史；原历史保留']
+ api.ledgerGet=async()=>({ok:true,value:{records:[...traces.map((trace,i)=>({taskId:'task-'+i,revision:1,chapter:{startedAt:'2026-10-05',status:'completed',prompt:'原口令'+i,answer:'原回答'+i,trace:[trace],metrics:[{step:i+1}]}})),{taskId:'legacy',revision:1,legacyRaw:'原始旧历史'}],gaps:[],cursor:null}})
+ await start(root);root.querySelector<HTMLButtonElement>('.ledger-open')!.click()
+ await vi.waitFor(()=>expect(root.querySelectorAll('.ledger-body details')).toHaveLength(4))
+ for(const detail of root.querySelectorAll<HTMLDetailsElement>('.ledger-body details')){detail.open=true;detail.dispatchEvent(new Event('toggle'))}
+ for(let i=0;i<traces.length;i++){
+  const detail=root.querySelectorAll<HTMLDetailsElement>('.ledger-body details')[i]
+  expect(detail?.textContent).toContain(traces[i]);expect(detail?.textContent).toContain('第 '+(i+1)+' 步');expect(detail?.textContent).toContain('原口令'+i)
+  expect(renderReadOnlyMarkdown).toHaveBeenCalledWith(expect.anything(),'原回答'+i,expect.anything())
+ }
+ expect(renderReadOnlyMarkdown).toHaveBeenCalledWith(expect.anything(),'原始旧历史')
 })

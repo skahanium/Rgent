@@ -979,8 +979,12 @@ export async function start(root: HTMLElement): Promise<void> {
     try {
       const status = await window.rgent.lifecycleStatus()
       if (epoch !== vaultEpoch || serial!==lifecycleSerial || (vaultSession && status.sessionId !== vaultSession)) return null
+      const wasPaused=bodyWritesPaused()
       recoveryState = status
       syncRecoveryInput()
+      // A newer lifecycle query may supersede the release query. Resume the
+      // retained drafts when that current query actually opens the write gate.
+      if(wasPaused&&!bodyWritesPaused()&&tabs.some(tab=>tab.dirty))scheduleSave()
       lifecycleWarning.hidden = status.status === 'ready'
       lifecycleWarning.textContent = status.status === 'invalid' ? '恢复记录无法核验 · 查看' : '文件操作待核验 · 查看'
       return status
@@ -1531,11 +1535,12 @@ export async function start(root: HTMLElement): Promise<void> {
     const load=document.createElement('button');load.type='button';load.className='settings-action';load.textContent='加载更多历史'
     const renderRecord=(record:import('../../main/ledger-store.ts').LedgerRecord)=>{
       const details=document.createElement('details'),heading=document.createElement('summary'),content=document.createElement('div')
+      details.dataset.taskId=record.taskId
       heading.textContent=`${record.chapter?.startedAt??'旧记录'} · ${record.chapter?.status??'只读原文'} · ${record.bodyStatus==='present'?'有正文保存回执':'正文状态无法核验'}`
       details.append(heading,content);ledgerBody.insertBefore(details,load)
       const reasoning=document.createElement('button');reasoning.type='button';reasoning.className='settings-action';reasoning.textContent=record.legacyReasoning?'查看旧推理原文':'查看短期推理';reasoning.onclick=async()=>{reasoning.disabled=true;const result=await window.rgent.ledgerReasoning({sessionId:captured.sessionId!,objectVersion:captured.objectVersion!,relPath:captured.relPath,taskId:record.taskId});if(!ledgerOpen||current()!==captured)return;const text=document.createElement('pre');text.textContent=result.ok?result.text??'短期推理已清理或不可用；原回答与历史仍保留。':'推理读取未能核验，原记录保持。';content.append(text);reasoning.remove()};details.append(reasoning)
       details.addEventListener('toggle',()=>{if(!details.open||content.dataset.rendered)return;content.dataset.rendered='true'
-        if(record.chapter){const meta=document.createElement('p'),p=record.chapter.provenance;meta.textContent=p?`模型：${p.model.modelId} · 接收方：${p.model.endpointHost}；工具摘要：${p.tools.map(t=>(t.name==='search_memory'?'检索记忆':t.name)+' '+t.outcome).join('、')||'无'}；实际读取来源：${p.sources.map(d=>d.relPath).join('、')||'无'}；模型消息引用来源：${p.sentSources?.join('、')||'无'}`:'旧记录元数据无法核验。';content.append(meta);const prompt=document.createElement('p');prompt.textContent=`口令：${record.chapter.prompt}`;content.append(prompt);const choice=ledgerRememberCommand(record);if(choice){const remember=document.createElement('button');remember.type='button';remember.className='memory-ledger-remember';remember.textContent='记住口令';remember.onclick=()=>void rememberSelection('ledger',choice.start,choice.end,choice.taskId);content.append(remember)}const answer=document.createElement('div');content.append(answer);renderReadOnlyMarkdown(answer,record.chapter.answer,noteHost({taskId:record.taskId,revision:record.revision,field:'answer'}))}
+        if(record.chapter){const meta=document.createElement('p'),p=record.chapter.provenance;meta.textContent=p?`模型：${p.model.modelId} · 接收方：${p.model.endpointHost}；工具摘要：${p.tools.map(t=>(t.name==='search_memory'?'检索记忆':t.name)+' '+t.outcome).join('、')||'无'}；实际读取来源：${p.sources.map(d=>d.relPath).join('、')||'无'}；模型消息引用来源：${p.sentSources?.join('、')||'无'}`:'旧记录元数据无法核验。';content.append(meta);if(record.chapter.metrics?.length){const steps=document.createElement('p');steps.textContent='模型步骤：'+record.chapter.metrics.map(m=>`第 ${m.step} 步`).join('、');content.append(steps)}for(const trace of record.chapter.trace??[]){const item=document.createElement('p');item.textContent=trace;content.append(item)}const prompt=document.createElement('p');prompt.textContent=`口令：${record.chapter.prompt}`;content.append(prompt);const choice=ledgerRememberCommand(record);if(choice){const remember=document.createElement('button');remember.type='button';remember.className='memory-ledger-remember';remember.textContent='记住口令';remember.onclick=()=>void rememberSelection('ledger',choice.start,choice.end,choice.taskId);content.append(remember)}const answer=document.createElement('div');content.append(answer);renderReadOnlyMarkdown(answer,record.chapter.answer,noteHost({taskId:record.taskId,revision:record.revision,field:'answer'}))}
         else {const raw=document.createElement('div');content.append(raw);if(record.legacyRaw)renderReadOnlyMarkdown(raw,record.legacyRaw);else raw.textContent='此记录的正文已清理。'}
       })
     }

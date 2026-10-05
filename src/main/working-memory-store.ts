@@ -196,5 +196,7 @@ export function applyMemoryRecovery(raw:string,patches:MemoryRecoveryPatch[]):st
 function boundedReceipts(jobs:MemoryJobReceipt[]):MemoryJobReceipt[]{
  const protectedJobs=jobs.filter(j=>['queued','running','interrupted'].includes(j.outcome))
  if(protectedJobs.length>256)throw Error('MEMORY_QUEUE_FULL')
- return [...jobs.filter(j=>!['queued','running','interrupted'].includes(j.outcome)).slice(-Math.min(64,256-protectedJobs.length)),...protectedJobs]
+ const terminalCapacity=Math.min(64,256-protectedJobs.length)
+ const terminalJobs=terminalCapacity>0?jobs.filter(j=>!['queued','running','interrupted'].includes(j.outcome)).slice(-terminalCapacity):[]
+ return [...terminalJobs,...protectedJobs]
 }

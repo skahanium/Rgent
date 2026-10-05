@@ -56,14 +56,18 @@ export function openOverlay(options: OverlayOptions): Overlay {
 
   // 原生 cancel 会被浮层里的 search 输入框吃掉（它自己用 Esc 清空），
   // 所以自己再拦一层 keydown——Esc 必须一按就关。
-  root.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape') return
+  const handleEscape = (event: KeyboardEvent): void => {
+    // Disabling a focused action can move focus to body. Catch Escape before
+    // Chromium dispatches a close-watcher cancel that may be non-cancelable.
+    if (!root.open || stack.at(-1) !== overlay || event.key !== 'Escape' || event.isComposing || event.keyCode === 229) return
     event.preventDefault()
     event.stopPropagation()
     if (options.dismissable !== false && options.canDismiss?.() !== false) overlay.close()
-  })
+  }
+  document.addEventListener('keydown', handleEscape, true)
 
   root.addEventListener('close', () => {
+    document.removeEventListener('keydown', handleEscape, true)
     root.remove()
     options.onClose?.()
     // 关掉之后把焦点还给触发它的地方。
