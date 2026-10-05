@@ -4,6 +4,59 @@ import { mountMemoryPage } from '../../src/renderer/src/memory-ui.ts'
 import type { MemoryEntryView, MemoryView } from '../../src/shared/memory.ts'
 const view:MemoryView={sessionId:'session',revision:null,objectVersion:null,config:{defaultModelId:null,limits:{seconds:120,calls:2,tools:0},vault:{enabled:false,override:{mode:'inherit'}},effectiveModelId:null,modelStatus:'missing'},recipient:null,status:'ready',entries:[],jobs:[],running:{permits:0,pending:0,active:0}}
 const flush=()=>new Promise(resolve=>setTimeout(resolve,0))
+const recentEntry:MemoryEntryView={id:'recent-1',version:1,content:'推进导入流程',layer:'demand',scope:'本库',category:'recent',status:'active',reason:null,updatedAt:'2026-10-05',sources:[{relPath:'notes/plan.md',kind:'body',taskId:'task-1',text:'原始目标',classification:'human'}],recent:{taskId:'task-1',noteId:'note-1',materialVersion:'material-1',createdAt:'2026-10-05',outcome:'completed',sections:{goal:'完成导入',completed:'入口已接线',blocked:'等待窗口验收',next:'核对来源'},assistantDraft:false}}
+it.each(['empty','recent','long'] as const)('keeps separate empty states for %s content',async kind=>{
+ const body=document.createElement('div');document.body.append(body)
+ const long:MemoryEntryView={id:'long-1',version:1,content:'固定规则',layer:'core',scope:'本库',status:'active',reason:null,updatedAt:'today',sources:[]}
+ const entries=kind==='empty'?[]:kind==='recent'?[recentEntry]:[long]
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,entries}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ const recent=body.querySelector<HTMLElement>('[data-memory-section="recent"]')!,longSection=body.querySelector<HTMLElement>('[data-memory-section="entries"]')!
+ expect((recent.querySelector<HTMLElement>('.memory-empty')!.hidden)).toBe(kind==='recent')
+ expect((longSection.querySelector<HTMLElement>('.memory-empty')!.hidden)).toBe(kind==='long')
+ if(kind!=='recent')expect(recent.querySelector('.memory-empty')!.textContent).toContain('还没有近期工作背景')
+ if(kind!=='long')expect(longSection.querySelector('.memory-empty')!.textContent).toContain('还没有长期内容')
+ expect(body.textContent).toContain('自动学习质量尚未通过验证')
+ dispose();body.remove()
+})
+it('separates recent background from long content, shows four sections and only offers forget for recent',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ const entry:MemoryEntryView={id:'long-1',version:1,content:'用户偏好中文',layer:'core',scope:'本库',status:'active',reason:null,updatedAt:'today',sources:[]}
+ const handlers={get:async()=>({ok:true,value:{...view,entries:[recentEntry,entry]}}),models:async()=>({ok:false,error:'IO_ERROR'}),edit:vi.fn(),disable:vi.fn(),restore:vi.fn(),forget:vi.fn()}
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},handlers as never);await flush()
+ const recent=body.querySelector<HTMLDetailsElement>('[data-memory-section="recent"] .memory-entry')!
+ expect(recent.textContent).toContain('完成导入');expect(recent.textContent).toContain('入口已接线');expect(recent.textContent).toContain('等待窗口验收');expect(recent.textContent).toContain('核对来源')
+ expect(recent.textContent).toContain('notes/plan.md');expect(recent.textContent).toContain('14 天')
+ expect(recent.querySelector('.memory-editor')).toBeNull();expect(recent.querySelector('.memory-entry-state-action')).toBeNull()
+ expect([...recent.querySelectorAll('button')].map(b=>b.textContent)).toEqual(['删除并遗忘','取消遗忘'])
+ expect(body.querySelector('[data-memory-section="entries"]')?.textContent).toContain('用户偏好中文')
+ expect(body.querySelector('.memory-status-line')?.textContent).toContain('长期 1 条 · 近期 1 块')
+ recent.querySelector<HTMLButtonElement>('button')!.click();expect(handlers.forget).not.toHaveBeenCalled();recent.querySelector<HTMLButtonElement>('[data-memory-action="cancel-forget"]')!.click();expect(handlers.forget).not.toHaveBeenCalled()
+ recent.querySelector<HTMLButtonElement>('button')!.click();recent.querySelector<HTMLButtonElement>('button')!.click();await flush()
+ expect(handlers.forget).toHaveBeenCalledWith({revision:null,objectVersion:null,id:'recent-1',version:1})
+ dispose();body.remove()
+})
+it('keeps a recent fold and source open through refresh, and filters both sections',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ let value:MemoryView={...view,entries:[recentEntry]}
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ const recent=body.querySelector<HTMLDetailsElement>('[data-memory-section="recent"] .memory-entry')!;recent.open=true
+ const source=recent.querySelector<HTMLDetailsElement>('.memory-source')!;source.open=true
+ value={...value,entries:[{...recentEntry,updatedAt:'2026-10-06',status:'paused',reason:'MEMORY_SOURCE_CHANGED'}]}
+ window.dispatchEvent(new CustomEvent('rgent:memory',{detail:'session'}));await flush()
+ expect(body.querySelector('[data-memory-section="recent"] .memory-entry')).toBe(recent);expect(recent.open).toBe(true);expect(source.open).toBe(true);expect(recent.textContent).toContain('来源需要检查')
+ body.querySelector<HTMLButtonElement>('[data-memory-filter="usable"]')!.click();expect(recent.hidden).toBe(true)
+ body.querySelector<HTMLButtonElement>('[data-memory-filter="attention"]')!.click();expect(recent.hidden).toBe(false)
+ dispose();body.remove()
+})
+it('reports recent and long job updates separately without inventing missing entries',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ const long:MemoryEntryView={id:'long-1',version:1,content:'结论',layer:'demand',scope:'本库',status:'active',reason:null,updatedAt:'today',sources:[]}
+ const jobs=[{taskId:'task-1',materialVersion:'v1',outcome:'applied' as const,retryable:false,entryIds:['recent-1','long-1']}]
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,entries:[recentEntry,long],jobs}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ expect(body.querySelector('.memory-job')?.textContent).toContain('更新近期背景 1 块 · 新增/更新长期内容 1 条')
+ expect(body.querySelector('.memory-job')?.textContent).not.toContain('undefined')
+ dispose();body.remove()
+})
 describe('memory page drafts',()=>{
   it('discloses unverified learning quality without changing the saved library switch',async()=>{
     const body=document.createElement('div');document.body.append(body);const save=vi.fn()
@@ -147,7 +200,7 @@ it('puts memories before optional configuration, filters every status and keeps 
  const statuses=['active','paused','pending','disabled','review','obsolete','disputed','deferred'] as const
  let value:MemoryView={...view,entries:statuses.map((status,i)=>({id:String(i),version:1,content:`记忆 ${status}`,layer:'demand',scope:'项目',status,reason:null,updatedAt:'now',sources:[]}))}
  const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
- expect([...body.querySelectorAll('[data-memory-section]')].map(e=>(e as HTMLElement).dataset.memorySection)).toEqual(['status','entries','models','jobs','maintenance'])
+ expect([...body.querySelectorAll('[data-memory-section]')].map(e=>(e as HTMLElement).dataset.memorySection)).toEqual(['status','recent','entries','models','jobs','maintenance'])
  expect(body.querySelector<HTMLDetailsElement>('[data-memory-section="models"]')!.open).toBe(true)
  expect(body.querySelector<HTMLDetailsElement>('[data-memory-section="jobs"]')!.open).toBe(false)
  const row=body.querySelector<HTMLDetailsElement>('.memory-entry')!;row.open=true

@@ -1,6 +1,6 @@
 import {hostLedgerFixture} from './host-ledger-fixture.ts'
 import { createServer, type RequestListener, type Server } from 'node:http'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentHost } from '../../src/main/agent-host.ts'
 import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
 import { createScopedAgentTools } from '../../src/main/scoped-agent-tools.ts'
@@ -10,7 +10,40 @@ import type { NoteSnapshot, AgentStartRequest } from '../../src/shared/ipc.ts'
 import { streamModelText, streamModelStep } from '../../src/main/model-stream.ts'
 
 const servers: Server[] = []
-afterEach(async () => { await Promise.all(servers.splice(0).map((server) => new Promise<void>((done) => server.close(() => done())))) })
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(servers.splice(0).map((server) => new Promise<void>((done) => server.close(() => done())))) })
+
+it('sends disabled thinking only for official consolidation model requests', async () => {
+  const bodies: Record<string, unknown>[] = []
+  const urls: string[] = []
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+    urls.push(String(url))
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+    return new Response('data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"fixture","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  })
+  const cases = [
+    { baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', purpose: 'consolidation' as const, disabled: true },
+    { baseURL: 'https://api.minimax.cn/v1', modelId: 'MiniMax-M3', purpose: 'consolidation' as const, disabled: true },
+    { baseURL: 'https://api.minimax.io/v1', modelId: 'MiniMax-M3', purpose: 'consolidation' as const, disabled: true },
+    { baseURL: 'https://api.deepseek.com', modelId: 'deepseek-flash', purpose: undefined, disabled: false },
+    { baseURL: 'https://api.deepseek.com', modelId: 'deepseek-chat', purpose: 'consolidation' as const, disabled: false },
+    { baseURL: 'https://api.minimax.cn/v1', modelId: 'MiniMax-M2.7', purpose: 'consolidation' as const, disabled: false },
+    { baseURL: 'https://api.deepseek.com.proxy.example/v1', modelId: 'deepseek-flash', purpose: 'consolidation' as const, disabled: false },
+    { baseURL: 'http://api.deepseek.com', modelId: 'deepseek-flash', purpose: 'consolidation' as const, disabled: false },
+    { baseURL: 'https://api.deepseek.com:8443', modelId: 'deepseek-flash', purpose: 'consolidation' as const, disabled: false }
+  ]
+  for (const item of cases) {
+    const events = []
+    for await (const event of streamModelStep({ baseURL: item.baseURL, modelId: item.modelId, purpose: item.purpose, apiKey: 'fixture-key', messages: [{ role: 'user', content: 'fixture' }], maxOutputTokens: 4096, signal: new AbortController().signal })) events.push(event)
+    expect(events.at(-1)).toMatchObject({ type: 'finish', reason: 'stop' })
+  }
+  expect(urls).toHaveLength(cases.length)
+  for (const [index, item] of cases.entries()) {
+    expect(bodies[index]?.model).toBe(item.modelId)
+    expect(bodies[index]?.max_tokens).toBe(4096)
+    if (item.disabled) expect(bodies[index]?.thinking).toEqual({ type: 'disabled' })
+    else expect(bodies[index]).not.toHaveProperty('thinking')
+  }
+})
 
 async function serverFor(handler: RequestListener): Promise<string> {
   const server = createServer(handler)

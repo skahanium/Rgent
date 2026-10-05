@@ -301,7 +301,7 @@ function buildStructuredContext(input:HostContextInput):HostContextPlan{
  const deferred:number[]=[]
  for(const n of bodyOrder){if(blocked(n)){omitted.bodyBlockNumbers.push(n+1);continue}const section=sourceBlock(parsed.partition.body,blocks[n]!,n+1),cost=count('\n'+section.text);if(bodyCost+cost<=bodyLimit){bodySections.push(section.text);refs.push({kind:'body',sourceId:section.sourceId});bodyCost+=cost}else deferred.push(n)}
  const addMemory=(entry:MemoryRecall['core'][number])=>{const text=memorySection(entry),cost=count('\n'+text);if(memoryCost+cost<=allocation.memory){memoryText.push(text);memoryIds.push(entry.id);memoryCost+=cost}else omitted.memoryIds.push(entry.id)}
- for(const e of [...(input.memory?.core??[]),...(input.memory?.demand??[])])addMemory(e)
+ for(const e of [...(input.memory?.core??[]),...(input.memory?.recent??[]),...(input.memory?.demand??[])])addMemory(e)
  // Body gets the returned unused reservation first. History and memory retain their hard ceilings.
  let remaining=budget-bodyCost-historyCost-memoryCost
  for(const n of deferred){const section=sourceBlock(parsed.partition.body,blocks[n]!,n+1),cost=count('\n'+section.text);if(cost<=remaining){bodySections.push(section.text);refs.push({kind:'body',sourceId:section.sourceId});remaining-=cost;bodyCost+=cost}else omitted.bodyBlockNumbers.push(n+1)}

@@ -1,6 +1,6 @@
 import {mkdtempSync,writeFileSync,appendFileSync,rmSync} from 'node:fs';import os from 'node:os';import path from 'node:path'
 import {it,expect,afterEach} from 'vitest'
-import {WorkingMemoryStore} from '../../src/main/working-memory-store.ts'
+import {WorkingMemoryStore,statusFromState} from '../../src/main/working-memory-store.ts'
 import {secureFsFor,closeSecureFs} from '../../src/main/secure-fs.ts'
 const roots:string[]=[];afterEach(()=>roots.splice(0).forEach(r=>{closeSecureFs(r);rmSync(r,{recursive:true,force:true})}))
 const fixture=()=>{const root=mkdtempSync(path.join(os.tmpdir(),'rgent-working-memory-'));roots.push(root);const fs=secureFsFor(root);return {root,fs,store:new WorkingMemoryStore(fs,()=>{})}}
@@ -51,8 +51,8 @@ it('diagnoses invalid storage without opening it, and requires exact bytes/objec
  store.reset(store.diagnosis(),4);expect(store.read().record.watermark).toBe(4);expect(store.canLearn(store.read().record,[source(3)])).toBe(false)
 })
 
-import {encodeWorkingMemory,type WorkingRecord} from '../../src/main/working-memory-store.ts'
-const entryRecord=(count:number,long=false):WorkingRecord=>({version:2,identity:'fixture',revision:1,nextSequence:count,watermark:0,forgotten:[],jobs:[],entries:Array.from({length:count},(_,i)=>({id:long?'E'.repeat(253)+String(i).padStart(3,'0'):'entry-'+i,version:1,content:'事实'+i,layer:'demand',scope:'库',sources:[{...source(i+1),revision:'',taskMaterialHash:null,materialId:long?'M'.repeat(253)+String(i).padStart(3,'0'):'material-'+i}],semantic:'fact',attribution:'人',reviewAt:null,status:'active',reason:null,updatedAt:'2026-01-01T00:00:00Z',updateBasis:{kind:'manual',id:'manual',version:1}}))})
+import {encodeWorkingMemory,parseWorkingMemory,type WorkingRecord,type WorkingRecent} from '../../src/main/working-memory-store.ts'
+const entryRecord=(count:number,long=false):WorkingRecord=>({version:3,identity:'fixture',revision:1,nextSequence:count,watermark:0,forgotten:[],jobs:[],recent:[],entries:Array.from({length:count},(_,i)=>({id:long?'E'.repeat(253)+String(i).padStart(3,'0'):'entry-'+i,version:1,content:'事实'+i,category:'long',layer:'demand',scope:'库',sources:[{...source(i+1),revision:'',taskMaterialHash:null,materialId:long?'M'.repeat(253)+String(i).padStart(3,'0'):'material-'+i}],semantic:'fact',attribution:'人',reviewAt:null,status:'active',state:{source:'verified',content:'current',enabled:true,capacity:'ready'},reason:null,updatedAt:'2026-01-01T00:00:00Z',updateBasis:{kind:'manual',id:'manual',version:1}}))})
 it('forgets 1000 longest legal identities serially beyond the old control wall',()=>{
  const {root,store}=fixture(),record=entryRecord(1000,true);writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record));expect(Buffer.byteLength(encodeWorkingMemory(record))).toBeLessThan(2*1024*1024)
  const started=performance.now();for(const e of record.entries)store.forget(store.read(),e.id,e.version)
@@ -107,4 +107,96 @@ it('keeps all 256 interrupted receipts when a new queued job or failure arrives'
  expect(store.read().raw).toBe(basis.raw)
  store.receipt(store.read(),{taskId:'new-job',materialVersion:'b'.repeat(64),outcome:'rejected',reason:'MEMORY_QUEUE_FULL',entryIds:[]})
  expect(store.read().record.jobs).toEqual(record.jobs)
+})
+
+it('writes only v3 Markdown and refuses a valid v2 record without overwriting it',()=>{
+ const {root,fs,store}=fixture(),old=encodeWorkingMemory(entryRecord(1)).replaceAll('rgent:memory:v3','rgent:memory:v2').replaceAll('rgent:item:v3','rgent:item:v2').replaceAll('rgent:end:v3','rgent:end:v2')
+ writeFileSync(path.join(root,'.rgent-memory'),old)
+ expect(()=>store.read()).toThrow('MEMORY_STORAGE_INVALID')
+ expect(fs.readSnapshot('.rgent-memory').bytes.toString()).toBe(old)
+})
+it('keeps a recent block in the same CAS record and forgets its dependent closure',()=>{
+ const {store}=fixture(),basis=store.read(),recent={taskId:'task-1',noteId:'note-1',materialVersion:'b'.repeat(64),createdAt:new Date().toISOString(),outcome:'completed' as const,sections:{goal:'整理清单',completed:'已列两项',blocked:'无',next:'继续核对'},assistantDraft:false}
+ const result=store.apply(basis,[],{taskId:'task-1',materialVersion:'b'.repeat(64),outcome:'applied',entryIds:[]},{sources:[source()],scope:'库',recent,tags:['工作']})
+ expect(result.recentIds).toHaveLength(1)
+ const saved=store.read();expect(saved.record.recent).toHaveLength(1)
+ expect(saved.record.recent[0]?.content).toContain('已列两项')
+ expect(saved.record.jobs.at(-1)?.entryIds).toContain(result.recentIds[0])
+ store.forget(saved,result.recentIds[0]!,1)
+ expect(store.read().record.recent).toEqual([])
+ expect(store.canLearn(store.read().record,[source()])).toBe(false)
+})
+it('isolates an invalid recent proposal from a valid standing group',()=>{
+ const {store}=fixture(),input={content:'长期约定',layer:'core' as const,scope:'库',sources:[source()],semantic:'standing' as const,attribution:'人',reviewAt:null}
+ const result=store.apply(store.read(),[[{action:'add',input}]],{taskId:'job',materialVersion:'b'.repeat(64),outcome:'applied',entryIds:[]},{sources:[{...source(2),taskId:'job'}],scope:'库',recent:{taskId:'job',noteId:'note-1',materialVersion:'b'.repeat(64),createdAt:new Date().toISOString(),outcome:'completed',sections:{goal:'x'.repeat(2100),completed:'',blocked:'',next:''},assistantDraft:false}})
+ expect(result.entryIds).toHaveLength(1);expect(result.recentIds).toEqual([]);expect(result.rejected).toBe(1)
+ expect(store.read().record.entries).toHaveLength(1)
+})
+it('projects source and content axes without losing a disputed state when paused',()=>{
+ const {store}=fixture(),base=store.read(),input={content:'有争议的事实',layer:'demand' as const,scope:'库',sources:[source()],semantic:'fact' as const,attribution:'人',reviewAt:null}
+ const target=store.add(base,input)
+ const result=store.apply(store.read(),[[{action:'conflict',id:target.id,version:1,input:{...input,content:'冲突说法',sources:[source(2)]}}]],{taskId:'job',materialVersion:'b'.repeat(64),outcome:'applied',entryIds:[]})
+ const disputed=store.read().record.entries.find(e=>e.id===result.entryIds[0])!
+ expect(disputed.state.content).toBe('disputed')
+ store.reconcile(store.read(),[{id:disputed.id,version:1,status:'paused',reason:'MEMORY_SOURCE_CHANGED'}])
+ const paused=store.read().record.entries.find(e=>e.id===disputed.id)!
+ expect(paused.status).toBe('paused');expect(paused.state.content).toBe('disputed');expect(paused.state.source).toBe('revoked')
+ const unchecked={...paused.state,source:'unchecked' as const}
+ expect(statusFromState(unchecked)).toBe('paused')
+ expect(statusFromState({...unchecked,source:'verified'})).toBe('disputed')
+})
+it('does not write during a read of an expired recent block',()=>{
+ const {root,store}=fixture(),record=entryRecord(0);record.nextSequence=1
+ record.recent=[{...entryRecord(1).entries[0]!,id:'recent-one',content:'目标：旧任务\n已完成：\n受阻：\n下一步：',category:'recent',layer:'demand',semantic:'fact',recent:{taskId:'task-1',noteId:'note-1',materialVersion:'b'.repeat(64),createdAt:'2020-01-01T00:00:00.000Z',outcome:'completed',sections:{goal:'旧任务',completed:'',blocked:'',next:''},assistantDraft:false}}]
+ const raw=encodeWorkingMemory(record);writeFileSync(path.join(root,'.rgent-memory'),raw)
+ expect(store.read().record.recent).toHaveLength(1)
+ expect(store.read().raw).toBe(raw)
+})
+it('updates the same task recent block by ID and invalidates the prior version',()=>{
+ const {store}=fixture(),first={taskId:'task-1',noteId:'note-1',materialVersion:'a'.repeat(64),createdAt:new Date().toISOString(),outcome:'completed' as const,sections:{goal:'第一步',completed:'',blocked:'',next:'第二步'},assistantDraft:false}
+ const firstResult=store.apply(store.read(),[],{taskId:'task-1',materialVersion:first.materialVersion,outcome:'applied',entryIds:[]},{sources:[source()],scope:'库',recent:first})
+ const old=store.read().record.recent[0]!
+ const second={...first,materialVersion:'b'.repeat(64),sections:{...first.sections,completed:'第二步完成'}}
+ const nextResult=store.apply(store.read(),[],{taskId:'task-1',materialVersion:second.materialVersion,outcome:'applied',entryIds:[]},{sources:[{...source(2),taskId:'task-1'}],scope:'库',recent:second})
+ expect(nextResult.recentIds).toEqual(firstResult.recentIds)
+ const updated=store.read().record.recent[0]!
+ expect(updated.id).toBe(old.id);expect(updated.version).toBe(old.version+1)
+ expect(updated.recent.materialVersion).toBe(second.materialVersion)
+ expect(store.read().record.jobs.at(-1)?.entryIds).toContain(old.id)
+ expect(()=>store.forget(store.read(),old.id,old.version)).toThrow('MEMORY_CHANGED')
+})
+it('rejects forged independent state and extra source authority in v3 metadata',()=>{
+ const {root,store}=fixture(),record=entryRecord(1),original=encodeWorkingMemory(record)
+ const mutate=(fn:(metadata:WorkingRecord)=>void)=>{
+  const data=/data="([A-Za-z0-9_-]+)"/.exec(original)![1]!,metadata=JSON.parse(Buffer.from(data,'base64url').toString()) as WorkingRecord
+  fn(metadata)
+  return original.replace(data,Buffer.from(JSON.stringify(metadata)).toString('base64url'))
+ }
+ writeFileSync(path.join(root,'.rgent-memory'),mutate(r=>{r.entries[0]!.state.content='disputed'}))
+ expect(()=>store.read()).toThrow('MEMORY_STORAGE_INVALID')
+ writeFileSync(path.join(root,'.rgent-memory'),mutate(r=>{(r.entries[0]!.sources[0] as object as Record<string,unknown>).extraAuthority=true}))
+ expect(()=>store.read()).toThrow('MEMORY_STORAGE_INVALID')
+})
+const v3Recent=(n:number):WorkingRecent=>{
+ const base=entryRecord(1).entries[0]!
+ return {...base,id:'recent-'+n,category:'recent',layer:'demand',semantic:'fact',content:'目标：旧任务\n已完成：\n受阻：\n下一步：',sources:[{...base.sources[0]!,taskId:'task-'+n}],recent:{taskId:'task-'+n,noteId:'note-'+n,materialVersion:'b'.repeat(64),createdAt:'2026-10-05T00:00:00.000Z',outcome:'completed',sections:{goal:'旧任务',completed:'',blocked:'',next:''},assistantDraft:false}}
+}
+it('rejects a recent item in the long collection, even when the record has no recent items',()=>{
+ const record=entryRecord(0);record.nextSequence=1;record.entries.push(v3Recent(1))
+ expect(()=>parseWorkingMemory(encodeWorkingMemory(record))).toThrow('MEMORY_STORAGE_INVALID')
+ record.entries=[];record.recent=[entryRecord(1).entries[0]! as WorkingRecent]
+ expect(()=>parseWorkingMemory(encodeWorkingMemory(record))).toThrow('MEMORY_STORAGE_INVALID')
+})
+it('rejects thirty three recent items hidden in the long collection',()=>{
+ const record=entryRecord(0);record.nextSequence=1;record.entries.push(...Array.from({length:33},(_,i)=>v3Recent(i+1)))
+ expect(()=>parseWorkingMemory(encodeWorkingMemory(record))).toThrow('MEMORY_STORAGE_INVALID')
+})
+it('rejects an item whose full encoded recent block exceeds 16 KiB',()=>{
+ const record=entryRecord(0);record.nextSequence=1
+ const item=v3Recent(1)
+ item.sources[0]!.sourceDeps=Array.from({length:16},(_,i)=>({relPath:`${i}-${'x'.repeat(900)}.md`,objectVersion:'object',bodyHash:'a'.repeat(64),permissionTier:'reference' as const}))
+ record.recent=[item]
+ const raw=encodeWorkingMemory(record)
+ expect(Buffer.byteLength(raw)).toBeGreaterThan(16*1024)
+ expect(()=>parseWorkingMemory(raw)).toThrow('MEMORY_STORAGE_INVALID')
 })

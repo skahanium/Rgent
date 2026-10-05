@@ -22,6 +22,6 @@ it('refuses a late queued mutation and every attempt to capture B from an A call
   await scoped.runBound(next,()=>vault.memoryMutation(store=>store.initialize()))
   release();expect(await late).toBe('VAULT_CHANGED');await attempts;expect(called).not.toHaveBeenCalled()
   expect(scoped.runBound(next,()=>vault.captureSession())).toBe(next)
-  expect(await readFile(path.join(b,'.rgent-memory'),'utf8')).toContain('rgent:memory:v2')
+  expect(await readFile(path.join(b,'.rgent-memory'),'utf8')).toContain('rgent:memory:v3')
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })

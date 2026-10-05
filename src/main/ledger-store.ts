@@ -126,11 +126,11 @@ export class LedgerStore{
  }
  onWrite(relPath:string,before:string,after:string,body:string,previousBody?:string,basis?:WorkingSnapshot){const record=basis?.record,registry=this.registry(),owner=registry.owners.find(o=>o.relPath===relPath&&o.objectVersion===before);if(!owner)return
   const units=this.materialUnits();let changed=false
-  const keep=new Set(record?.entries.flatMap(e=>e.sources.flatMap(s=>[s.materialId,...(s.basisGroups??[])]))??[]),pending=record?.jobs.some(j=>['queued','running','interrupted'].includes(j.outcome)),removed=new Set<string>(),added:MaterialUnit[]=[]
+  const keep=new Set((record?[...record.entries,...record.recent]:[]).flatMap(e=>e.sources.flatMap(s=>[s.materialId,...(s.basisGroups??[])]))??[]),pending=record?.jobs.some(j=>['queued','running','interrupted'].includes(j.outcome)),removed=new Set<string>(),added:MaterialUnit[]=[]
   if(previousBody!==undefined&&owner.bodyRevision===digest(previousBody))for(const unit of units.filter(u=>u.noteId===owner.noteId)){
    // A current owner hash proves this save's before image, never an old unit's birth.
    // Only an explicitly registered source can supply a missing birth hash.
-   const evidence=record?.entries.flatMap(e=>e.sources).find(s=>s.kind==='body'&&s.taskId===null&&s.relPath===relPath&&s.materialId===unit.id&&s.sequence===unit.sequence&&s.text.length===unit.end-unit.start&&digest(s.text)===s.hash)
+   const evidence=(record?[...record.entries,...record.recent]:[]).flatMap(e=>e.sources).find(s=>s.kind==='body'&&s.taskId===null&&s.relPath===relPath&&s.materialId===unit.id&&s.sequence===unit.sequence&&s.text.length===unit.end-unit.start&&digest(s.text)===s.hash)
    const text=unit.hash?previousBody.slice(unit.start,unit.end):evidence?.text,start=text?body.indexOf(text):-1
    if(text&&(!unit.hash||digest(text)===unit.hash)&&previousBody.indexOf(text)>=0&&previousBody.indexOf(text,previousBody.indexOf(text)+1)<0){
     if(!unit.hash){unit.hash=digest(text);changed=true}
@@ -182,7 +182,7 @@ export class LedgerStore{
  collectMaterials(basis:WorkingSnapshot,allowed:(relPath:string)=>boolean=()=>false,permissionRaw:string|null=null){
   const record=basis.record;this.materialCeiling()
   if(record.jobs.some(j=>['queued','running','interrupted'].includes(j.outcome)))return
-  const keep=new Set(record.entries.flatMap(e=>e.sources.flatMap(s=>[s.materialId,...(s.basisGroups??[])]))),units=this.materialUnits(),registry=this.registry(),removed=new Set<string>()
+  const keep=new Set([...record.entries,...record.recent].flatMap(e=>e.sources.flatMap(s=>[s.materialId,...(s.basisGroups??[])]))),units=this.materialUnits(),registry=this.registry(),removed=new Set<string>()
   let evidence:Map<string,string>|undefined
   const originals=()=>{if(evidence)return evidence;evidence=new Map<string,string>();for(const owner of registry.owners)for(const {record:task} of this.orderedRecords(owner,registry.sequence))for(const f of task.chapter?.material?.fragments??[]){if(f.kind!=='body'||f.taskId!==null||digest(f.text)!==f.hash)continue;const target=registry.owners.find(o=>o.relPath===f.relPath);if(!target)continue;for(const unit of units.filter(u=>u.noteId===target.noteId&&u.hash)){
     const text=unit.hash===f.hash?f.text:unit.start>=f.start&&unit.end<=f.end?f.text.slice(unit.start-f.start,unit.end-f.start):'';if(text&&digest(text)===unit.hash)evidence.set(unit.id,text)

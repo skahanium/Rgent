@@ -192,3 +192,27 @@ it('preflights staged memory dependencies without attributing an unsent selectio
  permit.stage(['demand']);expect(permit.dependencies(true).map(d=>d.id)).toEqual(['demand']);expect(permit.dependencies()).toEqual([])
  permit.markSent();expect(permit.dependencies().map(d=>d.id)).toEqual(['demand'])
 })
+
+it('keeps recent blocks between standing agreements and project facts within the total cap',()=>{
+ const now=new Date().toISOString()
+ const make=(id:string,category:'long'|'recent',layer:'core'|'demand')=>({...entry(id,`项目工作 ${id}`,layer),category,updatedAt:now})
+ const selected=recallMemory([make('standing','long','core'),make('recent','recent','demand'),make('fact','long','demand')],'项目工作','')
+ expect(selected.core.map(e=>e.id)).toEqual(['standing'])
+ expect(selected.recent?.map(e=>e.id)).toEqual(['recent'])
+ expect(selected.demand.map(e=>e.id)).toEqual(['fact'])
+})
+
+it('update candidates reserve relevant project facts alongside agreements and honor tags as lexical hints',async()=>{
+ const {updateMemoryCandidates}=await import('../../src/main/memory-use.ts')
+ const facts=Array.from({length:5},(_,i)=>({...entry('fact-'+i,'部署端口','demand'),semantic:'fact' as const,tags:['青灯'],scope:'项目甲'}))
+ const agreements=Array.from({length:40},(_,i)=>({...entry('standing-'+i,'青灯项目部署端口要求中文'),semantic:'standing' as const}))
+ const selected=updateMemoryCandidates([...agreements,...facts],'青灯项目部署端口调整','')
+ expect(selected).toHaveLength(16);expect(selected.filter(e=>e.semantic==='fact').length).toBeGreaterThanOrEqual(4)
+ expect(facts.every(e=>e.content==='部署端口')).toBe(true)
+})
+
+it('sends recent time, outcome and unaccepted assistant attribution in the budgeted material',async()=>{
+ const {memorySection}=await import('../../src/main/memory-use.ts')
+ const recent={...entry('background','助手提出的草案待确认','demand'),category:'recent' as const,recent:{taskId:'t',noteId:'n',materialVersion:'a'.repeat(64),createdAt:'2026-10-01T00:00:00.000Z',outcome:'completed' as const,sections:{goal:'目标',completed:'草案',blocked:'待确认',next:''},assistantDraft:true}}
+ const sent=memorySection(recent);expect(sent).toContain('2026-10-01');expect(sent).toContain('"assistantDraft":true');expect(sent).toContain('不能视为人的决定');expect(sent).toContain('"taskResult":"completed"')
+})

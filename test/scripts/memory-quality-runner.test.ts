@@ -113,12 +113,12 @@ it('experimental review cannot resend a real body source changed after its first
  }finally{vault?.dispose();await rm(base,{recursive:true,force:true})}
 })
 
-it('valid JSON with invalid production candidate references is counted as candidate rejection, never a network failure',async()=>{
+it('unknown production source references retain their distinct terminal category and cannot establish sufficient evidence',async()=>{
  let sent:ModelStepInput|undefined;const body=JSON.stringify({proposals:[{action:'add',content:'伪来源候选',layer:'demand',scope:'本库',sourceIds:['forged'],semantic:'fact',attribution:'人',reviewAt:null}]})
  const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){sent=input;yield {type:'text',text:body};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'baseline'})
- expect(result.entries).toEqual([]);expect(result.experiment?.category).toBe('candidate-rejected')
- expect(result.receipt?.reason).toBe('MEMORY_OUTPUT_INVALID')
- expect(support.v4EvidenceComplete({status:'completed',result,responses:[{input:{system:sent!.system,messages:sent!.messages},body,finishReason:'stop',reason:null}]})).toBe(true)
+ expect(result.entries).toEqual([]);expect(result.experiment?.category).toBe('reference')
+ expect(result.receipt?.reason).toBe('MEMORY_OUTPUT_REFERENCE_INVALID')
+ expect(support.v4EvidenceComplete({status:'completed',result,responses:[{input:{system:sent!.system,messages:sent!.messages},body,finishReason:'stop',reason:null}]})).toBe(false)
 })
 
 it.each(['empty','semantic-rejected'] as const)('retains actual production source identities and recomputable full saved material after cleanup for %s',async mode=>{

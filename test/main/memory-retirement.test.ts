@@ -12,3 +12,10 @@ it('requires an approved retirement target to remain present while ordinary atta
  const r=root();expect(()=>retireMemoryFile(r,()=>{})).not.toThrow()
  expect(()=>retireMemoryFile(r,()=>{},{revision:'a'.repeat(64),objectVersion:'approved'})).toThrow('MEMORY_CONFLICT')
 })
+it('retires a recognized v2 Markdown target while preserving damaged or new version bytes',()=>{
+ const r=root(),file=path.join(r,'.rgent-memory'),meta={version:2,identity:'old',revision:1,nextSequence:1,watermark:0,entries:[{id:'old',version:1,sources:[{}]}],forgotten:[],jobs:[]}
+ const old='<!-- rgent:memory:v2 data="'+Buffer.from(JSON.stringify(meta)).toString('base64url')+'" -->\n<!-- rgent:item:v2 id="old" bytes="3" -->\nold\n<!-- rgent:end:v2 -->\n'
+ writeFileSync(file,old);expect(retireMemoryFile(r,()=>{})).toBe(true);expect(readFileSync(file,'utf8')).toBe(RETIRED_MEMORY)
+ writeFileSync(file,old.replace('bytes="3"','bytes="30"'));expect(()=>retireMemoryFile(r,()=>{})).toThrow('MEMORY_RETIREMENT_FAILED')
+ const current='<!-- rgent:memory:v3 independent -->\n';writeFileSync(file,current);expect(retireMemoryFile(r,()=>{})).toBe(false);expect(readFileSync(file,'utf8')).toBe(current)
+})

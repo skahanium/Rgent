@@ -20,8 +20,20 @@ export type ModelStreamInput = {
 export type ModelStepInput = Omit<ModelStreamInput, 'prompt'> & {
   messages: ModelMessage[]
   tools?: Record<string, ToolSchema>
+  /** Internal request purpose; only background memory consolidation sets this. */
+  purpose?: 'consolidation'
 }
 export const MODEL_STREAM_BOUNDS = { argumentBytes: 65536, callsPerStep: 64, responseBytes: 1048576 } as const
+
+function disabledConsolidationThinking(input: ModelStepInput): boolean {
+  if (input.purpose !== 'consolidation') return false
+  let url: URL
+  try { url = new URL(input.baseURL) } catch { return false }
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return false
+  const path = url.pathname.replace(/\/$/u, '')
+  return url.host === 'api.deepseek.com' && input.modelId === 'deepseek-flash' && (path === '' || path === '/v1') ||
+    (url.host === 'api.minimax.cn' || url.host === 'api.minimax.io') && input.modelId === 'MiniMax-M3' && path === '/v1'
+}
 
 const THINK_OPEN = '<think>'
 const THINK_CLOSE = '</think>'
@@ -91,6 +103,7 @@ export async function* streamModelStep(input: ModelStepInput): AsyncGenerator<Mo
     [name, tool({ description: schema.description, inputSchema: jsonSchema(schema.inputSchema) })]))
   const result = streamText({
     model: provider.chatModel(input.modelId), messages: input.messages,
+    ...(disabledConsolidationThinking(input) ? { providerOptions: { rgent: { thinking: { type: 'disabled' } } } } : {}),
     ...(input.system ? { system: input.system } : {}),
     ...(Object.keys(tools).length ? { tools } : {}),
     stopWhen: isStepCount(1), abortSignal: input.signal, maxRetries: 0, onError: () => {},

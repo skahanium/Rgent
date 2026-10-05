@@ -1020,8 +1020,10 @@ if (ownsInstance) app.whenReady().then(() => {
   nativeTheme.themeSource = themeMode === 'day' ? 'light' : themeMode === 'night' ? 'dark' : 'system'
   try { modelConfig = createModelConfigStore(app.getPath('userData'), safeStorage) }
   catch (error) { modelConfigError = error instanceof Error ? error.message : 'MODEL_CONFIG_UNAVAILABLE' }
+  // Install the managed cache before any vault retirement callback can run.
+  summaryCache=new SummaryCache(path.join(app.getPath('userData'),'context-cache-v2'))
   vaultCatalog = new VaultCatalog(app.getPath('userData'))
-  vault = new VaultSession(app.getPath('userData'), send, undefined,(root,identity)=>vaultCatalog?.view().entries.find(e=>e.path===root&&e.rootIdentity===identity)?.id??null)
+  vault = new VaultSession(app.getPath('userData'), send, undefined,(root,identity)=>vaultCatalog?.view().entries.find(e=>e.path===root&&e.rootIdentity===identity)?.id??null,()=>{consolidation?.cancel();summaryCache?.invalidateAll()})
   const catalog = vaultCatalog.view()
   if (catalog.diagnostic) startupVaultState = {status:'needs-pick',reason:'missing',diagnostic:'设备库目录记录无法读取。原记录已保留，请检查本机存储；仍可手动打开笔记库。'}
   try {
@@ -1136,8 +1138,7 @@ if (ownsInstance) app.whenReady().then(() => {
     }
   })
   reasoningStore=new ReasoningStore(path.join(app.getPath('userData'),'reasoning-v2'))
-  const contextCache=new SummaryCache(path.join(app.getPath('userData'),'context-cache-v2'))
-  summaryCache=contextCache
+  const contextCache=summaryCache!
   consolidation=new WorkingMemoryConsolidation({
     service:workingService,
     configuration:context=>{

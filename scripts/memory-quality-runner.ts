@@ -7,7 +7,7 @@ import {WorkingMemoryConsolidation,parseMemorySuggestions,memoryConsolidationSys
 import {TaskMaterialTracker} from '../src/main/host-material.ts'
 import {serializeStoredVault} from '../src/main/notes-fs.ts'
 import {markPrompt,upsertAiAnswer} from '../src/main/host-source.ts'
-import {createMemoryUsePermit} from '../src/main/memory-use.ts'
+import {createMemoryUsePermit,memorySection} from '../src/main/memory-use.ts'
 import {buildHostContext} from '../src/main/host-context.ts'
 import {AgentHost} from '../src/main/agent-host.ts'
 import {TaskAuthorizationRegistry} from '../src/main/task-authorization.ts'
@@ -19,19 +19,21 @@ import type {ModelStepInput,ModelStepEvent} from '../src/main/model-stream.ts'
 import {createMemoryIpc} from '../src/main/memory-ipc.ts'
 import type {WorkingSource} from '../src/main/working-memory-store.ts'
 import type {SavedTaskMaterial} from '../src/main/host-material.ts'
-import {v4TerminalCategory,type V4Category} from './memory-quality-support.ts'
+import {fingerprint,v4TerminalCategory,type V4Category} from './memory-quality-support.ts'
 import type {MemoryQualityCase} from '../test/fixtures/memory-quality.ts'
 
 /** Genuine production saving/consolidation/use in one disposable fictional vault. */
 export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:ModelCredential,
- stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,signal:AbortSignal,options?:{strategy:'baseline'|'review'}){
- const base=await mkdtemp(path.join(os.tmpdir(),'rgent-memory-quality-')),root=path.join(base,'vault')
+ stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,signal:AbortSignal,options?:{strategy:'baseline'|'review'|'continuity';base?:string;noteName?:string;hostBeforeConsolidation?:boolean;verifyClosure?:boolean}){
+ const base=options?.base??await mkdtemp(path.join(os.tmpdir(),'rgent-memory-quality-')),root=path.join(base,'vault')
+ const qualityNote=options?.noteName??'fiction.md'
  let vault:VaultSession|null=null,engine:WorkingMemoryConsolidation|null=null
  try{
-  await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
-  const taskId='quality-'+spec.id,rawPrompt='/'+spec.prompt
+  await mkdir(root,{recursive:true});await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
+  let taskId='quality-'+spec.id;const rawPrompt='/'+spec.prompt
   const source=spec.body+'\n\n'+markPrompt(rawPrompt,{taskId,range:{start:0,end:rawPrompt.length},expectedText:rawPrompt,promptText:spec.prompt})
-  await writeFile(path.join(root,'fiction.md'),source)
+  const prior=options?.base?await import('node:fs/promises').then(fs=>fs.readFile(path.join(root,qualityNote),'utf8').catch(()=>'')):''
+  await writeFile(path.join(root,qualityNote),prior+'\n\n'+(options?.hostBeforeConsolidation?spec.body+'\n\n'+rawPrompt+'\n':source))
   if(spec.seed){const initialRaw='/'+spec.seed.content;await writeFile(path.join(root,'baseline.md'),spec.seed.content+'\n\n'+markPrompt(initialRaw,{taskId:'initial-'+spec.id,range:{start:0,end:initialRaw.length},expectedText:initialRaw,promptText:spec.seed.content}))}
   vault=new VaultSession(base,()=>{});vault.restore()
   const session=vault,service=new WorkingMemoryService(session,()=>null)
@@ -70,14 +72,14 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    const remembered=await ipc.handle('quality-manual','commit',{sessionId:note.sessionId,id:preview.value.id,content:seed.content,layer:seed.layer,scope:seed.scope})
    if(!remembered.ok)throw Error('EVALUATION_INITIAL_STATE_FAILED')
   }
-  const before=service.snapshot().record.entries
+  const before=service.snapshot().record.entries,beforeAll=[...before,...service.snapshot().record.recent]
   const experiment:V4Trace={category:'insufficient-evidence',calls:0,rejectReason:null}
-  let experimentalMaterial:SavedTaskMaterial|null=null,paidRecord:Record<string,unknown>|null=null
+  let experimentalMaterial:SavedTaskMaterial|null=null,paidRecord:Record<string,unknown>|null=null,foreground:Awaited<ReturnType<typeof runControlledQualityHost>>|null=null
   const recheckExperimental=async()=>{
    if(signal.aborted)throw Error('MEMORY_CANCELLED')
    if(!experimentalMaterial)throw Error('MEMORY_MATERIAL_UNVERIFIED')
    session.assertSession(service.context().sessionId)
-   const current=await service.savedMaterial('fiction.md',taskId)
+   const current=await service.savedMaterial(qualityNote,taskId)
    if(current.materialVersion!==experimentalMaterial.materialVersion)throw Error('MEMORY_MATERIAL_CHANGED')
    phase='evaluation-dispatch-recheck'
    try{for(const id of actualSourceIds){const source=sourceProofs.get(id);if(!source||!await service.verifySource(source))throw Error('MEMORY_SOURCE_CHANGED')}
@@ -85,21 +87,29 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    for(const entry of before)if(!await service.candidateCurrent(entry))throw Error('MEMORY_DEPENDENCY_CHANGED')
    session.assertSession(service.context().sessionId)
   }
-  const strategyStream=options? v4StrategyStream(options.strategy,observedStream,experiment,recheckExperimental,credential.contextTokens):observedStream
+  const strategyStream=options&&options.strategy!=='continuity'? v4StrategyStream(options.strategy,observedStream,experiment,recheckExperimental,credential.contextTokens):observedStream
   const evaluatedStream=async function*(input:ModelStepInput){const payload=JSON.parse(String(input.messages[0]?.content));actualSourceIds=(payload.sources??[]).map((s:{id:string})=>s.id);for await(const event of strategyStream(input))yield event}
-  engine=new WorkingMemoryConsolidation({service:()=>service,configuration:()=>({enabled:true,signature:'fictional-evaluation',credential,limits:{seconds:120,calls:2,tools:0}}),stream:input=>evaluatedStream({...input,signal:AbortSignal.any([input.signal,signal])}),changed:()=>{}})
+  engine=new WorkingMemoryConsolidation({...(options?.strategy==='continuity'?{strategy:'continuity' as const}:{}),service:()=>service,configuration:()=>({enabled:true,signature:'fictional-evaluation',credential,limits:{seconds:120,calls:2,tools:0}}),stream:input=>evaluatedStream({...input,signal:AbortSignal.any([input.signal,signal])}),changed:()=>{}})
   const activeEngine=engine,cancel=()=>activeEngine.cancel(undefined,'MEMORY_CANCELLED');signal.addEventListener('abort',cancel,{once:true})
   try{
    if(signal.aborted)throw Error('MEMORY_CANCELLED')
+   if(options?.hostBeforeConsolidation){
+    foreground=await runControlledQualityHost(session,service,credential,qualityNote,spec.prompt,spec.answer,signal,
+     id=>{taskId=id;engine!.capture(id)},async material=>{experimentalMaterial=material;await engine!.handoff(material)})
+    await engine.idle()
+   }else{
    engine.capture(taskId)
-   const note=await session.readOpened('fiction.md'),tracker=new TaskMaterialTracker()
-   tracker.body(note.content,{start:0,end:note.content.length},{relPath:'fiction.md',sessionId:note.sessionId!,objectVersion:note.objectVersion,revision:note.revision});tracker.commit()
-   await session.ledgerPrepare('fiction.md',{taskId,startedAt:new Date().toISOString(),status:'completed',prompt:spec.prompt,answer:spec.answer,material:tracker.snapshot()},undefined,{sessionId:note.sessionId,objectVersion:note.objectVersion,root,expectedRevision:note.revision})
-   const saved=await session.write('fiction.md',upsertAiAnswer(note.content,{taskId,answer:spec.answer}),note.revision,note)
-   await session.ledgerComplete('fiction.md',taskId,saved.revision)
-   const material=await service.savedMaterial('fiction.md',taskId)
+   const note=await session.readOpened(qualityNote),tracker=new TaskMaterialTracker()
+   tracker.body(note.content,{start:0,end:note.content.length},{relPath:qualityNote,sessionId:note.sessionId!,objectVersion:note.objectVersion,revision:note.revision});tracker.commit()
+   await session.ledgerPrepare(qualityNote,{taskId,startedAt:new Date().toISOString(),status:'completed',prompt:spec.prompt,answer:spec.answer,material:tracker.snapshot()},undefined,{sessionId:note.sessionId,objectVersion:note.objectVersion,root,expectedRevision:note.revision})
+   const saved=await session.write(qualityNote,upsertAiAnswer(note.content,{taskId,answer:spec.answer}),note.revision,note)
+   await session.ledgerComplete(qualityNote,taskId,saved.revision)
+   const material=await service.savedMaterial(qualityNote,taskId)
    experimentalMaterial=material
    await engine.handoff(material);await engine.idle()
+   }
+   if(!experimentalMaterial)throw Error('EVALUATION_MATERIAL_MISSING')
+   const material:SavedTaskMaterial=experimentalMaterial
    const entries=await service.entries(),receipt=service.snapshot().record.jobs.find(j=>j.taskId===taskId)??null
    if(options){
     learningCheck.checkedAt=new Date().toISOString();learningCheck.sourceIds=[...sentSourceIds]
@@ -109,15 +119,15 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
     if(learningCheck.result!==true)experiment.category='insufficient-evidence'
    }
    const paidEvidence=evidenceSnapshot()
-   paidRecord={evidence:paidEvidence,experiment:structuredClone(experiment),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},before,entries,receipt,completed:receipt?.outcome==='applied'&&!receipt.reason,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)}}
+   paidRecord={foreground,recent:structuredClone(service.snapshot().record.recent),evidence:paidEvidence,experiment:structuredClone(experiment),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},before,entries,receipt,completed:receipt?.outcome==='applied'&&!receipt.reason,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)}}
    const port={context:()=>service.context(),config:()=>({enabled:true,revision:1}),entries:(ids?:readonly string[])=>service.entries(ids)}
    const permit=await createMemoryUsePermit(port,credential,spec.prompt,spec.body)
-   const current=await session.read('fiction.md')
+   const current=await session.read(qualityNote)
    const context=buildHostContext({source:current.content,chapters:[],prompt:spec.prompt,placement:current.content.length,inputBudgetTokens:Math.max(1,Math.min(16384,credential.contextTokens-8192)),countTokens:conservativeTokens,memory:permit.recall})
    if(context.status==='ready'){permit.stage(context.memoryIds);await permit.assertCurrent(credential);permit.markSent()}
    // This follow-up is an actual Host task with a controlled stream, never a paid quality sample.
    let followup:{mode:'controlled-production-host';sent:{system:string;prompt:string}[];ledger:LedgerRecord}|null=null
-   if(!signal.aborted){
+   if(!signal.aborted&&!options?.hostBeforeConsolidation){
     const relPath='followup.md',prompt=spec.prompt,raw='/'+prompt
     await writeFile(path.join(root,relPath),spec.body+'\n\n'+raw+'\n')
     const sent:{system:string;prompt:string}[]=[]
@@ -138,6 +148,29 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
     try{if(signal.aborted)stop();await task.done;followup={mode:'controlled-production-host',sent,ledger:await session.ledgerRecord(relPath,task.id)}}
     finally{signal.removeEventListener('abort',stop)}
    }
+   if(options?.strategy==='continuity'){
+    const hostProof=foreground??followup,actualDependencies=hostProof?.ledger.chapter?.provenance?.version===2?hostProof.ledger.chapter.provenance.memoryDeps:[]
+    const selected=context.status==='ready'?[...permit.recall.core,...(permit.recall.recent??[]),...permit.recall.demand].filter(e=>context.memoryIds.includes(e.id)):[]
+    const selectedCost=(kind:'long'|'recent'|'fact')=>selected.filter(e=>kind==='recent'?e.category==='recent':e.category!=='recent'&&(kind==='long'?e.layer==='core':e.layer==='demand')).reduce((n,e)=>n+conservativeTokens('\n'+memorySection(e)),0)
+    const costs={long:selectedCost('long'),recent:selectedCost('recent'),fact:selectedCost('fact')},budgetTokens=Math.max(1,Math.min(16384,credential.contextTokens-8192)),total=costs.long+costs.recent+costs.fact
+    const budget={inputBudgetTokens:budgetTokens,selectedIds:selected.map(e=>e.id),actualHostDependencies:actualDependencies,costs,total,limit:Math.min(4096,Math.floor(.2*budgetTokens)),within:total<=Math.min(4096,Math.floor(.2*budgetTokens))&&costs.long<=2048&&costs.recent<=1024&&costs.fact<=2048&&selected.filter(e=>e.category==='recent').length<=4&&selected.filter(e=>e.category!=='recent'&&e.layer==='demand').length<=8}
+    let dispatchVerified=context.status==='ready';if(dispatchVerified)try{await permit.assertCurrent(credential)}catch{dispatchVerified=false}
+    const dependencies=permit.dependencies(),sameVersionVerified=(await permit.validateDependencies(dependencies)).every(Boolean),versionMismatchRejected=(await permit.validateDependencies(dependencies.map(d=>({...d,version:d.version+1})))).every(v=>!v)
+    const actualHostSelected=actualDependencies.map(d=>[...beforeAll,...entries].find(e=>e.id===d.id&&e.version===d.version)).filter((e):e is typeof entries[number]=>!!e)
+    const actualHostInputBudget=foreground?.inputBudgetTokens??budgetTokens
+    const actualCosts={long:0,recent:0,fact:0};for(const e of actualHostSelected)actualCosts[e.category==='recent'?'recent':e.layer==='core'?'long':'fact']+=conservativeTokens('\n'+memorySection(e))
+    const actualTotal=actualCosts.long+actualCosts.recent+actualCosts.fact
+    const actualHostBudget={inputBudgetTokens:actualHostInputBudget,selectedIds:actualDependencies.map(d=>d.id),selected:actualHostSelected.map(e=>({id:e.id,version:e.version,category:e.category,layer:e.layer,cost:conservativeTokens('\n'+memorySection(e))})),costs:actualCosts,total:actualTotal,mapped:actualHostSelected.length===actualDependencies.length,within:actualTotal<=Math.min(4096,Math.floor(.2*actualHostInputBudget))&&actualCosts.long<=2048&&actualCosts.recent<=1024&&actualCosts.fact<=2048&&actualHostSelected.filter(e=>e.category==='recent').length<=4&&actualHostSelected.filter(e=>e.category!=='recent'&&e.layer==='demand').length<=8}
+    let permissionRevoked:boolean|null=null,frozenSignatureMatches:boolean|null=null
+    if(selected.length){let allowed=true,revision=1;const trial=await createMemoryUsePermit({...port,config:()=>({enabled:allowed,revision})},credential,spec.prompt,spec.body);trial.stage(selected.map(e=>e.id));await trial.assertCurrent(credential);trial.markSent();frozenSignatureMatches=trial.snapshotSignature===permit.snapshotSignature;allowed=false;revision++;try{await trial.assertCurrent(credential);permissionRevoked=false}catch{permissionRevoked=true}}
+    const dispatch={snapshotSignature:permit.snapshotSignature,verified:dispatchVerified,dependencies,sameVersionVerified,versionMismatchRejected,permissionRevoked,frozenSignatureMatches,actualHostBudget}
+    const paidRecent=structuredClone(service.snapshot().record.recent)
+    const verifyClosure=options.verifyClosure??!options.hostBeforeConsolidation
+    const applicable=selected.length>0,closure=verifyClosure&&applicable?await verifyContinuityClosure(session,service,credential,permit,material,selected.find(e=>actualDependencies.some(d=>d.id===e.id))??selected[0]!,signal):null
+    const controlled={status:(!budget.within||!dispatchVerified||!sameVersionVerified||!versionMismatchRejected||!actualHostBudget.mapped||!actualHostBudget.within||selected.length&&(!permissionRevoked||!frozenSignatureMatches)||closure&&!closure.passed?'failed':applicable?'passed':'not-applicable') as 'passed'|'failed'|'not-applicable',reason:applicable?null:'no-selected-memory',budget,dispatch,closure,closureStatus:!verifyClosure?'deferred-chain-step':!applicable?'not-applicable':'verified'}
+    return {foreground,recent:paidRecent,evidence:paidEvidence,experiment:structuredClone(experiment),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,followup,dependencies:actualDependencies,forget:null,controlled,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)}}
+   }
+
    const provenance=followup?.ledger.chapter?.provenance
    const dependencies=provenance?.version===2?provenance.memoryDeps:[]
    const entry=entries.find(e=>dependencies.some(d=>d.id===e.id))
@@ -162,7 +195,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
      proof.relearningBlocked=calls>0&&validReplay&&originalBasisBlocked&&remaining.length===0&&['applied','rejected'].includes(replayReceipt?.outcome??'')&&replayReceipt?.reason==='MEMORY_OUTPUT_INVALID'
     }finally{signal.removeEventListener('abort',stopReplay);replay.close();await replay.idle()}
    }
-   return {evidence:paidEvidence,...(options?{experiment}:{}),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,dependencies,followup,forget:proof,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)}}
+   return {foreground,evidence:paidEvidence,...(options?{experiment}:{}),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,dependencies,followup,forget:proof,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)}}
   }catch(e){
    if(options){const reason=e instanceof Error&&/^[A-Z_]{3,80}$/.test(e.message)?e.message:'EVALUATION_FIXTURE_FAILED'
     const error=Error(reason)
@@ -171,7 +204,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    }
    throw e
   }finally{signal.removeEventListener('abort',cancel)}
- }finally{engine?.close();await engine?.idle();vault?.dispose();await rm(base,{recursive:true,force:true})}
+ }finally{engine?.close();await engine?.idle();vault?.dispose();if(!options?.base)await rm(base,{recursive:true,force:true})}
 }
 
 export const memorySemanticReviewSystem=memoryConsolidationSystem+`
@@ -221,4 +254,48 @@ export function v4StrategyStream(arm:'baseline'|'review',stream:(input:ModelStep
   try{trace.category=parseMemorySuggestions(audited).length?'valid':'safe-empty'}catch{trace.category='format';throw Error('MEMORY_CONFIRMATION_REQUIRED')}
   yield {type:'text',text:audited};yield {type:'finish',reason:'stop'}
  }
+}
+
+/** Real foreground saving and memory provenance; its stream is controlled and never billed. */
+async function runControlledQualityHost(session:VaultSession,service:WorkingMemoryService,credential:ModelCredential,relPath:string,prompt:string,answer:string,signal:AbortSignal,onStarted:(id:string)=>void,onSaved:(material:SavedTaskMaterial)=>Promise<void>){
+ let inputBudgetTokens=0
+ const root=session.requireUsableRoot(),raw='/'+prompt,sent:{system:string;prompt:string}[]=[]
+ const port={context:()=>service.context(),config:()=>({enabled:true,revision:1}),entries:(ids?:readonly string[])=>service.entries(ids)}
+ const authorization=new TaskAuthorizationRegistry({root:()=>root,session:()=>session.sessionId(),tree:()=>session.tree(),read:rel=>session.readOpened(rel),tier:modelTierFor,acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),configuration:()=>({credential,limits:{seconds:120,steps:1,tools:0}})})
+ const note=await session.readOpened(relPath),start=note.content.lastIndexOf(raw)
+ const command={...note,modelRecordId:'quality-controlled',expectedRevision:note.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:prompt}
+ const preview=await authorization.preview('quality-evaluator',{...command,references:[]})
+ let saved:SavedTaskMaterial|null=null
+ const host=new AgentHost({root:()=>root,session:()=>session.sessionId(),acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),read:rel=>session.readOpened(rel),write:(rel,text,revision,binding)=>{if(!binding)throw Error('NOTE_REPLACED');return session.write(rel,text,revision,binding)},authorize:()=>authorization.consume('quality-evaluator',{...command,previewId:preview.id}),tier:modelTierFor,credential:()=>credential,limits:()=>({seconds:120,steps:1,tools:0}),memory:port,
+  ledger:{prepare:(rel,chapter,version,binding)=>{if(!binding)throw Error('BAD_REQUEST');return session.ledgerPrepare(rel,chapter,version,binding)},complete:(rel,id,revision)=>session.ledgerComplete(rel,id,revision),contexts:rel=>session.ledgerContexts(rel)},
+  onTaskStarted:onStarted,onTaskMaterialSaved:async material=>{saved=material;await onSaved(material)},stream:async function*(input){inputBudgetTokens=Math.max(0,credential.contextTokens-input.maxOutputTokens-4096-conservativeTokens(input.system));sent.push({system:input.system,prompt:input.prompt});yield answer},emit:()=>{}})
+ const task=await host.start({...command,previewId:preview.id}),stop=()=>host.cancel(task.id);signal.addEventListener('abort',stop,{once:true})
+ try{if(signal.aborted)stop();await task.done;if(!saved)throw Error('EVALUATION_MATERIAL_MISSING');return {mode:'controlled-production-host' as const,inputBudgetTokens,sent,ledger:await session.ledgerRecord(relPath,task.id),material:saved as SavedTaskMaterial}}
+ finally{signal.removeEventListener('abort',stop)}
+}
+
+async function verifyContinuityClosure(session:VaultSession,service:WorkingMemoryService,credential:ModelCredential,permit:Awaited<ReturnType<typeof createMemoryUsePermit>>,material:SavedTaskMaterial,entry:import('../src/shared/memory.ts').MemoryEntry,signal:AbortSignal){
+ let probeMaterial=material
+ const anchor=entry.sources.find(s=>s.kind==='ledger'&&s.taskId)
+ if(anchor?.taskId)probeMaterial=await service.savedMaterial(anchor.relPath,anchor.taskId)
+ else for(const source of entry.sources){for(const chapter of await session.ledgerContexts(source.relPath)){try{const candidate=await service.savedMaterial(source.relPath,chapter.taskId!);if(candidate.material.fragments.some(f=>f.kind==='body'&&f.relPath===source.relPath&&f.hash===source.hash&&f.text===source.text)){probeMaterial=candidate;break}}catch{}}if(probeMaterial!==material)break}
+ const basis=service.snapshot(),affected=new Set([entry.id]);let expanded=true
+ while(expanded){expanded=false;for(const e of [...basis.record.entries,...basis.record.recent])if(!affected.has(e.id)&&e.sources.some(s=>s.memoryDeps.some(d=>affected.has(d.id)))){affected.add(e.id);expanded=true}}
+ await service.forget({sessionId:service.context().sessionId,revision:basis.revision,objectVersion:basis.objectVersion,id:entry.id,version:entry.version})
+ let revoked=false;try{await permit.assertCurrent(credential)}catch{revoked=true}
+ const originalBasisBlocked=await session.memoryMutation(store=>!store.canLearn(store.read().record,entry.sources as WorkingSource[]))
+ const beforeProbe=service.snapshot(),previousReceipt=beforeProbe.record.jobs.find(j=>j.taskId===probeMaterial.taskId)??null
+ let calls=0,validProposalSources=false,sent:unknown=null
+ const replay=new WorkingMemoryConsolidation({strategy:'continuity',service:()=>service,configuration:()=>({enabled:true,signature:'v5-controlled-replay',credential,limits:{seconds:120,calls:2,tools:0}}),changed:()=>{},stream:async function*(input){calls++;const p=JSON.parse(String(input.messages[0]!.content)),sourceIds=p.sources.filter((s:any)=>entry.sources.some(old=>old.text===s.text&&old.kind===s.kind&&old.classification===s.classification)).map((s:any)=>s.id)
+  validProposalSources=sourceIds.length>0&&sourceIds.every((id:string)=>p.sources.some((s:any)=>s.id===id))
+  const recent=entry.category==='recent'?(entry as any).recent:null
+  const proposal={recent:recent?{...recent.sections,sourceIds,assistantDraft:recent.assistantDraft}:null,proposals:recent?[]:[{action:'add',content:entry.content,layer:entry.layer,semantic:entry.semantic,scope:entry.scope,attribution:entry.attribution,reviewAt:entry.reviewAt,sourceIds}]}
+  sent={sources:structuredClone(p.sources),proposal:structuredClone(proposal)}
+  yield {type:'text',text:JSON.stringify(proposal)};yield {type:'finish',reason:'stop'}}})
+ const cancel=()=>replay.cancel();signal.addEventListener('abort',cancel,{once:true})
+ try{if(signal.aborted)throw Error('MEMORY_CANCELLED');replay.capture(probeMaterial.taskId);await replay.handoff(probeMaterial);await replay.idle();const afterSnapshot=service.snapshot(),after=afterSnapshot.record,remaining=[...after.entries,...after.recent].filter(e=>affected.has(e.id)||e.content===entry.content).map(e=>e.id),receipt=after.jobs.find(j=>j.taskId===probeMaterial.taskId)??null
+  const freshTerminal=!!receipt&&receipt.materialVersion===probeMaterial.materialVersion&&(['rejected','interrupted'].includes(receipt.outcome)||receipt.outcome==='applied'&&receipt.reason==='MEMORY_OUTPUT_INVALID'&&calls>0&&validProposalSources&&!receipt.entryIds.length)&&fingerprint(receipt)!==fingerprint(previousReceipt)&&afterSnapshot.revision!==beforeProbe.revision
+  const explicitBlock=!!receipt?.reason&&/SOURCE|DEPENDENCY|FORGOTTEN/.test(receipt.reason),proposalRejected=calls>0&&validProposalSources&&!!receipt&&['applied','rejected'].includes(receipt.outcome)&&!receipt.entryIds.length&&receipt.reason==='MEMORY_OUTPUT_INVALID'
+  return {passed:revoked&&originalBasisBlocked&&!remaining.length&&freshTerminal&&(explicitBlock||proposalRejected),affectedIds:[...affected],revoked,originalBasisBlocked,remaining,replay:{mode:'controlled-never-billed',calls,sent,validProposalSources,freshTerminal,explicitBlock,proposalRejected,previousReceipt,beforeRevision:beforeProbe.revision,afterRevision:afterSnapshot.revision,material:{taskId:probeMaterial.taskId,materialVersion:probeMaterial.materialVersion},receipt}}
+ }finally{signal.removeEventListener('abort',cancel);replay.close();await replay.idle()}
 }

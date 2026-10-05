@@ -9,7 +9,7 @@ const el=<K extends keyof HTMLElementTagNameMap>(tag:K,className?:string)=>{cons
 const paragraph=(text:string,className='settings-hint')=>{const p=el('p',className);p.textContent=text;return p}
 const button=(text:string,run:()=>void)=>{const b=el('button','settings-action');b.type='button';b.textContent=text;b.addEventListener('click',run);return b}
 const field=(title:string,input:HTMLElement)=>{const label=el('label','settings-field wide');const span=el('span');span.textContent=title;label.append(span,input);return label}
-const layerSelect=(value:string)=>{const s=el('select');for(const [v,label] of [['core','长期约定'],['demand','参考知识']]){const o=el('option');o.value=v!;o.textContent=label!;s.append(o)}s.value=value;return s}
+const layerSelect=(value:string)=>{const s=el('select');for(const [v,label] of [['core','长期约定'],['demand','项目事实']]){const o=el('option');o.value=v!;o.textContent=label!;s.append(o)}s.value=value;return s}
 const modelSelect=(config:PublicModelConfig|null,value:string|null,empty:string)=>{
   const select=el('select'),none=el('option');none.value='';none.textContent=empty;select.append(none)
   for(const group of config?modelModuleGroups(config):[]){const optgroup=el('optgroup');optgroup.label=group.label;for(const item of group.items){const option=el('option');option.value=item.id;option.textContent=item.label;optgroup.append(option)}select.append(optgroup)}
@@ -82,11 +82,15 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
   const heading=el('h3');heading.textContent='本库记忆'
   const refresh=button('',()=>void mutate(handlers.get,refresh));refresh.classList.add('memory-refresh');refresh.append(icon('refresh'));refresh.setAttribute('aria-label','刷新状态');refresh.title='刷新状态'
   statusHead.append(heading,refresh);statusCard.append(statusHead,status,paragraph('自动学习质量尚未通过验证。AI 可能遗漏或错误整理信息；请在重要任务中核对原材料，你可以查看、修改或遗忘记忆。','settings-hint memory-quality-status'))
+  const recentCard=el('section','memory-card memory-recent');recentCard.dataset.memorySection='recent'
+  const recentTitle=el('h3');recentTitle.textContent='近期工作背景'
+  const recentList=el('div','memory-list'),recentEmpty=el('div','memory-empty')
+  recentCard.append(recentTitle,recentList,recentEmpty)
   const items=el('section','memory-card memory-entries');items.dataset.memorySection='entries'
   const fold=(title:string,section:string)=>{const d=el('details','memory-card memory-fold');d.dataset.memorySection=section;const summary=el('summary');summary.textContent=title;d.append(summary);return d}
   const modelPanel=fold('模型设置','models'),jobsPanel=fold('最近整理记录','jobs'),maintenancePanel=fold('高级维护','maintenance')
   const jobs=el('div','memory-jobs'),maintenance=el('div','memory-maintenance');jobsPanel.append(jobs);maintenancePanel.append(maintenance)
-  body.append(statusCard,error,items,modelPanel,jobsPanel,maintenancePanel)
+  body.append(statusCard,error,recentCard,items,modelPanel,jobsPanel,maintenancePanel)
   let currentDefault:HTMLElement|null=null,currentVault:HTMLElement|null=null
   let updateReceiver=(_value:MemoryView):void=>{},updateDrafts=():void=>{}
   let filter:'all'|'usable'|'attention'='all'
@@ -100,26 +104,31 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
   }
   function applyFilter():void{
     for(const b of filters.querySelectorAll<HTMLButtonElement>('button'))b.setAttribute('aria-pressed',String(b.dataset.memoryFilter===filter))
-    let visible=0
-    for(const row of list.querySelectorAll<HTMLElement>('.memory-entry')){
+    for(const row of body.querySelectorAll<HTMLElement>('.memory-list .memory-entry')){
       const entry=view?.entries.find(e=>e.id===row.dataset.memoryId)
       row.hidden=filter==='usable'?entry?.status!=='active':filter==='attention'?!entry||!['paused','pending','review','disputed','deferred'].includes(entry.status):false
-      if(!row.hidden)visible++
     }
-    empty.hidden=visible>0
-    empty.replaceChildren(paragraph(view?.entries.length?'没有符合此筛选的记忆。':'还没有记忆','memory-empty-title'))
-    if(!view?.entries.length)empty.append(paragraph(view?.config.vault.enabled?'任务保存成功后，AI 会自动整理获准材料。你也可以从正文选区或账本口令中点击“记住”。':'开启本库记忆后，AI 会从保存成功的获准任务中自动整理。现有笔记不会被自动扫描。'))
+    const longs=view?.entries.filter(e=>e.category!=='recent')??[],recents=view?.entries.filter(e=>e.category==='recent')??[]
+    const shownLong=Array.from(list.querySelectorAll<HTMLElement>('.memory-entry')).some(row=>!row.hidden)
+    const shownRecent=Array.from(recentList.querySelectorAll<HTMLElement>('.memory-entry')).some(row=>!row.hidden)
+    empty.hidden=shownLong
+    empty.replaceChildren(paragraph(longs.length?'没有符合此筛选的长期内容。':'还没有长期内容','memory-empty-title'))
+    if(!longs.length)empty.append(paragraph(view?.config.vault.enabled?'任务保存成功后，AI 会自动整理获准材料。你也可以从正文选区或账本口令中点击“记住”。':'开启本库记忆后，AI 会从保存成功的获准任务中自动整理。现有笔记不会被自动扫描。'))
+    recentEmpty.hidden=shownRecent
+    recentEmpty.replaceChildren(paragraph(recents.length?'没有符合此筛选的近期背景。':'还没有近期工作背景','memory-empty-title'))
   }
   const modelName=(id:string|null)=>id?(modelsSnapshot?.models.find(m=>m.id===id)?.modelId??'原模型不可用'):'未选择'
   const accept=(value:MemoryView)=>{
     view=value;host.onChanged(value);updateReceiver(value)
-    status.textContent=`已保存 · ${value.config.vault.enabled?'已开启':'已关闭'} · ${value.entries.length} 条记忆${value.reason||value.status==='invalid'?` · ${memoryErrorText(value.reason??'MEMORY_UNAVAILABLE')}`:''}`
+    const recentCount=value.entries.filter(e=>e.category==='recent').length
+    status.textContent=`已保存 · ${value.config.vault.enabled?'已开启':'已关闭'} · 长期 ${value.entries.length-recentCount} 条 · 近期 ${recentCount} 块${value.reason||value.status==='invalid'?` · ${memoryErrorText(value.reason??'MEMORY_UNAVAILABLE')}`:''}`
     if(value.materialStatus==='invalid'&&value.reason!=='LEDGER_REGISTRY_INVALID')status.textContent+=` · ${memoryErrorText('LEDGER_REGISTRY_INVALID')}`
     if(value.retirementFailure)status.textContent+=` · ${memoryErrorText(value.retirementFailure)}`
+    if(value.bindingFailure)status.textContent+=` · ${memoryErrorText(value.bindingFailure)}`
     if(currentDefault){currentDefault.dataset.modelId=value.config.defaultModelId??'';currentDefault.textContent=`已保存：${modelName(value.config.defaultModelId)}`}
     if(currentVault)currentVault.textContent=`已保存：${value.config.vault.enabled?'已开启':'已关闭'} · ${value.config.vault.override.mode==='inherit'?'跟随默认模型':modelName(value.config.vault.override.modelId)}`
     if(!modelSetupChecked||lastModelStatus!==value.config.modelStatus&&value.config.modelStatus!=='ready'){modelPanel.open=value.config.modelStatus!=='ready';modelSetupChecked=true}lastModelStatus=value.config.modelStatus
-    updateDrafts();paintItems();paintJobs();paintMaintenance()
+    updateDrafts();paintRecent();paintItems();paintJobs();paintMaintenance()
   }
   async function mutate(run:()=>Promise<MemoryResult<MemoryView>>,b:HTMLButtonElement):Promise<void>{
     b.disabled=true;error.hidden=true
@@ -134,6 +143,53 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     hostNode.querySelector('.memory-preview')?.remove()
     renderMemoryPreview(hostNode,result.value,{commit:handlers.commit,isCurrent:()=>current()&&hostNode.isConnected,onDone:value=>{accept(value)},onCancel:()=>hostNode.querySelector('.memory-preview')?.remove()})
   }
+  function paintRecent():void{
+    const focus=document.activeElement instanceof HTMLElement&&recentCard.contains(document.activeElement)?document.activeElement:null
+    const existing=new Map(Array.from(recentList.querySelectorAll<HTMLDetailsElement>('.memory-entry')).map(row=>[row.dataset.memoryId!,row]))
+    recentList.replaceChildren()
+    for(const entry of view?.entries.filter(e=>e.category==='recent')??[]){
+      let row=existing.get(entry.id)
+      if(!row||row.dataset.version!==String(entry.version)){
+        row=el('details','memory-entry memory-recent-entry');row.dataset.memoryId=entry.id;row.dataset.version=String(entry.version)
+        row.append(el('summary'),el('div','memory-recent-sections'),el('div','memory-entry-metadata'))
+        const actions=el('div','settings-actions');let armed=false
+        const forget=button('删除并遗忘',()=>{
+          if(!armed){armed=true;const warning=paragraph('删除这块近期背景并阻止原材料自动重新生成。关联摘要会清除；无法确定无关的待整理材料也会一并清除。原笔记与账本不变，外部备份和已发送内容不会被清除。');warning.classList.add('memory-forget-warning');row!.append(warning);forget.textContent='确认删除并遗忘';cancelForget.hidden=false;return}
+          const latest=view?.entries.find(e=>e.id===entry.id);if(latest)void mutate(()=>handlers.forget(binding(latest)),forget)
+        })
+        const cancelForget=button('取消遗忘',()=>{armed=false;row!.querySelector('.memory-forget-warning')?.remove();forget.textContent='删除并遗忘';cancelForget.hidden=true;forget.focus()});cancelForget.hidden=true;cancelForget.dataset.memoryAction='cancel-forget'
+        forget.classList.add('memory-danger');actions.append(forget,cancelForget);row.append(actions)
+      }
+      const signature=JSON.stringify([entry.content,entry.status,entry.reason,entry.updatedAt,entry.sources,entry.recent])
+      if(row.dataset.metadata!==signature){
+        const summary=row.querySelector('summary')!,tags=el('span','memory-entry-tags'),badge=el('span','memory-badge')
+        badge.textContent=({active:'可使用',paused:'来源需要检查',pending:'待确认',disabled:'已停用',review:'待复核',obsolete:'已过时',disputed:'有争议',deferred:'等待可用空间'})[entry.status];badge.dataset.status=entry.status
+        tags.append(badge,paragraph('近期工作背景','memory-entry-category'))
+        const copy=el('span','memory-entry-excerpt');copy.textContent=entry.recent?.sections.goal||entry.content
+        summary.replaceChildren(icon('folder-open','memory-chevron'),copy,tags)
+        const sections=row.querySelector<HTMLElement>('.memory-recent-sections')!
+        sections.replaceChildren()
+        for(const [key,label] of [['goal','目标'],['completed','已完成'],['blocked','受阻'],['next','下一步']] as const){
+          const section=el('div','memory-recent-section'),title=el('strong');title.textContent=label
+          section.append(title,paragraph(entry.recent?.sections[key]||'无','memory-source-text'));sections.append(section)
+        }
+        const metadata=row.querySelector<HTMLElement>('.memory-entry-metadata')!
+        const outcome=entry.recent?.outcome?({completed:'已完成',cancelled:'已取消',failed:'失败',limit:'达到上限'})[entry.recent.outcome]:'未知'
+        let detail=metadata.querySelector<HTMLElement>(':scope > .settings-hint')
+        if(!detail){detail=paragraph('');metadata.prepend(detail)}
+        const created=entry.recent?.createdAt,createdLabel=created&&Number.isFinite(Date.parse(created))?new Date(created).toLocaleString('zh-CN',{year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}):'未提供'
+        detail.textContent=`任务结果：${outcome} · 建立：${createdLabel} · 有效期：${created?'建立后 14 天':'未提供'}${entry.reason?' · '+memoryErrorText(entry.reason):''}`
+        let technical=metadata.querySelector<HTMLDetailsElement>(':scope > .memory-technical')
+        if(!technical){technical=el('details','memory-technical');technical.append(Object.assign(el('summary'),{textContent:'详细信息'}),paragraph(''));metadata.append(technical)}
+        technical.querySelector('p')!.textContent=`更新：${entry.updatedAt} · 版本 ${entry.version} · 任务编号：${entry.recent?.taskId||'未提供'}`
+        sources(metadata,entry.sources)
+        row.dataset.metadata=signature
+      }
+      recentList.append(row)
+    }
+    applyFilter()
+    if(focus?.isConnected&&!focus.closest<HTMLElement>('[hidden]'))focus.focus({preventScroll:true})
+  }
   function paintEntryMetadata(row: HTMLElement, entry: MemoryEntryView): void {
     const signature = JSON.stringify([entry.status, entry.reason, entry.sources, entry.updatedAt, entry.pendingTarget,entry.attribution,entry.reviewAt])
     if (row.dataset.metadata === signature) return
@@ -141,7 +197,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     summary.replaceChildren()
     const copy=el('span','memory-entry-excerpt');copy.textContent=entry.content
     const tags=el('span','memory-entry-tags'),badge=el('span','memory-badge');badge.textContent=({active:'可使用',paused:'来源需要检查',pending:'待确认',disabled:'已停用',review:'待复核',obsolete:'已过时',disputed:'有争议',deferred:'等待可用空间'})[entry.status]
-    badge.dataset.status=entry.status;tags.append(badge,paragraph(entry.layer==='core'?'长期约定':'参考知识','memory-entry-category'));summary.append(icon('folder-open','memory-chevron'),copy,tags)
+    badge.dataset.status=entry.status;tags.append(badge,paragraph(entry.layer==='core'?'长期约定':'项目事实','memory-entry-category'));summary.append(icon('folder-open','memory-chevron'),copy,tags)
     row.querySelector<HTMLElement>('.memory-entry-content')!.textContent=entry.content
     const metadata = row.querySelector<HTMLElement>('.memory-entry-metadata')!
     let detail = metadata.querySelector<HTMLElement>(':scope > .settings-hint')
@@ -163,7 +219,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     const focus = document.activeElement instanceof HTMLElement && items.contains(document.activeElement) ? document.activeElement : null
     const existing = new Map(Array.from(items.querySelectorAll<HTMLElement>('.memory-entry')).map(row => [row.dataset.memoryId!, row]))
     list.replaceChildren()
-    for(const entry of view?.entries??[]){
+    for(const entry of view?.entries.filter(e=>e.category!=='recent')??[]){
       const previous = existing.get(entry.id)
       if (previous && previous.dataset.version === String(entry.version)) { paintEntryMetadata(previous, entry); list.append(previous); continue }
       if (previous instanceof HTMLDetailsElement && previous.open) {
@@ -211,11 +267,18 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     if(!view?.jobs.length)jobs.append(paragraph('还没有整理记录。获准任务保存后，整理结果会显示在这里。'))
     const jobLabel=(job:MemoryView['jobs'][number],index:number)=>`${index===0?'最近一次整理':'整理记录 '+(index+1)} · ${({queued:'等待整理',running:'正在整理',applied:'已完成',rejected:'没有写入',interrupted:'已中断',unavailable:'暂不可用', 'handed-off':'已移交'})[job.outcome]}${job.reason?` · ${memoryErrorText(job.reason)}`:''}`
     for(const [index,job] of [...(view?.jobs??[])].reverse().entries()){
-      const signature=JSON.stringify([job,view?.config,view?.recipient]),previous=existing.get(job.taskId)
+      const signature=JSON.stringify([job,view?.config,view?.recipient,job.entryIds?.map(id=>view?.entries.find(e=>e.id===id)?.category??null)]),previous=existing.get(job.taskId)
       if(previous?.dataset.signature===signature){previous.querySelector('.memory-job-result')!.textContent=jobLabel(job,index);jobs.append(previous);continue}
       const row=el('div','memory-job');row.dataset.taskId=job.taskId;row.dataset.signature=signature
       row.append(paragraph(jobLabel(job,index),'settings-hint memory-job-result'));const detail=el('details','memory-technical');detail.append(Object.assign(el('summary'),{textContent:'任务详情'}),paragraph(`任务编号：${job.taskId}`));row.append(detail);const request={taskId:job.taskId,materialVersion:job.materialVersion!}
-      if(job.outcome==='applied')row.append(paragraph(`本场新增或更新 ${job.entryIds?.length??0} 条；可在上方查看、编辑或删除并遗忘。`))
+      if(job.outcome==='applied'&&!job.entryIds)row.append(paragraph('本场已完成；写入明细未提供。'))
+      else if(job.outcome==='applied'){
+        const matched=(job.entryIds??[]).map(id=>view?.entries.find(e=>e.id===id))
+        if(matched.every(Boolean)){
+          const recent=matched.filter(e=>e?.category==='recent').length,long=matched.length-recent
+          row.append(paragraph(`更新近期背景 ${recent} 块 · 新增/更新长期内容 ${long} 条；可在上方查看或删除并遗忘。`))
+        }else row.append(paragraph(`本场写入 ${job.entryIds?.length??0} 项；部分条目当前不可查看。`))
+      }
       if(previous?.querySelector('.memory-preview'))row.append(paragraph('任务材料、状态或整理配置已变化；原预览已失效，请重新预览。'))
       if(job.undoable)row.append(button('撤销本场变更…',()=>void preview(row,()=>handlers.maintenance({action:'undo',taskId:job.taskId,materialVersion:job.materialVersion!,revision:view!.revision,objectVersion:view!.objectVersion}))))
       if(job.retryable)row.append(button('重新整理…',()=>void preview(row,()=>handlers.retry(request))))
@@ -260,7 +323,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     const sending=el('details','memory-technical');sending.append(Object.assign(el('summary'),{textContent:'会发送哪些内容'}),paragraph('只发送本场获准的口令、必要结果、实际使用的来源片段和相关记忆；不发送思维链、全库内容或完整历史。记忆不会扩大任务的笔记读取范围。'));modelPanel.append(sending)
     updateReceiver=(value:MemoryView)=>{receiver.textContent=value.recipient?`实际整理模型：${value.recipient.modelId} · ${value.recipient.host}`:'整理模型尚未选择或不可用。自动整理暂停；已有可使用的记忆仍可参考，不会改用其他模型。'}
     const modelGrid=el('div','memory-model-grid');modelGrid.append(device,vault);modelPanel.querySelector('summary')!.after(modelGrid)
-    modelPanel.append(paragraph('长期约定：长期适用的要求，通常自动带入任务。参考知识：项目事实或结论，相关时自动参考。'))
+    modelPanel.append(paragraph('长期约定：长期适用的要求，通常自动带入任务。项目事实：已确认的项目情况，相关时自动参考。近期工作背景：有期限的任务进展。'))
     accept(view)
   }).catch(()=>{if(current())showError('MEMORY_UNAVAILABLE')})
   const changed = (event: Event): void => {

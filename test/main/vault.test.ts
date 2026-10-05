@@ -10,7 +10,7 @@ import { modelTierFor } from '../../src/main/permissions.ts'
 import { VaultSession } from '../../src/main/vault.ts'
 import { markPrompt,upsertAiAnswer } from '../../src/main/host-source.ts'
 import { VaultLifecycle } from '../../src/main/vault-lifecycle.ts'
-import { watchVault } from '../../src/main/watch.ts'
+import { vaultRootIdentity,watchVault } from '../../src/main/watch.ts'
 import * as notesFs from '../../src/main/notes-fs.ts'
 import { createFolder, createNote, listVaultTree, parseStoredVault, readNote, readNoteSnapshot, serializeStoredVault, writeNote } from '../../src/main/notes-fs.ts'
 import { isVaultImagePath, readVaultMedia, resolveInVault, sanitizeNoteName, vaultMediaPath } from '../../src/main/paths.ts'
@@ -1078,4 +1078,14 @@ it.each(['revision','object'] as const)('retirement preserves a legal legacy tar
  let reads=0,swapped=false
  vi.spyOn(fs,'readSnapshot').mockImplementation(rel=>{const result=read(rel);if(rel==='.rgent-memory'&&++reads===1){if(change==='revision')writeFileSync(file,replacement);else{writeFileSync(file+'.new',replacement);renameSync(file+'.new',file)}swapped=true}return result})
  try{await expect(app.session.memoryRetirementRetry(preview,()=>{})).rejects.toThrow('MEMORY_CONFLICT');expect(swapped).toBe(true);expect(reads).toBeGreaterThanOrEqual(2);expect(writes).not.toHaveBeenCalled();expect(await readFile(file,'utf8')).toBe(replacement)}finally{app.session.dispose()}
+})
+
+it('revokes managed derived caches only after verified legacy retirement, including attach',async()=>{
+ const userData=await mkdtemp(path.join(os.tmpdir(),'rgent-v5-retire-cache-')),root=path.join(userData,'vault');await mkdir(root)
+ const legacy=JSON.stringify({version:1,entries:[],forgotten:[],jobs:[],relocations:[]}),file=path.join(root,'.rgent-memory'),invalidate=vi.fn()
+ await writeFile(file,legacy);const session=new VaultSession(userData,vi.fn(),undefined,undefined,invalidate)
+ try{session.restoreVerified(root,vaultRootIdentity(root)!);await session.memoryMutation(()=>{});expect(invalidate).toHaveBeenCalledTimes(1)
+ await writeFile(file,legacy);const preview=await session.memoryRetirementPreview();await session.memoryRetirementRetry(preview,()=>{});expect(invalidate).toHaveBeenCalledTimes(2)
+ await writeFile(file,'unknown bytes');await expect(session.memoryRetirementPreview()).rejects.toThrow();expect(invalidate).toHaveBeenCalledTimes(2)
+ }finally{session.dispose();await rm(userData,{recursive:true,force:true})}
 })

@@ -564,7 +564,7 @@ export class AgentHost {
                   if(memorySearchCalls>=4)throw Error('MEMORY_SEARCH_LIMIT')
                   memorySearchCalls++
                   const found=await wait(memory!.search(args.query))
-                  value={items:found.map(e=>({id:e.id,version:e.version,content:e.content,scope:e.scope,semantic:e.semantic,attribution:e.attribution,updatedAt:e.updatedAt,sourceChecked:e.sourceChecked,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId}))})),complete:true}
+                  value={items:found.map(e=>({id:e.id,version:e.version,content:e.content,scope:e.scope,semantic:e.semantic,attribution:e.attribution,updatedAt:e.updatedAt,category:e.category??'long',...(e.category==='recent'?{recent:e.recent}:{}),sourceChecked:e.sourceChecked,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId}))})),complete:true}
                 }else{value = await wait(scoped!.execute(call.name, call.input, signal));successfulLibraryTool=true}
               }
               catch (error) {

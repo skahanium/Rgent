@@ -1,6 +1,10 @@
 /** Registered public memory errors. Internal details never cross this text boundary. */
 export const MEMORY_ERROR_MESSAGES = {
   "LEDGER_REGISTRY_INVALID": "材料登记无法核验，清空和推进学习进度已停止；已有笔记和记忆保留，请检查笔记库诊断或高级维护。",
+  "MEMORY_OUTPUT_REFERENCE_INVALID": "模型引用了本次未提供的材料，相关内容没有写入；独立且通过检查的结果可保留，请查看整理记录。",
+  "MEMORY_SERVICE_FAILED": "整理模型的连接或服务请求失败，本次没有自动重试；回答与已有记忆保留，请检查连接后重试。",
+  "MEMORY_OUTPUT_EMPTY": "模型没有返回整理内容，本次未写入；回答与已有记忆保留，请检查整理模型。",
+  "MEMORY_OUTPUT_TRUNCATED": "整理内容在输出上限处被截断，本次未写入，也没有自动补写；请缩小材料范围后重试。",
   "MEMORY_OUTPUT_INVALID": "部分整理结果无法确认，相关内容没有写入；已通过检查的独立结果可保留，请查看整理记录。",
   "MEMORY_INPUT_LIMIT": "本场材料太长，未新增记忆；回答与已有记忆保留，可缩小材料范围后重试。",
   "MEMORY_CONFIG_LIMIT": "记忆设置达到保存上限，本次设置未生效；请在高级维护中检查状态。",
@@ -39,6 +43,7 @@ export const MEMORY_ERROR_MESSAGES = {
   "MEMORY_CONTENT_LIMIT": "这条记忆或来源片段超过内容上限；请缩小范围后重试，已有内容保留。",
   "MEMORY_SOURCE_LIMIT": "记忆材料登记或已知依据数量达到核验上限，相关学习暂停；请查看记忆来源，或缩小材料范围后重新授权任务。",
   "MEMORY_SOURCE_CHANGED": "来源片段已改变或无法确认，相关记忆暂停使用；请查看原文后检查来源。",
+  "MEMORY_SOURCE_REBIND_FAILED": "笔记已保存，但记忆来源关联未能续接；相关记忆可能暂停使用，请检查记忆状态与存储诊断。",
   "MEMORY_SOURCE_UNCONFIRMED": "来源身份无法确认，相关材料已停止使用；请展开记忆查看来源。",
   "MEMORY_DEPENDENCY_CHANGED": "依赖的记忆已改变或暂停，相关记忆停止使用；请查看原依据后重新核验。",
   "MEMORY_CONFIRMATION_REQUIRED": "记忆操作未完成，已有记录保留；请刷新状态并检查来源或模型设置。",

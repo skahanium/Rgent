@@ -280,7 +280,7 @@ async function confirmSlashAuthorization(page, inspect = false) {
 
 /** Three approved notes exercise actual Host tools through the controlled model server. */
 /** Real UI + Host + hidden store + background service, using only the loopback fixture. */
-async function verifyMemoryIntegration(page, vault, shot, requests) {
+async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) {
   process.stdout.write('\n库内记忆受控完整链路\n')
   const added = await page.eval(`(async () => {
     const config = await window.rgent.modelAdd({ provider:'custom', modelId:'memory-ui-fixture', contextTokens:50000 })
@@ -293,7 +293,7 @@ async function verifyMemoryIntegration(page, vault, shot, requests) {
   await waitFor(page, `!!document.querySelector('.settings-nav')`)
   await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='记忆').click()`)
   check('第五记忆页显示默认空模型与当前库关闭', await waitFor(page, `document.querySelector('[data-memory="default-model"]')?.value==='' && document.querySelector('[data-memory="vault-enabled"]')?.checked===false`))
-  check('记忆页先显示内容，首次未配置展开模型而维护折叠',await page.eval(`(() => {const sections=[...document.querySelectorAll('[data-memory-section]')];return sections.map(e=>e.dataset.memorySection).join(',')==='status,entries,models,jobs,maintenance'&&sections[2].open&&!sections[3].open&&!sections[4].open})()`))
+  check('记忆页先显示内容，首次未配置展开模型而维护折叠',await page.eval(`(() => {const sections=[...document.querySelectorAll('[data-memory-section]')];return sections.map(e=>e.dataset.memorySection).join(',')==='status,recent,entries,models,jobs,maintenance'&&document.querySelector('[data-memory-section="models"]').open&&!document.querySelector('[data-memory-section="jobs"]').open&&!document.querySelector('[data-memory-section="maintenance"]').open})()`))
   await page.eval(`(() => {const select=document.querySelector('[data-memory="default-model"]');select.value=window.__memoryModel;select.dispatchEvent(new Event('change'));[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='界面').click();[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='记忆').click()})()`)
   check('记忆页切换设置栏目保留未保存的模型草稿',await waitFor(page,`document.querySelector('[data-memory="default-model"]')?.value===window.__memoryModel && document.querySelector('.memory-model-grid .memory-save-status[role="status"]')?.textContent==='尚未保存'`))
   await page.eval(`(() => {const select=document.querySelector('[data-memory="default-model"]');select.value='';select.dispatchEvent(new Event('change'))})()`)
@@ -341,18 +341,81 @@ async function verifyMemoryIntegration(page, vault, shot, requests) {
   check('实际回答模型收到低信任核心记忆', nextRequests.some(r=>JSON.stringify(r).includes('后续回答请用中文简短表达（记忆验收）。')))
   const sourceEdit=await page.eval(`(async()=>{const note=await window.rgent.noteRead('记忆长期.md');const changed=await window.rgent.noteWrite({relPath:'记忆长期.md',content:${JSON.stringify('无关人写段落。\n\n')}+note.content,expectedRevision:note.revision,sessionId:note.sessionId,objectVersion:note.objectVersion});const memory=await window.rgent.memoryGet({sessionId:note.sessionId});return changed.ok&&memory.ok&&memory.value.entries[0]?.status==='active'})()`)
   check('来源无关受控编辑保留有效记忆',sourceEdit)
+  // Seed only this disposable vault, from the actual saved task and its verified
+  // prompt descriptor. The production view must independently verify the result.
+  const memoryFixtureFile=path.join(vault,'.rgent-memory'),memoryFixtureRecord=parseV5Memory(readFileSync(memoryFixtureFile,'utf8'))
+  const fixtureLong=memoryFixtureRecord.entries.find(e=>e.content==='后续回答请用中文简短表达（记忆验收）。')
+  const fixtureSource=fixtureLong?.sources.find(s=>s.kind==='ledger'&&s.classification==='command'&&s.taskId)
+  if(!fixtureSource)throw Error('近期夹具缺少真实已保存账本口令来源')
+  const fixtureLedger=await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(fixtureSource.relPath)});const r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(fixtureSource.relPath)}});if(!r.ok)throw Error(r.error);return r.value.records.find(r=>r.taskId===${JSON.stringify(fixtureSource.taskId)})})()`)
+  if(fixtureLedger?.state!=='saved'||!fixtureLedger.chapter)throw Error('近期夹具没有真实已保存任务')
+  const fixtureChapter=fixtureLedger.chapter,fixtureMaterial=fixtureChapter.material??{fragments:[],truncated:true}
+  // The preceding human save replaced the native note object. Capture the current
+  // read receipt while the proven saved-prompt descriptor is still authorized.
+  const fixtureCurrentNote=await page.eval(`window.rgent.noteRead(${JSON.stringify(fixtureSource.relPath)})`)
+  for(const entry of memoryFixtureRecord.entries)for(const source of entry.sources){
+    if(source.relPath===fixtureSource.relPath&&source.kind==='ledger'&&source.taskId===fixtureLedger.taskId){source.objectVersion=fixtureCurrentNote.objectVersion;source.revision=fixtureCurrentNote.revision}
+  }
+
+  // Same material identity as WorkingMemoryService.savedMaterial and LedgerStore.contextForRecord.
+  const fixtureLedgerHash=v4Hash(('口令：\n'+fixtureChapter.prompt+'\n\n历史回答：\n'+fixtureChapter.answer).trimEnd())
+  const fixtureRecent={taskId:fixtureLedger.taskId,noteId:fixtureLedger.noteId,materialVersion:v4Hash(JSON.stringify([fixtureLedger.taskId,fixtureLedgerHash,fixtureMaterial])),createdAt:fixtureChapter.startedAt,outcome:fixtureChapter.status,sections:{goal:'按照本场明确长期口令记录中文简短表达约定',completed:'已保存本场回答和明确约定',blocked:'无',next:'继续检查后续场次使用约定的情况'},assistantDraft:true}
+  const fixtureRecentEntry={...structuredClone(fixtureLong),id:'ui-v5-recent',version:1,content:`目标：${fixtureRecent.sections.goal}\n已完成：${fixtureRecent.sections.completed}\n受阻：${fixtureRecent.sections.blocked}\n下一步：${fixtureRecent.sections.next}`,layer:'demand',semantic:'fact',category:'recent',attribution:'工作记录',reviewAt:null,status:'active',state:{source:'verified',content:'current',enabled:true,capacity:'ready'},reason:null,updatedAt:fixtureChapter.startedAt,updateBasis:{kind:'consolidation',id:fixtureLedger.taskId,version:1},recent:fixtureRecent}
+  delete fixtureRecentEntry.pendingTarget
+  memoryFixtureRecord.recent.push(fixtureRecentEntry);memoryFixtureRecord.revision++
+  const fixtureEncoded=encodeV5Memory(memoryFixtureRecord);parseV5Memory(fixtureEncoded)
+  const fixtureLedgerBefore=vaultFileSnapshot(path.join(vault,'.rgent','ledgers')),fixtureNotesBefore=namesBytes(vault)
+  const recentParking=vault+'-近期夹具停靠';mkdirSync(recentParking);writeFileSync(path.join(recentParking,'停靠.md'),'近期夹具临时停靠')
+  const chooseRecentFixtureRoot=async target=>{
+    await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;globalThis.__recentFixtureDialog??=d.showOpenDialog;d.showOpenDialog=async()=>({canceled:false,filePaths:[${JSON.stringify(target)}]});return true})()`)
+    await v4Settings(page);await page.eval(`document.querySelector('[data-vault-action="open"]').click()`)
+    if(!await waitFor(page,`!document.querySelector('.overlay-settings')&&document.querySelector('#app').inert===false`))throw Error('近期夹具切库失败')
+  }
+  try{
+    await chooseRecentFixtureRoot(recentParking)
+    writeFileSync(memoryFixtureFile,fixtureEncoded)
+    await chooseRecentFixtureRoot(vault)
+  }finally{await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showOpenDialog=globalThis.__recentFixtureDialog;true`)}
+  const fixtureChecked=await page.eval(`(async()=>{const state=await window.rgent.vaultGet();return window.rgent.memoryGet({sessionId:state.sessionId})})()`)
+  check('近期夹具绑定真实账本材料并通过生产来源核验，笔记和账本不变',fixtureChecked.ok&&fixtureChecked.value.entries.some(e=>e.id==='ui-v5-recent'&&e.category==='recent'&&e.status==='active')&&vaultFileSnapshot(path.join(vault,'.rgent','ledgers'))===fixtureLedgerBefore&&namesBytes(vault)===fixtureNotesBefore,JSON.stringify({status:fixtureChecked.value?.status,reason:fixtureChecked.value?.reason,recent:fixtureChecked.value?.entries.filter(e=>e.category==='recent').map(e=>({id:e.id,status:e.status,reason:e.reason})),notesUnchanged:namesBytes(vault)===fixtureNotesBefore,ledgersUnchanged:vaultFileSnapshot(path.join(vault,'.rgent','ledgers'))===fixtureLedgerBefore}))
+
   await page.eval(`document.querySelector('.settings-open').click()`)
   await waitFor(page, `!!document.querySelector('.settings-nav')`)
   await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='记忆').click()`)
-  await waitFor(page, `!!document.querySelector('.memory-entry')`)
-  await page.eval(`document.querySelector('.memory-entry').open=true; document.querySelector('.memory-entry [data-memory-action="edit"]').click(); document.querySelector('.memory-entry .memory-source').open=true; document.querySelector('.memory-entry').scrollIntoView({block:'start'})`)
+  await waitFor(page, `!!document.querySelector('.memory-entry:not(.memory-recent-entry)')`)
+  check('近期背景实际管理页独立展示',await waitFor(page,`document.querySelectorAll('.memory-recent-entry').length>0 && document.querySelector('[data-memory-section="recent"] h3')?.textContent==='近期工作背景'`))
+  await page.eval(`document.querySelector('.memory-recent-entry').open=true`)
+  check('近期背景四段、结果、有效期与来源可读且没有编辑入口',await page.eval(`(()=>{const row=document.querySelector('.memory-recent-entry');return row.querySelectorAll('.memory-recent-section').length===4&&['目标','已完成','受阻','下一步'].every(label=>[...row.querySelectorAll('.memory-recent-section strong')].some(n=>n.textContent===label))&&row.textContent.includes('任务结果：')&&row.textContent.includes('14 天')&&!!row.querySelector('.memory-source')&&!row.querySelector('textarea,[data-memory-action="edit"]')})()`))
+  await shot(page,'memory-recent-background')
+  const recentTheme=await page.eval(`window.rgent.themeGet()`)
+  await page.call('Emulation.setEmulatedMedia',{features:[]})
+  for(const mode of ['day','night']){
+    await page.eval(`window.rgent.themeSet('${mode}')`)
+    if(!await waitFor(page,`document.documentElement.dataset.theme==='${mode}'`))throw Error('近期样张主题未同步')
+    for(const [width,height] of [[1200,800],[800,560]]){
+      await page.call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false})
+      await page.eval(`document.querySelector('.memory-recent-entry').scrollIntoView({block:'start'});new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`)
+      check(`近期背景 ${mode} ${width}px 四段完整且不横向溢出`,await page.eval(`(()=>{const main=document.querySelector('.settings-main'),row=document.querySelector('.memory-recent-entry');return main.scrollWidth<=main.clientWidth+1&&row.scrollWidth<=row.clientWidth+1&&row.querySelectorAll('.memory-recent-section').length===4&&row.querySelectorAll('.memory-recent-section .memory-source-text').length===4})()`))
+      await shot(page,`memory-recent-background-${mode}-${width}`)
+    }
+  }
+  await page.call('Emulation.setDeviceMetricsOverride',{width:1200,height:800,deviceScaleFactor:1,mobile:false})
+  await page.eval(`window.rgent.themeSet(${JSON.stringify(recentTheme)})`)
+
+  await page.eval(`[...document.querySelector('.memory-recent-entry').querySelectorAll('button')].find(b=>b.textContent==='删除并遗忘').click()`)
+  check('近期遗忘预览明确保留原文且取消保留背景',await waitFor(page,`document.querySelector('.memory-recent-entry .memory-forget-warning')?.textContent.includes('原笔记与账本不变')`))
+  await shot(page,'memory-recent-forget-preview')
+  await page.eval(`document.querySelector('.memory-recent-entry [data-memory-action="cancel-forget"]').click()`)
+  check('取消近期遗忘回到按钮且未删除背景',await page.eval(`!!document.querySelector('.memory-recent-entry')&&!document.querySelector('.memory-recent-entry .memory-forget-warning')&&document.activeElement?.textContent==='删除并遗忘'`))
+
+  await page.eval(`document.querySelector('.memory-entry:not(.memory-recent-entry)').open=true; document.querySelector('.memory-entry:not(.memory-recent-entry) [data-memory-action="edit"]').click(); document.querySelector('.memory-entry:not(.memory-recent-entry) .memory-source').open=true; document.querySelector('.memory-entry:not(.memory-recent-entry)').scrollIntoView({block:'start'})`)
   await shot(page,'memory-entry-and-source')
   check('配置有效后模型与维护默认收起，查看条目才进入编辑',await page.eval(`!document.querySelector('[data-memory-section="models"]').open&&!document.querySelector('[data-memory-section="maintenance"]').open&&!document.querySelector('.memory-editor').hidden`))
   const longName='记忆样张-很长的项目会议笔记名称与资料来源.md'
   writeFileSync(path.join(vault,longName),'项目样张采用中文说明，长期约定用于持续要求，参考知识在相关任务中使用。')
   const sampleIds=await page.eval(`(async()=>{const note=await window.rgent.noteRead(${JSON.stringify(longName)});const ids=[];for(const [content,layer] of [['虚构项目的跨篇参考资料：长名称和长适用范围需要完整可读，列表摘要保持紧凑，不覆盖正文。','demand'],['虚构项目长期约定：所有展示样张使用清晰的中文术语。','core']]){const p=await window.rgent.memoryManualPreview({sessionId:note.sessionId,relPath:${JSON.stringify(longName)},revision:note.revision,objectVersion:note.objectVersion,kind:'body',start:0,end:note.content.length});if(!p.ok)throw Error(p.error);const r=await window.rgent.memoryPreviewCommit({sessionId:note.sessionId,id:p.value.id,content,layer,scope:'虚构项目 / 长名称资料 / 仅用于记忆页排布窗口检查'});if(!r.ok)throw Error(r.error);ids.push(r.value.entries.find(e=>e.content===content).id)}return ids})()`)
   await page.eval(`document.querySelector('[aria-label="刷新状态"]').click()`)
-  await waitFor(page,`document.querySelectorAll('.memory-entry').length===3`)
+  await waitFor(page,`document.querySelectorAll('.memory-entry:not(.memory-recent-entry)').length===3`)
   const memoryTheme = await page.eval(`window.rgent.themeGet()`)
   // Earlier layout checks emulate light; nativeTheme can only drive matchMedia after clearing that override.
   await page.call('Emulation.setEmulatedMedia', { features: [] })
@@ -362,42 +425,42 @@ async function verifyMemoryIntegration(page, vault, shot, requests) {
     await page.eval(`window.rgent.themeSet('${mode}')`)
     const themeApplied = await waitFor(page, `document.documentElement.dataset.theme==='${mode}' && matchMedia('(prefers-color-scheme: dark)').matches===${mode==='night'}`)
     const textareaStyle = await page.eval(`(() => {
-      const textarea=document.querySelector('.memory-entry textarea'),reference=document.createElement('textarea'),field=document.createElement('div');field.className='settings-field-block';field.style.cssText='position:absolute;visibility:hidden';field.append(reference);document.querySelector('.settings-form').append(field)
+      const textarea=document.querySelector('.memory-entry:not(.memory-recent-entry) textarea'),reference=document.createElement('textarea'),field=document.createElement('div');field.className='settings-field-block';field.style.cssText='position:absolute;visibility:hidden';field.append(reference);document.querySelector('.settings-form').append(field)
       const current=getComputedStyle(textarea),standard=getComputedStyle(reference),properties=['backgroundColor','color','borderColor','borderRadius','paddingTop','paddingRight','paddingBottom','paddingLeft','fontFamily']
       const themed=properties.every(property=>current[property]===standard[property])&&current.paddingTop==='8px'&&current.paddingLeft==='10px'&&current.borderTopWidth==='1px';field.remove()
-      return document.documentElement.dataset.theme==='${mode}'&&themed&&document.querySelector('.memory-entry').open&&document.querySelector('.memory-entry .memory-source').open
+      return document.documentElement.dataset.theme==='${mode}'&&themed&&document.querySelector('.memory-entry:not(.memory-recent-entry)').open&&document.querySelector('.memory-entry:not(.memory-recent-entry) .memory-source').open
     })()`)
     check(`记忆条目文本框${mode==='day'?'日间':'夜间'}复用设置主题及边框留白`,themeApplied&&textareaStyle)
-    await page.eval(`document.querySelector('.memory-entry').scrollIntoView({block:'start'})`)
+    await page.eval(`document.querySelector('.memory-entry:not(.memory-recent-entry)').scrollIntoView({block:'start'})`)
     await shot(page,`memory-entry-and-source-${mode}`)
     for (const [width, height] of [[1200, 800], [800, 560], [1600, 900]]) {
       await page.call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
       await page.eval(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`)
-      await page.eval(`document.querySelector('.memory-entry').scrollIntoView({block:'start'})`)
+      await page.eval(`document.querySelector('.memory-entry:not(.memory-recent-entry)').scrollIntoView({block:'start'})`)
       await shot(page,`memory-entry-and-source-${mode}-${width}`)
-      check(`记忆页 ${mode} ${width}px 的模型分栏、文字与焦点边界`,await page.eval(`(() => {const main=document.querySelector('.settings-main'),grid=document.querySelector('.memory-model-grid'),page=document.querySelector('.memory-page'),editor=document.querySelector('.memory-entry textarea');editor.focus();const modelPanel=document.querySelector('[data-memory-section="models"]');modelPanel.open=true;const cols=getComputedStyle(grid).gridTemplateColumns.split(' ').length;modelPanel.open=false;editor.focus();const st=getComputedStyle(editor),probe=document.createElement('span');probe.style.color='var(--focus-ring)';document.body.append(probe);const neutral=getComputedStyle(probe).color;probe.remove();return main.scrollWidth<=main.clientWidth+1&&cols===(page.clientWidth>=600?2:1)&&st.outlineWidth==='2px'&&st.outlineColor===neutral})()`))
-      await page.eval(`document.querySelector('.memory-entry [data-memory-action="cancel-edit"]').click();document.querySelectorAll('.memory-entry').forEach(e=>e.open=false);document.querySelector('.settings-main').scrollTop=0`)
+      check(`记忆页 ${mode} ${width}px 的模型分栏、文字与焦点边界`,await page.eval(`(() => {const main=document.querySelector('.settings-main'),grid=document.querySelector('.memory-model-grid'),page=document.querySelector('.memory-page'),editor=document.querySelector('.memory-entry:not(.memory-recent-entry) textarea');editor.focus();const modelPanel=document.querySelector('[data-memory-section="models"]');modelPanel.open=true;const cols=getComputedStyle(grid).gridTemplateColumns.split(' ').length;modelPanel.open=false;editor.focus();const st=getComputedStyle(editor),probe=document.createElement('span');probe.style.color='var(--focus-ring)';document.body.append(probe);const neutral=getComputedStyle(probe).color;probe.remove();return main.scrollWidth<=main.clientWidth+1&&cols===(page.clientWidth>=600?2:1)&&st.outlineWidth==='2px'&&st.outlineColor===neutral})()`))
+      await page.eval(`document.querySelector('.memory-entry:not(.memory-recent-entry) [data-memory-action="cancel-edit"]').click();document.querySelectorAll('.memory-entry:not(.memory-recent-entry)').forEach(e=>e.open=false);document.querySelector('.settings-main').scrollTop=0`)
       await shot(page,`memory-list-${mode}-${width}`)
       await page.eval(`document.querySelector('[data-memory-section="models"]').open=true;document.querySelector('[data-memory-section="models"]').scrollIntoView({block:'start'})`)
       await shot(page,`memory-models-${mode}-${width}`)
       await page.eval(`document.querySelector('[data-memory-section="models"]').open=false;document.querySelector('[data-memory-section="maintenance"]').open=true;[...document.querySelector('.memory-maintenance').querySelectorAll('button')].find(b=>b.textContent==='清空本库记忆…').click()`)
       await waitFor(page,`!!document.querySelector('.memory-maintenance .memory-preview')`)
-      check(`清空预览 ${mode} ${width}px 明确影响并未立即执行`,await page.eval(`document.querySelector('.memory-maintenance .memory-preview').textContent.includes('原笔记与账本保留')&&[...document.querySelector('.memory-maintenance .memory-preview').querySelectorAll('button')].some(b=>b.textContent==='确认清空记忆')&&document.querySelectorAll('.memory-entry').length===3`))
+      check(`清空预览 ${mode} ${width}px 明确影响并未立即执行`,await page.eval(`document.querySelector('.memory-maintenance .memory-preview').textContent.includes('原笔记与账本保留')&&[...document.querySelector('.memory-maintenance .memory-preview').querySelectorAll('button')].some(b=>b.textContent==='确认清空记忆')&&document.querySelectorAll('.memory-entry:not(.memory-recent-entry)').length===3`))
       await page.eval(`document.querySelector('.memory-maintenance .memory-preview').scrollIntoView({block:'start'})`)
       await shot(page,`memory-maintenance-${mode}-${width}`)
-      await page.eval(`[...document.querySelector('.memory-maintenance .memory-preview').querySelectorAll('button')].find(b=>b.textContent==='取消').click();document.querySelector('[data-memory-section="maintenance"]').open=false;document.querySelector('.memory-entry').open=true;document.querySelector('.memory-entry [data-memory-action="edit"]').click()`)
+      await page.eval(`[...document.querySelector('.memory-maintenance .memory-preview').querySelectorAll('button')].find(b=>b.textContent==='取消').click();document.querySelector('[data-memory-section="maintenance"]').open=false;document.querySelector('.memory-entry:not(.memory-recent-entry)').open=true;document.querySelector('.memory-entry:not(.memory-recent-entry) [data-memory-action="edit"]').click()`)
 
     }
     await page.call('Emulation.setDeviceMetricsOverride', { width:1200, height:800, deviceScaleFactor:1, mobile:false })
   }
   await page.eval(`(async()=>{const state=await window.rgent.vaultGet();for(const id of ${JSON.stringify(sampleIds)}){const v=await window.rgent.memoryGet({sessionId:state.sessionId});const e=v.value.entries.find(e=>e.id===id);const r=await window.rgent.memoryItemForget({sessionId:state.sessionId,id,version:e.version,revision:v.value.revision,objectVersion:v.value.objectVersion});if(!r.ok)throw Error(r.error)}document.querySelector('[aria-label="刷新状态"]').click()})()`)
-  await waitFor(page,`document.querySelectorAll('.memory-entry').length===1`)
+  await waitFor(page,`document.querySelectorAll('.memory-entry:not(.memory-recent-entry)').length===1`)
   await page.eval(`window.rgent.themeSet(${JSON.stringify(memoryTheme)})`)
   check('条目日夜样张后恢复原主题',await waitFor(page,`document.documentElement.dataset.theme===${JSON.stringify(memoryRenderedTheme)}`))
-  await page.eval(`(() => {const entry=document.querySelector('.memory-entry');entry.open=true;[...entry.querySelectorAll('button')].find(b=>b.textContent==='删除并遗忘').click()})()`)
+  await page.eval(`(() => {const entry=document.querySelector('.memory-entry:not(.memory-recent-entry)');entry.open=true;[...entry.querySelectorAll('button')].find(b=>b.textContent==='删除并遗忘').click()})()`)
   check('遗忘预先说明清除待整理重试材料且原文不变',await waitFor(page, `document.querySelector('.memory-forget-warning')?.textContent.includes('原笔记与账本不变')`))
-  await page.eval(`[...document.querySelectorAll('.memory-entry button')].find(b=>b.textContent==='确认删除并遗忘').click()`)
-  check('遗忘回执后条目正文立即从记忆页移除',await waitFor(page, `document.querySelectorAll('.memory-entry').length===0`))
+  await page.eval(`[...document.querySelectorAll('.memory-entry:not(.memory-recent-entry) button')].find(b=>b.textContent==='确认删除并遗忘').click()`)
+  check('遗忘回执后条目正文立即从记忆页移除',await waitFor(page, `document.querySelectorAll('.memory-entry:not(.memory-recent-entry)').length===0`))
   await shot(page,'memory-forgotten-receipt')
   await page.key('Escape','Escape',0,27)
   await page.eval(`document.querySelector('.cm-content').focus()`)
@@ -522,6 +585,7 @@ const longNote = (() => {
 const visualOnly = process.env.RGENT_UI_VISUAL_ONLY === '1'
 const imeOnly = process.env.RGENT_UI_IME_ONLY === '1'
 const multiVaultOnly = process.env.RGENT_UI_MULTI_VAULT_ONLY === '1'
+const memoryOnly = process.env.RGENT_UI_MEMORY_ONLY === '1'
 const v4Only = process.env.RGENT_UI_V4_ONLY === '1'
 
 /** Browser IME commands exercise the real input bridge, rather than inserting final Chinese text. */
@@ -1774,10 +1838,20 @@ async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
   return copy
 }
 
-function encodeV4Memory(record) {
-  const meta={...record,entries:record.entries.map(({content,...entry})=>entry)}
-  return `<!-- rgent:memory:v2 data="${Buffer.from(JSON.stringify(meta)).toString('base64url')}" -->\n`+record.entries.map(e=>`<!-- rgent:item:v2 id="${e.id}" bytes="${Buffer.byteLength(e.content)}" -->\n${e.content}\n<!-- rgent:end:v2 -->\n`).join('')
+// Compile only the production codec definitions, without the store/FS implementation.
+// This keeps disposable fixtures identical to the current format on Node >=20.
+let memoryFixtureCodec
+function workingMemoryFixtureCodec() {
+  if (memoryFixtureCodec) return memoryFixtureCodec
+  const source=readFileSync(path.join(root,'src/main/working-memory-store.ts'),'utf8')
+  const definitions=source.slice(0,source.indexOf('export class WorkingMemoryStore')).replace(/^import .*$/gm,'').replace(/\bexport /g,'')
+  const esbuild=createRequire(require.resolve('vite'))('esbuild'),code=esbuild.transformSync(definitions,{loader:'ts',target:'es2022',format:'cjs'}).code
+  memoryFixtureCodec=new Function('Buffer','createHash','randomUUID',code+';return {encode:encodeWorkingMemory,parse:parseWorkingMemory}') (Buffer,createHash,()=> 'fixture-identity')
+  return memoryFixtureCodec
 }
+function encodeV5Memory(record) { return workingMemoryFixtureCodec().encode(record) }
+function parseV5Memory(raw) { return workingMemoryFixtureCodec().parse(raw) }
+
 const v4Hash = text => createHash('sha256').update(text).digest('hex')
 async function v4Task(page, vault, relPath, prompt, modelRecordId, references = []) {
   writeFileSync(path.join(vault,relPath),'/'+prompt+'\n')
@@ -1914,16 +1988,16 @@ async function verifyV4FullMemory(page,nativePage,vault,shot) {
   }
   await switchRoot(park)
   try{
-    const memoryFile=path.join(vault,'.rgent-memory'),raw=readFileSync(memoryFile,'utf8'),meta=JSON.parse(Buffer.from(/^<!-- rgent:memory:v2 data="([A-Za-z0-9_-]+)"/.exec(raw)[1],'base64url').toString()),sourceEntry=meta.entries.find(e=>e.sources.some(s=>s.relPath==='备份来源1.md'))??meta.entries[0]
+    const memoryFile=path.join(vault,'.rgent-memory'),raw=readFileSync(memoryFile,'utf8'),meta=parseV5Memory(raw),sourceEntry=meta.entries.find(e=>e.sources.some(s=>s.relPath==='备份来源1.md'))??meta.entries[0]
     if(!sourceEntry)throw Error('缺少原生满容量来源夹具')
     // A legal persisted capacity fixture assembled from an actually authorized source.
     // Reload the vault to let the production parser/reconciler establish its own state.
-    meta.entries=Array.from({length:1000},(_,i)=>({...structuredClone(sourceEntry),id:'v4-full-'+i,version:1,content:'满容量需遗忘条目'+i,layer:'demand',status:'paused',reason:'MEMORY_SOURCE_CHANGED',...(i?{pendingTarget:{id:'v4-full-0',version:1}}:{})}))
-    meta.jobs=[];meta.forgotten=[];delete meta.entries[0].pendingTarget
+    meta.entries=Array.from({length:1000},(_,i)=>({...structuredClone(sourceEntry),id:'v4-full-'+i,version:1,content:'满容量需遗忘条目'+i,layer:'demand',category:'long',state:{source:'revoked',content:'current',enabled:true,capacity:'ready'},status:'paused',reason:'MEMORY_SOURCE_CHANGED',...(i?{pendingTarget:{id:'v4-full-0',version:1}}:{})}))
+    meta.recent=[];meta.jobs=[];meta.forgotten=[];delete meta.entries[0].pendingTarget
     let low=0,high=1200
-    while(low<high){const mid=Math.ceil((low+high)/2);for(const e of meta.entries)e.content='满容量需遗忘条目'+e.id+'x'.repeat(mid);if(Buffer.byteLength(encodeV4Memory(meta))<=2*1024*1024-1024)low=mid;else high=mid-1}
+    while(low<high){const mid=Math.ceil((low+high)/2);for(const e of meta.entries)e.content='满容量需遗忘条目'+e.id+'x'.repeat(mid);if(Buffer.byteLength(encodeV5Memory(meta))<=2*1024*1024-1024)low=mid;else high=mid-1}
     for(const e of meta.entries)e.content='满容量需遗忘条目'+e.id+'x'.repeat(low)
-    const full=encodeV4Memory(meta);if(Buffer.byteLength(full)<=2*1024*1024-256*1024||Buffer.byteLength(full)>2*1024*1024)throw Error('合法满容量夹具未满足边界')
+    const full=encodeV5Memory(meta);if(Buffer.byteLength(full)<=2*1024*1024-256*1024||Buffer.byteLength(full)>2*1024*1024)throw Error('合法满容量夹具未满足边界')
     writeFileSync(memoryFile,full)
     const beforeNotes=namesBytes(vault),beforeRegistry=readFileSync(path.join(vault,'.rgent','registry.json')),beforeLedgers=vaultFileSnapshot(path.join(vault,'.rgent','ledgers'))
     // Only .rgent-memory/jobs may change here; every owner/task/legacy byte and native identity is protected.
@@ -1934,7 +2008,7 @@ async function verifyV4FullMemory(page,nativePage,vault,shot) {
     await v4Shots(page,shot,'full-memory-forget','.settings-main')
     await v4Click(page,'.memory-entry button','确认删除并遗忘')
     check('真实确认后 pendingTarget 千条闭包全移除、原文账本不变',await waitFor(page,`document.querySelectorAll('.memory-entry').length===0`)&&namesBytes(vault)===beforeNotes&&readFileSync(path.join(vault,'.rgent','registry.json')).equals(beforeRegistry)&&vaultFileSnapshot(path.join(vault,'.rgent','ledgers'))===beforeLedgers)
-    const after=readFileSync(memoryFile,'utf8'),data=JSON.parse(Buffer.from(/^<!-- rgent:memory:v2 data="([A-Za-z0-9_-]+)"/.exec(after)[1],'base64url').toString())
+    const after=readFileSync(memoryFile,'utf8'),data=parseV5Memory(after)
     check('满容量遗忘不保留已删除正文、约束阻止闭包重学',!after.includes('满容量需遗忘条目')&&data.entries.length===0&&data.forgotten.some(f=>f.entryIds.length===1000)&&data.forgotten.some(f=>sourceEntry.sources.every(s=>f.materialIds.includes(s.materialId))))
     check('遗忘后质量警示和人的开关保持可见',await page.eval(`document.querySelector('.memory-quality-status').textContent.includes('尚未通过验证') && !!document.querySelector('[data-memory="vault-enabled"]')`))
     await v4CloseSettings(page)
@@ -2375,6 +2449,77 @@ async function verifyModelFeedback(page, nativePage, shot) {
   await openModel()
 }
 
+function createControlledHostServer(memoryRequests,toolLoopRequests) {
+  const server = createHttpServer((request, response) => {
+      let body = ''
+      request.on('data', (chunk) => { body += String(chunk) })
+      request.on('end', () => {
+        const decoded = JSON.parse(body)
+        if (decoded.model === 'memory-ui-fixture') {
+          memoryRequests.push(decoded)
+          const material = JSON.parse(decoded.messages.find(m=>m.role==='user').content)
+          const source = (material.sources??[]).find(s=>s.classification==='command' && s.text.includes('长期记住'))
+          const proposals = source ? [{action:'add',content:'后续回答请用中文简短表达（记忆验收）。',layer:'core',scope:'当前库',semantic:'standing',attribution:'本场人的明确长期口令',sourceIds:[source.id],reviewAt:null}] : []
+          response.writeHead(200, {'content-type':'text/event-stream'})
+          response.write(`data: ${JSON.stringify({id:'memory-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{content:JSON.stringify({proposals})},finish_reason:null}]})}\n\n`)
+          response.write(`data: ${JSON.stringify({id:'memory-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`)
+          response.end('data: [DONE]\n\n'); return
+        }
+        if (body.includes('记忆后续')) {
+          memoryRequests.push(decoded)
+          const answer = body.includes('后续回答请用中文简短表达（记忆验收）。') ? '记忆验收旧回答：后续回答请用中文简短表达（记忆验收）。' : '受控遗忘核验回答。'
+          response.writeHead(200, {'content-type':'text/event-stream'})
+          response.write(`data: ${JSON.stringify({id:'memory-use-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{content:answer},finish_reason:null}]})}\n\n`)
+          response.write(`data: ${JSON.stringify({id:'memory-use-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`)
+          response.end('data: [DONE]\n\n'); return
+        }
+        if (body.includes('工具查证') && decoded.tools?.length === 2) {
+          toolLoopRequests.push(decoded)
+          response.writeHead(200, { 'content-type': 'text/event-stream' })
+          const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'tools-ui', object: 'chat.completion.chunk', created: 1, model: 'test', choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
+          const results = decoded.messages.filter(message => message.role === 'tool')
+          if (!results.length) {
+            emit({ tool_calls: [{ index: 0, id: 'ui-search', type: 'function', function: { name: 'search_library', arguments: '{"query":"工具' } }] })
+            emit({ tool_calls: [{ index: 0, function: { arguments: '线索"}' } }] }); emit({}, 'tool_calls'); response.end('data: [DONE]\n\n')
+          } else if (results.length === 1) {
+            const result = JSON.parse(results[0].content)
+            const sourceId = result.items.find(item => item.relPath === '工具参考.md')?.sourceId
+            emit({ tool_calls: [{ index: 0, id: 'ui-read', type: 'function', function: { name: 'read_library', arguments: JSON.stringify({ sourceId }) } }] }); emit({}, 'tool_calls'); response.end('data: [DONE]\n\n')
+          } else {
+            const timer = setTimeout(() => { if (response.destroyed) return; emit({ reasoning_content: '隐藏工具推理' }); emit({ content: '工具查证完成：已核对参考原文。' }); emit({}, 'stop'); response.end('data: [DONE]\n\n') }, 1200)
+            response.on('close', () => clearTimeout(timer))
+          }
+          return
+        }
+        response.writeHead(200, { 'content-type': 'text/event-stream' })
+        response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"受控回答第一句。"},"finish_reason":null}]}\n\n')
+        const timer = setTimeout(() => {
+          if (response.destroyed) return
+          response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"第二句。"},"finish_reason":null}]}\n\n')
+          response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n')
+          response.end('data: [DONE]\n\n')
+        }, body.includes('多任务') ? 10000 : body.includes('快速完成') ? 0 : 1200)
+        response.on('close', () => clearTimeout(timer))
+      })
+    })
+  return server
+}
+
+async function configureControlledHost(page,hostBaseURL) {
+  return page.eval(`(async () => {
+      const added = await window.rgent.modelProviderSave({ provider: 'custom', baseURL: '${hostBaseURL}', modelId: 'test', contextTokens: 20000, newKey: 'ui-fixture-secret' })
+      if (!added.ok) return false
+      const provider = added.config.providers.find((item) => item.provider === 'custom')
+      const model = added.config.models.find((item) => item.provider === 'custom')
+      if (!provider?.hasKey || !model) return false
+      if (added.config.defaultModelId !== null) return false
+      const second = await window.rgent.modelAdd({ provider: 'custom', modelId: 'test-override', contextTokens: 20000 })
+      if (!second.ok) return false
+      const picked = await window.rgent.modelDefaultSet({ modelId: model.id })
+      return picked.ok && picked.config.defaultModelId === model.id
+    })()`)
+}
+
 async function main() {
   const port = await availablePort()
   let inspectorPort = port
@@ -2535,6 +2680,21 @@ async function main() {
       page.restoreNativeWindow = () => nativePage.eval(`globalThis.__rgentFocusProbe?.destroy(); globalThis.__rgentTestWindow.show(); true`)
     }
 
+    if(memoryOnly){
+      const memoryRequests=[]
+      hostServer=createControlledHostServer(memoryRequests,[])
+      await new Promise(resolve=>hostServer.listen(0,'127.0.0.1',resolve))
+      const configured=await configureControlledHost(page,`http://127.0.0.1:${hostServer.address().port}/v1`)
+      check('记忆专项初始化受控供应商与设备默认模型',configured===true)
+      if(!configured)throw Error('记忆专项受控模型初始化失败')
+      await page.eval(`(()=>{const toggle=document.querySelector('.tree-toggle');if(toggle.getAttribute('aria-expanded')!=='true')toggle.click()})()`)
+      await waitFor(page,`document.querySelectorAll('.tree-row').length>0`)
+      try{await verifyMemoryIntegration(page,vault,shot,memoryRequests,nativePage)}catch(error){stageFailed('库内记忆专项',error)}
+      check('记忆专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode=failures===0?0:1
+      return
+    }
     if(v4Only){
       await verifyV4ReadOnly(page,nativePage,vault,shot)
       await verifyLedgerRecoveryDrafts(page,nativePage,vault)
@@ -3179,73 +3339,11 @@ async function main() {
     catch (error) { stageFailed('中文组合输入', error) }
     process.stdout.write('\nHost 最小环\n')
     try {
-    hostServer = createHttpServer((request, response) => {
-      let body = ''
-      request.on('data', (chunk) => { body += String(chunk) })
-      request.on('end', () => {
-        const decoded = JSON.parse(body)
-        if (decoded.model === 'memory-ui-fixture') {
-          memoryRequests.push(decoded)
-          const material = JSON.parse(decoded.messages.find(m=>m.role==='user').content)
-          const source = (material.sources??[]).find(s=>s.classification==='command' && s.text.includes('长期记住'))
-          const proposals = source ? [{action:'add',content:'后续回答请用中文简短表达（记忆验收）。',layer:'core',scope:'当前库',semantic:'standing',attribution:'本场人的明确长期口令',sourceIds:[source.id],reviewAt:null}] : []
-          response.writeHead(200, {'content-type':'text/event-stream'})
-          response.write(`data: ${JSON.stringify({id:'memory-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{content:JSON.stringify({proposals})},finish_reason:null}]})}\n\n`)
-          response.write(`data: ${JSON.stringify({id:'memory-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`)
-          response.end('data: [DONE]\n\n'); return
-        }
-        if (body.includes('记忆后续')) {
-          memoryRequests.push(decoded)
-          const answer = body.includes('后续回答请用中文简短表达（记忆验收）。') ? '记忆验收旧回答：后续回答请用中文简短表达（记忆验收）。' : '受控遗忘核验回答。'
-          response.writeHead(200, {'content-type':'text/event-stream'})
-          response.write(`data: ${JSON.stringify({id:'memory-use-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{content:answer},finish_reason:null}]})}\n\n`)
-          response.write(`data: ${JSON.stringify({id:'memory-use-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`)
-          response.end('data: [DONE]\n\n'); return
-        }
-        if (body.includes('工具查证') && decoded.tools?.length === 2) {
-          toolLoopRequests.push(decoded)
-          response.writeHead(200, { 'content-type': 'text/event-stream' })
-          const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'tools-ui', object: 'chat.completion.chunk', created: 1, model: 'test', choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
-          const results = decoded.messages.filter(message => message.role === 'tool')
-          if (!results.length) {
-            emit({ tool_calls: [{ index: 0, id: 'ui-search', type: 'function', function: { name: 'search_library', arguments: '{"query":"工具' } }] })
-            emit({ tool_calls: [{ index: 0, function: { arguments: '线索"}' } }] }); emit({}, 'tool_calls'); response.end('data: [DONE]\n\n')
-          } else if (results.length === 1) {
-            const result = JSON.parse(results[0].content)
-            const sourceId = result.items.find(item => item.relPath === '工具参考.md')?.sourceId
-            emit({ tool_calls: [{ index: 0, id: 'ui-read', type: 'function', function: { name: 'read_library', arguments: JSON.stringify({ sourceId }) } }] }); emit({}, 'tool_calls'); response.end('data: [DONE]\n\n')
-          } else {
-            const timer = setTimeout(() => { if (response.destroyed) return; emit({ reasoning_content: '隐藏工具推理' }); emit({ content: '工具查证完成：已核对参考原文。' }); emit({}, 'stop'); response.end('data: [DONE]\n\n') }, 1200)
-            response.on('close', () => clearTimeout(timer))
-          }
-          return
-        }
-        response.writeHead(200, { 'content-type': 'text/event-stream' })
-        response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"受控回答第一句。"},"finish_reason":null}]}\n\n')
-        const timer = setTimeout(() => {
-          if (response.destroyed) return
-          response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"第二句。"},"finish_reason":null}]}\n\n')
-          response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n')
-          response.end('data: [DONE]\n\n')
-        }, body.includes('多任务') ? 10000 : body.includes('快速完成') ? 0 : 1200)
-        response.on('close', () => clearTimeout(timer))
-      })
-    })
+    hostServer = createControlledHostServer(memoryRequests,toolLoopRequests)
     await new Promise((resolve) => hostServer.listen(0, '127.0.0.1', resolve))
     const hostAddress = hostServer.address()
     const hostBaseURL = `http://127.0.0.1:${hostAddress.port}/v1`
-    const configured = await page.eval(`(async () => {
-      const added = await window.rgent.modelProviderSave({ provider: 'custom', baseURL: '${hostBaseURL}', modelId: 'test', contextTokens: 20000, newKey: 'ui-fixture-secret' })
-      if (!added.ok) return false
-      const provider = added.config.providers.find((item) => item.provider === 'custom')
-      const model = added.config.models.find((item) => item.provider === 'custom')
-      if (!provider?.hasKey || !model) return false
-      if (added.config.defaultModelId !== null) return false
-      const second = await window.rgent.modelAdd({ provider: 'custom', modelId: 'test-override', contextTokens: 20000 })
-      if (!second.ok) return false
-      const picked = await window.rgent.modelDefaultSet({ modelId: model.id })
-      return picked.ok && picked.config.defaultModelId === model.id
-    })()`)
+    const configured = await configureControlledHost(page,hostBaseURL)
     check('首次供应商保存不自动设默认，显式默认指向受控兼容接口', configured === true)
     await page.eval(`document.querySelector('.settings-open')?.click()`)
     await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
@@ -3350,7 +3448,7 @@ async function main() {
     })()`, 8000)
     check('快速流结束后底栏不残留运行任务', quickFinished, quickFinished ? '' : await page.eval(`(async () => JSON.stringify({ note: (await window.rgent.noteRead('Host 快速.md')).content, tasks: await window.rgent.agentTasks(), status: document.querySelector('.status-left')?.innerText }))()`))
     await verifyScopedHost(page, vault, shot, toolLoopRequests)
-    try { await verifyMemoryIntegration(page, vault, shot, memoryRequests) } catch (error) { stageFailed('库内记忆', error) }
+    try { await verifyMemoryIntegration(page, vault, shot, memoryRequests, nativePage) } catch (error) { stageFailed('库内记忆', error) }
     await verifyRawSourceLifecycle(page, vault, modifier, shot)
     writeFileSync(path.join(vault, 'Host A.md'), '')
     writeFileSync(path.join(vault, 'Host B.md'), '')

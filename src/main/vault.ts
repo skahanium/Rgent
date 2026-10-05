@@ -1,7 +1,7 @@
 import { WorkingMemoryService } from './working-memory-service.ts'
 import { bodyFingerprint } from './ledger-provenance.ts'
 import { collectNotePaths } from '../shared/vault-rel.ts'
-import {WorkingMemoryStore,applyMemoryRecovery,type MemoryRecoveryPatch,type WorkingSource,type WorkingSnapshot} from './working-memory-store.ts'
+import {WorkingMemoryStore,applyMemoryRecovery,type MemoryRecoveryPatch,type WorkingBindingPatch,type WorkingSource,type WorkingSnapshot} from './working-memory-store.ts'
 import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -32,6 +32,7 @@ export class VaultSession {
   private ledgerStore: LedgerStore | null = null
   private ledgerFailure: string | null = null
   private memoryFailure: string | null = null
+  private memoryBindingFailure: string | null = null
   private initializationFailure: string | null = null
   private lifecycle: VaultLifecycle | null = null
   private lifecycleReady: Promise<void> = Promise.resolve()
@@ -60,7 +61,8 @@ export class VaultSession {
     private userData: string,
     private emit: (channel: string, payload?: unknown) => void,
     private beforeChange: (previousRoot: string) => Promise<void> = async () => {},
-    private catalogIdentity?:(root:string,identity:string)=>string|null
+    private catalogIdentity?:(root:string,identity:string)=>string|null,
+    private afterMemoryRetirement:()=>void=()=>{}
   ) {}
 
   private stateFile(): string {
@@ -156,6 +158,7 @@ export class VaultSession {
   }
 
   memoryDiagnosis(): string | null { this.assertCall(); return this.memoryFailure }
+  memoryBindingDiagnosis(): string | null { this.assertCall(); return this.memoryBindingFailure }
 
   async memoryRetirementPreview(){
     const sessionId=this.captureSession();await this.lifecycleReady
@@ -167,7 +170,7 @@ export class VaultSession {
       const check=()=>{assertOwner();this.assertSession(binding.sessionId);this.requireStableStructure();if(this.requireUsableRoot()!==binding.root||this.rootIdentity!==binding.rootIdentity)throw Error('VAULT_CHANGED')}
       check();const target=memoryRetirementTarget(binding.root,check)
       if(target.revision!==binding.revision||target.objectVersion!==binding.objectVersion)throw Error('MEMORY_CONFLICT')
-      try{retireMemoryFile(binding.root,check,binding);check();this.memoryFailure=null}catch(error){this.memoryFailure='MEMORY_RETIREMENT_FAILED';throw error}
+      try{if(retireMemoryFile(binding.root,check,binding))this.afterMemoryRetirement();check();this.memoryFailure=null}catch(error){this.memoryFailure='MEMORY_RETIREMENT_FAILED';throw error}
     })
   }
 
@@ -359,7 +362,7 @@ export class VaultSession {
       let memoryPlan:import('./vault-lifecycle.ts').MemoryRecoveryPlan|undefined
       if(mode==='restore'&&memory?.raw){
         const service=new WorkingMemoryService(this,()=>null),patches:MemoryRecoveryPatch[]=[],sourceResults=new Map<string,{candidate:WorkingSource;valid:boolean;reason:string}>()
-        for(const entry of memory.record.entries)for(const source of entry.sources){
+        for(const entry of [...memory.record.entries,...memory.record.recent])for(const source of entry.sources){
           const row=rows.find(r=>r.relPath===source.relPath),owner=reconstruction.owners.find(o=>o.relPath===source.relPath),note=snapshots.get(source.relPath),candidate=structuredClone(source)
           let valid=!!row&&row.outcome==='associate'&&!!note,reason=valid?'已逐条核验原文、分类及来源依赖':'归属或历史附件证明不足，来源暂停'
           if(valid){
@@ -373,10 +376,10 @@ export class VaultSession {
         }
         const entryValid=(id:string,version:number,seen=new Set<string>()):boolean=>{
           if(seen.has(id))return false;seen.add(id)
-          const entry=memory!.record.entries.find(e=>e.id===id&&e.version===version)
+          const entry=[...memory!.record.entries,...memory!.record.recent].find(e=>e.id===id&&e.version===version)
           return !!entry&&(entry.status==='active'||entry.status==='paused'&&['MEMORY_SOURCE_CHANGED','MEMORY_DEPENDENCY_CHANGED'].includes(entry.reason??''))&&(!entry.reviewAt||Date.parse(entry.reviewAt)>Date.now())&&entry.sources.length>0&&entry.sources.every(source=>sourceResults.get(entry.id+'\0'+source.id)?.valid&&source.memoryDeps.every(dep=>entryValid(dep.id,dep.version,new Set(seen))))
         }
-        for(const entry of memory.record.entries){const patch:MemoryRecoveryPatch={id:entry.id,version:entry.version,pause:!entryValid(entry.id,entry.version),sources:[]}
+        for(const entry of [...memory.record.entries,...memory.record.recent]){const patch:MemoryRecoveryPatch={id:entry.id,version:entry.version,pause:!entryValid(entry.id,entry.version),sources:[]}
           for(const source of entry.sources){const result=sourceResults.get(entry.id+'\0'+source.id)!,depsValid=source.memoryDeps.every(dep=>entryValid(dep.id,dep.version)),valid=result.valid&&depsValid
             rows.find(r=>r.relPath===source.relPath)?.sources.push({id:source.id,status:valid?'verified':'paused',reason:depsValid?result.reason:'记忆依赖版本、分类或到期状态无法核验'})
             if(valid)patch.sources.push({id:source.id,objectVersion:result.candidate.objectVersion,revision:result.candidate.revision,deps:result.candidate.sourceDeps.map(d=>({relPath:d.relPath,objectVersion:d.objectVersion}))})
@@ -530,6 +533,55 @@ export class VaultSession {
     this.index.markDirty()
     let materialControls:import('./working-memory-store.ts').WorkingSnapshot|undefined;try{materialControls=this.workingMemory?.read()}catch{/* Unverified memory controls cannot authorize identity GC. */}
     try { this.ledgerStore?.onWrite(relPath,previousObjectVersion,objectVersion,content,previousContent,materialControls) } catch { this.ledgerFailure='LEDGER_OWNERSHIP_UNVERIFIED';this.emit('tree:changed') }
+    if(previousPath===relPath&&previousContent!==undefined&&materialControls?.raw){
+      try{if(this.rebindMemoryAfterWrite(materialControls,relPath,previousObjectVersion,objectVersion,previousContent,content,revision))this.memoryBindingFailure=null}
+      catch{this.memoryBindingFailure='MEMORY_SOURCE_REBIND_FAILED';this.emit('tree:changed')}
+    }
+  }
+
+  private rebindMemoryAfterWrite(basis:WorkingSnapshot,relPath:string,before:string,after:string,oldContent:string,newContent:string,revision:string):boolean{
+    if(!this.workingMemory)return false
+    const oldParsed=compile(oldContent),newParsed=compile(newContent)
+    if(oldParsed.stale||newParsed.stale)return false
+    const oldBodyHash=bodyFingerprint(oldContent,oldParsed),newBodyHash=bodyFingerprint(newContent,newParsed)
+    const savedChapters=new Map<string,ReturnType<LedgerStore['contextForRecord']>[number]|null>()
+    const clearedTasks=new Set<string>()
+    const locate=(source:WorkingSource,parsed:ReturnType<typeof compile>)=>{
+      if(createHash('sha256').update(source.text).digest('hex')!==source.hash)return null
+      const raw=parsed.partition.body,at=raw.indexOf(source.text)
+      if(at<0||raw.indexOf(source.text,at+1)>=0)return null
+      const block=parsed.index.blocks.find(b=>b.range.start<=at&&b.range.end>=at+source.text.length)
+      if(!block||block.identity==='ai'||source.classification==='command'&&block.identity!=='command'||source.classification!=='command'&&block.identity==='command')return null
+      return {at,end:at+source.text.length,identity:block.identity}
+    }
+    const patches:WorkingBindingPatch[]=[]
+    for(const entry of [...basis.record.entries,...basis.record.recent]){
+      const updates:WorkingBindingPatch['sources']=[]
+      for(const source of entry.sources){
+        const owns=source.relPath===relPath&&this.acceptsObject(relPath,source.objectVersion,after)
+        let proven=false,start=source.start,end=source.end
+        if(owns&&source.kind==='body'){
+          const old=locate(source,oldParsed),next=locate(source,newParsed)
+          if(old&&next&&old.identity===next.identity){proven=true;start=next.at;end=next.end}
+        }else if(owns&&source.kind==='ledger'&&source.taskId&&source.classification==='command'){
+          try{let chapter=savedChapters.get(source.taskId)
+            if(chapter===undefined){const task=this.ledgerStore!.getRecord(relPath,source.taskId);if(task.state==='cleared')clearedTasks.add(source.taskId);chapter=task.state==='saved'?this.ledgerStore!.contextForRecord(task).find(c=>c.taskId===source.taskId)??null:null;savedChapters.set(source.taskId,chapter)}
+            if(clearedTasks.has(source.taskId))proven=true
+            else if(chapter?.fields?.status==='valid'&&chapter.eligible!==false&&(!source.taskMaterialHash||createHash('sha256').update(chapter.text).digest('hex')===source.taskMaterialHash)){
+              const field=chapter.fields.prompt,exact=chapter.text.slice(source.start,source.end)===source.text
+              const at=exact?source.start:chapter.text.indexOf(source.text)
+              if(at>=field.start&&at+source.text.length<=field.end&&(exact||chapter.text.indexOf(source.text,at+1)<0))proven=true
+            }
+          }catch{savedChapters.set(source.taskId,null)/* A missing or changed saved task cannot renew an object binding. */}
+        }
+        const deps=source.sourceDeps.filter(d=>d.relPath===relPath&&this.acceptsObject(relPath,d.objectVersion,after)&&oldBodyHash===d.bodyHash&&newBodyHash===d.bodyHash).map(d=>({relPath:d.relPath,oldObjectVersion:d.objectVersion,objectVersion:after}))
+        if(proven||deps.length)updates.push({id:source.id,oldObjectVersion:source.objectVersion,objectVersion:proven?after:source.objectVersion,revision:proven?revision:source.revision,start,end,deps})
+      }
+      if(updates.length)patches.push({id:entry.id,version:entry.version,sources:updates})
+    }
+    if(!patches.length)return false
+    this.workingMemory.rebindCommittedWrite(basis,patches)
+    return true
   }
 
   /** Move only bindings that lead to the explicitly verified filesystem object. */
@@ -839,6 +891,7 @@ export class VaultSession {
     this.rootUnavailable = false
     this.lifecycle = null
     this.memoryFailure = null
+    this.memoryBindingFailure = null
     this.token = null
     this.lifecycleError = null
     this.index.reset()
@@ -860,6 +913,7 @@ export class VaultSession {
     this.rootIdentity = vaultRootIdentity(this.root)
     this.rootUnavailable = false
     this.memoryFailure = null
+    this.memoryBindingFailure = null
     this.initializationFailure = null
     const token = randomUUID()
     this.token = token
@@ -877,7 +931,7 @@ export class VaultSession {
       if (this.token !== token) return
       if (result) this.emitRelocation(result)
       if(this.lifecycle?.status().status!=='ready')return
-      try { check(); retireMemoryFile(this.root!, check) } catch { this.memoryFailure = 'MEMORY_RETIREMENT_FAILED' }
+      try { check(); if(retireMemoryFile(this.root!, check))this.afterMemoryRetirement() } catch { this.memoryFailure = 'MEMORY_RETIREMENT_FAILED' }
       return this.mutations.run(()=>{try{check();const basis=this.workingMemory!.read();if(basis.raw)this.workingMemory!.interrupted(basis)}catch{/* Local memory diagnosis remains accessible; do not block ordinary notes. */}})
     }).catch((error: unknown) => {
       if (this.token !== token) return

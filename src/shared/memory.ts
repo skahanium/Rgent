@@ -43,12 +43,17 @@ export type MemoryEntry = {
   attribution?: string
   reviewAt?: string | null
   sources: MemorySource[]
+  category?: 'long' | 'recent'
+  recent?: {taskId:string;noteId:string;materialVersion:string;createdAt:string;outcome:'completed'|'cancelled'|'failed'|'limit';sections:{goal:string;completed:string;blocked:string;next:string};assistantDraft:boolean}
+  tags?: string[]
+  state?: MemoryEntryState
   status: 'active' | 'paused' | 'pending' | 'disabled' | 'review' | 'obsolete' | 'disputed' | 'deferred'
   reason: string | null
   updatedAt: string
   updateBasis: { kind: 'manual' | 'consolidation'; id: string; version: number }
   pendingTarget?: MemoryDependency
 }
+export type MemoryEntryState = { source: 'verified' | 'unchecked' | 'revoked'; content: 'current' | 'review' | 'disputed' | 'obsolete'; enabled: boolean; capacity: 'ready' | 'deferred' }
 export type MemoryJobReceipt = {
   taskId: string; materialVersion: string
   outcome: 'queued' | 'running' | 'applied' | 'rejected' | 'interrupted'
@@ -60,7 +65,7 @@ export type MemoryStatus = { status: 'ready'; count: number } | { status: 'inval
 
 /** Only these bounded, human management views cross IPC. No hidden record or authority. */
 export type MemorySourceView = Pick<MemorySource, 'relPath' | 'kind' | 'taskId' | 'text' | 'classification'>
-export type MemoryEntryView = Pick<MemoryEntry, 'id' | 'version' | 'content' | 'layer' | 'scope' | 'status' | 'reason' | 'updatedAt' | 'pendingTarget'> & { sources: MemorySourceView[];semantic?:'standing'|'fact';attribution?:string;reviewAt?:string|null }
+export type MemoryEntryView = Pick<MemoryEntry, 'id' | 'version' | 'content' | 'layer' | 'scope' | 'status' | 'reason' | 'updatedAt' | 'pendingTarget'> & { sources: MemorySourceView[];semantic?:'standing'|'fact';attribution?:string;reviewAt?:string|null;category?:'long'|'recent';recent?:MemoryEntry['recent'];tags?:string[];state?:MemoryEntryState }
 export type MemoryJobView = { taskId: string; materialVersion: string | null; outcome: MemoryJobReceipt['outcome'] | 'unavailable' | 'handed-off'; reason?: string; retryable: boolean; entryIds?: string[]; undoable?:boolean }
 export type MemoryView = {
   sessionId: string; revision: string | null; objectVersion: string | null
@@ -72,6 +77,7 @@ export type MemoryView = {
   learning?:{watermark:number;nextSequence:number}
   materialStatus?:'verified'|'empty'|'invalid'
   retirementFailure?:string
+  bindingFailure?:string
   retirement?:{revision:string;objectVersion:string;bytes:number}
   configDiagnosis?: {revision:string|null;bytes:number}
   diagnosis?:{revision:string|null;objectVersion:string|null;bytes:number}

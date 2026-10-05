@@ -13,7 +13,7 @@ export type SentFragment = MaterialBinding & {
 }
 /** Successful saving evidence only; this does not authorize background model work. */
 export type SavedTaskMaterial = {
-  taskId: string; context: MemoryContext | null; origin: MaterialBinding
+  taskId: string; noteId?:string; startedAt?:string; context: MemoryContext | null; origin: MaterialBinding
   status: 'completed' | 'cancelled' | 'failed' | 'limit'; reason?: string
   prompt: string; answer: string; ledgerHash: string; materialVersion: string
   material: SentTaskMaterial; sourceDeps: LedgerSource[]; memoryDeps: LedgerMemoryDependency[]

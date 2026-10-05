@@ -143,7 +143,7 @@ export function freezeV4(root:string,manifest:unknown){
  else writeFileSync(file,JSON.stringify(manifest,null,2),{flag:'wx',mode:0o600})
  return fingerprint(manifest)
 }
-export type V4Category='valid'|'safe-empty'|'semantic-rejected'|'candidate-rejected'|'format'|'format-repaired-unreviewed'|'service'|'interrupted'|'insufficient-evidence'
+export type V4Category='reference'|'valid'|'safe-empty'|'semantic-rejected'|'candidate-rejected'|'format'|'format-repaired-unreviewed'|'service'|'interrupted'|'insufficient-evidence'
 export type V4Annotation={retained:number|null;hardViolations:string[];correctNoop:boolean;evidenceComplete:boolean}
 export type V4Row={caseId:string;arm:'baseline'|'review';category:V4Category;automaticApplied:boolean;controlledFailure?:string;calls?:number;latencyMs?:number;receiptReason?:string;review:V4Annotation|null}
 export function v4Summary(rows:V4Row[],cases:MemoryQualityCase[],screen=false){
@@ -203,12 +203,13 @@ export function v4ScreenGate(rows:V4Row[]){
 export function v4TerminalCategory(category:V4Category,receipt:{outcome:string;reason?:string;entryIds:string[]}|null):V4Category{
  if(!receipt)return 'insufficient-evidence'
  if(receipt.outcome==='interrupted')return 'interrupted'
+ if(receipt.reason==='MEMORY_OUTPUT_REFERENCE_INVALID')return 'reference'
  if(receipt.outcome==='applied'&&!receipt.reason&&['valid','safe-empty'].includes(category))return category
  if(category==='semantic-rejected'&&receipt.outcome==='rejected'&&receipt.reason==='MEMORY_CONFIRMATION_REQUIRED')return category
  if(['valid','candidate-rejected'].includes(category)&&['applied','rejected'].includes(receipt.outcome)&&receipt.reason==='MEMORY_OUTPUT_INVALID')return 'candidate-rejected'
  if(category==='format-repaired-unreviewed'&&receipt.outcome==='rejected'&&receipt.reason==='MEMORY_CONFIRMATION_REQUIRED')return category
- if(category==='format'&&receipt.outcome==='rejected'&&['MEMORY_CONFIRMATION_REQUIRED','MEMORY_OUTPUT_INVALID','MEMORY_OUTPUT_TOKEN_LIMIT','MEMORY_OUTPUT_LIMIT'].includes(receipt.reason??''))return category
- if(category==='service'&&receipt.outcome==='rejected'&&['MEMORY_UNAVAILABLE','MEMORY_DEADLINE'].includes(receipt.reason??''))return category
+ if(category==='format'&&receipt.outcome==='rejected'&&['MEMORY_CONFIRMATION_REQUIRED','MEMORY_OUTPUT_INVALID','MEMORY_OUTPUT_TOKEN_LIMIT','MEMORY_OUTPUT_LIMIT','MEMORY_OUTPUT_EMPTY','MEMORY_OUTPUT_TRUNCATED'].includes(receipt.reason??''))return category
+ if(category==='service'&&receipt.outcome==='rejected'&&['MEMORY_UNAVAILABLE','MEMORY_DEADLINE','MEMORY_SERVICE_FAILED'].includes(receipt.reason??''))return category
  return 'insufficient-evidence'
 }
 /** An annotation supplies semantics, never a missing execution/source proof. */
@@ -235,4 +236,87 @@ export function v4EvidenceComplete(value:unknown):boolean{
  }
  if(evidence.verifications.some((v:any)=>proofs.has(v.id)&&v.result===false))return false
  return evidence.dispatches.length===value.responses.length
+}
+
+export const V5_PREFIX='v5-2026-10-05/'
+export const V5_RULES={calls:240,perModelCalls:120,rounds:2,attempts:30,screenCalls:40,historyCalls:828,parentLimit:1440,oldRemaining:612,longOverall:.95,longGroup:.9,recent:.9,zeroTolerance:['wrong-attribution','temporary-standing','ambiguous-overwrite'],limits:{seconds:120,calls:2,tools:0,outputTokens:4096},retry:'format-only-once',semanticChecks:['actionSatisfied','oldActiveRemoved','noDuplicateActive','attributionAndScope','noUnsupportedContent'],semanticReview:'逐语义单元核对真实 before/after；attributionAndScope包括归属、范围、standing/fact/recent分类和标签，noUnsupportedContent包括虚构；不以关键词匹配代证。',annotation:'coding-agent-semantic-review-not-user-confirmation'}
+export type V5SemanticChecks={actionSatisfied:boolean;oldActiveRemoved:boolean;noDuplicateActive:boolean;attributionAndScope:boolean;noUnsupportedContent:boolean}
+export type V5Annotation={semanticChecks:V5SemanticChecks;longRetained:number;recentCorrect:number;hardViolations:string[];evidenceComplete:boolean}
+export type V5Row={actionVerified?:boolean;controls?:'passed'|'not-applicable'|'failed';caseId:string;round:number;category:'valid'|'empty'|'length'|'format'|'reference'|'service'|'cancel'|'insufficient-evidence';review:V5Annotation|null}
+export function v5Summary(rows:V5Row[],cases:import('../test/fixtures/v5-memory-quality.ts').V5Case[],round:number){
+ const groups:Record<string,{required:number;retained:number}>={},categories:Record<string,number>={};let pending=0,valid=true,recentRequired=0,recentCorrect=0
+ const violations:string[]=[],actionChecks:{caseId:string;passed:boolean}[]=[],controlFailures:string[]=[],seen=new Set<string>()
+ for(const c of cases){const matches=rows.filter(r=>r.round===round&&r.caseId===c.id),r=matches[0],a=r?.review;if(matches.length>1)valid=false
+  if(r){seen.add(c.id);categories[r.category]=(categories[r.category]??0)+1}
+  const assessed=!!a&&a.evidenceComplete&&['valid','empty'].includes(r!.category)
+  if(!assessed)pending++
+  if(a&&(!a.semanticChecks||Object.keys(a.semanticChecks).sort().join()!=='actionSatisfied,attributionAndScope,noDuplicateActive,noUnsupportedContent,oldActiveRemoved'||['actionSatisfied','oldActiveRemoved','noDuplicateActive','attributionAndScope','noUnsupportedContent'].some(k=>typeof a.semanticChecks[k as keyof V5SemanticChecks]!=='boolean')||!Number.isSafeInteger(a.longRetained)||a.longRetained<0||a.longRetained>c.expected.long.length||!Number.isSafeInteger(a.recentCorrect)||a.recentCorrect<0||a.recentCorrect>c.expected.recent.length||!Array.isArray(a.hardViolations)||a.hardViolations.some(v=>!V5_RULES.zeroTolerance.includes(v))||typeof a.evidenceComplete!=='boolean'))valid=false
+  actionChecks.push({caseId:c.id,passed:!!a?.semanticChecks&&Object.values(a.semanticChecks).every(v=>v===true)&&(!c.expected.action||r?.actionVerified===true)})
+  if(r?.controls!=='passed'&&r?.controls!=='not-applicable')controlFailures.push(c.id)
+  if(c.expected.long.length){const g=groups[c.group]??={required:0,retained:0};g.required+=c.expected.long.length;g.retained+=assessed?a!.longRetained:0}
+  recentRequired+=c.expected.recent.length;recentCorrect+=assessed?a!.recentCorrect:0;violations.push(...(a?.hardViolations??[]))
+ }
+ if(rows.some(r=>r.round===round&&!cases.some(c=>c.id===r.caseId)))valid=false
+ const required=Object.values(groups).reduce((n,g)=>n+g.required,0),retained=Object.values(groups).reduce((n,g)=>n+g.retained,0)
+ const longRate=required?retained/required:1,recentRate=recentRequired?recentCorrect/recentRequired:1
+ return {round,valid,actionChecks,controlFailures,coverage:seen.size,expected:cases.length,pending,categories,violations,long:{required,retained,rate:longRate,groups},recent:{required:recentRequired,correct:recentCorrect,rate:recentRate},passed:valid&&actionChecks.every(c=>c.passed)&&!controlFailures.length&&seen.size===cases.length&&!pending&&!violations.length&&longRate>=.95&&Object.values(groups).every(g=>g.retained/g.required>=.9)&&recentRate>=.9}
+}
+export function v5DispatchGate(rows:V5Row[],nextCase:string,round:number,screen:boolean,cases:import('../test/fixtures/v5-memory-quality.ts').V5Case[]=[]){
+ if(rows.some(r=>r.review?.hardViolations.length))throw Error('EVALUATION_MODEL_STOPPED')
+ for(const r of rows){if(r.caseId===nextCase&&r.round===round)continue;if(!r.review)throw Error('EVALUATION_REVIEW_REQUIRED');if(!r.review.evidenceComplete||!['valid','empty'].includes(r.category))throw Error('EVALUATION_INSUFFICIENT_EVIDENCE')}
+ if(!screen&&cases.length&&!v5Summary(rows,cases,0).passed)throw Error('EVALUATION_SCREEN_REQUIRED')
+ if(round===1&&cases.length&&!v5Summary(rows,cases,0).passed)throw Error('EVALUATION_ROUND_REQUIRED')
+}
+export function freezeV5(root:string,manifest:unknown){mkdirSync(root,{recursive:true,mode:0o700});const file=path.join(root,'v5-manifest.json');if(existsSync(file)){if(fingerprint(JSON.parse(readFileSync(file,'utf8')))!==fingerprint(manifest))throw Error('EVALUATION_REVISION_CHANGED')}else writeFileSync(file,JSON.stringify(manifest,null,2),{flag:'wx',mode:0o600});return fingerprint(manifest)}
+/** Screening has its own frozen denominator; later reviewed attempts never invalidate it. */
+export function v5ScreenDispatchGate(rows:V5Row[],nextCase:string,round:number,screen:boolean,cases:import('../test/fixtures/v5-memory-quality.ts').V5Case[],screenIds:readonly string[]){
+ v5DispatchGate(rows,nextCase,round,true)
+ if(screen&&(round!==0||!screenIds.includes(nextCase)))throw Error('EVALUATION_CASES_NOT_AUTHORIZED')
+ if(!screen||round===1){const selected=cases.filter(c=>screenIds.includes(c.id));if(!v5Summary(rows.filter(r=>r.round===0&&screenIds.includes(r.caseId)),selected,0).passed)throw Error('EVALUATION_SCREEN_REQUIRED')}
+ if(round===1&&!v5Summary(rows.filter(r=>r.round===0),cases,0).passed)throw Error('EVALUATION_ROUND_REQUIRED')
+}
+/** Terminal reasons remain visible even when no response was received. */
+export function v5TerminalCategory(r:{status?:string;responses?:{finishReason?:string;reason?:string|null}[];result?:{receipt?:{outcome:string;reason?:string};entries?:unknown[];recent?:unknown[]}}):V5Row['category']{
+ if(r.status==='interrupted')return 'cancel'
+ const receipt=r.result?.receipt
+ if(receipt?.outcome==='interrupted'||receipt?.reason==='MEMORY_CANCELLED'||receipt?.reason==='MEMORY_DEADLINE')return 'cancel'
+ if(r.responses?.some(p=>p.finishReason==='length'))return 'length'
+ if(r.responses?.some(p=>p.reason))return 'service'
+ if(receipt?.reason==='MEMORY_OUTPUT_EMPTY')return 'empty'
+ if(receipt?.reason==='MEMORY_OUTPUT_TRUNCATED')return 'length'
+ if(receipt?.reason==='MEMORY_SERVICE_FAILED')return 'service'
+ if(receipt?.outcome==='applied'&&!receipt.reason)return (r.result?.entries?.length||r.result?.recent?.length)?'valid':'empty'
+ if(receipt?.reason==='MEMORY_OUTPUT_INVALID')return 'format'
+ if(/SOURCE|MATERIAL|DEPENDENCY|PERMISSION|SESSION|REFERENCE/.test(receipt?.reason??''))return 'reference'
+ return 'insufficient-evidence'
+}
+export function v5DiagnosticTargets<T extends {modelId:string}>(models:T[],live:boolean,only?:string):T[]{const targets=live?models.filter(m=>m.modelId===only):models;if(!targets.length)throw Error('EVALUATION_MODELS_NOT_AUTHORIZED');return targets}
+/** Mechanical action facts augment semantic review; content meaning remains manually assessed. */
+export function v5ActionEvidence(spec:import('../test/fixtures/v5-memory-quality.ts').V5Case,result:any):boolean{
+ const action=spec.expected.action;if(!action)return true
+ if(!result||!Array.isArray(result.before)||!Array.isArray(result.entries)||result.receipt?.outcome!=='applied'||result.receipt.reason)return false
+ const before=result.before.filter((e:any)=>e.category!=='recent'&&e.status==='active'),active=result.entries.filter((e:any)=>e.category!=='recent'&&e.status==='active')
+ if(spec.expected.maxActive!==undefined&&active.length>spec.expected.maxActive)return false
+ const target=spec.seed?before.find((e:any)=>e.content===spec.seed!.content&&e.semantic===spec.seed!.semantic&&e.scope===spec.seed!.scope):undefined
+ if(action==='unchanged')return !!target&&active.length===before.length&&before.every((e:any)=>active.some((now:any)=>now.id===e.id&&now.version===e.version&&now.content===e.content&&now.scope===e.scope&&now.semantic===e.semantic))
+ if(action==='correct')return !!target&&active.some((e:any)=>e.id===target.id&&e.version===target.version+1&&e.content!==target.content&&e.scope===target.scope&&e.semantic===target.semantic&&result.receipt.entryIds.includes(e.id))&&!active.some((e:any)=>e.id===target.id&&e.version===target.version)
+ if(action==='add')return active.some((e:any)=>e.semantic===spec.group&&result.receipt.entryIds.includes(e.id)&&!before.some((old:any)=>old.id===e.id))
+ return false
+}
+export function v5ControlledStatus(spec:import('../test/fixtures/v5-memory-quality.ts').V5Case,result:any):'passed'|'not-applicable'|'failed'{
+ const c=result?.controlled;if(!c||c.budget?.within!==true||c.dispatch?.verified!==true||c.dispatch?.sameVersionVerified!==true||c.dispatch?.versionMismatchRejected!==true||c.dispatch?.actualHostBudget?.mapped!==true||c.dispatch?.actualHostBudget?.within!==true)return 'failed'
+ if(c.status==='not-applicable')return c.reason==='no-selected-memory'&&!(result.receipt?.entryIds?.length)?'not-applicable':'failed'
+ if(c.status!=='passed'||c.dispatch.permissionRevoked!==true||c.dispatch.frozenSignatureMatches!==true)return 'failed'
+ if(spec.chain&&spec.step!<5)return c.closureStatus==='deferred-chain-step'?'passed':'failed'
+ return c.closureStatus==='verified'&&c.closure?.passed===true&&c.closure?.revoked===true&&c.closure?.originalBasisBlocked===true&&v5ReplayEvidence(c.closure?.replay)&&Array.isArray(c.closure?.remaining)&&!c.closure.remaining.length?'passed':'failed'
+}
+/** Recompute probe evidence: a retained applied/no-op receipt is never a rejection. */
+export function v5ReplayEvidence(replay:any):boolean{
+ const r=replay?.receipt,m=replay?.material
+ if(!r||!m||r.taskId!==m.taskId||r.materialVersion!==m.materialVersion||typeof replay.beforeRevision!=='string'||typeof replay.afterRevision!=='string'||replay.beforeRevision===replay.afterRevision||!('previousReceipt'in replay)||fingerprint(r)===fingerprint(replay.previousReceipt??null)||!Array.isArray(r.entryIds)||r.entryIds.length)return false
+ const explicitBlock=['rejected','interrupted'].includes(r.outcome)&&typeof r.reason==='string'&&/SOURCE|DEPENDENCY|FORGOTTEN/.test(r.reason)
+ const proposal=replay.sent?.proposal,sources=replay.sent?.sources,items=proposal&&Array.isArray(proposal.proposals)?[...proposal.proposals,...(proposal.recent?[proposal.recent]:[])]:[]
+ const referencesValid=Array.isArray(sources)&&items.length>0&&items.every((item:any)=>Array.isArray(item.sourceIds)&&item.sourceIds.length>0&&item.sourceIds.every((id:string)=>sources.some((s:any)=>s.id===id&&(item.semantic!=='standing'||s.classification==='command'))))
+ const proposalRejected=referencesValid&&Number.isSafeInteger(replay.calls)&&replay.calls>0&&replay.validProposalSources===true&&['applied','rejected'].includes(r.outcome)&&r.reason==='MEMORY_OUTPUT_INVALID'
+ return explicitBlock||proposalRejected
 }
