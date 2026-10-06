@@ -23,12 +23,12 @@ const byId=(id:string):V6Case=>{
  return found
 }
 const row=(spec:V6Case,over:Partial<V6Row>={},a:V6Annotation|null=fullReview(spec)):V6Row=>({
- caseId:spec.id,round:0,dispatched:true,terminal:true,structured:true,actionVerified:true,category:'valid',review:a,...over
+ caseId:spec.id,round:0,dispatched:true,terminal:true,structured:true,actionVerified:true,category:'valid',review:a,reviewAlt:a?{...structuredClone(a),annotator:{...a.annotator,identity:'review-agent-B',participatedInDesign:false}}:null,...over
 })
 const happy=()=>V6_QUALITY_CASES.map(c=>row(c))
 /** 未命中必留单元：该例计分为 0，但不触发即时否决。 */
 const missing=(spec:V6Case):V6Annotation=>({...fullReview(spec),correct:0,omitted:spec.expected.units.length})
-const patch=(rows:V6Row[],id:string,over:Partial<V6Row>,review?:V6Annotation|null)=>rows.map(r=>r.caseId===id?{...r,...over,...(review===undefined?{}:{review})}:r)
+const patch=(rows:V6Row[],id:string,over:Partial<V6Row>,review?:V6Annotation|null)=>rows.map(r=>{if(r.caseId!==id)return r;const a=review===undefined?Object.hasOwn(over,'review')?over.review:r.review:review;return {...r,...over,review:a??null,reviewAlt:a?{...structuredClone(a),annotator:{...a.annotator,identity:'review-agent-B',participatedInDesign:false}}:null}})
 
 describe('v6 冻结与派发门', () => {
  it('冻结单不可覆盖且指纹稳定', () => {
@@ -246,10 +246,16 @@ describe('v6 付费记录字段', () => {
    yield {type:'text',text:JSON.stringify({recent:{goal:'青灯核对',completed:'第 1、2 份完成',blocked:'第 3 份未开始',next:'核对第 3 份',sourceIds:payload.sources.map((source:any)=>source.id),assistantDraft:false},proposals:[]})}
    yield {type:'finish',reason:'stop'}
   },new AbortController().signal,{strategy:'continuity',verifyClosure:false})
+  expect(result.material.provenanceStatus).toBe('complete')
   expect(result.structured).toBe(true)
   expect(result.actionVerified).toBe(true)
   expect(result.receipt?.outcome).toBe('applied')
   expect(result.recent?.length).toBe(1)
+  expect(result.entries.find((e:any)=>e.id===result.recent![0]!.id)?.status).toBe('active')
+  expect(result.actionEvidence.finalTargets).toEqual([{id:result.recent![0]!.id,version:result.recent![0]!.version}])
+  const provenance=result.followup?.ledger.chapter?.provenance
+  expect(provenance?.version).toBe(2)
+  expect(provenance?.version===2?provenance.memoryDeps.map(d=>({id:d.id,version:d.version})):null).toContainEqual({id:result.recent![0]!.id,version:result.recent![0]!.version})
   expect(result.candidate.failureOrigin).toBeNull()
  },20000)
 })

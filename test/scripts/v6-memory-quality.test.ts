@@ -19,14 +19,14 @@ const byId=(id:string):V6Case=>{
  return found
 }
 const row=(spec:V6Case,over:Partial<V6Row>={},a:V6Annotation|null=fullReview(spec)):V6Row=>({
- caseId:spec.id,round:0,dispatched:true,terminal:true,structured:true,actionVerified:true,category:'valid',review:a,...over
+ caseId:spec.id,round:0,dispatched:true,terminal:true,structured:true,actionVerified:true,category:'valid',review:a,reviewAlt:a?{...structuredClone(a),annotator:{...a.annotator,identity:'review-agent-B',participatedInDesign:false}}:null,...over
 })
 const happy=()=>V6_QUALITY_CASES.map(c=>row(c))
 /** 未命中必留单元：该例计分为 0，但不触发即时否决。 */
 const missing=(spec:V6Case):V6Annotation=>({...fullReview(spec),correct:0,omitted:spec.expected.units.length})
 /** 取得输出但无法判定：必须引用预注册理由。 */
 const unassessable=(spec:V6Case,reason='safety-source-mapping-missing'):V6Annotation=>({...fullReview(spec),evidenceComplete:false,uncertainty:[reason]})
-const patch=(rows:V6Row[],id:string,over:Partial<V6Row>,review?:V6Annotation,reviewAlt?:V6Annotation)=>rows.map(r=>r.caseId===id?{...r,...over,...(review?{review}:{}),...(reviewAlt!==undefined?{reviewAlt}:{})}:r)
+const patch=(rows:V6Row[],id:string,over:Partial<V6Row>,review?:V6Annotation,reviewAlt?:V6Annotation)=>rows.map(r=>{if(r.caseId!==id)return r;const a=review??(Object.hasOwn(over,'review')?over.review:r.review);const b=reviewAlt??(Object.hasOwn(over,'reviewAlt')?over.reviewAlt:a?{...structuredClone(a),annotator:{...a.annotator,identity:'review-agent-B',participatedInDesign:false}}:null);return {...r,...over,review:a??null,reviewAlt:b??null}})
 
 describe('v6 fixture 冻结', () => {
  it('四个方向各五例、两条五步链、共三十例，分值合计一百', () => {
@@ -315,4 +315,71 @@ it.each(['success','failure','unknown'] as const)('explicit action state is auth
  expect(summary.actionFailures).toBe(state==='failure'?1:0)
  expect(summary.coverage.directions.update.judged).toBe(state==='unknown'?4:5)
  expect(summary.unknown).toBe(state==='unknown'?1:0)
+})
+
+
+describe('包4统一双标门及机械失败边界',()=>{
+ const secondary=(spec:V6Case)=>({...fullReview(spec),annotator:{...annotator,identity:'independent-B',participatedInDesign:false}})
+ it('任意十例双标不能替代冻结 required ID，缺失结果也必须计入缺覆盖',()=>{
+  const required=V6_QUALITY_CASES[20]!.id,rows=happy().map((r,i)=>({...r,reviewAlt:i<10?secondary(V6_QUALITY_CASES[i]!):null}))
+  const summary=v6Summary(rows,V6_QUALITY_CASES,0,{doubleRequired:[required]} as any)
+  expect((summary as any).doubleReview).toMatchObject({minimum:10,double:10,doubleGate:false,requiredIds:[required],missingRequiredIds:[required]})
+  expect(summary.gates.evidence).toBe(false)
+  expect(summary.verdict).toBe('insufficient-evidence')
+  const absent=v6Summary(rows.filter(r=>r.caseId!==required),V6_QUALITY_CASES,0,{doubleRequired:[required]} as any)
+  expect((absent as any).doubleReview.missingRequiredIds).toEqual([required])
+ })
+ it('首轮已知动作失败缺 required 副标，即使质量仍达门也禁止第二轮',()=>{
+  const spec=byId('v6-correction-01'),rows=patch(happy(),spec.id,{actionState:'failure',actionVerified:undefined,reviewAlt:null})
+  const summary=v6Summary(rows,V6_QUALITY_CASES,0,{doubleRequired:[spec.id]})
+  expect(summary.lower.total).toBe(90);expect(summary.upper.total).toBe(90)
+  expect(summary.gates.qualityLower).toBe(true);expect(summary.doubleReview.double).toBeGreaterThanOrEqual(10)
+  expect(()=>v6DispatchGate(rows,V6_QUALITY_CASES[0]!.id,1,V6_QUALITY_CASES,{doubleRequired:[spec.id]})).toThrow('EVALUATION_ROUND_REQUIRED')
+ })
+ it('必需案例齐全仍需至少十例，非法冻结名单拒绝',()=>{
+  const rows=happy().map((r,i)=>({...r,reviewAlt:i<9?secondary(V6_QUALITY_CASES[i]!):null})),required=V6_QUALITY_CASES[0]!.id
+  expect(v6Summary(rows,V6_QUALITY_CASES,0,{doubleRequired:[required]}).doubleReview).toMatchObject({double:9,missingRequiredIds:[],doubleGate:false})
+  expect(()=>v6Summary(rows,V6_QUALITY_CASES,0,{doubleRequired:['not-in-frozen-cases']})).toThrow('EVALUATION_DOUBLE_POLICY_INVALID')
+  expect(()=>v6Summary(rows,V6_QUALITY_CASES,0,{doubleRequired:[required,required]})).toThrow('EVALUATION_DOUBLE_POLICY_INVALID')
+ })
+ it('同身份或不完整副标不计双标覆盖，合法独立双标计入统一门',()=>{
+  const required=V6_QUALITY_CASES[20]!.id,rows=happy().map((r,i)=>({...r,reviewAlt:secondary(V6_QUALITY_CASES[i]!)}))
+  expect((v6Summary(rows,V6_QUALITY_CASES,0,{doubleRequired:[required]} as any) as any).doubleReview.doubleGate).toBe(true)
+  for(const reviewAlt of [fullReview(V6_QUALITY_CASES[20]!),{...secondary(V6_QUALITY_CASES[20]!),evidenceComplete:false,uncertainty:['no-model-output']},{...secondary(V6_QUALITY_CASES[20]!),resultHash:'conflicting-result'}]){
+   const summary=v6Summary(patch(rows,required,{reviewAlt}),V6_QUALITY_CASES,0,{doubleRequired:[required]} as any)
+   expect((summary as any).doubleReview.missingRequiredIds).toEqual([required])
+   expect(summary.gates.evidence).toBe(false)
+  }
+  expect((v6Summary(rows,V6_QUALITY_CASES,0) as any).doubleReview.policy).toBe('legacy-minimum')
+ })
+ it.each(['failure','unknown','success'] as const)('缺副标独立证据不足与动作确定性分别记录 (%s)',state=>{
+  const spec=byId('v6-correction-01'),summary=v6Summary([row(spec,{actionState:state,actionVerified:undefined,doubleRequired:true,reviewAlt:null})],[spec],0,{doubleRequired:[spec.id]} as any)
+  expect(summary.lower.total).toBe(0)
+  expect(summary.upper.total).toBe(state==='failure'?0:spec.weight)
+  expect(summary.judgeable).toBe(state==='failure'?1:0)
+  expect(summary.unknown).toBe(state==='failure'?0:1)
+  expect(summary.actionFailures).toBe(state==='failure'?1:0)
+  expect((summary as any).doubleReview.doubleGate).toBe(false)
+  expect((summary as any).doubleReview.missingRequiredIds).toEqual([spec.id])
+  expect(summary.gates.evidence).toBe(false)
+ })
+ it('真实输入依赖容量拒绝归 capacity，部分成功仍优先归 partial-commit',()=>{
+  expect(v6TerminalCategory({responses:[],result:{receipt:{outcome:'rejected',reason:'MEMORY_INPUT_LIMIT'},entries:[],recent:[]}})).toBe('capacity')
+  expect(v6TerminalCategory({result:{receipt:{outcome:'applied',reason:'MEMORY_INPUT_LIMIT',results:[{outcome:'applied'},{outcome:'rejected'}]},entries:[{id:'saved'}]}})).toBe('partial-commit')
+ })
+ it('所选模型暂停未终态收费请求，另一模型仍可派发且已收费请求不能重派',async()=>{
+  const support=await import('../../scripts/memory-quality-support.ts') as any,prefix='fiction/integrity/r10/',a=prefix+'A/0/case',b=prefix+'B/0/case'
+  const journal={dispatchKeys:()=>[a],charged:(k:string)=>k===a?1:0,read:()=>null}
+  expect(()=>support.v6AssertDispatchAvailable(journal,prefix,'A',prefix+'A/0/new',()=>false)).toThrow('EVALUATION_CHARGED_UNFINISHED')
+  expect(()=>support.v6AssertDispatchAvailable(journal,prefix,'B',b,()=>false)).not.toThrow()
+  expect(()=>support.v6AssertDispatchAvailable(journal,prefix,'A',a,()=>true)).toThrow('EVALUATION_ATTEMPT_ALREADY_DISPATCHED')
+ })
+ it('报告分别绑定实际规则案例、旧冻结和主副原证据及评分view',async()=>{
+  const support=await import('../../scripts/memory-quality-support.ts') as any,binding={key:'fiction/r9/A/0/case',frozenHash:'frozen',resultHash:'result',rulesHash:'old-rules'},original:any={...binding,review:{...fullReview(V6_QUALITY_CASES[0]!),rulesHash:'old-rules'}}
+  delete original.review.rulesHash;const before=JSON.stringify(original),view=support.v6BoundReview(original,binding,{replay:true,revision:9})
+  expect(view.evidence).toMatchObject({annotationHash:support.fingerprint(original),originalReviewHash:support.fingerprint(original.review),scoringViewHash:support.fingerprint(view.review),annotator:original.review.annotator,...binding})
+  expect(view.evidence.originalReviewHash).not.toBe(view.evidence.scoringViewHash)
+  expect(JSON.stringify(original)).toBe(before)
+  expect(support.v6AppliedEvidence({rules:'old-rules',dataset:'old-cases'},V6_QUALITY_CASES)).toEqual({frozenRulesHash:'old-rules',frozenDatasetHash:'old-cases',appliedRulesHash:support.fingerprint(V6_RULES),appliedDatasetHash:support.fingerprint(V6_QUALITY_CASES)})
+ })
 })

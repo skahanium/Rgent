@@ -78,13 +78,15 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
  stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,signal:AbortSignal,options?:{strategy:'baseline'|'review'|'continuity';base?:string;noteName?:string;hostBeforeConsolidation?:boolean;verifyClosure?:boolean;chainBlocked?:boolean;targetTaskId?:string}){
  const base=options?.base??await mkdtemp(path.join(os.tmpdir(),'rgent-memory-quality-')),root=path.join(base,'vault')
  const qualityNote=options?.noteName??'fiction.md'
+ // v6 的所有案例由真实 Host 保存 V2 材料；历史臂维持其显式版本语义。
+ const hostBeforeConsolidation=options?.hostBeforeConsolidation??(options?.strategy==='continuity')
  let vault:VaultSession|null=null,engine:WorkingMemoryConsolidation|null=null
  try{
   await mkdir(root,{recursive:true});await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
   let taskId='quality-'+spec.id;const rawPrompt='/'+spec.prompt
   const source=spec.body+'\n\n'+markPrompt(rawPrompt,{taskId,range:{start:0,end:rawPrompt.length},expectedText:rawPrompt,promptText:spec.prompt})
   const prior=options?.base?await import('node:fs/promises').then(fs=>fs.readFile(path.join(root,qualityNote),'utf8').catch(()=>'')):''
-  await writeFile(path.join(root,qualityNote),prior+'\n\n'+(options?.hostBeforeConsolidation?spec.body+'\n\n'+rawPrompt+'\n':source))
+  await writeFile(path.join(root,qualityNote),prior+'\n\n'+(hostBeforeConsolidation?spec.body+'\n\n'+rawPrompt+'\n':source))
   if(spec.seed){const initialRaw='/'+spec.seed.content;await writeFile(path.join(root,'baseline.md'),spec.seed.content+'\n\n'+markPrompt(initialRaw,{taskId:'initial-'+spec.id,range:{start:0,end:initialRaw.length},expectedText:initialRaw,promptText:spec.seed.content}))}
   vault=new VaultSession(base,()=>{});vault.restore()
   const session=vault,service=new WorkingMemoryService(session,()=>null)
@@ -175,7 +177,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
   const activeEngine=engine,cancel=()=>activeEngine.cancel(undefined,'MEMORY_CANCELLED');signal.addEventListener('abort',cancel,{once:true})
   try{
    if(signal.aborted)throw Error('MEMORY_CANCELLED')
-   if(options?.hostBeforeConsolidation){
+   if(hostBeforeConsolidation){
     foreground=await runControlledQualityHost(session,service,credential,qualityNote,spec.prompt,spec.answer,signal,
      id=>{taskId=id;engine!.capture(id)},async material=>{experimentalMaterial=material;await engine!.handoff(material)})
     await engine.idle()
@@ -191,7 +193,8 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    await engine.handoff(material);await engine.idle()
    }
    if(!experimentalMaterial)throw Error('EVALUATION_MATERIAL_MISSING')
-   const material:SavedTaskMaterial=experimentalMaterial
+   const material:SavedTaskMaterial=hostBeforeConsolidation?await service.savedMaterial(qualityNote,taskId):experimentalMaterial
+   if(material.materialVersion!==experimentalMaterial.materialVersion)throw Error('MEMORY_MATERIAL_CHANGED')
    const entries=await service.entries(),receipt=service.snapshot().record.jobs.find(j=>j.taskId===taskId)??null
    if(options){
     learningCheck.checkedAt=new Date().toISOString();learningCheck.sourceIds=[...sentSourceIds]
