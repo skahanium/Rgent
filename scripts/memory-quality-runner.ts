@@ -352,7 +352,7 @@ export function v4StrategyStream(arm:'baseline'|'review',stream:(input:ModelStep
 }
 
 /** Real foreground saving and memory provenance; its stream is controlled and never billed. */
-async function runControlledQualityHost(session:VaultSession,service:WorkingMemoryService,credential:ModelCredential,relPath:string,prompt:string,answer:string,signal:AbortSignal,onStarted:(id:string)=>void,onSaved:(material:SavedTaskMaterial)=>Promise<void>){
+export async function runControlledQualityHost(session:VaultSession,service:WorkingMemoryService,credential:ModelCredential,relPath:string,prompt:string,answer:string,signal:AbortSignal,onStarted:(id:string)=>void,onSaved:(material:SavedTaskMaterial)=>Promise<void>){
  let inputBudgetTokens=0
  const root=session.requireUsableRoot(),raw='/'+prompt,sent:{system:string;prompt:string}[]=[]
  const port={context:()=>service.context(),config:()=>({enabled:true,revision:1}),entries:(ids?:readonly string[])=>service.entries(ids)}

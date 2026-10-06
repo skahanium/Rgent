@@ -549,3 +549,56 @@ it('keeps the legacy parser available only via the explicit historical evaluatio
  const f=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({proposals:[suggestion(input)]})};yield {type:'finish',reason:'stop'}},'以后用中文',undefined,true)
  await f.engine.handoff(f.material);await f.engine.idle();expect(f.service.snapshot().record.jobs[0]?.outcome).toBe('applied');expect(await f.service.entries()).toHaveLength(1)
 })
+
+it('runs total 25 actual Host sessions across two stable libraries with five corrections, three forgets and two permission tightenings',async()=>{
+ const {runControlledQualityHost}=await import('../../scripts/memory-quality-runner.ts'),{VaultCatalog}=await import('../../src/main/vault-catalog.ts')
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-continuous-25-')),roots=[path.join(base,'青灯库'),path.join(base,'白鹭库')];for(const root of roots)await mkdir(root)
+ const credential={provider:'custom' as const,modelId:'controlled-25',baseURL:'https://example.test/v1',apiKey:'fictional',contextTokens:32768},signal=new AbortController().signal,names=['青灯','白鹭'],catalog=new VaultCatalog(base)
+ const registered=roots.map(root=>catalog.register(catalog.inspect(root))),known=[new Set<string>(),new Set<string>()],main:Array<{id:string;version:number;content:string}|null>=[null,null],aux=new Map<number,{id:string;version:number;content:string;relPath:string;taskId:string}>(),expectedWorkspace=new Map<string,string>()
+ const createVault=()=>new VaultSession(base,()=>{},async()=>{},(root,identity)=>catalog.view().entries.find(e=>e.path===root&&e.rootIdentity===identity)?.id??null)
+ let vault=createVault(),engine:WorkingMemoryConsolidation|null=null,corrections=0,forgets=0,tightenings=0,sessions=0,nextSends=0,restarts=0,derivedRevocations=0,partial=0
+ try{
+  for(let step=1;step<=25;step++){
+   const lib=(step-1)%2,root=roots[lib]!,name=names[lib]!,other=names[1-lib]!,target=catalog.inspect(root)
+   expect(target.id).toBe(registered[lib]!.id);engine?.close();await engine?.idle()
+   if(step===14){const lastId=catalog.view().lastVaultId,last=catalog.view().entries.find(e=>e.id===lastId)!;vault.dispose();vault=createVault();const checked=catalog.inspect(last.path);expect(checked.id).toBe(lastId);expect(vault.restoreVerified(checked.path,checked.rootIdentity)).toMatchObject({status:'ready',navigationKey:catalog.displayKeys(checked).key});restarts++}
+   expect(await vault.openVerified(target.path,target.rootIdentity)).toMatchObject({status:'ready',navigationKey:catalog.displayKeys(target).key});catalog.committed(target);expect(catalog.inspect(root).id).toBe(registered[lib]!.id)
+   const restored=catalog.workspace(target);if(expectedWorkspace.has(target.id!))expect(restored?.active).toBe(expectedWorkspace.get(target.id!))
+   const service=new WorkingMemoryService(vault,()=>null);await service.initialize();const relPath=`scene-${step}.md`
+   const forgetAt=new Map([[7,3],[8,4],[13,9]]),permissionAt=new Map([[14,10],[17,15]]),queryAt=new Map([[5,3],[6,4],[11,9],[12,10]])
+   const removed=new Set<string>();let forgottenValue:string|undefined
+   const forgottenStep=forgetAt.get(step);if(forgottenStep){
+    const item=aux.get(forgottenStep)!,basis=service.snapshot(),all=[...basis.record.entries,...basis.record.recent];removed.add(item.id);let grew=true
+    while(grew){grew=false;for(const e of all)if(!removed.has(e.id)&&e.sources.some(s=>s.memoryDeps.some(d=>removed.has(d.id)))){removed.add(e.id);grew=true}}
+    expect(all.some(e=>e.category==='recent'&&removed.has(e.id)&&e.sources.some(s=>s.memoryDeps.some(d=>d.id===item.id)))).toBe(true);derivedRevocations+=removed.size-1
+    await service.forget({sessionId:service.context().sessionId,revision:basis.revision,objectVersion:basis.objectVersion,id:item.id,version:item.version});forgets++;forgottenValue=item.content
+    const after=await service.entries();expect(after.some(e=>removed.has(e.id))).toBe(false)
+    // Forget revokes derived use; it preserves the original human command and raw ledger history.
+    expect(await readFile(path.join(root,item.relPath),'utf8')).toContain(item.content);expect((await vault.ledgerRecord(item.relPath,item.taskId)).chapter?.prompt).toBe(item.content)
+   }
+   const deniedStep=permissionAt.get(step);if(deniedStep){const item=aux.get(deniedStep)!;await writeFile(path.join(root,'.rgent-permissions'),JSON.stringify({[item.relPath]:'forbidden'}));tightenings++;expect((await service.entries()).find(e=>e.id===item.id)?.status).toBe('paused');expect(await readFile(path.join(root,item.relPath),'utf8')).toContain(item.content)}
+   const initial=step<=2,correct=step>=17&&step<=21,addAux=[3,4,9,10,15].includes(step),queryAux=queryAt.get(step),version=(main[lib]?.version??0)+1
+   const prompt=initial?`${name}项目版本为甲`:correct?`${name}项目版本明确更正为第${version}版`:addAux?`${name}敏感便签暗河编号为秘钥${step}`:queryAux?`继续核对${aux.get(queryAux)!.content}`:`继续核对${name}项目版本`
+   await writeFile(path.join(root,relPath),'/'+prompt+'\n');let issued=0
+   engine=new WorkingMemoryConsolidation({service:()=>service,configuration:()=>({enabled:true,signature:'continuous-25',credential,limits:{seconds:120,calls:2,tools:0}}),changed:()=>{},stream:async function*(input){issued++;const p=JSON.parse(String(input.messages[0]!.content)),source=p.sources.find((s:any)=>s.kind==='ledger'&&s.classification==='command'),old=main[lib]
+    const proposals=initial||addAux||correct?[{action:correct?'correct':'add',...(correct?{id:old!.id,version:old!.version}:{}),content:prompt,layer:'demand',scope:relPath,sourceIds:[source.id],semantic:'fact',attribution:'人的本场口令',reviewAt:null}]:[]
+    yield {type:'text',text:JSON.stringify({proposals,recent:{goal:queryAux?aux.get(queryAux)!.content:`继续${name}工作`,completed:'回答已保存',blocked:'',next:`核对${name}版本`,sourceIds:[source.id],assistantDraft:false}})};yield {type:'finish',reason:'stop'}
+   }})
+   const currentEngine=engine,foreground=await runControlledQualityHost(vault,service,credential,relPath,prompt,'受控回答已保存',signal,id=>currentEngine.capture(id),material=>currentEngine.handoff(material));await currentEngine.idle();sessions++
+   expect(foreground.ledger.state).toBe('saved');expect(foreground.ledger.chapter?.provenance?.version).toBe(2);const material=await service.savedMaterial(relPath,foreground.ledger.taskId);expect(material.provenanceStatus).toBe('complete');expect(material.materialVersion).toBe(foreground.material.materialVersion)
+   const deps=foreground.ledger.chapter!.provenance!.version===2?foreground.ledger.chapter!.provenance!.memoryDeps:[];expect(deps.every(d=>known[lib]!.has(d.id))).toBe(true);expect(deps.some(d=>known[1-lib]!.has(d.id))).toBe(false);expect(foreground.sent.every(s=>!(s.system+'\n'+s.prompt).includes(other))).toBe(true)
+   if(main[lib]){expect(deps).toContainEqual(expect.objectContaining({id:main[lib]!.id,version:main[lib]!.version}));expect(foreground.sent.some(s=>(s.system+'\n'+s.prompt).includes(main[lib]!.content))).toBe(true);nextSends++}
+   if(queryAux){const item=aux.get(queryAux)!;expect(deps).toContainEqual(expect.objectContaining({id:item.id,version:item.version}))}
+   if(forgottenValue){expect(deps.some(d=>removed.has(d.id))).toBe(false);expect(foreground.sent.every(s=>!(s.system+'\n'+s.prompt).includes(forgottenValue!))).toBe(true)}
+   if(deniedStep){const item=aux.get(deniedStep)!;expect(deps.some(d=>d.id===item.id)).toBe(false);expect(foreground.sent.every(s=>!(s.system+'\n'+s.prompt).includes(item.content))).toBe(true)}
+   const effective=await service.entries(),receipt=service.snapshot().record.jobs.find(j=>j.taskId===foreground.ledger.taskId);expect(receipt?.outcome).toBe('applied');expect(issued).toBe(1);if(receipt?.results?.some(r=>r.outcome==='rejected'))partial++
+   if(initial||correct){const e=effective.find(e=>e.content===prompt&&e.category==='long')!;expect(e).toBeDefined();expect(e.status).toBe('active');if(correct){expect(e.id).toBe(main[lib]!.id);expect(e.version).toBe(main[lib]!.version+1);corrections++}main[lib]={id:e.id,version:e.version,content:e.content}}
+   if(addAux){const e=effective.find(e=>e.content===prompt&&e.category==='long')!;expect(e?.status).toBe('active');aux.set(step,{id:e.id,version:e.version,content:e.content,relPath,taskId:foreground.ledger.taskId})}
+   for(const e of effective)known[lib]!.add(e.id)
+   if(queryAux){const item=aux.get(queryAux)!,recent=effective.find(e=>e.category==='recent'&&e.recent?.taskId===foreground.ledger.taskId)!;expect(recent?.status).toBe('active');expect(recent.sources.some(s=>s.memoryDeps.some(d=>d.id===item.id&&d.version===item.version))).toBe(true)}
+   catalog.saveWorkspace(target,{version:1,tabs:[{relPath,selection:{anchor:1,head:1},scrollTop:step}],active:relPath,sidebarHidden:false,treeScroll:step,resourceScroll:step});expectedWorkspace.set(target.id!,relPath)
+  }
+  expect({sessions,corrections,forgets,tightenings,restarts,nextSends}).toEqual({sessions:25,corrections:5,forgets:3,tightenings:2,restarts:1,nextSends:23});expect(derivedRevocations).toBeGreaterThanOrEqual(3)
+  expect(new VaultCatalog(base).view().entries.map(e=>e.id)).toEqual(registered.map(e=>e.id));console.info('Memory continuous controlled',JSON.stringify({sessions,corrections,forgets,tightenings,restarts,nextSends,derivedRevocations,partial,paidCalls:0}))
+ }finally{engine?.close();await engine?.idle();vault.dispose();await rm(base,{recursive:true,force:true})}
+},30000)

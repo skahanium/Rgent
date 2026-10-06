@@ -1,4 +1,4 @@
-import {mkdtempSync,writeFileSync,appendFileSync,rmSync} from 'node:fs';import os from 'node:os';import path from 'node:path'
+import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';import os from 'node:os';import path from 'node:path'
 import {it,expect,afterEach} from 'vitest'
 import {WorkingMemoryStore,statusFromState} from '../../src/main/working-memory-store.ts'
 import {secureFsFor,closeSecureFs} from '../../src/main/secure-fs.ts'
@@ -78,7 +78,7 @@ const entryRecord=(count:number,long=false):WorkingRecord=>({version:3,identity:
 it('forgets 1000 longest legal identities serially beyond the old control wall',()=>{
  const {root,store}=fixture(),record=entryRecord(1000,true);writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record));expect(Buffer.byteLength(encodeWorkingMemory(record))).toBeLessThan(2*1024*1024)
  const started=performance.now();for(const e of record.entries)store.forget(store.read(),e.id,e.version)
- const final=store.read();expect(final.record.entries).toEqual([]);expect(final.record.forgotten).toHaveLength(1000);expect(Buffer.byteLength(final.raw!)).toBeLessThanOrEqual(2*1024*1024);appendFileSync('/tmp/rgent-v4-D-capacity-numbers.jsonl',JSON.stringify({kind:'serial-1000',initialBytes:Buffer.byteLength(encodeWorkingMemory(record)),finalBytes:Buffer.byteLength(final.raw!),ms:Number((performance.now()-started).toFixed(2))})+'\n')
+ const final=store.read();expect(final.record.entries).toEqual([]);expect(final.record.forgotten).toHaveLength(1000);expect(Buffer.byteLength(final.raw!)).toBeLessThanOrEqual(2*1024*1024);console.info('Memory capacity cost',JSON.stringify({kind:'serial-1000',initialBytes:Buffer.byteLength(encodeWorkingMemory(record)),finalBytes:Buffer.byteLength(final.raw!),ms:Number((performance.now()-started).toFixed(2))}))
 },120000)
 it('forget closes pending target chains as well as recursive evidence dependencies',()=>{
  const {root,store}=fixture(),record=entryRecord(4);record.entries[1]!.pendingTarget={id:record.entries[0]!.id,version:1};record.entries[2]!.pendingTarget={id:record.entries[1]!.id,version:1};record.entries[3]!.sources[0]!.memoryDeps=[{id:record.entries[2]!.id,version:1}];writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record))
@@ -98,7 +98,7 @@ it('a near-full legal control region stays readable and forget never hits a sepa
 it('ordinary growth pauses on an existing unreserved full body but a real reduction and 1000-entry closure stay available',()=>{
  const {root,store}=fixture(),record=entryRecord(1000);for(const e of record.entries){e.content='x'.repeat(800);if(e.id!=='entry-0')e.pendingTarget={id:'entry-0',version:1}}
  const raw=encodeWorkingMemory(record);expect(Buffer.byteLength(raw)).toBeLessThanOrEqual(2*1024*1024);expect(Buffer.byteLength(raw)).toBeGreaterThan(2*1024*1024-256*1024);writeFileSync(path.join(root,'.rgent-memory'),raw)
- expect(()=>store.edit(store.read(),'entry-1',1,{content:'x'.repeat(900)})).toThrow('MEMORY_FILE_LIMIT');store.edit(store.read(),'entry-1',1,{content:'缩短'});const before=store.read(),started=performance.now();store.forget(before,'entry-0',1);const after=store.read();expect(after.record.entries).toEqual([]);appendFileSync('/tmp/rgent-v4-D-capacity-numbers.jsonl',JSON.stringify({kind:'closure-1000',initialBytes:Buffer.byteLength(before.raw!),finalBytes:Buffer.byteLength(after.raw!),ms:Number((performance.now()-started).toFixed(2))})+'\n')
+ expect(()=>store.edit(store.read(),'entry-1',1,{content:'x'.repeat(900)})).toThrow('MEMORY_FILE_LIMIT');store.edit(store.read(),'entry-1',1,{content:'缩短'});const before=store.read(),started=performance.now();store.forget(before,'entry-0',1);const after=store.read();expect(after.record.entries).toEqual([]);console.info('Memory capacity cost',JSON.stringify({kind:'closure-1000',initialBytes:Buffer.byteLength(before.raw!),finalBytes:Buffer.byteLength(after.raw!),ms:Number((performance.now()-started).toFixed(2))}))
 })
 it('a capacity-rejected automatic proposal records the real capacity reason while preserving existing entries',()=>{
  const {root,store}=fixture(),record=entryRecord(999);for(const e of record.entries)e.content='x'.repeat(800);writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record));const result=store.apply(store.read(),[[{action:'add',input:{content:'新事实',layer:'demand',scope:'库',sources:[source(1000)],semantic:'fact',attribution:'人',reviewAt:null}}]],{taskId:'capacity-job',materialVersion:'a'.repeat(64),outcome:'applied',entryIds:[]});expect(result.rejected).toBe(1);expect(result.snapshot.record.jobs.at(-1)?.reason).toBe('MEMORY_FILE_LIMIT');expect(result.snapshot.record.entries).toHaveLength(999)

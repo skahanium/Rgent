@@ -119,6 +119,7 @@ it('memory queries use the frozen snapshot and preserve tool dependencies throug
 const recallTopics=('量子纠缠 热力平衡 星际尘埃 海洋环流 火山喷发 地壳运动 光合作用 遗传密码 神经突触 免疫应答 蛋白折叠 大气污染 土壤侵蚀 冰川消融 混凝土养护 桥梁荷载 城市排水 农田灌溉 森林防火 湿地保护 水稻育种 苹果授粉 茶叶发酵 葡萄修剪 陶瓷烧结 钢铁冶炼 铜矿浮选 锂电循环 光纤传输 卫星定位 交通调度 物流分拣 仓储盘点 食品冷藏 药品质控 临床随访 语言习得 古籍校勘 文物修复 音乐节奏 绘画透视 建筑采光 财务审计 税务申报 期权定价 货币供给 劳动仲裁 专利检索 合同履约 公共卫生 '+
 'astronomy botany crystallography dendrology entomology fermentation geodesy hydrology immunology jurisprudence kinematics linguistics metallurgy neurology ornithology paleontology radiometry seismology thermometry virology acoustics biomechanics cryptography demography ergonomics fluidics genomics hematology ichthyology lexicography mineralogy nephrology oceanography pathology rheology spectroscopy toxicology volcanology aerodynamics cardiology epidemiology glaciology horticulture microscopy nanotechnology pharmacology robotics telecommunication urbanism zoology').split(' ')
 it('measures top-eight coverage and irrelevant returns on 1000 fixed memories / 100 lexical queries',()=>{
+ const started=performance.now()
  expect(recallTopics).toHaveLength(100)
  const memories=recallTopics.flatMap((topic,i)=>Array.from({length:8},(_,j)=>entry(`topic-${i}-${j}`,`${topic}：第${j+1}项约定，采用独立验证。`,'demand')))
  memories.push(...Array.from({length:200},(_,i)=>entry(`noise-${i}`,'项目会议施工进度和预算说明。','demand')))
@@ -129,6 +130,7 @@ it('measures top-eight coverage and irrelevant returns on 1000 fixed memories / 
   if(correct>=7)covered++
   returned+=result.length;irrelevant+=result.length-correct
  }
+ console.info('Memory lexical fixed',JSON.stringify({memories:memories.length,queries:100,coverageAt8:covered/100,irrelevantFraction:irrelevant/Math.max(returned,1),ms:Number((performance.now()-started).toFixed(2))}))
  expect(covered/100).toBeGreaterThanOrEqual(.85)
  expect(irrelevant/Math.max(returned,1)).toBeLessThanOrEqual(.05)
 })
