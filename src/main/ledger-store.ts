@@ -401,13 +401,15 @@ export class LedgerStore{
  }
  /** Read existing control identities and known dispatched body ranges; never allocate a unit. */
  summaryMaterials(relPath:string,taskIds:readonly string[],requiredBodyIds:readonly string[]=[],watermark=0,acceptsObject:(path:string,before:string,after:string)=>boolean=(_p,b,a)=>b===a){
-  const registry=this.registry(),units=this.materialUnits(),pending:{relPath:string;taskId:string}[]=[],queued=new Set<string>(),seen=new Set<string>(),bodyContexts=new Map<string,ContextChapter[]>(),materialIds=new Set<string>(),sequences:number[]=[]
+  const registry=this.registry(),units=this.materialUnits(),pending:{relPath:string;taskId:string}[]=[],queued=new Set<string>(),seen=new Set<string>(),bodyContexts=new Map<string,ContextChapter[]>(),materialIds=new Set<string>(),sequences:number[]=[],memoryDeps=new Map<string,{id:string;version:number}>()
   const queue=(path:string,taskId:string)=>{const key=path+'\0'+taskId;if(queued.has(key))return;if(queued.size>=100000)throw Error('MEMORY_SOURCE_LIMIT');queued.add(key);pending.push({relPath:path,taskId})};for(const taskId of taskIds)queue(relPath,taskId)
   const unitIds=new Set(units.map(u=>u.id));if(unitIds.size!==units.length||requiredBodyIds.some(id=>!unitIds.has(id))||units.some(u=>{const o=registry.owners.find(o=>o.noteId===u.noteId);return !o||u.sequence>o.sequenceCeiling||u.sequence>registry.sequence}))throw Error('MEMORY_MATERIAL_UNVERIFIED')
   const read=(path:string,taskId:string)=>{const owner=this.requiredOwner(path),record=this.record(owner,taskId);if(!record||!record.chapter||record.state==='cleared'||record.state==='pending-body'||record.sequence>owner.sequenceCeiling||record.sequence>registry.sequence||record.chapter.material?.truncated)throw Error('MEMORY_MATERIAL_UNVERIFIED');return record}
   while(pending.length){const at=pending.pop()!,key=at.relPath+'\0'+at.taskId;if(seen.has(key))continue;if(seen.size>=100000)throw Error('MEMORY_SOURCE_LIMIT');seen.add(key)
    const record=read(at.relPath,at.taskId)
    sequences.push(record.sequence);materialIds.add(at.taskId+'/prompt')
+   const provenance=record.chapter!.provenance
+   for(const dep of [...(provenance?.version===2?provenance.memoryDeps:[]),...(record.chapter!.material?.fragments??[]).flatMap(f=>f.memoryDeps)])memoryDeps.set(dep.id+'@'+dep.version,{id:dep.id,version:dep.version})
    for(const f of record.chapter!.material?.fragments??[]){
     if(digest(f.text)!==f.hash)throw Error('MEMORY_MATERIAL_UNVERIFIED')
     const sourceOwner=this.requiredOwner(f.relPath);if(!acceptsObject(f.relPath,f.objectVersion,sourceOwner.objectVersion))throw Error('MEMORY_MATERIAL_UNVERIFIED')
@@ -443,7 +445,7 @@ export class LedgerStore{
    }
    for(const sent of record.chapter!.sentSummaries??[])for(const d of sent.dependencies){const dependency=read(at.relPath,d.sourceId),chapter=this.contextForRecord(dependency)[0];if(dependency.sequence>=record.sequence||!chapter||digest(chapter.text)!==d.hash)throw Error('MEMORY_MATERIAL_UNVERIFIED');queue(at.relPath,d.sourceId)}
   }
-  return {materialIds:[...materialIds],sequences,ceiling:registry.sequence}
+  return {materialIds:[...materialIds],sequences,ceiling:registry.sequence,memoryDeps:[...memoryDeps.values()]}
  }
  contexts(relPath:string):ContextChapter[]{const owner=this.lookupOwner(relPath);if(!owner)return []
   return this.orderedRecords(owner,this.registry().sequence).reverse().flatMap(({record})=>this.contextForRecord(record))

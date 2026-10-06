@@ -208,7 +208,7 @@ export class WorkingMemoryStore{
       const e=candidate.entries.find(e=>e.id===change.id&&e.version===change.version)
       if(!e)throw Error('MEMORY_CHANGED')
       // 替换的前提不能包含本次替换自己作废的反向依赖闭包，否则更正条目会被自己的下游拖成不可核验。
-      pruneReplacedClosure(candidate,change.id,input)
+      assertReplacementIndependent(candidate,change.id,input)
       if(change.action==='conflict'){
        if(candidate.entries.length>=1000)throw Error('MEMORY_ENTRY_LIMIT')
        const pending:WorkingEntry={...input,id:randomUUID(),version:1,category:'long',status:'disputed',state:stateFromStatus('disputed'),reason:'MEMORY_CONFIRMATION_REQUIRED',updatedAt:now,pendingTarget:{id:e.id,version:e.version},updateBasis:{kind:'consolidation',id:receipt.taskId,version:1}}
@@ -365,12 +365,11 @@ function advanceVersion(record:WorkingRecord,id:string,from:number,to:number):st
  return rebound
 }
 
-/** 更正/作废/冲突替换时的前提剪枝：被替换条目的反向依赖闭包由这次变更本身作废，
- *  不能同时成为新版本的前提，否则更正会依赖"依赖旧版本的下游条目"而把自己拖下水。 */
-function pruneReplacedClosure(record:WorkingRecord,replacedId:string,input:WorkingInput):void{
+/** 实际来源引用自身或下游时无法证明独立更正，整组拒绝，禁止删边伪造独立依据。 */
+function assertReplacementIndependent(record:WorkingRecord,replacedId:string,input:WorkingInput):void{
  const reverse=new Set<string>([replacedId]);let grew=true
  while(grew){grew=false
   for(const entry of allEntries(record))if(!reverse.has(entry.id)&&entry.sources.some(source=>source.memoryDeps.some(dep=>reverse.has(dep.id)))){reverse.add(entry.id);grew=true}
  }
- for(const source of input.sources)source.memoryDeps=source.memoryDeps.filter(dep=>!reverse.has(dep.id))
+ if(input.sources.some(source=>source.memoryDeps.some(dep=>reverse.has(dep.id))))throw Error('MEMORY_DEPENDENCY_CHANGED')
 }

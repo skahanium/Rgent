@@ -16,6 +16,8 @@ export type SavedTaskMaterial = {
   taskId: string; noteId?:string; startedAt?:string; context: MemoryContext | null; origin: MaterialBinding
   status: 'completed' | 'cancelled' | 'failed' | 'limit'; reason?: string
   prompt: string; answer: string; ledgerHash: string; materialVersion: string
+  /** Runtime proof only; never serialized into memory or the ledger. */
+  provenanceStatus?: 'complete' | 'unknown'
   material: SentTaskMaterial; sourceDeps: LedgerSource[]; memoryDeps: LedgerMemoryDependency[]
 }
 export type SentTaskMaterial = { fragments: SentFragment[]; truncated: boolean }

@@ -42,7 +42,7 @@ it('persists controlled same-note source bindings for long and recent memory acr
  const base=await mkdtemp(path.join(os.tmpdir(),'rgent-memory-binding-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),markPrompt('/以后用中文',{taskId:'task',range:{start:0,end:6},expectedText:'/以后用中文',promptText:'以后用中文'}))
  let vault=new VaultSession(base,vi.fn());vault.restore()
  try{
-  let note=await vault.readOpened('a.md');await vault.ledgerPrepare('a.md',{taskId:'task',startedAt:new Date().toISOString(),status:'completed',prompt:'以后用中文',answer:'好的'})
+  let note=await vault.readOpened('a.md');await vault.ledgerPrepare('a.md',{taskId:'task',startedAt:new Date().toISOString(),status:'completed',prompt:'以后用中文',answer:'好的',provenance:{version:2,model:{provider:'custom',modelId:'fixture',endpointHost:'example.test'},scope:['a.md'],sources:[],tools:[],memoryDeps:[]}})
   const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'task',answer:'好的'}),note.revision,note);await vault.ledgerComplete('a.md','task',saved.revision)
   const service=new WorkingMemoryService(vault,()=>null),source=await service.sourceForPrompt('a.md','task'),material=await service.savedMaterial('a.md','task')
   const standing=await vault.memoryMutation(store=>store.add(store.read(),{content:'以后用中文',layer:'core',scope:'本库',sources:[source],semantic:'standing',attribution:'人',reviewAt:null}))
@@ -190,7 +190,7 @@ it('restores uniquely verified sources only after explicit copied-library associ
  const base=await mkdtemp(path.join(os.tmpdir(),'rgent-memory-recovery-')),root=path.join(base,'vault'),copy=path.join(base,'copy');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
  const body=markPrompt('/以后用中文',{taskId:'restore-task',range:{start:0,end:6},expectedText:'/以后用中文',promptText:'以后用中文'});await writeFile(path.join(root,'a.md'),body)
  const vault=new VaultSession(base,vi.fn());vault.restore()
- try{const note=await vault.readOpened('a.md');await vault.ledgerPrepare('a.md',{taskId:'restore-task',startedAt:new Date().toISOString(),status:'completed',prompt:'以后用中文',answer:'好的'})
+ try{const note=await vault.readOpened('a.md');await vault.ledgerPrepare('a.md',{taskId:'restore-task',startedAt:new Date().toISOString(),status:'completed',prompt:'以后用中文',answer:'好的',provenance:{version:2,model:{provider:'custom',modelId:'fixture',endpointHost:'example.test'},scope:['a.md'],sources:[],tools:[],memoryDeps:[]}})
   const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'restore-task',answer:'好的'}),note.revision,note);await vault.ledgerComplete('a.md','restore-task',saved.revision)
   const service=new WorkingMemoryService(vault,()=>null),source=await service.sourceForPrompt('a.md','restore-task')
   await vault.memoryMutation(store=>store.add(store.read(),{content:'以后用中文',layer:'core',scope:'本库',sources:[source],semantic:'standing',attribution:'人的口令',reviewAt:null}))
@@ -414,7 +414,7 @@ it.each([false,true])('expires recent by creation time through recursive depende
   const basis=service.snapshot(),created=Date.now()-14*86400000+1000;let now=Date.now()
   const recent={...basis.record.entries[0]!,category:'recent' as const,layer:'demand' as const,semantic:'fact' as const,recent:{taskId:'task',noteId:'note',materialVersion:'a'.repeat(64),createdAt:new Date(created).toISOString(),outcome:'completed' as const,sections:{goal:'',completed:'',blocked:'',next:''},assistantDraft:false}}
   recent.sources=[{...source,kind:'ledger',taskId:'task'}];basis.record.entries.shift();basis.record.recent=[recent]
-  vi.spyOn(service,'snapshot').mockImplementation(()=>structuredClone(basis));vi.spyOn(service,'savedMaterial').mockResolvedValue({noteId:'note',materialVersion:'a'.repeat(64)} as Awaited<ReturnType<typeof service.savedMaterial>>)
+  vi.spyOn(service,'snapshot').mockImplementation(()=>structuredClone(basis));vi.spyOn(service,'savedMaterial').mockResolvedValue({taskId:'task',context:service.context(),origin:{relPath:'a.md',sessionId:service.context().sessionId,objectVersion:source.objectVersion,revision:source.revision},status:'completed',prompt:source.text,answer:'',ledgerHash:'a'.repeat(64),noteId:'note',materialVersion:'a'.repeat(64),provenanceStatus:'complete',memoryDeps:[],sourceDeps:[],material:{fragments:[],truncated:false}})
   vi.spyOn(Date,'now').mockImplementation(()=>now);let checks=0;vi.spyOn(service,'verifySource').mockImplementation(async()=>{if(race&&++checks===3)now=created+14*86400000;return true})
   if(!race)now=created+14*86400000
   const raw=vault.memorySnapshot().raw,entries=await service.entries()
@@ -472,4 +472,50 @@ it('reports a stale dependency as MEMORY_DEPENDENCY_CHANGED and repairs a leftov
   const record=service.snapshot().record,upstream=record.entries.find(e=>e.id===upstreamId)!
   expect(record.entries.find(e=>e.content==='下游事实')!.sources[0]!.memoryDeps).toEqual([{id:upstreamId,version:upstream.version}])
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+
+it.each(['empty','dependency','unknown','mismatch','cache','race','overflow'] as const)('reconstructs only proven old recent ancestry without writing on reads (%s)',async mode=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-integrity-recent-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'原始资料')
+ let vault=new VaultSession(base,vi.fn());vault.restore()
+ try{
+  let service=new WorkingMemoryService(vault,()=>null);await service.initialize();let note=await vault.readOpened('a.md')
+  const source=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:4}),parent=await vault.memoryMutation(store=>store.add(store.read(),{content:'上游事实',layer:'demand',scope:'a.md',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}))
+  const dependency={id:parent.id,version:1,basisHashes:[source.basisHash],sourceDeps:[{id:source.id,version:1,hash:source.hash,relPath:'a.md',kind:'body' as const,taskId:null}]}
+  const provenance=mode==='unknown'?undefined:{version:2 as const,model:{provider:'custom',modelId:'fixture',endpointHost:'example.test'},scope:['a.md'],sources:[],tools:[],memoryDeps:mode==='empty'?[]:[dependency]}
+  await vault.ledgerPrepare('a.md',{taskId:'recent-task',startedAt:new Date().toISOString(),status:'completed',prompt:'继续工作',answer:'受控草稿',provenance})
+  note=await vault.read('a.md');const marked=markPrompt('/继续工作',{taskId:'recent-task',range:{start:0,end:5},expectedText:'/继续工作',promptText:'继续工作'});const written=await vault.write('a.md',note.content+'\n'+upsertAiAnswer(marked,{taskId:'recent-task',answer:'受控草稿'}),note.revision,note);await vault.ledgerComplete('a.md','recent-task',written.revision)
+  const material=await service.savedMaterial('a.md','recent-task'),anchor=await service.sourceForPrompt('a.md','recent-task')
+  if(mode==='cache'){
+   expect(await service.summaryAllowed('a.md',['recent-task'])).toBe(true)
+   const before=service.snapshot();await service.forget({sessionId:service.context().sessionId,revision:before.revision,objectVersion:before.objectVersion,id:parent.id,version:1})
+   expect(await service.summaryAllowed('a.md',['recent-task'])).toBe(false);return
+  }
+  const result=await vault.memoryMutation(store=>store.apply(store.read(),[],{taskId:'recent-task',materialVersion:material.materialVersion,outcome:'applied',entryIds:[]},{sources:[anchor],scope:'a.md',recent:{taskId:'recent-task',noteId:mode==='mismatch'?'wrong-note':material.noteId!,materialVersion:material.materialVersion,createdAt:new Date().toISOString(),outcome:'completed',sections:{goal:'继续上次工作',completed:'',blocked:'',next:''},assistantDraft:false}}))
+  const child=await vault.memoryMutation(store=>store.add(store.read(),{content:'近期派生候选',layer:'demand',scope:'a.md',sources:[{...anchor,memoryDeps:[{id:result.recentIds[0]!,version:1}]}],semantic:'fact',attribution:'人',reviewAt:null}))
+  if(mode==='dependency'){
+   const current=await vault.read('a.md'),marked=markPrompt('/接续下一步',{taskId:'recent-next',range:{start:0,end:6},expectedText:'/接续下一步',promptText:'接续下一步'})
+   await vault.ledgerPrepare('a.md',{taskId:'recent-next',startedAt:new Date().toISOString(),status:'completed',prompt:'接续下一步',answer:'下一步草稿',provenance:{...provenance!,memoryDeps:[{...dependency,id:result.recentIds[0]!,basisHashes:[anchor.basisHash],sourceDeps:[{id:anchor.id,version:1,hash:anchor.hash,relPath:'a.md',kind:'ledger',taskId:'recent-task'}]}]}})
+   const written=await vault.write('a.md',current.content+'\n'+upsertAiAnswer(marked,{taskId:'recent-next',answer:'下一步草稿'}),current.revision,current);await vault.ledgerComplete('a.md','recent-next',written.revision)
+   const nextMaterial=await service.savedMaterial('a.md','recent-next'),nextSource=await service.sourceForPrompt('a.md','recent-next')
+   await vault.memoryMutation(store=>store.apply(store.read(),[],{taskId:'recent-next',materialVersion:nextMaterial.materialVersion,outcome:'applied',entryIds:[]},{sources:[nextSource],scope:'a.md',recent:{taskId:'recent-next',noteId:nextMaterial.noteId!,materialVersion:nextMaterial.materialVersion,createdAt:new Date().toISOString(),outcome:'completed',sections:{goal:'下游接续',completed:'',blocked:'',next:''},assistantDraft:false}}))
+  }
+  vault.dispose();vault=new VaultSession(base,vi.fn());vault.restore();service=new WorkingMemoryService(vault,()=>null)
+  const before=service.snapshot()
+  if(mode==='overflow'){
+   const original=service.savedMaterial.bind(service);vi.spyOn(service,'savedMaterial').mockImplementation(async(...args)=>({...await original(...args),memoryDeps:Array.from({length:17},(_,i)=>({...dependency,id:'extra-'+i}))}))
+  }
+  if(mode==='race'){
+   const verify=service.verifySource.bind(service);let forgotten=false
+   vi.spyOn(service,'verifySource').mockImplementation(async s=>{if(!forgotten){forgotten=true;await service.forget({sessionId:service.context().sessionId,revision:before.revision,objectVersion:before.objectVersion,id:parent.id,version:1})}return verify(s)})
+   expect(await service.entries([child.id])).toEqual([]);return
+  }
+  const entries=await service.entries(),recent=entries.find(e=>e.id===result.recentIds[0])!
+  expect(service.snapshot().raw).toBe(before.raw);expect(service.snapshot().revision).toBe(before.revision)
+  if(mode==='unknown'||mode==='mismatch'||mode==='overflow'){expect(recent.status).toBe('paused');expect(entries.find(e=>e.id===child.id)?.status).toBe('paused')}
+  else{expect(recent.status).toBe('active');expect(recent.sources.flatMap(s=>s.memoryDeps)).toEqual(mode==='empty'?[]:[{id:parent.id,version:1}])}
+  await service.forget({sessionId:service.context().sessionId,revision:before.revision,objectVersion:before.objectVersion,id:parent.id,version:parent.version})
+  const remaining=service.snapshot().record
+  if(mode==='dependency'){expect(remaining.recent).toEqual([]);expect(remaining.entries).toEqual([]);expect(await service.summaryAllowed('a.md',['recent-task'])).toBe(false);expect(await service.summaryAllowed('a.md',['recent-next'])).toBe(false);expect(await vault.memoryMutation(store=>store.canLearn(store.read().record,[anchor]))).toBe(false)}
+  if(mode==='unknown'||mode==='mismatch'||mode==='overflow'){expect(await service.summaryAllowed('a.md',['recent-task'])).toBe(false);expect(remaining.recent[0]?.status).toBe('paused');expect((await service.entries()).find(e=>e.id===child.id)?.status).toBe('paused')}
+ }finally{vi.restoreAllMocks();vault.dispose();await rm(base,{recursive:true,force:true})}
 })

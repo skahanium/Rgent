@@ -328,12 +328,12 @@ it('rebinds dependents on a manual edit and on a manual confirmation',()=>{
 })
 it('refuses to let a replacement take its own dependents as premises',()=>{
  const {store}=fixture(),target=store.add(store.read(),{content:'本库记录先结论后依据',layer:'core',scope:'本库',sources:[source(1)],semantic:'standing',attribution:'人的口令',reviewAt:null}),dependent=dependentOn(store,target,2,'下游条目引用了这条约定')
- // 更正这一场的材料里装着"依赖旧版本的下游条目"：若照抄成前提，更正会把自己拖下水。
+ // 来源自身实际依赖旧版本的下游，不能通过删除边伪造独立更正。
  const carrier={...source(3),memoryDeps:[{id:dependent.id,version:dependent.version}]}
  store.apply(store.read(),[[{action:'correct',id:target.id,version:target.version,input:{content:'本库记录先依据后结论',layer:'core',scope:'本库',sources:[carrier],semantic:'standing',attribution:'人的更正口令',reviewAt:null}}]],{taskId:'job-self',materialVersion:'a'.repeat(64),outcome:'applied',entryIds:[]})
  const record=store.read().record,corrected=record.entries.find(e=>e.id===target.id)!
- expect(corrected.version).toBe(2)
- expect(corrected.sources[0]!.memoryDeps.map(d=>d.id)).not.toContain(dependent.id)
- expect(record.entries.find(e=>e.id===dependent.id)).toMatchObject({status:'paused',reason:'MEMORY_DEPENDENCY_CHANGED'})
+ expect(corrected.version).toBe(1)
+ expect(record.entries.find(e=>e.id===dependent.id)?.status).toBe('active')
+ expect(record.jobs.at(-1)?.results).toContainEqual({action:'correct',outcome:'rejected',code:'MEMORY_DEPENDENCY_CHANGED'})
  expect(danglingRefs(record)).toEqual([])
 })

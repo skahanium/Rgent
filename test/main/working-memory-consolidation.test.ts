@@ -25,7 +25,7 @@ async function fixture(stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEve
  const engine=new WorkingMemoryConsolidation({service:()=>service,configuration,stream,changed:vi.fn(),strategy})
  engine.capture('task')
  let note=await vault.readOpened('a.md')
- await vault.ledgerPrepare('a.md',{taskId:'task',startedAt:new Date().toISOString(),status:'completed',prompt,answer:'好的'})
+ await vault.ledgerPrepare('a.md',{taskId:'task',startedAt:new Date().toISOString(),status:'completed',prompt,answer:'好的',provenance:{version:2,model:{provider:'custom',modelId:'fixture',endpointHost:'example.test'},scope:['a.md'],sources:[],tools:[],memoryDeps:[]}})
  const result=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'task',answer:'好的'}),note.revision,note)
  await vault.ledgerComplete('a.md','task',result.revision)
  const material=await service.savedMaterial('a.md','task')
@@ -304,13 +304,13 @@ it('inherits only the material, cited-source and replaced-entry dependencies',()
  // 库里其余条目不再被整批写成本条的依赖：更正它们不会让这条一起暂停。
  expect(ids).not.toContain('unrelated')
  expect(ids).not.toContain('replaced')
- // 近期背景是会话日志、不是前提：它不作依赖父，也不继承记忆依赖。
+ // 近期背景不是事实权威，撤销关系仍须保留。
  const log:any=entry('log-1',1,[src('s-log')]);(log as any).category='recent'
  const materialWithLog:any={...material,memoryDeps:[{id:'log-1',version:1},{id:'material-memory',version:2}]}
  const [withLog]=inheritInputs([cited],materialWithLog,[log] as unknown as Parameters<typeof inheritInputs>[2],undefined)
- expect(((withLog!.memoryDeps??[]) as unknown as {id:string}[]).map(d=>d.id)).not.toContain('log-1')
- const [asLog]=inheritInputs([cited],materialWithLog,[log] as unknown as Parameters<typeof inheritInputs>[2],undefined,{skipMemoryDeps:true})
- expect(asLog!.memoryDeps??[]).toEqual([])
+ expect(((withLog!.memoryDeps??[]) as unknown as {id:string}[]).map(d=>d.id)).toContain('log-1')
+ const [asLog]=inheritInputs([cited],materialWithLog,[log] as unknown as Parameters<typeof inheritInputs>[2],undefined)
+ expect(asLog!.memoryDeps).toEqual(expect.arrayContaining([{id:'log-1',version:1},{id:'dep-of-cited',version:3}]))
  expect((asLog!.sourceDeps as unknown as {id:string}[]).length).toBeGreaterThan(0)
  expect(((out!.sourceDeps??[]) as unknown as {id:string}[]).map(d=>d.id).sort()).toEqual(['file','material-file'])
 })
@@ -442,4 +442,33 @@ it('spends the second call on the format repair when the first transport attempt
  expect(calls).toBe(2)
  expect(f.service.snapshot().record.jobs[0]?.outcome).toBe('applied')
  expect(f.service.snapshot().record.jobs[0]?.reason).toBeUndefined()
+})
+
+it.each(['exact','paraphrase','own-edge','historical'] as const)('proves command independence only for the current full command while retaining actual source edges (%s)',async mode=>{
+ const f=await fixture(async function*(input){const p=JSON.parse(String(input.messages[0]!.content)),s=p.sources[0];yield {type:'text',text:JSON.stringify({recent:null,proposals:[{action:'add',content:mode==='paraphrase'?'新指令的改写':s.text,layer:'demand',scope:'a.md',sourceIds:[s.id],semantic:'fact',attribution:'人的口令',reviewAt:null}]})};yield {type:'finish',reason:'stop'}},'独立的新项目事实','continuity')
+ const source=await f.service.sourceForPrompt('a.md','task'),parent=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'原依据',layer:'demand',scope:'a.md',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}))
+ f.material.memoryDeps=[{id:parent.id,version:1,basisHashes:[source.basisHash],sourceDeps:[{id:source.id,version:1,hash:source.hash,relPath:'a.md',kind:'ledger',taskId:'task'}]}]
+ vi.spyOn(f.service,'savedMaterial').mockResolvedValue(f.material)
+ if(mode==='own-edge')vi.spyOn(f.service,'sourceForPrompt').mockResolvedValue({...source,memoryDeps:[{id:parent.id,version:1}]})
+ if(mode==='historical'){
+  const note=await f.vault.read('a.md'),marked=markPrompt('/独立的新项目事实',{taskId:'old-task',range:{start:0,end:9},expectedText:'/独立的新项目事实',promptText:'独立的新项目事实'})
+  await f.vault.ledgerPrepare('a.md',{taskId:'old-task',startedAt:new Date().toISOString(),status:'completed',prompt:'独立的新项目事实',answer:'旧草稿'})
+  const written=await f.vault.write('a.md',note.content+'\n'+upsertAiAnswer(marked,{taskId:'old-task',answer:'旧草稿'}),note.revision,note);await f.vault.ledgerComplete('a.md','old-task',written.revision)
+  const historical=await f.service.sourceForPrompt('a.md','old-task');vi.spyOn(f.service,'sourceForPrompt').mockResolvedValue(historical)
+ }
+ await f.engine.handoff(f.material);await f.engine.idle()
+ const derived=f.service.snapshot().record.entries.find(e=>e.id!==parent.id)!
+ expect(derived).toBeDefined();expect(derived.status).toBe('active')
+ expect(derived.sources.flatMap(s=>s.memoryDeps)).toEqual(mode==='exact'?[]:[{id:parent.id,version:1}])
+})
+it('keeps a successful correction and reports stale recent background as a rejected partial result',async()=>{
+ let oldId=''
+ const f=await fixture(async function*(input){const p=JSON.parse(String(input.messages[0]!.content)),s=p.sources[0],target=p.memory.find((e:any)=>e.id===oldId);yield {type:'text',text:JSON.stringify({recent:{goal:'按旧版本继续',completed:'',blocked:'',next:'',sourceIds:[s.id],assistantDraft:false},proposals:[{action:'correct',id:target.id,version:target.version,content:'青灯版本已更正',layer:'demand',scope:'a.md',sourceIds:[s.id],semantic:'fact',attribution:'人',reviewAt:null}]})};yield {type:'finish',reason:'stop'}},'青灯版本已更正','continuity')
+ const source=await f.service.sourceForPrompt('a.md','task'),old=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'青灯版本甲',layer:'demand',scope:'a.md',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}));oldId=old.id
+ f.material.memoryDeps=[{id:old.id,version:1,basisHashes:[source.basisHash],sourceDeps:[{id:source.id,version:1,hash:source.hash,relPath:'a.md',kind:'ledger',taskId:'task'}]}];vi.spyOn(f.service,'savedMaterial').mockResolvedValue(f.material)
+ await f.engine.handoff(f.material);await f.engine.idle()
+ const record=f.service.snapshot().record
+ expect(record.entries.find(e=>e.id===old.id)).toMatchObject({version:2,status:'active',content:'青灯版本已更正'})
+ expect(record.recent).toEqual([])
+ expect(record.jobs.at(-1)).toMatchObject({outcome:'applied',reason:'MEMORY_DEPENDENCY_CHANGED',results:expect.arrayContaining([{action:'correct',outcome:'applied'},{action:'recent',outcome:'rejected',code:'MEMORY_DEPENDENCY_CHANGED'}])})
 })

@@ -125,18 +125,16 @@ function proposalGroups(values:unknown[],sources:WorkingSource[],entries:Working
  }
  return {groups:valid,dropped}
 }
-/** 依赖只继承"本次材料"与"被引用来源／被替换条目自己携带的"集合。
- *  旧实现把库里其余条目整批写成 memoryDeps，导致更正 A 会让与 A 无关的 B 一起暂停，并沿链继续传染
- *  （v6 冻结实测的 chain-alpha 连锁已证实）。上下文里出现过某条记忆不等于本条依赖它；
- *  账本层面的"本场实际使用依赖"另由 ledger provenance 记录，不因此丢失。 */
-export function inheritInputs(refs:WorkingSource[],material:SavedTaskMaterial,entries:WorkingEntry[],replacedId?:string,options?:{skipMemoryDeps?:boolean}):WorkingSource[]{
- const logIds=new Set(entries.filter(e=>e.category==='recent').map(e=>e.id))
- const sourceDeps=[...material.sourceDeps,...entries.filter(e=>e.id===replacedId).flatMap(e=>e.sources.flatMap(s=>s.sourceDeps))].map(d=>({...d,permissionTier:'reference' as const}))
- // 近期背景是会话日志、不是前提：它既不作别人的依赖父，自己也不继承记忆依赖，否则"更正一条约定"
- // 会因为日志依赖旧版本而连带把更正本身暂停（r4／r6 链式 α4 已复现）。
- const memoryDeps=options?.skipMemoryDeps?[]:[...material.memoryDeps.filter(d=>!logIds.has(d.id)).map(d=>({id:d.id,version:d.version})),...refs.flatMap(s=>s.memoryDeps),...entries.filter(e=>e.id===replacedId).flatMap(e=>e.sources.flatMap(s=>s.memoryDeps))]
+/** 来源本身的依赖永远保留；近期背景同样续接撤销关系，不赋予事实权威。
+ * 更正只免去粗上下文中的自身及其下游，不能剪掉被引用来源实际携带的边。 */
+export function inheritInputs(refs:WorkingSource[],material:SavedTaskMaterial,entries:WorkingEntry[],replacedId?:string):WorkingSource[]{
+ const reverse=new Set<string>(replacedId?[replacedId]:[]);let grew=true
+ while(grew){grew=false;for(const entry of entries)if(!reverse.has(entry.id)&&entry.sources.some(s=>s.memoryDeps.some(d=>reverse.has(d.id)))){reverse.add(entry.id);grew=true}}
+ const replaced=entries.filter(e=>e.id===replacedId)
+ const sourceDeps=[...material.sourceDeps,...replaced.flatMap(e=>e.sources.flatMap(s=>s.sourceDeps))].map(d=>({...d,permissionTier:'reference' as const}))
+ const memoryDeps=[...material.memoryDeps.filter(d=>!reverse.has(d.id)).map(d=>({id:d.id,version:d.version})),...refs.flatMap(s=>s.memoryDeps),...replaced.flatMap(e=>e.sources.flatMap(s=>s.memoryDeps))]
  const unique=<T>(items:T[])=>[...new Map(items.map(item=>[JSON.stringify(item),item])).values()]
- return refs.map(s=>({...structuredClone(s),sourceDeps:unique([...s.sourceDeps,...sourceDeps]),memoryDeps:options?.skipMemoryDeps?[]:unique([...s.memoryDeps,...memoryDeps].filter(d=>d.id!==replacedId))}))
+ return refs.map(s=>({...structuredClone(s),sourceDeps:unique([...s.sourceDeps,...sourceDeps]),memoryDeps:unique([...s.memoryDeps,...memoryDeps])}))
 }
 function recentInput(value:unknown,sources:WorkingSource[],entries:WorkingEntry[],material:SavedTaskMaterial):WorkingRecentInput|null|undefined{
  if(value===null)return null
@@ -144,7 +142,7 @@ function recentInput(value:unknown,sources:WorkingSource[],entries:WorkingEntry[
  const refs=value.sourceIds.map(id=>sources.find(s=>s.id===id))
  if(refs.some(s=>!s))return undefined
  const anchor=sources.find(s=>s.taskId===material.taskId&&s.kind==='ledger'&&s.classification==='command');if(!anchor)return undefined;if(!refs.includes(anchor))refs.push(anchor)
- return {sources:inheritInputs(refs as WorkingSource[],material,entries,undefined,{skipMemoryDeps:true}),scope:material.origin.relPath,recent:{taskId:material.taskId,noteId:material.noteId,materialVersion:material.materialVersion,createdAt:material.startedAt,outcome:material.status,sections:{goal:String(value.goal),completed:String(value.completed),blocked:String(value.blocked),next:String(value.next)},assistantDraft:value.assistantDraft}}
+ return {sources:inheritInputs(refs as WorkingSource[],material,entries),scope:material.origin.relPath,recent:{taskId:material.taskId,noteId:material.noteId,materialVersion:material.materialVersion,createdAt:material.startedAt,outcome:material.status,sections:{goal:String(value.goal),completed:String(value.completed),blocked:String(value.blocked),next:String(value.next)},assistantDraft:value.assistantDraft}}
 }
 /** 只有明确的传输失败才重试一次：认证、证书、参数、厂商拒绝与已有部分正文都不重试。 */
 function retryableTransport(error:unknown):boolean{
@@ -290,10 +288,10 @@ export class WorkingMemoryConsolidation{
   check()
   return job.service.vault.memoryMutation(store=>{check();return store.receipt(store.read(),{taskId:job.material.taskId,materialVersion:job.material.materialVersion,outcome,entryIds:[],...(reason?{reason}:{})})})
  }
- private async recheck(job:Job,sources:WorkingSource[],entries:WorkingEntry[]){
+ private async recheck(job:Job,sources:WorkingSource[],entries:WorkingEntry[],input=false){
   this.assert(job)
   if(this.ports.strategy==='continuity'){const saved=await until(()=>job.service.savedMaterial(job.material.origin.relPath,job.material.taskId),job.controller.signal);if(saved.materialVersion!==job.material.materialVersion)throw Error('MEMORY_MATERIAL_CHANGED')}
-  const checkedSources=this.ports.strategy==='continuity'?inheritInputs(sources,job.material,[]):sources
+  const checkedSources=input&&this.ports.strategy==='continuity'?inheritInputs(sources,job.material,[]):sources
   for(const source of checkedSources){if(!await until(()=>job.service.verifySource(source),job.controller.signal))throw Error('MEMORY_SOURCE_CHANGED')}
   const dependencies=checkedSources.flatMap(s=>s.memoryDeps)
   const validParents=await until(()=>job.service.entries(dependencies.map(d=>d.id)),job.controller.signal)
@@ -304,7 +302,7 @@ export class WorkingMemoryConsolidation{
  private async response(job:Job,payload:unknown,sources:WorkingSource[],entries:WorkingEntry[]){
   const content=JSON.stringify(payload),config=job.configuration,system=this.ports.strategy==='continuity'?memoryContinuitySystem:memoryConsolidationSystem
   if(Buffer.byteLength(content)+Buffer.byteLength(system)>32768||conservativeTokens(content)+conservativeTokens(system)+4096>config.credential.contextTokens)throw Error('MEMORY_INPUT_LIMIT')
-  await this.recheck(job,sources,entries)
+  await this.recheck(job,sources,entries,true)
   const iterator=this.ports.stream({...config.credential,system,purpose:'consolidation',messages:[{role:'user',content}],signal:job.controller.signal,maxOutputTokens:4096})[Symbol.asyncIterator]()
   let raw='',bytes=0,finished=false
   try{for(;;){const next=await until(()=>Promise.resolve(iterator.next()),job.controller.signal);if(next.done)break
@@ -360,8 +358,8 @@ export class WorkingMemoryConsolidation{
    const unknownReference=(value:unknown)=>obj(value)&&Array.isArray(value.sourceIds)&&value.sourceIds.some(id=>typeof id==='string'&&!sources.some(s=>s.id===id))
    const referenceRejected=values.some(unknownReference)||continuity&&unknownReference(recentValue)
    // The original command is independent; a model's paraphrase is not proof of independence.
-   for(const group of groups)for(const change of group){const exact=change.input.sources.length===1&&change.input.content===change.input.sources[0]!.text&&change.input.scope===job.material.origin.relPath
-    if(!exact||change.action!=='add')change.input.sources=inheritInputs(change.input.sources,job.material,entries,change.action==='add'?undefined:change.id)
+   for(const group of groups)for(const change of group){const ref=change.input.sources[0],exact=change.input.sources.length===1&&ref?.classification==='command'&&ref.kind==='ledger'&&ref.taskId===job.material.taskId&&ref.materialId===job.material.taskId+'/prompt'&&ref.relPath===job.material.origin.relPath&&ref.text===job.material.prompt&&change.input.content===ref.text&&change.input.scope===job.material.origin.relPath
+    if(!exact||change.action!=='add')change.input.sources=inheritInputs(change.input.sources,job.material,[...basis.record.entries,...basis.record.recent],change.action==='add'?undefined:change.id)
    }
    let recent=continuity?recentInput(recentValue,sources,entries,job.material):undefined
    // A new derivation must not be published against a version replaced in this
@@ -370,11 +368,22 @@ export class WorkingMemoryConsolidation{
    const staleBatchDependency=(refs:WorkingSource[])=>refs.some(s=>s.memoryDeps.some(d=>replacements.some(r=>r.id===d.id&&r.version===d.version)))
    let dependencyRejected=false
    groups=groups.filter(group=>{if(group.some(c=>staleBatchDependency(c.input.sources))){dependencyRejected=true;proposed.dropped.push({action:group[0]!.action,outcome:'rejected',code:'MEMORY_DEPENDENCY_CHANGED'});return false}return true})
-   if(recent&&staleBatchDependency(recent.sources)){recent=undefined;dependencyRejected=true}
-   for(const group of groups)for(const change of group)change.input.sources=await Promise.all(change.input.sources.map(s=>until(()=>job.service.renewSavedBinding(s),job.controller.signal)))
-   if(recent)recent.sources=await Promise.all(recent.sources.map(s=>until(()=>job.service.renewSavedBinding(s),job.controller.signal)))
-   const derived=[...groups.flatMap(g=>g.flatMap(c=>c.input.sources)),...(recent?.sources??[])]
-   await this.recheck(job,derived.length?derived:sources,entries)
+   if(recent&&staleBatchDependency(recent.sources)){recent=undefined;dependencyRejected=true;proposed.dropped.push({action:'recent',outcome:'rejected',code:'MEMORY_DEPENDENCY_CHANGED'})}
+   const accepted:WorkingChange[][]=[]
+   for(const group of groups)try{
+    for(const change of group)change.input.sources=await Promise.all(change.input.sources.map(s=>until(()=>job.service.renewSavedBinding(s),job.controller.signal)))
+    await this.recheck(job,group.flatMap(c=>c.input.sources),[]);accepted.push(group)}catch(error){
+    this.assert(job);const code=publicMemoryError(error);if(!['MEMORY_SOURCE_CHANGED','MEMORY_DEPENDENCY_CHANGED'].includes(code))throw error
+    proposed.dropped.push({action:group[0]!.action,outcome:'rejected',code})
+   }
+   groups=accepted
+   if(recent)try{
+    recent.sources=await Promise.all(recent.sources.map(s=>until(()=>job.service.renewSavedBinding(s),job.controller.signal)))
+    await this.recheck(job,recent.sources,[])}catch(error){
+    this.assert(job);const code=publicMemoryError(error);if(!['MEMORY_SOURCE_CHANGED','MEMORY_DEPENDENCY_CHANGED'].includes(code))throw error
+    recent=undefined;proposed.dropped.push({action:'recent',outcome:'rejected',code})
+   }
+   await this.recheck(job,[],entries)
    const result=await job.service.vault.memoryMutation(store=>{
     this.assert(job)
     // Queuing the next task may update receipts, but cannot change this job's entry basis.

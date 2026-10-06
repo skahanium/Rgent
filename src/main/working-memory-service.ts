@@ -60,8 +60,29 @@ export class WorkingMemoryService{
    const first=raw.indexOf(source.text);return first>=0&&raw.indexOf(source.text,first+1)<0&&hash(source.text)===source.hash
   }catch{return false}
  }
+ /** 旧近期块的撤销关系来自已保存账本；只读核验不把旧版本改成现版本。 */
+ private async recentSources(recent:import('./working-memory-store.ts').WorkingRecent):Promise<WorkingSource[]>{
+  const sources=structuredClone(recent.sources),anchor=sources.find(s=>s.kind==='ledger'&&s.taskId===recent.recent.taskId),unique=<T>(items:T[])=>[...new Map(items.map(item=>[JSON.stringify(item),item])).values()]
+  if(!anchor)throw Error('MEMORY_SOURCE_CHANGED')
+  const saved=await this.savedMaterial(anchor.relPath,recent.recent.taskId)
+  if(saved.provenanceStatus!=='complete'||saved.noteId!==recent.recent.noteId||saved.materialVersion!==recent.recent.materialVersion)throw Error('MEMORY_SOURCE_CHANGED')
+  const memoryDeps=unique([...anchor.memoryDeps,...saved.memoryDeps.map(d=>({id:d.id,version:d.version})),...saved.material.fragments.flatMap(f=>f.memoryDeps.map(d=>({id:d.id,version:d.version})))])
+  const sourceDeps=unique([...anchor.sourceDeps,...saved.sourceDeps.map(d=>({...d,permissionTier:'reference' as const})),...saved.material.fragments.flatMap(f=>f.sourceDeps.map(d=>({...d,permissionTier:'reference' as const})))])
+  if(memoryDeps.length>16||sourceDeps.length>16)throw Error('MEMORY_SOURCE_CHANGED')
+  anchor.memoryDeps=memoryDeps;anchor.sourceDeps=sourceDeps;return sources
+ }
+ private async effectiveEntries(original:readonly WorkingEntry[]):Promise<WorkingEntry[]>{
+  const all=structuredClone([...original])
+  for(const entry of all){if(entry.category!=='recent')continue
+   try{entry.sources=await this.recentSources(entry as import('./working-memory-store.ts').WorkingRecent)}catch{
+    // 不能证明的相关块保留内容，但不可再发送或作为派生前提。
+    if(entry.status!=='disabled'){entry.status='paused';entry.state=stateFromStatus('paused',entry.state);entry.reason='MEMORY_SOURCE_CHANGED'}
+   }
+  }
+  return all
+ }
  async entries(ids?:readonly string[]):Promise<WorkingEntry[]>{
-  const context=this.context(),basis=this.snapshot(),all=[...basis.record.entries,...basis.record.recent]
+  const context=this.context(),basis=this.snapshot(),all=await this.effectiveEntries([...basis.record.entries,...basis.record.recent])
   const wanted=ids?all.filter(e=>ids.includes(e.id)):all
   const result:WorkingEntry[]=[]
   for(const original of wanted){const entry=structuredClone(original)
@@ -71,13 +92,15 @@ export class WorkingMemoryService{
    result.push(entry)
   }
   this.vault.assertSession(context.sessionId)
-  const latest=this.snapshot().record,current=[...latest.entries,...latest.recent]
+  const projected=await this.effectiveEntries([...this.snapshot().record.entries,...this.snapshot().record.recent])
+  const latest=this.snapshot().record,current=[...latest.entries,...latest.recent].map(e=>{const proof=projected.find(p=>p.id===e.id&&p.version===e.version);return proof?{...e,sources:proof.sources,...(proof.status==='paused'?{status:proof.status,reason:proof.reason}:{})}:e})
   // Async source proofs can overlap a queued edit of an upstream entry. Check only
   // the proven dependency closure against the final snapshot, not its file revision.
   // 依赖环不是依赖失效：环上条目按已计入处理，避免整条环被永久判成依赖已变。
   const dependenciesCurrent=(entry:WorkingEntry,seen=new Set<string>()):boolean=>{
    if(seen.has(entry.id))return true;seen.add(entry.id)
-   return entry.sources.every(s=>s.memoryDeps.every(dep=>{
+   const now=current.find(e=>e.id===entry.id&&e.version===entry.version);if(!now||now.status!=='active')return false
+   return now.sources.every(s=>s.memoryDeps.every(dep=>{
     const parent=current.find(e=>e.id===dep.id&&e.version===dep.version&&e.status==='active')
     return !!parent&&!recentExpired(parent)&&(!parent.reviewAt||Date.parse(parent.reviewAt)>Date.now())&&dependenciesCurrent(parent,new Set(seen))
    }))
@@ -102,7 +125,7 @@ export class WorkingMemoryService{
   const record=this.snapshot().record,all=[...record.entries,...record.recent],now=all.find(e=>e.id===entry.id&&e.version===entry.version&&(e.status===entry.status||entry.status==='review'&&e.status==='active'&&!!e.reviewAt&&Date.parse(e.reviewAt)<=Date.now()))
   return !!now&&await this.verifyEntry(now,all)
  }
- private async verifyEntry(entry:WorkingEntry,all:WorkingEntry[],seen=new Set<string>()):Promise<boolean>{return await this.verifyFailure(entry,all,seen)===null}
+ private async verifyEntry(entry:WorkingEntry,all:WorkingEntry[],seen=new Set<string>()):Promise<boolean>{const effective=await this.effectiveEntries(all),current=effective.find(e=>e.id===entry.id&&e.version===entry.version)??entry;return current.status!=='paused'&&await this.verifyFailure(current,effective,seen)===null}
  /** 失败原因分开：来源本身失配（source）还是依赖已不可用（dependency）。
   *  依赖环按"已计入"处理——环不是来源变更，不能把整条环永久判成不可核验。 */
  private async verifyFailure(entry:WorkingEntry,all:WorkingEntry[],seen=new Set<string>()):Promise<'source'|'dependency'|null>{
@@ -136,7 +159,14 @@ export class WorkingMemoryService{
  }
  private bind(request:MemoryItemRequest){this.vault.assertSession(request.sessionId);const basis=this.snapshot();if(basis.revision!==request.revision||basis.objectVersion!==request.objectVersion)throw Error('MEMORY_CONFLICT');const entry=[...basis.record.entries,...basis.record.recent].find(e=>e.id===request.id&&e.version===request.version);if(!entry)throw Error('MEMORY_CHANGED');return {basis,entry}}
  async edit(request:MemoryItemRequest,change:Partial<WorkingInput>&{status?:WorkingEntry['status']}){const committed=await this.mutate(store=>{const {basis}=this.bind(request);return store.edit(basis,request.id,request.version,change)});await this.recheckDeferred().catch(()=>{});return committed}
- async forget(request:MemoryItemRequest){const committed=await this.mutate(store=>{const {basis}=this.bind(request);return store.forget(basis,request.id,request.version)});await this.recheckDeferred().catch(()=>{});return committed}
+ async forget(request:MemoryItemRequest){const committed=await this.mutate(async store=>{
+  const {basis}=this.bind(request),effective=await this.effectiveEntries([...basis.record.entries,...basis.record.recent])
+  // 异步账本读取后重核同一请求；补边、未知暂停和遗忘共享原对象/原字节的一次 CAS。
+  this.bind(request)
+  basis.record.entries=effective.filter(e=>e.category==='long')
+  basis.record.recent=effective.filter(e=>e.category==='recent') as import('./working-memory-store.ts').WorkingRecent[]
+  return store.forget(basis,request.id,request.version)
+ });await this.recheckDeferred().catch(()=>{});return committed}
  async recheckDeferred(){
   const context=this.context()
   // 旧文件可能残留指向同 id 旧版本的依赖：改写引用并如实暂停依赖方，幂等、同一次 CAS。
@@ -203,7 +233,7 @@ export class WorkingMemoryService{
   const note=await this.vault.read(relPath);this.context()
   const chapter=this.vault.ledgerContextForRecord(record).find(c=>c.taskId===taskId);this.context()
   if(record.state!=='saved'||!record.chapter||!chapter)throw Error('MEMORY_JOB_UNAVAILABLE');const c=record.chapter,material=c.material??{fragments:[],truncated:true},ledgerHash=hash(chapter.text.trimEnd())
-  return {taskId,noteId:record.noteId,startedAt:c.startedAt,context,origin:{relPath,sessionId:context.sessionId,objectVersion:note.objectVersion,revision:note.revision},status:c.status,prompt:c.prompt,answer:c.answer,ledgerHash,materialVersion:hash(JSON.stringify([taskId,ledgerHash,material])),material,sourceDeps:c.provenance?.sources??[],memoryDeps:c.provenance?.version===2?c.provenance.memoryDeps:[]}
+  return {taskId,noteId:record.noteId,startedAt:c.startedAt,context,origin:{relPath,sessionId:context.sessionId,objectVersion:note.objectVersion,revision:note.revision},status:c.status,prompt:c.prompt,answer:c.answer,ledgerHash,materialVersion:hash(JSON.stringify([taskId,ledgerHash,material])),material,provenanceStatus:c.provenance?.version===2?'complete':'unknown',sourceDeps:c.provenance?.sources??[],memoryDeps:c.provenance?.version===2?c.provenance.memoryDeps:[]}
  }
  /** Derived history obeys forgetting even when the original task never used memory. */
  async summaryAllowed(relPath:string,taskIds:readonly string[]):Promise<boolean>{
@@ -211,6 +241,9 @@ export class WorkingMemoryService{
    this.context();const basis=this.vault.memorySnapshot(),record=basis.record
    const forgotten=new Set(record.forgotten.flatMap(f=>f.materialIds))
    const covered=await this.vault.summaryMaterials(relPath,taskIds,[...forgotten].filter(id=>!id.endsWith('/prompt')),record.watermark);this.context();if(covered.ceiling<record.watermark||covered.materialIds.some(id=>forgotten.has(id))||record.watermark>0&&covered.sequences.some(sequence=>sequence<=record.watermark))return false
+   const relatedRecent=record.recent.filter(e=>covered.materialIds.includes(e.recent.taskId+'/prompt'))
+   for(const recent of relatedRecent)await this.recentSources(recent)
+   if(covered.memoryDeps.length){const parents=await this.entries(covered.memoryDeps.map(d=>d.id));if(covered.memoryDeps.some(d=>!parents.some(e=>e.id===d.id&&e.version===d.version&&e.status==='active')))return false}
    // A concurrent forget/reset cannot be approved using the earlier control snapshot.
    this.context();const current=this.vault.memorySnapshot().record;return JSON.stringify([current.identity,current.watermark,current.forgotten])===JSON.stringify([record.identity,record.watermark,record.forgotten])
   }catch{return false}
