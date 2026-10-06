@@ -133,7 +133,8 @@ it('measures top-eight coverage and irrelevant returns on 1000 fixed memories / 
  expect(irrelevant/Math.max(returned,1)).toBeLessThanOrEqual(.05)
 })
 
-it('reports independent labeled recall quality, no-answer false positives and the lexical semantic gap',async()=>{
+// 1000 条 × 100 查询的词面秩评在 100 路并行下会超过默认 5 秒；单跑约 3.1 秒，断言本身仍是原口径。
+it('reports independent labeled recall quality, no-answer false positives and the lexical semantic gap',{timeout:20000},async()=>{
  const {memoryRecallQualityFixture}=await import('../fixtures/memory-recall-quality.ts')
  const {memories,queries,labels}=memoryRecallQualityFixture(entry)
  expect(memories).toHaveLength(1000);expect(queries).toHaveLength(100)

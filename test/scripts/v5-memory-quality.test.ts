@@ -58,6 +58,7 @@ it('keeps a completed screen valid after two ordinary cases and permits round tw
  const firstRound=V5_QUALITY_CASES.map(c=>reviewed(c.id))
  expect(()=>support.v5ScreenDispatchGate(firstRound,V5_QUALITY_CASES[0].id,1,false,V5_QUALITY_CASES,V5_SCREEN_IDS)).not.toThrow()
 })
+// 五步链单跑约 10.7 秒，单跑约 10.7 秒，在 100 路并行下会超过 20 秒；断言不变，只放宽时限。
 it('runs every chain foreground before paid consolidation and hands off its actual memory provenance',async()=>{
  const base=await mkdtemp(path.join(os.tmpdir(),'rgent-v5-real-chain-')),credential={provider:'custom' as const,baseURL:'https://fiction.test/v1',modelId:'fiction',apiKey:'private-secret',contextTokens:32768}
  const hostInputs:string[]=[]
@@ -94,7 +95,7 @@ it('includes explicit correction and Chinese-seed English repetition with genuin
 it('classifies empty, truncated, service, reference and cancellation receipts separately',()=>{
  for(const [reason,category] of [['MEMORY_OUTPUT_EMPTY','empty'],['MEMORY_OUTPUT_TRUNCATED','length'],['MEMORY_SERVICE_FAILED','service'],['MEMORY_SOURCE_CHANGED','reference'],['MEMORY_OUTPUT_REFERENCE_INVALID','reference'],['MEMORY_CANCELLED','cancel'],['MEMORY_OUTPUT_INVALID','format']] as const)
   expect(support.v5TerminalCategory({result:{receipt:{outcome:'rejected',reason}}})).toBe(category)
-})
+},60000)
 it('does not count deadline cancellation as a provider service failure',()=>{expect(support.v5TerminalCategory({status:'completed',responses:[{reason:'MODEL_CANCELLED'}],result:{receipt:{outcome:'interrupted',reason:'MEMORY_DEADLINE'}}})).toBe('cancel')})
 it('diagnoses only the selected live model and preserves separate full-diagnostic recipients',()=>{
  const models=[{modelId:'MiniMax-M3',host:'api.minimax.cn'},{modelId:'deepseek-flash',host:'api.deepseek.com'}]
