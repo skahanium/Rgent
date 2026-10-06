@@ -320,8 +320,8 @@ const roleSource=(id:string,text:string,classification:'command'|'human'):Workin
 it('keeps a verbatim authority quote and demotes extra citations into the supporting role',()=>{
  const command=roleSource('cmd','以后在本库解释先给结论','command'),human=roleSource('body','我偏好先给结论再举例子','human')
  const agreement=roleAgreement({semantic:'standing',authority:[{sourceId:'cmd',quote:'先给结论'}],sourceIds:['cmd','body']},[command,human])
- expect(agreement).toEqual({authority:[{sourceId:'cmd',quote:'先给结论'}],supporting:['body']})
- expect(roleAgreement({semantic:'fact',authority:[{sourceId:'body',quote:'先给结论'}],sourceIds:['body']},[human])).toEqual({authority:[{sourceId:'body',quote:'先给结论'}],supporting:[]})
+ expect(agreement).toEqual({agreement:{authority:[{sourceId:'cmd',quote:'先给结论'}],supporting:['body']},extra:[]})
+ expect(roleAgreement({semantic:'fact',authority:[{sourceId:'body',quote:'先给结论'}],sourceIds:['body']},[human])).toEqual({agreement:{authority:[{sourceId:'body',quote:'先给结论'}],supporting:[]},extra:[]})
 })
 it('refuses standing without a verbatim human command and keeps the legacy rule for old proposals',()=>{
  const command=roleSource('cmd','以后在本库解释先给结论','command'),human=roleSource('body','我偏好先给结论','human')
@@ -334,7 +334,11 @@ it('refuses standing without a verbatim human command and keeps the legacy rule 
  expect(()=>roleAgreement({semantic:'standing',sourceIds:['body']},[human])).toThrow()
  // v6 口径：即使引用全是口令，没有显式 authority 的长期约定也要拒绝
  expect(()=>roleAgreement({semantic:'standing',sourceIds:['cmd']},[command],true)).toThrow()
- expect(roleAgreement({semantic:'standing',sourceIds:['cmd'],authority:[{sourceId:'cmd',quote:'先给结论'}]},[command],true)).toEqual({authority:[{sourceId:'cmd',quote:'先给结论'}],supporting:[]})
+ expect(roleAgreement({semantic:'standing',sourceIds:['cmd'],authority:[{sourceId:'cmd',quote:'先给结论'}]},[command],true)).toEqual({agreement:{authority:[{sourceId:'cmd',quote:'先给结论'}],supporting:[]},extra:[]})
+ // 佐证可以只出现在本场来源里：并入条目来源并记为辅助，不因未重复写进 sourceIds 而拒绝整条。
+ const role=roleAgreement({semantic:'standing',authority:[{sourceId:'cmd',quote:'先给结论'}],sourceIds:['cmd'],supporting:['body']},[command],true,id=>id==='body'?human:undefined)!
+ expect(role.agreement.supporting).toEqual(['body'])
+ expect(role.extra.map(source=>source.id)).toEqual(['body'])
  expect(roleAgreement({semantic:'fact',sourceIds:['body']},[human])).toBeUndefined()
 })
 it('saves a standing agreement that quotes the original command and refuses one without authority',async()=>{
