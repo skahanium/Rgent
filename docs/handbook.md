@@ -23,7 +23,7 @@
 - Host 阶段用 Electron `safeStorage` 加密密钥，密文只存应用数据目录；解密材料由操作系统保护。不要把真实密钥、库内容、权限名单样例写成真实秘密。
 - 测试不把真实 API Key 写进仓库。
 - 改壳、preload 或 sandbox 之后：`pnpm test` 必须过，且 `pnpm build` 后窗口能起来。sandbox 下 preload 必须是可加载的 CommonJS（`out/preload/index.cjs`）。
-- 当前阶段提交前跑 `pnpm docs:check`；CI 按[变更范围分层](#ci-分层)。代码门在 macOS、Windows 上以锁文件安装，先构建与原生装载检查，再运行 `pnpm test` 与功能 `pnpm ui:check`；纯文档不触发产品构建。
+- 当前阶段提交前跑 `pnpm docs:check`；CI 按[变更范围分层](#ci-分层)。代码门在 macOS、Windows 上以锁文件安装，先构建与原生装载检查，再运行 `pnpm test` 与功能 `pnpm ui:check`；纯文档不触发产品构建。窗口检查按范围收口：默认 `pnpm ui:check` 跑全窗口，`RGENT_UI_MULTI_VAULT_ONLY=1`／`RGENT_UI_V4_ONLY=1`／`RGENT_UI_MEMORY_ONLY=1` 分别跑多库、v4、记忆专项；改动库管理、记忆或 v4 路径时跑对应专项并分别记录数字，不用默认范围代称专项已验。
 - 提交与推送分开：**默认只提交到本地**，推送必须等用户明确指令。不要在未获指令时 push、开 PR 或触发 CI；本地验收用 `pnpm test`／`docs:check`／`build`／`ui:check`。也不要擅自新建分支或工作树（用户 2026-10-01 定）。
 
 ## CI 分层
