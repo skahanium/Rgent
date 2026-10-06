@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import {VaultSession} from '../src/main/vault.ts'
 import {WorkingMemoryService} from '../src/main/working-memory-service.ts'
-import {WorkingMemoryConsolidation,parseMemorySuggestions,memoryConsolidationSystem} from '../src/main/working-memory-consolidation.ts'
+import {WorkingMemoryConsolidation,parseContinuitySuggestions,parseMemorySuggestions,memoryConsolidationSystem} from '../src/main/working-memory-consolidation.ts'
 import {TaskMaterialTracker} from '../src/main/host-material.ts'
 import {serializeStoredVault} from '../src/main/notes-fs.ts'
 import {markPrompt,upsertAiAnswer} from '../src/main/host-source.ts'
@@ -19,12 +19,38 @@ import type {ModelStepInput,ModelStepEvent} from '../src/main/model-stream.ts'
 import {createMemoryIpc} from '../src/main/memory-ipc.ts'
 import type {WorkingSource} from '../src/main/working-memory-store.ts'
 import type {SavedTaskMaterial} from '../src/main/host-material.ts'
-import {fingerprint,v4TerminalCategory,type V4Category} from './memory-quality-support.ts'
+import {fingerprint,v4TerminalCategory,V6_PIPELINE,type V4Category} from './memory-quality-support.ts'
 import type {MemoryQualityCase} from '../test/fixtures/memory-quality.ts'
+
+/** v6 机械动作核对：沿用 v5 的逐动作口径，另接近期块、无种子更正／冲突与无目标未变。
+ *  只判真实提交事实，内容语义仍由冻结标注判定。 */
+export function v6MechanicalAction(spec:MemoryQualityCase,facts:{before:readonly any[];entries:readonly any[];receipt:any}):boolean{
+ const action=spec.expected.action
+ if(!action)return true
+ const receipt=facts.receipt
+ if(!receipt)return false
+ const longActive=(list:readonly any[])=>list.filter(e=>e.category!=='recent'&&e.status==='active')
+ const before=longActive(facts.before),after=longActive(facts.entries)
+ if(spec.expected.maxActive!==undefined&&after.length>spec.expected.maxActive)return false
+ const seed=spec.seed
+ const target=seed?before.find(e=>e.content===seed.content&&e.semantic===seed.semantic&&e.scope===seed.scope):undefined
+ const stable=before.length===after.length&&before.every(e=>after.some(now=>now.id===e.id&&now.version===e.version&&now.content===e.content&&now.scope===e.scope&&now.semantic===e.semantic))
+ const added=after.filter(e=>!before.some(old=>old.id===e.id))
+ const mine=(e:any)=>e.updateBasis?.kind==='consolidation'&&e.updateBasis?.id===receipt.taskId
+ const entryIds=Array.isArray(receipt.entryIds)?receipt.entryIds:[]
+ if(action==='unchanged')return (seed?!!target:true)&&stable
+ if(receipt.outcome!=='applied')return false
+ if(action==='correct')return seed?(!!target&&after.some(e=>e.id===target.id&&e.version===target.version+1&&e.content!==target.content&&e.scope===target.scope&&e.semantic===target.semantic&&entryIds.includes(e.id))&&!after.some(e=>e.id===target.id&&e.version===target.version)):after.some(e=>mine(e)&&before.some(old=>old.id===e.id&&old.version<e.version))
+ if(action==='conflict')return seed?(!!target&&after.some(e=>e.id===target.id&&e.version===target.version)&&facts.entries.some(e=>e.status==='disputed'&&e.pendingTarget?.id===target.id&&e.pendingTarget?.version===target.version)):facts.entries.some(e=>e.status==='disputed'&&mine(e))
+ if(action==='add')return added.some(e=>(!spec.expected.semantic||e.semantic===spec.expected.semantic)&&entryIds.includes(e.id))||facts.entries.some(e=>e.category==='recent'&&e.status==='active'&&!!e.recent&&entryIds.includes(e.id))
+ return false
+}
+
+type PaidCall={phase:'proposal'|'format-repair'|'semantic-review';payload:any;body:string;finishReason:string|null;reason:string|null;startedAt:string;finishedAt?:string}
 
 /** Genuine production saving/consolidation/use in one disposable fictional vault. */
 export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:ModelCredential,
- stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,signal:AbortSignal,options?:{strategy:'baseline'|'review'|'continuity';base?:string;noteName?:string;hostBeforeConsolidation?:boolean;verifyClosure?:boolean}){
+ stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,signal:AbortSignal,options?:{strategy:'baseline'|'review'|'continuity';base?:string;noteName?:string;hostBeforeConsolidation?:boolean;verifyClosure?:boolean;chainBlocked?:boolean}){
  const base=options?.base??await mkdtemp(path.join(os.tmpdir(),'rgent-memory-quality-')),root=path.join(base,'vault')
  const qualityNote=options?.noteName??'fiction.md'
  let vault:VaultSession|null=null,engine:WorkingMemoryConsolidation|null=null
@@ -37,7 +63,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
   if(spec.seed){const initialRaw='/'+spec.seed.content;await writeFile(path.join(root,'baseline.md'),spec.seed.content+'\n\n'+markPrompt(initialRaw,{taskId:'initial-'+spec.id,range:{start:0,end:initialRaw.length},expectedText:initialRaw,promptText:spec.seed.content}))}
   vault=new VaultSession(base,()=>{});vault.restore()
   const session=vault,service=new WorkingMemoryService(session,()=>null)
-  const sourceProofs=new Map<string,WorkingSource>(),sentSourceIds=new Set<string>()
+  const sourceProofs=new Map<string,WorkingSource>(),sentSourceIds=new Set<string>(),paidCalls:PaidCall[]=[]
   const verifications:{id:string;startedAt:string;finishedAt:string;result:boolean;phase:string;reason?:string}[]=[],dispatches:{phase:string;sourceIds:string[];mapped:boolean;startedAt:string;finishedAt?:string}[]=[]
   let phase='production',actualSourceIds:string[]=[]
   const learningCheck:{checkedAt:string|null;sourceIds:string[];result:boolean|null;reason:string|null}={checkedAt:null,sourceIds:[],result:null,reason:null}
@@ -55,7 +81,12 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    const mapped=sources.every(s=>{const proof=sourceProofs.get(String(s.id));return !!proof&&s.text===proof.text&&s.kind===proof.kind&&s.classification===proof.classification&&s.attribution===proof.relPath})
    const dispatch={phase:payload?.repair?'format-repair':payload?.material?'semantic-review':'proposal',sourceIds:ids,mapped,startedAt:new Date().toISOString(),finishedAt:undefined as string|undefined};dispatches.push(dispatch)
    if(!mapped)throw Error('MEMORY_MATERIAL_UNVERIFIED')
-   try{for await(const event of stream(input))yield event}finally{dispatch.finishedAt=new Date().toISOString()}
+   // v6 留证：逐次调用的实际 payload、正文与终态；既有 dispatches 形状不变。
+   const call:PaidCall={phase:dispatch.phase as PaidCall['phase'],payload,body:'',finishReason:null,reason:null,startedAt:new Date().toISOString(),finishedAt:undefined}
+   paidCalls.push(call)
+   try{for await(const event of stream(input)){if(event.type==='text')call.body+=event.text;if(event.type==='finish')call.finishReason=event.reason;yield event}}
+   catch(e){call.reason=e instanceof Error&&/^[A-Z_]{3,80}$/.test(e.message)?e.message:'EVALUATION_REQUEST_FAILED';throw e}
+   finally{dispatch.finishedAt=new Date().toISOString();call.finishedAt=dispatch.finishedAt}
   }
   const evidenceSnapshot=()=>({root,sources:[...sentSourceIds].flatMap(id=>{const source=sourceProofs.get(id);return source?[structuredClone(source)]:[]}),dispatches:structuredClone(dispatches),verifications:structuredClone(verifications),capturedAt:new Date().toISOString(),learningCheck:structuredClone(learningCheck),savedMaterial:experimentalMaterial?structuredClone(experimentalMaterial):null})
   await service.initialize()
@@ -73,6 +104,31 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    if(!remembered.ok)throw Error('EVALUATION_INITIAL_STATE_FAILED')
   }
   const before=service.snapshot().record.entries,beforeAll=[...before,...service.snapshot().record.recent]
+  /** v6 所需字段：派发、终态、结构化、受阻、机械动作与候选归因；只看实际发送与真实回执。 */
+  const v6Fields=(facts:{before?:any[];beforeAll?:any[];entries?:any[];receipt?:any;controlled?:any;blocked?:boolean})=>{
+   const entries=facts.entries??[],beforeFact=facts.before??[],all=facts.beforeAll??beforeFact,receipt=facts.receipt??null
+   const parseable=(call:PaidCall)=>{try{if(options?.strategy==='continuity')parseContinuitySuggestions(call.body);else parseMemorySuggestions(call.body);return true}catch{return false}}
+   const terminal=paidCalls.some(call=>!call.reason&&call.finishReason==='stop')
+   // 合法空提议也算取得完整可解析结构化输出。
+   const structured=paidCalls.some(call=>!call.reason&&call.finishReason==='stop'&&parseable(call))
+   const seed=spec.seed
+   const expectedTarget=seed?seed.content:null
+   const target=seed?all.find(e=>e.content===seed.content&&(!seed.semantic||e.semantic===seed.semantic)&&(!seed.scope||e.scope===seed.scope)):undefined
+   const targetEligible=!!target
+   const targetShown=!!target&&paidCalls.some(call=>Array.isArray(call.payload?.memory)&&call.payload.memory.some((entry:any)=>entry&&typeof entry==='object'&&entry.id===target!.id))
+   const codes=[receipt?.reason,...(Array.isArray(receipt?.results)?receipt.results.map((r:any)=>r?.code):[])].filter((code:any):code is string=>typeof code==='string')
+   const serviceCodes=['MEMORY_SERVICE_FAILED','MEMORY_UNAVAILABLE','MEMORY_DEADLINE','MEMORY_CANCELLED','MEMORY_INTERRUPTED']
+   const outputCodes=['MEMORY_OUTPUT_EMPTY','MEMORY_OUTPUT_TRUNCATED','MEMORY_OUTPUT_INVALID','MEMORY_OUTPUT_TOKEN_LIMIT','MEMORY_OUTPUT_LIMIT']
+   const model=paidCalls.some(call=>!!call.reason)||codes.some(code=>serviceCodes.includes(code))
+   // 管线顺序固定；候选未把可用目标送进实际 payload、或取得终态却拿不到可解析输出都算候选阶段。
+   const candidate=targetEligible&&!targetShown||!model&&terminal&&(!structured||codes.some(code=>outputCodes.includes(code)))
+   const admission=codes.some(code=>/REFERENCE|TARGET_NOT_FOUND|DEPENDENCY|SOURCE|PERMISSION|SESSION|MATERIAL|CONFIRMATION_REQUIRED/.test(code))
+   const commit=codes.some(code=>['MEMORY_FILE_LIMIT','MEMORY_ENTRY_LIMIT','MEMORY_CONFLICT','MEMORY_CHANGED','MEMORY_MATERIAL_FORGOTTEN','BAD_MEMORY_EDIT','MEMORY_UNDONE','MEMORY_QUEUE_FULL'].includes(code))||!model&&!candidate&&!admission&&receipt?.outcome==='rejected'
+   const use=facts.controlled?.status==='failed'
+   const failed=V6_PIPELINE.filter(stage=>({candidate,model,admission,commit,use} as Record<string,boolean>)[stage])
+   return {dispatched:paidCalls.length>0,terminal,structured,blocked:facts.blocked===true,actionVerified:v6MechanicalAction(spec,{before:beforeFact,entries,receipt}),
+    candidate:{expectedTarget,targetEligible,targetShown,snapshotHash:fingerprint([...sentSourceIds]),failureOrigin:failed[0]??null,secondary:failed.slice(1) as string[]}}
+  }
   const experiment:V4Trace={category:'insufficient-evidence',calls:0,rejectReason:null}
   let experimentalMaterial:SavedTaskMaterial|null=null,paidRecord:Record<string,unknown>|null=null,foreground:Awaited<ReturnType<typeof runControlledQualityHost>>|null=null
   const recheckExperimental=async()=>{
@@ -168,7 +224,9 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
     const verifyClosure=options.verifyClosure??!options.hostBeforeConsolidation
     const applicable=selected.length>0,closure=verifyClosure&&applicable?await verifyContinuityClosure(session,service,credential,permit,material,selected.find(e=>actualDependencies.some(d=>d.id===e.id))??selected[0]!,signal):null
     const controlled={status:(!budget.within||!dispatchVerified||!sameVersionVerified||!versionMismatchRejected||!actualHostBudget.mapped||!actualHostBudget.within||selected.length&&(!permissionRevoked||!frozenSignatureMatches)||closure&&!closure.passed?'failed':applicable?'passed':'not-applicable') as 'passed'|'failed'|'not-applicable',reason:applicable?null:'no-selected-memory',budget,dispatch,closure,closureStatus:!verifyClosure?'deferred-chain-step':!applicable?'not-applicable':'verified'}
-    return {foreground,recent:paidRecent,evidence:paidEvidence,experiment:structuredClone(experiment),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,followup,dependencies:actualDependencies,forget:null,controlled,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)}}
+    const v6=v6Fields({before,beforeAll,entries,receipt,controlled,blocked:options.chainBlocked===true})
+    return {foreground,recent:paidRecent,evidence:paidEvidence,experiment:structuredClone(experiment),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,followup,dependencies:actualDependencies,forget:null,controlled,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)},
+     dispatched:v6.dispatched,terminal:v6.terminal,structured:v6.structured,blocked:v6.blocked,actionVerified:v6.actionVerified,candidate:v6.candidate}
    }
 
    const provenance=followup?.ledger.chapter?.provenance
@@ -197,12 +255,17 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
      proof.relearningBlocked=calls>0&&validReplay&&originalBasisBlocked&&remaining.length===0&&['applied','rejected'].includes(replayReceipt?.outcome??'')&&(/SOURCE|DEPENDENCY|FORGOTTEN/.test(replayReason)||replayReason==='MEMORY_OUTPUT_INVALID')
     }finally{signal.removeEventListener('abort',stopReplay);replay.close();await replay.idle()}
    }
-   return {foreground,evidence:paidEvidence,...(options?{experiment}:{}),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,dependencies,followup,forget:proof,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)}}
+   const v6=v6Fields({before,beforeAll,entries,receipt,blocked:options?.chainBlocked===true})
+   return {foreground,evidence:paidEvidence,...(options?{experiment}:{}),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,dependencies,followup,forget:proof,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)},
+    dispatched:v6.dispatched,terminal:v6.terminal,structured:v6.structured,blocked:v6.blocked,actionVerified:v6.actionVerified,candidate:v6.candidate}
   }catch(e){
    if(options){const reason=e instanceof Error&&/^[A-Z_]{3,80}$/.test(e.message)?e.message:'EVALUATION_FIXTURE_FAILED'
     const error=Error(reason)
+    // 失败也要留 v6 证据：已收费记录优先，其次用当前可观察事实。
+    const seen=paidRecord?{before:(paidRecord.before as any[]|undefined)??before,entries:(paidRecord.entries as any[]|undefined)??[],receipt:(paidRecord.receipt as any)??null,controlled:(paidRecord.controlled as any)??null}:{before,entries:[],receipt:null,controlled:null}
+    const v6=v6Fields({...seen,beforeAll,blocked:options.chainBlocked===true})
     const retained=paidRecord??{evidence:evidenceSnapshot(),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},before,entries:[],receipt:null,completed:false,material:experimentalMaterial?{...structuredClone(experimentalMaterial),fragments:structuredClone(experimentalMaterial.material.fragments)}:null}
-    Object.assign(error,{evaluationResult:paidRecord?{...paidRecord,controlledFailure:reason}:{...retained,experiment:{...experiment,category:'insufficient-evidence'},fixtureFailure:reason}});throw error
+    Object.assign(error,{evaluationResult:paidRecord?{...paidRecord,...v6,controlledFailure:reason}:{...retained,...v6,experiment:{...experiment,category:'insufficient-evidence'},fixtureFailure:reason}});throw error
    }
    throw e
   }finally{signal.removeEventListener('abort',cancel)}
