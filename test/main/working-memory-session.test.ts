@@ -34,3 +34,16 @@ it('a previously used memory service refuses every late mutation after the mount
   expect(current.snapshot().revision).toBe(basis.revision)
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
+
+it('late successful maintenance cannot clear the new session failure',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-maintenance-late-')),a=path.join(base,'A'),b=path.join(base,'B');await mkdir(a);await mkdir(b)
+ const vault=new VaultSession(base,()=>{});vault.restoreVerified(a,vaultRootIdentity(a));const old=new WorkingMemoryService(vault,()=>null),oldContext=old.context();await old.initialize()
+ let release!:()=>void,entered!:()=>void;const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r)
+ try{
+  // The inner operation has checked its final old context; hold only its completion boundary.
+  vi.spyOn(old as any,'recheckDeferredCurrent').mockImplementation(async()=>{vault.assertSession(oldContext.sessionId);entered();await gate})
+  const checking=old.recheckDeferred().then(()=>null,(e:Error)=>e.message);await started;await vault.openVerified(b,vaultRootIdentity(b));const current=new WorkingMemoryService(vault,()=>null);await current.initialize()
+  await current.recheckAfterCommit(async()=>{throw Error('MEMORY_FILE_LIMIT')});expect((await current.view()).maintenanceFailure).toBe('MEMORY_FILE_LIMIT')
+  release();const outcome=await checking;expect((await new WorkingMemoryService(vault,()=>null).view()).maintenanceFailure).toBe('MEMORY_FILE_LIMIT');expect(outcome).toBe('VAULT_CHANGED')
+ }finally{release?.();vault.dispose();await rm(base,{recursive:true,force:true})}
+})

@@ -1753,3 +1753,5 @@ v6 双标覆盖由同一评分器核验：两份完整、有效、身份不同�
 包 4 维护结果小提交：已提交的编辑／禁用／遗忘及整理成功批次保留原成功结果，失败的陈旧依赖修复或待用条目提升通过既有 MemoryView.maintenanceFailure 展示“后续维护未完成”。只在同一 VaultSession／session 保存有界错误码，新的 service 读取仍能看到且不隐式重试；下一次明确成功维护解除，重启不持久化此运行诊断。IPC 在返回视图前完成一次记忆维护，edit／disable／forget 由 service 已维护，主进程外层不再重复维护；配置、确认、撤销、旧存储退出等现有出口仍续接。前台来源撤销独立尝试，记忆维护失败不跳过 recheckSources；旧会话最后断言及实际发送来源核验保持。
 
 编辑／遗忘两例真实提交后维护失败和界面提示先红三例（`/tmp/rgent-integrity-p4-maintenance-red.log`）；整理已 applied 但提升失败诊断丢失另红一例（`/tmp/rgent-integrity-p4-promotion-red.log`，仅该提升旧空 catch 保留时复现）。失败仍可见、提交字节不反转、每次维护只一遍、新 service 读不重试、下一次成功维护解除及旧 session 拒绝回归已核。最终必要定向、类型、文档、源码差异结果见本包临时报告；不在本小提交运行完整／构建／窗口／模型门。实际维护提示截图待根任务既有窗口门，渲染定向不代称截图或人工确认。
+
+维护独立复核追加：提升内部已完成旧会话核验后，外层 Promise 续体仍可晚到；成功清诊断前必须再次 assertSession 原 context。新会话已登记 MEMORY_FILE_LIMIT，旧成功晚到原先将其删掉的真实红见 `/tmp/rgent-integrity-p4-maintenance-late-red.log`；修复仅加外层最终断言，旧 catch 仍按旧 session 拒绝，不能写新诊断。此处不扩持久存储或强制重试。

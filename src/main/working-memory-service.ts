@@ -177,7 +177,7 @@ export class WorkingMemoryService{
  }
  async recheckDeferred(){
   const context=this.context()
-  try{await this.recheckDeferredCurrent(context);maintenanceFailures.delete(this.vault)}catch(error){this.vault.assertSession(context.sessionId);maintenanceFailures.set(this.vault,{sessionId:context.sessionId,reason:publicMemoryError(error)});throw error}
+  try{await this.recheckDeferredCurrent(context);this.vault.assertSession(context.sessionId);maintenanceFailures.delete(this.vault)}catch(error){this.vault.assertSession(context.sessionId);maintenanceFailures.set(this.vault,{sessionId:context.sessionId,reason:publicMemoryError(error)});throw error}
  }
  private async recheckDeferredCurrent(context:MemoryContext){
   // 旧文件可能残留指向同 id 旧版本的依赖：改写引用并如实暂停依赖方，幂等、同一次 CAS。
