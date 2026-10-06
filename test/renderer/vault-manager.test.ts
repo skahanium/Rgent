@@ -331,8 +331,8 @@ it('does not declare recovery complete when its current status cannot be read',a
 it('shows root preview before explicit association confirmation and lets the current invalid root choose a position',async()=>{
  const catalog={...view([entry('old')]),activeId:'old',activeUnavailable:true},change=vi.fn(async(request:any)=>request.action==='root-preview'?{...catalog,rootPreview:{id:'proof',entryId:'old',path:'/new',previousPath:'/old',previousIdentity:'1:1',rootIdentity:'2:2',workspace:'unavailable',warning:'明确授权新关联'}}:catalog)
  const {button,row}=start(catalog,{change});await flush()
- expect(button('预览根关联',row('old'))).toBeDefined()
- button('预览根关联',row('old')).click();await flush()
+ expect(button('预览恢复',row('old'))).toBeDefined()
+ button('预览恢复',row('old')).click();await flush()
  expect(change).toHaveBeenCalledWith({id:'old',revision:'r1',action:'root-preview'})
  expect(change.mock.calls.some(([r])=>r.action==='root-confirm')).toBe(false)
  button('确认建立新关联',row('old')).click();await flush()
@@ -341,7 +341,7 @@ it('shows root preview before explicit association confirmation and lets the cur
 
 it.each([['VAULT_PREVIEW_LIMIT','四份'],['VAULT_WORKSPACE_INVALID','原字节保留'],['BAD_SENDER','原窗口已变更'],['STALE_PREVIEW','预览已失效']])('maps explicit root recovery error %s to a retained-draft retry explanation',async(code,copy)=>{
  const {row,button,overlay}=start({...view([entry('old')]),activeId:'old'},{change:vi.fn(async()=>{throw Error(code)})});await flush()
- button('预览根关联',row('old')).click();await flush()
+ button('预览恢复',row('old')).click();await flush()
  expect(overlay.root.querySelector('.vault-settings-status')?.textContent).toContain(copy)
 })
 
@@ -349,7 +349,17 @@ it('refreshes the committed catalogue revision after attach failure so the retai
  const initial={...view([entry('old')]),activeId:'old',activeUnavailable:true};let revision='r1'
  const change=vi.fn(async(r:any)=>{if(r.action==='root-confirm'){revision='r2';throw Error('attach failed')}return {...initial,revision,rootPreview:{id:'proof',entryId:'old',path:'/new',previousPath:'/old',previousIdentity:'1:1',rootIdentity:'2:2',workspace:'none',warning:'核对'}}})
  const {row,button}=start(initial,{get:async()=>({...initial,revision}),change});await flush()
- button('预览根关联',row('old')).click();await flush();button('确认建立新关联',row('old')).click();await flush()
- button('预览根关联',row('old')).click();await flush()
+ button('预览恢复',row('old')).click();await flush();button('确认建立新关联',row('old')).click();await flush()
+ button('预览恢复',row('old')).click();await flush()
  expect(change).toHaveBeenLastCalledWith({id:'old',revision:'r2',action:'root-preview'})
+})
+
+it('explains recovery in the main preview and keeps machine object identifiers in collapsed technical information',async()=>{
+ const catalog={...view([entry('old')]),activeId:'old',activeUnavailable:true},change=vi.fn(async()=>({...catalog,rootPreview:{id:'proof',entryId:'old',path:'/new',previousPath:'/old',previousIdentity:'123:456',rootIdentity:'789:012',workspace:'restore' as const,warning:'主进程说明'}}))
+ const {row,button}=start(catalog,{change});await flush();button('预览恢复',row('old')).click();await flush()
+ const proof=row('old').querySelector('.vault-settings-confirmation:not([hidden])')!,technical=proof.querySelector('details')!
+ expect(technical).not.toBeNull();expect(technical.open).toBe(false);expect(technical.textContent).toContain('123:456');expect(technical.textContent).toContain('789:012')
+ const main=[...proof.children].filter(e=>e.tagName!=='DETAILS').map(e=>e.textContent).join('')
+ expect(main).toContain('恢复本库上次的工作位置');expect(main).toContain('不证明这是原来的目录');expect(main).toContain('账本和记忆会分别核验');expect(main).toContain('旧稿不会自动写入当前目录');expect(main).not.toContain('123:456')
+ expect(button('取消恢复预览',row('old'))).toBeDefined()
 })

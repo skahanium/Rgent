@@ -154,11 +154,11 @@ export function mountVaultManager(context: {
     const remove = button('从列表移除', () => { if (!busy) { confirmation.hidden = false; cancelRemove.focus() } })
     remove.dataset.vaultAction = 'remove'
     const rootProof=element('div','vault-settings-confirmation');rootProof.hidden=true
-    const previewRoot=button('预览根关联',()=>{void rootChange('root-preview')});previewRoot.dataset.vaultAction='root-preview'
-    const chooseRoot=button('选择位置并预览',()=>{void rootChange('root-preview',true)});chooseRoot.dataset.vaultAction='root-choose'
+    const previewRoot=button('预览恢复',()=>{void rootChange('root-preview')});previewRoot.dataset.vaultAction='root-preview'
+    const chooseRoot=button('选择位置并预览恢复',()=>{void rootChange('root-preview',true)});chooseRoot.dataset.vaultAction='root-choose'
     async function rootChange(action:'root-preview'|'root-confirm'|'root-cancel',choose?:boolean){
       if(!catalog)return
-      await run('正在核对根关联…',async()=>{
+      await run('正在核对恢复信息…',async()=>{
         let result:Catalog
         try{result=await handlers.change(action==='root-preview'?{id:row.entry.id,revision:catalog!.revision,action,...(choose?{choose:true}:{})}:{id:row.entry.id,revision:catalog!.revision,action,previewId:row.rootPreview!.id})}catch(error){if(action!=='root-preview'&&alive()){row.showRoot(null);const latest=await handlers.get().catch(()=>null);if(latest&&alive())showCatalog(latest)}throw error}
         if(alive()){
@@ -168,7 +168,11 @@ export function mountVaultManager(context: {
       })
     }
     function showRoot(p:VaultRootPreview|null){row.rootPreview=p;rootProof.replaceChildren();rootProof.hidden=!p
-          if(p){rootProof.append(element('p','',`${p.previousPath} → ${p.path}`),element('p','',`登记对象 ${p.previousIdentity} → 当前对象 ${p.rootIdentity}`),element('p','',p.workspace==='unavailable'?'工作区位置无法恢复；原记录保留，正文仍可打开。':p.workspace==='restore'?'按稳定登记恢复工作区位置。':'没有可恢复的工作区位置。'),element('p','',p.warning),button('取消根预览',()=>{void rootChange('root-cancel')}),button('确认建立新关联',()=>{void rootChange('root-confirm')}))}
+      if(p){
+        const technical=element('details','vault-root-technical')
+        technical.append(element('summary','','技术信息'),element('p','',`登记对象 ${p.previousIdentity} → 当前对象 ${p.rootIdentity}`))
+        rootProof.append(element('p','',`${p.previousPath} → ${p.path}`),element('p','',p.workspace==='unavailable'?'无法恢复本库上次的工作位置；原记录保留，正文仍可打开。':p.workspace==='restore'?'恢复本库上次的工作位置。':'没有可恢复的上次工作位置。'),element('p','','确认只建立此设备上的新关联，不证明这是原来的目录。账本和记忆会分别核验。旧任务会停止，待保存回答和窗口稿会保留；旧稿不会自动写入当前目录，另存正文需要再次确认。'),technical,button('取消恢复预览',()=>{void rootChange('root-cancel')}),button('确认建立新关联',()=>{void rootChange('root-confirm')}))
+      }
     }
     menu.append(relocate,previewRoot,chooseRoot,remove,relocateHint)
     const form = element('form', 'vault-settings-name'); form.noValidate = true; form.hidden = true
@@ -274,7 +278,7 @@ function errorText(error: unknown): string {
   if(message.includes('VAULT_WORKSPACE_INVALID'))return '工作区位置记录损坏，原字节保留；正文可打开，位置不会覆盖。'
   if(message.includes('BAD_SENDER'))return '原窗口已变更，本次关联未提交；请重新预览。'
   if(message.includes('VAULT_PREVIEW_LIMIT'))return '最多保留四份根预览，请取消旧预览后重试。'
-  if(message.includes('SOURCE_AVAILABLE'))return '根关联仍有效，无需恢复。'
+  if(message.includes('SOURCE_AVAILABLE'))return '笔记库仍可正常打开，无需恢复。'
   if (message.includes('VAULT_REPLACED')) return '这个位置现在放的是另一个目录（原库已被替换）。请核对后重新定位，不要直接打开。'
   if (message.includes('VAULT_RELOCATE_REQUIRED')) return '这个库换了位置，请用「重新定位」指到新的文件夹。'
   if (message.includes('VAULT_TARGET_CHANGED')) return '库目录不可访问或已移动，请检查目录后重试。'
