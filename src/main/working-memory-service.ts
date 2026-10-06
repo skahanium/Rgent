@@ -67,15 +67,16 @@ export class WorkingMemoryService{
   for(const original of wanted){const entry=structuredClone(original)
    if(recentExpired(entry)){entry.status='obsolete';entry.reason=null}
    if(entry.status==='active'&&entry.reviewAt&&Date.parse(entry.reviewAt)<=Date.now()){entry.status='review';entry.reason='MEMORY_CONFIRMATION_REQUIRED'}
-   if(entry.status==='active'&&!await this.verifyEntry(entry,all)){entry.status='paused';entry.reason='MEMORY_SOURCE_CHANGED'}
+   if(entry.status==='active'){const failure=await this.verifyFailure(entry,all);if(failure){entry.status='paused';entry.reason=failure==='dependency'?'MEMORY_DEPENDENCY_CHANGED':'MEMORY_SOURCE_CHANGED'}}
    result.push(entry)
   }
   this.vault.assertSession(context.sessionId)
   const latest=this.snapshot().record,current=[...latest.entries,...latest.recent]
   // Async source proofs can overlap a queued edit of an upstream entry. Check only
   // the proven dependency closure against the final snapshot, not its file revision.
+  // 依赖环不是依赖失效：环上条目按已计入处理，避免整条环被永久判成依赖已变。
   const dependenciesCurrent=(entry:WorkingEntry,seen=new Set<string>()):boolean=>{
-   if(seen.has(entry.id))return false;seen.add(entry.id)
+   if(seen.has(entry.id))return true;seen.add(entry.id)
    return entry.sources.every(s=>s.memoryDeps.every(dep=>{
     const parent=current.find(e=>e.id===dep.id&&e.version===dep.version&&e.status==='active')
     return !!parent&&!recentExpired(parent)&&(!parent.reviewAt||Date.parse(parent.reviewAt)>Date.now())&&dependenciesCurrent(parent,new Set(seen))
@@ -101,12 +102,15 @@ export class WorkingMemoryService{
   const record=this.snapshot().record,all=[...record.entries,...record.recent],now=all.find(e=>e.id===entry.id&&e.version===entry.version&&(e.status===entry.status||entry.status==='review'&&e.status==='active'&&!!e.reviewAt&&Date.parse(e.reviewAt)<=Date.now()))
   return !!now&&await this.verifyEntry(now,all)
  }
- private async verifyEntry(entry:WorkingEntry,all:WorkingEntry[],seen=new Set<string>()):Promise<boolean>{
-  if(seen.has(entry.id))return false;seen.add(entry.id)
-  if(recentExpired(entry)||!entry.sources.length)return false
-  if(entry.category==='recent'){const recent=entry as import('./working-memory-store.ts').WorkingRecent;try{const saved=await this.savedMaterial(recent.sources.find(s=>s.kind==='ledger'&&s.taskId===recent.recent.taskId)!.relPath,recent.recent.taskId);if(saved.noteId!==recent.recent.noteId||saved.materialVersion!==recent.recent.materialVersion)return false}catch{return false}}
-  for(const s of entry.sources){if(!await this.verifySource(s))return false;for(const dep of s.memoryDeps){const parent=all.find(e=>e.id===dep.id&&e.version===dep.version&&e.status==='active');if(!parent||parent.reviewAt&&Date.parse(parent.reviewAt)<=Date.now()||!await this.verifyEntry(parent,all,new Set(seen)))return false}}
-  return this.agreementCurrent(entry)
+ private async verifyEntry(entry:WorkingEntry,all:WorkingEntry[],seen=new Set<string>()):Promise<boolean>{return await this.verifyFailure(entry,all,seen)===null}
+ /** 失败原因分开：来源本身失配（source）还是依赖已不可用（dependency）。
+  *  依赖环按"已计入"处理——环不是来源变更，不能把整条环永久判成不可核验。 */
+ private async verifyFailure(entry:WorkingEntry,all:WorkingEntry[],seen=new Set<string>()):Promise<'source'|'dependency'|null>{
+  if(seen.has(entry.id))return null;seen.add(entry.id)
+  if(recentExpired(entry)||!entry.sources.length)return 'source'
+  if(entry.category==='recent'){const recent=entry as import('./working-memory-store.ts').WorkingRecent;try{const saved=await this.savedMaterial(recent.sources.find(s=>s.kind==='ledger'&&s.taskId===recent.recent.taskId)!.relPath,recent.recent.taskId);if(saved.noteId!==recent.recent.noteId||saved.materialVersion!==recent.recent.materialVersion)return 'source'}catch{return 'source'}}
+  for(const s of entry.sources){if(!await this.verifySource(s))return 'source';for(const dep of s.memoryDeps){const parent=all.find(e=>e.id===dep.id&&e.version===dep.version&&e.status==='active');if(!parent||parent.reviewAt&&Date.parse(parent.reviewAt)<=Date.now())return 'dependency';if(await this.verifyFailure(parent,all,new Set(seen))!==null)return 'dependency'}}
+  return this.agreementCurrent(entry)?null:'source'
  }
  /** 引用原话必须仍逐字存在于所引来源；失配按来源不可核验降级，不静默保留权威。 */
  private agreementCurrent(entry:WorkingEntry):boolean{
@@ -134,7 +138,10 @@ export class WorkingMemoryService{
  async edit(request:MemoryItemRequest,change:Partial<WorkingInput>&{status?:WorkingEntry['status']}){const committed=await this.mutate(store=>{const {basis}=this.bind(request);return store.edit(basis,request.id,request.version,change)});await this.recheckDeferred().catch(()=>{});return committed}
  async forget(request:MemoryItemRequest){const committed=await this.mutate(store=>{const {basis}=this.bind(request);return store.forget(basis,request.id,request.version)});await this.recheckDeferred().catch(()=>{});return committed}
  async recheckDeferred(){
-  const context=this.context(),basis=this.snapshot(),ready:WorkingEntry[]=[]
+  const context=this.context()
+  // 旧文件可能残留指向同 id 旧版本的依赖：改写引用并如实暂停依赖方，幂等、同一次 CAS。
+  await this.mutate(store=>store.repairStaleDependencies(store.read())).catch(()=>{})
+  const basis=this.snapshot(),ready:WorkingEntry[]=[]
   for(const e of basis.record.entries.filter(e=>e.status==='deferred'))if((!e.reviewAt||Date.parse(e.reviewAt)>Date.now())&&await this.verifyEntry(e,basis.record.entries))ready.push(e)
   this.vault.assertSession(context.sessionId)
   if(!ready.length)return

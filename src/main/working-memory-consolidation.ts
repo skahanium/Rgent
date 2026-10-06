@@ -57,7 +57,7 @@ export function parseContinuitySuggestions(raw:string):{recent:unknown;proposals
 }
 /** 依据角色：authority 的原话必须逐字存在于所引来源；standing 还要求该来源是人的 command。
  *  旧口径（提议里没有 authority／supporting 字段）保持每个引用都必须是口令的严格规则不变。 */
-export function roleAgreement(v:Record<string,unknown>,refs:WorkingSource[],requireRoles=false,resolve?:(id:string)=>WorkingSource|undefined):{agreement:import('../shared/memory.ts').AgreementBasis;extra:WorkingSource[]}|undefined{
+export function roleAgreement(v:Record<string,unknown>,refs:WorkingSource[],requireRoles=false,resolve?:(id:string)=>WorkingSource|undefined):{agreement:import('../shared/memory.ts').AgreementBasis|undefined;extra:WorkingSource[]}|undefined{
  const declared=v.authority!==undefined||v.supporting!==undefined
  if(!declared){
   // v6 口径要求长期约定显式声明权威依据；旧口径保持原有全称规则，不改动历史运行语义。
@@ -66,15 +66,17 @@ export function roleAgreement(v:Record<string,unknown>,refs:WorkingSource[],requ
   return undefined
  }
  const byId=new Map(refs.map(s=>[s.id,s]))
- if(!Array.isArray(v.authority)||!v.authority.length||v.authority.length>4)throw Error()
- const authority=(v.authority as unknown[]).map(item=>{
+ // 长期约定必须有人的口令原话；项目事实可以只列佐证来源，不因为没有权威依据就整条拒绝。
+ const hasAuthority=v.authority!==undefined
+ if(hasAuthority&&(!Array.isArray(v.authority)||!v.authority.length||v.authority.length>4))throw Error()
+ const authority=hasAuthority?(v.authority as unknown[]).map(item=>{
   if(!obj(item)||Object.keys(item).sort().join()!=='quote,sourceId'||typeof item.sourceId!=='string'||typeof item.quote!=='string'||!item.quote.length||!bounded(item.quote,512))throw Error()
   const source=byId.get(item.sourceId);if(!source)throw Error()
   // 程序只验原话逐字存在与来源分类；内容与范围是否真由口令支持仍属质量验收。
   if(!source.text.includes(item.quote))throw Error()
   return {sourceId:item.sourceId,quote:item.quote,command:source.classification==='command'}
- })
- if(new Set(authority.map(a=>a.sourceId)).size!==authority.length)throw Error()
+ }):[]
+ if(hasAuthority&&new Set(authority.map(a=>a.sourceId)).size!==authority.length)throw Error()
  // 长期约定必须至少有一条人的口令作权威依据；其余（例如正文里的同义佐证）降为辅助佐证并记录，不整条拒绝。
  const commanded=authority.filter(item=>item.command)
  if(v.semantic==='standing'&&!commanded.length)throw Error()
@@ -90,6 +92,8 @@ export function roleAgreement(v:Record<string,unknown>,refs:WorkingSource[],requ
  // 有界程序整理：混入的非权威引用降为辅助佐证并记录角色，不整条拒绝，也不删除正文引用。
  const demoted=refs.map(s=>s.id).filter(id=>!authorityIds.has(id)&&!(supporting as string[]).includes(id))
  const extra=list.filter(source=>!byId.has(source.id))
+ // 没有权威依据的项目事实：来源照旧并入，只是不记权威角色（记录格式要求权威非空）。
+ if(!hasAuthority)return {agreement:undefined,extra}
  return {agreement:{authority:kept,supporting:[...new Set([...list.map(source=>source.id),...demotedAuthority,...demoted])]},extra}
 }
 function proposalGroups(values:unknown[],sources:WorkingSource[],entries:WorkingEntry[],requireRoles=false):{groups:WorkingChange[][];dropped:import('../shared/memory.ts').MemoryJobGroupResult[]}{

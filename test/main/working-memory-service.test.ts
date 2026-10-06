@@ -444,3 +444,32 @@ it('demotes an agreement whose quoted authority text is absent from the cited so
   expect(usable[0]?.reason).toBeNull()
  }finally{vi.restoreAllMocks();vault.dispose();await rm(base,{recursive:true,force:true})}
 })
+it('reports a stale dependency as MEMORY_DEPENDENCY_CHANGED and repairs a leftover reference',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-stale-dependency-')),root=path.join(base,'vault');await mkdir(root)
+ await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'可核验的来源材料')
+ const {encodeWorkingMemory,parseWorkingMemory}=await import('../../src/main/working-memory-store.ts')
+ let vault=new VaultSession(base,vi.fn());vault.restore()
+ let upstreamId=''
+ try{
+  const note=await vault.readOpened('a.md'),service=new WorkingMemoryService(vault,()=>null)
+  const source=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:note.content.length})
+  const upstream=await vault.memoryMutation(store=>store.add(store.read(),{content:'上游事实',layer:'demand',scope:'本库',sources:[source],semantic:'fact',attribution:'来源笔记',reviewAt:null}))
+  upstreamId=upstream.id
+  await vault.memoryMutation(store=>store.add(store.read(),{content:'下游事实',layer:'demand',scope:'本库',sources:[{...source,id:'downstream',memoryDeps:[{id:upstream.id,version:upstream.version}]}],semantic:'fact',attribution:'来源笔记',reviewAt:null}))
+ }finally{vault.dispose()}
+ // 旧文件里可能留下的形态：上游已升版，下游仍指向同 id 的旧版本（该版本已不存在）。
+ const legacy=parseWorkingMemory(await readFile(path.join(root,'.rgent-memory'),'utf8'))
+ legacy.entries.find(e=>e.id===upstreamId)!.version+=1
+ await writeFile(path.join(root,'.rgent-memory'),encodeWorkingMemory(legacy))
+ vault=new VaultSession(base,vi.fn());vault.restore()
+ try{
+  const service=new WorkingMemoryService(vault,()=>null)
+  const stale=await service.entries()
+  const downstream=stale.find(e=>e.content==='下游事实')!
+  expect(downstream.status).toBe('paused')
+  expect(downstream.reason).toBe('MEMORY_DEPENDENCY_CHANGED')
+  await service.recheckDeferred()
+  const record=service.snapshot().record,upstream=record.entries.find(e=>e.id===upstreamId)!
+  expect(record.entries.find(e=>e.content==='下游事实')!.sources[0]!.memoryDeps).toEqual([{id:upstreamId,version:upstream.version}])
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})

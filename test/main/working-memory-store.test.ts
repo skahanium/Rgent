@@ -301,3 +301,39 @@ it('keeps a rejected target and a saved independent group apart in one batch',()
  expect(receipt.results).toEqual([{action:'correct',outcome:'rejected',code:'MEMORY_TARGET_NOT_FOUND'},{action:'add',outcome:'applied'}])
  expect(store.read().record.entries).toHaveLength(1)
 })
+const dependentOn=(store:WorkingMemoryStore,target:{id:string;version:number},seq:number,content='下游依据上游节奏')=>store.add(store.read(),{content,layer:'demand',scope:'本库',sources:[{...source(seq),memoryDeps:[{id:target.id,version:target.version}]}],semantic:'fact',attribution:'人说',reviewAt:null})
+const danglingRefs=(record:{entries:readonly any[];recent:readonly any[]})=>{const all=[...record.entries,...record.recent];return all.flatMap(e=>e.sources.flatMap((s:any)=>s.memoryDeps)).filter((d:any)=>!all.some(e=>e.id===d.id&&e.version===d.version))}
+it('rebinds dependents when a version advances in place instead of leaving a stale reference',()=>{
+ const {store}=fixture(),target=store.add(store.read(),{content:'石桥双周检查',layer:'demand',scope:'本库',sources:[source(1)],semantic:'fact',attribution:'人说',reviewAt:null}),dependent=dependentOn(store,target,2)
+ store.apply(store.read(),[[{action:'correct',id:target.id,version:target.version,input:{content:'石桥每周检查',layer:'demand',scope:'本库',sources:[source(3)],semantic:'fact',attribution:'人的更正',reviewAt:null}}]],{taskId:'job-correct',materialVersion:'a'.repeat(64),outcome:'applied',entryIds:[]})
+ const record=store.read().record,corrected=record.entries.find(e=>e.id===target.id)!,replacement=record.entries.find(e=>e.id===dependent.id)!
+ expect(corrected.version).toBe(2)
+ // 悬空引用（指向同 id 旧版本）会让依赖方永久不可核验：必须改写而不是留着。
+ expect(danglingRefs(record)).toEqual([])
+ expect(replacement.sources[0]!.memoryDeps).toEqual([{id:target.id,version:2}])
+ // 依赖被改写的一方按"依赖已变"暂停，原因可辨、可复核恢复，而不是折成来源变更。
+ expect(replacement).toMatchObject({status:'paused',reason:'MEMORY_DEPENDENCY_CHANGED'})
+})
+it('rebinds dependents on a manual edit and on a manual confirmation',()=>{
+ const {store}=fixture(),first=store.add(store.read(),{content:'第一条依据',layer:'demand',scope:'本库',sources:[source(1)],semantic:'fact',attribution:'人说',reviewAt:null}),onFirst=dependentOn(store,first,2,'引用第一条')
+ store.edit(store.read(),first.id,first.version,{content:'第一条依据已修订'})
+ expect(danglingRefs(store.read().record)).toEqual([])
+ expect(store.read().record.entries.find(e=>e.id===onFirst.id)).toMatchObject({status:'paused',reason:'MEMORY_DEPENDENCY_CHANGED'})
+ const second=store.add(store.read(),{content:'第二条依据',layer:'demand',scope:'本库',sources:[source(3)],semantic:'fact',attribution:'人说',reviewAt:null}),onSecond=dependentOn(store,second,4,'引用第二条')
+ const pending=store.apply(store.read(),[[{action:'conflict',id:second.id,version:second.version,input:{content:'第二条依据待定',layer:'demand',scope:'本库',sources:[source(5)],semantic:'fact',attribution:'人说',reviewAt:null}}]],{taskId:'job-conflict',materialVersion:'a'.repeat(64),outcome:'applied',entryIds:[]})
+ const disputed=store.read().record.entries.find(e=>e.status==='disputed')!
+ store.confirm(store.read(),disputed.id,disputed.version)
+ expect(danglingRefs(store.read().record)).toEqual([])
+ expect(store.read().record.entries.find(e=>e.id===onSecond.id)).toMatchObject({status:'paused',reason:'MEMORY_DEPENDENCY_CHANGED'})
+})
+it('refuses to let a replacement take its own dependents as premises',()=>{
+ const {store}=fixture(),target=store.add(store.read(),{content:'本库记录先结论后依据',layer:'core',scope:'本库',sources:[source(1)],semantic:'standing',attribution:'人的口令',reviewAt:null}),dependent=dependentOn(store,target,2,'下游条目引用了这条约定')
+ // 更正这一场的材料里装着"依赖旧版本的下游条目"：若照抄成前提，更正会把自己拖下水。
+ const carrier={...source(3),memoryDeps:[{id:dependent.id,version:dependent.version}]}
+ store.apply(store.read(),[[{action:'correct',id:target.id,version:target.version,input:{content:'本库记录先依据后结论',layer:'core',scope:'本库',sources:[carrier],semantic:'standing',attribution:'人的更正口令',reviewAt:null}}]],{taskId:'job-self',materialVersion:'a'.repeat(64),outcome:'applied',entryIds:[]})
+ const record=store.read().record,corrected=record.entries.find(e=>e.id===target.id)!
+ expect(corrected.version).toBe(2)
+ expect(corrected.sources[0]!.memoryDeps.map(d=>d.id)).not.toContain(dependent.id)
+ expect(record.entries.find(e=>e.id===dependent.id)).toMatchObject({status:'paused',reason:'MEMORY_DEPENDENCY_CHANGED'})
+ expect(danglingRefs(record)).toEqual([])
+})

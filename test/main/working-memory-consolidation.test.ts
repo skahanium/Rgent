@@ -363,15 +363,26 @@ it('refuses standing without a verbatim human command and keeps the legacy rule 
  expect(roleAgreement({semantic:'standing',sourceIds:['cmd'],authority:[{sourceId:'cmd',quote:'先给结论'}]},[command],true)).toEqual({agreement:{authority:[{sourceId:'cmd',quote:'先给结论'}],supporting:[]},extra:[]})
  // 口令 + 正文同义佐证：保留口令为权威依据，正文降为辅助，不整条拒绝。
  const mixed=roleAgreement({semantic:'standing',authority:[{sourceId:'body',quote:'先给结论'},{sourceId:'cmd',quote:'先给结论'}],sourceIds:['cmd','body']},[command,human],true)!
- expect(mixed.agreement.authority).toEqual([{sourceId:'cmd',quote:'先给结论'}])
- expect(mixed.agreement.supporting).toContain('body')
+ expect(mixed.agreement!.authority).toEqual([{sourceId:'cmd',quote:'先给结论'}])
+ expect(mixed.agreement!.supporting).toContain('body')
  // 只有正文、没有任何口令依据时必须拒绝。
  expect(()=>roleAgreement({semantic:'standing',authority:[{sourceId:'body',quote:'先给结论'}],sourceIds:['body','cmd']},[command,human],true)).toThrow()
  // 佐证可以只出现在本场来源里：并入条目来源并记为辅助，不因未重复写进 sourceIds 而拒绝整条。
  const role=roleAgreement({semantic:'standing',authority:[{sourceId:'cmd',quote:'先给结论'}],sourceIds:['cmd'],supporting:['body']},[command],true,id=>id==='body'?human:undefined)!
- expect(role.agreement.supporting).toEqual(['body'])
+ expect(role.agreement!.supporting).toEqual(['body'])
  expect(role.extra.map(source=>source.id)).toEqual(['body'])
  expect(roleAgreement({semantic:'fact',sourceIds:['body']},[human])).toBeUndefined()
+})
+it('admits a factual proposal that only lists supporting sources without inventing an authority',()=>{
+ const command=roleSource('cmd','以后在本库解释先给结论','command'),human=roleSource('body','我偏好先给结论再举例子','human')
+ // 项目事实不要求口令权威：只列佐证时仍然准入，佐证并入条目来源。
+ const role=roleAgreement({semantic:'fact',supporting:['body'],sourceIds:['cmd']},[command],true,id=>id==='body'?human:undefined)!
+ expect(role.agreement).toBeUndefined()
+ expect(role.extra.map(source=>source.id)).toEqual(['body'])
+ // 长期约定仍然必须有人的口令原话：只列佐证不算权威。
+ expect(()=>roleAgreement({semantic:'standing',supporting:['body'],sourceIds:['cmd']},[command],true,id=>id==='body'?human:undefined)).toThrow()
+ // 佐证必须是本场真实来源，未知 id 仍硬拒。
+ expect(()=>roleAgreement({semantic:'fact',supporting:['missing'],sourceIds:['cmd']},[command],true)).toThrow()
 })
 it('saves a standing agreement that quotes the original command and refuses one without authority',async()=>{
  const proposal=(authority:boolean)=>(input:ModelStepInput)=>{

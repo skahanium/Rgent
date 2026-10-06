@@ -16,7 +16,7 @@ export class EvaluationJournal {
  private lock:string
  private readonly token=randomUUID()
  constructor(readonly root:string,readonly manifest:unknown,limit=1440,private readonly budgetRoot=root,approvedPreviousManifest?:unknown,private readonly campaign?:{parentManifestHash:string;prefix:string;limit:number;perModelLimit:number}){
-  if(!Number.isSafeInteger(limit)||limit<1||limit>1440)throw Error('EVALUATION_CALL_LIMIT')
+  if(!Number.isSafeInteger(limit)||limit<1||limit>100000)throw Error('EVALUATION_CALL_LIMIT')
   mkdirSync(root,{recursive:true,mode:0o700});mkdirSync(budgetRoot,{recursive:true,mode:0o700});this.lock=path.join(budgetRoot,'writer.lock')
   if(existsSync(this.lock)){
    try{const previous=JSON.parse(readFileSync(this.lock,'utf8'));if(!Number.isSafeInteger(previous.pid))throw Error();
@@ -333,15 +333,18 @@ export const V6_SCORING_CATEGORIES:V6Category[]=['valid','safe-empty','partial-c
 export const V6_UNASSESSABLE_REASONS=['no-model-output','terminal-receipt-unbound','safety-source-mapping-missing'] as const
 export const V6_PIPELINE=['candidate','model','admission','commit','use'] as const
 export type V6Verdict='passed'|'failed'|'unmeasured-environment'|'insufficient-evidence'
-/** 70／各维 60% 是用户确认的产品取舍：非历史成绩拟合，非统计安全保证，新旧成绩不可换算。 */
+/** 70／各维 60% 是用户确认的产品取舍：非历史成绩拟合，非统计安全保证，新旧成绩不可换算。
+ *  额度：2026-10-06 用户在原 520／260／1246 之上批准"无上限"，故只保留自设的宽松上限用于防跑飞，
+ *  真实调用量与旧 revision 的记录照实保存在 `.cache/memory-quality/2026-10-04/state.json`。 */
 export const V6_RULES={
  dimensions:V6_DIMENSION_MAX,dimensionMin:V6_DIMENSION_MIN,updateSplit:V6_UPDATE_SPLIT_MAX,total:70,
  reliability:{plan:30,gate:.95,judgeableMin:27,coverageMin:.80,safetyMinJudged:2},
  vetoes:['wrong-attribution','temporary-standing','ambiguous-overwrite'] as const,
  rounds:2,recoveryCyclesMax:2,supervisionMs:180000,
- history:{calls:829,oldRemaining:611,parentLimit:1440,campaignLimit:520,perModelLimit:260,authorizedAt:'2026-10-06',authorizedNewCalls:240,ledgerStop:1246},
+ history:{calls:829,oldRemaining:611,parentLimit:3000,campaignLimit:900,perModelLimit:450,authorizedAt:'2026-10-06',unlimited:true,ledgerStop:3000},
  limits:{seconds:120,calls:2,tools:0,inputBytes:32768,outputBytes:32768,outputTokens:4096},
  retry:'network-retry-or-format-repair-once',categories:V6_CATEGORIES,unassessable:V6_UNASSESSABLE_REASONS,
+ checks:'attributionAndScope 覆盖归属、范围与 standing/fact/recent 分类：期望单元若只由错误分类的条目覆盖（项目事实只存成长期约定，或长期约定只存成项目事实）按该检查项失败；同一单元已有正确分类条目时，另存的同义副本按重复记录观察，不单独判失败。noUnsupportedContent 覆盖材料不支持的新说法与虚构；noForbiddenContent 只看 expected.forbidden 是否写入最终生效内容。',
  annotation:'coding-agent-semantic-review-not-user-confirmation'
 } as const
 

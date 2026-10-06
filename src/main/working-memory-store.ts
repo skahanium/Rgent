@@ -183,7 +183,7 @@ export class WorkingMemoryStore{
   record.entries.push(entry);this.commit(basis,record);return entry
  }
  edit(basis:WorkingSnapshot,id:string,version:number,change:Partial<WorkingInput>&{status?:WorkingEntry['status']}){
-  const record=structuredClone(basis.record),entry=record.entries.find(e=>e.id===id);if(!entry||entry.version!==version)throw Error('MEMORY_CHANGED');Object.assign(entry,structuredClone(change));if(!inputValid(entry))throw Error('BAD_MEMORY_EDIT');entry.version++;entry.updatedAt=new Date().toISOString()
+  const record=structuredClone(basis.record),entry=record.entries.find(e=>e.id===id);if(!entry||entry.version!==version)throw Error('MEMORY_CHANGED');Object.assign(entry,structuredClone(change));if(!inputValid(entry))throw Error('BAD_MEMORY_EDIT');const priorVersion=entry.version;entry.version++;entry.updatedAt=new Date().toISOString();advanceVersion(record,entry.id,priorVersion,entry.version)
   if(entry.layer==='core'&&entry.status==='active'&&record.entries.filter(e=>e.layer==='core'&&e.status==='active').reduce((n,e)=>n+conservativeTokens(e.content),0)>2048)entry.status='deferred'
   entry.state=stateFromStatus(entry.status,entry.state)
   return this.commit(basis,record)
@@ -207,12 +207,14 @@ export class WorkingMemoryStore{
      }else{
       const e=candidate.entries.find(e=>e.id===change.id&&e.version===change.version)
       if(!e)throw Error('MEMORY_CHANGED')
+      // 替换的前提不能包含本次替换自己作废的反向依赖闭包，否则更正条目会被自己的下游拖成不可核验。
+      pruneReplacedClosure(candidate,change.id,input)
       if(change.action==='conflict'){
        if(candidate.entries.length>=1000)throw Error('MEMORY_ENTRY_LIMIT')
        const pending:WorkingEntry={...input,id:randomUUID(),version:1,category:'long',status:'disputed',state:stateFromStatus('disputed'),reason:'MEMORY_CONFIRMATION_REQUIRED',updatedAt:now,pendingTarget:{id:e.id,version:e.version},updateBasis:{kind:'consolidation',id:receipt.taskId,version:1}}
        candidate.entries.push(pending);accepted.push(pending.id)
       }else{
-       Object.assign(e,input);e.version++;e.updatedAt=now;e.updateBasis={kind:'consolidation',id:receipt.taskId,version:e.version};e.status=change.action==='obsolete'?'obsolete':'active';e.state=stateFromStatus(e.status,e.state);e.reason=null;accepted.push(e.id)
+       Object.assign(e,input);const priorVersion=e.version;e.version++;e.updatedAt=now;e.updateBasis={kind:'consolidation',id:receipt.taskId,version:e.version};e.status=change.action==='obsolete'?'obsolete':'active';e.state=stateFromStatus(e.status,e.state);e.reason=null;advanceVersion(candidate,e.id,priorVersion,e.version);accepted.push(e.id)
       }
      }
      // A newly added/corrected agreement may defer itself, never evict an older active one.
@@ -269,7 +271,7 @@ export class WorkingMemoryStore{
   const record=structuredClone(basis.record),removed:WorkingEntry[]=[]
   for(const change of after){const collection=record.entries.some(e=>e.id===change.id)?record.entries:record.recent,at=collection.findIndex(e=>e.id===change.id&&e.version===change.version);if(at<0)throw Error('MEMORY_CHANGED')
    const current=collection[at]!,previous=before.find(e=>e.id===current.id)
-   if(previous){collection[at]={...structuredClone(previous),version:current.version+1,updatedAt:new Date().toISOString(),updateBasis:{kind:'manual',id:taskId,version:current.version+1}} as WorkingRecent}
+   if(previous){const restored={...structuredClone(previous),version:current.version+1,updatedAt:new Date().toISOString(),updateBasis:{kind:'manual',id:taskId,version:current.version+1}} as WorkingRecent;collection[at]=restored;advanceVersion(record,restored.id,current.version,restored.version)}
    else {removed.push(current);collection.splice(at,1)}
   }
   if(removed.length)record.forgotten.push({materialIds:[...new Set(removed.flatMap(e=>e.sources.flatMap(s=>[s.materialId,...(s.basisGroups??[])])))],entryIds:removed.map(e=>({id:e.id,version:e.version})),through:Math.max(...removed.flatMap(e=>e.sources.map(s=>s.sequence)))})
@@ -293,10 +295,19 @@ export class WorkingMemoryStore{
   for(const state of states){const e=allEntries(record).find(e=>e.id===state.id&&e.version===state.version);if(e&&e.status!==state.status){e.status=state.status;e.state=stateFromStatus(state.status,e.state);e.reason=state.reason;changed=true}}
   return changed?this.commit(basis,record,false,true):basis
  }
+ /** 惰性修复旧文件里的悬空依赖：依赖 id 仍在、但被引用的版本不存在且已有更新版本时改写引用。
+  *  幂等、同一次 CAS；被改写方按"依赖已变"暂停。id 已遗忘的引用保持原样，交由核验如实报依赖变更。 */
+ repairStaleDependencies(basis:WorkingSnapshot){
+  const record=structuredClone(basis.record),current=new Map(allEntries(record).map(e=>[e.id,e.version]))
+  let changed=false
+  for(const dep of allEntries(record).flatMap(e=>e.sources.flatMap(s=>s.memoryDeps))){const latest=current.get(dep.id);if(latest===undefined||latest===dep.version)continue
+   if(advanceVersion(record,dep.id,dep.version,latest).length)changed=true}
+  return changed?this.commit(basis,record,false,true):basis
+ }
  confirm(basis:WorkingSnapshot,id:string,version:number){const record=structuredClone(basis.record),entry=record.entries.find(e=>e.id===id&&e.version===version);if(!entry)throw Error('MEMORY_CHANGED')
   let target=entry
   if(entry.pendingTarget){const prior=record.entries.find(e=>e.id===entry.pendingTarget!.id&&e.version===entry.pendingTarget!.version);if(!prior)throw Error('MEMORY_CHANGED');target=prior;Object.assign(target,{content:entry.content,sources:entry.sources,scope:entry.scope,layer:entry.layer,semantic:entry.semantic,attribution:entry.attribution});record.entries=record.entries.filter(e=>e.id!==entry.id)}
-  target.status='active';target.state=stateFromStatus('active',target.state);target.reason=null;target.reviewAt=null;target.version++;target.updatedAt=new Date().toISOString();target.updateBasis={kind:'manual',id:target.id,version:target.version}
+  target.status='active';target.state=stateFromStatus('active',target.state);target.reason=null;target.reviewAt=null;const priorVersion=target.version;target.version++;target.updatedAt=new Date().toISOString();target.updateBasis={kind:'manual',id:target.id,version:target.version};advanceVersion(record,target.id,priorVersion,target.version)
   if(target.layer==='core'&&record.entries.filter(e=>e.layer==='core'&&e.status==='active').reduce((n,e)=>n+conservativeTokens(e.content),0)>2048){target.status='deferred';target.state=stateFromStatus('deferred',target.state)}
   return this.commit(basis,record)
  }
@@ -335,4 +346,31 @@ function boundedReceipts(jobs:MemoryJobReceipt[]):MemoryJobReceipt[]{
  const terminalCapacity=Math.min(64,256-protectedJobs.length)
  const terminalJobs=terminalCapacity>0?jobs.filter(j=>!['queued','running','interrupted'].includes(j.outcome)).slice(-terminalCapacity):[]
  return [...terminalJobs,...protectedJobs]
+}
+
+/** 就地升版（更正、手工编辑、确认提升、撤销）后，把其他条目指向旧版本的依赖引用改写到新版本。
+ *  不改写会留下同 id 旧版本的悬空引用，依赖方永久不可核验（r8 冻结链式 α4 已证实）；
+ *  被改写的依赖方按"依赖已变"暂停并可复核恢复，不是来源变更。 */
+function advanceVersion(record:WorkingRecord,id:string,from:number,to:number):string[]{
+ if(from===to)return []
+ const rebound:string[]=[]
+ for(const entry of allEntries(record)){
+  if(entry.id===id&&entry.version===to)continue
+  let changed=false
+  for(const source of entry.sources)for(const dep of source.memoryDeps)if(dep.id===id&&dep.version===from){dep.version=to;changed=true}
+  if(!changed)continue
+  rebound.push(entry.id)
+  if(entry.status==='active'){entry.status='paused';entry.reason='MEMORY_DEPENDENCY_CHANGED';entry.state=stateFromStatus('paused',entry.state)}
+ }
+ return rebound
+}
+
+/** 更正/作废/冲突替换时的前提剪枝：被替换条目的反向依赖闭包由这次变更本身作废，
+ *  不能同时成为新版本的前提，否则更正会依赖"依赖旧版本的下游条目"而把自己拖下水。 */
+function pruneReplacedClosure(record:WorkingRecord,replacedId:string,input:WorkingInput):void{
+ const reverse=new Set<string>([replacedId]);let grew=true
+ while(grew){grew=false
+  for(const entry of allEntries(record))if(!reverse.has(entry.id)&&entry.sources.some(source=>source.memoryDeps.some(dep=>reverse.has(dep.id)))){reverse.add(entry.id);grew=true}
+ }
+ for(const source of input.sources)source.memoryDeps=source.memoryDeps.filter(dep=>!reverse.has(dep.id))
 }

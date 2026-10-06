@@ -55,6 +55,13 @@ describe('v6 fixture 冻结', () => {
    expect(new Set([...coverage.cases,coverage.chain]).size).toBe(3)
   }
  })
+ it('标注口径写死分类规则，避免两名标注者各自解释 standing/fact 分类', () => {
+  // r8 复验里两名标注者对"项目事实只存成 standing"给出不同判定，直接把 MiniMax 第一轮从 passed 拉成
+  // insufficient-evidence。分类规则必须留在冻结规则文本里，不能只存在于标注者记忆。
+  expect(V6_RULES.checks).toContain('standing/fact/recent')
+  expect(V6_RULES.checks).toContain('错误分类')
+  expect(V6_RULES.checks).toContain('同义副本按重复记录观察')
+ })
 })
 
 describe('v6 计分', () => {
