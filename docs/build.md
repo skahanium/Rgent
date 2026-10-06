@@ -1538,20 +1538,16 @@ DeepSeek 发送前故障证据为 `diagnostic-97d058c1-810b-4b5e-ab2b-05c623f95b
 
 #### v6 交接（给下一个会话：从这里接着做）
 
-**现在在哪**：包 0–5 全部交付；r4 冻结实测 + 离线审计完成；r5（运行器链式 vault 跨 revision 复用，已修 `3f34f5c`）与 r6（干净复验，deepseek 第一轮 passed 88.367）完成。修正后的裁判、动作核对、依赖边界与提示词契约分别见 `ee93c8a`、`a2fb8b1`、`681b760`、`d4fc2b8`。**r7 未冻结、未花任何新调用**。
+**现在在哪**：包 0–5 全部交付；r4 冻结实测 + 离线审计完成；r5（运行器链式 vault 跨 revision 复用，已修 `3f34f5c`）与 r6（干净复验，deepseek 第一轮 passed 88.367）完成。修正后的裁判、动作核对、依赖边界与提示词契约分别见 `ee93c8a`、`a2fb8b1`、`681b760`、`d4fc2b8`。**r7 未冻结、未花任何新调用**。2026-10-06 追加：唯一红灯已转绿（提交 `59e950c`），改的是链式夹具、不是断言，产品依赖边界未动；判定过程与门见下。
 
-**唯一红灯（必须先解决，且不许无理由改弱断言）**：`test/scripts/v5-memory-quality.test.ts > runs every chain foreground…` 断言链式步骤 `result.material.memoryDeps.length > 1`，实测为 1。已核实账本"本场实际使用的记忆"由 `src/main/memory-use.ts:159` 的 `dependencies()` 生成、列的是**被装入条目本身**（不是依赖闭包），所以 `inheritInputs` 的收窄按设计不该让它掉到 1。判定命令（在链条第 2 步打印两处事实即可定性）：
+**红灯已清（2026-10-06，提交 `59e950c`；原交接的定位写错了，记录更正如下）**：`test/scripts/v5-memory-quality.test.ts > runs every chain foreground…` 里真正失败的断言是同一行的 `result.controlled.closure.affectedIds.length > 1`（实测 1），不是 `result.material.memoryDeps.length > 1`。链条第 5 步实测：`material.memoryDeps` 与账本 provenance 都是 **3** 条（本场实际装入的三条近期日志），`foreground.sent` 也逐条列出——**溯源没有被砍**，因为账本"本场实际使用的记忆"列的是被装入条目本身（`src/main/memory-use.ts:159`），不是依赖闭包；交接里 `agent-host.ts:373`／`scoped-agent-tools.ts:116` 那条推断因此不成立。
 
-```
-pnpm exec vitest run test/scripts/v5-memory-quality.test.ts --reporter=verbose
-# 在该用例 step===2 处临时 console.log(result.material.memoryDeps, result.foreground?.sent)
-```
-- 若 `sent`（实际注入）也只剩 1 条 → 是取用/遗忘行为变化，按产品语义判断是否可接受并写明理由；
-- 若 `sent` 正常而 `memoryDeps` 只剩 1 → 是 `agent-host.ts:373` 里 `scoped.memoryDeps`（来源见 `src/main/scoped-agent-tools.ts:116`）被我的来源级收窄砍到，**把溯源记录补回**（注入记录与依赖闭包分开），而不是改期望值。
+- 闭包为什么只有 1：链案例五步产出的全是**近期背景**，而 `d4fc2b8` 之后近期块自身不携带记忆依赖（`skipMemoryDeps`），所以纯近期库上"遗忘某条日志"的闭包只有锚点本身。原断言只在**已被修掉的缺陷**下才成立（每条日志都依赖前几条，遗忘一条连带整链），既不能用缺陷撑着，也不该无理由改弱。
+- 修法（`59e950c`，只改链式夹具、不动产品依赖边界）：链条第 5 步除近期背景外再学一条由本场来源派生的项目事实。长期条目把本场装入的近期日志记为依赖父，于是 `affectedIds` = 锚点 + 该派生条目（实测 2 条），`closure.passed` 仍真、`remaining` 为空（`forget` 按依赖级联移除，见 `working-memory-store.ts:283`）。断言原样保留，并补两处事实：账本 provenance 条数 **>1**、派生条目确实在 `affectedIds` 内——正好对上 v5 合同「近期块的遗忘闭包与长期记忆同样执行」。
+- 顺带登记一处观察（**本轮不改产品代码**）：`inheritInputs` 里按"候选中的 recent 条目"过滤 `material.memoryDeps` 的 `logIds`，在生产路径恒为空集（调用点传长期候选或 `[]`），所以长期条目仍依赖本场装入的近期日志。有效方向是"遗忘近期日志连带派生长期条目"，与遗忘闭包要求一致；那条过滤目前只是单元测试覆盖的形状，若要让它生效须先改围栏。
+- 本轮门（串行复跑）：`pnpm test` **1626 通过／2 平台跳过／0 失败**（类型检查含在内；共收集 1628 例——交接写的「1628 通过」是收集总数，不是通过数）、`pnpm docs:check` 通过、`pnpm build` 通过、`pnpm ui:check` **354／0**。绿灯顺序已执行完，仅本地提交、未推送。
 
-**绿灯后的固定顺序**：`pnpm test`（应 1628 通过／2 跳过）→ `pnpm docs:check` → `pnpm build` → `pnpm ui:check`（预期 354／0）→ 提交。
-
-**再冻结 r7 并复验**（额度已由用户 2026-10-06 批准，登记在 decisions.md）：
+**再冻结 r7 并复验**（额度已由用户 2026-10-06 批准，登记在 decisions.md；**r7 尚未冻结，本轮未花任何调用**）：
 - 冻结：`rm .cache/memory-quality/2026-10-04/v6/v6-manifest.json` 后 `RGENT_V6_REVISION=7 pnpm memory:check --v6 --freeze --profile "$HOME/Library/Application Support/rgent" --models f372c75e-4a91-490c-9f03-93265d1be478,5e5b7773-5d7f-4b81-b939-519c641d1a9a`
 - 范围：两模型 × 两轮 × 30 例 = 120 次尝试，一次一例、**先标注再派发下一例**、每轮内两模型交错、链式 1→5 保序；驱动器与手册：`.cache/memory-quality/2026-10-04/v6/v6-drive.py`、`RUNBOOK.md`（注意驱动器 progress 行的 `r3` 标签是旧的，数字以 `state.json` 为准）。
 - 双标注：每模型每轮 ≥10 条（共 ≥40），由**另一名标注者**（`coding-agent-reviewer-b`）用 `submit2` 提交，且**不得读** `annotation-*.json`。
