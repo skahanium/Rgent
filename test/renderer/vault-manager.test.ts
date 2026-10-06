@@ -92,7 +92,14 @@ describe('embedded vault settings page', () => {
     expect(overlay.root.querySelector('[role="status"]')!.textContent).toBe('')
     handlers.open.mockImplementation(async () => { throw Error('VAULT_TARGET_CHANGED') })
     button('切换', row('a')).click(); await flush()
-    expect(overlay.root.textContent).toContain('库的位置或身份发生变化'); expect(overlay.root.textContent).not.toContain('VAULT_TARGET_CHANGED')
+    expect(overlay.root.textContent).toContain('库目录不可访问或已移动'); expect(overlay.root.textContent).not.toContain('VAULT_TARGET_CHANGED')
+    // 三种失败要分开说：被替换 ≠ 换了位置 ≠ 目录不可访问；不能共用一句"身份发生变化"。
+    handlers.open.mockImplementation(async () => { throw Error('VAULT_REPLACED') })
+    button('切换', row('a')).click(); await flush()
+    expect(overlay.root.textContent).toContain('另一个目录（原库已被替换）'); expect(overlay.root.textContent).not.toContain('库目录不可访问或已移动')
+    handlers.open.mockImplementation(async () => { throw Error('VAULT_RELOCATE_REQUIRED') })
+    button('切换', row('a')).click(); await flush()
+    expect(overlay.root.textContent).toContain('换了位置'); expect(overlay.root.textContent).not.toContain('另一个目录')
   })
   it('ignores a late initial catalog after the overlay is closed', async () => {
     const pending = deferred<VaultCatalogView>()
@@ -145,7 +152,9 @@ describe('embedded vault settings page', () => {
     ['ACTIVE_VAULT_RELOCATE', '当前库正在使用'],
     ['VAULT_NESTED', '不能互相包含'],
     ['VAULT_ALREADY_REGISTERED', '已经登记'],
-    ['VAULT_REPLACED', '库的位置或身份发生变化'],
+    ['VAULT_REPLACED', '另一个目录（原库已被替换）'],
+    ['VAULT_RELOCATE_REQUIRED', '换了位置'],
+    ['VAULT_TARGET_CHANGED', '库目录不可访问或已移动'],
     ['VAULT_NOT_REGISTERED', '库列表已变化'],
     ['VAULT_CATALOG_LIMIT', '库列表已达到容量上限']
   ])('translates Electron-wrapped %s to a concrete message', async (code, message) => {

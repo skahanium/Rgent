@@ -1202,6 +1202,15 @@ a[href]:focus-visible,
   line-height: 1.5;
 }
 
+/* 选择库卡片底部的动作行：两个按钮之间必须有间隔，不能贴成一个色块。 */
+.picker-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+}
+
 .pick-btn,
 .modal-actions button[value='ok'],
 .modal-actions button:last-child {

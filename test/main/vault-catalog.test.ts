@@ -287,3 +287,33 @@ it('does not claim an unrelated legacy row when a new registration is relocated'
  expect(catalog.workspace(catalog.inspect(moved))).toBeNull()
  expect(JSON.parse(fs.readFileSync(path.join(data,'vault-workspaces.json'),'utf8')).entries[0].id).toBeUndefined()
 })
+it('accepts a human-confirmed remount but still refuses a replaced directory',()=>{
+ const {data,vault,catalog}=fixture(),file=path.join(data,'vault-catalog.json'),workspaces=path.join(data,'vault-workspaces.json')
+ const entry=catalog.register(catalog.inspect(vault))
+ catalog.saveWorkspace(catalog.inspect(vault),{version:1,tabs:[{relPath:'keep.md'}],active:'keep.md'})
+ const current=catalog.inspect(vault),inode=current.rootIdentity.slice(current.rootIdentity.indexOf(':')+1)
+ const stale=`99999999:${inode}`
+ // 卷重新挂载：记录里是旧设备号，磁盘上是新设备号，inode 相同。
+ const rewrite=(rootIdentity:string)=>{const saved=JSON.parse(fs.readFileSync(file,'utf8'));saved.entries[0].rootIdentity=rootIdentity;fs.writeFileSync(file,JSON.stringify(saved))
+  const savedWorkspaces=JSON.parse(fs.readFileSync(workspaces,'utf8'));savedWorkspaces.entries[0].rootIdentity=rootIdentity;fs.writeFileSync(workspaces,JSON.stringify(savedWorkspaces))}
+ rewrite(stale)
+ // 未确认前仍然拒绝把同一个位置当成新库登记。
+ expect(()=>catalog.register(current)).toThrow('VAULT_REPLACED')
+ // 人确认后：身份改记新设备号，工作区（tab／阅读位置）跟着换过去，没丢。
+ const confirmed=catalog.confirmRemount(entry.id,catalog.view().revision)
+ expect(confirmed.rootIdentity).toBe(current.rootIdentity)
+ expect(catalog.view().entries[0].rootIdentity).toBe(current.rootIdentity)
+ expect(catalog.workspace(catalog.inspect(vault))?.active).toBe('keep.md')
+ expect(JSON.parse(fs.readFileSync(workspaces,'utf8')).entries[0].rootIdentity).toBe(current.rootIdentity)
+ // 已经是当前身份时确认是幂等的。
+ expect(catalog.confirmRemount(entry.id,catalog.view().revision).rootIdentity).toBe(current.rootIdentity)
+})
+it('refuses a remount confirmation when the inode changed too',()=>{
+ const {data,vault,catalog}=fixture(),file=path.join(data,'vault-catalog.json')
+ const entry=catalog.register(catalog.inspect(vault)),current=catalog.inspect(vault)
+ const inode=Number(current.rootIdentity.slice(current.rootIdentity.indexOf(':')+1))
+ const replaced=`99999999:${inode+1}`
+ const saved=JSON.parse(fs.readFileSync(file,'utf8'));saved.entries[0].rootIdentity=replaced;fs.writeFileSync(file,JSON.stringify(saved))
+ expect(()=>catalog.confirmRemount(entry.id,catalog.view().revision)).toThrow('VAULT_REPLACED')
+ expect(JSON.parse(fs.readFileSync(file,'utf8')).entries[0].rootIdentity).toBe(replaced)
+})

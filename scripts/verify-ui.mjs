@@ -1583,6 +1583,29 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   // replacement assertions. Capture the real single-library empty-list state.
   rmSync(sibling,{recursive:true,force:true});renameSync(sibling+'-原对象',sibling)
   renameSync(path.join(sibling,'临时移走.md'),path.join(sibling,'同名.md'))
+  // 卷重新挂载：设备号变了、inode 没变。记录里留着旧设备号时，库必须仍能被人工确认打开，
+  // 而不是被判成"被替换"卡在选库页（macOS 重启后 APFS 会换设备号）。
+  {
+    const catalogFile=path.join(profile,'vault-catalog.json'),workspaceFile=path.join(profile,'vault-workspaces.json')
+    const liveCatalog=JSON.parse(readFileSync(catalogFile,'utf8'))
+    const remountEntry=liveCatalog.entries.find(entry=>entry.id===liveCatalog.lastVaultId)
+    const realIdentity=remountEntry.rootIdentity,inode=realIdentity.slice(realIdentity.indexOf(':')+1),staleIdentity=`99999999:${inode}`
+    remountEntry.rootIdentity=staleIdentity
+    writeFileSync(catalogFile,JSON.stringify(liveCatalog))
+    const liveWorkspaces=JSON.parse(readFileSync(workspaceFile,'utf8'))
+    for(const item of liveWorkspaces.entries)if(item.path===remountEntry.path)item.rootIdentity=staleIdentity
+    writeFileSync(workspaceFile,JSON.stringify(liveWorkspaces))
+    await restart(async restoredPage=>{
+      check('卷重新挂载后停在选库并说明可确认打开',await waitFor(restoredPage,`!!document.querySelector('.picker-card') && document.querySelector('.picker-copy')?.textContent.includes('重新挂载') && document.querySelectorAll('.tab').length===0`))
+      check('选择库的两个按钮有间隔且不贴在一起',await restoredPage.eval(`(()=>{const card=document.querySelector('.picker-card');if(!card||!card.querySelector('.picker-actions'))return false;const boxes=[...card.querySelectorAll('.pick-btn')].map(b=>b.getBoundingClientRect());return boxes.length===2&&boxes[0].width>0&&boxes[0].right+4<=boxes[1].left})()`))
+      await restoredPage.eval(`[...document.querySelectorAll('.pick-btn')].find(n=>n.textContent==='已登记的笔记库').click()`)
+      await waitFor(restoredPage,`!!document.querySelector('[data-vault-open="${remountEntry.id}"]')`)
+      await restoredPage.eval(`document.querySelector('[data-vault-open="${remountEntry.id}"]').click()`)
+      check('确认切换后打开同一个库并恢复工作区',await waitFor(restoredPage,`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelector('.tab')?.textContent.includes('同名') && document.querySelector('.cm-content')?.textContent.includes('必须保留的草稿')`))
+    })
+    const confirmed=JSON.parse(readFileSync(catalogFile,'utf8')).entries.find(entry=>entry.id===remountEntry.id)
+    check('确认后身份改记新设备号且工作区一并换绑',confirmed.rootIdentity===realIdentity&&JSON.parse(readFileSync(workspaceFile,'utf8')).entries.every(item=>item.path!==remountEntry.path||item.rootIdentity===realIdentity))
+  }
   const singleCatalog=JSON.parse(catalogBefore)
   singleCatalog.entries=singleCatalog.entries.filter(entry=>entry.id==='vault-b')
   writeFileSync(path.join(profile,'vault-catalog.json'),JSON.stringify(singleCatalog))
@@ -1747,7 +1770,7 @@ async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
   })()`)
   // Actual local receiver and consumed/unused authorizations establish a non-default old state.
   let oldCalls=0
-  const oldReceiver=createHttpServer((request,response)=>{let raw='';request.on('data',c=>raw+=c);request.on('end',()=>{oldCalls++;const r=JSON.parse(raw),answer=r.model==='v4-backup-memory'?JSON.stringify({proposals:[]}):'旧授权真实回答';response.writeHead(200,{'content-type':'text/event-stream'});response.end(`data: ${JSON.stringify({choices:[{index:0,delta:{content:answer},finish_reason:null}]})}\n\ndata: ${JSON.stringify({choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\ndata: [DONE]\n\n`)})})
+  const oldReceiver=createHttpServer((request,response)=>{let raw='';request.on('data',c=>raw+=c);request.on('end',()=>{oldCalls++;const r=JSON.parse(raw),answer=r.model==='v4-backup-memory'?JSON.stringify({recent:null,proposals:[]}):'旧授权真实回答';response.writeHead(200,{'content-type':'text/event-stream'});response.end(`data: ${JSON.stringify({choices:[{index:0,delta:{content:answer},finish_reason:null}]})}\n\ndata: ${JSON.stringify({choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\ndata: [DONE]\n\n`)})})
   const copy=vault+'-复制',parking=vault+'-停靠'
   await new Promise(resolve=>oldReceiver.listen(0,'127.0.0.1',resolve))
   try{
@@ -2089,7 +2112,7 @@ async function verifyV4ConsolidationRetry(page,nativePage,vault,shot) {
   process.stdout.write('\nv4 D：整理模型失败与独立 Host 材料交接故障的真实重试\n')
   let requests=0,memoryAttempts=0
   const server=createHttpServer((request,response)=>{let raw='';request.on('data',chunk=>raw+=chunk);request.on('end',()=>{
-    const r=JSON.parse(raw);requests++;if(r.model==='v4-consolidation-memory'&&++memoryAttempts===1){response.writeHead(503,{'content-type':'application/json'});response.end(JSON.stringify({error:{message:'受控临时整理失败'}}));return}const answer=r.model==='v4-consolidation-memory'?JSON.stringify({proposals:[]}):'V4整理已保存回答'
+    const r=JSON.parse(raw);requests++;if(r.model==='v4-consolidation-memory'&&++memoryAttempts<=2){response.writeHead(503,{'content-type':'application/json'});response.end(JSON.stringify({error:{message:'受控临时整理失败'}}));return}const answer=r.model==='v4-consolidation-memory'?JSON.stringify({recent:null,proposals:[]}):'V4整理已保存回答'
     response.writeHead(200,{'content-type':'text/event-stream'});response.write(`data: ${JSON.stringify({id:'v4-consolidation',object:'chat.completion.chunk',created:1,model:r.model,choices:[{index:0,delta:{content:answer},finish_reason:null}]})}\n\n`);response.write(`data: ${JSON.stringify({id:'v4-consolidation',object:'chat.completion.chunk',created:1,model:r.model,choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`);response.end('data: [DONE]\n\n')
   })})
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve))
@@ -2102,7 +2125,7 @@ async function verifyV4ConsolidationRetry(page,nativePage,vault,shot) {
     check('真实重试预览显示当前接收方与材料',await waitFor(page,`document.querySelector('.memory-preview')?.textContent.includes('v4-consolidation-memory')`))
     await v4Shots(page,shot,'consolidation-retry','.settings-main')
     await v4Click(page,'.memory-preview button','确认重新整理')
-    check('重新披露后整理完成且未重新生成已保存回答',await waitFor(page,`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(id)}&&j.outcome==='applied')})()`,20000)&&requests===3&&readFileSync(path.join(vault,'V4整理.md'),'utf8').includes('V4整理已保存回答'))
+    check('重新披露后整理完成且未重新生成已保存回答',await waitFor(page,`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(id)}&&j.outcome==='applied')})()`,20000)&&requests===4&&readFileSync(path.join(vault,'V4整理.md'),'utf8').includes('V4整理已保存回答'))
     await v4CloseSettings(page)
     // A condition breakpoint only schedules a real disposable disk fault after ledger.complete.
     // It never replaces Host saving, material versions, or the original result consumer.
@@ -2118,14 +2141,14 @@ async function verifyV4ConsolidationRetry(page,nativePage,vault,shot) {
       if(!breakpoint||!installed.result.locations.length)throw Error('Host 实际构建脚本条件断点未绑定')
       const handoffId=await v4Task(page,vault,materialRel,'V4保存完成后材料核验故障',models.answer)
       check('真实回答保存完成后 Host 材料核验确实失败且原对象已恢复',await v4TaskDone(page,materialRel,handoffId)&&await nativePage.eval(`(()=>{const g=globalThis.__v4HandoffFault,fs=process.getBuiltinModule('fs');return g.fired===1&&g.results.length===1&&g.results[0].taskId===${JSON.stringify(handoffId)}&&g.results[0].status==='unavailable'&&typeof g.results[0].reason==='string'&&fs.statSync(g.file).dev+':'+fs.statSync(g.file).ino===g.id&&fs.readFileSync(g.file).toString('base64')===g.before&&!fs.existsSync(g.parked)})()`))
-      check('Host 交接失败由真实版本形成独立 rejected、未调用整理模型',await waitFor(page,`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(handoffId)}&&j.outcome==='rejected'&&typeof j.materialVersion==='string'&&j.retryable)})()`)&&requests===4&&memoryAttempts===2)
+      check('Host 交接失败由真实版本形成独立 rejected、未调用整理模型',await waitFor(page,`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(handoffId)}&&j.outcome==='rejected'&&typeof j.materialVersion==='string'&&j.retryable)})()`)&&requests===5&&memoryAttempts===3)
       const savedAnswer=readFileSync(materialFile)
       await v4Settings(page,'记忆');await page.eval(`document.querySelector('[data-memory-section="jobs"]').open=true`)
       check('材料交接失败的现有页面回执与恢复入口可见',await waitFor(page,`document.querySelector('.memory-job[data-task-id="${handoffId}"] .memory-job-result')?.textContent.includes('没有写入')&&[...document.querySelectorAll('.memory-job[data-task-id="${handoffId}"] button')].some(b=>b.textContent==='重新整理…'&&!b.disabled)`))
       await v4Click(page,`.memory-job[data-task-id="${handoffId}"] button`,'重新整理…')
       check('材料交接重试须重新披露真实接收方',await waitFor(page,`document.querySelector('.memory-preview')?.textContent.includes('v4-consolidation-memory')`));await v4Shots(page,shot,'handoff-retry','.settings-main')
       await v4Click(page,'.memory-preview button','确认重新整理')
-      check('交接故障受控重试完成且保存回答原字节不重复生成',await waitFor(page,`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(handoffId)}&&j.outcome==='applied')})()`,20000)&&requests===5&&memoryAttempts===3&&readFileSync(materialFile).equals(savedAnswer))
+      check('交接故障受控重试完成且保存回答原字节不重复生成',await waitFor(page,`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(handoffId)}&&j.outcome==='applied')})()`,20000)&&requests===6&&memoryAttempts===4&&readFileSync(materialFile).equals(savedAnswer))
       await v4CloseSettings(page)
     }finally{
       try{

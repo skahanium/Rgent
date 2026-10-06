@@ -2,7 +2,7 @@ import type { LifecycleFlushPhase, RecoveryFlushContext } from '../shared/flush.
 import { parseLedgerRepairRequest } from '../shared/ledger.ts'
 import { parseStoredVault } from './notes-fs.ts'
 import { boundArguments, isVaultChannel, isVaultEvent } from '../shared/vault-binding.ts'
-import { VaultCatalog } from './vault-catalog.ts'
+import { VaultCatalog, sameRootInode } from './vault-catalog.ts'
 import { VaultSwitch } from './vault-switch.ts'
 import { parseVaultRestoreReceipt, type VaultTarget } from '../shared/vault-management.ts'
 import { readFileSync } from 'node:fs'
@@ -656,8 +656,14 @@ function registerIpc(): void {
     if (vaultSwitch?.busy) throw Error('VAULT_SWITCH_BUSY')
     const entry = vaultCatalog!.view().entries.find(item => item.id === id)
     if (!entry) throw Error('VAULT_TARGET_INVALID')
-    const target = vaultCatalog!.inspect(entry.path)
-    if (target.rootIdentity !== entry.rootIdentity) throw Error('VAULT_TARGET_CHANGED')
+    let target = vaultCatalog!.inspect(entry.path)
+    if (target.rootIdentity !== entry.rootIdentity) {
+      // 人在列表里点「切换」就是确认同一个库：卷重新挂载（同 inode、新设备号）时重记身份再打开；
+      // 目录真被替换（inode 变了）仍由 confirmRemount 抛 VAULT_REPLACED 拒绝。
+      const confirmed = vaultCatalog!.confirmRemount(entry.id, vaultCatalog!.view().revision)
+      target = vaultCatalog!.inspect(entry.path)
+      if (target.rootIdentity !== confirmed.rootIdentity) throw Error('VAULT_TARGET_CHANGED')
+    }
     if (activeTarget?.rootIdentity === target.rootIdentity && activeTarget.path === target.path) return visibleVaultState()
     return vaultSwitch!.run(target, event.senderFrame)
   })
@@ -1032,7 +1038,7 @@ if (ownsInstance) app.whenReady().then(() => {
     const last = catalog.entries.find(item => item.id === catalog.lastVaultId)
     if (last) {
       const target = vaultCatalog.inspect(last.path)
-      if (target.rootIdentity !== last.rootIdentity) throw Error('VAULT_REPLACED')
+      if (target.rootIdentity !== last.rootIdentity) throw Error(sameRootInode(target.rootIdentity, last.rootIdentity) ? 'VAULT_REMOUNTED' : 'VAULT_REPLACED')
       const state = vault.restoreVerified(target.path, target.rootIdentity)
       if (state.status !== 'ready') throw Error('VAULT_TARGET_CHANGED')
       activeTarget = target
@@ -1047,8 +1053,14 @@ if (ownsInstance) app.whenReady().then(() => {
         activeTarget = target
       }
     }
-  } catch {
-    startupVaultState = {status:'needs-pick',reason:'missing',diagnostic:'上次使用的笔记库无法打开，可能已移动、无法访问或被同路径的其他目录替换。请手动选择并核对目标。'}
+  } catch (error) {
+    const code = error instanceof Error ? error.message : ''
+    // 三种情况分开说：卷重新挂载（可一键确认）、同路径被替换、找不到。
+    startupVaultState = {status:'needs-pick',reason:'missing',diagnostic: code === 'VAULT_REMOUNTED'
+      ? '这个库所在的卷被重新挂载过（设备号变了，目录本身没变）。点「已登记的笔记库」，在它右侧按「切换」确认打开即可。'
+      : code === 'VAULT_REPLACED'
+        ? '上次使用的笔记库可能已被同路径的其他目录替换。请手动选择并核对目标。'
+        : '上次使用的笔记库无法打开，可能已移动、无法访问或被同路径的其他目录替换。请手动选择并核对目标。'}
   }
   vaultSwitch = new VaultSwitch({
     check: target => {

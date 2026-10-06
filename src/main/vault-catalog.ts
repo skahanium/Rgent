@@ -16,6 +16,11 @@ function text(value: unknown, max: number): value is string { return typeof valu
 function label(value: unknown): value is string { return text(value, 80) && value.trim().length > 0 }
 function rootPath(value: unknown): value is string { return text(value, 4096) && path.isAbsolute(value) && path.resolve(value) === value }
 function identity(value: unknown): value is string { return typeof value === 'string' && /^\d+:\d+$/.test(value) && value.length <= 128 }
+/** 根身份是 `设备号:inode`。APFS 上设备号跨挂载／重启会变，inode 不会：
+ *  设备号变、inode 不变＝同一个目录只是卷重新挂载过；inode 变＝目录真被换掉。 */
+export function sameRootInode(a: string, b: string): boolean {
+  return identity(a) && identity(b) && a.slice(a.indexOf(':') + 1) === b.slice(b.indexOf(':') + 1)
+}
 function nested(a: string, b: string): boolean {
   const rel = path.relative(a, b)
   return rel === '' || (!path.isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${path.sep}`))
@@ -203,8 +208,31 @@ export class VaultCatalog {
     this.save(this.file, data, source, 'VAULT_CATALOG_CONFLICT', () => { this.checked(target) })
     return this.view()
   }
-  committed(target: VaultTarget): VaultCatalogEntry {
-    const { source, data } = this.writable(); const entry = this.entry(data, target)
+  /** 卷重新挂载后只允许人类确认一次：同一个 inode、不同设备号时改记新设备号，并把该路径的工作区
+   *  登记一并换到新身份，保住 tab 与阅读位置。inode 也变了说明目录真被替换，仍按 VAULT_REPLACED 拒绝。 */
+  confirmRemount(id: string, revision: string): VaultCatalogEntry {
+    if (typeof revision !== 'string') throw new Error('VAULT_CATALOG_CONFLICT')
+    const { source, data } = this.writable(revision)
+    const entry = data.entries.find(item => item.id === id)
+    if (!entry) throw new Error('VAULT_NOT_REGISTERED')
+    let current: VaultTarget
+    try { current = this.inspect(entry.path) } catch { throw new Error('VAULT_TARGET_CHANGED') }
+    if (current.rootIdentity === entry.rootIdentity) return { ...entry }
+    if (!sameRootInode(current.rootIdentity, entry.rootIdentity)) throw new Error('VAULT_REPLACED')
+    const previous = entry.rootIdentity
+    entry.rootIdentity = current.rootIdentity
+    this.rebindWorkspaceIdentity(entry.path, previous, current.rootIdentity)
+    this.save(this.file, data, source, 'VAULT_CATALOG_CONFLICT', () => { this.checked(current) })
+    return { ...entry }
+  }
+  private rebindWorkspaceIdentity(target: string, from: string, to: string): void {
+    const source = snapshot(this.workspaceFile), data = parseWorkspaces(source)
+    if (!data) throw new Error('VAULT_WORKSPACE_INVALID')
+    let changed = false
+    for (const item of data.entries) if (item.path === target && item.rootIdentity === from) { item.rootIdentity = to; changed = true }
+    if (changed) this.save(this.workspaceFile, data, source, 'VAULT_WORKSPACE_CONFLICT')
+  }
+  committed(target: VaultTarget): VaultCatalogEntry {    const { source, data } = this.writable(); const entry = this.entry(data, target)
     entry.lastUsed = Date.now(); data.lastVaultId = entry.id
     this.save(this.file, data, source, 'VAULT_CATALOG_CONFLICT', () => { this.checked(target) })
     return { ...entry }

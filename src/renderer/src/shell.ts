@@ -945,7 +945,10 @@ export async function start(root: HTMLElement): Promise<void> {
       void chooseVault()
     })
     const manage=document.createElement('button');manage.type='button';manage.className='pick-btn';manage.textContent='已登记的笔记库';manage.onclick=showVaultManager
-    card.append(heading, copy, button, manage)
+    const actions = document.createElement('div')
+    actions.className = 'picker-actions'
+    actions.append(button, manage)
+    card.append(heading, copy, actions)
     overlay.root.append(card)
   }
 
