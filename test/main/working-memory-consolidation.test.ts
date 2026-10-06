@@ -354,3 +354,45 @@ it('saves a standing agreement that quotes the original command and refuses one 
  expect(await refused.service.entries()).toHaveLength(0)
  expect(refused.service.snapshot().record.jobs[0]?.reason).toBe('MEMORY_OUTPUT_INVALID')
 })
+
+const transport=(code:string)=>new Error('MODEL_REQUEST_FAILED',{cause:{code,httpStatus:null}})
+it('retries one explicit transport failure and still shares the two-call budget',async()=>{
+ let calls=0
+ const f=await fixture(async function*(input){calls++
+  if(calls===1)throw transport('ENOTFOUND')
+  yield {type:'text',text:JSON.stringify({proposals:[suggestion(input)]})};yield {type:'finish',reason:'stop'}})
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(calls).toBe(2)
+ expect((await f.service.entries()).map(e=>e.content)).toEqual(['后续在本库使用中文'])
+})
+it('never retries certificate or authentication failures',async()=>{
+ let calls=0
+ const f=await fixture(async function*(){calls++;throw transport('UNABLE_TO_VERIFY_LEAF_SIGNATURE')})
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(calls).toBe(1)
+ expect(f.service.snapshot().record.jobs[0]?.reason).toBe('MEMORY_SERVICE_FAILED')
+})
+it('never retries a transport interruption that already produced partial text',async()=>{
+ let calls=0
+ const f=await fixture(async function*(){calls++;yield {type:'text',text:'{"proposals":'};throw transport('ECONNRESET')})
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(calls).toBe(1)
+ expect(f.service.snapshot().record.jobs[0]?.reason).toBe('MEMORY_OUTPUT_INVALID')
+})
+it('does not attempt a third call when the retry itself returns unusable output',async()=>{
+ let calls=0
+ const f=await fixture(async function*(){calls++
+  if(calls===1)throw transport('ETIMEDOUT')
+  yield {type:'text',text:'not json'};yield {type:'finish',reason:'stop'}})
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(calls).toBe(2)
+ expect(f.service.snapshot().record.jobs[0]?.reason).toBe('MEMORY_OUTPUT_INVALID')
+})
+it('spends the second call on the format repair when the first transport attempt succeeded',async()=>{
+ let calls=0
+ const f=await fixture(async function*(){calls++;yield {type:'text',text:calls===1?'bad json':'{"proposals":[]}'};yield {type:'finish',reason:'stop'}})
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(calls).toBe(2)
+ expect(f.service.snapshot().record.jobs[0]?.outcome).toBe('applied')
+ expect(f.service.snapshot().record.jobs[0]?.reason).toBeUndefined()
+})

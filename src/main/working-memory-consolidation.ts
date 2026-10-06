@@ -122,6 +122,15 @@ function recentInput(value:unknown,sources:WorkingSource[],entries:WorkingEntry[
  const anchor=sources.find(s=>s.taskId===material.taskId&&s.kind==='ledger'&&s.classification==='command');if(!anchor)return undefined;if(!refs.includes(anchor))refs.push(anchor)
  return {sources:inheritInputs(refs as WorkingSource[],material,entries),scope:material.origin.relPath,recent:{taskId:material.taskId,noteId:material.noteId,materialVersion:material.materialVersion,createdAt:material.startedAt,outcome:material.status,sections:{goal:String(value.goal),completed:String(value.completed),blocked:String(value.blocked),next:String(value.next)},assistantDraft:value.assistantDraft}}
 }
+/** 只有明确的传输失败才重试一次：认证、证书、参数、厂商拒绝与已有部分正文都不重试。 */
+function retryableTransport(error:unknown):boolean{
+ if(!(error instanceof Error)||error.message!=='MEMORY_SERVICE_FAILED')return false
+ const cause=(error as {cause?:{code?:unknown;httpStatus?:unknown}}).cause
+ const code=typeof cause?.code==='string'?cause.code:null
+ if(code&&['ENOTFOUND','ECONNRESET','ECONNREFUSED','ETIMEDOUT'].includes(code))return true
+ const status=typeof cause?.httpStatus==='number'?cause.httpStatus:null
+ return status!==null&&status>=500&&status<=599
+}
 async function until<T>(operation:()=>Promise<T>,signal:AbortSignal):Promise<T>{
  if(signal.aborted)throw signal.reason??Error('MEMORY_CANCELLED')
  let abort!:()=>void
@@ -283,7 +292,7 @@ export class WorkingMemoryConsolidation{
     if(e.type==='finish'){if(finished)throw Error('MEMORY_OUTPUT_INVALID');if(e.reason==='length')throw Error('MEMORY_OUTPUT_TRUNCATED');if(e.reason!=='stop')throw Error('MEMORY_OUTPUT_INVALID');finished=true}
    }
    if(!finished)throw Error('MEMORY_OUTPUT_INVALID');if(!raw.trim())throw Error('MEMORY_OUTPUT_EMPTY');return raw
-  }catch(error){if(error instanceof Error&&error.message==='MODEL_REQUEST_FAILED')throw Error('MEMORY_SERVICE_FAILED');throw error}finally{if(iterator.return)void Promise.resolve(iterator.return()).catch(()=>{})}
+  }catch(error){if(error instanceof Error&&error.message==='MODEL_REQUEST_FAILED'&&!raw.trim())throw new Error('MEMORY_SERVICE_FAILED',{cause:(error as {cause?:unknown}).cause});if(error instanceof Error&&error.message==='MODEL_REQUEST_FAILED')throw Error('MEMORY_OUTPUT_INVALID');throw error}finally{if(iterator.return)void Promise.resolve(iterator.return()).catch(()=>{})}
  }
  private async run(job:Job){
   try{
@@ -307,12 +316,20 @@ export class WorkingMemoryConsolidation{
    const payload={task:{id:job.material.taskId,status:job.material.status,...(continuity?{assistantDraft:job.material.answer}: {})},sources:sources.map(s=>({id:s.id,text:s.text,classification:s.classification,kind:s.kind,attribution:s.relPath})),memory:entries.map(e=>({id:e.id,version:e.version,content:e.content,layer:e.layer,semantic:e.semantic,scope:e.scope,attribution:e.attribution,updatedAt:e.updatedAt,status:e.status,reviewAt:e.reviewAt,tags:e.tags}))}
    // Retain the highest ranked candidates within the existing input limits.
    while(entries.length&&(Buffer.byteLength(JSON.stringify(payload))+Buffer.byteLength(system)>32768||conservativeTokens(JSON.stringify(payload))+conservativeTokens(system)+4096>job.configuration.credential.contextTokens)){entries.pop();payload.memory.pop()}
-   let values:unknown[],recentValue:unknown=null;const draft=await this.response(job,payload,sources,entries)
+   let values:unknown[],recentValue:unknown=null;const budget=job.configuration.limits.calls;let calls=0
+   const ask=(nextPayload:unknown=payload)=>{calls++;return this.response(job,nextPayload,sources,entries)}
+   // 第二次调用只允许用于一次网络重试或一次格式修复，二者共享同一上限；总期限不因此重算。
+   let draft:string
+   try{draft=await ask()}
+   catch(error){
+    if(calls>=budget||!retryableTransport(error))throw error
+    draft=await ask()
+   }
    const parse=(text:string)=>continuity?parseContinuitySuggestions(text):{recent:null,proposals:parseMemorySuggestions(text)}
    let parsed:ReturnType<typeof parse>
    try{parsed=parse(draft)}catch{
-    if(job.configuration.limits.calls<2)throw Error('MEMORY_OUTPUT_INVALID')
-    parsed=parse(await this.response(job,{repair:{draft,issues:[continuity?'必须是仅含 recent 与最多16项 proposals 的完整 JSON；不增加新材料或新结论':'必须是仅含 proposals 数组的完整 JSON；不增加新材料或新结论']}},sources,entries))
+    if(calls>=budget)throw Error('MEMORY_OUTPUT_INVALID')
+    parsed=parse(await ask({repair:{draft,issues:[continuity?'必须是仅含 recent 与最多16项 proposals 的完整 JSON；不增加新材料或新结论':'必须是仅含 proposals 数组的完整 JSON；不增加新材料或新结论']}}))
    }
    values=parsed.proposals;recentValue=parsed.recent
    const proposed=proposalGroups(values,sources,entries,Boolean(continuity));let groups=proposed.groups
