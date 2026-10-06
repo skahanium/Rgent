@@ -281,3 +281,38 @@ describe('v6 取证与保护', () => {
   expect(legacy.passed).toBe(false)
  })
 })
+
+it('historical replay binds missing inner hashes only to a verified old outer envelope',async()=>{
+ const {v6BoundReview}=await import('../../scripts/memory-quality-support.ts'),spec=V6_QUALITY_CASES[0]!,binding={key:'fiction/r9/model/0/case',frozenHash:'frozen',resultHash:'result',rulesHash:'rules'}
+ const original={...binding,review:fullReview(spec)}
+ const missing=structuredClone(original);for(const key of ['frozenHash','resultHash','rulesHash'] as const)delete (missing.review as Partial<V6Annotation>)[key]
+ const before=JSON.stringify(missing),view=v6BoundReview(missing,binding,{replay:true,revision:9})
+ expect(v6ReviewValid(spec,view.review)).toBe(true)
+ expect(view.review).toMatchObject({frozenHash:'frozen',resultHash:'result',rulesHash:'rules'})
+ expect(view.historicalBinding).toEqual({binding:'verified-outer-envelope',originalInnerEvidence:false,missingInnerHashes:['frozenHash','resultHash','rulesHash']})
+ expect(JSON.stringify(missing)).toBe(before)
+ expect(()=>v6BoundReview(missing,binding,{replay:false,revision:9})).toThrow('EVALUATION_ANNOTATION_INVALID')
+ expect(()=>v6BoundReview(missing,binding,{replay:true,revision:10})).toThrow('EVALUATION_ANNOTATION_INVALID')
+ expect(v6BoundReview(original,binding,{replay:false,revision:10}).historicalBinding).toBeUndefined()
+})
+it.each(['inner-conflict','inner-null','outer-conflict','outer-missing','outer-key','revision-missing'] as const)('historical replay never replaces conflicting or unbound evidence (%s)',async mode=>{
+ const {v6BoundReview}=await import('../../scripts/memory-quality-support.ts'),binding={key:'fiction/r9/model/0/case',frozenHash:'frozen',resultHash:'result',rulesHash:'rules'},annotation:any={...binding,review:fullReview(V6_QUALITY_CASES[0]!)}
+ delete annotation.review.resultHash;delete annotation.review.rulesHash
+ if(mode==='inner-conflict')annotation.review.frozenHash='conflicting'
+ if(mode==='inner-null')annotation.review.frozenHash=null
+ if(mode==='outer-conflict')annotation.resultHash='conflicting'
+ if(mode==='outer-missing')delete annotation.rulesHash
+ if(mode==='outer-key')annotation.key='different-case'
+ if(mode==='revision-missing')delete annotation.review.frozenHash
+ expect(()=>v6BoundReview(annotation,binding,{replay:true,revision:mode==='revision-missing'?NaN:9})).toThrow('EVALUATION_ANNOTATION_INVALID')
+})
+
+it.each(['success','failure','unknown'] as const)('explicit action state is authoritative when the legacy boolean is absent (%s)',state=>{
+ const spec=byId('v6-correction-01'),baseline=v6Summary(happy(),V6_QUALITY_CASES,0),summary=v6Summary(patch(happy(),spec.id,{actionState:state,actionVerified:undefined}),V6_QUALITY_CASES,0)
+ expect(summary.judgeable).toBe(state==='unknown'?29:30)
+ expect(summary.lower.dimensions.update).toBe(baseline.lower.dimensions.update-(state==='success'?0:spec.weight))
+ expect(summary.upper.dimensions.update).toBe(baseline.upper.dimensions.update-(state==='failure'?spec.weight:0))
+ expect(summary.actionFailures).toBe(state==='failure'?1:0)
+ expect(summary.coverage.directions.update.judged).toBe(state==='unknown'?4:5)
+ expect(summary.unknown).toBe(state==='unknown'?1:0)
+})

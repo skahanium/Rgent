@@ -11,7 +11,7 @@ import {memoryConsolidationSystem,memoryContinuitySystem,parseContinuitySuggesti
 import {MEMORY_QUALITY_CASES} from '../test/fixtures/memory-quality.ts'
 import type {MemoryQualityCase} from '../test/fixtures/memory-quality.ts'
 import {runMemoryQualityCase,memorySemanticReviewSystem} from './memory-quality-runner.ts'
-import {EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,recordedQualityReview,V4_RULES,V4_SCREEN,V4_PARENT_MANIFEST,V4_PREFIX,v4Cases,v4Selection,v4EvidenceComplete,freezeV4,v4Summary,v4DispatchGate,v4ScreenGate,v4ResumeAction,type V4Row,type V4Annotation,type V4Category,V5_RULES,V5_PREFIX,freezeV5,v5Summary,v5ScreenDispatchGate,v5TerminalCategory,v5DiagnosticTargets,v5ActionEvidence,v5ControlledStatus,type V5Row,type V5Annotation,V6_RULES,V6_PREFIX,V6_CATEGORIES,V6_SCORING_CATEGORIES,freezeV6,v6ReviewValid,v6LoadedActionState,v6Summary,v6DispatchGate,v6TerminalCategory,v6RecoveryDecision,type V6Row,type V6Annotation} from './memory-quality-support.ts'
+import {EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,recordedQualityReview,V4_RULES,V4_SCREEN,V4_PARENT_MANIFEST,V4_PREFIX,v4Cases,v4Selection,v4EvidenceComplete,freezeV4,v4Summary,v4DispatchGate,v4ScreenGate,v4ResumeAction,type V4Row,type V4Annotation,type V4Category,V5_RULES,V5_PREFIX,freezeV5,v5Summary,v5ScreenDispatchGate,v5TerminalCategory,v5DiagnosticTargets,v5ActionEvidence,v5ControlledStatus,type V5Row,type V5Annotation,V6_RULES,V6_PREFIX,V6_CATEGORIES,V6_SCORING_CATEGORIES,freezeV6,v6BoundReview,v6ReviewValid,v6LoadedActionState,v6Summary,v6DispatchGate,v6TerminalCategory,v6RecoveryDecision,type V6Row,type V6Annotation} from './memory-quality-support.ts'
 
 import {V5_QUALITY_CASES,V5_SCREEN_IDS} from '../test/fixtures/v5-memory-quality.ts'
 import {V6_QUALITY_CASES,V6_INDEPENDENT_IDS,V6_SAFETY_COVERAGE} from '../test/fixtures/v6-memory-quality.ts'
@@ -290,18 +290,24 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
   console.log(JSON.stringify({key:k,frozenHash,resultHash:fingerprint(JSON.parse(readFileSync(file,'utf8'))),rulesHash:fingerprint(V6_RULES)}));return
  }
  const classify=v6TerminalCategory
+ const historicalAnnotationBindings=new Map<string,{key:string;role:'primary'|'secondary';binding:'verified-outer-envelope';originalInnerEvidence:false;missingInnerHashes:string[]}>()
  const rowOf=(model:string,round:number,c:V6Case):V6Row|null=>{
   const k=key(model,round,c.id),file=resultFile(k);if(!existsSync(file))return null
   const r=JSON.parse(readFileSync(file,'utf8')),af=annotationFile(k),a=existsSync(af)?JSON.parse(readFileSync(af,'utf8')):null
   if(r.key!==k||r.case?.id!==c.id||r.frozenHash!==frozenHash||a&&(a.frozenHash!==frozenHash||a.resultHash!==fingerprint(r)))throw Error('EVALUATION_REVISION_CHANGED')
   const bf=doubleFile(k),b=existsSync(bf)?JSON.parse(readFileSync(bf,'utf8')):null
-  for(const annotation of [a,b])if(annotation&&(annotation.frozenHash!==frozenHash||annotation.resultHash!==fingerprint(r)||annotation.rulesHash!==frozen.rules||annotation.review?.frozenHash!==frozenHash||annotation.review?.resultHash!==fingerprint(r)||annotation.review?.rulesHash!==frozen.rules))throw Error('EVALUATION_ANNOTATION_INVALID')
+  const bound=[a,b].map((annotation,i)=>{
+   if(!annotation)return null
+   const view=v6BoundReview(annotation,{key:k,frozenHash,resultHash:fingerprint(r),rulesHash:frozen.rules},{replay:options.replay===true,revision:frozen.revision})
+   if(view.historicalBinding){const role=i===0?'primary':'secondary';historicalAnnotationBindings.set(k+'/'+role,{key:k,role,...view.historicalBinding})}
+   return view.review
+  })
   const paid=r.result??null
   const loaded=paid?.followup?.ledger?.chapter?.provenance?.version===2?paid.followup.ledger.chapter.provenance.memoryDeps:undefined
   const savedState=paid?.actionEvidence?.state??(paid?.actionVerified===true?'success':paid?.actionVerified===false?'failure':'unknown')
   const actionState=c.expected.action&&(paid?.actionEvidence?.requiresLoad===true||['correct','add','conflict'].includes(c.expected.action)||c.expected.targetFromCase||c.seed)?v6LoadedActionState(savedState,paid?.actionEvidence?.finalTargets,loaded):savedState
   const budget=JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8')),chargedCalls=budget.dispatches.filter((d:any)=>d.key===k).length
-  return {caseId:c.id,round,doubleRequired:Array.isArray(frozen.doubleRequired)&&frozen.doubleRequired.includes(c.id),chargedCalls,observedCalls:Array.isArray(paid?.evidence?.dispatches)?paid.evidence.dispatches.length:0,dispatched:chargedCalls>0,terminal:paid?.terminal===true,structured:paid?.structured===true,blocked:paid?.blocked===true,actionVerified:typeof paid?.actionVerified==='boolean'?paid.actionVerified:undefined,actionState,category:classify(r),calls:Array.isArray(r.responses)?r.responses.length:0,latencyMs:typeof r.latencyMs==='number'?r.latencyMs:0,receiptReason:paid?.receipt?.reason,candidate:paid?.candidate??undefined,review:a?.review??null,reviewAlt:b?.review??null}
+  return {caseId:c.id,round,doubleRequired:Array.isArray(frozen.doubleRequired)&&frozen.doubleRequired.includes(c.id),chargedCalls,observedCalls:Array.isArray(paid?.evidence?.dispatches)?paid.evidence.dispatches.length:0,dispatched:chargedCalls>0,terminal:paid?.terminal===true,structured:paid?.structured===true,blocked:paid?.blocked===true,actionVerified:typeof paid?.actionVerified==='boolean'?paid.actionVerified:undefined,actionState,category:classify(r),calls:Array.isArray(r.responses)?r.responses.length:0,latencyMs:typeof r.latencyMs==='number'?r.latencyMs:0,receiptReason:paid?.receipt?.reason,candidate:paid?.candidate??undefined,review:bound[0]??null,reviewAlt:bound[1]??null}
  }
  const rows=(model:string):V6Row[]=>[0,1].flatMap(round=>cases.flatMap(c=>{const row=rowOf(model,round,c);return row?[row]:[]}))
  const stopFile=(model:string)=>path.join(root,'stop-'+model+'.json'),recoveryFile=(model:string)=>path.join(root,'recovery-'+model+'.json')
@@ -412,7 +418,7 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
   })}))
   const summary={frozenHash,executionCommit:frozen.executionCommit,reportCommit:executionCommit(),at:new Date().toISOString(),reviewProtocol,calls:state.calls,previousCalls:V6_RULES.history.calls,remainingGlobal:V6_RULES.history.parentLimit-state.calls,campaignCalls:campaignCalls(campaignPrefix),campaignLimit:V6_RULES.history.campaignLimit,environment:{unavailable:environmentUnavailable,rows:diagnostic??[]},models:summaries,formalQualityPassed:false,productionStrategyChanged:false,userSemanticConfirmation:false}
   if(options.publish){if(options.replay||!options.profile||frozen.runtime!==runtime()||frozen.rules!==fingerprint(V6_RULES)||frozen.scorer!==scorerHash())throw Error('EVALUATION_PUBLICATION_INVALID');const model=summaries.find((m:any)=>m.model===options.publish),protocol=reviewProtocol.find((m:any)=>m.model===options.publish);if(!model||!model.rounds.every((r:any)=>r.summary.verdict==='passed')||!protocol?.rounds.every((r:any)=>r.doubleGate))throw Error('EVALUATION_PUBLICATION_INVALID');atomicReport(path.join(options.profile,'memory-quality-status.json'),{state:'passed',modelId:model.model,host:model.host,pipeline:'continuity-m4',runtimeFingerprint:runtime(),scoringFingerprint:MEMORY_SCORING_FINGERPRINT,verifiedAt:new Date().toISOString(),commit:frozen.executionCommit,humanReviewed:false,rounds:2,frozenHash})}
-  writeFileSync(path.join(root,(options.replay?'historical-review-':'summary-')+randomUUID()+'.json'),JSON.stringify({...summary,historicalReview:options.replay===true,runtimeFingerprint:runtime(),scoringFingerprint:MEMORY_SCORING_FINGERPRINT},null,2),{flag:'wx',mode:0o600})
+  writeFileSync(path.join(root,(options.replay?'historical-review-':'summary-')+randomUUID()+'.json'),JSON.stringify({...summary,historicalReview:options.replay===true,...(options.replay?{historicalAnnotationBindings:[...historicalAnnotationBindings.values()]}:{}),runtimeFingerprint:runtime(),scoringFingerprint:MEMORY_SCORING_FINGERPRINT},null,2),{flag:'wx',mode:0o600})
   console.log(JSON.stringify({models:summaries.map((s:any)=>({model:s.model,calls:s.calls,rounds:s.rounds.map((r:any)=>({round:r.round,verdict:r.summary.verdict,metrics:r.summary.metrics,judgeable:r.summary.judgeable,blocked:r.summary.blocked}))})),calls:state.calls,remainingGlobal:summary.remainingGlobal,campaignCalls:summary.campaignCalls,environmentUnavailable}))
  }finally{journal?.close()}
 }

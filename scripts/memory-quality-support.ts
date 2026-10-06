@@ -357,6 +357,14 @@ export type V6Annotation={
  annotator:V6Annotator;rulesHash:string;resultHash:string;frozenHash:string
  revisionHistory?:{at:string;by:string;reason:string;impact:string}[]
 }
+/** 显式旧历史 replay 可由已核外层生成评分视图；原内层缺证据须在追加报告单列。 */
+export function v6BoundReview(annotation:any,binding:{key:string;frozenHash:string;resultHash:string;rulesHash:string},mode:{replay:boolean;revision:number}):{review:V6Annotation;historicalBinding?:{binding:'verified-outer-envelope';originalInnerEvidence:false;missingInnerHashes:string[]}}{
+ const hashes=['frozenHash','resultHash','rulesHash'] as const,review=annotation?.review
+ if(!annotation||annotation.key!==binding.key||!review||typeof review!=='object'||Array.isArray(review)||hashes.some(key=>typeof binding[key]!=='string'||!binding[key]||annotation[key]!==binding[key]))throw Error('EVALUATION_ANNOTATION_INVALID')
+ const missing=hashes.filter(key=>!Object.hasOwn(review,key))
+ if(hashes.some(key=>Object.hasOwn(review,key)&&review[key]!==binding[key])||missing.length&&!(mode.replay===true&&Number.isSafeInteger(mode.revision)&&mode.revision>=1&&mode.revision<=9))throw Error('EVALUATION_ANNOTATION_INVALID')
+ return {review:{...structuredClone(review),...Object.fromEntries(missing.map(key=>[key,binding[key]]))},...(missing.length?{historicalBinding:{binding:'verified-outer-envelope' as const,originalInnerEvidence:false as const,missingInnerHashes:missing}}:{})}
+}
 export type V6Row={
  caseId:string;round:number
  dispatched:boolean;terminal:boolean;structured:boolean;blocked?:boolean;actionVerified?:boolean;actionState?:'success'|'failure'|'unknown';doubleRequired?:boolean
@@ -471,7 +479,7 @@ export function v6Summary(rows:V6Row[],cases:V6Case[],round:number,options:V6Sum
   if(hasVeto&&bounds.unresolved)unresolvedVeto++
   // 期望动作没有落地是程序可判定的失败：该例下上界都为 0，进维度扣分，不再算"证据不足"。
   const notLanded=!!spec.expected.action&&(row?.actionState==='failure'||row?.actionState===undefined&&row?.actionVerified===false)
-  const actionUnknown=!!spec.expected.action&&(row?.actionState==='unknown'||row?.actionVerified===undefined)
+  const actionUnknown=!!spec.expected.action&&(row?.actionState==='unknown'||row?.actionState===undefined&&row?.actionVerified===undefined)
   if(bounds.lower===null||bounds.unresolved||actionUnknown){
    uncertain.push(spec.id);dims[spec.direction]+=0;dimsUpper[spec.direction]+=spec.weight
    if(spec.split)splitUpper[spec.split]+=spec.weight
