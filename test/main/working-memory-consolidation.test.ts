@@ -4,7 +4,7 @@ import path from 'node:path'
 import {afterEach,it,expect,vi} from 'vitest'
 import {VaultSession} from '../../src/main/vault.ts'
 import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
-import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions,roleAgreement} from '../../src/main/working-memory-consolidation.ts'
+import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions,roleAgreement,inheritInputs} from '../../src/main/working-memory-consolidation.ts'
 import type {WorkingSource} from '../../src/main/working-memory-store.ts'
 import {createHash} from 'node:crypto'
 import {serializeStoredVault} from '../../src/main/notes-fs.ts'
@@ -275,18 +275,36 @@ it('default paraphrases inherit sent memory dependencies and forgetting revokes 
  const basis=f.service.snapshot();await f.service.forget({sessionId:f.service.context().sessionId,revision:basis.revision,objectVersion:basis.objectVersion,id:parent.id,version:parent.version})
  expect(f.service.snapshot().record.entries).toEqual([])
 })
-it.each(['recent','add'] as const)('rejects a new %s against a same-batch replaced version while retaining the independent correction',async kind=>{
+it.each(['recent','add'] as const)('keeps an independent %s in the same batch as a genuine correction instead of rejecting the whole batch',async kind=>{
  const f=await fixture(async function*(input){
   const p=JSON.parse(String(input.messages[0]!.content)),target=p.memory[0],sourceIds=[p.sources[0].id]
   const corrected={action:'correct',id:target.id,version:target.version,content:'青灯项目版本明确更正为乙',layer:'demand',semantic:'fact',scope:'本库',sourceIds,attribution:'人的口令',reviewAt:null}
-  yield {type:'text',text:JSON.stringify({recent:kind==='recent'?{goal:'青灯接续',completed:'版本更正',blocked:'',next:'',sourceIds,assistantDraft:false}:null,proposals:[corrected,...(kind==='add'?[{...corrected,action:'add',id:undefined,version:undefined,content:'青灯下次核对更正版本'}]:[])]})};yield {type:'finish',reason:'stop'}
+  yield {type:'text',text:JSON.stringify({recent:kind==='recent'?{goal:'青灯接续',completed:'版本更正',blocked:'',next:'',sourceIds,assistantDraft:false}:null,proposals:[corrected,...(kind==='add'?[{...corrected,action:'add',id:undefined,version:undefined,content:'青灯下游清单已更新',scope:'下游'}] :[])]})}
+  yield {type:'finish',reason:'stop'}
  },'青灯项目版本明确更正为乙','continuity')
  const source=await f.service.sourceForPrompt('a.md','task'),old=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'青灯项目版本为甲',layer:'demand',scope:'本库',sources:[source],semantic:'fact',attribution:'人的口令',reviewAt:null}))
  await f.engine.handoff(f.material);await f.engine.idle()
- const rows=await f.service.entries()
- expect(rows).toHaveLength(1);expect(rows[0]).toMatchObject({id:old.id,version:2,status:'active',content:'青灯项目版本明确更正为乙'})
- expect(f.service.snapshot().record.recent).toEqual([])
- expect(f.service.snapshot().record.jobs[0]).toMatchObject({outcome:'applied',reason:'MEMORY_DEPENDENCY_CHANGED',entryIds:[old.id]})
+ const rows=await f.service.entries(),job=f.service.snapshot().record.jobs[0]
+ // 更正落地；同批的独立提案不再因为"整库互相依赖"被连带否决。
+ expect(rows.find(e=>e.id===old.id)).toMatchObject({version:2,status:'active',content:'青灯项目版本明确更正为乙'})
+ expect(job?.reason).toBeUndefined()
+ if(kind==='add')expect(rows.some(e=>e.content==='青灯下游清单已更新')).toBe(true)
+ else expect(f.service.snapshot().record.recent).toHaveLength(1)
+})
+it('inherits only the material, cited-source and replaced-entry dependencies',()=>{
+ const src=(id:string,memoryDeps:{id:string;version:number}[]=[],sourceDeps:any[]=[])=>({id,version:1,relPath:'a.md',objectVersion:'o',revision:'a'.repeat(64),permissionTier:'reference' as const,kind:'ledger' as const,taskId:'t',taskMaterialHash:'b'.repeat(64),classification:'command' as const,start:0,end:1,text:'x',hash:'c'.repeat(64),basisHash:'d'.repeat(64),sourceDeps,memoryDeps,materialId:'t/f',sequence:1})
+ const entry=(id:string,version:number,sources:any[])=>({id,version,content:id,layer:'demand' as const,scope:'库',sources,semantic:'fact' as const,attribution:'人',reviewAt:null,status:'active' as const,state:{source:'verified' as const,content:'current' as const,enabled:true,capacity:'ready' as const},reason:null,updatedAt:'2026-01-01T00:00:00Z',updateBasis:{kind:'manual' as const,id:'m',version:1}})
+ const unrelated=entry('unrelated',1,[src('s-unrelated')])
+ const cited=src('s-cited',[{id:'dep-of-cited',version:3}])
+ const replaced=entry('replaced',4,[src('s-replaced-source',[{id:'dep-of-replaced',version:7}],[{id:'file',version:2,hash:'e'.repeat(64),relPath:'n.md',kind:'body',taskId:'t'}])])
+ const material:any={sourceDeps:[{id:'material-file',version:1,hash:'f'.repeat(64),relPath:'m.md',kind:'body',taskId:'t'}],memoryDeps:[{id:'material-memory',version:2}]}
+ const [out]=inheritInputs([cited],material,[unrelated,replaced] as unknown as Parameters<typeof inheritInputs>[2],'replaced')
+ const ids=((out!.memoryDeps??[]) as unknown as {id:string}[]).map(d=>d.id)
+ expect(ids.sort()).toEqual(['dep-of-cited','dep-of-replaced','material-memory'])
+ // 库里其余条目不再被整批写成本条的依赖：更正它们不会让这条一起暂停。
+ expect(ids).not.toContain('unrelated')
+ expect(ids).not.toContain('replaced')
+ expect(((out!.sourceDeps??[]) as unknown as {id:string}[]).map(d=>d.id).sort()).toEqual(['file','material-file'])
 })
 it('corrects an actually Host-sent old version without self dependency and retains its upstream forgetting closure',async()=>{
  const {runMemoryQualityCase}=await import('../../scripts/memory-quality-runner.ts')

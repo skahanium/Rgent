@@ -118,9 +118,13 @@ function proposalGroups(values:unknown[],sources:WorkingSource[],entries:Working
  }
  return {groups:valid,dropped}
 }
-function inheritInputs(refs:WorkingSource[],material:SavedTaskMaterial,entries:WorkingEntry[],replacedId?:string):WorkingSource[]{
- const sourceDeps=[...material.sourceDeps,...entries.flatMap(e=>e.sources.flatMap(s=>s.sourceDeps))].map(d=>({...d,permissionTier:'reference' as const}))
- const memoryDeps=[...material.memoryDeps.map(d=>({id:d.id,version:d.version})),...entries.filter(e=>e.id!==replacedId).map(e=>({id:e.id,version:e.version})),...entries.filter(e=>e.id===replacedId).flatMap(e=>e.sources.flatMap(s=>s.memoryDeps))]
+/** 依赖只继承"本次材料"与"被引用来源／被替换条目自己携带的"集合。
+ *  旧实现把库里其余条目整批写成 memoryDeps，导致更正 A 会让与 A 无关的 B 一起暂停，并沿链继续传染
+ *  （v6 冻结实测的 chain-alpha 连锁已证实）。上下文里出现过某条记忆不等于本条依赖它；
+ *  账本层面的"本场实际使用依赖"另由 ledger provenance 记录，不因此丢失。 */
+export function inheritInputs(refs:WorkingSource[],material:SavedTaskMaterial,entries:WorkingEntry[],replacedId?:string):WorkingSource[]{
+ const sourceDeps=[...material.sourceDeps,...entries.filter(e=>e.id===replacedId).flatMap(e=>e.sources.flatMap(s=>s.sourceDeps))].map(d=>({...d,permissionTier:'reference' as const}))
+ const memoryDeps=[...material.memoryDeps.map(d=>({id:d.id,version:d.version})),...refs.flatMap(s=>s.memoryDeps),...entries.filter(e=>e.id===replacedId).flatMap(e=>e.sources.flatMap(s=>s.memoryDeps))]
  const unique=<T>(items:T[])=>[...new Map(items.map(item=>[JSON.stringify(item),item])).values()]
  return refs.map(s=>({...structuredClone(s),sourceDeps:unique([...s.sourceDeps,...sourceDeps]),memoryDeps:unique([...s.memoryDeps,...memoryDeps].filter(d=>d.id!==replacedId))}))
 }
