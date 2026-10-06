@@ -459,7 +459,7 @@ export function v6CaseBounds(spec:V6Case,row:{review?:V6Annotation|null;reviewAl
  const independent=!!primary&&!!secondary&&primary.annotator?.identity!==secondary.annotator?.identity
  const veto=reviews.some(r=>r?.hardViolations?.length)
  const required=(row as V6Row|undefined)?.doubleRequired===true||veto||secondary!==null
- const semantics=(r:V6Annotation)=>JSON.stringify([r.correct,r.omitted,r.wrongNew,[...r.hardViolations].sort(),r.checks,r.evidenceComplete,[...r.uncertainty].sort()])
+ const semantics=(r:V6Annotation)=>JSON.stringify([r.correct,r.omitted,r.wrongNew,[...r.hardViolations].sort(),[r.checks.attributionAndScope,r.checks.noUnsupportedContent,r.checks.noForbiddenContent],r.evidenceComplete,[...r.uncertainty].sort()])
  const disagreement=v6ReviewValid(spec,primary)&&v6ReviewValid(spec,secondary)&&semantics(primary!)!==semantics(secondary!)
  if(required&&(!independent||scores.some(n=>n===null)))return {lower:0,upper:1,disagreement:true,unresolved:true}
  const known=scores.filter((n):n is number=>n!==null)

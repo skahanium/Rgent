@@ -1,5 +1,5 @@
 import {describe,expect,it,vi} from 'vitest'
-import {mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs'
+import {mkdtempSync,readFileSync,realpathSync,rmSync,writeFileSync} from 'node:fs'
 import {spawnSync} from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
@@ -81,7 +81,36 @@ describe('v6 计账与调用上限', () => {
 
 describe('v6 命令行只读路径', () => {
  const cli=path.join(process.cwd(),'scripts/check-memory.mjs')
- const run=(argv:string[])=>spawnSync(process.execPath,[cli,...argv],{cwd:process.cwd(),encoding:'utf8'})
+ const run=(argv:string[])=>spawnSync(process.execPath,[cli,...argv],{cwd:process.cwd(),encoding:'utf8',timeout:10000})
+  // 隔离构建、报告写盘与 Electron 派发，执行真实 CLI 的参数检查及 options 传递。
+  // 不启动窗口，不读凭据，不读私人评测缓存，也不调用模型。
+  const data=(source:string)=>'data:text/javascript,'+encodeURIComponent(source)
+  const stubs={
+   vite:data('export async function build(){}; export async function loadConfigFromFile(){return {config:{main:{define:{}}}}}'),
+   'node:fs':data("export * from 'node:fs'; export const copyFileSync=()=>{}; export const mkdirSync=()=>{}"),
+   'node:child_process':data("import {EventEmitter} from 'node:events'; export function spawn(_file,_args,options){process.stdout.write('TEST_OPTIONS='+options.env.RGENT_MEMORY_EVAL_OPTIONS+'\\n');const child=new EventEmitter();child.stdout=new EventEmitter();child.kill=()=>true;setImmediate(()=>child.emit('exit',0));return child}")
+  }
+  const loader=data(`const stubs=${JSON.stringify(stubs)};export async function resolve(specifier,context,next){if(context.parentURL?.endsWith('/scripts/check-memory.mjs')&&stubs[specifier])return {url:stubs[specifier],shortCircuit:true};return next(specifier,context)}`)
+  const bootstrap=data(`import {register} from 'node:module';register(${JSON.stringify(loader)},import.meta.url)`)
+  const isolated=(argv:string[],cwd=process.cwd())=>spawnSync(process.execPath,['--import',bootstrap,cli,...argv],{cwd,encoding:'utf8',timeout:10000})
+ it('相对路径按调用目录解析，不把报告路径交给 Electron 后误报启动超时', () => {
+  const temporary=mkdtempSync(path.join(os.tmpdir(),'rgent-evaluation-relative-'))
+  try{
+   const result=isolated(['--report','reports','--profile','profile','--annotation','labels.json','--budget','budget'],temporary)
+   expect(result.status).toBe(0)
+   const transmitted=JSON.parse(result.stdout.split('\n').find(line=>line.startsWith('TEST_OPTIONS='))!.slice('TEST_OPTIONS='.length))
+   for(const [key,relative] of Object.entries({report:'reports',profile:'profile',annotation:'labels.json',budget:'budget'}))expect(transmitted[key]).toBe(path.join(realpathSync(temporary),relative))
+  }finally{rmSync(temporary,{recursive:true,force:true})}
+ })
+ it('路径参数缺值或下一项是开关时，在构建和派发前明确拒绝', () => {
+  for(const flag of ['--report','--profile','--annotation','--budget']){
+   for(const rest of [[],['--v6']]){
+    const result=isolated([flag,...rest])
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('EVALUATION_PATH_REQUIRED')
+   }
+  }
+ })
  it('帮助文本列出 v6 用法，v6 拒绝付费筛查与错误组合', () => {
   const help=run(['--v6','--help'])
   expect(help.status).toBe(0)
