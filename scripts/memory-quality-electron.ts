@@ -17,7 +17,7 @@ import {V5_QUALITY_CASES,V5_SCREEN_IDS} from '../test/fixtures/v5-memory-quality
 import {V6_QUALITY_CASES,V6_INDEPENDENT_IDS} from '../test/fixtures/v6-memory-quality.ts'
 import type {V6Case} from '../test/fixtures/v6-memory-quality.ts'
 
-const options=JSON.parse(process.env.RGENT_MEMORY_EVAL_OPTIONS??'{}') as {root:string;budget:string;profile:string;report:string;models:string[];pilot:boolean;live:boolean;only?:string;v4?:boolean;v5?:boolean;v6?:boolean;round?:number;freeze?:boolean;diagnose?:boolean;review?:boolean;stop?:string;resume?:string;annotation?:string;screen?:boolean;cases?:string[]}
+const options=JSON.parse(process.env.RGENT_MEMORY_EVAL_OPTIONS??'{}') as {root:string;budget:string;profile:string;report:string;models:string[];pilot:boolean;live:boolean;only?:string;v4?:boolean;v5?:boolean;v6?:boolean;round?:number;freeze?:boolean;diagnose?:boolean;review?:boolean;stop?:string;resume?:string;annotation?:string;double?:boolean;screen?:boolean;hashes?:boolean;cases?:string[]}
 app.setName('rgent')
 app.setPath('userData',path.join(options.report,'electron-profile'))
 // Electron emits ready after its entry module has finished loading.
@@ -263,7 +263,7 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
  // 与 v5 相同的无付费诊断：只开 DNS 与一次认证 TLS 握手，不读密钥、不发 HTTP。
  const diagnose=async(models:any[],strict:boolean)=>{const rows=[];for(const m of models){let dns=false,tls=false;try{await Promise.race([lookup(m.host),new Promise((_,reject)=>{const t=setTimeout(()=>reject(Error('DNS_TIMEOUT')),10000);t.unref()})]);dns=true;await new Promise<void>((resolve,reject)=>{const socket=connect({host:m.host,port:443,servername:m.host,rejectUnauthorized:true});socket.setTimeout(10000,()=>socket.destroy(Error('TLS_TIMEOUT')));socket.once('secureConnect',()=>{socket.end();resolve()});socket.once('error',e=>{socket.destroy();reject(e)})});tls=true}catch{}rows.push({model:m.modelId,host:m.host,dns,tls})}
   atomicReport(path.join(root,'diagnostic-'+randomUUID()+'.json'),{at:new Date().toISOString(),credentialsRead:false,httpRequests:0,rows});if(strict&&rows.some(r=>!r.dns||!r.tls))throw Error('EVALUATION_CONNECTION_UNSTABLE');return rows}
- if(!options.freeze&&!options.diagnose&&!options.live&&!options.review&&!options.stop){console.log(JSON.stringify({mode:'v6-development-only',network:false,cases:cases.length,independent:V6_INDEPENDENT_IDS.length,rounds:V6_RULES.rounds,campaignLimit:V6_RULES.history.campaignLimit,perModelLimit:V6_RULES.history.perModelLimit,supervisionMs:V6_RULES.supervisionMs,categories:V6_CATEGORIES,scoring:V6_SCORING_CATEGORIES,rules:V6_RULES}));return}
+ if(!options.freeze&&!options.diagnose&&!options.live&&!options.review&&!options.stop&&!options.resume&&!options.hashes){console.log(JSON.stringify({mode:'v6-development-only',network:false,cases:cases.length,independent:V6_INDEPENDENT_IDS.length,rounds:V6_RULES.rounds,campaignLimit:V6_RULES.history.campaignLimit,perModelLimit:V6_RULES.history.perModelLimit,supervisionMs:V6_RULES.supervisionMs,categories:V6_CATEGORIES,scoring:V6_SCORING_CATEGORIES,rules:V6_RULES}));return}
  let frozen:any
  if(options.freeze){const meta=metadata();if(execFileSync('git',['status','--porcelain','--untracked-files=no'],{cwd:options.root,encoding:'utf8'}).trim())throw Error('EVALUATION_DIRTY_EXECUTION');const parent=JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8'));if(parent.limit!==V6_RULES.history.parentLimit||parent.calls<V6_RULES.history.calls)throw Error('EVALUATION_HISTORY_MISMATCH')
   const revision=Math.max(1,Number(process.env.RGENT_V6_REVISION??1)||1)
@@ -278,7 +278,15 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
  const frozenHash=fingerprint(frozen)
  const prefix=String(frozen.prefix??V6_PREFIX)
  const key=(model:string,round:number,id:string)=>prefix+model+'/'+round+'/'+id
- const resultFile=(k:string)=>path.join(root,'result-'+fingerprint(k)+'.json'),annotationFile=(k:string)=>path.join(root,'annotation-'+fingerprint(k)+'.json')
+ const resultFile=(k:string)=>path.join(root,'result-'+fingerprint(k)+'.json'),doubleFile=(k:string)=>path.join(root,'annotation2-'+fingerprint(k)+'.json'),annotationFile=(k:string)=>path.join(root,'annotation-'+fingerprint(k)+'.json')
+ // 只读：为一条已落盘结果打印标注必须绑定的三个指纹，不改任何文件、不派发。
+ if(options.hashes){
+  const round=options.round??0,id=options.cases?.[0],model=frozen.models.find((m:any)=>m.modelId===options.only)
+  if(!model||!id||options.cases?.length!==1)throw Error('EVALUATION_ONE_ATTEMPT_REQUIRED')
+  const k=key(model.modelId,round,id),file=resultFile(k)
+  if(!existsSync(file))throw Error('EVALUATION_RESULT_MISSING')
+  console.log(JSON.stringify({key:k,frozenHash,resultHash:fingerprint(JSON.parse(readFileSync(file,'utf8'))),rulesHash:fingerprint(V6_RULES)}));return
+ }
  const classify=v6TerminalCategory
  const rowOf=(model:string,round:number,c:V6Case):V6Row|null=>{
   const k=key(model,round,c.id),file=resultFile(k);if(!existsSync(file))return null
@@ -316,8 +324,13 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
   if(!existsSync(file))throw Error('EVALUATION_ANNOTATION_INVALID')
   const result=JSON.parse(readFileSync(file,'utf8')),spec=cases.find(c=>c.id===result.case?.id)
   if(!spec||result.key!==input.key||(input.frozenHash??review.frozenHash)!==frozenHash||(input.resultHash??review.resultHash)!==fingerprint(result)||(input.rulesHash??review.rulesHash)!==fingerprint(V6_RULES)||!v6ReviewValid(spec,review))throw Error('EVALUATION_ANNOTATION_INVALID')
-  const target=annotationFile(String(input.key));if(existsSync(target))throw Error('EVALUATION_ANNOTATION_EXISTS')
-  writeFileSync(target,JSON.stringify({key:input.key,frozenHash,resultHash:fingerprint(result),rulesHash:fingerprint(V6_RULES),review,at:new Date().toISOString()},null,2),{flag:'wx',mode:0o600})
+  const target=options.double?doubleFile(String(input.key)):annotationFile(String(input.key))
+  if(options.double){const primary=annotationFile(String(input.key));if(!existsSync(primary))throw Error('EVALUATION_DOUBLE_ORDER')
+   const first=JSON.parse(readFileSync(primary,'utf8'))
+   // 双标注必须是另一名标注者：同身份重复提交不算独立复核。
+   if(first.review?.annotator?.identity===review.annotator?.identity)throw Error('EVALUATION_DOUBLE_NOT_INDEPENDENT')}
+  if(existsSync(target))throw Error('EVALUATION_ANNOTATION_EXISTS')
+  writeFileSync(target,JSON.stringify({key:input.key,frozenHash,resultHash:fingerprint(result),rulesHash:fingerprint(V6_RULES),review,double:options.double===true,at:new Date().toISOString()},null,2),{flag:'wx',mode:0o600})
  }
  let journal:EvaluationJournal|undefined
  try{
@@ -377,7 +390,16 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
   const firstCall=(model:string)=>{const attempts=[0,1].flatMap(round=>cases.flatMap(c=>{const file=resultFile(key(model,round,c.id));return existsSync(file)?[JSON.parse(readFileSync(file,'utf8'))]:[]})),parsed=attempts.filter((attempt:any)=>{const first=Array.isArray(attempt.responses)?attempt.responses[0]:null;if(!first||first.reason||first.finishReason!=='stop'||typeof first.body!=='string')return false;try{parseContinuitySuggestions(first.body);return true}catch{return false}}).length;return {parsed,total:attempts.length,rate:attempts.length?parsed/attempts.length:0}}
   const modelCalls=(modelId:string)=>state.dispatches.filter((d:any)=>d.key.startsWith(V6_PREFIX)&&d.key.includes('/'+modelId+'/')).length
   const summaries=frozen.models.map((m:any)=>({model:m.modelId,recordId:m.recordId,host:m.host,calls:modelCalls(m.modelId),remaining:V6_RULES.history.perModelLimit-modelCalls(m.modelId),firstCall:firstCall(m.modelId),rounds:[0,1].map(round=>({round,summary:v6Summary(rows(m.modelId),cases,round,{environmentUnavailable})}))}))
-  const summary={frozenHash,executionCommit:frozen.executionCommit,reportCommit:executionCommit(),at:new Date().toISOString(),calls:state.calls,previousCalls:V6_RULES.history.calls,remainingGlobal:V6_RULES.history.parentLimit-state.calls,campaignCalls:campaignCalls(V6_PREFIX),campaignLimit:V6_RULES.history.campaignLimit,environment:{unavailable:environmentUnavailable,rows:diagnostic??[]},models:summaries,formalQualityPassed:false,productionStrategyChanged:false,userSemanticConfirmation:false}
+  // 双标注复核：逐模型轮报告独立第二标注的覆盖率与计数一致率，不代称用户人工确认。
+  const reviewProtocol=frozen.models.map((m:any)=>({model:m.modelId,rounds:[0,1].map(round=>{
+   const keys=cases.map(c=>key(m.modelId,round,c.id)).filter(k=>existsSync(resultFile(k)))
+   const both=keys.filter(k=>existsSync(annotationFile(k))&&existsSync(doubleFile(k)))
+   const agree=both.filter(k=>{const a=JSON.parse(readFileSync(annotationFile(k),'utf8')).review,b=JSON.parse(readFileSync(doubleFile(k),'utf8')).review
+    return a.correct===b.correct&&a.omitted===b.omitted&&a.wrongNew===b.wrongNew&&JSON.stringify(a.hardViolations)===JSON.stringify(b.hardViolations)})
+   const annotators=[...new Set(both.flatMap(k=>[JSON.parse(readFileSync(annotationFile(k),'utf8')).review?.annotator?.identity,JSON.parse(readFileSync(doubleFile(k),'utf8')).review?.annotator?.identity]).filter((v:any)=>typeof v==='string'))]
+   return {round,judged:keys.length,double:both.length,agreementRate:both.length?agree.length/both.length:null,doubleGate:both.length>=10,annotators}
+  })}))
+  const summary={frozenHash,executionCommit:frozen.executionCommit,reportCommit:executionCommit(),at:new Date().toISOString(),reviewProtocol,calls:state.calls,previousCalls:V6_RULES.history.calls,remainingGlobal:V6_RULES.history.parentLimit-state.calls,campaignCalls:campaignCalls(V6_PREFIX),campaignLimit:V6_RULES.history.campaignLimit,environment:{unavailable:environmentUnavailable,rows:diagnostic??[]},models:summaries,formalQualityPassed:false,productionStrategyChanged:false,userSemanticConfirmation:false}
   atomicReport(path.join(root,'summary.json'),summary)
   console.log(JSON.stringify({models:summaries.map((s:any)=>({model:s.model,calls:s.calls,rounds:s.rounds.map((r:any)=>({round:r.round,verdict:r.summary.verdict,metrics:r.summary.metrics,judgeable:r.summary.judgeable,blocked:r.summary.blocked}))})),calls:state.calls,remainingGlobal:summary.remainingGlobal,campaignCalls:summary.campaignCalls,environmentUnavailable}))
  }finally{journal?.close()}

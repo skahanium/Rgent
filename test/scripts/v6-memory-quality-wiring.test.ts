@@ -108,8 +108,9 @@ describe('v6 命令行只读路径', () => {
  it('v6 暴露 --resume 且不因此要求 profile', () => {
   expect(run(['--v6','--help']).stdout).toContain('--resume')
   const resumeWithoutProfile=run(['--v6','--resume','MiniMax-M3'])
-  expect(resumeWithoutProfile.status).not.toBe(1)
   expect(resumeWithoutProfile.stderr).not.toContain('Explicit profile')
+  // 无失败可恢复时按领域码拒绝，而不是当成缺少 profile。
+  expect(resumeWithoutProfile.stderr).toMatch(/EVALUATION_(RESUME_NOT_REQUIRED|FREEZE_REQUIRED|REVISION_CHANGED)/)
  })
 })
 describe('v6 恢复周期与停损', () => {
