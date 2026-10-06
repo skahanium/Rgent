@@ -67,6 +67,20 @@ export type MemoryJobReceipt = {
   reason?: string
   results?: MemoryJobGroupResult[]
 }
+/** 记忆整理管线标识：评测成绩与界面提示都绑定到这个版本；变化后旧成绩不再继承。 */
+export const MEMORY_PIPELINE = 'continuity-m4'
+/** 已发布的质量成绩：四种状态分开显示，stale 表示模型、主机或管线已变。 */
+export type MemoryQualityEvidence = {
+  state: 'unverified' | 'testing' | 'passed' | 'failed' | 'insufficient'
+  verifiedAt?: string
+  modelId?: string | null
+  host?: string | null
+  pipeline?: string | null
+  commit?: string | null
+  humanReviewed: boolean
+  stale: boolean
+  rounds?: number | null
+}
 export type MemoryContext = { sessionId: string; vaultKey: string }
 export type MemoryStatus = { status: 'ready'; count: number } | { status: 'invalid'; reason: string }
 
@@ -88,6 +102,8 @@ export type MemoryView = {
   retirement?:{revision:string;objectVersion:string;bytes:number}
   configDiagnosis?: {revision:string|null;bytes:number}
   diagnosis?:{revision:string|null;objectVersion:string|null;bytes:number}
+ /** 质量成绩与证据状态：未取得人工复核时如实标注，不显示为通过。 */
+ quality?:MemoryQualityEvidence
 }
 export type MemoryResult<T> = { ok: true; value: T } | { ok: false; error: string }
 export type MemorySessionRequest = { sessionId: string }

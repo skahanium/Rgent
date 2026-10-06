@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs'
 import {memoryDependency,sameMemoryDependency,memorySnapshotSignature} from './memory-use.ts'
 import {historicalContextPolicy} from './ledger-provenance.ts'
 import {WorkingMemoryService} from './working-memory-service.ts'
+import {readQualityEvidence} from './memory-quality-status.ts'
 import {WorkingMemoryConsolidation} from './working-memory-consolidation.ts'
 import {memoryAuthorizationState as configuredMemoryAuthorizationState} from './model-config.ts'
 import {ReasoningStore} from './reasoning-store.ts'
@@ -81,7 +82,7 @@ let authorizations: TaskAuthorizationRegistry | null = null
 let consolidation:WorkingMemoryConsolidation|null=null
 let summaryCache:SummaryCache|null=null
 let reasoningStore:ReasoningStore|null=null
-function workingService(){return vault?new WorkingMemoryService(vault,()=>modelConfig):null}
+function workingService(){return vault?new WorkingMemoryService(vault,()=>modelConfig,(binding)=>readQualityEvidence(app.getPath('userData'),binding)):null}
 const memoryIpc = createMemoryIpc({
   vault: () => vault, config: () => modelConfig, service: () => workingService(),
   engine:()=>consolidation,

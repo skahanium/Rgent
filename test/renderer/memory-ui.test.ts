@@ -325,3 +325,22 @@ it('offers a retirement preview for a verified legacy object while keeping unkno
   dispose();body.remove()
  }
 })
+
+it('shows the four evidence states separately and marks missing human review',async()=>{
+ const cases:[MemoryView['quality'],string[]][]=[
+  [{state:'passed',humanReviewed:true,stale:false},['已通过本项目质量验收']],
+  [{state:'passed',humanReviewed:true,stale:true},['旧成绩不再适用']],
+  [{state:'failed',humanReviewed:true,stale:false},['已测试，未通过本轮质量验收']],
+  [{state:'insufficient',humanReviewed:true,stale:false},['测试未完成或证据不足']],
+  [{state:'testing',humanReviewed:false,stale:false},['正在测试中','未人工复核']],
+  [undefined,['自动学习质量尚未通过验证']]
+ ]
+ for(const [quality,expected] of cases){
+  const body=document.createElement('div');document.body.append(body)
+  const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,...(quality?{quality}:{})}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+  const text=body.querySelector('.memory-quality-status')?.textContent??''
+  for(const fragment of expected)expect(text).toContain(fragment)
+  expect(text).toContain('你可以查看、修改或遗忘记忆')
+  dispose();body.remove()
+ }
+})

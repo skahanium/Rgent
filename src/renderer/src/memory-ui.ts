@@ -71,6 +71,17 @@ export type MemoryPageHandlers={
   maintenance:(r:Omit<MemoryMaintenanceRequest,'sessionId'>)=>Promise<MemoryResult<MemoryPreview>>
   commit:(r:Omit<MemoryCommitRequest,'sessionId'>)=>Promise<MemoryResult<MemoryView>>
 }
+/** 质量成绩四种状态分别如实显示；未取得人工复核时明确标注，不显示为通过。 */
+export function qualityEvidenceText(quality:MemoryView['quality']):string{
+ const base=(()=>{switch(quality?.state){
+  case 'passed':return quality.stale?'曾通过本轮质量验收，但整理模型、主机或管线已变，旧成绩不再适用。':'已通过本项目质量验收。'
+  case 'failed':return '已测试，未通过本轮质量验收：可能遗漏或错误整理信息。'
+  case 'insufficient':return '测试未完成或证据不足，尚未得出结论。'
+  case 'testing':return '正在测试中。'
+  default:return '自动学习质量尚未通过验证。AI 可能遗漏或错误整理信息。'}})()
+ const review=quality&&quality.state!=='unverified'&&!quality.humanReviewed?' 未人工复核。':''
+ return `${base}${review}请在重要任务中核对原材料，你可以查看、修改或遗忘记忆。`
+}
 export type MemoryPageHost={body:HTMLElement;isCurrent:()=>boolean;onChanged:(view:MemoryView)=>void}
 export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers):()=>void{
   let disposed=false,view:MemoryView|null=null,readSerial=0,modelsSnapshot:PublicModelConfig|null=null
@@ -81,7 +92,8 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
   const status=paragraph('正在读取记忆…','memory-status-line'),statusHead=el('div','memory-card-heading')
   const heading=el('h3');heading.textContent='本库记忆'
   const refresh=button('',()=>void mutate(handlers.get,refresh));refresh.classList.add('memory-refresh');refresh.append(icon('refresh'));refresh.setAttribute('aria-label','刷新状态');refresh.title='刷新状态'
-  statusHead.append(heading,refresh);statusCard.append(statusHead,status,paragraph('自动学习质量尚未通过验证。AI 可能遗漏或错误整理信息；请在重要任务中核对原材料，你可以查看、修改或遗忘记忆。','settings-hint memory-quality-status'))
+  const qualityNote=paragraph(qualityEvidenceText(undefined),'settings-hint memory-quality-status')
+  statusHead.append(heading,refresh);statusCard.append(statusHead,status,qualityNote)
   const recentCard=el('section','memory-card memory-recent');recentCard.dataset.memorySection='recent'
   const recentTitle=el('h3');recentTitle.textContent='近期工作背景'
   const recentList=el('div','memory-list'),recentEmpty=el('div','memory-empty')
@@ -125,6 +137,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     if(value.materialStatus==='invalid'&&value.reason!=='LEDGER_REGISTRY_INVALID')status.textContent+=` · ${memoryErrorText('LEDGER_REGISTRY_INVALID')}`
     if(value.retirementFailure)status.textContent+=` · ${memoryErrorText(value.retirementFailure)}`
     if(value.bindingFailure)status.textContent+=` · ${memoryErrorText(value.bindingFailure)}`
+    qualityNote.textContent=qualityEvidenceText(value.quality)
     if(currentDefault){currentDefault.dataset.modelId=value.config.defaultModelId??'';currentDefault.textContent=`已保存：${modelName(value.config.defaultModelId)}`}
     if(currentVault)currentVault.textContent=`已保存：${value.config.vault.enabled?'已开启':'已关闭'} · ${value.config.vault.override.mode==='inherit'?'跟随默认模型':modelName(value.config.vault.override.modelId)}`
     if(!modelSetupChecked||lastModelStatus!==value.config.modelStatus&&value.config.modelStatus!=='ready'){modelPanel.open=value.config.modelStatus!=='ready';modelSetupChecked=true}lastModelStatus=value.config.modelStatus
