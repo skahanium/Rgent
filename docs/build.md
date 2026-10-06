@@ -1536,6 +1536,29 @@ DeepSeek 发送前故障证据为 `diagnostic-97d058c1-810b-4b5e-ab2b-05c623f95b
 
 **本轮口径**：真实调用含被放弃冻结的 5 次，均由 campaign 240 次上限统一计数，故新增调用至多 235 次、总账至多 1069／1440；被放弃冻结的尝试只在冻结证据里保留，不进入任何一轮分数。
 
+#### v6 交接（给下一个会话：从这里接着做）
+
+**现在在哪**：包 0–5 全部交付；r4 冻结实测 + 离线审计完成；r5（运行器链式 vault 跨 revision 复用，已修 `3f34f5c`）与 r6（干净复验，deepseek 第一轮 passed 88.367）完成。修正后的裁判、动作核对、依赖边界与提示词契约分别见 `ee93c8a`、`a2fb8b1`、`681b760`、`d4fc2b8`。**r7 未冻结、未花任何新调用**。
+
+**唯一红灯（必须先解决，且不许无理由改弱断言）**：`test/scripts/v5-memory-quality.test.ts > runs every chain foreground…` 断言链式步骤 `result.material.memoryDeps.length > 1`，实测为 1。已核实账本"本场实际使用的记忆"由 `src/main/memory-use.ts:159` 的 `dependencies()` 生成、列的是**被装入条目本身**（不是依赖闭包），所以 `inheritInputs` 的收窄按设计不该让它掉到 1。判定命令（在链条第 2 步打印两处事实即可定性）：
+
+```
+pnpm exec vitest run test/scripts/v5-memory-quality.test.ts --reporter=verbose
+# 在该用例 step===2 处临时 console.log(result.material.memoryDeps, result.foreground?.sent)
+```
+- 若 `sent`（实际注入）也只剩 1 条 → 是取用/遗忘行为变化，按产品语义判断是否可接受并写明理由；
+- 若 `sent` 正常而 `memoryDeps` 只剩 1 → 是 `agent-host.ts:373` 里 `scoped.memoryDeps`（来源见 `src/main/scoped-agent-tools.ts:116`）被我的来源级收窄砍到，**把溯源记录补回**（注入记录与依赖闭包分开），而不是改期望值。
+
+**绿灯后的固定顺序**：`pnpm test`（应 1628 通过／2 跳过）→ `pnpm docs:check` → `pnpm build` → `pnpm ui:check`（预期 354／0）→ 提交。
+
+**再冻结 r7 并复验**（额度已由用户 2026-10-06 批准，登记在 decisions.md）：
+- 冻结：`rm .cache/memory-quality/2026-10-04/v6/v6-manifest.json` 后 `RGENT_V6_REVISION=7 pnpm memory:check --v6 --freeze --profile "$HOME/Library/Application Support/rgent" --models f372c75e-4a91-490c-9f03-93265d1be478,5e5b7773-5d7f-4b81-b939-519c641d1a9a`
+- 范围：两模型 × 两轮 × 30 例 = 120 次尝试，一次一例、**先标注再派发下一例**、每轮内两模型交错、链式 1→5 保序；驱动器与手册：`.cache/memory-quality/2026-10-04/v6/v6-drive.py`、`RUNBOOK.md`（注意驱动器 progress 行的 `r3` 标签是旧的，数字以 `state.json` 为准）。
+- 双标注：每模型每轮 ≥10 条（共 ≥40），由**另一名标注者**（`coding-agent-reviewer-b`）用 `submit2` 提交，且**不得读** `annotation-*.json`。
+- 审计与判定：`pnpm exec vitest run test/scripts/v6-frozen-audit.test.ts` 生成 `audit-<frozenHash>.json`；切换默认需"单一模型**两轮**通过 + 工程门"；`paused` 条目下一场装不进，标注口径按"最终保存并实际装入"。
+- 额度：campaign 已用 177／**520**、每模型上限 **260**（deepseek 112、MiniMax 65）、本轮新增 **≤240 次**、总账硬停 **1246／1440**（现 1006）。
+- 收尾：结论写入本节 + `AGENTS.md` 当前阶段；旧 revision 的判定与分数**原样保留、不改写**；仅本地提交、不推送。
+
 #### v6 修正后定点复验（revision 6，deepseek-flash 第一轮，2026-10-06）
 
 计划按用户确认的范围：单模型单轮＋定点反例。r5 因**运行器链式 vault 跨 revision 复用**（残留片段已在遗忘集内，合规提案被 `MEMORY_MATERIAL_FORGOTTEN` 连带拒绝）只跑到 21/30 即停并如实标注；该缺陷已修（`3f34f5c`，链式 base 带 revision），r5 结果只作环境失效记录。r6 为干净复验。
