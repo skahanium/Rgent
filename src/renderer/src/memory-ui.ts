@@ -136,6 +136,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     status.textContent=`已保存 · ${value.config.vault.enabled?'已开启':'已关闭'} · 长期 ${value.entries.length-recentCount} 条 · 近期 ${recentCount} 块${value.reason||value.status==='invalid'?` · ${memoryErrorText(value.reason??'MEMORY_UNAVAILABLE')}`:''}`
     if(value.materialStatus==='invalid'&&value.reason!=='LEDGER_REGISTRY_INVALID')status.textContent+=` · ${memoryErrorText('LEDGER_REGISTRY_INVALID')}`
     if(value.retirementFailure)status.textContent+=` · ${memoryErrorText(value.retirementFailure)}`
+    if(value.maintenanceFailure)status.textContent+=` · 后续维护未完成：${memoryErrorText(value.maintenanceFailure)}`
     if(value.bindingFailure)status.textContent+=` · ${memoryErrorText(value.bindingFailure)}`
     qualityNote.textContent=qualityEvidenceText(value.quality)
     if(currentDefault){currentDefault.dataset.modelId=value.config.defaultModelId??'';currentDefault.textContent=`已保存：${modelName(value.config.defaultModelId)}`}

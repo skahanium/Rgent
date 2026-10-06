@@ -417,14 +417,10 @@ function registerIpc(): void {
     [IPC.memoryMaintenancePreview,'maintenance'],
     [IPC.memoryJobRetryPreview, 'retry'], [IPC.memoryJobCancel, 'cancel']
   ] as const) registerTrustedHandle(channel, async (event, request) => {
-    const currentVault=vault,service=workingService(),session=currentVault?.sessionId(),root=currentVault?.root
+    const currentVault=vault,session=currentVault?.sessionId()
     const result=await memoryIpc.handle(`${event.sender.id}:${event.senderFrame!.routingId}`, operation, request,()=>{if(!trusted(event))throw Error('MEMORY_SESSION_CLOSED')})
     if(currentVault&&session)currentVault.assertSession(session)
     if(result.ok&&!['get','manual','restore','retry','maintenance'].includes(operation)){
-      if(service&&currentVault&&session&&root){
-        await service.recheckDeferred().catch(()=>{});currentVault.assertSession(session)
-        await agentHost?.recheckSources(root,session);currentVault.assertSession(session)
-      }
       send(IPC.memoryChanged,session)
     }
     return result

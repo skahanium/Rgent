@@ -400,7 +400,7 @@ export class WorkingMemoryConsolidation{
    if(result.entryIds.length){const changed=[...result.snapshot.record.entries,...result.snapshot.record.recent].filter(e=>result.entryIds.includes(e.id));const before=[...basis.record.entries,...basis.record.recent].filter(e=>result.entryIds.includes(e.id));this.undoBatches.set(job.material.taskId,{service:job.service,sessionId:job.context.sessionId,version:job.material.materialVersion,before:structuredClone(before),after:changed.map(e=>({id:e.id,version:e.version}))});while(this.undoBatches.size>8)this.undoBatches.delete(this.undoBatches.keys().next().value!)}
    if(result.rejected)this.notify(job)
    // Promotion is a separate source recheck; its failure cannot turn a committed batch into failure.
-   await (async()=>{this.assert(job);await job.service.recheckDeferred();this.notify(job)})().catch(()=>{})
+   await job.service.recheckAfterCommit(async()=>{this.assert(job);await job.service.recheckDeferred()});this.notify(job)
   }catch(e){
    const reason=publicMemoryError(e)
    try{await this.receipt(job,job.controller.signal.aborted?'interrupted':'rejected',reason)}catch{/* Preserve the existing bytes if diagnosis or CAS prevents a receipt. */}

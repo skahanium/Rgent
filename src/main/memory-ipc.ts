@@ -70,6 +70,11 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
  const previews=new Map<string,HeldPreview>()
  const clear=()=>previews.clear()
  const hold=(held:Omit<HeldPreview,'expires'>)=>{ports.vault()?.assertSession(held.preview.sessionId);for(const [id,p] of previews)if(p.expires<Date.now())previews.delete(id);if(previews.size>=128)throw Error('MEMORY_QUEUE_FULL');previews.set(held.preview.id,{...held,expires:Date.now()+120000});return {ok:true as const,value:held.preview}}
+ const maintain=async(service:WorkingMemoryService,vault:VaultSession,session:string,includeMemory=true)=>{
+  if(includeMemory)await service.recheckAfterCommit(()=>service.recheckDeferred())
+  // 来源撤销独立核验；记忆维护失败也必须尝试停止已撤销的前台任务。
+  await service.recheckAfterCommit(()=>ports.recheck(vault,session));vault.assertSession(session)
+ }
  const view=async(service:WorkingMemoryService)=>{const value=await service.view();service.vault.assertSession(value.sessionId);value.running=ports.engine?.()?.state()??value.running;value.jobs.push(...(ports.engine?.()?.failureJobs?.()??[]));for(const job of value.jobs)job.undoable=!!job.materialVersion&&!!ports.engine?.()?.canUndo(job.taskId,job.materialVersion);return {ok:true as const,value}}
  return {clear,async handle(owner:string,op:MemoryOperation,value:unknown,assertOwner?:()=>void):Promise<MemoryResult<MemoryView|MemoryPreview>>{
   try{
@@ -124,10 +129,10 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
    if(op==='commit'){
     const p=previews.get(request.id as string);previews.delete(request.id as string)
     if(!p||p.owner!==owner||p.expires<Date.now()||p.preview.sessionId!==session)throw Error('STALE_PREVIEW')
-    if(p.preview.kind==='retire'){if(!assertOwner)throw Error('MEMORY_SESSION_CLOSED');await vault.memoryRetirementRetry(p.retirement!,assertOwner);vault.assertSession(session);clear();ports.invalidate?.();await ports.recheck(vault,session);vault.assertSession(session);return await view(service)}
-    if(p.preview.kind==='undo'){const engine=ports.engine?.();if(!engine)throw Error('MEMORY_RETRY_UNAVAILABLE');await engine.undo(p.job!.taskId,p.job!.materialVersion);vault.assertSession(session);ports.invalidate?.();await ports.recheck(vault,session);vault.assertSession(session);return await view(service)}
+    if(p.preview.kind==='retire'){if(!assertOwner)throw Error('MEMORY_SESSION_CLOSED');await vault.memoryRetirementRetry(p.retirement!,assertOwner);vault.assertSession(session);clear();ports.invalidate?.();await maintain(service,vault,session);vault.assertSession(session);return await view(service)}
+    if(p.preview.kind==='undo'){const engine=ports.engine?.();if(!engine)throw Error('MEMORY_RETRY_UNAVAILABLE');await engine.undo(p.job!.taskId,p.job!.materialVersion);vault.assertSession(session);ports.invalidate?.();await maintain(service,vault,session);vault.assertSession(session);return await view(service)}
     if(p.preview.kind==='reset-config'){
-     if(!config)throw Error('MEMORY_CONFIG_UNAVAILABLE');clear();ports.invalidate?.();config.resetMemoryConfig(p.binding!.revision);await ports.recheck(vault,session);return await view(service)
+     if(!config)throw Error('MEMORY_CONFIG_UNAVAILABLE');clear();ports.invalidate?.();config.resetMemoryConfig(p.binding!.revision);await maintain(service,vault,session);return await view(service)
     }
     if(p.preview.kind==='retry'){await ports.engine!()!.retry(p.job!.taskId,p.job!.materialVersion,p.signature!);vault.assertSession(session);return await view(service)}
     if(p.preview.kind==='reset'||p.preview.kind==='watermark'){
@@ -158,7 +163,7 @@ export function createMemoryIpc(ports:MemoryIpcPorts){
     else await service.edit(item,op==='disable'?{status:'disabled'}:{content:request.content as string,layer:request.layer as 'core'|'demand',scope:request.scope as string})
    }
    vault.assertSession(session)
-   await ports.recheck(vault,session)
+   await maintain(service,vault,session,!['edit','disable','forget'].includes(op))
    vault.assertSession(session)
    return await view(service)
   }catch(e){return {ok:false,error:publicMemoryError(e)}}

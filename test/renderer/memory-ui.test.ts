@@ -344,3 +344,10 @@ it('shows the four evidence states separately and marks missing human review',as
   dispose();body.remove()
  }
 })
+
+it('shows saved content together with a visible maintenance failure',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,maintenanceFailure:'MEMORY_FILE_LIMIT'}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ const line=body.querySelector('.memory-status-line')!.textContent!;expect(line).toContain('已保存');expect(line).toContain('后续维护未完成');expect(line).not.toContain('MEMORY_FILE_LIMIT')
+ dispose();body.remove()
+})

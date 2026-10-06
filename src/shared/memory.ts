@@ -103,6 +103,8 @@ export type MemoryView = {
   materialStatus?:'verified'|'empty'|'invalid'
   retirementFailure?:string
   bindingFailure?:string
+  /** 已提交后的运行维护诊断；会话内保留，成功维护后解除。 */
+  maintenanceFailure?:string
   retirement?:{revision:string;objectVersion:string;bytes:number}
   configDiagnosis?: {revision:string|null;bytes:number}
   diagnosis?:{revision:string|null;objectVersion:string|null;bytes:number}

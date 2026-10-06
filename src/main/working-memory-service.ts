@@ -3,6 +3,7 @@ import {createHash,randomUUID} from 'node:crypto'
 import type {VaultSession} from './vault.ts'
 import type {ModelConfigStore} from './model-config.ts'
 import type {WorkingSource,WorkingEntry,WorkingSnapshot,WorkingInput,WorkingMemoryStore} from './working-memory-store.ts'
+import {publicMemoryError} from './memory-ipc.ts'
 import {MEMORY_PIPELINE} from '../shared/memory.ts'
 import type {MemoryContext,MemoryView,MemoryItemRequest,MemoryManualRequest} from '../shared/memory.ts'
 import {stateFromStatus,statusFromState} from './working-memory-store.ts'
@@ -13,6 +14,8 @@ import {modelTierFor} from './permissions.ts'
 import {conservativeTokens} from './context-budget.ts'
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex')
 const recentExpired=(entry:WorkingEntry)=>entry.category==='recent'&&Date.parse((entry as import('./working-memory-store.ts').WorkingRecent).recent.createdAt)<=Date.now()-14*86400000
+// 仅按活动库会话保存运行诊断；读取新 service 不重试、不写盘，换会话不继承。
+const maintenanceFailures=new WeakMap<VaultSession,{sessionId:string;reason:string}>()
 export class WorkingMemoryService{
  private boundContext:MemoryContext|null=null
  constructor(readonly vault:VaultSession,private readonly config:()=>ModelConfigStore|null,private readonly quality?:(binding:{modelId:string|null;host:string|null;pipeline:string})=>import('../shared/memory.ts').MemoryQualityEvidence){if(vault.root)this.boundContext=vault.memoryContext()}
@@ -142,6 +145,7 @@ export class WorkingMemoryService{
   return agreement.authority.every(item=>{const source=entry.sources.find(s=>s.id===item.sourceId);return !!source&&source.text.includes(item.quote)})
  }
  async view():Promise<MemoryView>{
+  const failure=maintenanceFailures.get(this.vault),maintenanceFailure=failure?.sessionId===this.context().sessionId?failure.reason:undefined
   const context=this.context(),config=this.config();let configError:string|undefined
   let cfg:import('../shared/memory.ts').PublicMemoryConfig={defaultModelId:null,limits:{seconds:120,calls:2,tools:0},vault:{enabled:false,override:{mode:'inherit'}},effectiveModelId:null,modelStatus:'unavailable'}
   try{if(!config)throw Error('MEMORY_CONFIG_UNAVAILABLE');cfg=config.getMemoryConfig(context.vaultKey)}catch{configError='MEMORY_CONFIG_UNAVAILABLE'}
@@ -151,14 +155,14 @@ export class WorkingMemoryService{
   let retirement:MemoryView['retirement']
   if(this.vault.memoryDiagnosis())try{const target=await this.vault.memoryRetirementPreview();retirement={revision:target.revision,objectVersion:target.objectVersion,bytes:target.bytes}}catch{/* Unknown legacy bytes remain preserved and cannot be retried. */}
   let basis:WorkingSnapshot,entries:WorkingEntry[]
-  try{basis=this.snapshot();entries=await this.entries();basis=this.snapshot()}catch(e){this.vault.assertSession(context.sessionId);const materials=this.vault.materialState(),retirementFailure=this.vault.memoryDiagnosis(),bindingFailure=this.vault.memoryBindingDiagnosis();return {sessionId:context.sessionId,revision:null,objectVersion:null,config:cfg,recipient:credential?{modelId:credential.modelId,host:new URL(credential.baseURL).host}:null,status:'invalid',reason:e instanceof Error?e.message:'MEMORY_STORAGE_INVALID',materialStatus:materials.status,quality:this.quality?.({modelId:null,host:null,pipeline:MEMORY_PIPELINE})??{state:'unverified' as const,humanReviewed:false,stale:false},...(retirementFailure?{retirementFailure,...(retirement?{retirement}:{})}:{}),...(bindingFailure?{bindingFailure}:{}),entries:[],jobs:[],running:{permits:0,pending:0,active:0},diagnosis:this.vault.memoryDiagnostic(),...(configDiagnosis?{configDiagnosis}:{})}}
+  try{basis=this.snapshot();entries=await this.entries();basis=this.snapshot()}catch(e){this.vault.assertSession(context.sessionId);const materials=this.vault.materialState(),retirementFailure=this.vault.memoryDiagnosis(),bindingFailure=this.vault.memoryBindingDiagnosis();return {sessionId:context.sessionId,revision:null,objectVersion:null,config:cfg,recipient:credential?{modelId:credential.modelId,host:new URL(credential.baseURL).host}:null,status:'invalid',...(maintenanceFailure?{maintenanceFailure}:{}),reason:e instanceof Error?e.message:'MEMORY_STORAGE_INVALID',materialStatus:materials.status,quality:this.quality?.({modelId:null,host:null,pipeline:MEMORY_PIPELINE})??{state:'unverified' as const,humanReviewed:false,stale:false},...(retirementFailure?{retirementFailure,...(retirement?{retirement}:{})}:{}),...(bindingFailure?{bindingFailure}:{}),entries:[],jobs:[],running:{permits:0,pending:0,active:0},diagnosis:this.vault.memoryDiagnostic(),...(configDiagnosis?{configDiagnosis}:{})}}
   const materials=this.vault.materialState(),retirementFailure=this.vault.memoryDiagnosis(),bindingFailure=this.vault.memoryBindingDiagnosis()
   const recipient=credential?{modelId:credential.modelId,host:new URL(credential.baseURL).host}:null
   const quality=this.quality?.({modelId:recipient?.modelId??null,host:recipient?.host??null,pipeline:MEMORY_PIPELINE})??{state:'unverified' as const,humanReviewed:false,stale:false}
-  return {sessionId:context.sessionId,revision:basis.revision,objectVersion:basis.objectVersion,config:cfg,recipient,status:'ready',quality,...(configError?{reason:configError}:materials.status==='invalid'?{reason:materials.reason}:{}),materialStatus:materials.status,...(retirementFailure?{retirementFailure,...(retirement?{retirement}:{})}:{}),...(bindingFailure?{bindingFailure}:{}),entries:entries.map(e=>({...e,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId,text:s.text,classification:s.classification}))})),jobs:basis.record.jobs.map(j=>({...j,retryable:materials.status!=='invalid'&&['interrupted','rejected'].includes(j.outcome)&&cfg.vault.enabled&&!!credential})),running:{permits:0,pending:0,active:0},...(materials.status!=='invalid'?{learning:{watermark:basis.record.watermark,nextSequence:Math.max(basis.record.nextSequence,materials.sequence)}}:{}),diagnosis:this.vault.memoryDiagnostic(),...(configDiagnosis?{configDiagnosis}:{})}
+  return {sessionId:context.sessionId,revision:basis.revision,objectVersion:basis.objectVersion,config:cfg,recipient,status:'ready',quality,...(maintenanceFailure?{maintenanceFailure}:{}),...(configError?{reason:configError}:materials.status==='invalid'?{reason:materials.reason}:{}),materialStatus:materials.status,...(retirementFailure?{retirementFailure,...(retirement?{retirement}:{})}:{}),...(bindingFailure?{bindingFailure}:{}),entries:entries.map(e=>({...e,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId,text:s.text,classification:s.classification}))})),jobs:basis.record.jobs.map(j=>({...j,retryable:materials.status!=='invalid'&&['interrupted','rejected'].includes(j.outcome)&&cfg.vault.enabled&&!!credential})),running:{permits:0,pending:0,active:0},...(materials.status!=='invalid'?{learning:{watermark:basis.record.watermark,nextSequence:Math.max(basis.record.nextSequence,materials.sequence)}}:{}),diagnosis:this.vault.memoryDiagnostic(),...(configDiagnosis?{configDiagnosis}:{})}
  }
  private bind(request:MemoryItemRequest){this.vault.assertSession(request.sessionId);const basis=this.snapshot();if(basis.revision!==request.revision||basis.objectVersion!==request.objectVersion)throw Error('MEMORY_CONFLICT');const entry=[...basis.record.entries,...basis.record.recent].find(e=>e.id===request.id&&e.version===request.version);if(!entry)throw Error('MEMORY_CHANGED');return {basis,entry}}
- async edit(request:MemoryItemRequest,change:Partial<WorkingInput>&{status?:WorkingEntry['status']}){const committed=await this.mutate(store=>{const {basis}=this.bind(request);return store.edit(basis,request.id,request.version,change)});await this.recheckDeferred().catch(()=>{});return committed}
+ async edit(request:MemoryItemRequest,change:Partial<WorkingInput>&{status?:WorkingEntry['status']}){const committed=await this.mutate(store=>{const {basis}=this.bind(request);return store.edit(basis,request.id,request.version,change)});await this.recheckAfterCommit(()=>this.recheckDeferred());return committed}
  async forget(request:MemoryItemRequest){const committed=await this.mutate(async store=>{
   const {basis}=this.bind(request),effective=await this.effectiveEntries([...basis.record.entries,...basis.record.recent])
   // 异步账本读取后重核同一请求；补边、未知暂停和遗忘共享原对象/原字节的一次 CAS。
@@ -166,11 +170,18 @@ export class WorkingMemoryService{
   basis.record.entries=effective.filter(e=>e.category==='long')
   basis.record.recent=effective.filter(e=>e.category==='recent') as import('./working-memory-store.ts').WorkingRecent[]
   return store.forget(basis,request.id,request.version)
- });await this.recheckDeferred().catch(()=>{});return committed}
+ });await this.recheckAfterCommit(()=>this.recheckDeferred());return committed}
+ /** 提交后的维护失败不能推翻提交，也不能把磁盘路径或密钥传给界面。 */
+ async recheckAfterCommit(operation:()=>Promise<unknown>){
+  try{await operation()}catch(error){try{const context=this.context();maintenanceFailures.set(this.vault,{sessionId:context.sessionId,reason:publicMemoryError(error)})}catch{/* Closed sessions cannot publish diagnosis into another library. */}}
+ }
  async recheckDeferred(){
   const context=this.context()
+  try{await this.recheckDeferredCurrent(context);maintenanceFailures.delete(this.vault)}catch(error){this.vault.assertSession(context.sessionId);maintenanceFailures.set(this.vault,{sessionId:context.sessionId,reason:publicMemoryError(error)});throw error}
+ }
+ private async recheckDeferredCurrent(context:MemoryContext){
   // 旧文件可能残留指向同 id 旧版本的依赖：改写引用并如实暂停依赖方，幂等、同一次 CAS。
-  await this.mutate(store=>store.repairStaleDependencies(store.read())).catch(()=>{})
+  await this.mutate(store=>store.repairStaleDependencies(store.read()))
   const basis=this.snapshot(),ready:WorkingEntry[]=[]
   for(const e of basis.record.entries.filter(e=>e.status==='deferred'))if((!e.reviewAt||Date.parse(e.reviewAt)>Date.now())&&await this.verifyEntry(e,basis.record.entries))ready.push(e)
   this.vault.assertSession(context.sessionId)

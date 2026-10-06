@@ -532,3 +532,10 @@ it('corrects a Host-loaded parent using proven legacy recent ancestry while leav
   }
  }
 },20000)
+
+it('keeps the applied batch and publishes failure when post-commit promotion fails',async()=>{
+ const f=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({proposals:[suggestion(input)],recent:null})};yield {type:'finish',reason:'stop'}},'以后用中文','continuity')
+ const promotion=vi.spyOn(f.service,'recheckDeferred').mockRejectedValue(Error('MEMORY_FILE_LIMIT'));await f.engine.handoff(f.material);await f.engine.idle()
+ expect(f.service.snapshot().record.jobs[0]?.outcome).toBe('applied');expect((await f.service.entries()).map(e=>e.content)).toEqual(['后续在本库使用中文']);expect(promotion).toHaveBeenCalledTimes(1)
+ expect(await new WorkingMemoryService(f.vault,()=>null).view()).toMatchObject({maintenanceFailure:'MEMORY_FILE_LIMIT'})
+})

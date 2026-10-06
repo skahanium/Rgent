@@ -1748,3 +1748,8 @@ v6 双标覆盖由同一评分器核验：两份完整、有效、身份不同�
 
 
 包4整轮独立自查追加摘要门：原 summaryAllowed 只核当前 recent 的可信关系，未知/V1旧块滚出十四天集合后，历史章节被当空依赖而重新允许摘要派生发送。新增实际 store 十四天滚出+旧账本 missing/V1/V2-empty 三态；前两例先红 true→false，V2明确空关系正例与原始历史可读／字节不变保持。ledger-store.summaryMaterials 派生用途对每个递归覆盖章节要求V2，原 ledgerContexts 原始回顾通道不经过此门，不清旧数据。既有撤销／三代材料链的正例夹具补真实明确V2关系，遗忘／水位／伪哈希／错祖先断言保持；真正未知/V1旧历史由新反例明确拒绝，未把旧产物或旧评分改为新证明。日志 `/tmp/rgent-integrity-p4-summary-rolled-red.log`、`...-summary-green.log`、`...-summary-chain-green.log`；必要摘要/三代材料边界定向、类型／文档／diff核验，未做full/build/UI/模型。
+
+
+包 4 维护结果小提交：已提交的编辑／禁用／遗忘及整理成功批次保留原成功结果，失败的陈旧依赖修复或待用条目提升通过既有 MemoryView.maintenanceFailure 展示“后续维护未完成”。只在同一 VaultSession／session 保存有界错误码，新的 service 读取仍能看到且不隐式重试；下一次明确成功维护解除，重启不持久化此运行诊断。IPC 在返回视图前完成一次记忆维护，edit／disable／forget 由 service 已维护，主进程外层不再重复维护；配置、确认、撤销、旧存储退出等现有出口仍续接。前台来源撤销独立尝试，记忆维护失败不跳过 recheckSources；旧会话最后断言及实际发送来源核验保持。
+
+编辑／遗忘两例真实提交后维护失败和界面提示先红三例（`/tmp/rgent-integrity-p4-maintenance-red.log`）；整理已 applied 但提升失败诊断丢失另红一例（`/tmp/rgent-integrity-p4-promotion-red.log`，仅该提升旧空 catch 保留时复现）。失败仍可见、提交字节不反转、每次维护只一遍、新 service 读不重试、下一次成功维护解除及旧 session 拒绝回归已核。最终必要定向、类型、文档、源码差异结果见本包临时报告；不在本小提交运行完整／构建／窗口／模型门。实际维护提示截图待根任务既有窗口门，渲染定向不代称截图或人工确认。

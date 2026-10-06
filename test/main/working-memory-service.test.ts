@@ -543,3 +543,20 @@ it.each(['missing','v1','v2-empty'] as const)('rolled-out recent history cannot 
   expect(service.snapshot().raw).toBe(before.raw)
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
+
+it.each(['edit','forget'] as const)('keeps a committed %s visible when its one maintenance attempt fails',async operation=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-maintenance-result-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'原始事实')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{const service=new WorkingMemoryService(vault,()=>null),note=await vault.readOpened('a.md'),source=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:4})
+  const entry=await vault.memoryMutation(store=>store.add(store.read(),{content:'原始事实',layer:'demand',scope:'本库',sources:[source],semantic:'fact',attribution:'人',reviewAt:null})),basis=service.snapshot(),request={sessionId:service.context().sessionId,revision:basis.revision,objectVersion:basis.objectVersion,id:entry.id,version:entry.version}
+  const mutation=vault.memoryMutation.bind(vault);let attempts=0;const spy=vi.spyOn(vault,'memoryMutation').mockImplementation((...args)=>{attempts++;if(attempts===2)return Promise.reject(Error('MEMORY_FILE_LIMIT'));return mutation(...args)})
+  const {createMemoryIpc}=await import('../../src/main/memory-ipc.ts');const revoke=vi.fn(async()=>{}),ipc=createMemoryIpc({vault:()=>vault,config:()=>null,service:()=>service,recheck:revoke})
+  const result=await ipc.handle('fixture',operation,operation==='edit'?{...request,content:'已更新事实',layer:'demand',scope:'本库'}:request)
+  expect(result.ok).toBe(true);if(!result.ok||!('entries' in result.value))throw Error('expected committed view')
+  expect(result.value).toMatchObject({status:'ready',maintenanceFailure:'MEMORY_FILE_LIMIT'});expect(attempts).toBe(2);expect(revoke).toHaveBeenCalledOnce()
+  if(operation==='edit')expect(service.snapshot().record.entries.find(e=>e.id===entry.id)).toMatchObject({content:'已更新事实',version:2});else expect(service.snapshot().record.entries.some(e=>e.id===entry.id)).toBe(false)
+  // Production creates a fresh service for each read: runtime diagnostics must survive that read without retrying.
+  expect(await new WorkingMemoryService(vault,()=>null).view()).toMatchObject({maintenanceFailure:'MEMORY_FILE_LIMIT'});expect(attempts).toBe(2)
+  spy.mockRestore();await service.recheckDeferred();expect((await service.view()).maintenanceFailure).toBeUndefined()
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})
