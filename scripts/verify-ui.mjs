@@ -1603,8 +1603,10 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
       await restoredPage.eval(`document.querySelector('[data-vault-open="${remountEntry.id}"]').click()`)
       await waitFor(restoredPage,`document.querySelector('.vault-settings')?.getAttribute('aria-busy')==='false'`)
       check('普通切换不认领变化的根',JSON.parse(readFileSync(catalogFile,'utf8')).entries.find(entry=>entry.id===remountEntry.id).rootIdentity===staleIdentity)
+      await rootRecoveryShots(restoredPage,shot,'switch-refused',null)
       await restoredPage.eval(`document.querySelector('[data-vault-id="${remountEntry.id}"] [data-vault-action="more"]').click();document.querySelector('[data-vault-id="${remountEntry.id}"] [data-vault-action="root-preview"]').click()`)
       check('先展示根对象与工作区恢复预览',await waitFor(restoredPage,`[...document.querySelectorAll('[data-vault-id="${remountEntry.id}"] button')].some(n=>n.textContent==='确认建立新关联')`))
+      await rootRecoveryShots(restoredPage,shot,'remount-preview',remountEntry.id)
       await restoredPage.eval(`[...document.querySelectorAll('[data-vault-id="${remountEntry.id}"] button')].find(n=>n.textContent==='确认建立新关联').click()`)
       check('确认切换后打开同一个库并恢复工作区',await waitFor(restoredPage,`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelector('.tab')?.textContent.includes('同名') && document.querySelector('.cm-content')?.textContent.includes('必须保留的草稿')`))
     })
@@ -1631,6 +1633,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
       await waitFor(restoredPage,`document.querySelector('.vault-settings')?.getAttribute('aria-busy')==='false'`)
       await restoredPage.eval(`document.querySelector('[data-vault-id="vault-b"] [data-vault-action="more"]').click();document.querySelector('[data-vault-id="vault-b"] [data-vault-action="root-preview"]').click()`)
       await waitFor(restoredPage,`[...document.querySelectorAll('[data-vault-id="vault-b"] button')].some(n=>n.textContent==='取消根预览')`)
+      await rootRecoveryShots(restoredPage,shot,'active-root-preview','vault-b')
       await restoredPage.eval(`[...document.querySelectorAll('[data-vault-id="vault-b"] button')].find(n=>n.textContent==='取消根预览').click()`)
       check('活动根恢复取消保留两篇窗口稿',await waitFor(restoredPage,`document.querySelector('.vault-settings')?.getAttribute('aria-busy')==='false' && document.querySelectorAll('.tab').length===2`)&&readFileSync(path.join(sibling,'根保稿.md'),'utf8')==='新根第二篇不可覆写')
       await restoredPage.eval(`document.querySelector('[data-vault-id="vault-b"] [data-vault-action="root-preview"]').click()`)
@@ -1706,6 +1709,38 @@ async function v4Click(page, selector, text) {
   const expression=`[...document.querySelectorAll(${JSON.stringify(selector)})].find(b=>b.textContent===${JSON.stringify(text)} && !b.disabled)`
   if(!await waitFor(page,`!!(${expression})`))throw Error('未出现可用按钮：'+text)
   await page.eval(`(${expression}).click()`)
+}
+async function rootRecoveryShots(page,shot,name,id) {
+  const theme=await page.eval('window.rgent.themeGet()')
+  const renderedTheme=await page.eval('document.documentElement.dataset.theme')
+  const viewport=await page.eval('({width:innerWidth,height:innerHeight})')
+  try {
+    for(const mode of ['day','night']) {
+      await page.eval(`window.rgent.themeSet('${mode}')`)
+      if(!await waitFor(page,`document.documentElement.dataset.theme==='${mode}'`))throw Error('根恢复样张主题未同步')
+      for(const [width,height] of [[1200,800],[800,560]]) {
+        await page.call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false})
+        const target=id?`[data-vault-id=${JSON.stringify(id)}] .vault-settings-confirmation:not([hidden])`:'.vault-settings-status'
+        await page.eval(`document.querySelector(${JSON.stringify(target)})?.scrollIntoView({block:'nearest'});new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`)
+        check(`${name} ${mode} ${width}px 根恢复文字无横向裁切`,await page.eval(`(()=>{const n=document.querySelector(${JSON.stringify(target)}),panel=document.querySelector('.vault-settings');return !!n&&!!n.textContent.trim()&&n.scrollWidth<=n.clientWidth+1&&panel.scrollWidth<=panel.clientWidth+1&&document.documentElement.scrollWidth<=innerWidth+1})()`))
+        if(id) {
+          const textVisible=await page.eval(`(()=>{const n=document.querySelector(${JSON.stringify(target)});return [...n.querySelectorAll('p')].every(p=>{p.scrollIntoView({block:'nearest'});const range=document.createRange();range.selectNodeContents(p);return !!p.textContent.trim()&&[...range.getClientRects()].every(r=>r.width>0&&r.height>0&&r.left>=0&&r.top>=0&&r.right<=innerWidth+1&&r.bottom<=innerHeight+1)})})()`)
+          check(`${name} ${mode} ${width}px 路径、身份、工作区与保稿说明可滚动完整阅读`,textVisible)
+          await page.eval(`document.querySelector(${JSON.stringify(target)})?.scrollIntoView({block:'start'})`)
+          await shot(page,`root-recovery-${name}-text-${mode}-${width}`)
+          await page.eval(`(()=>{const n=document.querySelector(${JSON.stringify(target)});[...n.querySelectorAll('button')].find(b=>b.textContent==='确认建立新关联')?.scrollIntoView({block:'nearest'})})()`)
+          check(`${name} ${mode} ${width}px 确认与取消控件可见可操作`,await page.eval(`(()=>{const n=document.querySelector(${JSON.stringify(target)});return ['确认建立新关联','取消根预览'].every(text=>{const b=[...n.querySelectorAll('button')].find(b=>b.textContent===text);if(!b||b.disabled)return false;const r=b.getBoundingClientRect(),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);return r.width>0&&r.height>0&&r.left>=0&&r.top>=0&&r.right<=innerWidth+1&&r.bottom<=innerHeight+1&&!!hit&&b.contains(hit)})})()`))
+        }else {
+          check(`${name} ${mode} ${width}px 失败提示可见`,await page.eval(`(()=>{const n=document.querySelector('.vault-settings-status'),r=n.getBoundingClientRect();return !!n.textContent.trim()&&r.width>0&&r.height>0&&r.top>=0&&r.bottom<=innerHeight+1})()`))
+        }
+        await shot(page,`root-recovery-${name}-${mode}-${width}`)
+      }
+    }
+  }finally {
+    await page.call('Emulation.setDeviceMetricsOverride',{...viewport,deviceScaleFactor:1,mobile:false})
+    await page.eval(`window.rgent.themeSet(${JSON.stringify(theme)})`)
+    await waitFor(page,`document.documentElement.dataset.theme===${JSON.stringify(renderedTheme)}`)
+  }
 }
 async function v4OpenNote(page, name) {
   await selectBrowserFolder(page,'')
