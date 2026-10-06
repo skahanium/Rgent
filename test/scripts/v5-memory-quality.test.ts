@@ -67,13 +67,27 @@ it('runs every chain foreground before paid consolidation and hands off its actu
   const priorStarts=hostStart.mock.calls.length
   const result=await runMemoryQualityCase({id:'actual-chain-'+step,group:'fact',heldOut:false,prompt:'继续青灯项目',body:`青灯项目第${step}份目录检查完成；下一步核对版本。`,answer:'受控助手草稿尚未确认。',expected:{required:[],forbidden:[],notes:''}},credential,async function*(input){
    expect(hostStart.mock.calls.length).toBe(priorStarts+1)
-   const p=JSON.parse(String(input.messages[0]!.content));yield {type:'text',text:JSON.stringify({recent:{goal:'青灯项目',completed:`第${step}份目录完成（前步真实输出）`,blocked:'版本待核',next:'核对版本',sourceIds:p.sources.map((s:any)=>s.id),assistantDraft:false},proposals:[]})};yield {type:'finish',reason:'stop'}
+   const p=JSON.parse(String(input.messages[0]!.content))
+   // 第 5 步除近期背景外再学一条由本场来源派生的项目事实：遗忘本场日志的闭包因此有真实下游
+   // （长期条目把本场装入的近期日志记为依赖父），而不是靠近期日志自身携带依赖——后者正是
+   // a2fb8b1／d4fc2b8 修掉的级联缺陷，用缺陷撑起来的闭包宽度不构成产品保证。
+   const proposals=step===5?[{action:'add',content:'青灯项目下一步核对版本号。',layer:'demand',scope:'本库',sourceIds:p.sources.map((s:any)=>s.id),semantic:'fact',attribution:'受控夹具',reviewAt:null}]:[]
+   yield {type:'text',text:JSON.stringify({recent:{goal:'青灯项目',completed:`第${step}份目录完成（前步真实输出）`,blocked:'版本待核',next:'核对版本',sourceIds:p.sources.map((s:any)=>s.id),assistantDraft:false},proposals})};yield {type:'finish',reason:'stop'}
   },new AbortController().signal,{strategy:'continuity',base,noteName:`chain-${step}.md`,hostBeforeConsolidation:true,verifyClosure:step===5})
   expect(result.completed).toBe(true)
   expect(result.foreground?.ledger.state).toBe('saved')
   expect(result.foreground?.ledger.chapter?.taskId).toBe(result.material.taskId)
   expect(result.foreground?.material.materialVersion).toBe(result.material.materialVersion)
-  if(step===5){expect(support.v5ControlledStatus(V5_QUALITY_CASES.find(c=>c.chain==='alpha'&&c.step===5)!,result)).toBe('passed');expect(result.controlled?.closure?.passed).toBe(true);expect(result.controlled?.closure?.affectedIds.length).toBeGreaterThan(1)}
+  if(step===5){
+   expect(support.v5ControlledStatus(V5_QUALITY_CASES.find(c=>c.chain==='alpha'&&c.step===5)!,result)).toBe('passed');expect(result.controlled?.closure?.passed).toBe(true)
+   // 账本"本场实际使用的记忆"列的是被装入条目本身（不是依赖闭包），依赖收窄不该让它掉到 1。
+   expect(result.dependencies.length).toBeGreaterThan(1)
+   // 闭包必须覆盖"锚点（本场装入的近期日志）＋由本场来源派生的长期条目"：v5 合同要求近期块的遗忘闭包与长期记忆同样执行。
+   const derived=result.entries.find((e:any)=>e.category==='long')
+   expect(derived).toBeTruthy()
+   expect(result.controlled?.closure?.affectedIds).toEqual(expect.arrayContaining([derived!.id]))
+   expect(result.controlled?.closure?.affectedIds.length).toBeGreaterThan(1)
+  }
   hostInputs.push(JSON.stringify(result.foreground?.sent))
   if(step>1){expect(hostInputs.at(-1)).toContain(`第${step-1}份目录完成（前步真实输出）`);expect(result.material.memoryDeps.length).toBeGreaterThan(0)}
  }
