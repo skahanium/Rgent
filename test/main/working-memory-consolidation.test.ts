@@ -335,6 +335,12 @@ it('refuses standing without a verbatim human command and keeps the legacy rule 
  // v6 口径：即使引用全是口令，没有显式 authority 的长期约定也要拒绝
  expect(()=>roleAgreement({semantic:'standing',sourceIds:['cmd']},[command],true)).toThrow()
  expect(roleAgreement({semantic:'standing',sourceIds:['cmd'],authority:[{sourceId:'cmd',quote:'先给结论'}]},[command],true)).toEqual({agreement:{authority:[{sourceId:'cmd',quote:'先给结论'}],supporting:[]},extra:[]})
+ // 口令 + 正文同义佐证：保留口令为权威依据，正文降为辅助，不整条拒绝。
+ const mixed=roleAgreement({semantic:'standing',authority:[{sourceId:'body',quote:'先给结论'},{sourceId:'cmd',quote:'先给结论'}],sourceIds:['cmd','body']},[command,human],true)!
+ expect(mixed.agreement.authority).toEqual([{sourceId:'cmd',quote:'先给结论'}])
+ expect(mixed.agreement.supporting).toContain('body')
+ // 只有正文、没有任何口令依据时必须拒绝。
+ expect(()=>roleAgreement({semantic:'standing',authority:[{sourceId:'body',quote:'先给结论'}],sourceIds:['body','cmd']},[command,human],true)).toThrow()
  // 佐证可以只出现在本场来源里：并入条目来源并记为辅助，不因未重复写进 sourceIds 而拒绝整条。
  const role=roleAgreement({semantic:'standing',authority:[{sourceId:'cmd',quote:'先给结论'}],sourceIds:['cmd'],supporting:['body']},[command],true,id=>id==='body'?human:undefined)!
  expect(role.agreement.supporting).toEqual(['body'])

@@ -72,10 +72,14 @@ export function roleAgreement(v:Record<string,unknown>,refs:WorkingSource[],requ
   const source=byId.get(item.sourceId);if(!source)throw Error()
   // 程序只验原话逐字存在与来源分类；内容与范围是否真由口令支持仍属质量验收。
   if(!source.text.includes(item.quote))throw Error()
-  if(v.semantic==='standing'&&source.classification!=='command')throw Error()
-  return {sourceId:item.sourceId,quote:item.quote}
+  return {sourceId:item.sourceId,quote:item.quote,command:source.classification==='command'}
  })
  if(new Set(authority.map(a=>a.sourceId)).size!==authority.length)throw Error()
+ // 长期约定必须至少有一条人的口令作权威依据；其余（例如正文里的同义佐证）降为辅助佐证并记录，不整条拒绝。
+ const commanded=authority.filter(item=>item.command)
+ if(v.semantic==='standing'&&!commanded.length)throw Error()
+ const kept=(v.semantic==='standing'?commanded:authority).map(({sourceId,quote})=>({sourceId,quote}))
+ const demotedAuthority=v.semantic==='standing'?authority.filter(item=>!commanded.includes(item)).map(item=>item.sourceId):[]
  const supporting=v.supporting===undefined?[]:v.supporting
  if(!Array.isArray(supporting)||supporting.length>8||new Set(supporting).size!==supporting.length||supporting.some(id=>typeof id!=='string'))throw Error()
  // 佐证只要求是本场真实来源：模型可以只把口令写进 sourceIds，再另行列出正文佐证。
@@ -86,7 +90,7 @@ export function roleAgreement(v:Record<string,unknown>,refs:WorkingSource[],requ
  // 有界程序整理：混入的非权威引用降为辅助佐证并记录角色，不整条拒绝，也不删除正文引用。
  const demoted=refs.map(s=>s.id).filter(id=>!authorityIds.has(id)&&!(supporting as string[]).includes(id))
  const extra=list.filter(source=>!byId.has(source.id))
- return {agreement:{authority,supporting:[...list.map(source=>source.id),...demoted]},extra}
+ return {agreement:{authority:kept,supporting:[...new Set([...list.map(source=>source.id),...demotedAuthority,...demoted])]},extra}
 }
 function proposalGroups(values:unknown[],sources:WorkingSource[],entries:WorkingEntry[],requireRoles=false):{groups:WorkingChange[][];dropped:import('../shared/memory.ts').MemoryJobGroupResult[]}{
  const groups=new Map<string,unknown[]>(),sourceMap=new Map(sources.map(s=>[s.id,s]))
