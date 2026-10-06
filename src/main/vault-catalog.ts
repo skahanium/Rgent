@@ -90,6 +90,9 @@ function parseWorkspaces(source: Snapshot): WorkspaceData | null {
     const entries: WorkspaceData['entries'] = []
     for (const item of value.entries) {
       if (!object(item) || item.id !== undefined && !text(item.id,128) || !rootPath(item.path) || !identity(item.rootIdentity) || !object(item.workspace) || item.workspace.version !== 1 || !Array.isArray(item.workspace.tabs) || !(item.workspace.active===undefined||item.workspace.active===null||typeof item.workspace.active==='string') || entries.some(entry => item.id === undefined && entry.id === undefined && entry.path === item.path && entry.rootIdentity === item.rootIdentity)) return null
+      // 已保存的tab身份不能通过过滤坏行变成空工作区；显示偏好仍沿原归一化。
+      const tabs=item.workspace.tabs
+      if(tabs.length>64||tabs.some(tab=>!object(tab)||!relPath(tab.relPath))||new Set(tabs.map(tab=>relPath((tab as Record<string,unknown>).relPath))).size!==tabs.length)return null
       if(item.id!==undefined&&entries.some(entry=>entry.id===item.id))return null
       entries.push({ ...(item.id?{id:item.id as string}:{}), path: item.path, rootIdentity: item.rootIdentity, workspace: workspaceValue(item.workspace) })
     }

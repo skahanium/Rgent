@@ -382,3 +382,13 @@ it('preserves valid-JSON malformed workspace instead of converting broken tabs i
  expect(()=>catalog.saveWorkspace(catalog.inspect(vault),{version:1,tabs:[],active:null})).toThrow('VAULT_WORKSPACE_INVALID')
  expect(fs.readFileSync(file,'utf8')).toBe(raw)
 })
+
+it.each([{tabs:[null]},{tabs:[{relPath:'../keep.md'}]}])('preserves stored workspace with malformed tab contents instead of silently filtering to empty: %j',({tabs})=>{
+ const {data,vault,catalog}=fixture(),entry=catalog.register(catalog.inspect(vault)),file=path.join(data,'vault-workspaces.json')
+ const raw=JSON.stringify({version:1,entries:[{id:entry.id,path:entry.path,rootIdentity:entry.rootIdentity,workspace:{version:1,tabs,active:'keep.md'}}]});fs.writeFileSync(file,raw)
+ fs.renameSync(vault,vault+'-old');fs.mkdirSync(vault)
+ const owner={caller:'1:1',sessionId:'old'},preview=catalog.previewRoot(entry.id,catalog.inspect(vault),catalog.view().revision,owner)
+ expect(preview.workspace).toBe('unavailable');catalog.confirmRoot(preview.id,owner)
+ expect(()=>catalog.saveWorkspace(catalog.inspect(vault),{version:1,tabs:[],active:null})).toThrow('VAULT_WORKSPACE_INVALID')
+ expect(fs.readFileSync(file,'utf8')).toBe(raw)
+})

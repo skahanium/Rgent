@@ -1722,3 +1722,5 @@ sourceSessionId 只扩原另存／舍弃通道。人的第二次确认仅出版�
 红证据：`/tmp/rgent-integrity-p3-red-{root,flush,copy,relocate,release,workspace-hold,owner,bad-workspace,retry-ui}.log`。初始flush测试漏导入的测试错误先修，再取得真实断言红；主进程夹具规范路径与原frame恢复ACK适配单列，不用测试错误称产品失败。关键绿证据：旧来源排队期间frame替换拒写、catalog成功attach失败重试、旧pending正文copy不ack／显式abandon、两篇真实shell保稿／同名和迟到事件不覆稿、copy保留原tab／逐篇舍弃后恢复位置；日志 `/tmp/rgent-integrity-p3-{green-owner,main-pending,final-ownership-shell,green-workspace-hold,green-retry-ui}.log`。
 
 必要既有回归与新边界：十文件260／0（`/tmp/rgent-integrity-p3-targeted-final.log`），随后协议／库页重试补充四文件146／0（`/tmp/rgent-integrity-p3-final-protocol.log`），范围重叠不累加。类型、文档、diff及窗口脚本语法核验通过。MULTI脚本已适配普通切换拒身份变化→明确预览确认→稳定ID位置恢复，并增加实际活动根替换两篇保稿／取消确认／新同名正文及工作区不覆盖反例；本包未运行build、完整测试或真实窗口，因此新窗口场景仍待总任务实际验证，不能代称Windows／人工输入法／用户视觉证据。未调用模型、未改变正常设备配置、未新增存储格式／实体／通道／依赖／页面／分支／worktree，只有本地提交；包4及最终独立自查待续。
+
+包 3 独立复审追加：已存工作区的 tabs 数组内容也需核验，不能把 `[null]` 或越界路径行过滤成空工作区再允许覆盖。新增两例真实断言先红，修正存储解析的每行对象／安全笔记路径／唯一性与原64篇上限；普通可选显示偏好及人输入归一化保持。坏记录预览明确不可恢复、确认保字节、后续 save 拒写。首次参数化夹具误把数组元素作tabs参数已修，不作为产品红；真实红与定向绿分别 `/tmp/rgent-integrity-p3-review-workspace-{red,green}.log`。仅解析范围定向、类型与文档检查，不并行运行总任务实际UI／build／full／模型。
