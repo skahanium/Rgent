@@ -378,7 +378,7 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
    journal.write(k,{status:'started',key:k,frozenHash,model,round,case:spec,startedAt:new Date().toISOString()})
    let result:unknown,error:string|null=null
    const started=performance.now()
-   try{result=await runMemoryQualityCase(v6RunnerSpec(spec),credential,stream,controller.signal,{strategy:'continuity',verifyClosure:!spec.chain||spec.step===5,...(spec.chain?{base:path.join(root,`fictional-${model.modelId}-${round}-${spec.chain}`),noteName:`step-${spec.step}.md`,hostBeforeConsolidation:true}:{}),chainBlocked:blocked})}
+   try{result=await runMemoryQualityCase(v6RunnerSpec(spec),credential,stream,controller.signal,{strategy:'continuity',verifyClosure:!spec.chain||spec.step===5,...(spec.chain?{base:path.join(root,`fictional-${model.modelId}-r${frozen.revision??1}-${round}-${spec.chain}`),noteName:`step-${spec.step}.md`,hostBeforeConsolidation:true}:{}),chainBlocked:blocked})}
    catch(e){error=publicError(e);result=(e as any)?.evaluationResult??null}
    const row:any={key:k,model,round,case:spec,frozenHash,status:controller.signal.aborted?'interrupted':'completed',responses,result,error,latencyMs:performance.now()-started,review:null}
    journal.finish(k,JSON.parse(JSON.stringify(row).replaceAll(credential.apiKey,'[redacted]')))
