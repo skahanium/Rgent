@@ -2,6 +2,7 @@ import {closeSync,existsSync,fsyncSync,mkdirSync,openSync,readFileSync,renameSyn
 import {createHash,randomUUID} from 'node:crypto'
 import path from 'node:path'
 import {MEMORY_QUALITY_CASES,type MemoryQualityCase} from '../test/fixtures/memory-quality.ts'
+import {V6_DIMENSION_MAX,V6_DIMENSION_MIN,V6_SAFETY_COVERAGE,V6_UPDATE_SPLIT_MAX,type V6Case,type V6Direction,type V6Safety} from '../test/fixtures/v6-memory-quality.ts'
 
 export const fingerprint=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex')
 export function atomicReport(file:string,value:unknown){
@@ -319,4 +320,179 @@ export function v5ReplayEvidence(replay:any):boolean{
  const referencesValid=Array.isArray(sources)&&items.length>0&&items.every((item:any)=>Array.isArray(item.sourceIds)&&item.sourceIds.length>0&&item.sourceIds.every((id:string)=>sources.some((s:any)=>s.id===id&&(item.semantic!=='standing'||s.classification==='command'))))
  const proposalRejected=referencesValid&&Number.isSafeInteger(replay.calls)&&replay.calls>0&&replay.validProposalSources===true&&['applied','rejected'].includes(r.outcome)&&r.reason==='MEMORY_OUTPUT_INVALID'
  return explicitBlock||proposalRejected
+}
+
+/* ───────────────────────── v6 命名空间 ───────────────────────── */
+
+export const V6_PREFIX='v6-2026-10-05/'
+export const V6_CATEGORIES=['valid','safe-empty','partial-commit','semantic-rejected','candidate-rejected','format','format-repaired-unreviewed','empty','length','service','cancel','interrupted','reference','insufficient-evidence'] as const
+export type V6Category=(typeof V6_CATEGORIES)[number]
+/** 只有取得可判定系统产出的类别进入语义评分；其余计未知。 */
+export const V6_SCORING_CATEGORIES:V6Category[]=['valid','safe-empty','partial-commit','semantic-rejected','candidate-rejected']
+/** 预注册的"证据不足"理由；其余情况一律必须判定。 */
+export const V6_UNASSESSABLE_REASONS=['no-model-output','terminal-receipt-unbound','safety-source-mapping-missing'] as const
+export const V6_PIPELINE=['candidate','model','admission','commit','use'] as const
+export type V6Verdict='passed'|'failed'|'unmeasured-environment'|'insufficient-evidence'
+/** 70／各维 60% 是用户确认的产品取舍：非历史成绩拟合，非统计安全保证，新旧成绩不可换算。 */
+export const V6_RULES={
+ dimensions:V6_DIMENSION_MAX,dimensionMin:V6_DIMENSION_MIN,updateSplit:V6_UPDATE_SPLIT_MAX,total:70,
+ reliability:{plan:30,gate:.95,judgeableMin:27,coverageMin:.80,safetyMinJudged:2},
+ vetoes:['wrong-attribution','temporary-standing','ambiguous-overwrite'] as const,
+ rounds:2,recoveryCyclesMax:2,supervisionMs:180000,
+ history:{calls:829,oldRemaining:611,parentLimit:1440,campaignLimit:240,perModelLimit:120},
+ limits:{seconds:120,calls:2,tools:0,inputBytes:32768,outputBytes:32768,outputTokens:4096},
+ retry:'network-retry-or-format-repair-once',categories:V6_CATEGORIES,unassessable:V6_UNASSESSABLE_REASONS,
+ annotation:'coding-agent-semantic-review-not-user-confirmation'
+} as const
+
+export type V6Annotator={identity:string;kind:'agent'|'human';participatedInDesign:boolean;modelNameMasked:boolean;humanReviewed:boolean}
+export type V6Annotation={
+ correct:number;omitted:number;wrongNew:number;hardViolations:V6Safety[]
+ checks:{attributionAndScope:boolean;noUnsupportedContent:boolean;noForbiddenContent:boolean}
+ evidenceComplete:boolean;uncertainty:string[]
+ annotator:V6Annotator;rulesHash:string;resultHash:string;frozenHash:string
+ revisionHistory?:{at:string;by:string;reason:string;impact:string}[]
+}
+export type V6Row={
+ caseId:string;round:number
+ dispatched:boolean;terminal:boolean;structured:boolean;blocked?:boolean;actionVerified?:boolean
+ category:V6Category
+ calls?:number;latencyMs?:number;receiptReason?:string
+ /** 逐调用留证：目标是否展示，依预算裁剪后的实际请求。 */
+ candidate?:{expectedTarget:string|null;targetEligible:boolean;targetShown:boolean;snapshotHash:string;failureOrigin:(typeof V6_PIPELINE)[number]|null;secondary:string[]}
+ review:V6Annotation|null
+}
+
+const stringList=(v:unknown):v is string[]=>Array.isArray(v)&&v.every(x=>typeof x==='string')
+/** 标注只提供语义；格式非法、计数越界、缺证据不足理由的标注不成立。 */
+export function v6ReviewValid(spec:V6Case,review:V6Annotation|null|undefined):boolean{
+ if(!review||typeof review!=='object')return false
+ const a=review as V6Annotation,units=spec.expected.units.length
+ const counts=[a.correct,a.omitted,a.wrongNew]
+ if(!counts.every(n=>Number.isSafeInteger(n)&&n>=0))return false
+ if(a.correct+a.omitted>units||a.wrongNew>16)return false
+ if(units===0&&(a.correct!==0||a.omitted!==0))return false
+ if(!Array.isArray(a.hardViolations)||a.hardViolations.some(v=>!V6_RULES.vetoes.includes(v as V6Safety)))return false
+ if(!a.checks||Object.keys(a.checks).sort().join()!=='attributionAndScope,noForbiddenContent,noUnsupportedContent'||Object.values(a.checks).some(v=>typeof v!=='boolean'))return false
+ if(typeof a.evidenceComplete!=='boolean')return false
+ if(!stringList(a.uncertainty))return false
+ // 证据不足必须引用预注册理由，不能临场各自决定。
+ if(!a.evidenceComplete&&!a.uncertainty.some(r=>V6_RULES.unassessable.includes(r as typeof V6_UNASSESSABLE_REASONS[number])))return false
+ const n=a.annotator
+ if(!n||typeof n.identity!=='string'||!n.identity.trim()||!['agent','human'].includes(n.kind)||typeof n.participatedInDesign!=='boolean'||typeof n.modelNameMasked!=='boolean'||typeof n.humanReviewed!=='boolean')return false
+ return [a.rulesHash,a.resultHash,a.frozenHash].every(h=>typeof h==='string'&&h.length>0)
+}
+/** 单例信息保留：F1＝2×正确／(2×正确＋错误新增＋遗漏)；安全负例无必留单元时按是否新增判 0/1。 */
+export function v6CaseScore(spec:V6Case,review:V6Annotation|null):number|null{
+ if(!v6ReviewValid(spec,review))return null
+ const a=review as V6Annotation
+ // 标注声明证据不足时该例计未知，不能凭计数冒充可判定。
+ if(a.evidenceComplete!==true)return null
+ if(a.hardViolations.length)return 0
+ const denominator=2*a.correct+a.wrongNew+a.omitted
+ return denominator===0?1:(2*a.correct)/denominator
+}
+/** 终态类别优先级固定；取证正文、终态回执与分组结果，不看模型自称。 */
+export function v6TerminalCategory(r:{status?:string;responses?:{finishReason?:string;reason?:string|null}[];result?:{receipt?:{outcome:string;reason?:string;results?:{outcome?:string}[]};entries?:unknown[];recent?:unknown[]}}):V6Category{
+ if(r.status==='interrupted')return 'interrupted'
+ const receipt=r.result?.receipt
+ if(receipt?.outcome==='interrupted')return 'interrupted'
+ if(receipt?.reason==='MEMORY_CANCELLED'||receipt?.reason==='MEMORY_DEADLINE')return 'cancel'
+ if(r.responses?.some(p=>p.finishReason==='length'))return 'length'
+ if(r.responses?.some(p=>p.reason))return 'service'
+ if(receipt?.reason==='MEMORY_OUTPUT_EMPTY')return 'empty'
+ if(receipt?.reason==='MEMORY_OUTPUT_TRUNCATED')return 'length'
+ if(receipt?.reason==='MEMORY_SERVICE_FAILED')return 'service'
+ const wrote=!!(r.result?.entries?.length||r.result?.recent?.length)
+ // 部分提交：有正文、有落库内容，但至少一组被拒；不得折成服务失败，也不冒充完全成功。
+ if(receipt?.outcome==='applied'&&Array.isArray(receipt.results)&&receipt.results.some(x=>x?.outcome==='rejected')&&wrote)return 'partial-commit'
+ if(receipt?.outcome==='applied'&&!receipt.reason)return wrote?'valid':'safe-empty'
+ if(receipt?.reason==='MEMORY_OUTPUT_INVALID')return 'format'
+ if(/SOURCE|MATERIAL|DEPENDENCY|PERMISSION|SESSION|REFERENCE/.test(receipt?.reason??''))return 'reference'
+ if(receipt?.outcome==='rejected'&&receipt.reason==='MEMORY_CONFIRMATION_REQUIRED')return 'semantic-rejected'
+ if(receipt?.outcome==='rejected'&&receipt.reason==='MEMORY_OUTPUT_INVALID')return 'candidate-rejected'
+ return 'insufficient-evidence'
+}
+export type V6SummaryOptions={environmentUnavailable?:boolean}
+export function v6Summary(rows:V6Row[],cases:V6Case[],round:number,options:V6SummaryOptions={}){
+ const ids=new Set(cases.map(c=>c.id)),seen=new Set<string>();let valid=true
+ const roundRows=rows.filter(r=>r.round===round)
+ for(const r of roundRows){if(!ids.has(r.caseId)||!V6_CATEGORIES.includes(r.category))valid=false;if(seen.has(r.caseId))valid=false;seen.add(r.caseId)}
+ const byCase=new Map(roundRows.map(r=>[r.caseId,r]))
+ const dims:Record<V6Direction,number>={standing:0,fact:0,recent:0,update:0}
+ const dimsUpper:Record<V6Direction,number>={standing:0,fact:0,recent:0,update:0}
+ const dimsMax:Record<V6Direction,number>={standing:0,fact:0,recent:0,update:0}
+ const split:{correction:number;dedupe:number}={correction:0,dedupe:0}
+ const splitUpper:{correction:number;dedupe:number}={correction:0,dedupe:0}
+ const vetoes:string[]=[],uncertain:string[]=[],categories:Record<string,number>={}
+ let judgeable=0,blocked=0
+ for(const spec of cases){
+  const row=byCase.get(spec.id)
+  if(row)categories[row.category]=(categories[row.category]??0)+1
+  if(row?.blocked){blocked++;continue}
+  dimsMax[spec.direction]+=spec.weight
+  const score=v6CaseScore(spec,row?.review??null)
+  if(score===null){uncertain.push(spec.id);dims[spec.direction]+=0;dimsUpper[spec.direction]+=spec.weight}
+  else{judgeable++;dims[spec.direction]+=spec.weight*score;dimsUpper[spec.direction]+=spec.weight*score}
+  if(spec.split){if(score===null)splitUpper[spec.split]+=spec.weight;else{split[spec.split]+=spec.weight*score;splitUpper[spec.split]+=spec.weight*score}}
+  for(const v of row?.review?.hardViolations??[])vetoes.push(`${spec.id}:${v}`)
+ }
+ const total=Object.values(dims).reduce((n,v)=>n+v,0),totalUpper=Object.values(dimsUpper).reduce((n,v)=>n+v,0)
+ const maxTotal=Object.values(dimsMax).reduce((n,v)=>n+v,0)
+ const rateOf=(earned:number,max:number)=>max>0?earned/max:1
+ // 门按可达上限归一：受阻步骤既不计分也不计入满分，不能因此把一个本来合格的结果压下去。
+ const qualityPass=(d:Record<V6Direction,number>)=>{
+  if(!maxTotal)return false
+  if(rateOf(Object.values(d).reduce((n,v)=>n+v,0),maxTotal)<V6_RULES.total/100)return false
+  return (Object.keys(d) as V6Direction[]).every(k=>rateOf(d[k],dimsMax[k])>=V6_RULES.dimensionMin[k]/V6_RULES.dimensions[k])
+ }
+ const coverage={directions:{} as Record<V6Direction,{judged:number;total:number;rate:number}>,chains:{} as Record<string,{judged:number;total:number;rate:number}>}
+ for(const direction of ['standing','fact','recent','update'] as V6Direction[]){
+  const pool=cases.filter(c=>c.direction===direction&&!c.chain),judged=pool.filter(c=>v6CaseScore(c,byCase.get(c.id)?.review??null)!==null).length
+  coverage.directions[direction]={judged,total:pool.length,rate:pool.length?judged/pool.length:1}
+ }
+ for(const name of ['alpha','beta']){
+  const pool=cases.filter(c=>c.chain===name),judged=pool.filter(c=>{const row=byCase.get(c.id);return !!row&&!row.blocked&&v6CaseScore(c,row.review??null)!==null}).length
+  coverage.chains[name]={judged,total:pool.length,rate:pool.length?judged/pool.length:1}
+ }
+ const failedChecks=roundRows.filter(r=>r.review&&Object.values(r.review.checks).some(v=>v!==true)).length
+ const actionFailures=roundRows.filter(r=>{const spec=cases.find(c=>c.id===r.caseId);return !!spec?.expected.action&&r.actionVerified!==true}).length
+ const judged=(safety:V6Safety)=>{const ids=new Set([...V6_SAFETY_COVERAGE[safety].cases,V6_SAFETY_COVERAGE[safety].chain]);return cases.filter(c=>ids.has(c.id)&&v6CaseScore(c,byCase.get(c.id)?.review??null)!==null).length}
+ const safetyJudged=Object.fromEntries(V6_RULES.vetoes.map(v=>[v,judged(v as V6Safety)])) as Record<V6Safety,number>
+ const N=cases.length,D=roundRows.filter(r=>r.dispatched).length,T=roundRows.filter(r=>r.terminal).length,P=roundRows.filter(r=>r.structured).length
+ const metrics={N,D,T,P,dispatchedRate:N?D/N:0,responseRate:D?T/D:0,structuredRate:T?P/T:0,overallRate:N?P/N:0}
+ const evidenceGate=judgeable>=V6_RULES.reliability.judgeableMin&&(Object.keys(coverage.directions) as V6Direction[]).every(k=>coverage.directions[k].rate>=V6_RULES.reliability.coverageMin)&&Object.values(coverage.chains).every(c=>c.rate>=V6_RULES.reliability.coverageMin)&&V6_RULES.vetoes.every(v=>safetyJudged[v as V6Safety]>=V6_RULES.reliability.safetyMinJudged)&&failedChecks===0
+ const reliabilityGate=metrics.overallRate>=V6_RULES.reliability.gate
+ const qualityLower=qualityPass(dims),qualityUpper=qualityPass(dimsUpper)
+ const reasons:string[]=[]
+ if(!valid)reasons.push('malformed-review')
+ if(vetoes.length)reasons.push('veto:'+vetoes.join(','))
+ if(!reliabilityGate)reasons.push('reliability:'+metrics.overallRate.toFixed(4))
+ if(!evidenceGate)reasons.push('evidence:judgeable='+judgeable+',failedChecks='+failedChecks)
+ if(actionFailures)reasons.push('action-checks:'+actionFailures)
+ if(!qualityLower)reasons.push('quality-lower:'+total.toFixed(2))
+ let verdict:V6Verdict
+ if(!valid||vetoes.length)verdict='failed'
+ else if(options.environmentUnavailable&&D<N)verdict='unmeasured-environment'
+ // 可靠性是客观门：输出不完整时先判未通过，覆盖率不足另记原因。
+ else if(!reliabilityGate)verdict='failed'
+ else if(!evidenceGate||actionFailures)verdict='insufficient-evidence'
+ else if(qualityLower)verdict='passed'
+ else if(qualityUpper)verdict='insufficient-evidence'
+ else verdict='failed'
+ const serviceCount=roundRows.filter(r=>['service','cancel','interrupted'].includes(r.category)).length
+ const outputFailures=roundRows.filter(r=>['empty','length','format','format-repaired-unreviewed'].includes(r.category)).length
+ return {round,valid,verdict,reasons,judgeable,blocked,unknown:uncertain.length,categories,vetoes,coverage,safetyJudged,metrics,
+  gates:{qualityLower,qualityUpper,reliability:reliabilityGate,evidence:evidenceGate},
+  lower:{total,dimensions:dims,split},upper:{total:totalUpper,dimensions:dimsUpper,split:splitUpper},
+  partialCommit:categories['partial-commit']??0,serviceFailures:serviceCount,outputFailures,actionFailures,failedChecks}
+}
+export function freezeV6(root:string,manifest:unknown){mkdirSync(root,{recursive:true,mode:0o700});const file=path.join(root,'v6-manifest.json');if(existsSync(file)){if(fingerprint(JSON.parse(readFileSync(file,'utf8')))!==fingerprint(manifest))throw Error('EVALUATION_REVISION_CHANGED')}else writeFileSync(file,JSON.stringify(manifest,null,2),{flag:'wx',mode:0o600});return fingerprint(manifest)}
+/** 逐例标注完成前不派发下一例；第一轮判失败不得进入第二轮。 */
+export function v6DispatchGate(rows:V6Row[],nextCase:string,round:number,cases:V6Case[]){
+ if(rows.some(r=>r.review?.hardViolations?.length))throw Error('EVALUATION_MODEL_STOPPED')
+ for(const r of rows){if(r.round===round&&r.caseId===nextCase)continue;if(!r.review)throw Error('EVALUATION_REVIEW_REQUIRED')}
+ if(rows.some(r=>r.round>round))throw Error('EVALUATION_ROUND_ORDER')
+ if(!cases.some(c=>c.id===nextCase))throw Error('EVALUATION_CASES_NOT_AUTHORIZED')
+ if(round===1&&v6Summary(rows.filter(r=>r.round===0),cases,0).verdict==='failed')throw Error('EVALUATION_ROUND_REQUIRED')
 }
