@@ -71,7 +71,10 @@ it('rejects invented correction targets without discarding a factual add that om
  },'记录验收时间还需重新确认')
  await f.engine.handoff(f.material);await f.engine.idle()
  expect((await f.service.entries()).map(e=>e.content)).toEqual(['验收时间需重新确认'])
- expect(f.service.snapshot().record.jobs[0]?.reason).toBe('MEMORY_OUTPUT_INVALID')
+ // 找不到更新目标要留下自己的原因，既不新增冲突副本，也不折成格式错误。
+ const job=f.service.snapshot().record.jobs[0]
+ expect(job?.reason).toBe('MEMORY_TARGET_NOT_FOUND')
+ expect(job?.results).toEqual([{action:'correct',outcome:'rejected',code:'MEMORY_TARGET_NOT_FOUND'},{action:'add',outcome:'applied'}])
 })
 it('an unrelated human addition does not reject a late proposal based on unchanged material',async()=>{
  let release!:()=>void,entered!:()=>void;const waiting=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r)

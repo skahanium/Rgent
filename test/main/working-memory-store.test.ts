@@ -275,3 +275,29 @@ it('rejects an item whose full encoded recent block exceeds 16 KiB',()=>{
  expect(Buffer.byteLength(raw)).toBeGreaterThan(16*1024)
  expect(()=>parseWorkingMemory(raw)).toThrow('MEMORY_STORAGE_INVALID')
 })
+
+it('treats a representation-only duplicate as an idempotent no-op instead of a second active entry',()=>{
+ const {store}=fixture(),input={content:'本库回答使用中文',layer:'core' as const,scope:'本库',sources:[source()],semantic:'standing' as const,attribution:'人的口令',reviewAt:null}
+ store.add(store.read(),input)
+ store.apply(store.read(),[[{action:'add',input:{...input,content:' 本库回答使用中文　'}}]],{taskId:'idempotent',materialVersion:'a'.repeat(64),outcome:'applied',entryIds:[]})
+ expect(store.read().record.entries).toHaveLength(1)
+ const receipt=store.read().record.jobs.find(job=>job.taskId==='idempotent')!
+ expect(receipt.results).toEqual([{action:'add',outcome:'unchanged'}])
+ expect(receipt.reason).toBeUndefined()
+ expect(receipt.outcome).toBe('applied')
+})
+it('does not merge genuinely different facts that merely look similar',()=>{
+ const {store}=fixture(),input={content:'石桥项目每两周检查一次',layer:'demand' as const,scope:'本库',sources:[source()],semantic:'fact' as const,attribution:'人说',reviewAt:null}
+ store.add(store.read(),input)
+ store.apply(store.read(),[[{action:'add',input:{...input,content:'石桥项目每周检查一次'}}]],{taskId:'distinct',materialVersion:'a'.repeat(64),outcome:'applied',entryIds:[]})
+ expect(store.read().record.entries.map(e=>e.content)).toEqual(['石桥项目每两周检查一次','石桥项目每周检查一次'])
+})
+it('keeps a rejected target and a saved independent group apart in one batch',()=>{
+ const {store}=fixture(),input={content:'银桥项目采用 A 方案',layer:'demand' as const,scope:'本库',sources:[source()],semantic:'fact' as const,attribution:'人说',reviewAt:null}
+ store.apply(store.read(),[[{action:'add',input}]],{taskId:'mixed',materialVersion:'a'.repeat(64),outcome:'applied',entryIds:[]},null,[{action:'correct',outcome:'rejected',code:'MEMORY_TARGET_NOT_FOUND'}])
+ const receipt=store.read().record.jobs.find(job=>job.taskId==='mixed')!
+ expect(receipt.outcome).toBe('applied')
+ expect(receipt.reason).toBe('MEMORY_TARGET_NOT_FOUND')
+ expect(receipt.results).toEqual([{action:'correct',outcome:'rejected',code:'MEMORY_TARGET_NOT_FOUND'},{action:'add',outcome:'applied'}])
+ expect(store.read().record.entries).toHaveLength(1)
+})

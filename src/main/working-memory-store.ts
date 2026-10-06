@@ -160,19 +160,19 @@ export class WorkingMemoryStore{
   return this.commit(basis,record)
  }
  /** Groups are isolated proposals. Related corrections either commit together or not at all. */
- apply(basis:WorkingSnapshot,groups:readonly (readonly WorkingChange[])[],receipt:MemoryJobReceipt,recentInput:WorkingRecentInput|null=null){
+ apply(basis:WorkingSnapshot,groups:readonly (readonly WorkingChange[])[],receipt:MemoryJobReceipt,recentInput:WorkingRecentInput|null=null,priorResults:readonly MemoryJobGroupResult[]=[]){
   if(groups.length>64||groups.reduce((n,g)=>n+g.length,0)>64)throw Error('MEMORY_OUTPUT_LIMIT')
   let record=structuredClone(basis.record),rejected=0,rejectionReason:string|undefined;const entryIds:string[]=[]
-  const results:MemoryJobGroupResult[]=[]
-  for(const group of groups){const candidate=structuredClone(record),accepted:string[]=[]
+  const results:MemoryJobGroupResult[]=[...priorResults]
+  for(const group of groups){const candidate=structuredClone(record),accepted:string[]=[];let duplicates=0
    try{if(!group.length)throw Error('BAD_MEMORY_EDIT')
     for(const change of group){
      if(!inputValid(change.input)||!this.canLearn(candidate,change.input.sources))throw Error('MEMORY_MATERIAL_FORGOTTEN')
      const input=structuredClone(change.input),now=new Date().toISOString()
      candidate.nextSequence=Math.max(candidate.nextSequence,...input.sources.map(s=>s.sequence))
      if(change.action==='add'){
-      const duplicate=candidate.entries.find(e=>e.content===input.content&&e.scope===input.scope&&e.semantic===input.semantic&&e.status!=='disabled')
-      if(duplicate)continue
+      const duplicate=candidate.entries.find(e=>e.status!=='disabled'&&sameStatement(e,input))
+      if(duplicate){duplicates++;continue}
       if(candidate.entries.length>=1000)throw Error('MEMORY_ENTRY_LIMIT')
       const e:WorkingEntry={...input,id:randomUUID(),version:1,category:'long',status:'active',state:stateFromStatus('active'),reason:null,updatedAt:now,updateBasis:{kind:'consolidation',id:receipt.taskId,version:1}};candidate.entries.push(e);accepted.push(e.id)
      }else{
@@ -192,7 +192,8 @@ export class WorkingMemoryStore{
     }
     if(!ordinaryFits(candidate))throw Error('MEMORY_FILE_LIMIT')
     record=candidate;entryIds.push(...accepted)
-    results.push({action:group[0]!.action,outcome:'applied'})
+    // 同一议题只有允许的表示差异时返回明确幂等结果：不冒充新增，也不当作失败。
+    results.push(accepted.length?{action:group[0]!.action,outcome:'applied'}:duplicates?{action:group[0]!.action,outcome:'unchanged'}:{action:group[0]!.action,outcome:'applied'})
    }catch(error){
     rejected++
     // 具体原因逐组保留：容量、版本、来源与遗忘分别可辨，不再一律折成格式错误。
@@ -228,8 +229,9 @@ export class WorkingMemoryStore{
    }
   }
   record.jobs=record.jobs.filter(j=>j.taskId!==receipt.taskId)
-  const bounded=boundedJobResults(results)
-  record.jobs.push({...receipt,...(rejected&&!receipt.reason?{reason:rejectionReason??'MEMORY_OUTPUT_INVALID'}:{}),...(bounded.length?{results:bounded}:{}),...(rejected&&!entryIds.length&&!recentIds.length?{outcome:'rejected' as const}:{}),entryIds:[...new Set([...entryIds,...recentIds])]});record.jobs=boundedReceipts(record.jobs)
+  const bounded=boundedJobResults(results),priorRejection=priorResults.find(result=>result.outcome==='rejected')?.code
+  const dominantReason=receipt.reason??rejectionReason??priorRejection
+  record.jobs.push({...receipt,...(dominantReason?{reason:dominantReason}:{}),...(bounded.length?{results:bounded}:{}),...((rejected||priorRejection)&&!entryIds.length&&!recentIds.length?{outcome:'rejected' as const}:{}),entryIds:[...new Set([...entryIds,...recentIds])]});record.jobs=boundedReceipts(record.jobs)
   const snapshot=this.commit(basis,record,false,!entryIds.length&&!recentIds.length)
   return {snapshot,entryIds:[...new Set([...entryIds,...recentIds])],recentIds,rejected}
  }
@@ -298,15 +300,20 @@ export function applyMemoryRecovery(raw:string,patches:MemoryRecoveryPatch[]):st
  nextRevision(record);if(!ordinaryFits(record))throw Error('MEMORY_FILE_LIMIT');return encodeWorkingMemory(record)
 }
 
+/** 只做确定性表示归一：大小写、全半角与空白差异不算新事实；不做同义词或语义合并。 */
+function sameStatement(entry:{content:string;scope:string;semantic:string},input:{content:string;scope:string;semantic:string}):boolean{
+ return entry.scope===input.scope&&entry.semantic===input.semantic&&normalizedStatement(entry.content)===normalizedStatement(input.content)
+}
+function normalizedStatement(text:string):string{return text.normalize('NFKC').toLowerCase().replace(/\s+/g,' ').trim()}
 function boundedJobResults(results:readonly MemoryJobGroupResult[]):MemoryJobGroupResult[]{
  // 拒绝原因优先保留：界面要能说明哪些没保存、为什么。
- const ordered=[...results.filter(r=>r.outcome==='rejected'),...results.filter(r=>r.outcome==='applied')],out:MemoryJobGroupResult[]=[]
+ const ordered=[...results.filter(r=>r.outcome==='rejected'),...results.filter(r=>r.outcome!=='rejected')],out:MemoryJobGroupResult[]=[]
  for(const result of ordered){if(out.length>=8)break;if(Buffer.byteLength(JSON.stringify([...out,result]))>256)break;out.push(result)}
  return out
 }
 function jobResultsValid(value:unknown):value is MemoryJobGroupResult[]{
  if(!Array.isArray(value)||value.length>8||Buffer.byteLength(JSON.stringify(value))>256)return false
- return value.every(item=>object(item)&&Object.keys(item).every(key=>['action','outcome','code'].includes(key))&&['add','correct','conflict','obsolete','recent'].includes(String(item.action))&&['applied','rejected'].includes(String(item.outcome))&&(item.code===undefined||typeof item.code==='string'&&/^[A-Z][A-Z_]{0,63}$/.test(item.code)))
+ return value.every(item=>object(item)&&Object.keys(item).every(key=>['action','outcome','code'].includes(key))&&['add','correct','conflict','obsolete','recent'].includes(String(item.action))&&['applied','rejected','unchanged'].includes(String(item.outcome))&&(item.code===undefined||typeof item.code==='string'&&/^[A-Z][A-Z_]{0,63}$/.test(item.code)))
 }
 function boundedReceipts(jobs:MemoryJobReceipt[]):MemoryJobReceipt[]{
  const protectedJobs=jobs.filter(j=>['queued','running','interrupted'].includes(j.outcome))

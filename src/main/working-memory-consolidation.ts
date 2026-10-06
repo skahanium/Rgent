@@ -83,25 +83,30 @@ export function roleAgreement(v:Record<string,unknown>,refs:WorkingSource[],requ
  const demoted=refs.map(s=>s.id).filter(id=>!authorityIds.has(id)&&!(supporting as string[]).includes(id))
  return {authority,supporting:[...(supporting as string[]),...demoted]}
 }
-function proposalGroups(values:unknown[],sources:WorkingSource[],entries:WorkingEntry[],requireRoles=false):WorkingChange[][]{
+function proposalGroups(values:unknown[],sources:WorkingSource[],entries:WorkingEntry[],requireRoles=false):{groups:WorkingChange[][];dropped:import('../shared/memory.ts').MemoryJobGroupResult[]}{
  const groups=new Map<string,unknown[]>(),sourceMap=new Map(sources.map(s=>[s.id,s]))
  values.forEach((v,i)=>{const key=obj(v)&&typeof v.group==='string'?v.group:'independent-'+i;groups.set(key,[...(groups.get(key)??[]),v])})
- const valid:WorkingChange[][]=[]
+ const valid:WorkingChange[][]=[],dropped:import('../shared/memory.ts').MemoryJobGroupResult[]=[]
  for(const group of groups.values()){
   try{const changes:WorkingChange[]=[]
    for(const v of group){
-    if(!obj(v)||Object.keys(v).some(k=>!['action','content','layer','scope','sourceIds','semantic','attribution','reviewAt','id','version','group','tags','authority','supporting'].includes(k))||!['add','correct','conflict','obsolete'].includes(String(v.action))||!bounded(v.content,4096)||!v.content.trim()||!['core','demand'].includes(String(v.layer))||!bounded(v.scope,512)||!bounded(v.attribution,512)||!v.attribution.trim()||!['standing','fact'].includes(String(v.semantic))||v.reviewAt!==null&&!(typeof v.reviewAt==='string'&&Number.isFinite(Date.parse(v.reviewAt)))||!Array.isArray(v.sourceIds)||!v.sourceIds.length||v.sourceIds.length>16||new Set(v.sourceIds).size!==v.sourceIds.length||v.sourceIds.some(id=>typeof id!=='string'||!sourceMap.has(id))||v.group!==undefined&&!(typeof v.group==='string'&&/^[A-Za-z0-9_-]{1,64}$/.test(v.group)))throw Error()
+    if(!obj(v)||Object.keys(v).some(k=>!['action','content','layer','scope','sourceIds','semantic','attribution','reviewAt','id','version','group','tags','authority','supporting'].includes(k))||!['add','correct','conflict','obsolete'].includes(String(v.action))||!bounded(v.content,4096)||!v.content.trim()||!['core','demand'].includes(String(v.layer))||!bounded(v.scope,512)||!bounded(v.attribution,512)||!v.attribution.trim()||!['standing','fact'].includes(String(v.semantic))||v.reviewAt!==null&&!(typeof v.reviewAt==='string'&&Number.isFinite(Date.parse(v.reviewAt)))||!Array.isArray(v.sourceIds)||!v.sourceIds.length||v.sourceIds.length>16||new Set(v.sourceIds).size!==v.sourceIds.length||v.sourceIds.some(id=>typeof id!=='string')||v.sourceIds.some(id=>!sourceMap.has(id)&&(()=>{throw Error('MEMORY_OUTPUT_REFERENCE_INVALID')})())||v.group!==undefined&&!(typeof v.group==='string'&&/^[A-Za-z0-9_-]{1,64}$/.test(v.group)))throw Error()
     if(v.tags!==undefined&&(!Array.isArray(v.tags)||v.tags.length>6||new Set(v.tags).size!==v.tags.length||v.tags.some(t=>!bounded(t,64)||!t.length)))throw Error()
     const refs=v.sourceIds.map(id=>sourceMap.get(id)!)
     const agreement=roleAgreement(v,refs,requireRoles)
     const input:WorkingInput={content:v.content,layer:v.layer as 'core'|'demand',scope:v.scope,sources:structuredClone(refs),semantic:v.semantic as 'standing'|'fact',attribution:v.attribution,reviewAt:v.reviewAt as string|null,...(v.tags?{tags:v.tags as string[]}:{}),...(agreement?{agreement}:{})}
     if(v.action==='add'){if(v.id!==undefined||v.version!==undefined)throw Error();changes.push({action:'add',input})}
-    else{if(typeof v.id!=='string'||!Number.isSafeInteger(v.version)||!entries.some(e=>e.id===v.id&&e.version===v.version))throw Error();changes.push({action:v.action as 'correct'|'conflict'|'obsolete',id:v.id,version:Number(v.version),input})}
+    else{if(typeof v.id!=='string'||!Number.isSafeInteger(v.version))throw Error('MEMORY_OUTPUT_INVALID');if(!entries.some(e=>e.id===v.id&&e.version===v.version))throw Error('MEMORY_TARGET_NOT_FOUND');changes.push({action:v.action as 'correct'|'conflict'|'obsolete',id:v.id,version:Number(v.version),input})}
    }
    valid.push(changes)
-  }catch{/* Invalid independent proposals cannot invalidate other valid groups. */}
+  }catch(error){/* Invalid independent proposals cannot invalidate other valid groups. */
+   const raw=obj(group[0])?(group[0] as Record<string,unknown>).action:undefined
+   const action=typeof raw==='string'&&['add','correct','conflict','obsolete'].includes(raw)?raw as 'add'|'correct'|'conflict'|'obsolete':'add'
+   const code=error instanceof Error&&/^[A-Z][A-Z_]{0,63}$/.test(error.message)?error.message:'MEMORY_OUTPUT_INVALID'
+   dropped.push({action,outcome:'rejected',code})
+  }
  }
- return valid
+ return {groups:valid,dropped}
 }
 function inheritInputs(refs:WorkingSource[],material:SavedTaskMaterial,entries:WorkingEntry[],replacedId?:string):WorkingSource[]{
  const sourceDeps=[...material.sourceDeps,...entries.flatMap(e=>e.sources.flatMap(s=>s.sourceDeps))].map(d=>({...d,permissionTier:'reference' as const}))
@@ -295,9 +300,9 @@ export class WorkingMemoryConsolidation{
    }
    // Only related, valid committed memory is sent, not the entire vault record.
    const continuity=this.ports.strategy==='continuity',system=continuity?memoryContinuitySystem:memoryConsolidationSystem
-   const hints=sources.map(s=>s.text).join('\n'),preselected=continuity?updateMemoryCandidates(job.service.snapshot().record.entries,job.material.prompt,hints):null
+   const usedIds=job.material.memoryDeps.map(d=>d.id),hints=sources.map(s=>s.text).join('\n'),preselected=continuity?updateMemoryCandidates(job.service.snapshot().record.entries,job.material.prompt,hints,usedIds):null
    const candidates=await until(()=>job.service.consolidationCandidates(sources,preselected?.map(e=>e.id)),job.controller.signal),byId=new Map(candidates.map(e=>[e.id,e]))
-   const entries=continuity?updateMemoryCandidates(candidates,job.material.prompt,hints):rankMemoryEntries(candidates.map(e=>({...e,status:'active' as const})),job.material.prompt,hints).slice(0,8).map(e=>byId.get(e.id)!)
+   const entries=continuity?updateMemoryCandidates(candidates,job.material.prompt,hints,usedIds):rankMemoryEntries(candidates.map(e=>({...e,status:'active' as const})),job.material.prompt,hints).slice(0,8).map(e=>byId.get(e.id)!)
    basis=job.service.snapshot()
    const payload={task:{id:job.material.taskId,status:job.material.status,...(continuity?{assistantDraft:job.material.answer}: {})},sources:sources.map(s=>({id:s.id,text:s.text,classification:s.classification,kind:s.kind,attribution:s.relPath})),memory:entries.map(e=>({id:e.id,version:e.version,content:e.content,layer:e.layer,semantic:e.semantic,scope:e.scope,attribution:e.attribution,updatedAt:e.updatedAt,status:e.status,reviewAt:e.reviewAt,tags:e.tags}))}
    // Retain the highest ranked candidates within the existing input limits.
@@ -310,7 +315,7 @@ export class WorkingMemoryConsolidation{
     parsed=parse(await this.response(job,{repair:{draft,issues:[continuity?'必须是仅含 recent 与最多16项 proposals 的完整 JSON；不增加新材料或新结论':'必须是仅含 proposals 数组的完整 JSON；不增加新材料或新结论']}},sources,entries))
    }
    values=parsed.proposals;recentValue=parsed.recent
-   let groups=proposalGroups(values,sources,entries,Boolean(continuity))
+   const proposed=proposalGroups(values,sources,entries,Boolean(continuity));let groups=proposed.groups
    const unknownReference=(value:unknown)=>obj(value)&&Array.isArray(value.sourceIds)&&value.sourceIds.some(id=>typeof id==='string'&&!sources.some(s=>s.id===id))
    const referenceRejected=values.some(unknownReference)||continuity&&unknownReference(recentValue)
    // The original command is independent; a model's paraphrase is not proof of independence.
@@ -323,7 +328,7 @@ export class WorkingMemoryConsolidation{
    const replacements=groups.flatMap(g=>g.flatMap(c=>c.action==='correct'||c.action==='obsolete'?[{id:c.id,version:c.version}]:[]))
    const staleBatchDependency=(refs:WorkingSource[])=>refs.some(s=>s.memoryDeps.some(d=>replacements.some(r=>r.id===d.id&&r.version===d.version)))
    let dependencyRejected=false
-   groups=groups.filter(group=>{if(group.some(c=>staleBatchDependency(c.input.sources))){dependencyRejected=true;return false}return true})
+   groups=groups.filter(group=>{if(group.some(c=>staleBatchDependency(c.input.sources))){dependencyRejected=true;proposed.dropped.push({action:group[0]!.action,outcome:'rejected',code:'MEMORY_DEPENDENCY_CHANGED'});return false}return true})
    if(recent&&staleBatchDependency(recent.sources)){recent=undefined;dependencyRejected=true}
    for(const group of groups)for(const change of group)change.input.sources=await Promise.all(change.input.sources.map(s=>until(()=>job.service.renewSavedBinding(s),job.controller.signal)))
    if(recent)recent.sources=await Promise.all(recent.sources.map(s=>until(()=>job.service.renewSavedBinding(s),job.controller.signal)))
@@ -335,7 +340,7 @@ export class WorkingMemoryConsolidation{
     const current=store.read(),materialState=(r:typeof basis.record)=>JSON.stringify([r.identity,r.watermark,r.forgotten])
     if(materialState(current.record)!==materialState(basis.record))throw Error('MEMORY_CONFLICT')
     for(const used of entries)if(![...current.record.entries,...current.record.recent].some(e=>e.id===used.id&&e.version===used.version))throw Error('MEMORY_CONFLICT')
-    return store.apply(current,groups,{taskId:job.material.taskId,materialVersion:job.material.materialVersion,outcome:'applied',entryIds:[],...(groups.reduce((n,g)=>n+g.length,0)<values.length||continuity&&recentValue!==null&&!recent?{reason:dependencyRejected?'MEMORY_DEPENDENCY_CHANGED':referenceRejected?'MEMORY_OUTPUT_REFERENCE_INVALID':'MEMORY_OUTPUT_INVALID'}:{})},recent)
+    return store.apply(current,groups,{taskId:job.material.taskId,materialVersion:job.material.materialVersion,outcome:'applied',entryIds:[],...(dependencyRejected?{reason:'MEMORY_DEPENDENCY_CHANGED'}:referenceRejected?{reason:'MEMORY_OUTPUT_REFERENCE_INVALID'}:proposed.dropped.length?{reason:proposed.dropped[0]!.code??'MEMORY_OUTPUT_INVALID'}:continuity&&recentValue!==null&&!recent?{reason:'MEMORY_OUTPUT_INVALID'}:{})},recent,proposed.dropped)
    })
    if(result.entryIds.length){const changed=[...result.snapshot.record.entries,...result.snapshot.record.recent].filter(e=>result.entryIds.includes(e.id));const before=[...basis.record.entries,...basis.record.recent].filter(e=>result.entryIds.includes(e.id));this.undoBatches.set(job.material.taskId,{service:job.service,sessionId:job.context.sessionId,version:job.material.materialVersion,before:structuredClone(before),after:changed.map(e=>({id:e.id,version:e.version}))});while(this.undoBatches.size>8)this.undoBatches.delete(this.undoBatches.keys().next().value!)}
    if(result.rejected)this.notify(job)

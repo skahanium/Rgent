@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import type { MemoryEntry } from '../../src/shared/memory.ts'
-import { createMemoryUsePermit, recallMemory, memorySection } from '../../src/main/memory-use.ts'
+import { createMemoryUsePermit, recallMemory, memorySection, updateMemoryCandidates } from '../../src/main/memory-use.ts'
 
 const entry = (id: string, content = '项目使用中文', layer: 'core' | 'demand' = 'core'): MemoryEntry => ({ id, version: 1, content, layer, scope: '本库', status: 'active', reason: null, updatedAt: '2026-10-02', updateBasis: { kind: 'manual', id: 'manual', version: 1 }, sources: [{ id: `source-${id}`, version: 1, relPath: 'outside.md', objectVersion: 'object', revision: 'a'.repeat(64), permissionTier: 'reference', kind: 'body', taskId: null, taskMaterialHash: null, classification: 'human', start: 0, end: 2, text: '依据', hash: 'b'.repeat(64), basisHash: 'c'.repeat(64), sourceDeps: [], memoryDeps: [] }] })
 const model = { provider: 'custom' as const, modelId: 'main', baseURL: 'https://example.com/v1', contextTokens: 16000, apiKey: 'secret' }
@@ -215,4 +215,25 @@ it('sends recent time, outcome and unaccepted assistant attribution in the budge
  const {memorySection}=await import('../../src/main/memory-use.ts')
  const recent={...entry('background','助手提出的草案待确认','demand'),category:'recent' as const,recent:{taskId:'t',noteId:'n',materialVersion:'a'.repeat(64),createdAt:'2026-10-01T00:00:00.000Z',outcome:'completed' as const,sections:{goal:'目标',completed:'草案',blocked:'待确认',next:''},assistantDraft:true}}
  const sent=memorySection(recent);expect(sent).toContain('2026-10-01');expect(sent).toContain('"assistantDraft":true');expect(sent).toContain('不能视为人的决定');expect(sent).toContain('"taskResult":"completed"')
+})
+
+it('backfills update candidates from explicit scope signals and task usage without claiming equivalence',()=>{
+ const candidate=(id:string,content:string,scope:string,updatedAt:string,semantic:'standing'|'fact',tags:string[]=[])=>({id,status:'active' as const,content,scope,updatedAt,semantic,tags,category:'long' as const})
+ const inScope=candidate('scope-hit','完全不同的措辞甲','石桥项目','2026-01-01','fact')
+ const used=candidate('used-hit','完全不同的措辞乙','本库','2026-01-02','standing')
+ const unrelated=candidate('unrelated','完全不同的措辞丙','别处','2026-01-03','fact')
+ const selected=updateMemoryCandidates([inScope,used,unrelated],'继续石桥项目的核对','',['used-hit'])
+ expect(selected.map(item=>item.id)).toContain('scope-hit')
+ expect(selected.map(item=>item.id)).toContain('used-hit')
+ expect(selected.map(item=>item.id)).not.toContain('unrelated')
+})
+it('reserves candidate slots for both long-term agreements and project facts',()=>{
+ const many=(semantic:'standing'|'fact',count:number)=>Array.from({length:count},(_,i)=>({id:`${semantic}-${i}`,status:'active' as const,content:'核对样稿版本号',scope:'本库',updatedAt:'2026-01-01',semantic,tags:[],category:'long' as const}))
+ const lone:('standing'|'fact')[]=['standing','fact']
+ for(const only of lone){
+  const other=only==='standing'?'fact':'standing'
+  const selected=updateMemoryCandidates([...many(only,20),...many(other,1)],'核对样稿版本号','')
+  expect(selected).toHaveLength(16)
+  expect(selected.some(item=>item.semantic===other)).toBe(true)
+ }
 })

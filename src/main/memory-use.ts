@@ -54,14 +54,26 @@ export function recallMemory(entries: readonly MemoryEntry[], prompt: string, ne
   }
   return { core, recent, demand, omittedDemand }
 }
-/** Updating is distinct from answering: both categories and explicit entity/scope hints participate. */
-export function updateMemoryCandidates<T extends Pick<MemoryEntry,'id'|'status'|'content'|'scope'|'updatedAt'|'semantic'|'tags'|'category'>>(entries:readonly T[],prompt:string,materials:string):T[]{
+/** Updating is distinct from answering: lexical relevance plus bounded backfill from
+ *  explicit scope/entity signals, entries this task actually used, and the most recently
+ *  updated entries in scope. Backfill only widens the candidate window; it never proves
+ *  semantic equivalence, and the same kind of long-term content can never crowd out the
+ *  other. */
+export function updateMemoryCandidates<T extends Pick<MemoryEntry,'id'|'status'|'content'|'scope'|'updatedAt'|'semantic'|'tags'|'category'>>(entries:readonly T[],prompt:string,materials:string,used:readonly string[]=[]):T[]{
  const projected=entries.filter(e=>e.category!=='recent'&&!['disabled','paused','pending'].includes(e.status)).map(e=>({...e,status:'active' as const,scope:[e.scope,...(e.tags??[])].join('\n')}))
- const byId=new Map(entries.map(e=>[e.id,e])),ranked=rankMemoryEntries(projected,prompt,materials).slice(0,64).map(e=>byId.get(e.id)!)
- const facts=ranked.filter(e=>e.semantic==='fact').slice(0,4)
- const selected=ranked.slice(0,16)
- for(const fact of facts)if(!selected.includes(fact)){let replace=selected.length-1;while(replace>=0&&selected[replace]!.semantic==='fact')replace--;if(replace>=0)selected[replace]=fact}
- return selected
+ const byId=new Map(entries.map(e=>[e.id,e])),lexical=rankMemoryEntries(projected,prompt,materials)
+ const haystack=`${prompt}\n${materials}`.toLocaleLowerCase(),scopeWords=new Set(terms(haystack))
+ const scopeSignal=(entry:T)=>[entry.scope,...(entry.tags??[])].some(part=>{const token=part.trim().toLocaleLowerCase();return token.length>1&&(scopeWords.has(token)||haystack.includes(token))})
+ const byRecency=(list:readonly T[])=>[...list].sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt)||a.id.localeCompare(b.id))
+ const inScope=projected.filter(scopeSignal),recentBackfill=byRecency(inScope.length?inScope:projected).slice(0,8)
+ const merged=[...lexical,...inScope,...projected.filter(e=>used.includes(e.id)),...recentBackfill]
+ const ranked=[...new Map(merged.map(e=>[e.id,e])).values()].slice(0,64).map(e=>byId.get(e.id)!)
+ // 双向保护：相关长期约定与相关项目事实各留至多四个名额，其余按排序补足。
+ const reserved=[...ranked.filter(e=>e.semantic==='standing').slice(0,4),...ranked.filter(e=>e.semantic==='fact').slice(0,4)]
+ const selected:T[]=[]
+ for(const item of reserved)if(!selected.includes(item))selected.push(item)
+ for(const item of ranked)if(selected.length<16&&!selected.includes(item))selected.push(item)
+ return selected.slice(0,16)
 }
 export function memoryDependency(entry: MemoryEntry): LedgerMemoryDependency {
   return { id: entry.id, version: entry.version, basisHashes: [...new Set(entry.sources.map(s => s.basisHash))], sourceDeps: entry.sources.map(s => ({ id: s.id, version: s.version, hash: s.hash, relPath: s.relPath, kind: s.kind, taskId: s.taskId })) }

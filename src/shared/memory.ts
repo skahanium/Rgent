@@ -59,7 +59,7 @@ export type MemoryEntry = {
 export type AgreementBasis = { authority: { sourceId: string; quote: string }[]; supporting: string[] }
 export type MemoryEntryState = { source: 'verified' | 'unchecked' | 'revoked'; content: 'current' | 'review' | 'disputed' | 'obsolete'; enabled: boolean; capacity: 'ready' | 'deferred' }
 /** 有界分组结果：一次整理里相关更正组共同成败，独立组分别记账。 */
-export type MemoryJobGroupResult = { action: 'add' | 'correct' | 'conflict' | 'obsolete' | 'recent'; outcome: 'applied' | 'rejected'; code?: string }
+export type MemoryJobGroupResult = { action: 'add' | 'correct' | 'conflict' | 'obsolete' | 'recent'; outcome: 'applied' | 'rejected' | 'unchanged'; code?: string }
 export type MemoryJobReceipt = {
   taskId: string; materialVersion: string
   outcome: 'queued' | 'running' | 'applied' | 'rejected' | 'interrupted'
