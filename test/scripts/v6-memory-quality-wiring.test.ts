@@ -8,7 +8,7 @@ import {
 } from '../../scripts/memory-quality-support.ts'
 import {V6_QUALITY_CASES} from '../fixtures/v6-memory-quality.ts'
 import type {V6Case} from '../fixtures/v6-memory-quality.ts'
-import {runMemoryQualityCase,v6MechanicalAction} from '../../scripts/memory-quality-runner.ts'
+import {runMemoryQualityCase,v6ActionEvidence,v6MechanicalAction} from '../../scripts/memory-quality-runner.ts'
 vi.mock('electron',()=>({dialog:{showOpenDialog:vi.fn()}}))
 
 const annotator={identity:'review-agent-A',kind:'agent' as const,participatedInDesign:true,modelNameMasked:true,humanReviewed:false}
@@ -107,7 +107,9 @@ describe('v6 命令行只读路径', () => {
  })
  it('v6 暴露 --resume 且不因此要求 profile', () => {
   expect(run(['--v6','--help']).stdout).toContain('--resume')
-  const resumeWithoutProfile=run(['--v6','--resume','MiniMax-M3'])
+  const temporary=mkdtempSync(path.join(os.tmpdir(),'rgent-v6-resume-cli-'))
+  let resumeWithoutProfile:ReturnType<typeof run>
+  try{resumeWithoutProfile=run(['--v6','--resume','MiniMax-M3','--report',path.join(temporary,'fictional-report'),'--budget',path.join(temporary,'fictional-budget')])}finally{rmSync(temporary,{recursive:true,force:true})}
   expect(resumeWithoutProfile.stderr).not.toContain('Explicit profile')
   // 无失败可恢复时按领域码拒绝，而不是当成缺少 profile。
   expect(resumeWithoutProfile.stderr).toMatch(/EVALUATION_(RESUME_NOT_REQUIRED|FREEZE_REQUIRED|REVISION_CHANGED)/)
@@ -211,6 +213,8 @@ describe('v6 付费记录字段', () => {
   expect(result.actionVerified).toBe(true)
   expect(result.actionEvidence.finalTargets).toEqual(result.receipt!.entryIds.map(id=>({id,version:result.entries.find(e=>e.id===id)!.version})))
   expect(result.followup?.sent.length).toBe(1)
+  expect(result.followup!.inputBudgetTokens).toBeGreaterThan(0)
+  expect(result.controlled!.dispatch.actualHostBudget.inputBudgetTokens).toBe(result.followup!.inputBudgetTokens)
   expect(result.dependencies).toEqual(expect.arrayContaining(result.actionEvidence.finalTargets!.map(t=>expect.objectContaining(t))))
   expect(result.candidate.expectedTarget).toBeNull()
   expect(result.candidate.targetEligible).toBe(false)
@@ -266,3 +270,35 @@ it('完整性 campaign 跨修订按真实模型累计，两模型限额互不占
   }finally{journal.close()}
  }finally{rmSync(budget,{recursive:true,force:true})}
 })
+
+it('无种子链目标须由预注册前步关系解析，否则未知；更正目标排除辅助近期块',()=>{
+ const spec=(expected:import('../fixtures/memory-quality.ts').MemoryQualityCase['expected']|Record<string,unknown>)=>({id:'case',group:'standing' as const,heldOut:false,prompt:'p',body:'b',answer:'a',expected:{required:[],forbidden:[],notes:'',...expected}})
+ const prior={id:'target',version:1,category:'entry',status:'active',semantic:'standing',content:'旧顺序',scope:'本库',updateBasis:{kind:'consolidation',id:'quality-v6-chain-alpha-4'}}
+ const unrelated={...prior,id:'other',updateBasis:{kind:'consolidation',id:'quality-other'}}
+ const unchanged=spec({action:'unchanged',targetFromCase:'v6-chain-alpha-4',targetCategory:'entry'})
+ expect(v6ActionEvidence(unchanged,{before:[prior,unrelated],entries:[prior,unrelated],targetTaskId:'quality-v6-chain-alpha-4',receipt:{taskId:'now',outcome:'applied',entryIds:[]}})).toMatchObject({finalTargets:[{id:'target',version:1}]})
+ expect(v6ActionEvidence(spec({action:'unchanged'}),{before:[prior],entries:[prior],targetTaskId:'quality-v6-chain-alpha-4',receipt:{taskId:'now',outcome:'applied',entryIds:[]}}).state).toBe('unknown')
+ const corrected={...prior,version:2,content:'新顺序',updateBasis:{kind:'consolidation',id:'now'}},recent={id:'aux',version:1,category:'recent',status:'active',recent:{}}
+ const correct=spec({action:'correct',semantic:'standing',targetFromCase:'v6-chain-alpha-4',targetCategory:'entry'})
+ expect(v6ActionEvidence(correct,{before:[prior],entries:[corrected,recent],targetTaskId:'quality-v6-chain-alpha-4',receipt:{taskId:'now',outcome:'applied',entryIds:['target','aux']}})).toMatchObject({finalTargets:[{id:'target',version:2}]})
+ const conflict=spec({action:'conflict',targetFromCase:'v6-chain-beta-3',targetCategory:'entry'})
+ const fact={...prior,semantic:'fact',updateBasis:{kind:'consolidation',id:'quality-v6-chain-beta-3'}}
+ expect(v6ActionEvidence(conflict,{before:[fact],entries:[fact,{id:'pending',status:'disputed',pendingTarget:{id:'target',version:1}}],targetTaskId:'quality-v6-chain-beta-3',receipt:{taskId:'now',outcome:'applied',entryIds:['pending']}})).toMatchObject({finalTargets:[{id:'target',version:1}]})
+})
+
+it('真实前置Host链用观测taskId解析后续目标并留证后置发送版本',async()=>{
+ const base=mkdtempSync(path.join(os.tmpdir(),'rgent-v6-real-target-')),credential={provider:'custom' as const,baseURL:'https://fiction.test/v1',modelId:'fiction',apiKey:'private-secret',contextTokens:32768}
+ const first={id:'v6-chain-first',group:'standing' as const,heldOut:false,prompt:'记住本库项目记录先给结论后给依据。',body:'【虚构夹具】以后项目记录先给结论后给依据。',answer:'未采纳草稿',expected:{required:[],forbidden:[],notes:'',action:'add' as const,semantic:'standing' as const,targetCategory:'entry' as const}}
+ try{
+  const saved=await runMemoryQualityCase(first,credential,async function*(input){const payload=JSON.parse(String(input.messages[0]!.content)),command=payload.sources.find((v:any)=>v.classification==='command');yield {type:'text',text:JSON.stringify({recent:null,proposals:[{action:'add',content:'本库项目记录先给结论后给依据',layer:'core',scope:'本库',sourceIds:[command.id],semantic:'standing',attribution:'人的口令',reviewAt:null,authority:[{sourceId:command.id,quote:String(command.text).slice(0,4)}]}]})};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'continuity',base,noteName:'first.md',hostBeforeConsolidation:true,verifyClosure:false})
+  expect(saved.receipt!.taskId).not.toBe('quality-'+first.id)
+  const second={...first,id:'v6-chain-repeat',prompt:'再确认一次刚才的项目记录约定，顺序没变。',body:'【虚构夹具】只是复述：先结论后依据，无新的改动。',expected:{required:[],forbidden:[],notes:'',action:'unchanged' as const,targetFromCase:first.id,targetCategory:'entry' as const}}
+  const result=await runMemoryQualityCase(second,credential,async function*(){yield {type:'text',text:JSON.stringify({recent:null,proposals:[]})};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'continuity',base,noteName:'repeat.md',hostBeforeConsolidation:true,verifyClosure:false,targetTaskId:saved.receipt!.taskId})
+  expect(result.actionEvidence).toMatchObject({state:'success',requiresLoad:true,finalTargets:saved.actionEvidence.finalTargets})
+  expect(result.candidate.targetEligible).toBe(true)
+  expect(result.candidate.targetShown).toBe(true)
+  expect(result.candidate.expectedTarget).toBe(saved.actionEvidence.finalTargets![0]!.id+'@'+saved.actionEvidence.finalTargets![0]!.version)
+  expect(result.dependencies).toEqual(expect.arrayContaining(result.actionEvidence.finalTargets!.map(t=>expect.objectContaining(t))))
+  expect(result.followup!.inputBudgetTokens).toBeGreaterThan(0)
+ }finally{rmSync(base,{recursive:true,force:true})}
+},20000)

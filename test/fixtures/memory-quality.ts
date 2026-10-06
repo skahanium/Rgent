@@ -14,6 +14,8 @@ export type MemoryQualityCase = {
     required: string[]
     forbidden: string[]
     notes: string
+    targetFromCase?: string
+    targetCategory?: 'entry' | 'recent'
     maxActive?: number
     action?: 'add' | 'correct' | 'unchanged' | 'conflict'
     semantic?: 'standing' | 'fact'

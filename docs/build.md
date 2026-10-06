@@ -1685,3 +1685,5 @@ r8 的残留缺陷经过代码级复核后定位到**真实根因**（原记录�
 确定性反例先红：原缓存审计测试改为内存夹具，首次 5 失败／1 通过（`/tmp/rgent-integrity-p1-red.log`）；修复后定向六文件 91／0（`/tmp/rgent-integrity-p1-target.log`）。类型检查、文档检查和 diff 检查分别验证；中间夹具断言形状错误不作为产品通过。未运行完整测试、产品 build／UI、网络诊断或付费调用；最终门由总任务串行执行，Windows／CI／输入法人工／用户视觉待核保持。
 
 包 1 独立审查追加：新完整性 campaign 的键含 revision 段，原日志服务误把 revision 当模型，导致同修订两模型共享每模型限额。新增跨 r10／r11／r12 双模型反例先红，再为现有日志服务指定模型段（历史前缀仍为第零段，新完整性前缀为第一段），同模型跨修订累计、两模型独立计数，240 总门保持。定向日志 `/tmp/rgent-integrity-p1-budget-{red,green}.log`；类型及 diff 核验，未付费／build／全量。
+
+包 1 第二轮审查修补：机械目标不再把 receipt 的所有新增对象都当预期目标，按预注册类别／语义过滤辅助近期块；无种子更正／复述／冲突按冻结案例的前步关系，经前步原始结果的真实 receipt.taskId 解析 before 唯一对象（Host 随机任务 ID，不能由 case ID 猜造），无法机械定位则未知。真实受控 Host 两步链反例先红后绿，后置账本实际发送版本与目标核对；旧行缺此证据仍未知。后置探针单独捕获实际 inputBudgetTokens，不复用前置 Host 预算。评分构建指纹扩至 support／runner／electron／CLI 及 v6 规则夹具和基础材料夹具，freeze 与设备成绩统一用构建注入值，生产源码指纹仍独立。CLI 恢复测试显式使用临时虚构 report 与 budget，默认私人状态不参与普通测试。日志 `/tmp/rgent-integrity-p1-{targets-red,host-target-red,host-target-green,review-target,review-types}.log`；不调用付费模型或运行全量／产品构建。

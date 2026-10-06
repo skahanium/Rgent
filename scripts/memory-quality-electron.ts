@@ -258,7 +258,7 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
  // 执行提交在 git 不可用时退回环境变量，仍与 v4／v5 一样只记录事实。
  const executionCommit=()=>{try{return execFileSync('git',['rev-parse','HEAD'],{cwd:options.root,encoding:'utf8'}).trim()}catch{return process.env.RGENT_EVALUATION_COMMIT??'unknown'}}
  const promptHash=()=>createHash('sha256').update(memoryContinuitySystem,'utf8').digest('hex')
- const scorerHash=()=>fingerprint(readFileSync(path.join(options.root,'scripts/memory-quality-support.ts'),'utf8'))
+ const scorerHash=()=>MEMORY_SCORING_FINGERPRINT
  const weightsHash=()=>fingerprint(cases.map(c=>[c.id,c.direction,c.weight,c.split??null,c.chain??null,c.step??null]))
  const runtime=()=>MEMORY_RUNTIME_FINGERPRINT
  const metadata=()=>{const raw=readFileSync(path.join(options.profile,'model-config.json')),cfg=JSON.parse(raw.toString());const models=options.models.map(id=>{const m=cfg.models?.find((m:any)=>m.id===id),c=cfg.connections?.find((c:any)=>c.id===m?.connectionId);if(!m||!c)throw Error('EVALUATION_MODELS_NOT_AUTHORIZED');const url=new URL(c.baseURL),expected=m.modelId==='MiniMax-M3'?'api.minimax.cn':m.modelId==='deepseek-flash'?'api.deepseek.com':null;if(url.protocol!=='https:'||url.host!==expected||url.username||url.password||url.search||url.hash)throw Error('EVALUATION_MODELS_NOT_AUTHORIZED');return {recordId:id,modelId:m.modelId,host:url.host,baseURL:c.baseURL,contextTokens:m.contextTokens,connectionId:c.id}});if(models.length!==2||new Set(models.map(m=>m.modelId)).size!==2)throw Error('EVALUATION_MODELS_NOT_AUTHORIZED');return {raw,models,configuration:fingerprint(raw.toString())}}
@@ -299,7 +299,7 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
   const paid=r.result??null
   const loaded=paid?.followup?.ledger?.chapter?.provenance?.version===2?paid.followup.ledger.chapter.provenance.memoryDeps:undefined
   const savedState=paid?.actionEvidence?.state??(paid?.actionVerified===true?'success':paid?.actionVerified===false?'failure':'unknown')
-  const actionState=c.expected.action&&(['correct','add'].includes(c.expected.action)||paid?.actionEvidence?.finalTargets?.length)?v6LoadedActionState(savedState,paid?.actionEvidence?.finalTargets,loaded):savedState
+  const actionState=c.expected.action&&(paid?.actionEvidence?.requiresLoad===true||['correct','add','conflict'].includes(c.expected.action)||c.expected.targetFromCase||c.seed)?v6LoadedActionState(savedState,paid?.actionEvidence?.finalTargets,loaded):savedState
   const budget=JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8')),chargedCalls=budget.dispatches.filter((d:any)=>d.key===k).length
   return {caseId:c.id,round,doubleRequired:Array.isArray(frozen.doubleRequired)&&frozen.doubleRequired.includes(c.id),chargedCalls,observedCalls:Array.isArray(paid?.evidence?.dispatches)?paid.evidence.dispatches.length:0,dispatched:chargedCalls>0,terminal:paid?.terminal===true,structured:paid?.structured===true,blocked:paid?.blocked===true,actionVerified:typeof paid?.actionVerified==='boolean'?paid.actionVerified:undefined,actionState,category:classify(r),calls:Array.isArray(r.responses)?r.responses.length:0,latencyMs:typeof r.latencyMs==='number'?r.latencyMs:0,receiptReason:paid?.receipt?.reason,candidate:paid?.candidate??undefined,review:a?.review??null,reviewAlt:b?.review??null}
  }
@@ -385,8 +385,11 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
    // 开始标记沿用 v5 的 result-<hash>/attempt-<hash> 落盘方式，供恢复与停损判断。
    journal.write(k,{status:'started',key:k,frozenHash,model,round,case:spec,startedAt:new Date().toISOString()})
    let result:unknown,error:string|null=null
+   let targetTaskId:string|undefined
+   if(spec.expected.targetFromCase){const targetKey=key(model.modelId,round,spec.expected.targetFromCase),targetFile=resultFile(targetKey)
+    if(existsSync(targetFile)){const priorResult=JSON.parse(readFileSync(targetFile,'utf8'));if(priorResult.key!==targetKey||priorResult.frozenHash!==frozenHash)throw Error('EVALUATION_REVISION_CHANGED');if(typeof priorResult.result?.receipt?.taskId==='string')targetTaskId=priorResult.result.receipt.taskId}}
    const started=performance.now()
-   try{result=await runMemoryQualityCase(v6RunnerSpec(spec),credential,stream,controller.signal,{strategy:'continuity',verifyClosure:!spec.chain||spec.step===5,...(spec.chain?{base:path.join(root,`fictional-${model.modelId}-r${frozen.revision??1}-${round}-${spec.chain}`),noteName:`step-${spec.step}.md`,hostBeforeConsolidation:true}:{}),chainBlocked:blocked})}
+   try{result=await runMemoryQualityCase(v6RunnerSpec(spec),credential,stream,controller.signal,{strategy:'continuity',targetTaskId,verifyClosure:!spec.chain||spec.step===5,...(spec.chain?{base:path.join(root,`fictional-${model.modelId}-r${frozen.revision??1}-${round}-${spec.chain}`),noteName:`step-${spec.step}.md`,hostBeforeConsolidation:true}:{}),chainBlocked:blocked})}
    catch(e){error=publicError(e);result=(e as any)?.evaluationResult??null}
    const row:any={key:k,model,round,case:spec,frozenHash,status:controller.signal.aborted?'interrupted':'completed',responses,result,error,latencyMs:performance.now()-started,review:null}
    journal.finish(k,JSON.parse(JSON.stringify(row).replaceAll(credential.apiKey,'[redacted]')))
@@ -417,5 +420,5 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
 /** runner 使用 v5 时代的 MemoryQualityCase 形状：v6 方向映射到 group，动作与种子原样带上，供机械动作核对。 */
 function v6RunnerSpec(spec:V6Case):MemoryQualityCase{
  return {id:spec.id,group:(spec.direction==='recent'?'fact':spec.direction) as MemoryQualityCase['group'],heldOut:false,prompt:spec.prompt,body:spec.body,answer:spec.answer,...(spec.seed?{seed:spec.seed}:{}),
-  expected:{required:[],forbidden:[],notes:'v6 semantic review only',...(spec.expected.action?{action:spec.expected.action}:{}),...(spec.expected.maxActive!==undefined?{maxActive:spec.expected.maxActive}:{}),...(spec.expected.semantic?{semantic:spec.expected.semantic}:{})}}
+  expected:{required:[],forbidden:[],notes:'v6 semantic review only',...(spec.expected.action?{action:spec.expected.action}:{}),targetCategory:spec.expected.targetCategory??(spec.direction==='recent'&&!spec.chain?'recent':'entry'),...(spec.expected.targetFromCase?{targetFromCase:spec.expected.targetFromCase}:{}),...(spec.expected.maxActive!==undefined?{maxActive:spec.expected.maxActive}:{}),...(spec.expected.semantic?{semantic:spec.expected.semantic}:{})}}
 }

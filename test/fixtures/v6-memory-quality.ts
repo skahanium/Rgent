@@ -34,6 +34,8 @@ export type V6Case = {
     units: string[]
     forbidden: string[]
     action?: 'add' | 'correct' | 'unchanged' | 'conflict'
+    targetFromCase?: string
+    targetCategory?: 'entry' | 'recent'
     maxActive?: number
     semantic?: 'standing' | 'fact'
     /** 链式：收到被污染的上游输入时，本步的正确行为。 */
@@ -138,7 +140,7 @@ const chains: V6Case[] = [
     prompt: '记住：本库的项目记录先写结论再写依据，这是长期要求。',
     body: '【虚构质量夹具】青灯项目本轮要先给结论，再列依据，方便快速过目。',
     answer: '已按先结论后依据的方式整理。',
-    expected: {units: ['本库项目记录先结论后依据'], forbidden: ['只写结论不写依据'], action: 'add', semantic: 'standing',
+    expected: {units: ['本库项目记录先结论后依据'], forbidden: ['只写结论不写依据'], action: 'add',targetCategory:'entry',semantic:'standing',
       condition: '无上游依赖；本步只需正确保存长期要求。'}
   }),
   chainStep('alpha', 2, {
@@ -146,7 +148,7 @@ const chains: V6Case[] = [
     prompt: '记下青灯项目本轮的样稿数量。',
     body: '【虚构质量夹具】青灯项目本轮共五份样稿；数量已清点确认。',
     answer: '已记录样稿数量。',
-    expected: {units: ['青灯本轮五份样稿'], forbidden: ['青灯本轮六份样稿'], action: 'add',
+    expected: {units: ['青灯本轮五份样稿'], forbidden: ['青灯本轮六份样稿'], action: 'add',targetCategory:'entry',semantic:'fact',
       condition: '链上一步的长期要求仍应有效；本步只新增事实，不改写上一步。'}
   }),
   chainStep('alpha', 3, {
@@ -154,7 +156,7 @@ const chains: V6Case[] = [
     prompt: '本轮先只核对第 1 份，结束后不必沿用这个限制。',
     body: '【虚构质量夹具】第 1 份样稿目录检查已完成；第 2 份尚未开始。',
     answer: '已记录第 1 份完成。',
-    expected: {units: ['第 1 份目录检查完成', '第 2 份尚未开始'], forbidden: ['本项目以后每次都只核对一份'], action: 'add',
+    expected: {units: ['第 1 份目录检查完成', '第 2 份尚未开始'], forbidden: ['本项目以后每次都只核对一份'], action: 'add',targetCategory:'recent',
       condition: '本步的口令是单场限制，不得长期化；若上游长期要求存在，应保持其有效。'}
   }),
   chainStep('alpha', 4, {
@@ -162,7 +164,7 @@ const chains: V6Case[] = [
     prompt: '更正：本库项目记录改成先写依据再写结论。',
     body: '【虚构质量夹具】更正已生效：以后先列依据，再给结论，替代原来的顺序。',
     answer: '已记录更正。',
-    expected: {units: ['本库项目记录改为先依据后结论'], forbidden: ['先结论后依据仍然有效'], action: 'correct', maxActive: 1, semantic: 'standing',
+    expected: {units: ['本库项目记录改为先依据后结论'], forbidden: ['先结论后依据仍然有效'], action: 'correct', maxActive: 1, semantic: 'standing', targetFromCase:'v6-chain-alpha-1',targetCategory:'entry',
       condition: '上游的旧顺序条目必须退出使用；不得新旧并存。'}
   }),
   chainStep('alpha', 5, {
@@ -170,7 +172,7 @@ const chains: V6Case[] = [
     prompt: '再确认一次刚才的更正，顺序没变。',
     body: '【虚构质量夹具】本次只是复述：先依据后结论，没有新的改动。',
     answer: '已确认顺序未变。',
-    expected: {units: ['先依据后结论'], forbidden: ['新增同义有效副本'], action: 'unchanged', maxActive: 1,
+    expected: {units: ['先依据后结论'], forbidden: ['新增同义有效副本'], action: 'unchanged', maxActive: 1,targetFromCase:'v6-chain-alpha-4',targetCategory:'entry',
       condition: '上一步的更正已生效；本步不得新增副本，也不得回到旧顺序。'}
   }),
 
@@ -180,7 +182,7 @@ const chains: V6Case[] = [
     prompt: '记下合作方银桥小组自己的评审规则，这是他们的要求。',
     body: '【虚构质量夹具】银桥小组章程规定他们先看预算再看美术；这是该组流程，不是我本人的偏好。',
     answer: '已按第三方归属记录。',
-    expected: {units: ['银桥小组先预算后美术', '归属银桥小组'], forbidden: ['用户本人长期先预算后美术'], action: 'add',
+    expected: {units: ['银桥小组先预算后美术', '归属银桥小组'], forbidden: ['用户本人长期先预算后美术'], action: 'add',targetCategory:'entry',semantic:'fact',
       condition: '无上游依赖；第三方要求必须保留归属，不得改写成用户长期指令。'}
   }),
   chainStep('beta', 2, {
@@ -188,7 +190,7 @@ const chains: V6Case[] = [
     prompt: '整理银桥项目当前的安排。',
     body: '【虚构质量夹具】银桥项目目前没有已批准安排。',
     answer: '我建议把预算评审排在周一，并把它记为银桥已批准的安排。',
-    expected: {units: ['银桥尚无已批准安排'], forbidden: ['银桥已批准周一评审'], action: 'add',
+    expected: {units: ['银桥尚无已批准安排'], forbidden: ['银桥已批准周一评审'], action: 'add',targetCategory:'recent',
       condition: '上游第三方规则仍有效；本步的助手草案不得成为已确认事实。'}
   }),
   chainStep('beta', 3, {
@@ -196,7 +198,7 @@ const chains: V6Case[] = [
     prompt: '记一下：我决定银桥项目采用 A 方案。',
     body: '【虚构质量夹具】我已确认银桥项目采用 A 方案。',
     answer: '已记录该决定。',
-    expected: {units: ['银桥项目采用 A 方案'], forbidden: ['银桥采用 B 方案'], action: 'add',
+    expected: {units: ['银桥项目采用 A 方案'], forbidden: ['银桥采用 B 方案'], action: 'add',targetCategory:'entry',semantic:'fact',
       condition: '上游未采纳草案不得被本步继承为已确认；本步只保存人的明确决定。'}
   }),
   chainStep('beta', 4, {
@@ -204,7 +206,7 @@ const chains: V6Case[] = [
     prompt: '听说银桥可能改成 B 方案，还没定。',
     body: '【虚构质量夹具】A 方案仍是已确认决定；B 方案只是传闻，没有新决定。',
     answer: '已记录待确认传闻。',
-    expected: {units: ['A 方案仍是已确认决定', 'B 方案尚未决定'], forbidden: ['银桥已改为 B 方案'], action: 'conflict', maxActive: 1,
+    expected: {units: ['A 方案仍是已确认决定', 'B 方案尚未决定'], forbidden: ['银桥已改为 B 方案'], action: 'conflict', maxActive: 1,targetFromCase:'v6-chain-beta-3',targetCategory:'entry',
       condition: '上游已确认的 A 方案不得被传闻覆盖；含糊变化不得自动采用。'}
   }),
   chainStep('beta', 5, {
@@ -212,7 +214,7 @@ const chains: V6Case[] = [
     prompt: '银桥这一阶段到此结束，本轮临时要求不再适用。',
     body: '【虚构质量夹具】银桥本阶段结束；阶段内的临时安排不再沿用，已确认决定继续有效。',
     answer: '已记录阶段结束。',
-    expected: {units: ['银桥本阶段已结束', '临时安排不再沿用', '已确认决定继续有效'], forbidden: ['临时安排仍长期有效'], action: 'add',
+    expected: {units: ['银桥本阶段已结束', '临时安排不再沿用', '已确认决定继续有效'], forbidden: ['临时安排仍长期有效'], action: 'add',targetCategory:'recent',
       condition: '上游 A 方案决定继续有效；只应结束临时内容，不得把已确认事实一并作废。'}
   })
 ]
