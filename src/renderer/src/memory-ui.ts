@@ -265,7 +265,17 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     const existing=new Map(Array.from(jobs.querySelectorAll<HTMLElement>('.memory-job')).map(row=>[row.dataset.taskId!,row]))
     jobs.replaceChildren();jobsPanel.querySelector('summary')!.textContent=`最近整理记录 · 正在整理 ${view?.running.active??0} / 等待整理 ${view?.running.pending??0}`
     if(!view?.jobs.length)jobs.append(paragraph('还没有整理记录。获准任务保存后，整理结果会显示在这里。'))
-    const jobLabel=(job:MemoryView['jobs'][number],index:number)=>`${index===0?'最近一次整理':'整理记录 '+(index+1)} · ${({queued:'等待整理',running:'正在整理',applied:'已完成',rejected:'没有写入',interrupted:'已中断',unavailable:'暂不可用', 'handed-off':'已移交'})[job.outcome]}${job.reason?` · ${memoryErrorText(job.reason)}`:''}`
+    const actionLabel:Record<string,string>={add:'新增',correct:'更正',conflict:'争议',obsolete:'过时',recent:'近期背景'}
+    const jobResults=(job:MemoryView['jobs'][number])=>{
+      const results=job.results??[]
+      const applied=results.filter(result=>result.outcome==='applied').length,rejected=results.filter(result=>result.outcome==='rejected')
+      return {applied,rejected,partial:applied>0&&rejected.length>0}
+    }
+    const jobLabel=(job:MemoryView['jobs'][number],index:number)=>{
+      const {applied,rejected,partial}=jobResults(job)
+      const partialNote=rejected.length?` · ${partial?`部分保存：已保存 ${applied} 组、未保存 ${rejected.length} 组`:`未保存 ${rejected.length} 组`}`:''
+      return `${index===0?'最近一次整理':'整理记录 '+(index+1)} · ${({queued:'等待整理',running:'正在整理',applied:'已完成',rejected:'没有写入',interrupted:'已中断',unavailable:'暂不可用', 'handed-off':'已移交'})[job.outcome]}${partialNote}${job.reason?` · ${memoryErrorText(job.reason)}`:''}`
+    }
     for(const [index,job] of [...(view?.jobs??[])].reverse().entries()){
       const signature=JSON.stringify([job,view?.config,view?.recipient,job.entryIds?.map(id=>view?.entries.find(e=>e.id===id)?.category??null)]),previous=existing.get(job.taskId)
       if(previous?.dataset.signature===signature){previous.querySelector('.memory-job-result')!.textContent=jobLabel(job,index);jobs.append(previous);continue}
@@ -276,9 +286,11 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
         const matched=(job.entryIds??[]).map(id=>view?.entries.find(e=>e.id===id))
         if(matched.every(Boolean)){
           const recent=matched.filter(e=>e?.category==='recent').length,long=matched.length-recent
-          row.append(paragraph(`更新近期背景 ${recent} 块 · 新增/更新长期内容 ${long} 条；可在上方查看或删除并遗忘。`))
+          row.append(paragraph(`${jobResults(job).partial?'部分保存：':''}更新近期背景 ${recent} 块 · 新增/更新长期内容 ${long} 条；可在上方查看或删除并遗忘。`))
         }else row.append(paragraph(`本场写入 ${job.entryIds?.length??0} 项；部分条目当前不可查看。`))
       }
+      {const rejected=jobResults(job).rejected
+       if(rejected.length)row.append(paragraph(`未保存的分组：${rejected.slice(0,4).map(result=>`${actionLabel[result.action]??result.action}${result.code?`（${memoryErrorText(result.code)}）`:''}`).join('、')}${rejected.length>4?` 等 ${rejected.length} 组`:''}`))}
       if(previous?.querySelector('.memory-preview'))row.append(paragraph('任务材料、状态或整理配置已变化；原预览已失效，请重新预览。'))
       if(job.undoable)row.append(button('撤销本场变更…',()=>void preview(row,()=>handlers.maintenance({action:'undo',taskId:job.taskId,materialVersion:job.materialVersion!,revision:view!.revision,objectVersion:view!.objectVersion}))))
       if(job.retryable)row.append(button('重新整理…',()=>void preview(row,()=>handlers.retry(request))))

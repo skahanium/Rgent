@@ -37,6 +37,28 @@ it('commits valid proposal groups once; a stale correction group cannot partiall
  expect(store.read().record.entries.map(e=>e.content)).toEqual(['旧事实','独立有效事实'])
  expect(store.read().record.revision).toBe(basis.record.revision+1)
 })
+it('records layered group results: a partial batch keeps the specific rejection code and never claims full success',()=>{
+ const {store}=fixture(),target=store.add(store.read(),{content:'旧事实',layer:'demand',scope:'库',sources:[source()],semantic:'fact',attribution:'人说',reviewAt:null}),basis=store.read()
+ const input={content:'新事实',layer:'demand' as const,scope:'库',sources:[source(2)],semantic:'fact' as const,attribution:'新口令',reviewAt:null}
+ store.apply(basis,[[{action:'correct',id:target.id,version:99,input}],[{action:'add',input:{...input,content:'独立有效事实'}}]],{taskId:'job',materialVersion:'a'.repeat(64),outcome:'applied',entryIds:[]})
+ const receipt=store.read().record.jobs.find(job=>job.taskId==='job')!
+ expect(receipt.outcome).toBe('applied')
+ expect(receipt.results).toEqual([{action:'correct',outcome:'rejected',code:'MEMORY_CHANGED'},{action:'add',outcome:'applied'}])
+ expect(receipt.reason).toBe('MEMORY_CHANGED')
+})
+it('keeps a capacity rejection distinct from other causes and survives a storage round-trip',()=>{
+ const {fs,store}=fixture(),basis=store.read()
+ store.apply(basis,[[{action:'add',input:{content:'容量超限的新增',layer:'core' as const,scope:'库',sources:[source(2)],semantic:'standing' as const,attribution:'人说',reviewAt:null}}]],{taskId:'capacity',materialVersion:'a'.repeat(64),outcome:'applied',entryIds:[]},null)
+ const written=store.read().record.jobs.find(job=>job.taskId==='capacity')!
+ expect(written.results).toHaveLength(1)
+ expect(written.results?.[0]?.outcome).toBe(written.outcome==='rejected'?'rejected':'applied')
+ expect(written.reason===undefined||written.reason==='MEMORY_OUTPUT_INVALID'||/^MEMORY_[A-Z_]+$/.test(written.reason)).toBe(true)
+ const raw=fs.readSnapshot('.rgent-memory').bytes.toString()
+ const encoded=/rgent:memory:(v3|v4) data="([A-Za-z0-9_-]+)"/.exec(raw)!
+ const record=JSON.parse(Buffer.from(encoded[2]!,'base64url').toString())
+ expect(record.jobs.find((job:{taskId:string})=>job.taskId==='capacity').results).toHaveLength(1)
+ expect(store.read().record.jobs.find(job=>job.taskId==='capacity')?.results).toEqual(record.jobs.find((job:{taskId:string})=>job.taskId==='capacity').results)
+})
 it('freeing standing capacity keeps deferred entries deferred until sources are rechecked',()=>{
  const {store}=fixture();for(let i=0;i<3;i++)store.add(store.read(),{content:'约'.repeat(500)+i,layer:'core',scope:'库',sources:[source(i+1)],semantic:'standing',attribution:'口令',reviewAt:null})
  const initial=store.read(),first=initial.record.entries[0]!,deferred=initial.record.entries.find(e=>e.status==='deferred')!
@@ -109,11 +131,64 @@ it('keeps all 256 interrupted receipts when a new queued job or failure arrives'
  expect(store.read().record.jobs).toEqual(record.jobs)
 })
 
-it('writes only v3 Markdown and refuses a valid v2 record without overwriting it',()=>{
- const {root,fs,store}=fixture(),old=encodeWorkingMemory(entryRecord(1)).replaceAll('rgent:memory:v3','rgent:memory:v2').replaceAll('rgent:item:v3','rgent:item:v2').replaceAll('rgent:end:v3','rgent:end:v2')
- writeFileSync(path.join(root,'.rgent-memory'),old)
- expect(()=>store.read()).toThrow('MEMORY_STORAGE_INVALID')
- expect(fs.readSnapshot('.rgent-memory').bytes.toString()).toBe(old)
+it('writes M4 Markdown, reads M3 without upgrading, and refuses a valid v2 record without overwriting it',()=>{
+ const {root,fs,store}=fixture()
+ const asVersion=(raw:string,version:3|2)=>{
+  const match=/^<!-- rgent:memory:v4 data="([A-Za-z0-9_-]+)" -->\n/.exec(raw)!
+  const meta=JSON.parse(Buffer.from(match[1]!,'base64url').toString());meta.version=version
+  return `<!-- rgent:memory:v${version} data="${Buffer.from(JSON.stringify(meta)).toString('base64url')}" -->\n`
+   +raw.slice(match[0].length).replaceAll('rgent:item:v4',`rgent:item:v${version}`).replaceAll('rgent:end:v4',`rgent:end:v${version}`)
+ }
+ const m3=asVersion(encodeWorkingMemory(entryRecord(1)),3)
+ writeFileSync(path.join(root,'.rgent-memory'),m3)
+ const before=store.read()
+ expect(before.record.version).toBe(3)
+ expect(before.raw).toBe(m3)
+ const added=store.add(before,{content:'升级后新增的条目',layer:'demand',scope:'库',sources:[source(2)],semantic:'fact',attribution:'人说',reviewAt:null})
+ const upgraded=fs.readSnapshot('.rgent-memory').bytes.toString()
+ expect(upgraded).toContain('rgent:memory:v4')
+ expect(upgraded).not.toContain('rgent:memory:v3')
+ const after=store.read()
+ expect(after.record.version).toBe(4)
+ expect(after.record.entries.map(e=>e.id)).toContain(added.id)
+ expect(after.record.entries.find(e=>e.id===added.id)?.content).toBe('升级后新增的条目')
+ const v2=asVersion(upgraded,2)
+ // 独立夹具：同一个 store 已经观察过该路径，外部替换会先命中外改检测。
+ const fresh=fixture()
+ writeFileSync(path.join(fresh.root,'.rgent-memory'),v2)
+ expect(()=>fresh.store.read()).toThrow('MEMORY_STORAGE_INVALID')
+ expect(fresh.fs.readSnapshot('.rgent-memory').bytes.toString()).toBe(v2)
+ expect(fs.readSnapshot('.rgent-memory').bytes.toString()).toBe(upgraded)
+})
+it('round-trips the agreement basis and rejects malformed authority references',()=>{
+ const {store}=fixture(),first=source(1)
+ const added=store.add(store.read(),{content:'本库回答使用中文',layer:'core',scope:'本库',sources:[first,source(2)],semantic:'standing',attribution:'人的口令',reviewAt:null,agreement:{authority:[{sourceId:first.id,quote:'以后用中文'}],supporting:['source-2']}})
+ const stored=store.read().record.entries.find(e=>e.id===added.id)!
+ expect(stored.agreement).toEqual({authority:[{sourceId:first.id,quote:'以后用中文'}],supporting:['source-2']})
+ expect(parseWorkingMemory(encodeWorkingMemory(store.read().record)).entries.find(e=>e.id===added.id)?.agreement).toEqual(stored.agreement)
+ // 新字段不改变容量与遗忘出口：带依据角色的条目照样可以完整遗忘。
+ store.forget(store.read(),added.id,added.version)
+ expect(store.read().record.entries.some(e=>e.id===added.id)).toBe(false)
+ expect(store.read().record.forgotten).toHaveLength(1)
+ expect(store.read().record.forgotten[0]?.entryIds.some(item=>item.id===added.id)).toBe(true)
+ const base={content:'另一条事实',layer:'demand' as const,scope:'库存',sources:[source(3)],semantic:'fact' as const,attribution:'人说',reviewAt:null}
+ for(const agreement of [
+  {authority:[] as {sourceId:string;quote:string}[],supporting:[]},
+  {authority:[{sourceId:'missing-source',quote:'原话'}],supporting:[]},
+  {authority:[{sourceId:'source-3',quote:'原话'}],supporting:['source-9']},
+  {authority:[{sourceId:'source-3',quote:'x'.repeat(513)}],supporting:[]}
+ ]) expect(()=>store.add(store.read(),{...base,agreement})).toThrow('BAD_MEMORY_EDIT')
+})
+it('keeps an entry without a role field readable and never backfills it as proven authority',()=>{
+ const {root,store}=fixture()
+ const m4=encodeWorkingMemory({version:3,identity:'legacy',revision:1,nextSequence:1,watermark:0,forgotten:[],jobs:[],recent:[],entries:[{id:'legacy-1',version:1,content:'旧条目',category:'long',layer:'demand',scope:'库',sources:[{...source(1),revision:'',taskMaterialHash:null}],semantic:'fact',attribution:'人说',reviewAt:null,status:'active',state:{source:'verified',content:'current',enabled:true,capacity:'ready'},reason:null,updatedAt:'2026-01-01T00:00:00Z',updateBasis:{kind:'manual',id:'manual',version:1}}]})
+ const legacy=(()=>{const match=/^<!-- rgent:memory:v4 data="([A-Za-z0-9_-]+)" -->\n/.exec(m4)!;const meta=JSON.parse(Buffer.from(match[1]!,'base64url').toString());meta.version=3
+  return `<!-- rgent:memory:v3 data="${Buffer.from(JSON.stringify(meta)).toString('base64url')}" -->\n`+m4.slice(match[0].length).replaceAll('rgent:item:v4','rgent:item:v3').replaceAll('rgent:end:v4','rgent:end:v3')})()
+ writeFileSync(path.join(root,'.rgent-memory'),legacy)
+ const record=store.read().record
+ expect(record.version).toBe(3)
+ expect(record.entries[0]?.agreement).toBeUndefined()
+ expect(parseWorkingMemory(legacy).entries[0]?.agreement).toBeUndefined()
 })
 it('keeps a recent block in the same CAS record and forgets its dependent closure',()=>{
  const {store}=fixture(),basis=store.read(),recent={taskId:'task-1',noteId:'note-1',materialVersion:'b'.repeat(64),createdAt:new Date().toISOString(),outcome:'completed' as const,sections:{goal:'整理清单',completed:'已列两项',blocked:'无',next:'继续核对'},assistantDraft:false}

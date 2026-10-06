@@ -57,6 +57,18 @@ it('reports recent and long job updates separately without inventing missing ent
  expect(body.querySelector('.memory-job')?.textContent).not.toContain('undefined')
  dispose();body.remove()
 })
+it('discloses partial consolidation: saved groups, rejected groups and the specific reason',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ const jobs=[{taskId:'task-partial',materialVersion:'v1',outcome:'applied' as const,retryable:false,reason:'MEMORY_CHANGED',entryIds:['recent-1'],
+  results:[{action:'recent' as const,outcome:'applied' as const},{action:'correct' as const,outcome:'rejected' as const,code:'MEMORY_CHANGED'}]}]
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,entries:[recentEntry],jobs}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ const text=body.querySelector('.memory-job')?.textContent??''
+ expect(text).toContain('部分保存：已保存 1 组、未保存 1 组')
+ expect(text).toContain('未保存的分组：更正')
+ expect(text).not.toContain('MEMORY_CHANGED')
+ expect(text).toContain('记录在核对期间发生变化')
+ dispose();body.remove()
+})
 describe('memory page drafts',()=>{
   it('discloses unverified learning quality without changing the saved library switch',async()=>{
     const body=document.createElement('div');document.body.append(body);const save=vi.fn()

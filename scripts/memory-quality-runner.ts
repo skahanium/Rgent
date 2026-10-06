@@ -192,7 +192,9 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
      const remaining=(await service.entries()).filter(e=>e.id===entry.id||e.content===entry.content).map(e=>e.id)
      const replayReceipt=service.snapshot().record.jobs.find(j=>j.taskId===taskId)??null
      proof.replay={attempted:true,calls,validSourceIds:validReplay,originalBasisBlocked,remaining,receipt:replayReceipt}
-     proof.relearningBlocked=calls>0&&validReplay&&originalBasisBlocked&&remaining.length===0&&['applied','rejected'].includes(replayReceipt?.outcome??'')&&replayReceipt?.reason==='MEMORY_OUTPUT_INVALID'
+     const replayReason=replayReceipt?.reason??''
+     // 具体来源／依赖／遗忘阻断与旧的格式兜底都算显式阻断，不能只看被折叠的旧码。
+     proof.relearningBlocked=calls>0&&validReplay&&originalBasisBlocked&&remaining.length===0&&['applied','rejected'].includes(replayReceipt?.outcome??'')&&(/SOURCE|DEPENDENCY|FORGOTTEN/.test(replayReason)||replayReason==='MEMORY_OUTPUT_INVALID')
     }finally{signal.removeEventListener('abort',stopReplay);replay.close();await replay.idle()}
    }
    return {foreground,evidence:paidEvidence,...(options?{experiment}:{}),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,dependencies,followup,forget:proof,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)}}

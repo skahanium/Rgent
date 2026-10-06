@@ -9,7 +9,7 @@ export function retireMemoryFile(root:string,check:()=>void,expected?:{revision:
  if(expected&&(disk.objectVersion!==expected.objectVersion||createHash('sha256').update(disk.bytes).digest('hex')!==expected.revision))throw Error('MEMORY_CONFLICT')
  const raw=disk.bytes.toString('utf8')
  if(!Buffer.from(raw).equals(disk.bytes))throw Error('MEMORY_RETIREMENT_FAILED')
- if(raw===RETIRED_MEMORY||raw.startsWith('<!-- rgent:memory:v3 '))return false
+ if(raw===RETIRED_MEMORY||raw.startsWith('<!-- rgent:memory:v3 ')||raw.startsWith('<!-- rgent:memory:v4 '))return false
  if(!recognizedLegacyMemory(raw))throw Error('MEMORY_RETIREMENT_FAILED')
  check();fs.replace(MEMORY_FILE,raw,RETIRED_MEMORY,disk.objectVersion)
  check();if(fs.readSnapshot(MEMORY_FILE).bytes.toString()!==RETIRED_MEMORY)throw Error('MEMORY_RETIREMENT_FAILED')

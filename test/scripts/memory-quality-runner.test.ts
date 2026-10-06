@@ -19,7 +19,7 @@ const credential={provider:'custom' as const,baseURL:'https://fiction.test/v1',m
 it('uses saved body and ledger evidence, then the production context and revocation paths',async()=>{
  expect(typeof runner.runMemoryQualityCase).toBe('function')
  const requests:ModelStepInput[]=[]
- const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){requests.push(input);const data=JSON.parse(String(input.messages[0]!.content));yield {type:'text',text:JSON.stringify({proposals:[{action:'add',content:'本库报告使用蓝鹭术语',layer:'core',scope:'本库',sourceIds:[data.sources.find((s:any)=>s.classification==='command').id],semantic:'standing',attribution:'人的口令',reviewAt:null}]})};yield {type:'finish',reason:'stop',usage:{inputTokens:100,outputTokens:60}}},new AbortController().signal)
+ const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){requests.push(input);const data=JSON.parse(String(input.messages[0]!.content));yield {type:'text',text:JSON.stringify({proposals:[{action:'add',content:'本库报告使用蓝鹭术语',layer:'core',scope:'本库',sourceIds:[data.sources.find((s:any)=>s.classification==='command').id],semantic:'standing',attribution:'人的口令',reviewAt:null,authority:[{sourceId:data.sources.find((s:any)=>s.classification==='command').id,quote:String(data.sources.find((s:any)=>s.classification==='command').text).slice(0,4)}]}]})};yield {type:'finish',reason:'stop',usage:{inputTokens:100,outputTokens:60}}},new AbortController().signal)
  expect(result.completed).toBe(true);expect(result.entries).toHaveLength(1)
  expect(result.context.status).toBe('ready');expect(result.dependencies).toHaveLength(1)
  expect(result.forget?.relearningBlocked).toBe(true);expect(result.forget?.revoked).toBe(true)
@@ -51,7 +51,7 @@ it('records a corrected version in a genuine next-task ledger and cannot relearn
  expect(result.dependencies).toHaveLength(1);expect(result.dependencies[0]?.version).toBe(2)
  expect(result.followup?.ledger.chapter?.provenance).toMatchObject({version:2,memoryDeps:result.dependencies})
  expect(result.followup?.sent[0]?.prompt).toContain('石桥项目每两周检查一次。')
- expect(result.forget).toMatchObject({revoked:true,relearningBlocked:true,replay:{attempted:true,calls:1,remaining:[],receipt:{outcome:'rejected',reason:'MEMORY_OUTPUT_INVALID'}}})
+ expect(result.forget).toMatchObject({revoked:true,relearningBlocked:true,replay:{attempted:true,calls:1,remaining:[],receipt:{outcome:'rejected',reason:'MEMORY_MATERIAL_FORGOTTEN'}}})
  expect(paidCalls).toBe(1)
 })
 
@@ -70,7 +70,7 @@ it('v4 semantic review sees the actual source payload and commits only the revie
  const sent:ModelStepInput[]=[]
  const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){sent.push(input);const data=JSON.parse(String(input.messages[0]!.content)),source=(data.sources??data.material.sources).find((s:any)=>s.classification==='command')
   const content=sent.length===1?'本库报告错误使用红雀术语':'本库报告使用蓝鹭术语'
-  yield {type:'text',text:JSON.stringify({proposals:[{action:'add',content,layer:'core',scope:'本库',sourceIds:[source.id],semantic:'standing',attribution:'人的口令',reviewAt:null}]})};yield {type:'finish',reason:'stop'}
+  yield {type:'text',text:JSON.stringify({proposals:[{action:'add',content,layer:'core',scope:'本库',sourceIds:[source.id],semantic:'standing',attribution:'人的口令',reviewAt:null,authority:[{sourceId:source.id,quote:String(source.text).slice(0,4)}]}]})};yield {type:'finish',reason:'stop'}
  },new AbortController().signal,{strategy:'review'})
  expect(sent).toHaveLength(2);expect(sent[1]!.system).toContain('语义核对')
  expect(String(sent[1]!.messages[0]!.content)).toContain('红雀')
@@ -184,10 +184,10 @@ it('retains paid material and exact source proof if a later controlled follow-up
  }finally{spy.mockRestore()}
 })
 
-it('does not label an actual learning-material rejection hidden behind OUTPUT_INVALID as candidate rejection',async()=>{
+it('labels a real learning-material rejection with its own code instead of the old OUTPUT_INVALID collapse',async()=>{
  let armed=false;const original=WorkingMemoryStore.prototype.canLearn,spy=vi.spyOn(WorkingMemoryStore.prototype,'canLearn').mockImplementation(function(this:WorkingMemoryStore,...args){return armed?false:original.apply(this,args)})
- try{const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){const payload=JSON.parse(String(input.messages[0]!.content));yield {type:'text',text:JSON.stringify({proposals:[{action:'add',content:'本库报告使用蓝鹭术语',layer:'core',scope:'本库',sourceIds:[payload.sources[0].id],semantic:'standing',attribution:'人的口令',reviewAt:null}]})};yield {type:'finish',reason:'stop'};armed=true},new AbortController().signal,{strategy:'baseline'})
-  expect(result.receipt?.reason).toBe('MEMORY_OUTPUT_INVALID');expect(result.experiment?.category).toBe('insufficient-evidence')
+ try{const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){const payload=JSON.parse(String(input.messages[0]!.content));yield {type:'text',text:JSON.stringify({proposals:[{action:'add',content:'本库报告使用蓝鹭术语',layer:'core',scope:'本库',sourceIds:[payload.sources[0].id],semantic:'standing',attribution:'人的口令',reviewAt:null,authority:[{sourceId:payload.sources[0].id,quote:String(payload.sources[0].text).slice(0,4)}]}]})};yield {type:'finish',reason:'stop'};armed=true},new AbortController().signal,{strategy:'baseline'})
+  expect(result.receipt?.reason).toBe('MEMORY_MATERIAL_FORGOTTEN');expect(result.receipt?.results?.some(item=>item.outcome==='rejected'&&item.code==='MEMORY_MATERIAL_FORGOTTEN')).toBe(true);expect(result.experiment?.category).toBe('insufficient-evidence')
   expect(result.evidence.learningCheck.result).toBe(false)
  }finally{spy.mockRestore()}
 })

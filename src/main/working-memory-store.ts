@@ -1,6 +1,6 @@
 import {createHash,randomUUID} from 'node:crypto'
 import type {SecureVaultFs} from './secure-fs.ts'
-import type {MemoryEntry,MemoryEntryState,MemorySource,MemoryJobReceipt} from '../shared/memory.ts'
+import type {MemoryEntry,MemoryEntryState,MemorySource,MemoryJobReceipt,MemoryJobGroupResult} from '../shared/memory.ts'
 import {conservativeTokens} from './context-budget.ts'
 import {RETIRED_MEMORY} from './memory-retirement.ts'
 /** sequence is the earliest explicitly proven material age; registry units keep their actual allocation numbers. */
@@ -10,9 +10,9 @@ export type WorkingRecent=WorkingEntry&{category:'recent';layer:'demand';semanti
 export type WorkingRecentInput=Pick<WorkingRecent,'sources'|'scope'|'recent'|'tags'>
 export type WorkingBindingPatch={id:string;version:number;sources:{id:string;oldObjectVersion:string;objectVersion:string;revision:string;start:number;end:number;deps:{relPath:string;oldObjectVersion:string;objectVersion:string}[]}[]}
 export type Forgotten={materialIds:string[];entryIds:{id:string;version:number}[];through:number}
-export type WorkingRecord={version:3;identity:string;revision:number;nextSequence:number;watermark:number;entries:WorkingEntry[];recent:WorkingRecent[];forgotten:Forgotten[];jobs:MemoryJobReceipt[]}
+export type WorkingRecord={version:3|4;identity:string;revision:number;nextSequence:number;watermark:number;entries:WorkingEntry[];recent:WorkingRecent[];forgotten:Forgotten[];jobs:MemoryJobReceipt[]}
 export type WorkingSnapshot={record:WorkingRecord;revision:string|null;objectVersion:string|null;raw:string|null}
-export type WorkingInput=Pick<WorkingEntry,'content'|'layer'|'scope'|'sources'|'semantic'|'attribution'|'reviewAt'|'tags'>
+export type WorkingInput=Pick<WorkingEntry,'content'|'layer'|'scope'|'sources'|'semantic'|'attribution'|'reviewAt'|'tags'|'agreement'>
 export type WorkingChange = {action:'add';input:WorkingInput} | {action:'correct'|'conflict'|'obsolete';id:string;version:number;input:WorkingInput}
 const FILE='.rgent-memory',MAX=2*1024*1024,RESERVE=256*1024
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex')
@@ -20,7 +20,7 @@ const identifier=(v:unknown):v is string=>typeof v==='string'&&/^[A-Za-z0-9_/-]{
 const text=(v:unknown,max:number):v is string=>typeof v==='string'&&Buffer.byteLength(v)<=max&&!/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(v)
 const integer=(n:unknown):n is number=>Number.isSafeInteger(n)&&Number(n)>=0
 const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v)
-const empty=():WorkingRecord=>({version:3,identity:randomUUID(),revision:0,nextSequence:0,watermark:0,entries:[],recent:[],forgotten:[],jobs:[]})
+const empty=():WorkingRecord=>({version:4,identity:randomUUID(),revision:0,nextSequence:0,watermark:0,entries:[],recent:[],forgotten:[],jobs:[]})
 export function statusFromState(state:MemoryEntryState):WorkingEntry['status']{
  if(!state.enabled)return 'disabled'
  if(state.source!=='verified')return 'paused'
@@ -46,11 +46,22 @@ function sourceValid(s:unknown):s is WorkingSource{
  if(!object(s)||Object.keys(s).sort().join()!==(s.basisGroups===undefined?'basisHash,classification,end,hash,id,kind,materialId,memoryDeps,objectVersion,permissionTier,relPath,revision,sequence,sourceDeps,start,taskId,taskMaterialHash,text,version':'basisGroups,basisHash,classification,end,hash,id,kind,materialId,memoryDeps,objectVersion,permissionTier,relPath,revision,sequence,sourceDeps,start,taskId,taskMaterialHash,text,version')||!identifier(s.id)||!identifier(s.materialId)||!integer(s.sequence)||s.sequence<1||s.version!==1||!text(s.relPath,4096)||!s.relPath.endsWith('.md')||s.relPath.split('/').some(p=>!p||p==='.'||p==='..'||p.startsWith('.'))||!text(s.objectVersion,512)||!text(s.revision,128)||!['reference','follow'].includes(String(s.permissionTier))||!['body','ledger'].includes(String(s.kind))||!['human','command','adopted-ai'].includes(String(s.classification))||!(s.taskId===null||identifier(s.taskId))||!(s.taskMaterialHash===null||typeof s.taskMaterialHash==='string'&&/^[a-f0-9]{64}$/.test(s.taskMaterialHash))||!integer(s.start)||!integer(s.end)||s.end<=s.start||!text(s.text,4096)||typeof s.hash!=='string'||!/^[a-f0-9]{64}$/.test(s.hash)||typeof s.basisHash!=='string'||!/^[a-f0-9]{64}$/.test(s.basisHash)||!Array.isArray(s.sourceDeps)||s.sourceDeps.length>16||!Array.isArray(s.memoryDeps)||s.memoryDeps.length>16||s.basisGroups!==undefined&&(!Array.isArray(s.basisGroups)||s.basisGroups.length>16||!s.basisGroups.every(identifier)||new Set(s.basisGroups).size!==s.basisGroups.length))return false
  return s.sourceDeps.every(d=>object(d)&&Object.keys(d).sort().join()==='bodyHash,objectVersion,permissionTier,relPath'&&text(d.relPath,4096)&&text(d.objectVersion,512)&&typeof d.bodyHash==='string'&&/^[a-f0-9]{64}$/.test(d.bodyHash)&&['reference','follow'].includes(String(d.permissionTier)))&&s.memoryDeps.every(d=>object(d)&&Object.keys(d).sort().join()==='id,version'&&identifier(d.id)&&integer(d.version)&&d.version>0)
 }
-function inputValid(e:unknown):e is WorkingInput{return object(e)&&text(e.content,4096)&&e.content.trim().length>0&&['core','demand'].includes(String(e.layer))&&text(e.scope,512)&&Array.isArray(e.sources)&&e.sources.length>0&&e.sources.length<=16&&e.sources.every(sourceValid)&&['standing','fact'].includes(String(e.semantic))&&text(e.attribution,512)&&tagsValid(e.tags)&&(e.reviewAt===null||typeof e.reviewAt==='string'&&Number.isFinite(Date.parse(e.reviewAt)))}
+function inputValid(e:unknown):e is WorkingInput{return object(e)&&text(e.content,4096)&&e.content.trim().length>0&&['core','demand'].includes(String(e.layer))&&text(e.scope,512)&&Array.isArray(e.sources)&&e.sources.length>0&&e.sources.length<=16&&e.sources.every(sourceValid)&&['standing','fact'].includes(String(e.semantic))&&text(e.attribution,512)&&tagsValid(e.tags)&&agreementValid(e.agreement,e.sources)&&(e.reviewAt===null||typeof e.reviewAt==='string'&&Number.isFinite(Date.parse(e.reviewAt)))}
 function entryValid(e:unknown):e is WorkingEntry{
  if(!inputValid(e))return false
- const x=e as WorkingEntry,allowed=new Set(['id','version','content','layer','scope','sources','semantic','attribution','reviewAt','status','state','category','tags','recent','reason','updatedAt','updateBasis','pendingTarget'])
- return Object.keys(x).every(k=>allowed.has(k))&&identifier(x.id)&&integer(x.version)&&x.version>0&&['active','paused','pending','disabled','review','obsolete','disputed','deferred'].includes(x.status)&&stateValid(x.state)&&statusFromState(x.state)===x.status&&tagsValid(x.tags)&&['long','recent'].includes(String(x.category))&&(x.category==='recent'||x.recent===undefined)&&text(x.updatedAt,64)&&Number.isFinite(Date.parse(x.updatedAt))&&(x.reason===null||text(x.reason,256))&&object(x.updateBasis)&&Object.keys(x.updateBasis).sort().join()==='id,kind,version'&&['manual','consolidation'].includes(String(x.updateBasis.kind))&&identifier(x.updateBasis.id)&&integer(x.updateBasis.version)&&x.updateBasis.version>0&&(x.pendingTarget===undefined||object(x.pendingTarget)&&Object.keys(x.pendingTarget).sort().join()==='id,version'&&identifier(x.pendingTarget.id)&&integer(x.pendingTarget.version)&&x.pendingTarget.version>0)
+ const x=e as WorkingEntry,allowed=new Set(['id','version','content','layer','scope','sources','semantic','attribution','reviewAt','agreement','status','state','category','tags','recent','reason','updatedAt','updateBasis','pendingTarget'])
+ return Object.keys(x).every(k=>allowed.has(k))&&identifier(x.id)&&integer(x.version)&&x.version>0&&['active','paused','pending','disabled','review','obsolete','disputed','deferred'].includes(x.status)&&stateValid(x.state)&&statusFromState(x.state)===x.status&&tagsValid(x.tags)&&agreementValid(x.agreement,x.sources)&&['long','recent'].includes(String(x.category))&&(x.category==='recent'||x.recent===undefined)&&text(x.updatedAt,64)&&Number.isFinite(Date.parse(x.updatedAt))&&(x.reason===null||text(x.reason,256))&&object(x.updateBasis)&&Object.keys(x.updateBasis).sort().join()==='id,kind,version'&&['manual','consolidation'].includes(String(x.updateBasis.kind))&&identifier(x.updateBasis.id)&&integer(x.updateBasis.version)&&x.updateBasis.version>0&&(x.pendingTarget===undefined||object(x.pendingTarget)&&Object.keys(x.pendingTarget).sort().join()==='id,version'&&identifier(x.pendingTarget.id)&&integer(x.pendingTarget.version)&&x.pendingTarget.version>0)
+}
+/** 依据角色只作结构校验：引用是否真实支撑内容仍由质量验收判断。 */
+function agreementValid(agreement:unknown,sources:readonly {id:string}[]):boolean{
+ if(agreement===undefined)return true
+ if(!object(agreement)||Object.keys(agreement).sort().join()!=='authority,supporting')return false
+ if(!Array.isArray(agreement.authority)||!agreement.authority.length||agreement.authority.length>4)return false
+ if(!Array.isArray(agreement.supporting)||agreement.supporting.length>8||new Set(agreement.supporting).size!==agreement.supporting.length)return false
+ const ids=new Set(sources.map(s=>s.id))
+ if(!agreement.supporting.every(id=>identifier(id)&&ids.has(id)))return false
+ const seen=new Set<string>()
+ return agreement.authority.every(item=>{if(!object(item)||Object.keys(item).sort().join()!=='quote,sourceId'||!identifier(item.sourceId)||!ids.has(item.sourceId)||seen.has(item.sourceId)||!text(item.quote,512)||!item.quote.length)return false;seen.add(item.sourceId);return true})
 }
 function recentValid(e:unknown):e is WorkingRecent{
  if(!entryValid(e)||e.category!=='recent'||e.layer!=='demand'||e.semantic!=='fact'||!object((e as WorkingRecent).recent))return false
@@ -80,17 +91,20 @@ function nextRevision(record:WorkingRecord,reduction=false){
  else record.revision++
 }
 export function encodeWorkingMemory(record:WorkingRecord):string{
- const meta={...record,entries:record.entries.map(({content:_content,...entry})=>entry),recent:record.recent.map(({content:_content,...entry})=>entry)}
- const header=`<!-- rgent:memory:v3 data="${Buffer.from(JSON.stringify(meta)).toString('base64url')}" -->\n`
- return header+allEntries(record).map(e=>`<!-- rgent:item:v3 id="${e.id}" bytes="${Buffer.byteLength(e.content)}" -->\n${e.content}\n<!-- rgent:end:v3 -->\n`).join('')
+ // 任何一次真实写入都是 M4 编码：读到 M3 后在同一个 CAS 内升级，不另留旧格式副本。
+ const canonical:WorkingRecord={...record,version:4}
+ const meta={...canonical,entries:canonical.entries.map(({content:_content,...entry})=>entry),recent:canonical.recent.map(({content:_content,...entry})=>entry)}
+ const header=`<!-- rgent:memory:v4 data="${Buffer.from(JSON.stringify(meta)).toString('base64url')}" -->\n`
+ return header+allEntries(canonical).map(e=>`<!-- rgent:item:v4 id="${e.id}" bytes="${Buffer.byteLength(e.content)}" -->\n${e.content}\n<!-- rgent:end:v4 -->\n`).join('')
 }
+/** 读 M3 与 M4；读取不升级，下一次经授权的真实写入在同一 CAS 内转换。M2 及更早仍按不兼容处理。 */
 export function parseWorkingMemory(raw:string):WorkingRecord{
- try{if(Buffer.byteLength(raw)>MAX)throw Error();const prefix=/^<!-- rgent:memory:v3 data="([A-Za-z0-9_-]+)" -->\n/.exec(raw);if(!prefix)throw Error();const data=Buffer.from(prefix[1]!,'base64url');if(data.toString('base64url')!==prefix[1])throw Error();const r=JSON.parse(data.toString()) as WorkingRecord
-  if(Object.keys(r).sort().join()!=='entries,forgotten,identity,jobs,nextSequence,recent,revision,version,watermark'||r.version!==3||!identifier(r.identity)||!integer(r.revision)||!integer(r.nextSequence)||!integer(r.watermark)||r.watermark>r.nextSequence||!Array.isArray(r.entries)||r.entries.length>1000||!r.entries.every(e=>object(e)&&e.category==='long')||!Array.isArray(r.recent)||r.recent.length>32||!r.recent.every(e=>object(e)&&e.category==='recent')||!Array.isArray(r.jobs)||r.jobs.length>256||!Array.isArray(r.forgotten))throw Error()
+ try{if(Buffer.byteLength(raw)>MAX)throw Error();const prefix=/^<!-- rgent:memory:(v3|v4) data="([A-Za-z0-9_-]+)" -->\n/.exec(raw);if(!prefix)throw Error();const data=Buffer.from(prefix[2]!,'base64url');if(data.toString('base64url')!==prefix[2])throw Error();const r=JSON.parse(data.toString()) as WorkingRecord
+  if(Object.keys(r).sort().join()!=='entries,forgotten,identity,jobs,nextSequence,recent,revision,version,watermark'||![3,4].includes(Number(r.version))||(r.version===3&&prefix[1]!=='v3')||(r.version===4&&prefix[1]!=='v4')||!identifier(r.identity)||!integer(r.revision)||!integer(r.nextSequence)||!integer(r.watermark)||r.watermark>r.nextSequence||!Array.isArray(r.entries)||r.entries.length>1000||!r.entries.every(e=>object(e)&&e.category==='long')||!Array.isArray(r.recent)||r.recent.length>32||!r.recent.every(e=>object(e)&&e.category==='recent')||!Array.isArray(r.jobs)||r.jobs.length>256||!Array.isArray(r.forgotten))throw Error()
   for(const f of r.forgotten){if(!object(f)||Object.keys(f).sort().join()!=='entryIds,materialIds,through'||!integer(f.through)||f.through>r.nextSequence||!Array.isArray(f.materialIds)||!f.materialIds.every(identifier)||!Array.isArray(f.entryIds)||f.entryIds.some(d=>!object(d)||!identifier(d.id)||!integer(d.version)||d.version<1))throw Error()}
-  for(const job of r.jobs)if(!object(job)||!identifier(job.taskId)||typeof job.materialVersion!=='string'||!/^[a-f0-9]{64}$/.test(job.materialVersion)||!['queued','running','applied','rejected','interrupted'].includes(String(job.outcome))||!Array.isArray(job.entryIds)||!job.entryIds.every(identifier)||job.reason!==undefined&&!text(job.reason,256))throw Error()
+  for(const job of r.jobs)if(!object(job)||!identifier(job.taskId)||typeof job.materialVersion!=='string'||!/^[a-f0-9]{64}$/.test(job.materialVersion)||!['queued','running','applied','rejected','interrupted'].includes(String(job.outcome))||!Array.isArray(job.entryIds)||!job.entryIds.every(identifier)||job.reason!==undefined&&!text(job.reason,256)||job.results!==undefined&&!jobResultsValid(job.results))throw Error()
   let remaining=Buffer.from(raw.slice(prefix[0].length))
-  for(const e of allEntries(r)){const marker=/^<!-- rgent:item:v3 id="([A-Za-z0-9_-]+)" bytes="(\d+)" -->\n/.exec(remaining.subarray(0,remaining.indexOf(10)+1).toString());if(!marker||marker[1]!==e.id||Number(marker[2])>4096)throw Error();const start=Buffer.byteLength(marker[0]),end=start+Number(marker[2]),content=remaining.subarray(start,end);const suffix='\n<!-- rgent:end:v3 -->\n';if(!Buffer.from(content.toString()).equals(content)||remaining.subarray(end,end+Buffer.byteLength(suffix)).toString()!==suffix)throw Error();e.content=content.toString();remaining=remaining.subarray(end+Buffer.byteLength(suffix));if(!entryValid(e)||e.sources.some(s=>s.sequence>r.nextSequence))throw Error();if(e.category==='recent'){if(!recentValid(e)||e.content!==recentContent(e.recent))throw Error()}else if(e.category!=='long')throw Error()}
+  for(const e of allEntries(r)){const marker=/^<!-- rgent:item:(v3|v4) id="([A-Za-z0-9_-]+)" bytes="(\d+)" -->\n/.exec(remaining.subarray(0,remaining.indexOf(10)+1).toString());if(!marker||marker[1]!==prefix[1]||marker[2]!==e.id||Number(marker[3])>4096)throw Error();const start=Buffer.byteLength(marker[0]),end=start+Number(marker[3]),content=remaining.subarray(start,end);const suffix=`\n<!-- rgent:end:${prefix[1]} -->\n`;if(!Buffer.from(content.toString()).equals(content)||remaining.subarray(end,end+Buffer.byteLength(suffix)).toString()!==suffix)throw Error();e.content=content.toString();remaining=remaining.subarray(end+Buffer.byteLength(suffix));if(!entryValid(e)||e.sources.some(s=>s.sequence>r.nextSequence))throw Error();if(e.category==='recent'){if(!recentValid(e)||e.content!==recentContent(e.recent))throw Error()}else if(e.category!=='long')throw Error()}
   if(r.recent.some(e=>recentEncodedBytes({...r,recent:[e]})>16*1024)||recentEncodedBytes(r)>128*1024||remaining.length||new Set(allEntries(r).map(e=>e.id)).size!==allEntries(r).length)throw Error();return r
  }catch{throw Error('MEMORY_STORAGE_INVALID')}
 }
@@ -149,6 +163,7 @@ export class WorkingMemoryStore{
  apply(basis:WorkingSnapshot,groups:readonly (readonly WorkingChange[])[],receipt:MemoryJobReceipt,recentInput:WorkingRecentInput|null=null){
   if(groups.length>64||groups.reduce((n,g)=>n+g.length,0)>64)throw Error('MEMORY_OUTPUT_LIMIT')
   let record=structuredClone(basis.record),rejected=0,rejectionReason:string|undefined;const entryIds:string[]=[]
+  const results:MemoryJobGroupResult[]=[]
   for(const group of groups){const candidate=structuredClone(record),accepted:string[]=[]
    try{if(!group.length)throw Error('BAD_MEMORY_EDIT')
     for(const change of group){
@@ -177,7 +192,14 @@ export class WorkingMemoryStore{
     }
     if(!ordinaryFits(candidate))throw Error('MEMORY_FILE_LIMIT')
     record=candidate;entryIds.push(...accepted)
-   }catch(error){rejected++;if(error instanceof Error&&error.message==='MEMORY_FILE_LIMIT')rejectionReason='MEMORY_FILE_LIMIT'}
+    results.push({action:group[0]!.action,outcome:'applied'})
+   }catch(error){
+    rejected++
+    // 具体原因逐组保留：容量、版本、来源与遗忘分别可辨，不再一律折成格式错误。
+    const code=error instanceof Error&&/^[A-Z][A-Z_]{0,63}$/.test(error.message)?error.message:'MEMORY_OUTPUT_INVALID'
+    rejectionReason=rejectionReason??code
+    results.push({action:group[0]?.action??'add',outcome:'rejected',code})
+   }
   }
   const recentIds:string[]=[]
   if(recentInput){
@@ -197,10 +219,17 @@ export class WorkingMemoryStore{
      if(!candidate.recent.some(e=>e.id===entry.id)||recentEncodedBytes({...candidate,recent:[entry]})>16*1024||!ordinaryFits(candidate))throw Error('MEMORY_FILE_LIMIT')
      record=candidate;recentIds.push(entry.id)
     }
-   }catch(error){rejected++;if(error instanceof Error&&error.message==='MEMORY_FILE_LIMIT')rejectionReason='MEMORY_FILE_LIMIT'}
+    results.push({action:'recent',outcome:'applied'})
+   }catch(error){
+    rejected++
+    const code=error instanceof Error&&/^[A-Z][A-Z_]{0,63}$/.test(error.message)?error.message:'MEMORY_OUTPUT_INVALID'
+    rejectionReason=rejectionReason??code
+    results.push({action:'recent',outcome:'rejected',code})
+   }
   }
   record.jobs=record.jobs.filter(j=>j.taskId!==receipt.taskId)
-  record.jobs.push({...receipt,...(rejected&&!entryIds.length&&!recentIds.length?{outcome:'rejected' as const}:{}),entryIds:[...new Set([...entryIds,...recentIds])],...(rejected?{reason:rejectionReason??'MEMORY_OUTPUT_INVALID'}:{})});record.jobs=boundedReceipts(record.jobs)
+  const bounded=boundedJobResults(results)
+  record.jobs.push({...receipt,...(rejected&&!receipt.reason?{reason:rejectionReason??'MEMORY_OUTPUT_INVALID'}:{}),...(bounded.length?{results:bounded}:{}),...(rejected&&!entryIds.length&&!recentIds.length?{outcome:'rejected' as const}:{}),entryIds:[...new Set([...entryIds,...recentIds])]});record.jobs=boundedReceipts(record.jobs)
   const snapshot=this.commit(basis,record,false,!entryIds.length&&!recentIds.length)
   return {snapshot,entryIds:[...new Set([...entryIds,...recentIds])],recentIds,rejected}
  }
@@ -269,6 +298,16 @@ export function applyMemoryRecovery(raw:string,patches:MemoryRecoveryPatch[]):st
  nextRevision(record);if(!ordinaryFits(record))throw Error('MEMORY_FILE_LIMIT');return encodeWorkingMemory(record)
 }
 
+function boundedJobResults(results:readonly MemoryJobGroupResult[]):MemoryJobGroupResult[]{
+ // 拒绝原因优先保留：界面要能说明哪些没保存、为什么。
+ const ordered=[...results.filter(r=>r.outcome==='rejected'),...results.filter(r=>r.outcome==='applied')],out:MemoryJobGroupResult[]=[]
+ for(const result of ordered){if(out.length>=8)break;if(Buffer.byteLength(JSON.stringify([...out,result]))>256)break;out.push(result)}
+ return out
+}
+function jobResultsValid(value:unknown):value is MemoryJobGroupResult[]{
+ if(!Array.isArray(value)||value.length>8||Buffer.byteLength(JSON.stringify(value))>256)return false
+ return value.every(item=>object(item)&&Object.keys(item).every(key=>['action','outcome','code'].includes(key))&&['add','correct','conflict','obsolete','recent'].includes(String(item.action))&&['applied','rejected'].includes(String(item.outcome))&&(item.code===undefined||typeof item.code==='string'&&/^[A-Z][A-Z_]{0,63}$/.test(item.code)))
+}
 function boundedReceipts(jobs:MemoryJobReceipt[]):MemoryJobReceipt[]{
  const protectedJobs=jobs.filter(j=>['queued','running','interrupted'].includes(j.outcome))
  if(protectedJobs.length>256)throw Error('MEMORY_QUEUE_FULL')

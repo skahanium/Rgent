@@ -43,6 +43,8 @@ export type MemoryEntry = {
   attribution?: string
   reviewAt?: string | null
   sources: MemorySource[]
+  /** 依据角色：authortiy 是人的 command 原话，supporting 只用于理解；缺字段的旧条目保持原貌。 */
+  agreement?: AgreementBasis
   category?: 'long' | 'recent'
   recent?: {taskId:string;noteId:string;materialVersion:string;createdAt:string;outcome:'completed'|'cancelled'|'failed'|'limit';sections:{goal:string;completed:string;blocked:string;next:string};assistantDraft:boolean}
   tags?: string[]
@@ -53,20 +55,25 @@ export type MemoryEntry = {
   updateBasis: { kind: 'manual' | 'consolidation'; id: string; version: number }
   pendingTarget?: MemoryDependency
 }
+/** 权威依据必须来自人的明确口令，且引用原话逐字存在于该来源；辅助佐证仍参与依赖与遗忘闭包。 */
+export type AgreementBasis = { authority: { sourceId: string; quote: string }[]; supporting: string[] }
 export type MemoryEntryState = { source: 'verified' | 'unchecked' | 'revoked'; content: 'current' | 'review' | 'disputed' | 'obsolete'; enabled: boolean; capacity: 'ready' | 'deferred' }
+/** 有界分组结果：一次整理里相关更正组共同成败，独立组分别记账。 */
+export type MemoryJobGroupResult = { action: 'add' | 'correct' | 'conflict' | 'obsolete' | 'recent'; outcome: 'applied' | 'rejected'; code?: string }
 export type MemoryJobReceipt = {
   taskId: string; materialVersion: string
   outcome: 'queued' | 'running' | 'applied' | 'rejected' | 'interrupted'
   entryIds: string[]
   reason?: string
+  results?: MemoryJobGroupResult[]
 }
 export type MemoryContext = { sessionId: string; vaultKey: string }
 export type MemoryStatus = { status: 'ready'; count: number } | { status: 'invalid'; reason: string }
 
 /** Only these bounded, human management views cross IPC. No hidden record or authority. */
 export type MemorySourceView = Pick<MemorySource, 'relPath' | 'kind' | 'taskId' | 'text' | 'classification'>
-export type MemoryEntryView = Pick<MemoryEntry, 'id' | 'version' | 'content' | 'layer' | 'scope' | 'status' | 'reason' | 'updatedAt' | 'pendingTarget'> & { sources: MemorySourceView[];semantic?:'standing'|'fact';attribution?:string;reviewAt?:string|null;category?:'long'|'recent';recent?:MemoryEntry['recent'];tags?:string[];state?:MemoryEntryState }
-export type MemoryJobView = { taskId: string; materialVersion: string | null; outcome: MemoryJobReceipt['outcome'] | 'unavailable' | 'handed-off'; reason?: string; retryable: boolean; entryIds?: string[]; undoable?:boolean }
+export type MemoryEntryView = Pick<MemoryEntry, 'id' | 'version' | 'content' | 'layer' | 'scope' | 'status' | 'reason' | 'updatedAt' | 'pendingTarget'> & { sources: MemorySourceView[];semantic?:'standing'|'fact';attribution?:string;reviewAt?:string|null;agreement?:AgreementBasis;category?:'long'|'recent';recent?:MemoryEntry['recent'];tags?:string[];state?:MemoryEntryState }
+export type MemoryJobView = { taskId: string; materialVersion: string | null; outcome: MemoryJobReceipt['outcome'] | 'unavailable' | 'handed-off'; reason?: string; results?: MemoryJobGroupResult[]; retryable: boolean; entryIds?: string[]; undoable?:boolean }
 export type MemoryView = {
   sessionId: string; revision: string | null; objectVersion: string | null
   config: PublicMemoryConfig

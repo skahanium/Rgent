@@ -4,7 +4,9 @@ import path from 'node:path'
 import {afterEach,it,expect,vi} from 'vitest'
 import {VaultSession} from '../../src/main/vault.ts'
 import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
-import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions} from '../../src/main/working-memory-consolidation.ts'
+import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions,roleAgreement} from '../../src/main/working-memory-consolidation.ts'
+import type {WorkingSource} from '../../src/main/working-memory-store.ts'
+import {createHash} from 'node:crypto'
 import {serializeStoredVault} from '../../src/main/notes-fs.ts'
 import {markPrompt,upsertAiAnswer} from '../../src/main/host-source.ts'
 import type {ModelStepInput,ModelStepEvent} from '../../src/main/model-stream.ts'
@@ -30,7 +32,7 @@ async function fixture(stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEve
  cleanups.push(async()=>{engine.close();await engine.idle();vault.dispose();await rm(base,{recursive:true,force:true})})
  return {vault,service,engine,material,changeConfig:()=>{signature='changed'},disableConfig:()=>{enabled=false}}
 }
-const suggestion=(input:ModelStepInput)=>{const data=JSON.parse(String(input.messages[0]!.content));return {action:'add',content:'后续在本库使用中文',layer:'core',scope:'本库',sourceIds:[data.sources[0].id],semantic:'standing',attribution:'人在本场口令中要求',reviewAt:null}}
+const suggestion=(input:ModelStepInput)=>{const data=JSON.parse(String(input.messages[0]!.content));const first=data.sources[0];return {action:'add',content:'后续在本库使用中文',layer:'core',scope:'本库',sourceIds:[first.id],semantic:'standing',attribution:'人在本场口令中要求',reviewAt:null,authority:[{sourceId:first.id,quote:String(first.text).slice(0,4)}]}}
 it('cancel and idle include a handoff still checking saved material',async()=>{
  let calls=0,release!:()=>void
  const f=await fixture(async function*(){calls++;yield {type:'text',text:'{"proposals":[]}'};yield {type:'finish',reason:'stop'}})
@@ -310,3 +312,42 @@ it('corrects an actually Host-sent old version without self dependency and retai
   expect(service.snapshot().record.entries).toEqual([])
  }finally{vault.dispose()}
 },20000)
+
+const roleSource=(id:string,text:string,classification:'command'|'human'):WorkingSource=>({id,version:1,relPath:'a.md',objectVersion:'object',revision:'a'.repeat(64),permissionTier:'reference',kind:classification==='command'?'ledger':'body',taskId:'task',taskMaterialHash:'b'.repeat(64),classification,start:0,end:text.length,text,hash:createHash('sha256').update(text).digest('hex'),basisHash:'d'.repeat(64),sourceDeps:[],memoryDeps:[],materialId:'task/fragment',sequence:1})
+it('keeps a verbatim authority quote and demotes extra citations into the supporting role',()=>{
+ const command=roleSource('cmd','以后在本库解释先给结论','command'),human=roleSource('body','我偏好先给结论再举例子','human')
+ const agreement=roleAgreement({semantic:'standing',authority:[{sourceId:'cmd',quote:'先给结论'}],sourceIds:['cmd','body']},[command,human])
+ expect(agreement).toEqual({authority:[{sourceId:'cmd',quote:'先给结论'}],supporting:['body']})
+ expect(roleAgreement({semantic:'fact',authority:[{sourceId:'body',quote:'先给结论'}],sourceIds:['body']},[human])).toEqual({authority:[{sourceId:'body',quote:'先给结论'}],supporting:[]})
+})
+it('refuses standing without a verbatim human command and keeps the legacy rule for old proposals',()=>{
+ const command=roleSource('cmd','以后在本库解释先给结论','command'),human=roleSource('body','我偏好先给结论','human')
+ expect(()=>roleAgreement({semantic:'standing',authority:[{sourceId:'cmd',quote:'口令里没有这句话'}],sourceIds:['cmd']},[command])).toThrow()
+ expect(()=>roleAgreement({semantic:'standing',authority:[{sourceId:'body',quote:'先给结论'}],sourceIds:['body']},[human])).toThrow()
+ expect(()=>roleAgreement({semantic:'standing',authority:[],sourceIds:['cmd']},[command])).toThrow()
+ expect(()=>roleAgreement({semantic:'standing',authority:[{sourceId:'missing',quote:'先给结论'}],sourceIds:['cmd']},[command])).toThrow()
+ expect(()=>roleAgreement({semantic:'standing',authority:[{sourceId:'cmd',quote:'先给结论'}],supporting:['missing'],sourceIds:['cmd']},[command])).toThrow()
+ // 旧口径（没有角色字段）仍然是"每个引用都必须是口令"，不因新字段放宽
+ expect(()=>roleAgreement({semantic:'standing',sourceIds:['body']},[human])).toThrow()
+ // v6 口径：即使引用全是口令，没有显式 authority 的长期约定也要拒绝
+ expect(()=>roleAgreement({semantic:'standing',sourceIds:['cmd']},[command],true)).toThrow()
+ expect(roleAgreement({semantic:'standing',sourceIds:['cmd'],authority:[{sourceId:'cmd',quote:'先给结论'}]},[command],true)).toEqual({authority:[{sourceId:'cmd',quote:'先给结论'}],supporting:[]})
+ expect(roleAgreement({semantic:'fact',sourceIds:['body']},[human])).toBeUndefined()
+})
+it('saves a standing agreement that quotes the original command and refuses one without authority',async()=>{
+ const proposal=(authority:boolean)=>(input:ModelStepInput)=>{
+  const data=JSON.parse(String(input.messages[0]!.content)),first=data.sources[0]
+  return {recent:null,proposals:[{action:'add',content:'以后在本库解释先给结论',layer:'core',scope:'本库',sourceIds:[first.id],semantic:'standing',attribution:'人的口令',reviewAt:null,...(authority?{authority:[{sourceId:first.id,quote:String(first.text).slice(0,4)}]}:{})}]}
+ }
+ const accepted=await fixture(async function*(input){yield {type:'text',text:JSON.stringify(proposal(true)(input))};yield {type:'finish',reason:'stop'}},'以后在本库解释先给结论','continuity')
+ await accepted.engine.handoff(accepted.material);await accepted.engine.idle()
+ const entry=(await accepted.service.entries())[0]
+ expect(entry?.content).toBe('以后在本库解释先给结论')
+ expect(entry?.agreement?.authority).toHaveLength(1)
+ expect(entry?.agreement?.authority[0]?.quote).toBe('以后在本')
+ expect(accepted.service.snapshot().record.jobs[0]?.outcome).toBe('applied')
+ const refused=await fixture(async function*(input){yield {type:'text',text:JSON.stringify(proposal(false)(input))};yield {type:'finish',reason:'stop'}},'以后在本库解释先给结论','continuity')
+ await refused.engine.handoff(refused.material);await refused.engine.idle()
+ expect(await refused.service.entries()).toHaveLength(0)
+ expect(refused.service.snapshot().record.jobs[0]?.reason).toBe('MEMORY_OUTPUT_INVALID')
+})

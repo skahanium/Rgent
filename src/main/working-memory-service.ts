@@ -105,7 +105,13 @@ export class WorkingMemoryService{
   if(recentExpired(entry)||!entry.sources.length)return false
   if(entry.category==='recent'){const recent=entry as import('./working-memory-store.ts').WorkingRecent;try{const saved=await this.savedMaterial(recent.sources.find(s=>s.kind==='ledger'&&s.taskId===recent.recent.taskId)!.relPath,recent.recent.taskId);if(saved.noteId!==recent.recent.noteId||saved.materialVersion!==recent.recent.materialVersion)return false}catch{return false}}
   for(const s of entry.sources){if(!await this.verifySource(s))return false;for(const dep of s.memoryDeps){const parent=all.find(e=>e.id===dep.id&&e.version===dep.version&&e.status==='active');if(!parent||parent.reviewAt&&Date.parse(parent.reviewAt)<=Date.now()||!await this.verifyEntry(parent,all,new Set(seen)))return false}}
-  return true
+  return this.agreementCurrent(entry)
+ }
+ /** 引用原话必须仍逐字存在于所引来源；失配按来源不可核验降级，不静默保留权威。 */
+ private agreementCurrent(entry:WorkingEntry):boolean{
+  const agreement=entry.agreement
+  if(!agreement)return true
+  return agreement.authority.every(item=>{const source=entry.sources.find(s=>s.id===item.sourceId);return !!source&&source.text.includes(item.quote)})
  }
  async view():Promise<MemoryView>{
   const context=this.context(),config=this.config();let configError:string|undefined

@@ -423,3 +423,24 @@ it.each([false,true])('expires recent by creation time through recursive depende
   expect(vault.memorySnapshot().raw).toBe(raw)
  }finally{vi.restoreAllMocks();vault.dispose();await rm(base,{recursive:true,force:true})}
 })
+
+it('demotes an agreement whose quoted authority text is absent from the cited source',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-agreement-quote-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),markPrompt('/以后本库回答使用中文',{taskId:'quote',range:{start:0,end:11},expectedText:'/以后本库回答使用中文',promptText:'以后本库回答使用中文'}))
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{
+  const note=await vault.readOpened('a.md')
+  await vault.ledgerPrepare('a.md',{taskId:'quote',startedAt:new Date().toISOString(),status:'completed',prompt:'以后本库回答使用中文',answer:'保存回执'})
+  const written=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'quote',answer:'保存回执'}),note.revision,note)
+  await vault.ledgerComplete('a.md','quote',written.revision)
+  const service=new WorkingMemoryService(vault,()=>null),source=await service.sourceForPrompt('a.md','quote')
+  const added=await vault.memoryMutation(store=>store.add(store.read(),{content:'以后本库回答使用中文',layer:'core',scope:'本库',sources:[source],semantic:'standing',attribution:'人的口令',reviewAt:null,agreement:{authority:[{sourceId:source.id,quote:'这段原话并不存在于来源'}],supporting:[]}}))
+  const demoted=await service.entries([added.id])
+  expect(demoted[0]?.status).toBe('paused')
+  expect(demoted[0]?.reason).toBe('MEMORY_SOURCE_CHANGED')
+  // 原话真实存在时不误伤：同一条目改为正确引用后可继续使用。
+  await vault.memoryMutation(store=>{const current=store.read(),entry=current.record.entries.find(e=>e.id===added.id)!;return store.edit(current,added.id,entry.version,{content:entry.content,agreement:{authority:[{sourceId:source.id,quote:source.text.slice(0,4)}],supporting:[]}})})
+  const usable=await service.entries([added.id])
+  expect(usable[0]?.status).toBe('active')
+  expect(usable[0]?.reason).toBeNull()
+ }finally{vi.restoreAllMocks();vault.dispose();await rm(base,{recursive:true,force:true})}
+})
