@@ -1,22 +1,16 @@
 import { LEDGER_ERROR_MESSAGES, ledgerErrorText } from '../../shared/ledger-errors.ts'
 import type { LedgerRepairRequest, LedgerRepairResult, LedgerRecoveryView } from '../../shared/ledger.ts'
 import type { LifecycleStatus } from '../../shared/ipc.ts'
-import type { VaultCatalogEntry, VaultCatalogView } from '../../shared/vault-management'
+import type { VaultCatalogEntry, VaultCatalogView, VaultRootPreview, VaultCatalogChangeRequest, VaultCatalogChangeResult } from '../../shared/vault-management'
 import { icon, type IconName } from './icons'
 
-type Catalog = VaultCatalogView & { activeId?: string | null }
+type Catalog = VaultCatalogChangeResult & { activeId?: string | null; activeUnavailable?:boolean }
 export type VaultManagerHandlers = {
   recovery?: {state():Promise<LifecycleStatus>;repair(request:LedgerRepairRequest):Promise<LedgerRepairResult>}
   get(): Promise<Catalog>
   open(id: string): Promise<void>
   pick(create: boolean): Promise<void>
-  change(request: {
-    id: string
-    revision: string
-    action: 'pin' | 'label' | 'remove' | 'relocate'
-    pinned?: boolean
-    label?: string
-  }): Promise<Catalog>
+  change(request: VaultCatalogChangeRequest): Promise<Catalog>
 }
 
 export type VaultManagerPage = { dispose(): void; isDirty(): boolean; isBusy(): boolean }
@@ -98,7 +92,7 @@ export function mountVaultManager(context: {
     for (const row of rows.values()) {
       for (const action of row.root.querySelectorAll<HTMLButtonElement>('button')) action.disabled = busy
       row.input.disabled = busy
-      row.relocate.disabled = busy || row.entry.id === catalog?.activeId
+      row.relocate.disabled = busy || row.entry.id === catalog?.activeId&&!catalog?.activeUnavailable
       row.save.disabled = busy || row.input.value.trim() === row.entry.label || !row.input.value.trim()
     }
   }
@@ -130,9 +124,9 @@ export function mountVaultManager(context: {
   }
   function change(entry: VaultCatalogEntry, action: 'pin' | 'label' | 'remove' | 'relocate', patch: { pinned?: boolean; label?: string } = {}): void {
     if (!catalog || busy) return
-    const request = { id: entry.id, revision: catalog.revision, action, ...patch }
+    const request = { id: entry.id, revision: catalog.revision, action, ...patch } as VaultCatalogChangeRequest
     const savedMessage = action === 'remove' && entry.id === catalog.activeId ? '已从本设备列表移除。当前笔记库仍保持打开；笔记、账本和记忆均保留。' : '已保存。'
-    void run(action === 'relocate' ? '正在重新定位笔记库…' : '正在保存库列表…', () => handlers.change(request), savedMessage)
+    void run(action === 'relocate' ? '正在重新定位笔记库…' : '正在保存库列表…', async()=>{const result=await handlers.change(request);if(result.rootPreview){const row=rows.get(entry.id)!;row.rootPreview=result.rootPreview;row.showRoot(result.rootPreview)}return result}, savedMessage)
   }
   function createRow(entry: VaultCatalogEntry) {
     const root = element('article', 'vault-settings-row'); root.dataset.vaultId = entry.id
@@ -159,7 +153,24 @@ export function mountVaultManager(context: {
     const relocateHint = element('p', 'vault-settings-hint', '正在使用的笔记库需先切换到其他库，再重新定位。')
     const remove = button('从列表移除', () => { if (!busy) { confirmation.hidden = false; cancelRemove.focus() } })
     remove.dataset.vaultAction = 'remove'
-    menu.append(relocate, remove, relocateHint)
+    const rootProof=element('div','vault-settings-confirmation');rootProof.hidden=true
+    const previewRoot=button('预览根关联',()=>{void rootChange('root-preview')});previewRoot.dataset.vaultAction='root-preview'
+    const chooseRoot=button('选择位置并预览',()=>{void rootChange('root-preview',true)});chooseRoot.dataset.vaultAction='root-choose'
+    async function rootChange(action:'root-preview'|'root-confirm'|'root-cancel',choose?:boolean){
+      if(!catalog)return
+      await run('正在核对根关联…',async()=>{
+        let result:Catalog
+        try{result=await handlers.change(action==='root-preview'?{id:row.entry.id,revision:catalog!.revision,action,...(choose?{choose:true}:{})}:{id:row.entry.id,revision:catalog!.revision,action,previewId:row.rootPreview!.id})}catch(error){if(action!=='root-preview'&&alive()){row.showRoot(null);const latest=await handlers.get().catch(()=>null);if(latest&&alive())showCatalog(latest)}throw error}
+        if(alive()){
+          row.showRoot(result.rootPreview??null)
+        }
+        return result
+      })
+    }
+    function showRoot(p:VaultRootPreview|null){row.rootPreview=p;rootProof.replaceChildren();rootProof.hidden=!p
+          if(p){rootProof.append(element('p','',`${p.previousPath} → ${p.path}`),element('p','',`登记对象 ${p.previousIdentity} → 当前对象 ${p.rootIdentity}`),element('p','',p.workspace==='unavailable'?'工作区位置无法恢复；原记录保留，正文仍可打开。':p.workspace==='restore'?'按稳定登记恢复工作区位置。':'没有可恢复的工作区位置。'),element('p','',p.warning),button('取消根预览',()=>{void rootChange('root-cancel')}),button('确认建立新关联',()=>{void rootChange('root-confirm')}))}
+    }
+    menu.append(relocate,previewRoot,chooseRoot,remove,relocateHint)
     const form = element('form', 'vault-settings-name'); form.noValidate = true; form.hidden = true
     const label = element('label', '', '显示名称')
     const input = document.createElement('input'); input.type = 'text'; input.value = entry.label; input.maxLength = 80
@@ -173,8 +184,8 @@ export function mountVaultManager(context: {
     const confirm = button('确认从列表移除', () => change(row.entry, 'remove')); confirm.dataset.vaultAction = 'confirm-remove'
     const cancelRemove = button('取消移除', () => { if (!busy) { confirmation.hidden = true; remove.focus() } }); cancelRemove.dataset.vaultAction = 'cancel-remove'
     confirmation.append(cancelRemove, confirm)
-    root.append(title, position, path, actions, menu, form, confirmation)
-    const row = { entry, root, labelText, open, using, position, path, actions, pin, edit, more, menu, relocate, relocateHint, form, input, save, confirmation }
+    root.append(title, position, path, actions, menu, form, confirmation,rootProof)
+    const row = { showRoot,rootPreview:null as VaultRootPreview|null,entry, root, labelText, open, using, position, path, actions, pin, edit, more, menu, relocate, relocateHint, form, input, save, confirmation }
     form.addEventListener('submit', event => { event.preventDefault(); if (!busy && !save.disabled) change(row.entry, 'label', { label: input.value.trim() }) })
     input.addEventListener('input', refreshControls)
     return row
@@ -199,7 +210,7 @@ export function mountVaultManager(context: {
       if (active) row.open.removeAttribute('data-vault-open')
       else row.open.dataset.vaultOpen = entry.id
       row.relocateHint.hidden = !active
-      row.relocateHint.textContent = active ? '正在使用的笔记库需先切换到其他库，再重新定位。' : ''
+      row.relocateHint.textContent = active ? catalog?.activeUnavailable?'原根不可访问，可选择位置、预览并明确确认新关联；窗口稿保留。':'正在使用的稳定根需先切换到其他库，再重新定位。' : ''
       row.pin.textContent = entry.pinned ? '取消固定' : '固定'
       if (active && row.edit.parentElement !== row.actions) row.actions.insertBefore(row.edit, row.more)
       else if (!active && row.edit.parentElement !== row.menu) row.menu.prepend(row.edit)
@@ -250,7 +261,8 @@ function button(text: string, click: () => void, glyph?: IconName): HTMLButtonEl
 function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : ''
   if(Object.hasOwn(LEDGER_ERROR_MESSAGES,message))return ledgerErrorText(message)
-  if(message.includes('STALE_PREVIEW')||message.includes('STALE_RECOVERY'))return '文件、附件或权限已改变，恢复已停止；已核验进度保留，请核查后重试。'
+  if(message.includes('STALE_PREVIEW'))return '根对象、目录登记、工作区或会话已变更，预览已失效。请重新预览；窗口稿保留。'
+  if(message.includes('STALE_RECOVERY'))return '文件、附件或权限已改变，恢复已停止；已核验进度保留，请核查后重试。'
   if (message.includes('VAULT_SWITCH_CANCELLED')) return ''
   if (message.includes('VAULT_SWITCH_TIMEOUT')) return '切换准备未在时限内完成，仍留在当前库。窗口稿和设置修改已保留；请重试，或先处理保存与任务问题。'
   if (message.includes('VAULT_SWITCH_BODY_CONFLICT')) return '窗口稿与磁盘稿发生冲突，两份均已保留。请先关闭设置，处理正文保存冲突后，再重试切换。'
@@ -259,6 +271,10 @@ function errorText(error: unknown): string {
   if (message.includes('PREVIOUS_TASK_UNSAVED')) return '生成回答尚未保存，已留在原库。请先处理保存问题，再重试切换。'
   if (message.includes('VAULT_TARGET_INVALID')) return '无法打开所选位置。请检查目录是否存在及访问权限后重试。'
   if (message.includes('VAULT_CATALOG_CONFLICT')) return '库列表已在别处更新。请离开本页后重新进入，再核对修改。'
+  if(message.includes('VAULT_WORKSPACE_INVALID'))return '工作区位置记录损坏，原字节保留；正文可打开，位置不会覆盖。'
+  if(message.includes('BAD_SENDER'))return '原窗口已变更，本次关联未提交；请重新预览。'
+  if(message.includes('VAULT_PREVIEW_LIMIT'))return '最多保留四份根预览，请取消旧预览后重试。'
+  if(message.includes('SOURCE_AVAILABLE'))return '根关联仍有效，无需恢复。'
   if (message.includes('VAULT_REPLACED')) return '这个位置现在放的是另一个目录（原库已被替换）。请核对后重新定位，不要直接打开。'
   if (message.includes('VAULT_RELOCATE_REQUIRED')) return '这个库换了位置，请用「重新定位」指到新的文件夹。'
   if (message.includes('VAULT_TARGET_CHANGED')) return '库目录不可访问或已移动，请检查目录后重试。'

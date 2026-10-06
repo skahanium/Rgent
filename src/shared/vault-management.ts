@@ -58,3 +58,14 @@ export function parseVaultTransition(value: unknown): VaultTransition | null {
     r.restoreId!==undefined && (r.phase!=='restoring' || typeof r.restoreId!=='string' || !r.restoreId || r.restoreId.length>128)) return null
   return r as VaultTransition
 }
+
+export type VaultRootPreview = {id:string;entryId:string;path:string;previousPath:string;previousIdentity:string;rootIdentity:string;workspace:'restore'|'none'|'unavailable';warning:string}
+export type VaultCatalogChangeRequest = {id:string;revision:string} & ({action:'pin';pinned:boolean}|{action:'label';label:string}|{action:'remove'|'relocate'}|{action:'root-preview';choose?:boolean}|{action:'root-confirm'|'root-cancel';previewId:string})
+export type VaultCatalogChangeResult = VaultCatalogView & {rootPreview?:VaultRootPreview;state?:import('./ipc.ts').VaultState}
+export function parseVaultCatalogChange(value:unknown):VaultCatalogChangeRequest|null{
+ if(!value||typeof value!=='object'||Array.isArray(value))return null
+ const r=value as Record<string,unknown>,fields:Record<string,string[]>={pin:['pinned'],label:['label'],remove:[],relocate:[],'root-preview':['choose'],'root-confirm':['previewId'],'root-cancel':['previewId']}
+ if(typeof r.id!=='string'||!r.id||r.id.length>128||typeof r.revision!=='string'||typeof r.action!=='string'||!Object.hasOwn(fields,r.action)||Object.keys(r).some(k=>!['id','revision','action',...fields[String(r.action)]!].includes(k)))return null
+ if(r.action==='pin'&&typeof r.pinned!=='boolean'||r.action==='label'&&typeof r.label!=='string'||r.action==='root-preview'&&r.choose!==undefined&&typeof r.choose!=='boolean'||['root-confirm','root-cancel'].includes(r.action)&&(typeof r.previewId!=='string'||!r.previewId||r.previewId.length>128))return null
+ return r as VaultCatalogChangeRequest
+}

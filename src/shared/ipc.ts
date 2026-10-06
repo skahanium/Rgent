@@ -199,7 +199,7 @@ export type ChromeTextSetResult = { ok: true; preference: import('./reading-pref
 export type VaultState = (
   | { status: 'needs-pick'; reason: 'first-run' | 'missing'; sessionId?: string | null; cancelled?: boolean; diagnostic?: string }
   | { status: 'ready'; rootName: string; vaultChanged?: boolean; sessionId?: string; navigationKey?: string; legacyNavigationKey?:string; diagnostic?: string; vaultId?: string; cancelled?: boolean }
-) & { restoreId?: string }
+) & { restoreId?: string; protectedSessionId?:string }
 
 export type TreeEntry = {
   name: string
@@ -220,6 +220,7 @@ export type SetPermissionRequest = { relPath: string; tier: PermissionTier }
 
 export type NoteSnapshot = { content: string; revision: string; objectVersion: string; sessionId: string; ledger?:{status:'verified'|'unregistered'|'unmigrated'|'invalid';reason?:string;next:'none'|'migrate'|'repair'} }
 export type SaveCopyPreviewRequest = ObjectBinding & {
+  sourceSessionId?: string
   source: string
   body: string
   draftVersion: string
@@ -272,7 +273,7 @@ export type LifecycleRetryResult = {
 } | { ok: false; error: string }
 export type NoteWriteRequest = ObjectBinding & { relPath: string; content: string; expectedRevision: string }
 
-export type NoteInspectRequest = ObjectBinding & { relPath: string }
+export type NoteInspectRequest = ObjectBinding & { relPath: string; sourceSessionId?:string }
 export type NoteInspectResult = { status: 'ready'; snapshot: NoteSnapshot } | { status: 'missing' | 'replaced' | 'unreadable'; sessionId: string; relPath: string; objectVersion: string }
 export type NoteAvailability = 'missing' | 'replaced' | 'unavailable'
 export type NotePayload = { sessionId: string; relPath: string } & (

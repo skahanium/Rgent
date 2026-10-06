@@ -44,6 +44,20 @@ export class VaultSession {
   private stopWatch: (() => void) | null = null
   private lastWrites = new Map<string, RecentWrite & { objectVersion: string }>()
   private readonly verified = new Map<string, Map<string, NoteSnapshot>>()
+  private readonly protectedSources=new Map<string,{root:string;rootIdentity:string;snapshot:NoteSnapshot;relPath:string}>()
+  protectRootDrafts(sessionId:string,bindings?:Array<{relPath:string;objectVersion:string}>):void{
+    this.assertSession(sessionId)
+    if([...this.protectedSources.values()].some(p=>p.snapshot.sessionId!==sessionId))throw Error('UNSAVED_DRAFT')
+    const selected=bindings?bindings.map(b=>{const snapshot=this.latestFor(b.relPath,b.objectVersion);if(!snapshot)throw Error('LEDGER_BASIS_UNAVAILABLE');return {...b,snapshot}}):[...this.verified].flatMap(([relPath,versions])=>[...versions.values()].map(snapshot=>({relPath,objectVersion:snapshot.objectVersion,snapshot})))
+    if(selected.reduce((n,p)=>n+Buffer.byteLength(p.snapshot.content,'utf8'),0)>64*1024*1024||selected.length>8192)throw Error('OBJECT_BINDING_LIMIT')
+    const combined=new Map(this.protectedSources)
+    for(const p of selected)combined.set(sessionId+':'+p.relPath+':'+p.objectVersion,{root:this.root!,rootIdentity:this.rootIdentity!,snapshot:p.snapshot,relPath:p.relPath})
+    if(combined.size>8192||[...combined.values()].reduce((n,p)=>n+Buffer.byteLength(p.snapshot.content,'utf8'),0)>64*1024*1024)throw Error('OBJECT_BINDING_LIMIT')
+    for(const {relPath,objectVersion,snapshot}of selected)this.protectedSources.set(sessionId+':'+relPath+':'+objectVersion,{root:this.root!,rootIdentity:this.rootIdentity!,snapshot:{...snapshot},relPath})
+  }
+  protectedRootSource(sessionId:string,relPath:string,objectVersion:string):{root:string;rootIdentity:string;snapshot:NoteSnapshot;relPath:string}|null{return this.protectedSources.get(sessionId+':'+relPath+':'+objectVersion)??null}
+  protectedSession():string|null{return [...this.protectedSources.values()].find(p=>p.snapshot.sessionId!==this.token)?.snapshot.sessionId??null}
+  discardRootSource(sessionId:string,relPath:string,objectVersion:string):void{if(!this.protectedRootSource(sessionId,relPath,objectVersion))throw Error('STALE_PREVIEW');for(const [key,p]of this.protectedSources)if(p.snapshot.sessionId===sessionId&&p.relPath===relPath)this.protectedSources.delete(key)}
   private readonly successors = new Map<string, Map<string, string>>()
   private readonly latestObjects = new Map<string, string>()
   private readonly copyPreviews = new Map<string, {
@@ -614,6 +628,7 @@ export class VaultSession {
       if (knownPath === relPath && (id === objectVersion || id === replaced)) continue
       bytes += Buffer.byteLength(snapshot.content, 'utf8')
     }
+    for(const proof of this.protectedSources.values())if(proof.snapshot.sessionId!==this.token)bytes+=Buffer.byteLength(proof.snapshot.content,'utf8')
     if (bytes > 64 * 1024 * 1024) throw new Error('OBJECT_BINDING_LIMIT')
   }
 
@@ -631,18 +646,18 @@ export class VaultSession {
     this.assertSession(request.sessionId)
     return this.mutations.run(async () => {
       this.assertSession(request.sessionId)
-      this.requireStableStructure()
+      if(request.sourceSessionId)this.requireUsableRoot();else this.requireStableStructure()
       this.checkCopyPaths(request.source, request.target)
       if (partitionSource(request.body).ledger !== null) throw new Error('BAD_BODY')
-      const basis = this.latestFor(request.source, request.objectVersion)
+      const basis = request.sourceSessionId?this.protectedRootSource(request.sourceSessionId,request.source,request.objectVersion)?.snapshot:this.latestFor(request.source, request.objectVersion)
       if (!basis) throw new Error('LEDGER_BASIS_UNAVAILABLE')
-      if ((await this.noteStatus(request.source, request)).status === 'ready') throw new Error('SOURCE_AVAILABLE')
+      if (!request.sourceSessionId&&(await this.noteStatus(request.source, request)).status === 'ready') throw new Error('SOURCE_AVAILABLE')
       this.assertSession(request.sessionId)
       const parentIdentity = this.copyTargetIdentity(request.target)
       const content = request.body
       const view: SaveCopyPreviewView = { id: randomUUID(), sessionId: request.sessionId, source: request.source,
-        target: request.target, draftVersion: request.draftVersion, pendingTaskIds: chapters.map((chapter) => chapter.taskId),
-        warning: '另存创建新笔记归属，保留窗口正文及本预览列出的旧账本恢复材料和待保存任务记录；原账本不移动，不复制附件、不重启任务。' }
+        target: request.target, draftVersion: request.draftVersion, pendingTaskIds: request.sourceSessionId?[]:chapters.map((chapter) => chapter.taskId),
+        warning: request.sourceSessionId?'只保留正文为新笔记，不复制账本、历史、附件或记忆，不确认旧待保存回答；原窗口稿取消或失败时保留。':'另存创建新笔记归属，保留窗口正文及本预览列出的旧账本恢复材料和待保存任务记录；原账本不移动，不复制附件、不重启任务。' }
       this.copyPreviews.clear();this.ledgerRecoveryPreviews.clear()
       this.copyPreviews.set(view.id, { view: { ...view, pendingTaskIds: [...view.pendingTaskIds] }, request: { ...request }, content,
         bodyHash: revisionOf(request.body), basisHash: revisionOf(basis.content), pendingHash: revisionOf(JSON.stringify(chapters)), parentIdentity })
@@ -656,26 +671,27 @@ export class VaultSession {
     return prepared ? { ...prepared.request } : null
   }
 
-  async commitSaveCopy(request: SaveCopyCommitRequest, chapters: readonly LedgerChapterWrite[] = []): Promise<{ relPath: string; snapshot: NoteSnapshot; taskIds: string[] }> {
+  async commitSaveCopy(request: SaveCopyCommitRequest, chapters: readonly LedgerChapterWrite[] = [], assertOwner:()=>void=()=>{}): Promise<{ relPath: string; snapshot: NoteSnapshot; taskIds: string[] }> {
     this.assertSession(request.sessionId)
     await this.lifecycleReady
     this.assertSession(request.sessionId)
     return this.mutations.run(async () => {
-      this.assertSession(request.sessionId)
-      this.requireStableStructure()
+      assertOwner();this.assertSession(request.sessionId)
       const prepared = this.copyPreviews.get(request.id)
+      if(prepared?.request.sourceSessionId)this.requireUsableRoot();else this.requireStableStructure()
       if (!prepared || prepared.view.sessionId !== request.sessionId || prepared.view.draftVersion !== request.draftVersion ||
           revisionOf(request.body) !== prepared.bodyHash || revisionOf(JSON.stringify(chapters)) !== prepared.pendingHash) {
         throw new Error('STALE_PREVIEW')
       }
-      const basis = this.latestFor(prepared.request.source, prepared.request.objectVersion)
+      const basis = prepared.request.sourceSessionId?this.protectedRootSource(prepared.request.sourceSessionId,prepared.request.source,prepared.request.objectVersion)?.snapshot:this.latestFor(prepared.request.source, prepared.request.objectVersion)
       if (!basis || revisionOf(basis.content) !== prepared.basisHash) throw new Error('STALE_PREVIEW')
-      if ((await this.noteStatus(prepared.request.source, prepared.request)).status === 'ready') throw new Error('SOURCE_AVAILABLE')
-      this.assertSession(request.sessionId)
-      this.requireStableStructure()
+      if (!prepared.request.sourceSessionId&&(await this.noteStatus(prepared.request.source, prepared.request)).status === 'ready') throw new Error('SOURCE_AVAILABLE')
+      assertOwner();this.assertSession(request.sessionId)
+      if(prepared.request.sourceSessionId)this.requireUsableRoot();else this.requireStableStructure()
       if (this.copyTargetIdentity(prepared.view.target) !== prepared.parentIdentity) throw new Error('STALE_PREVIEW')
       const root = this.root!
       this.requireSnapshotCapacity(prepared.view.target, 'pending-copy', prepared.content)
+      assertOwner()
       const objectVersion = secureFsFor(root).replace(prepared.view.target, null, prepared.content)
       // Publication has already happened. A changed parent is a verification
       // failure, not a rollback: keep the draft, pending chapters and new file.
@@ -686,11 +702,11 @@ export class VaultSession {
         this.verifyCopyParent(prepared.view.target, prepared.parentIdentity)
         throw new Error('COPY_VERIFY_FAILED')
       }
-      this.assertSession(request.sessionId)
+      assertOwner();this.assertSession(request.sessionId)
       this.verifyCopyParent(prepared.view.target, prepared.parentIdentity)
       if (written.objectVersion !== objectVersion || written.content !== prepared.content) throw new Error('COPY_VERIFY_FAILED')
       const snapshot = { ...written, sessionId: request.sessionId }
-      this.ledgerStore!.recoveryCopy(prepared.request.source, prepared.view.target, prepared.request.objectVersion, partitionSource(basis.content).ledger, chapters)
+      if(!prepared.request.sourceSessionId)this.ledgerStore!.recoveryCopy(prepared.request.source, prepared.view.target, prepared.request.objectVersion, partitionSource(basis.content).ledger, chapters)
       this.remember(prepared.view.target, snapshot)
       this.lastWrites.set(prepared.view.target, { revision: snapshot.revision, objectVersion, at: Date.now() })
       this.copyPreviews.delete(request.id)
@@ -881,7 +897,7 @@ export class VaultSession {
     if (this.debounce) clearTimeout(this.debounce)
     this.debounce = null
     this.changedNotes.clear()
-    this.verified.clear()
+    this.verified.clear();this.protectedSources.clear()
     this.successors.clear()
     this.latestObjects.clear()
     this.copyPreviews.clear();this.ledgerRecoveryPreviews.clear()

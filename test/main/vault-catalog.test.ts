@@ -287,7 +287,7 @@ it('does not claim an unrelated legacy row when a new registration is relocated'
  expect(catalog.workspace(catalog.inspect(moved))).toBeNull()
  expect(JSON.parse(fs.readFileSync(path.join(data,'vault-workspaces.json'),'utf8')).entries[0].id).toBeUndefined()
 })
-it('accepts a human-confirmed remount but still refuses a replaced directory',()=>{
+it('requires an explicit preview for same-inode identity change and keeps workspace identity bytes',()=>{
  const {data,vault,catalog}=fixture(),file=path.join(data,'vault-catalog.json'),workspaces=path.join(data,'vault-workspaces.json')
  const entry=catalog.register(catalog.inspect(vault))
  catalog.saveWorkspace(catalog.inspect(vault),{version:1,tabs:[{relPath:'keep.md'}],active:'keep.md'})
@@ -300,13 +300,14 @@ it('accepts a human-confirmed remount but still refuses a replaced directory',()
  // 未确认前仍然拒绝把同一个位置当成新库登记。
  expect(()=>catalog.register(current)).toThrow('VAULT_REPLACED')
  // 人确认后：身份改记新设备号，工作区（tab／阅读位置）跟着换过去，没丢。
- const confirmed=catalog.confirmRemount(entry.id,catalog.view().revision)
+ const owner={caller:'1:1',sessionId:null},preview=catalog.previewRoot(entry.id,catalog.inspect(vault),catalog.view().revision,owner)
+ const confirmed=catalog.confirmRoot(preview.id,owner)
  expect(confirmed.rootIdentity).toBe(current.rootIdentity)
  expect(catalog.view().entries[0].rootIdentity).toBe(current.rootIdentity)
  expect(catalog.workspace(catalog.inspect(vault))?.active).toBe('keep.md')
- expect(JSON.parse(fs.readFileSync(workspaces,'utf8')).entries[0].rootIdentity).toBe(current.rootIdentity)
+ expect(JSON.parse(fs.readFileSync(workspaces,'utf8')).entries[0].rootIdentity).toBe(stale)
  // 已经是当前身份时确认是幂等的。
- expect(catalog.confirmRemount(entry.id,catalog.view().revision).rootIdentity).toBe(current.rootIdentity)
+ expect(()=>catalog.confirmRoot(preview.id,owner)).toThrow('STALE_PREVIEW')
 })
 it('refuses a remount confirmation when the inode changed too',()=>{
  const {data,vault,catalog}=fixture(),file=path.join(data,'vault-catalog.json')
@@ -314,6 +315,70 @@ it('refuses a remount confirmation when the inode changed too',()=>{
  const inode=Number(current.rootIdentity.slice(current.rootIdentity.indexOf(':')+1))
  const replaced=`99999999:${inode+1}`
  const saved=JSON.parse(fs.readFileSync(file,'utf8'));saved.entries[0].rootIdentity=replaced;fs.writeFileSync(file,JSON.stringify(saved))
- expect(()=>catalog.confirmRemount(entry.id,catalog.view().revision)).toThrow('VAULT_REPLACED')
+ expect(()=>catalog.committed({...entry})).toThrow('VAULT_REPLACED')
  expect(JSON.parse(fs.readFileSync(file,'utf8')).entries[0].rootIdentity).toBe(replaced)
+})
+
+it('requires a bound single-use explicit root preview and preserves stable-ID workspace bytes',()=>{
+ const {data,vault,catalog}=fixture(),entry=catalog.register(catalog.inspect(vault))
+ catalog.saveWorkspace({...entry},{version:1,tabs:[{relPath:'a.md'}],active:'a.md'})
+ const workspace=fs.readFileSync(path.join(data,'vault-workspaces.json'),'utf8')
+ fs.renameSync(vault,vault+'-old');fs.mkdirSync(vault)
+ const before=fs.readFileSync(path.join(data,'vault-catalog.json'),'utf8'),api=catalog as any
+ expect(typeof api.previewRoot).toBe('function')
+ const view=api.previewRoot(entry.id,catalog.inspect(vault),catalog.view().revision,{caller:'window:frame',sessionId:'old'})
+ expect(fs.readFileSync(path.join(data,'vault-catalog.json'),'utf8')).toBe(before)
+ expect(()=>api.confirmRoot(view.id,{caller:'other:frame',sessionId:'old'})).toThrow('STALE_PREVIEW')
+ const next=api.previewRoot(entry.id,catalog.inspect(vault),catalog.view().revision,{caller:'window:frame',sessionId:'old'})
+ const target=api.confirmRoot(next.id,{caller:'window:frame',sessionId:'old'})
+ expect(target.id).toBe(entry.id);expect(target.rootIdentity).not.toBe(entry.rootIdentity)
+ expect(fs.readFileSync(path.join(data,'vault-workspaces.json'),'utf8')).toBe(workspace)
+ expect(()=>api.confirmRoot(next.id,{caller:'window:frame',sessionId:'old'})).toThrow('STALE_PREVIEW')
+})
+
+it.each(['session','expired','cancelled','root','catalog','workspace'] as const)('rejects stale root preview proof (%s)',mode=>{
+ const {data,vault,catalog}=fixture(),entry=catalog.register(catalog.inspect(vault)),owner={caller:'1:1',sessionId:'old'}
+ fs.renameSync(vault,vault+'-old');fs.mkdirSync(vault)
+ const preview=catalog.previewRoot(entry.id,catalog.inspect(vault),catalog.view().revision,owner),before=fs.readFileSync(path.join(data,'vault-catalog.json'),'utf8')
+ if(mode==='expired')vi.spyOn(Date,'now').mockReturnValue(Date.now()+120001)
+ if(mode==='cancelled')catalog.cancelRoot(preview.id,owner)
+ if(mode==='root'){fs.renameSync(vault,vault+'-new');fs.mkdirSync(vault)}
+ if(mode==='catalog')catalog.update(entry.id,{pinned:true},catalog.view().revision)
+ if(mode==='workspace')fs.writeFileSync(path.join(data,'vault-workspaces.json'),'broken')
+ expect(()=>catalog.confirmRoot(preview.id,mode==='session'?{...owner,sessionId:'new'}:owner)).toThrow()
+ if(mode!=='catalog')expect(fs.readFileSync(path.join(data,'vault-catalog.json'),'utf8')).toBe(before)
+})
+it('caps root previews per window across frames and leaves bad workspace bytes intact on confirmation',()=>{
+ const {data,vault,catalog}=fixture(),entry=catalog.register(catalog.inspect(vault));fs.writeFileSync(path.join(data,'vault-workspaces.json'),'broken')
+ fs.renameSync(vault,vault+'-old');fs.mkdirSync(vault)
+ const owner={caller:'1:1',sessionId:'old'},p=catalog.previewRoot(entry.id,catalog.inspect(vault),catalog.view().revision,owner)
+ for(let i=2;i<=4;i++)catalog.previewRoot(entry.id,catalog.inspect(vault),catalog.view().revision,{caller:'1:'+i,sessionId:'old'})
+ expect(()=>catalog.previewRoot(entry.id,catalog.inspect(vault),catalog.view().revision,{caller:'1:5',sessionId:'old'})).toThrow('VAULT_PREVIEW_LIMIT')
+ expect(p.workspace).toBe('unavailable');catalog.confirmRoot(p.id,owner)
+ expect(fs.readFileSync(path.join(data,'vault-workspaces.json'),'utf8')).toBe('broken')
+ expect(()=>catalog.saveWorkspace(catalog.inspect(vault),{version:1,tabs:[],active:null})).toThrow('VAULT_WORKSPACE_INVALID')
+})
+
+it('retries a unique legacy workspace ID supplement after catalogue publication fails',()=>{
+ const {data,vault,catalog}=fixture(),entry=catalog.register(catalog.inspect(vault)),file=path.join(data,'vault-catalog.json'),workspaceFile=path.join(data,'vault-workspaces.json')
+ const legacy=JSON.parse(fs.readFileSync(file,'utf8'));delete legacy.entries[0].displayVersion;fs.writeFileSync(file,JSON.stringify(legacy))
+ fs.writeFileSync(workspaceFile,JSON.stringify({version:1,entries:[{path:entry.path,rootIdentity:entry.rootIdentity,workspace:{version:1,tabs:[{relPath:'keep.md'}],active:'keep.md'}}]}))
+ fs.renameSync(vault,vault+'-old');fs.mkdirSync(vault)
+ const owner={caller:'1:1',sessionId:'old'},preview=catalog.previewRoot(entry.id,catalog.inspect(vault),catalog.view().revision,owner),rename=fs.renameSync
+ const spy=vi.spyOn(fs,'renameSync').mockImplementation((from,to)=>{if(to===file)throw Error('catalog write interrupted');return rename(from,to)})
+ expect(()=>catalog.confirmRoot(preview.id,owner)).toThrow('catalog write interrupted');spy.mockRestore()
+ const supplemented=fs.readFileSync(workspaceFile,'utf8');expect(JSON.parse(supplemented).entries[0].id).toBe(entry.id)
+ expect(catalog.view().entries[0].rootIdentity).toBe(entry.rootIdentity)
+ const retry=catalog.previewRoot(entry.id,catalog.inspect(vault),catalog.view().revision,owner);catalog.confirmRoot(retry.id,owner)
+ expect(fs.readFileSync(workspaceFile,'utf8')).toBe(supplemented);expect(catalog.workspace(catalog.inspect(vault))?.active).toBe('keep.md')
+})
+
+it('preserves valid-JSON malformed workspace instead of converting broken tabs into an empty position record',()=>{
+ const {data,vault,catalog}=fixture(),entry=catalog.register(catalog.inspect(vault)),file=path.join(data,'vault-workspaces.json')
+ const raw=JSON.stringify({version:1,entries:[{id:entry.id,path:entry.path,rootIdentity:entry.rootIdentity,workspace:{version:1,tabs:'corrupt',active:'keep.md'}}]});fs.writeFileSync(file,raw)
+ fs.renameSync(vault,vault+'-old');fs.mkdirSync(vault)
+ const owner={caller:'1:1',sessionId:'old'},preview=catalog.previewRoot(entry.id,catalog.inspect(vault),catalog.view().revision,owner)
+ expect(preview.workspace).toBe('unavailable');catalog.confirmRoot(preview.id,owner)
+ expect(()=>catalog.saveWorkspace(catalog.inspect(vault),{version:1,tabs:[],active:null})).toThrow('VAULT_WORKSPACE_INVALID')
+ expect(fs.readFileSync(file,'utf8')).toBe(raw)
 })

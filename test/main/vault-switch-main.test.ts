@@ -4,12 +4,12 @@ import path from 'node:path'
 import {afterEach,beforeEach,expect,it,vi} from 'vitest'
 import {IPC} from '../../src/shared/ipc.ts'
 import {VaultCatalog} from '../../src/main/vault-catalog.ts'
-const state=vi.hoisted(()=>({trusted:true,memoryOwnerCheck:undefined as undefined|(()=>void),data:'',handles:new Map<string,Function>(),events:new Map<string,Function>(),appEvents:new Map<string,Function>(),window:null as any,host:null as any,launch:Promise.resolve(),active:false,settled:0,stopped:0,watchFailure:'',open:vi.fn(),save:vi.fn(),confirm:vi.fn(),memoryResult:null as Promise<any>|null,rechecks:[] as string[],tasks:[] as {id:string;root:string;relPath:string}[],cancelled:[] as string[],retried:[] as string[]}))
+const state=vi.hoisted(()=>({heldObjects:[] as {relPath:string;objectVersion:string}[],pending:[] as any[],acknowledged:[] as any[],trusted:true,memoryOwnerCheck:undefined as undefined|(()=>void),data:'',handles:new Map<string,Function>(),events:new Map<string,Function>(),appEvents:new Map<string,Function>(),window:null as any,host:null as any,launch:Promise.resolve(),active:false,settled:0,stopped:0,watchFailure:'',open:vi.fn(),save:vi.fn(),confirm:vi.fn(),memoryResult:null as Promise<any>|null,rechecks:[] as string[],tasks:[] as {id:string;root:string;relPath:string}[],cancelled:[] as string[],retried:[] as string[]}))
 vi.mock('electron',()=>({
  app:{isPackaged:true,getPath:()=>state.data,requestSingleInstanceLock:()=>true,quit:vi.fn(),whenReady:()=>Promise.resolve(),on:(name:string,fn:Function)=>state.appEvents.set(name,fn)},
  BrowserWindow:class{
   static getAllWindows(){return state.window?[state.window]:[]}
-  webContents={id:1,on:vi.fn(),isDestroyed:()=>false,setWindowOpenHandler:vi.fn(),send:(channel:string,id:string)=>{if(channel===IPC.lifecycleFlushRequest)queueMicrotask(()=>state.events.get(IPC.lifecycleFlushDone)?.({sender:this.webContents},{id,ok:true}))}}
+  webContents={id:1,on:vi.fn(),isDestroyed:()=>false,setWindowOpenHandler:vi.fn(),send:(channel:string,id:string)=>{if(channel===IPC.lifecycleFlushRequest)queueMicrotask(()=>state.events.get(IPC.lifecycleFlushDone)?.({sender:this.webContents},{id,ok:true,heldObjects:state.heldObjects}))}}
   constructor(){state.window=this}on=vi.fn();isDestroyed=()=>false;loadFile=vi.fn();loadURL=vi.fn()
  },
  dialog:{showOpenDialog:state.open,showSaveDialog:state.save,showMessageBox:state.confirm},
@@ -24,14 +24,15 @@ vi.mock('../../src/main/memory-ipc.ts',async original=>{
 vi.mock('../../src/main/model-config.ts',async original=>({...await original<object>(),createModelConfigStore:()=>{throw Error('UNAVAILABLE')}}))
 vi.mock('../../src/main/watch.ts',async original=>({...await original<object>(),watchVault:(root:string)=>{if(root===state.watchFailure)throw Error('WATCH_INITIALIZATION_FAILED');return ()=>{}}}))
 vi.mock('../../src/main/agent-host.ts',()=>({AgentHost:class{
- constructor(){state.host=this}active=()=>state.tasks.length?state.tasks:state.active?[{id:'old'}]:[];hasPending=()=>false
- whenLaunchesSettled=async()=>{state.settled++;await state.launch}
+ constructor(){state.host=this}active=()=>state.tasks.length?state.tasks:state.active?[{id:'old'}]:[];hasPending=()=>state.pending.length>0
+ pendingChapters=()=>state.pending;acknowledgeCopied=(...args:any[])=>{state.acknowledged.push(args);state.pending=[]};whenLaunchesSettled=async()=>{state.settled++;await state.launch}
  cancelAll=async()=>{state.stopped++;state.active=false};retryPending=async(root:string)=>{state.retried.push(root)};pendingPaths=()=>['same.md'];cancel=async(id:string)=>{state.cancelled.push(id)};recheckSources=async(root:string)=>{state.rechecks.push(root)}
 }}))
 let base='',catalog:VaultCatalog,a:string,b:string,c:string
-const invoke=(channel:string,...args:unknown[])=>state.handles.get(channel)!({sender:state.window.webContents,senderFrame:{routingId:1}},...args)
+const callerFrame={routingId:1}
+const invoke=(channel:string,...args:unknown[])=>state.handles.get(channel)!({sender:state.window.webContents,senderFrame:callerFrame},...args)
 beforeEach(async()=>{
- vi.resetModules();state.trusted=true;state.memoryOwnerCheck=undefined;state.handles.clear();state.events.clear();state.appEvents.clear();state.window=null;state.launch=Promise.resolve();state.active=false;state.settled=0;state.stopped=0;state.watchFailure='';state.memoryResult=null;state.rechecks=[];state.tasks=[];state.cancelled=[];state.retried=[];state.open.mockReset();state.save.mockReset();state.confirm.mockReset();state.confirm.mockResolvedValue({response:1})
+ vi.resetModules();state.heldObjects=[];state.pending=[];state.acknowledged=[];state.trusted=true;state.memoryOwnerCheck=undefined;state.handles.clear();state.events.clear();state.appEvents.clear();state.window=null;state.launch=Promise.resolve();state.active=false;state.settled=0;state.stopped=0;state.watchFailure='';state.memoryResult=null;state.rechecks=[];state.tasks=[];state.cancelled=[];state.retried=[];state.open.mockReset();state.save.mockReset();state.confirm.mockReset();state.confirm.mockResolvedValue({response:1})
  base=fs.mkdtempSync(path.join(os.tmpdir(),'rgent-switch-main-'));state.data=path.join(base,'data');fs.mkdirSync(state.data)
  a=path.join(base,'A');b=path.join(base,'B');c=path.join(base,'C');for(const root of [a,b,c])fs.mkdirSync(root)
  catalog=new VaultCatalog(state.data);catalog.committed(catalog.inspect(a));catalog.register(catalog.inspect(b));catalog.register(catalog.inspect(c))
@@ -166,4 +167,74 @@ it('passes a captured production frame check to the existing memory IPC handler'
  await invoke(IPC.memoryGet,{session,args:[{sessionId:session}]})
  expect(state.memoryOwnerCheck).toBeTypeOf('function');expect(()=>state.memoryOwnerCheck!()).not.toThrow()
  state.trusted=false;expect(()=>state.memoryOwnerCheck!()).toThrow('MEMORY_SESSION_CLOSED')
+})
+
+it.each(['same-inode','replaced'] as const)('ordinary open preserves all registration bytes for %s identity changes',async kind=>{
+ const file=path.join(state.data,'vault-catalog.json'),data=JSON.parse(fs.readFileSync(file,'utf8')),entry=data.entries.find((e:any)=>e.path===fs.realpathSync(a))
+ if(kind==='same-inode')entry.rootIdentity='999999:'+entry.rootIdentity.split(':')[1]
+ else{fs.renameSync(a,a+'-old');fs.mkdirSync(a)}
+ if(kind==='same-inode')fs.writeFileSync(file,JSON.stringify(data))
+ const before=fs.readFileSync(file,'utf8')
+ await expect(invoke(IPC.vaultOpen,entry.id)).rejects.toThrow('VAULT_REPLACED')
+ expect(fs.readFileSync(file,'utf8')).toBe(before)
+})
+it('keeps explicit recovery retry after catalogue commit and failed attach, without ordinary pending retry',async()=>{
+ const entry=catalog.view().entries.find(e=>e.path===fs.realpathSync(a))!,oldSession=(await invoke(IPC.vaultGet)).sessionId
+ fs.renameSync(a,a+'-old');fs.mkdirSync(a)
+ const {VaultSession}=await import('../../src/main/vault.ts'),open=vi.spyOn(VaultSession.prototype,'openVerified').mockRejectedValueOnce(Error('controlled attach failure'))
+ const preview=await invoke(IPC.vaultCatalogChange,{id:entry.id,revision:catalog.view().revision,action:'root-preview'})
+ await expect(invoke(IPC.vaultCatalogChange,{id:entry.id,revision:preview.revision,action:'root-confirm',previewId:preview.rootPreview.id})).rejects.toThrow('controlled attach failure')
+ expect(catalog.view().entries.find(e=>e.id===entry.id)?.rootIdentity).not.toBe(entry.rootIdentity)
+ expect((await invoke(IPC.vaultGet)).sessionId).toBe(oldSession)
+ expect(state.retried).toEqual([])
+ const retry=await invoke(IPC.vaultCatalogChange,{id:entry.id,revision:catalog.view().revision,action:'root-preview'})
+ open.mockRestore()
+ const result=await invoke(IPC.vaultCatalogChange,{id:entry.id,revision:retry.revision,action:'root-confirm',previewId:retry.rootPreview.id})
+ expect(result.state).toMatchObject({status:'ready',protectedSessionId:oldSession})
+ expect(result.state.sessionId).not.toBe(oldSession);expect(state.retried).toEqual([])
+})
+
+it('returns an explicit root preview instead of associating a different object through legacy relocate',async()=>{
+ const entry=catalog.view().entries.find(e=>e.path===fs.realpathSync(b))!,before=fs.readFileSync(path.join(state.data,'vault-catalog.json'),'utf8')
+ const newRoot=path.join(base,'replacement');fs.mkdirSync(newRoot);state.open.mockResolvedValue({canceled:false,filePaths:[newRoot]})
+ const result=await invoke(IPC.vaultCatalogChange,{id:entry.id,revision:catalog.view().revision,action:'relocate'})
+ expect(result.rootPreview).toMatchObject({entryId:entry.id,path:fs.realpathSync(newRoot)})
+ expect(fs.readFileSync(path.join(state.data,'vault-catalog.json'),'utf8')).toBe(before)
+})
+
+it('rejects root association if its original frame is replaced during preparation waits',async()=>{
+ const entry=catalog.view().entries.find(e=>e.path===fs.realpathSync(a))!
+ fs.renameSync(a,a+'-old');fs.mkdirSync(a)
+ const preview=await invoke(IPC.vaultCatalogChange,{id:entry.id,revision:catalog.view().revision,action:'root-preview'}),before=fs.readFileSync(path.join(state.data,'vault-catalog.json'),'utf8')
+ let release!:()=>void;state.launch=new Promise<void>(r=>release=r)
+ const result=invoke(IPC.vaultCatalogChange,{id:entry.id,revision:preview.revision,action:'root-confirm',previewId:preview.rootPreview.id}).then(()=>null,(e:Error)=>e.message)
+ await vi.waitFor(()=>expect(state.settled).toBeGreaterThan(0));state.trusted=false;release()
+ expect(await result).toBe('BAD_SENDER');expect(fs.readFileSync(path.join(state.data,'vault-catalog.json'),'utf8')).toBe(before)
+})
+
+it('body-only copy leaves old pending visible until explicit old-source abandon and never acknowledges it as copied',async()=>{
+ const entry=catalog.view().entries.find(e=>e.path===fs.realpathSync(a))!
+ fs.writeFileSync(path.join(a,'held.md'),'old verified body')
+ const oldSession=(await invoke(IPC.vaultGet)).sessionId,source=await invoke(IPC.noteRead,{session:oldSession,args:['held.md']})
+ state.heldObjects=[{relPath:'held.md',objectVersion:source.objectVersion}];state.pending=[{taskId:'old-pending',answer:'retained answer'}]
+ fs.renameSync(a,a+'-old');fs.mkdirSync(a);fs.writeFileSync(path.join(a,'held.md'),'new target body')
+ const p=await invoke(IPC.vaultCatalogChange,{id:entry.id,revision:catalog.view().revision,action:'root-preview'}),attached=await invoke(IPC.vaultCatalogChange,{id:entry.id,revision:p.revision,action:'root-confirm',previewId:p.rootPreview.id}),session=attached.state.sessionId
+ expect(await invoke(IPC.vaultTransition,{id:attached.state.restoreId,sessionId:session,outcome:'diagnosed'})).toBe(true)
+ const request={sessionId:session,sourceSessionId:oldSession,objectVersion:source.objectVersion,source:'held.md',target:'copy.md',body:'window draft',draftVersion:'copy'}
+ const preview=await invoke(IPC.noteSaveCopyPreview,{session,args:[request]})
+ expect(preview).toMatchObject({ok:true,preview:{pendingTaskIds:[]}})
+ const result=await invoke(IPC.noteSaveCopyCommit,{session,args:[{sessionId:session,id:preview.preview.id,draftVersion:'copy',body:'window draft'}]})
+ expect(result).toMatchObject({ok:true,taskIds:[]});expect(state.pending).toHaveLength(1);expect(state.acknowledged).toEqual([])
+ expect(fs.readFileSync(path.join(a,'held.md'),'utf8')).toBe('new target body');expect(fs.readFileSync(path.join(a+'-old','held.md'),'utf8')).toBe('old verified body')
+ expect(await invoke(IPC.noteAbandon,{session,args:[{sessionId:session,sourceSessionId:oldSession,objectVersion:source.objectVersion,relPath:'held.md'}]})).toBe(true)
+ expect(state.pending).toEqual([]);expect(state.acknowledged[0]?.[0]).toBe(entry.path)
+ expect((await invoke(IPC.vaultGet)).protectedSessionId).toBeUndefined()
+})
+
+it('rejects malformed source-session copy and abandon extensions before touching retained pending',async()=>{
+ const session=(await invoke(IPC.vaultGet)).sessionId;state.pending=[{taskId:'retained'}]
+ expect(await invoke(IPC.noteSaveCopyPreview,{session,args:[{sessionId:session,sourceSessionId:17,objectVersion:'old',source:'a.md',target:'b.md',body:'draft',draftVersion:'d'}]})).toMatchObject({ok:false,error:'BAD_REQUEST'})
+ expect(await invoke(IPC.noteAbandon,{session,args:[{sessionId:session,sourceSessionId:17,objectVersion:'old',relPath:'a.md'}]})).toBe(false)
+ expect(await invoke(IPC.noteAbandon,{session,args:[{sessionId:session,sourceSessionId:'old',objectVersion:'old',relPath:'a.md',unexpected:true}]})).toBe(false)
+ expect(state.pending).toHaveLength(1);expect(state.acknowledged).toEqual([])
 })

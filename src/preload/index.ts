@@ -60,6 +60,7 @@ async function invoke(channel: string, ...args: unknown[]): Promise<any> {
   const result = await ipcRenderer.invoke(channel, ...(isVaultChannel(channel) ? [{ session, args }] : args))
   if (isVaultChannel(channel) && session !== mountedSession) throw Error('VAULT_CHANGED')
   if (channel === IPC.vaultGet || channel === IPC.vaultPick || channel === IPC.vaultOpen) mountedSession = result?.sessionId ?? null
+  if(channel===IPC.vaultCatalogChange&&result?.state)mountedSession=result.state.sessionId??null
   return result
 }
 
@@ -92,7 +93,7 @@ const api = {
   onVaultTransition: (handler: (busy:boolean,session:string|null,state:VaultTransition)=>void):(()=>void) => subscribe(IPC.vaultTransition,value=>{const state=parseVaultTransition(value);if(state)handler(state.busy,state.session,state)}),
   vaultTransitionDone: (receipt:VaultRestoreReceipt):Promise<boolean> => invoke(IPC.vaultTransition,receipt),
   vaultCatalog: (): Promise<import('../shared/vault-management.ts').VaultCatalogView & {activeId?:string|null}> => invoke(IPC.vaultCatalog),
-  vaultCatalogChange: (request: {id:string;revision:string;action:'pin'|'label'|'remove'|'relocate';pinned?:boolean;label?:string}): Promise<import('../shared/vault-management.ts').VaultCatalogView> => invoke(IPC.vaultCatalogChange, request),
+  vaultCatalogChange: (request: import('../shared/vault-management.ts').VaultCatalogChangeRequest): Promise<import('../shared/vault-management.ts').VaultCatalogChangeResult> => invoke(IPC.vaultCatalogChange, request),
   vaultOpen: (id:string): Promise<VaultState> => invoke(IPC.vaultOpen, id),
   vaultWorkspaceGet: (session:string): Promise<import('../shared/vault-management.ts').VaultWorkspace|null> => invoke(IPC.vaultWorkspaceGet,session),
   vaultWorkspaceSave: (session:string,workspace:import('../shared/vault-management.ts').VaultWorkspace): Promise<boolean> => invoke(IPC.vaultWorkspaceSave,session,workspace),
@@ -152,7 +153,7 @@ const api = {
   onLifecycleFlushRequest: (handler: (id: string, cleanUnavailablePaths: readonly string[], phase?: LifecycleFlushPhase, context?: RecoveryFlushContext) => void): (() => void) =>
     subscribe(IPC.lifecycleFlushRequest, (id, paths, phase, context) => {
       if (typeof id !== 'string' || !Array.isArray(paths) || !paths.every(path => typeof path === 'string')) return
-      if (typeof phase === 'string' && ['recovery-preview','recovery-commit','recovery-resume','recovery-release'].includes(phase)) {
+      if (typeof phase === 'string' && ['recovery-preview','recovery-commit','recovery-resume','recovery-release','root-recovery-protect'].includes(phase)) {
         if (!context || typeof context !== 'object' || Array.isArray(context)) return
         const c = context as Record<string, unknown>
         if (Object.keys(c).sort().join() !== 'operationId,sessionId' || typeof c.sessionId !== 'string' || !c.sessionId || typeof c.operationId !== 'string' || !c.operationId) return
@@ -166,7 +167,7 @@ const api = {
         }else handler(id, paths, phase)
       }
     }),
-  lifecycleFlushDone: (id: string, ok: boolean): void => { ipcRenderer.send(IPC.lifecycleFlushDone, { id, ok }) },
+  lifecycleFlushDone: (id: string, ok: boolean, heldObjects?:Array<{relPath:string;objectVersion:string}>): void => { ipcRenderer.send(IPC.lifecycleFlushDone, {id,ok,...(heldObjects?{heldObjects}:{})}) },
   onNoteExternalChange: (handler: (payload: NotePayload) => void): (() => void) =>
     subscribe(IPC.noteExternalChange, (payload) => handler(payload as NotePayload)),
   onVaultLost: (handler: () => void): (() => void) => subscribe(IPC.vaultLost, () => handler()),

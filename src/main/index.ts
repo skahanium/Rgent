@@ -4,7 +4,7 @@ import { parseStoredVault } from './notes-fs.ts'
 import { boundArguments, isVaultChannel, isVaultEvent } from '../shared/vault-binding.ts'
 import { VaultCatalog, sameRootInode } from './vault-catalog.ts'
 import { VaultSwitch } from './vault-switch.ts'
-import { parseVaultRestoreReceipt, type VaultTarget } from '../shared/vault-management.ts'
+import { parseVaultRestoreReceipt, parseVaultCatalogChange, type VaultTarget } from '../shared/vault-management.ts'
 import { readFileSync } from 'node:fs'
 import {memoryDependency,sameMemoryDependency,memorySnapshotSignature} from './memory-use.ts'
 import {historicalContextPolicy} from './ledger-provenance.ts'
@@ -65,6 +65,9 @@ const FLUSH_GRACE_MS = 1000
 let vaultSwitch: import('./vault-switch.ts').VaultSwitch<import('../shared/vault-management.ts').VaultTarget, VaultState> | null = null
 let vaultCatalog: VaultCatalog | null = null
 let activeTarget: VaultTarget | null = null
+let rootRecoveryIntent:{previewId:string;caller:string;sessionId:string|null;assertOwner:()=>void}|null=null
+let rootRecoveryHold:RecoveryFlushContext|null=null
+let protectedRootCaller:string|null=null
 let startupVaultState: Extract<VaultState, {status:'needs-pick'}> | null = null
 let mainWindow: BrowserWindow | null = null
 let vault: VaultSession | null = null
@@ -103,7 +106,8 @@ function memoryAuthorizationState(sessionId: string) {
   try{if(!modelConfig)throw Error();return configuredMemoryAuthorizationState(modelConfig,vault!.memoryContext().vaultKey)}catch{return {signature:'memory-v2-unavailable',disclosure:undefined}}
 }
 const imageControllers = new Map<AbortController, {vault: VaultSession; binding: string; request: import('../shared/ipc.ts').RemoteImageGetRequest}>()
-const lifecycleFlushes = new Map<string, (ok: boolean) => void>()
+const lifecycleFlushes = new Map<string, (ok: boolean,heldObjects?:Array<{relPath:string;objectVersion:string}>) => void>()
+let rootHeldObjects:Array<{relPath:string;objectVersion:string}>|null=null
 const structureGate = new VaultStructureGate()
 const lifecycleErrorCodes = new Set(['BAD_PATH', 'BAD_REQUEST', 'NO_VAULT', 'VAULT_CHANGED', 'STALE_PREVIEW',
   'STALE_RECOVERY', 'EEXIST', 'ENOENT', 'PATH_CHANGED', 'UNSAFE_PATH', 'PERMISSION_DOWNGRADE',
@@ -119,6 +123,7 @@ function visibleVaultState(): VaultState {
     state.vaultId = entry?.id
     if(entry){const keys=vaultCatalog!.displayKeys({...activeTarget,id:entry.id});state.navigationKey=keys.key;state.legacyNavigationKey=keys.legacy}
   }
+  const held=vault?.protectedSession();if(held&&held!==vault?.sessionId())state.protectedSessionId=held
   // A temporarily inaccessible root retains its mount for draft recovery.
   // Availability must not be interpreted as an authoritative unmount.
   return state.status === 'needs-pick' ? {...state,sessionId:vault?.sessionId()??null} : state
@@ -140,7 +145,7 @@ async function flushBeforeStructure(win: BrowserWindow, cleanUnavailablePaths: r
       lifecycleFlushes.delete(id)
       resolve(false)
     }, 120_000)
-    lifecycleFlushes.set(id, (ok) => { clearTimeout(timer); lifecycleFlushes.delete(id); resolve(ok) })
+    lifecycleFlushes.set(id,(ok,heldObjects)=>{clearTimeout(timer);lifecycleFlushes.delete(id);if(phase==='root-recovery-protect'){rootHeldObjects=heldObjects??null;resolve(ok&&!!heldObjects)}else resolve(ok)})
     win.webContents.send(IPC.lifecycleFlushRequest, id, cleanUnavailablePaths, phase, context)
   })
 }
@@ -626,17 +631,41 @@ function registerIpc(): void {
     return vaultSwitch?.restored(event.senderFrame, receipt, vault?.sessionId() ?? null) ?? false
   })
   registerTrustedHandle(IPC.vaultGet, () => visibleVaultState())
-  registerTrustedHandle(IPC.vaultCatalog, () => ({...vaultCatalog!.view(), activeId:activeTarget?.id ?? null}))
+  registerTrustedHandle(IPC.vaultCatalog, () => ({...vaultCatalog!.view(), activeId:activeTarget?.id ?? null,activeUnavailable:!!activeTarget&&vault?.currentState().status!=='ready'}))
   registerTrustedHandle(IPC.vaultCatalogChange, async (event, request: unknown) => {
-    const r = request as Record<string, unknown>
-    if (!r || typeof r !== 'object' || typeof r.revision !== 'string' || typeof r.id !== 'string' || !['label','pin','remove','relocate'].includes(String(r.action))) throw Error('BAD_REQUEST')
-    if (vaultSwitch?.busy) throw Error('VAULT_SWITCH_BUSY')
+    const r=parseVaultCatalogChange(request)
+    if(!r)throw Error('BAD_REQUEST')
+    if(vaultSwitch?.busy)throw Error('VAULT_SWITCH_BUSY')
+    const owner={caller:`${event.sender.id}:${event.senderFrame!.routingId}`,sessionId:vault?.sessionId()??null}
+    if(r.action==='root-cancel'){vaultCatalog!.cancelRoot(r.previewId,owner);return vaultCatalog!.view()}
+    if(r.action==='root-preview'){
+      const entry=vaultCatalog!.view().entries.find(e=>e.id===r.id);if(!entry)throw Error('VAULT_NOT_REGISTERED')
+      let chosen=entry.path
+      if(r.choose){
+        if(activeTarget?.id===r.id&&vault?.currentState().status==='ready')throw Error('ACTIVE_VAULT_RELOCATE')
+        const selection=await dialog.showOpenDialog(mainWindow!,{title:'选择待核对的笔记库位置',properties:['openDirectory']})
+        if(selection.canceled||!selection.filePaths[0])return vaultCatalog!.view()
+        if(!trusted(event)||(vault?.sessionId()??null)!==owner.sessionId||vaultSwitch?.busy)throw Error('VAULT_CHANGED')
+        chosen=selection.filePaths[0]
+      }
+      const target=vaultCatalog!.inspect(chosen)
+      if(target.path===entry.path&&target.rootIdentity===entry.rootIdentity&&!(activeTarget?.id===entry.id&&vault?.currentState().status!=='ready'))throw Error('SOURCE_AVAILABLE')
+      return {...vaultCatalog!.view(),rootPreview:vaultCatalog!.previewRoot(r.id,target,r.revision,owner)}
+    }
+    if(r.action==='root-confirm'){
+      const target=vaultCatalog!.rootTarget(r.previewId,owner)
+      if(target.id!==r.id||vaultCatalog!.view().revision!==r.revision)throw Error('STALE_PREVIEW')
+      rootRecoveryIntent={previewId:r.previewId,...owner,assertOwner:()=>{if(!trusted(event)||`${event.sender.id}:${event.senderFrame!.routingId}`!==owner.caller)throw Error('BAD_SENDER')}}
+      try{const state=await vaultSwitch!.run(target,event.senderFrame);return {...vaultCatalog!.view(),state}}
+      finally{rootRecoveryIntent=null}
+    }
+    vaultCatalog!.invalidateRootPreviews()
     if (r.action === 'remove') return vaultCatalog!.remove(r.id, r.revision)
     if (r.action === 'pin' && typeof r.pinned === 'boolean') return vaultCatalog!.update(r.id, {pinned:r.pinned}, r.revision)
     if (r.action === 'label' && typeof r.label === 'string') return vaultCatalog!.update(r.id, {label:r.label}, r.revision)
     if (r.action === 'relocate') {
       const id = r.id, revision = r.revision
-      if (activeTarget?.id === r.id) throw Error('ACTIVE_VAULT_RELOCATE')
+      if(activeTarget?.id===r.id&&vault?.currentState().status==='ready')throw Error('ACTIVE_VAULT_RELOCATE')
       if (structureGate.isBusy()) throw Error('STRUCTURE_BUSY')
       return vaultSwitch!.select(async (_run, current) => {
         const session = vault?.sessionId()
@@ -645,8 +674,11 @@ function registerIpc(): void {
         if (chosen.canceled || !chosen.filePaths[0]) return vaultCatalog!.view()
         if (vault?.sessionId() !== session) throw Error('VAULT_CHANGED')
         if (structureGate.isBusy()) throw Error('STRUCTURE_BUSY')
-        if (activeTarget?.id === id) throw Error('ACTIVE_VAULT_RELOCATE')
-        return vaultCatalog!.relocate(id, vaultCatalog!.inspect(chosen.filePaths[0]), revision)
+        if(activeTarget?.id===id&&vault?.currentState().status==='ready')throw Error('ACTIVE_VAULT_RELOCATE')
+        const target=vaultCatalog!.inspect(chosen.filePaths[0]),entry=vaultCatalog!.view().entries.find(e=>e.id===id)
+        if(!entry)throw Error('VAULT_NOT_REGISTERED')
+        if(target.rootIdentity!==entry.rootIdentity)return {...vaultCatalog!.view(),rootPreview:vaultCatalog!.previewRoot(id,target,revision,owner)}
+        return vaultCatalog!.relocate(id,target,revision)
       }, event.senderFrame)
     }
     throw Error('BAD_REQUEST')
@@ -657,13 +689,9 @@ function registerIpc(): void {
     const entry = vaultCatalog!.view().entries.find(item => item.id === id)
     if (!entry) throw Error('VAULT_TARGET_INVALID')
     let target = vaultCatalog!.inspect(entry.path)
-    if (target.rootIdentity !== entry.rootIdentity) {
-      // 人在列表里点「切换」就是确认同一个库：卷重新挂载（同 inode、新设备号）时重记身份再打开；
-      // 目录真被替换（inode 变了）仍由 confirmRemount 抛 VAULT_REPLACED 拒绝。
-      const confirmed = vaultCatalog!.confirmRemount(entry.id, vaultCatalog!.view().revision)
-      target = vaultCatalog!.inspect(entry.path)
-      if (target.rootIdentity !== confirmed.rootIdentity) throw Error('VAULT_TARGET_CHANGED')
-    }
+    if(target.rootIdentity!==entry.rootIdentity)throw Error('VAULT_REPLACED')
+    if(activeTarget?.id===id&&vault?.currentState().status!=='ready')throw Error('VAULT_REPLACED')
+    vaultCatalog!.invalidateRootPreviews()
     if (activeTarget?.rootIdentity === target.rootIdentity && activeTarget.path === target.path) return visibleVaultState()
     return vaultSwitch!.run(target, event.senderFrame)
   })
@@ -698,6 +726,7 @@ function registerIpc(): void {
       if (!chosen) return visibleVaultState()
       if (vault?.sessionId() !== session) throw Error('VAULT_CHANGED')
       if (structureGate.isBusy()) throw Error('STRUCTURE_BUSY')
+      vaultCatalog!.invalidateRootPreviews()
       const target = create === true ? vaultCatalog!.create(chosen) : vaultCatalog!.inspect(chosen)
       if (!vaultCatalog!.view().diagnostic) vaultCatalog!.register(target)
       if (activeTarget?.rootIdentity === target.rootIdentity && activeTarget.path === target.path) return visibleVaultState()
@@ -827,6 +856,18 @@ function registerIpc(): void {
     return state
   })
   registerTrustedHandle(IPC.noteAbandon, async (_event, value: unknown) => {
+    if(!value||typeof value!=='object'||Array.isArray(value))return false
+    if(Object.keys(value).some(k=>!['relPath','sessionId','objectVersion','sourceSessionId'].includes(k)))return false
+    const supplied=value as import('../shared/ipc.ts').NoteInspectRequest
+    if(supplied.sourceSessionId!==undefined&&(typeof supplied.sourceSessionId!=='string'||!supplied.sourceSessionId||supplied.sourceSessionId.length>128))return false
+    if(supplied?.sourceSessionId&&vault){
+      if(![supplied.sessionId,supplied.objectVersion,supplied.relPath].every(v=>typeof v==='string'&&!!v))return false
+      vault.assertSession(supplied.sessionId)
+      const proof=vault.protectedRootSource(supplied.sourceSessionId,supplied.relPath,supplied.objectVersion)
+      if(!proof||protectedRootCaller!==`${_event.sender.id}:${_event.senderFrame!.routingId}`)return false
+      const chapters=agentHost?.pendingChapters(proof.root,supplied.relPath,supplied.sourceSessionId,supplied.objectVersion)??[]
+      agentHost?.acknowledgeCopied(proof.root,supplied.relPath,chapters);vault.discardRootSource(supplied.sourceSessionId,supplied.relPath,supplied.objectVersion);return true
+    }
     const r = parseBinding(value)
     if (!r || !vault) return false
     const current=vault,root=current.root!
@@ -840,11 +881,17 @@ function registerIpc(): void {
   })
   registerTrustedHandle(IPC.noteSaveCopyPreview, async (_event, value: unknown) => {
     if (!value || typeof value !== 'object' || !vault || structureGate.isBusy()) return { ok: false, error: 'BAD_REQUEST' }
+    if(Array.isArray(value)||Object.keys(value).some(k=>!['sessionId','sourceSessionId','objectVersion','source','target','body','draftVersion'].includes(k)))return {ok:false,error:'BAD_REQUEST'}
     const r = value as import('../shared/ipc.ts').SaveCopyPreviewRequest
+    if(r.sourceSessionId!==undefined&&(typeof r.sourceSessionId!=='string'||!r.sourceSessionId||r.sourceSessionId.length>128))return {ok:false,error:'BAD_REQUEST'}
     if (![r.source,r.target,r.body,r.draftVersion,r.sessionId,r.objectVersion].every(v => typeof v === 'string') || r.body.length > 16*1024*1024) return { ok:false,error:'BAD_REQUEST' }
     try {
       const current = vault; const root = current.root!
       current.assertSession(r.sessionId)
+      if(r.sourceSessionId){
+        if(protectedRootCaller!==`${_event.sender.id}:${_event.senderFrame!.routingId}`||!current.protectedRootSource(r.sourceSessionId,r.source,r.objectVersion))throw Error('STALE_PREVIEW')
+        return {ok:true,preview:await current.previewSaveCopy(r,[])}
+      }
       await agentHost?.whenLaunchesSettled()
       for (const task of agentHost?.active().filter(t=>t.root===root && t.relPath===r.source) ?? []) await agentHost?.cancel(task.id, 'user').catch(()=>{})
       current.assertSession(r.sessionId)
@@ -864,6 +911,7 @@ function registerIpc(): void {
     try {
       const current=vault; const root=current.root!
       current.assertSession(r.sessionId)
+      if(prepared?.sourceSessionId){if(protectedRootCaller!==`${_event.sender.id}:${_event.senderFrame!.routingId}`)throw Error('STALE_PREVIEW');return {ok:true,...await current.commitSaveCopy(r,[],()=>{if(!trusted(_event)||protectedRootCaller!==`${_event.sender.id}:${_event.senderFrame!.routingId}`)throw Error('BAD_SENDER')})}}
       const chapters=agentHost?.pendingChapters(root,c.relPath,c.sessionId,c.objectVersion) ?? []
       const result=await current.commitSaveCopy(r,chapters)
       current.assertSession(r.sessionId)
@@ -999,8 +1047,10 @@ function registerIpc(): void {
   })
   registerTrustedOn(IPC.lifecycleFlushDone, (event, value: unknown) => {
     if (!mainWindow || event.sender !== mainWindow.webContents || !value || typeof value !== 'object') return
-    const response = value as { id?: unknown; ok?: unknown }
-    if (typeof response.id === 'string') lifecycleFlushes.get(response.id)?.(response.ok === true)
+    const response = value as {id?:unknown;ok?:unknown;heldObjects?:unknown}
+    const held=response.heldObjects
+    const valid=Array.isArray(held)&&held.length<=8192&&held.every(v=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join()==='objectVersion,relPath'&&typeof v.relPath==='string'&&typeof v.objectVersion==='string'&&v.relPath.length<=4096&&v.objectVersion.length<=256)
+    if(typeof response.id==='string')lifecycleFlushes.get(response.id)?.(response.ok===true,valid?held:undefined)
   })
   registerTrustedHandle(IPC.backlinks, async (_event, relPath: unknown) => {
     const pathInVault = asString(relPath)
@@ -1057,7 +1107,7 @@ if (ownsInstance) app.whenReady().then(() => {
     const code = error instanceof Error ? error.message : ''
     // 三种情况分开说：卷重新挂载（可一键确认）、同路径被替换、找不到。
     startupVaultState = {status:'needs-pick',reason:'missing',diagnostic: code === 'VAULT_REMOUNTED'
-      ? '这个库所在的卷被重新挂载过（设备号变了，目录本身没变）。点「已登记的笔记库」，在它右侧按「切换」确认打开即可。'
+      ? '登记的目录身份发生变化，可能与卷重新挂载有关。请在「已登记的笔记库」预览并明确确认新关联。'
       : code === 'VAULT_REPLACED'
         ? '上次使用的笔记库可能已被同路径的其他目录替换。请手动选择并核对目标。'
         : '上次使用的笔记库无法打开，可能已移动、无法访问或被同路径的其他目录替换。请手动选择并核对目标。'}
@@ -1069,6 +1119,21 @@ if (ownsInstance) app.whenReady().then(() => {
       if (structureGate.isBusy()) throw Error('STRUCTURE_BUSY')
     },
     prepare: async (_target, current) => {
+      if(rootRecoveryIntent){
+        const sessionId=vault?.sessionId()
+        if(sessionId){
+          const context={sessionId,operationId:vaultSwitch!.operationId}
+          if(mainWindow&&!await flushBeforeStructure(mainWindow,[],'settings',context))throw Error('VAULT_SWITCH_CANCELLED')
+          current();rootRecoveryHold=context
+          if(mainWindow&&!await flushBeforeStructure(mainWindow,[],'root-recovery-protect',context))throw Error('UNSAVED_DRAFT')
+          current();consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED');await consolidation?.idle();current()
+          await agentHost?.whenLaunchesSettled();current()
+          if(vault?.root)await agentHost?.cancelAll('vault-change',vault.root).catch(()=>{})
+          await agentHost?.whenLaunchesSettled();current();await vault!.idle();current()
+          vault!.protectRootDrafts(sessionId,rootHeldObjects??[]);rootHeldObjects=null;protectedRootCaller=rootRecoveryIntent.caller
+        }
+        return
+      }
       const context={sessionId:vault?.sessionId()??'',operationId:vaultSwitch!.operationId}
       if (mainWindow && !await flushBeforeStructure(mainWindow, [], 'settings', context)) throw Error('VAULT_SWITCH_CANCELLED')
       current()
@@ -1094,8 +1159,10 @@ if (ownsInstance) app.whenReady().then(() => {
         if (agentHost?.hasPending(previous)) throw Error('PREVIOUS_TASK_UNSAVED')
       }
     },
-    flush: async () => !vault?.root || !!mainWindow && await flushBeforeStructure(mainWindow,[],undefined,{sessionId:vault?.sessionId()??'',operationId:vaultSwitch!.operationId}),
+    flush: async () => !!rootRecoveryIntent || !vault?.root || !!mainWindow && await flushBeforeStructure(mainWindow,[],undefined,{sessionId:vault?.sessionId()??'',operationId:vaultSwitch!.operationId}),
     commit: async target => {
+      const protectedSessionId=rootRecoveryIntent?.sessionId??undefined
+      if(rootRecoveryIntent){rootRecoveryIntent.assertOwner();target=vaultCatalog!.confirmRoot(rootRecoveryIntent.previewId,{caller:rootRecoveryIntent.caller,sessionId:rootRecoveryIntent.sessionId})}
       const state = await vault!.openVerified(target.path, target.rootIdentity)
       activeTarget = target
       startupVaultState = null
@@ -1103,7 +1170,7 @@ if (ownsInstance) app.whenReady().then(() => {
       for (const controller of imageControllers.keys()) controller.abort()
       try { const entry = vaultCatalog!.committed(target); activeTarget = {...target,id:entry.id,label:entry.label} }
       catch { if (state.status === 'ready') state.diagnostic = '库已打开，但设备库目录未保存。请检查本机存储后重试。' }
-      return state.status === 'ready' ? {...visibleVaultState(), vaultChanged:state.vaultChanged, ...(state.diagnostic?{diagnostic:state.diagnostic}:{})} as VaultState : state
+      return state.status === 'ready' ? {...visibleVaultState(), vaultChanged:state.vaultChanged,...(protectedSessionId?{protectedSessionId}:{}), ...(state.diagnostic?{diagnostic:state.diagnostic}:{})} as VaultState : state
     },
     changed: (phase, closePending, operationId) => send(IPC.vaultTransition, {busy:phase!=='idle',session:vault?.sessionId()??null,phase,closePending,operationId}),
     handoff: (state, id, _owner, retry) => {
@@ -1128,7 +1195,7 @@ if (ownsInstance) app.whenReady().then(() => {
         else vaultSwitch.continueWaiting()
       }).catch(()=>{if(vaultSwitch?.isCurrentStall(ticket)){vaultSwitch.cancelClose();vaultSwitch.continueWaiting()}})
     },
-    release: () => send(IPC.vaultTransition, {busy:false,session:vault?.sessionId()??null,phase:'idle'})
+    release: () => {if(rootRecoveryHold){mainWindow?.webContents.send(IPC.lifecycleFlushRequest,rootRecoveryHold.operationId,[],'recovery-release',rootRecoveryHold);rootRecoveryHold=null}send(IPC.vaultTransition,{busy:false,session:vault?.sessionId()??null,phase:'idle'})}
   })
   authorizations = new TaskAuthorizationRegistry({
     root:()=>{try{return vault?.requireUsableRoot()??null}catch{return null}},

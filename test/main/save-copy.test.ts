@@ -132,3 +132,63 @@ it('reports a changed parent after publication without clearing the preview or r
   expect(published).not.toContain(chapter.answer) // pending Host material and preview remain; no historical bytes in body
   await expect(readFile(path.join(root, 'source.md'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
+
+it('preserves isolated old-root proof for a separately confirmed body-only copy despite damaged new registry',async()=>{
+ const {session,root,base,snapshot}=await setup(false),api=session as any
+ expect(typeof api.protectRootDrafts).toBe('function')
+ api.protectRootDrafts(snapshot.sessionId)
+ await rename(root,root+'-old');await mkdir(root);await writeFile(path.join(root,'source.md'),'replacement must stay')
+ const {vaultRootIdentity}=await import('../../src/main/watch.ts')
+ await session.openVerified(root,vaultRootIdentity(root))
+ await writeFile(path.join(root,'.rgent-ledger-registry'),'broken')
+ const request={sessionId:session.sessionId()!,sourceSessionId:snapshot.sessionId,objectVersion:snapshot.objectVersion,source:'source.md',target:'held.md',body:'protected draft',draftVersion:'held'}
+ const preview=await session.previewSaveCopy(request)
+ expect(preview.pendingTaskIds).toEqual([]);expect(preview.warning).toContain('只保留正文')
+ const saved=await session.commitSaveCopy({sessionId:request.sessionId,id:preview.id,draftVersion:'held',body:request.body})
+ expect(saved.taskIds).toEqual([]);expect(await readFile(path.join(root,'held.md'),'utf8')).toBe(request.body)
+ expect(await readFile(path.join(root,'source.md'),'utf8')).toBe('replacement must stay')
+ expect(await readFile(path.join(root+'-old','source.md'),'utf8')).toBe(original)
+ expect(await readFile(path.join(root,'.rgent-ledger-registry'),'utf8')).toBe('broken')
+ await expect(session.write('source.md','forbidden',snapshot.revision,snapshot)).rejects.toThrow()
+})
+
+it('protects only requested open-object bases, rejects another root recovery until resolved, and clears every same-path version on explicit discard',async()=>{
+ const {session,root,snapshot}=await setup(false),{vaultRootIdentity}=await import('../../src/main/watch.ts')
+ await writeFile(path.join(root,'not-open.md'),'cached only');await session.read('not-open.md')
+ session.protectRootDrafts(snapshot.sessionId,[{relPath:'source.md',objectVersion:snapshot.objectVersion}])
+ expect(session.protectedRootSource(snapshot.sessionId,'not-open.md',(await session.read('not-open.md')).objectVersion)).toBeNull()
+ await rename(root,root+'-old');await mkdir(root);await writeFile(path.join(root,'new.md'),'new')
+ await session.openVerified(root,vaultRootIdentity(root));const newer=await session.read('new.md')
+ expect(()=>session.protectRootDrafts(newer.sessionId,[{relPath:'new.md',objectVersion:newer.objectVersion}])).toThrow('UNSAVED_DRAFT')
+ session.discardRootSource(snapshot.sessionId,'source.md',snapshot.objectVersion)
+ expect(session.protectedSession()).toBeNull()
+ expect(()=>session.protectRootDrafts(newer.sessionId,[{relPath:'new.md',objectVersion:newer.objectVersion}])).not.toThrow()
+})
+it('retains protected source proof and publishes no copy if the new root changes after body preview',async()=>{
+ const {session,root,snapshot}=await setup(false),{vaultRootIdentity}=await import('../../src/main/watch.ts')
+ session.protectRootDrafts(snapshot.sessionId,[{relPath:'source.md',objectVersion:snapshot.objectVersion}]);await rename(root,root+'-old');await mkdir(root);await session.openVerified(root,vaultRootIdentity(root))
+ const request={sessionId:session.sessionId()!,sourceSessionId:snapshot.sessionId,objectVersion:snapshot.objectVersion,source:'source.md',target:'kept.md',draftVersion:'held',body:'kept draft'},preview=await session.previewSaveCopy(request)
+ await rename(root,root+'-new');await mkdir(root)
+ await expect(session.commitSaveCopy({sessionId:request.sessionId,id:preview.id,draftVersion:'held',body:request.body})).rejects.toThrow()
+ expect(session.protectedRootSource(snapshot.sessionId,'source.md',snapshot.objectVersion)).not.toBeNull()
+ await expect(readFile(path.join(root,'kept.md'),'utf8')).rejects.toThrow()
+ await expect(readFile(path.join(root+'-new','kept.md'),'utf8')).rejects.toThrow()
+})
+
+it('rejects an owner replaced while protected copy waits for the write queue',async()=>{
+ const {session,root,snapshot}=await setup(false),{vaultRootIdentity}=await import('../../src/main/watch.ts')
+ session.protectRootDrafts(snapshot.sessionId,[{relPath:'source.md',objectVersion:snapshot.objectVersion}]);await rename(root,root+'-old');await mkdir(root);await session.openVerified(root,vaultRootIdentity(root))
+ const request={sessionId:session.sessionId()!,sourceSessionId:snapshot.sessionId,objectVersion:snapshot.objectVersion,source:'source.md',target:'held.md',draftVersion:'held',body:'held draft'},preview=await session.previewSaveCopy(request)
+ let valid=true,release!:()=>void
+ const queued=session.memoryMutation(async()=>{await new Promise<void>(r=>release=r)})
+ await vi.waitFor(()=>expect(release).toBeTypeOf('function'))
+ const copying=(session.commitSaveCopy as any)({sessionId:request.sessionId,id:preview.id,draftVersion:'held',body:request.body},[],()=>{if(!valid)throw Error('BAD_SENDER')})
+ valid=false;release();await queued
+ await expect(copying).rejects.toThrow('BAD_SENDER')
+ await expect(readFile(path.join(root,'held.md'),'utf8')).rejects.toThrow()
+})
+
+it('drops isolated source proofs on disposal instead of retaining a hidden old-root recovery gate',async()=>{
+ const {session,snapshot}=await setup(false);session.protectRootDrafts(snapshot.sessionId,[{relPath:'source.md',objectVersion:snapshot.objectVersion}]);session.dispose()
+ expect(session.protectedRootSource(snapshot.sessionId,'source.md',snapshot.objectVersion)).toBeNull()
+})

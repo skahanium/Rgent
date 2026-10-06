@@ -1669,7 +1669,7 @@ r8 的残留缺陷经过代码级复核后定位到**真实根因**（原记录�
 |---|---|---|
 | 1 | 唯一评分、双标注、动作三态、不可变报告、构建指纹；测试不读私人缓存 | 本机定向已接线；最终整合门与独立复审待核 |
 | 2 | 近期背景撤销关系、独立原话、更正及部分提交、旧块核验 | 本机定向已接线；独立复审与最终整合门待核 |
-| 3 | 明确根恢复预览、单次令牌、稳定工作区 ID、失败保稿 | 待施工 |
+| 3 | 明确根恢复预览、单次令牌、稳定工作区 ID、失败保稿 | 本机定向已接线；独立复审与最终整合门待核 |
 | 4 | 两库 25 场、千条性能、词面基准、旧入口退役、实际窗口 | 待施工 |
 
 真实复测本包最多 240 次，冻结单、双标注、分模型结论另记；不是重复启用默认，不自动关闭开关或更改正常配置。收口一次串行 docs:check→test→build→ui:check，开发仅必要定向；Windows／CI／原生输入法／用户视觉均独立待核。不推送、不更新 master。历史证据保留其提交及适用范围。
@@ -1709,3 +1709,16 @@ r8 的残留缺陷经过代码级复核后定位到**真实根因**（原记录�
 包 1 显式历史复核兼容修补（2026-10-06）：旧 revision ≤9 的副标注存在内层 review 未存 frozenHash／resultHash／rulesHash、外层 key 与三 hash 严格绑定的历史形态。仅 `--v6 --replay` 在外层核验成功后生成内存评分视图，缺失字段由已核外层补入；已有内层冲突、外层缺失／冲突及新 revision 均拒绝。追加 historical-review 报告逐 key／主副角色记录 `historicalAnnotationBindings`、缺失字段和 `binding:'verified-outer-envelope'`／`originalInnerEvidence:false`，不把新补视图说成原内层证据，不改原标注或报告。新 freeze／review／live／publish 仍要求完整内外绑定。裁判动作三态以 actionState 为权威，只有未记录 state 时才回看旧 actionVerified；明确 failure 缺旧布尔仍可判定、下上界为零，success 正常计分，unknown 不翻成检查器错误。
 
 固定虚构反例：历史缺内层三 hash 1 失败／6 通过（`/tmp/rgent-integrity-replay-red.log`）；已知动作 state 缺旧布尔 2 失败／1 通过（`/tmp/rgent-integrity-replay-state-red.log`），中间未知断言错用未公开字段已改为实际 `unknown` 计数。最小修复后两个评分文件 57／0（`/tmp/rgent-integrity-replay-target.log`），类型、文档及 diff 核验另记 `/tmp/rgent-integrity-replay-{types,docs}.log`。本修补没有读取私人报告、实际 replay、真实模型、发布、build／全量／窗口或原产物写入；总任务另行显式历史复核，历史成绩不升级为新认证。
+
+
+### 包 3：明确根关联与旧会话保稿（2026-10-06）
+
+执行基线 `f8d8e9c`。先登记合同强制点，再补根预览／保稿失败反例。普通 open/switch 对设备或 inode 变化均拒绝并保留目录字节；同 inode 只诊断可能与卷重新挂载有关。现有目录通道严格承载 root-preview／confirm／cancel，窗口/frame、原会话、规范目标对象与目录／工作区修订绑定，120 秒、每窗口四份、单次使用。异对象重新定位同样先预览，活动失联根可选位置再预览；稳定活动根原重新定位限制保持。catalog 先确认而 attach 失败时原会话／稿保留、忙门释放，库页刷新已提交目录修订，可立即重新预览重试。
+
+根确认先处理设置稿，再通过现有生命周期通道同步全部正文、取消计时、排空已发写入；ACK列实际打开对象，只证明 draft held。停止旧任务而不执行普通 retryPending／无 pending 门。旧核验快照隔离在原 session/root/object，既有 64MiB 与对象界限及合并上限保持；不同未解决旧会话阻止再次覆盖保稿证明。新根回执保留旧 tab 与可见另存／舍弃出口，下一场普通写不接受旧对象。新工作区、目录与迟到 Host 不覆稿；held 期间不保存不完整工作区，最后逐篇明确处理后沿原恢复位置入口读取。
+
+sourceSessionId 只扩原另存／舍弃通道。人的第二次确认仅出版正文，核 body/basis hash、父对象、exclusive 写及 postread；最终写前重核原 frame。根保护分支绕开 recoveryCopy／importLegacy／记忆换根，坏登记不挡正文保留。复制成功开新正文 tab、原 held tab 及 pending 不自动确认；明确舍弃后才清同路径证明与对应旧 pending。稳定ID工作区根变不改字节；唯一原登记匹配的无ID记录可补ID，中断可重试。坏JSON及合法JSON坏tabs结构都保持原字节、拒空写，不挡根关联后正文可读。
+
+红证据：`/tmp/rgent-integrity-p3-red-{root,flush,copy,relocate,release,workspace-hold,owner,bad-workspace,retry-ui}.log`。初始flush测试漏导入的测试错误先修，再取得真实断言红；主进程夹具规范路径与原frame恢复ACK适配单列，不用测试错误称产品失败。关键绿证据：旧来源排队期间frame替换拒写、catalog成功attach失败重试、旧pending正文copy不ack／显式abandon、两篇真实shell保稿／同名和迟到事件不覆稿、copy保留原tab／逐篇舍弃后恢复位置；日志 `/tmp/rgent-integrity-p3-{green-owner,main-pending,final-ownership-shell,green-workspace-hold,green-retry-ui}.log`。
+
+必要既有回归与新边界：十文件260／0（`/tmp/rgent-integrity-p3-targeted-final.log`），随后协议／库页重试补充四文件146／0（`/tmp/rgent-integrity-p3-final-protocol.log`），范围重叠不累加。类型、文档、diff及窗口脚本语法核验通过。MULTI脚本已适配普通切换拒身份变化→明确预览确认→稳定ID位置恢复，并增加实际活动根替换两篇保稿／取消确认／新同名正文及工作区不覆盖反例；本包未运行build、完整测试或真实窗口，因此新窗口场景仍待总任务实际验证，不能代称Windows／人工输入法／用户视觉证据。未调用模型、未改变正常设备配置、未新增存储格式／实体／通道／依赖／页面／分支／worktree，只有本地提交；包4及最终独立自查待续。

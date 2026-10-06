@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { vaultRootIdentity } from './watch.ts'
-import type { VaultCatalogEntry, VaultCatalogView, VaultTarget, VaultWorkspace } from '../shared/vault-management.ts'
+import type { VaultCatalogEntry, VaultCatalogView, VaultTarget, VaultWorkspace, VaultRootPreview } from '../shared/vault-management.ts'
 
 const LIMIT = 128
 const MAX_FILE_BYTES = 4_194_304
@@ -16,8 +16,7 @@ function text(value: unknown, max: number): value is string { return typeof valu
 function label(value: unknown): value is string { return text(value, 80) && value.trim().length > 0 }
 function rootPath(value: unknown): value is string { return text(value, 4096) && path.isAbsolute(value) && path.resolve(value) === value }
 function identity(value: unknown): value is string { return typeof value === 'string' && /^\d+:\d+$/.test(value) && value.length <= 128 }
-/** 根身份是 `设备号:inode`。APFS 上设备号跨挂载／重启会变，inode 不会：
- *  设备号变、inode 不变＝同一个目录只是卷重新挂载过；inode 变＝目录真被换掉。 */
+/** 同 inode 可提示卷重新挂载的可能性，不能证明物理连续性或授权认领。 */
 export function sameRootInode(a: string, b: string): boolean {
   return identity(a) && identity(b) && a.slice(a.indexOf(':') + 1) === b.slice(b.indexOf(':') + 1)
 }
@@ -90,7 +89,7 @@ function parseWorkspaces(source: Snapshot): WorkspaceData | null {
     if (!object(value) || value.version !== 1 || !Array.isArray(value.entries) || value.entries.length > LIMIT) return null
     const entries: WorkspaceData['entries'] = []
     for (const item of value.entries) {
-      if (!object(item) || item.id !== undefined && !text(item.id,128) || !rootPath(item.path) || !identity(item.rootIdentity) || !object(item.workspace) || item.workspace.version !== 1 || entries.some(entry => item.id === undefined && entry.id === undefined && entry.path === item.path && entry.rootIdentity === item.rootIdentity)) return null
+      if (!object(item) || item.id !== undefined && !text(item.id,128) || !rootPath(item.path) || !identity(item.rootIdentity) || !object(item.workspace) || item.workspace.version !== 1 || !Array.isArray(item.workspace.tabs) || !(item.workspace.active===undefined||item.workspace.active===null||typeof item.workspace.active==='string') || entries.some(entry => item.id === undefined && entry.id === undefined && entry.path === item.path && entry.rootIdentity === item.rootIdentity)) return null
       if(item.id!==undefined&&entries.some(entry=>entry.id===item.id))return null
       entries.push({ ...(item.id?{id:item.id as string}:{}), path: item.path, rootIdentity: item.rootIdentity, workspace: workspaceValue(item.workspace) })
     }
@@ -102,6 +101,7 @@ function parseWorkspaces(source: Snapshot): WorkspaceData | null {
 export class VaultCatalog {
   private readonly file: string
   private readonly workspaceFile: string
+  private readonly rootPreviews=new Map<string,{view:VaultRootPreview;target:VaultTarget;revision:string;workspaceRevision:string;caller:string;sessionId:string|null;expires:number}>()
   constructor(userData: string) {
     this.file = path.join(userData, 'vault-catalog.json')
     this.workspaceFile = path.join(userData, 'vault-workspaces.json')
@@ -208,29 +208,38 @@ export class VaultCatalog {
     this.save(this.file, data, source, 'VAULT_CATALOG_CONFLICT', () => { this.checked(target) })
     return this.view()
   }
-  /** 卷重新挂载后只允许人类确认一次：同一个 inode、不同设备号时改记新设备号，并把该路径的工作区
-   *  登记一并换到新身份，保住 tab 与阅读位置。inode 也变了说明目录真被替换，仍按 VAULT_REPLACED 拒绝。 */
-  confirmRemount(id: string, revision: string): VaultCatalogEntry {
-    if (typeof revision !== 'string') throw new Error('VAULT_CATALOG_CONFLICT')
-    const { source, data } = this.writable(revision)
-    const entry = data.entries.find(item => item.id === id)
-    if (!entry) throw new Error('VAULT_NOT_REGISTERED')
-    let current: VaultTarget
-    try { current = this.inspect(entry.path) } catch { throw new Error('VAULT_TARGET_CHANGED') }
-    if (current.rootIdentity === entry.rootIdentity) return { ...entry }
-    if (!sameRootInode(current.rootIdentity, entry.rootIdentity)) throw new Error('VAULT_REPLACED')
-    const previous = entry.rootIdentity
-    entry.rootIdentity = current.rootIdentity
-    this.rebindWorkspaceIdentity(entry.path, previous, current.rootIdentity)
-    this.save(this.file, data, source, 'VAULT_CATALOG_CONFLICT', () => { this.checked(current) })
-    return { ...entry }
+  /** 同 inode 仅作诊断，普通打开不认领；令牌仅授权建立新的设备关联。 */
+  previewRoot(id:string,target:VaultTarget,revision:string,owner:{caller:string;sessionId:string|null}):VaultRootPreview{
+    const {data}=this.writable(revision),entry=data.entries.find(e=>e.id===id)
+    if(!entry)throw Error('VAULT_NOT_REGISTERED')
+    const current=this.inspect(target.path)
+    if(current.path!==target.path||current.rootIdentity!==target.rootIdentity)throw Error('VAULT_TARGET_CHANGED')
+    if(this.compatible(data.entries,current,id))throw Error('VAULT_ALREADY_REGISTERED')
+    const source=snapshot(this.workspaceFile),workspaces=parseWorkspaces(source)
+    const matches=workspaces?.entries.filter(e=>e.id===id||!e.id&&e.path===entry.path&&e.rootIdentity===entry.rootIdentity)??[]
+    const view:VaultRootPreview={id:randomUUID(),entryId:id,path:current.path,previousPath:entry.path,previousIdentity:entry.rootIdentity,rootIdentity:current.rootIdentity,workspace:!workspaces?'unavailable':matches.length===1?'restore':'none',warning:'确认只建立新的设备库关联，不证明目录连续性。账本和记忆来源须独立核验；停止旧任务并保留待保存回答与窗口稿，另存正文须再次确认。'}
+    const windowId=owner.caller.split(':')[0]
+    for(const [key,item]of this.rootPreviews)if(item.expires<=Date.now())this.rootPreviews.delete(key)
+    if([...this.rootPreviews.values()].filter(p=>p.caller.split(':')[0]===windowId).length>=4)throw Error('VAULT_PREVIEW_LIMIT')
+    this.rootPreviews.set(view.id,{view,target:{...current,id},revision,workspaceRevision:source.revision,...owner,expires:Date.now()+120000})
+    return {...view}
   }
-  private rebindWorkspaceIdentity(target: string, from: string, to: string): void {
-    const source = snapshot(this.workspaceFile), data = parseWorkspaces(source)
-    if (!data) throw new Error('VAULT_WORKSPACE_INVALID')
-    let changed = false
-    for (const item of data.entries) if (item.path === target && item.rootIdentity === from) { item.rootIdentity = to; changed = true }
-    if (changed) this.save(this.workspaceFile, data, source, 'VAULT_WORKSPACE_CONFLICT')
+  rootTarget(id:string,owner:{caller:string;sessionId:string|null}):VaultTarget{const p=this.rootPreviews.get(id);if(!p||p.expires<=Date.now()||p.caller!==owner.caller||p.sessionId!==owner.sessionId)throw Error('STALE_PREVIEW');return {...p.target}}
+  cancelRoot(id:string,owner:{caller:string;sessionId:string|null}):void{const p=this.rootPreviews.get(id);this.rootPreviews.delete(id);if(!p||p.caller!==owner.caller||p.sessionId!==owner.sessionId)throw Error('STALE_PREVIEW')}
+  invalidateRootPreviews():void{this.rootPreviews.clear()}
+  confirmRoot(id:string,owner:{caller:string;sessionId:string|null}):VaultTarget{
+    const p=this.rootPreviews.get(id);this.rootPreviews.delete(id)
+    if(!p||p.expires<=Date.now()||p.caller!==owner.caller||p.sessionId!==owner.sessionId||snapshot(this.workspaceFile).revision!==p.workspaceRevision)throw Error('STALE_PREVIEW')
+    const {source,data}=this.writable(p.revision),entry=data.entries.find(e=>e.id===p.view.entryId)
+    if(!entry||entry.path!==p.view.previousPath||entry.rootIdentity!==p.view.previousIdentity)throw Error('STALE_PREVIEW')
+    const current=this.inspect(p.target.path)
+    if(current.path!==p.target.path||current.rootIdentity!==p.target.rootIdentity)throw Error('STALE_PREVIEW')
+    if(this.compatible(data.entries,current,entry.id))throw Error('VAULT_ALREADY_REGISTERED')
+    // 补旧工作区ID在目录变更前完成，已有ID不改路径或根身份；中断可按原登记重试。
+    if(parseWorkspaces(snapshot(this.workspaceFile)))this.migrateWorkspaceId(entry)
+    entry.path=current.path;entry.rootIdentity=current.rootIdentity;entry.lastUsed=null
+    this.save(this.file,data,source,'VAULT_CATALOG_CONFLICT',()=>{const now=this.inspect(current.path);if(now.path!==current.path||now.rootIdentity!==current.rootIdentity)throw Error('VAULT_TARGET_CHANGED')})
+    this.invalidateRootPreviews();return {...entry}
   }
   committed(target: VaultTarget): VaultCatalogEntry {    const { source, data } = this.writable(); const entry = this.entry(data, target)
     entry.lastUsed = Date.now(); data.lastVaultId = entry.id
@@ -238,7 +247,7 @@ export class VaultCatalog {
     return { ...entry }
   }
   private migrateWorkspaceId(entry: VaultCatalogEntry): void {
-    if(entry.displayVersion && entry.legacyDisplayKey!==createHash('sha256').update(entry.path).digest('hex'))return
+    if(entry.displayVersion&&entry.legacyDisplayKey!==createHash('sha256').update(entry.path).digest('hex'))return
     const source=snapshot(this.workspaceFile),data=parseWorkspaces(source)
     if(!data)throw Error('VAULT_WORKSPACE_INVALID')
     if(data.entries.some(item=>item.id===entry.id))return

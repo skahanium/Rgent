@@ -801,7 +801,7 @@ it('keeps settings drafts when switching is cancelled and keeps the panel throug
 const vaultFlush = async () => { for (let i=0;i<8;i++) await Promise.resolve() }
 function vaultSettings(overrides: Record<string,unknown> = {}) {
  const catalog = {revision:'r1',diagnostic:null,lastVaultId:'a',activeId:'a',entries:[{id:'a',label:'本库',path:'/a',rootIdentity:'a',pinned:false,lastUsed:1},{id:'b',label:'其它库',path:'/b',rootIdentity:'b',pinned:false,lastUsed:0}]}
- const vault = {get:async()=>catalog, open:vi.fn(async()=>{}), pick:vi.fn(async()=>{}), change:vi.fn(async(r:{label?:string})=>({...catalog,revision:'r2',entries:catalog.entries.map(e=>e.id==='a'?{...e,label:r.label??e.label}:e)})),...overrides}
+ const vault = {get:async()=>catalog, open:vi.fn(async()=>{}), pick:vi.fn(async()=>{}), change:vi.fn(async(r:import('../../src/shared/vault-management.ts').VaultCatalogChangeRequest)=>({...catalog,revision:'r2',entries:catalog.entries.map(e=>e.id==='a'?{...e,label:('label' in r?r.label:undefined)??e.label}:e)})),...overrides}
  const panel=createSettingsOverlay({getMode:async()=>'day',setMode:async mode=>({ok:true,mode}),vault})
  return {panel,vault,go:(name:string)=>[...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')].find(b=>b.textContent===name)!.click()}
 }

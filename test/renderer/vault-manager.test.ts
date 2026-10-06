@@ -327,3 +327,29 @@ it('does not declare recovery complete when its current status cannot be read',a
  expect(root.querySelector('.vault-settings-recovery')!.textContent).not.toContain('恢复已完成')
  expect(root.textContent).toContain('恢复状态无法读取')
 })
+
+it('shows root preview before explicit association confirmation and lets the current invalid root choose a position',async()=>{
+ const catalog={...view([entry('old')]),activeId:'old',activeUnavailable:true},change=vi.fn(async(request:any)=>request.action==='root-preview'?{...catalog,rootPreview:{id:'proof',entryId:'old',path:'/new',previousPath:'/old',previousIdentity:'1:1',rootIdentity:'2:2',workspace:'unavailable',warning:'明确授权新关联'}}:catalog)
+ const {button,row}=start(catalog,{change});await flush()
+ expect(button('预览根关联',row('old'))).toBeDefined()
+ button('预览根关联',row('old')).click();await flush()
+ expect(change).toHaveBeenCalledWith({id:'old',revision:'r1',action:'root-preview'})
+ expect(change.mock.calls.some(([r])=>r.action==='root-confirm')).toBe(false)
+ button('确认建立新关联',row('old')).click();await flush()
+ expect(change).toHaveBeenLastCalledWith({id:'old',revision:'r1',action:'root-confirm',previewId:'proof'})
+})
+
+it.each([['VAULT_PREVIEW_LIMIT','四份'],['VAULT_WORKSPACE_INVALID','原字节保留'],['BAD_SENDER','原窗口已变更'],['STALE_PREVIEW','预览已失效']])('maps explicit root recovery error %s to a retained-draft retry explanation',async(code,copy)=>{
+ const {row,button,overlay}=start({...view([entry('old')]),activeId:'old'},{change:vi.fn(async()=>{throw Error(code)})});await flush()
+ button('预览根关联',row('old')).click();await flush()
+ expect(overlay.root.querySelector('.vault-settings-status')?.textContent).toContain(copy)
+})
+
+it('refreshes the committed catalogue revision after attach failure so the retained root preview control can retry',async()=>{
+ const initial={...view([entry('old')]),activeId:'old',activeUnavailable:true};let revision='r1'
+ const change=vi.fn(async(r:any)=>{if(r.action==='root-confirm'){revision='r2';throw Error('attach failed')}return {...initial,revision,rootPreview:{id:'proof',entryId:'old',path:'/new',previousPath:'/old',previousIdentity:'1:1',rootIdentity:'2:2',workspace:'none',warning:'核对'}}})
+ const {row,button}=start(initial,{get:async()=>({...initial,revision}),change});await flush()
+ button('预览根关联',row('old')).click();await flush();button('确认建立新关联',row('old')).click();await flush()
+ button('预览根关联',row('old')).click();await flush()
+ expect(change).toHaveBeenLastCalledWith({id:'old',revision:'r2',action:'root-preview'})
+})

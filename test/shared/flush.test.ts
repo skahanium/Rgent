@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { CloseFlow, reportFlush, timeoutAction } from '../../src/shared/flush.ts'
+import { describe, expect, it, vi } from 'vitest'
+import { CloseFlow, reportFlush, timeoutAction, RecoveryDraftGate } from '../../src/shared/flush.ts'
 
 describe('timeoutAction', () => {
   it('never leaves a live renderer without an escape', () => {
@@ -126,4 +126,27 @@ it('workspace saving reports false and thrown disk failures, preventing a succes
   await reportFlush(async()=>{const workspace=await saveWorkspacePosition(write,notice);const body=true;return workspace&&body},value=>done.push(value))
  }
  expect(done).toEqual([{ok:false},{ok:false}]);expect(await saveWorkspacePosition(async()=>true,notice)).toBe(true)
+})
+
+it('protects invalid-root drafts without attempting save and releases only the original operation',async()=>{
+ const gate=new RecoveryDraftGate(),save=vi.fn(async()=>false),deps={session:()=> 'old',composing:()=>false,changed:vi.fn(),settled:async()=>{},save,dirty:()=>true}
+ expect(await gate.handle('root-recovery-protect' as any,{sessionId:'old',operationId:'op'},deps)).toBe(true)
+ expect(save).not.toHaveBeenCalled();expect(gate.maySave('old')).toBe(false)
+ await gate.handle('recovery-release',{sessionId:'old',operationId:'other'},deps)
+ expect(gate.held('old')).toBe(true)
+ await gate.handle('recovery-release',{sessionId:'old',operationId:'op'},deps)
+ expect(gate.held('old')).toBe(false)
+})
+
+it('releases the old root hold after a new mount without reopening old write authority',async()=>{
+ let session='old';const gate=new RecoveryDraftGate(),deps={session:()=>session,composing:()=>false,changed:vi.fn(),settled:async()=>{},save:async()=>false,dirty:()=>true},context={sessionId:'old',operationId:'root'}
+ expect(await gate.handle('root-recovery-protect',context,deps)).toBe(true);session='new'
+ expect(await gate.handle('recovery-release',context,deps)).toBe(true)
+ expect(gate.held('old')).toBe(false)
+})
+
+it('rejects extra root-association request fields and missing confirmation tokens on the existing channel',async()=>{
+ const {parseVaultCatalogChange}=await import('../../src/shared/vault-management.ts')
+ expect(parseVaultCatalogChange({id:'v',revision:'r',action:'root-preview',choose:true})).not.toBeNull()
+ for(const request of [{id:'v',revision:'r',action:'root-confirm'},{id:'v',revision:'r',action:'root-preview',choose:'yes'},{id:'v',revision:'r',action:'root-confirm',previewId:'p',force:true},{id:'v',revision:'r',action:'root-confirm',previewId:'p',sessionId:'guess'}])expect(parseVaultCatalogChange(request)).toBeNull()
 })

@@ -78,7 +78,7 @@ export function timeoutAction(flow: CloseFlow, rendererAlive: boolean): CloseAct
   return rendererAlive ? flow.stalled() : flow.rendererGone()
 }
 
-export type RecoveryFlushPhase = 'recovery-preview' | 'recovery-commit' | 'recovery-resume' | 'recovery-release'
+export type RecoveryFlushPhase = 'recovery-preview' | 'recovery-commit' | 'recovery-resume' | 'recovery-release' | 'root-recovery-protect'
 export type LifecycleFlushPhase = 'settings' | 'freeze' | RecoveryFlushPhase
 export type RecoveryFlushContext = { sessionId: string; operationId: string }
 
@@ -92,20 +92,20 @@ export class RecoveryDraftGate {
     session: () => string | null; composing: () => boolean; changed: () => void
     settled: () => Promise<unknown>; save: () => Promise<boolean>; dirty: () => boolean
   }): Promise<boolean> {
-    if (context.sessionId !== deps.session()) return false
     if (phase === 'recovery-release') {
       if (this.owner?.sessionId === context.sessionId && this.owner.operationId === context.operationId) {
         this.owner = null; deps.changed()
       }
       return true
     }
+    if (context.sessionId !== deps.session()) return false
     if (deps.composing() || this.held(context.sessionId)) return false
     this.owner = context; this.preview = phase==='recovery-preview'; deps.changed()
     const current = () => this.owner === context && deps.session() === context.sessionId
     await deps.settled()
     if (!current()) return false
     if (phase === 'recovery-preview') return await deps.save() && current()
-    return current() && (phase === 'recovery-resume' || !deps.dirty())
+    return current() && (phase === 'recovery-resume' || phase === 'root-recovery-protect' || !deps.dirty())
   }
 }
 

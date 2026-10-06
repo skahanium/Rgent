@@ -35,6 +35,8 @@ const LIFECYCLE_ERRORS: Record<string, string> = {
   SOURCE_AVAILABLE: '原对象已能核验，请重新查看当前笔记后处理保存。',
   LEDGER_BASIS_UNAVAILABLE: '无法核对原账本依据，窗口稿仍保留，另存未提交。',
   LEDGER_BOUNDARY_INVALID: '正文语法遮住了账本边界，尚未保存。请闭合代码块或注释，并在 HTML 块后保留空行；窗口稿和原账本仍保留。',
+  BAD_SENDER:'原调用窗口已变更，正文未提交，请重新预览。',
+  OBJECT_BINDING_LIMIT:'保稿证明达到容量上限，原窗口稿保留；请先处理已有保留稿。',
   STALE_PREVIEW: '文件或引用在预览后发生变化，请重新预览再提交。',
   STALE_RECOVERY: '恢复记录已变化，请重新查看状态再重试。',
   VAULT_CHANGED: '笔记库已切换，本次操作已停止。',
@@ -215,9 +217,10 @@ export async function start(root: HTMLElement): Promise<void> {
       pick: create => changeVault(() => window.rgent.vaultPick(create)),
       change: async request => {
         const view = await window.rgent.vaultCatalogChange(request)
-        const state = await window.rgent.vaultGet()
+        if(view.state)await applyState(view.state)
+        const state = view.state??await window.rgent.vaultGet()
         if (state.status === 'ready') { vaultNameText = state.rootName; updateStatus() }
-        return { ...view, activeId: state.status === 'ready' ? state.vaultId ?? null : null }
+        return {...view,activeId:state.status==='ready'?state.vaultId??null:view.entries.find(e=>e.id===request.id)?.id??null,activeUnavailable:state.status!=='ready'}
       }
     },
     memory: memoryHandlers,
@@ -442,14 +445,16 @@ export async function start(root: HTMLElement): Promise<void> {
     if(state.restoreId)void queryRestoreState(state.restoreId,session)
   })
   window.rgent.onLifecycleFlushRequest((id, cleanUnavailablePaths, phase, context) => {
-    if (phase?.startsWith('recovery-')) {
+    if (phase?.startsWith('recovery-')||phase==='root-recovery-protect') {
       if (!context) { window.rgent.lifecycleFlushDone(id,false); return }
+      if(phase==='root-recovery-protect'){const tab=current();if(tab){tab.content=editor.getText();tab.selection=editor.selectionRange();tab.scrollTop=editor.view.scrollDOM.scrollTop}if(saveTimer!==null){clearTimeout(saveTimer);saveTimer=null}if(workspaceTimer!==null){clearTimeout(workspaceTimer);workspaceTimer=null}}
       const deps = {session:()=>vaultSession,composing:()=>restoringWorkspace||editor.view.compositionStarted,
         changed:syncRecoveryInput,settled:()=>Promise.resolve(saveInFlight),save:()=>flushSave(context.operationId),dirty:()=>tabs.some(tab=>tab.dirty||!!tab.availability)}
       void (async()=>{
         if (phase==='recovery-release') await refreshLifecycle()
         const ok=await recoveryDraftGate.handle(phase as import('../../shared/flush.ts').RecoveryFlushPhase,context,deps)
         if (phase==='recovery-release') { if(context.sessionId===vaultSession&&!bodyWritesPaused()&&tabs.some(tab=>tab.dirty))scheduleSave() }
+        else if(phase==='root-recovery-protect')window.rgent.lifecycleFlushDone(id,ok,tabs.filter(t=>t.sessionId===context.sessionId&&t.objectVersion).map(t=>({relPath:t.relPath,objectVersion:t.objectVersion!})))
         else window.rgent.lifecycleFlushDone(id,ok)
       })().catch(()=>window.rgent.lifecycleFlushDone(id,false))
       return
@@ -491,7 +496,7 @@ export async function start(root: HTMLElement): Promise<void> {
   window.rgent.onNoteExternalChange((payload) => {
     if (payload.sessionId && payload.sessionId !== vaultSession) return
     const tab = tabs.find((item) => item.relPath === payload.relPath)
-    if (!tab) return
+    if (!tab||tab.sessionId!==vaultSession) return
     const epoch = vaultEpoch
     // 事件负载只提示需要复核；排队后必须重新读盘，不能采用排队前的旧快照。
     void runExclusiveConflict(() => reconcileTab(tab, epoch)).then(() => {
@@ -700,7 +705,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const restore = async () => {
       if (state.status === 'needs-pick') {
         diagnosed=true
-        if(state.restoreId&&state.sessionId!==undefined&&state.sessionId!==vaultSession){resetSession();vaultSession=state.sessionId}
+        if(state.restoreId&&state.sessionId!==undefined&&state.sessionId!==vaultSession){if(!state.protectedSessionId)resetSession();else for(const tab of tabs)markUnavailable(tab,'replaced');vaultSession=state.sessionId}
         if (tabs.length) {
           for (const tab of tabs) markUnavailable(tab, 'unavailable')
           hostNotice = ROOT_UNAVAILABLE_NOTICE
@@ -737,7 +742,7 @@ export async function start(root: HTMLElement): Promise<void> {
       if (state.vaultChanged || sessionChanged) {
         // chooseVault flushed the old vault before vaultPick switched the root.
         // Never send an old tab's path through noteWrite after the new root is active.
-        resetSession()
+        if(state.protectedSessionId){for(const tab of tabs)markUnavailable(tab,'replaced');hostNotice='原库窗口稿和待保存回答已保留。请逐篇另存正文或明确舍弃；根关联不复制历史。';renderTabs()}else resetSession()
       }
       fileBrowser.setVault(state.navigationKey ?? null,state.legacyNavigationKey)
       sidebarSizer.refresh()
@@ -745,7 +750,8 @@ export async function start(root: HTMLElement): Promise<void> {
       if (serial !== stateSerial) return
       if(!await refreshTree())diagnosed=true
       if (serial !== stateSerial) return
-      if (vaultSession && restoredSession !== vaultSession) {
+      if(tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession)){restoredSession=null;diagnosed=true}
+      if (vaultSession && restoredSession !== vaultSession&&!tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession)) {
         const session = vaultSession
         const restored = await restoreWorkspace(session, serial)
         if (serial !== stateSerial || session !== vaultSession) return
@@ -784,17 +790,17 @@ export async function start(root: HTMLElement): Promise<void> {
   function workspaceSnapshot(): VaultWorkspace {
     const tab = current()
     if (tab) { tab.selection = editor.selectionRange(); tab.scrollTop = editor.view.scrollDOM.scrollTop }
-    return {version:1,tabs:tabs.map(t=>({relPath:t.relPath,selection:t.selection,scrollTop:t.scrollTop})),active,
+    return {version:1,tabs:tabs.filter(t=>t.sessionId===vaultSession).map(t=>({relPath:t.relPath,selection:t.selection,scrollTop:t.scrollTop})),active,
       sidebarHidden:treePanel.classList.contains('is-collapsed'),...fileBrowser.workspaceScroll()}
   }
   async function saveWorkspace(): Promise<boolean> {
-    if (restoringWorkspace || vaultSession && restoredSession !== vaultSession) return false
+    if (restoringWorkspace || tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession) || vaultSession && restoredSession !== vaultSession) return false
     if (!vaultSession) return true
     const session = vaultSession
     return saveWorkspacePosition(()=>window.rgent.vaultWorkspaceSave(session,workspaceSnapshot()),()=>{if(session===vaultSession){hostNotice='工作区位置未保存，已留在当前库。请检查本机存储后重试保存或切换。';updateStatus()}})
   }
   function scheduleWorkspace(): void {
-    if (restoringWorkspace || !vaultSession || restoredSession !== vaultSession) return
+    if (restoringWorkspace || tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession) || !vaultSession || restoredSession !== vaultSession) return
     if (workspaceTimer !== null) clearTimeout(workspaceTimer)
     workspaceTimer = window.setTimeout(()=>{workspaceTimer=null;void saveWorkspace()},400)
   }
@@ -1194,7 +1200,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const present = collectRelPaths(tree)
     const tab = current()
     return {
-      sessionId: vaultSession ?? undefined,
+      sessionId: tab?.sessionId ?? vaultSession ?? undefined,
       noteRelPath: active ?? '',
       imageEpoch: tab ? `${tab.sessionId}/${tab.objectVersion}/${tab.revision}` : '',
       vaultHas: (relPath) => present.has(relPath),
@@ -1774,7 +1780,8 @@ export async function start(root: HTMLElement): Promise<void> {
     const body = tab.relPath === active ? editor.getText() : tab.content
     const draftVersion = crypto.randomUUID()
     try {
-      const result = await window.rgent.noteSaveCopyPreview({ sessionId:tab.sessionId, objectVersion:tab.objectVersion,
+      const held=tab.sessionId!==vaultSession
+      const result = await window.rgent.noteSaveCopyPreview({ sessionId:held?vaultSession!:tab.sessionId,...(held?{sourceSessionId:tab.sessionId}:{}), objectVersion:tab.objectVersion,
         source, target, body, draftVersion })
       if (epoch !== vaultEpoch || !tabs.includes(tab)) return
       if (!result.ok) throw new Error(result.error)
@@ -1785,21 +1792,23 @@ export async function start(root: HTMLElement): Promise<void> {
         const title=document.createElement('h2'); title.textContent='另存为新笔记'
         const description=document.createElement('p'); description.textContent=`${source} → ${result.preview.target}`
         const note=document.createElement('p'); note.textContent=result.preview.warning
-        const tasks=document.createElement('p'); tasks.textContent=result.preview.pendingTaskIds.length ? `将以原任务 ID 保留 ${result.preview.pendingTaskIds.length} 份未落盘完整回答到新笔记账本；任务不重启。` : '另存保留当前草稿和恢复关系；原账本不移动，不自动继承未列出的历史。'
+        const tasks=document.createElement('p'); tasks.textContent=result.preview.pendingTaskIds.length ? `将以原任务 ID 保留 ${result.preview.pendingTaskIds.length} 份未落盘完整回答到新笔记账本；任务不重启。` : held?'只保存正文副本；旧待保存回答仍留在原 tab，可单独明确舍弃。':'另存保留当前草稿和恢复关系；原账本不移动，不自动继承未列出的历史。'
         const cancel=document.createElement('button'); cancel.textContent='取消'; cancel.onclick=()=>panel.close()
         const save=document.createElement('button'); save.className='save-copy-confirm'; save.textContent='确认另存'; save.onclick=()=>{answer=true;panel.close()}
         panel.root.append(title,description,note,tasks,cancel,save)
       })
       if (!accepted || epoch !== vaultEpoch || !tabs.includes(tab)) return
       const currentBody = tab.relPath === active ? editor.getText() : tab.content
-      const saved=await window.rgent.noteSaveCopyCommit({id:result.preview.id,sessionId:tab.sessionId,draftVersion,body:currentBody})
+      const saved=await window.rgent.noteSaveCopyCommit({id:result.preview.id,sessionId:result.preview.sessionId,draftVersion,body:currentBody})
       if (epoch !== vaultEpoch || !tabs.includes(tab)) return
       if (!saved.ok) throw new Error(saved.error)
       const selection=tab.selection
-      applySource(tab,saved.snapshot); tab.relPath=saved.relPath
+      const destination=held?{...tab}:tab
+      applySource(destination,saved.snapshot);destination.relPath=saved.relPath
+      if(held){tabs.push(destination);hostNotice='正文副本已保存；原窗口稿和旧待保存回答仍保留，可返回原 tab 明确舍弃。'}
       hostRevisions.delete(source)
       for(const id of saved.taskIds) { activeTasks.delete(id); endedTaskIds.add(id) }
-      if(active===source) { active=saved.relPath; editor.setText(tab.content,noteHost(),selection) }
+      if(active===source) { active=saved.relPath; editor.setText(destination.content,noteHost(),selection) }
       closeLedger(); syncActiveLocks(); renderTabs(); updateStatus(); await refreshTree()
     } catch(error) { if(epoch===vaultEpoch) window.alert(lifecycleErrorText(error)) }
   }
@@ -1807,8 +1816,8 @@ export async function start(root: HTMLElement): Promise<void> {
     const tab=current(); const epoch=vaultEpoch
     if(!tab?.availability || !tab.sessionId || !tab.objectVersion) return
     if(!window.confirm('明确舍弃这篇原对象的窗口稿及尚未落盘的生成内容？磁盘同名文件不会改动。')) return
-    const ok=await window.rgent.noteAbandon({relPath:tab.relPath,sessionId:tab.sessionId,objectVersion:tab.objectVersion})
-    if(ok && epoch===vaultEpoch) await closeTab(tab.relPath,{save:false})
+    const ok=await window.rgent.noteAbandon({relPath:tab.relPath,sessionId:tab.sessionId===vaultSession?tab.sessionId:vaultSession!,...(tab.sessionId!==vaultSession?{sourceSessionId:tab.sessionId}:{}),objectVersion:tab.objectVersion})
+    if(ok&&epoch===vaultEpoch){await closeTab(tab.relPath,{save:false});if(!tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession)){restoredSession=null;hostNotice='旧窗口稿已逐篇处理。请恢复原工作区位置；恢复前不覆盖位置记录。';workspaceRecovery.querySelector('span')!.textContent=hostNotice;workspaceRecovery.hidden=false;updateStatus()}}
   }
 
   function applySource(tab: Tab, source: NoteSnapshot): void {
