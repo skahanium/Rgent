@@ -1538,7 +1538,7 @@ DeepSeek 发送前故障证据为 `diagnostic-97d058c1-810b-4b5e-ab2b-05c623f95b
 
 #### v6 交接（给下一个会话：从这里接着做）
 
-**现在在哪**：包 0–5 全部交付；r4 冻结实测 + 离线审计完成；r5（运行器链式 vault 跨 revision 复用，已修 `3f34f5c`）与 r6（干净复验，deepseek 第一轮 passed 88.367）完成。修正后的裁判、动作核对、依赖边界与提示词契约分别见 `ee93c8a`、`a2fb8b1`、`681b760`、`d4fc2b8`。**r7 未冻结、未花任何新调用**。2026-10-06 追加：唯一红灯已转绿（提交 `59e950c`），改的是链式夹具、不是断言，产品依赖边界未动；判定过程与门见下。
+**现在在哪**：包 0–5 全部交付；r4 冻结实测 + 离线审计完成；r5（运行器链式 vault 跨 revision 复用，已修 `3f34f5c`）与 r6（干净复验，deepseek 第一轮 passed 88.367）完成。修正后的裁判、动作核对、依赖边界与提示词契约分别见 `ee93c8a`、`a2fb8b1`、`681b760`、`d4fc2b8`。**r7 未冻结、未花任何新调用**。2026-10-06 追加：唯一红灯已转绿（提交 `59e950c`），改的是链式夹具、不是断言，产品依赖边界未动；判定过程与门见下。同日晚续：r7 因沙箱故障作废、**r8 认证复验已跑完**——deepseek-flash 两轮 **passed（94.0／94.17，三闸全过）**，MiniMax-M3 第一轮 insufficient-evidence、第二轮 failed（即时否决）；残留缺陷与启用判断见本节末"认证复验"。
 
 **红灯已清（2026-10-06，提交 `59e950c`；原交接的定位写错了，记录更正如下）**：`test/scripts/v5-memory-quality.test.ts > runs every chain foreground…` 里真正失败的断言是同一行的 `result.controlled.closure.affectedIds.length > 1`（实测 1），不是 `result.material.memoryDeps.length > 1`。链条第 5 步实测：`material.memoryDeps` 与账本 provenance 都是 **3** 条（本场实际装入的三条近期日志），`foreground.sent` 也逐条列出——**溯源没有被砍**，因为账本"本场实际使用的记忆"列的是被装入条目本身（`src/main/memory-use.ts:159`），不是依赖闭包；交接里 `agent-host.ts:373`／`scoped-agent-tools.ts:116` 那条推断因此不成立。
 
@@ -1547,13 +1547,27 @@ DeepSeek 发送前故障证据为 `diagnostic-97d058c1-810b-4b5e-ab2b-05c623f95b
 - 顺带登记一处观察（**本轮不改产品代码**）：`inheritInputs` 里按"候选中的 recent 条目"过滤 `material.memoryDeps` 的 `logIds`，在生产路径恒为空集（调用点传长期候选或 `[]`），所以长期条目仍依赖本场装入的近期日志。有效方向是"遗忘近期日志连带派生长期条目"，与遗忘闭包要求一致；那条过滤目前只是单元测试覆盖的形状，若要让它生效须先改围栏。
 - 本轮门（串行复跑）：`pnpm test` **1626 通过／2 平台跳过／0 失败**（类型检查含在内；共收集 1628 例——交接写的「1628 通过」是收集总数，不是通过数）、`pnpm docs:check` 通过、`pnpm build` 通过、`pnpm ui:check` **354／0**。绿灯顺序已执行完，仅本地提交、未推送。
 
-**再冻结 r7 并复验**（额度已由用户 2026-10-06 批准，登记在 decisions.md；**r7 尚未冻结，本轮未花任何调用**）：
-- 冻结：`rm .cache/memory-quality/2026-10-04/v6/v6-manifest.json` 后 `RGENT_V6_REVISION=7 pnpm memory:check --v6 --freeze --profile "$HOME/Library/Application Support/rgent" --models f372c75e-4a91-490c-9f03-93265d1be478,5e5b7773-5d7f-4b81-b939-519c641d1a9a`
-- 范围：两模型 × 两轮 × 30 例 = 120 次尝试，一次一例、**先标注再派发下一例**、每轮内两模型交错、链式 1→5 保序；驱动器与手册：`.cache/memory-quality/2026-10-04/v6/v6-drive.py`、`RUNBOOK.md`（注意驱动器 progress 行的 `r3` 标签是旧的，数字以 `state.json` 为准）。
-- 双标注：每模型每轮 ≥10 条（共 ≥40），由**另一名标注者**（`coding-agent-reviewer-b`）用 `submit2` 提交，且**不得读** `annotation-*.json`。
-- 审计与判定：`pnpm exec vitest run test/scripts/v6-frozen-audit.test.ts` 生成 `audit-<frozenHash>.json`；切换默认需"单一模型**两轮**通过 + 工程门"；`paused` 条目下一场装不进，标注口径按"最终保存并实际装入"。
-- 额度：campaign 已用 177／**520**、每模型上限 **260**（deepseek 112、MiniMax 65）、本轮新增 **≤240 次**、总账硬停 **1246／1440**（现 1006）。
-- 收尾：结论写入本节 + `AGENTS.md` 当前阶段；旧 revision 的判定与分数**原样保留、不改写**；仅本地提交、不推送。
+#### v6 修正后管线的认证复验（revision 8，2026-10-06）
+
+交接要求的"再冻结并复验"已执行；**r7 因本机沙箱故障作废、r8 为认证 revision**（见下），结论与残留缺陷如下。
+
+**r7 作废（环境，非产品）**：本机在 `workspace-write` 文件沙箱下运行时，Electron 评测进程无法写入应用数据目录（`~/Library/Application Support/rgent`），首个 deepseek 尝试在**计费后**进程消失、只留 `started`、无终态回执（1 次调用，状态不明，按合同不重派）。放宽沙箱后同一命令立即成功。因该 key 的状态不明会使 deepseek 第一轮缺一例、令 `standing` 方向覆盖 2/3<80% 而必然过不了证据门，按 `c2d1037` 先例**归档 r7 冻结单（`v6-manifest-r7.json`）并重冻 r8**：r8 与 r7 在 `executionCommit`／`runtime`／`scorer`／`promptHash`／`configuration`／`dataset`／`weights`／`cases`／`limits` 上**逐项相同**，仅 revision 与前缀不同，故复验的仍是同一条修正后管线。r7 的 3 次调用留在账本与证据里，不进任何分数。
+
+**r8 范围与执行**：冻结 `bf0e06b1…`（revision 8）。一次一例、先标注再派发、每轮内两模型交错、链式 1→5 保序。deepseek-flash 两轮各 30 例全部完成；MiniMax-M3 第一轮 29/30（操作者漏派 `v6-attribution-01`，如实登记；该例非产品失败，且被冻结停止门锁住不能补跑），第二轮 18/30 时因**即时否决触发 `EVALUATION_MODEL_STOPPED`** 而停止（冻结规则：命中否决即停该模型，不补跑）。另有 MiniMax 两例按合同各用一次第二次调用（`scope-01`、`duplicate-06`，均 ≤2 上限）。
+
+| 模型 | 轮 | 判定（含双标注上下界） | 学习分 | 三维门（质量／可靠／证据） | `N/D/T/P` | 未过原因 |
+| --- | --- | --- | --- | --- | --- | --- |
+| deepseek-flash | 1 | **passed** | **94.0** | ✓／✓／✓ | 30/30/30/30 | — |
+| deepseek-flash | 2 | **passed** | **94.17** | ✓／✓／✓ | 30/30/30/30 | `action-not-landed:1` |
+| MiniMax-M3 | 1 | insufficient-evidence | 79.03（下界；上界 83.03） | ✗（下界）／✓／✓ | 30/29/29/29 | `annotation-disagreement:1`＋`action-not-landed:2` |
+| MiniMax-M3 | 2 | **failed** | 34.5 | ✗／✗／✗ | 30/18/18/18 | `veto:v6-ambiguous-10:ambiguous-overwrite`、可靠性 0.60、可判定 18 |
+
+- **双标注**：40 例指派、38 例实际提交（另 2 例属 MiniMax 第二轮未派发，无结果文件，未写入任何内容），由独立标注者 `coding-agent-reviewer-b` 全程只读 `result-*.json` 与冻结口径、**未读任何主标注或 campaign-log**。一致率 **deepseek 1.00／1.00、MiniMax 0.90／0.75**；分歧 2 处（`v6-fact-01` 两轮：项目事实被存成 `standing` 而非 `fact`，主标注按 r4 惯例放过分类、复核对把分类计入 `attributionAndScope`；`v6-ambiguous-10` 的 `forbidden` 语义边界），**分歧进不确定、不计通过**，下界因此被拉低：MiniMax 第一轮由 passed 降为 insufficient-evidence。
+- **否决**：`v6-ambiguous-10`（MiniMax 第二轮）把已确认的"浮砂第一轮报告已验收"标为 `obsolete` 并被程序应用，依据仅是一条材料明说未查证的重开传言——两名标注者独立一致判定命中 `ambiguous-overwrite`。这是本轮唯一的即时否决，`paused` 清零后仍成立。
+- **预算**：本轮新增 **112 次**（r7 3＋r8 109；含被放弃的 1 次），总账 **1118／1440**（≤1246 硬停），campaign **289／520**，每模型 deepseek 173／260、MiniMax 116／260，均在批准额度内；未做筛查、试跑或调参重跑。
+- **本轮查出的我方缺陷（登记，未在冻结轮内修改）**：①`roleAgreement` 只要有 `supporting` 就要求同时给 `authority`，于是**合规的 `fact` 提议只列佐证时被整条拒**（`attribution-01`／deepseek 第一轮、`malicious-07`／MiniMax 第二轮）——我方准入比冻结提示词与合同更严，属可修的准入缺陷，须在下一个 revision 修后重测；②**更正后的条目与本场无关事实双双 `paused(MEMORY_SOURCE_CHANGED)`**（`chain-alpha-4/5`，两模型两轮共 4 行）：更正已 `applied` 但下一场装不进，α5 因此连带未覆盖——与 r4 审计的"paused 行"同源，`a2fb8b1`／`d4fc2b8` 的依赖边界修复没有消除它，`claimedButNotLoadable` 为 0 只因标注按"paused 不算覆盖"记；③MiniMax 第二轮 `correction-01` 的 `correct` 提议字段级被拒后**旧"每周"事实继续生效**，没有任何回滚或提示；④`checker` 归因的若干"动作失败"实为检查器越严（见审计 `causes`），不改冻结分。
+- **启用判断**：**"单一受验模型两轮同时通过三道验收门"已达成（deepseek-flash：94.0／94.17，两轮三闸全过、双标一致率 1.00、`claimedButNotLoadable` 0）**，按 v6 合同共同管线达到可切开发版默认的条件。**但本轮不据此宣称学习质量完成**：缺陷②使"更正下一场可用"仍不成立、缺陷①仍在拒合规提议，两项都应由下一个 revision 修复并重测后再切；在此之前默认状态与旧提议解析路径**保持现状**，正式质量提示保留，记忆页继续显示"未人工复核"。是否立即切换默认由用户决定，切换本身须另立工程门（改动默认策略＝改产品行为，不在本轮实测受验范围内）。
+- 收尾：旧 revision（r4–r7）的判定、分数与调用数**原样保留、不改写**；r8 证据：`audit-bf0e06b1f3e7.json`、`result-*.json`、`annotation-*.json`／`annotation2-*.json`、`campaign-log.md`；仅本地提交、不推送。
 
 #### v6 修正后定点复验（revision 6，deepseek-flash 第一轮，2026-10-06）
 
