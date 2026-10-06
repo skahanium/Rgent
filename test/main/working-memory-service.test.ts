@@ -207,12 +207,12 @@ it('blocks derived summary coverage after forgetting a raw task prompt with no m
  const base=await mkdtemp(path.join(os.tmpdir(),'rgent-forgotten-summary-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),markPrompt('/以后用中文',{taskId:'task',range:{start:0,end:6},expectedText:'/以后用中文',promptText:'以后用中文'}))
  const vault=new VaultSession(base,vi.fn());vault.restore()
  try{
-  const note=await vault.readOpened('a.md');await vault.ledgerPrepare('a.md',{taskId:'task',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'以后用中文',answer:'历史回答保持'})
+  const note=await vault.readOpened('a.md');await vault.ledgerPrepare('a.md',{taskId:'task',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'以后用中文',provenance:{version:2,model:{provider:'custom',modelId:'fixture',endpointHost:'example.test'},scope:['a.md'],sources:[],tools:[],memoryDeps:[]},answer:'历史回答保持'})
   const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'task',answer:'历史回答保持'}),note.revision,note);await vault.ledgerComplete('a.md','task',saved.revision)
   const service=new WorkingMemoryService(vault,()=>null),source=await service.sourceForPrompt('a.md','task'),coverage=service as WorkingMemoryService & {summaryAllowed?:(relPath:string,taskIds:readonly string[])=>Promise<boolean>}
   expect(source.memoryDeps).toEqual([])
   await writeFile(path.join(root,'b.md'),markPrompt('/未遗忘材料',{taskId:'task-other',range:{start:0,end:6},expectedText:'/未遗忘材料',promptText:'未遗忘材料'}))
-  const other=await vault.readOpened('b.md');await vault.ledgerPrepare('b.md',{taskId:'task-other',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'未遗忘材料',answer:'另一个历史'})
+  const other=await vault.readOpened('b.md');await vault.ledgerPrepare('b.md',{taskId:'task-other',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'未遗忘材料',provenance:{version:2,model:{provider:'custom',modelId:'fixture',endpointHost:'example.test'},scope:['a.md'],sources:[],tools:[],memoryDeps:[]},answer:'另一个历史'})
   const otherSaved=await vault.write('b.md',upsertAiAnswer(other.content,{taskId:'task-other',answer:'另一个历史'}),other.revision,other);await vault.ledgerComplete('b.md','task-other',otherSaved.revision)
   const otherSource=await service.sourceForPrompt('b.md','task-other'),validEntry=await vault.memoryMutation(s=>s.add(s.read(),{content:'未遗忘有效记忆',layer:'demand',scope:'本库',sources:[otherSource],semantic:'fact',attribution:'人的口令',reviewAt:null}))
   expect(await coverage.summaryAllowed?.('b.md',['task-other'])).toBe(true)
@@ -231,7 +231,7 @@ it('blocks summary copies derived from forgotten body material UUIDs without all
  const vault=new VaultSession(base,vi.fn());vault.restore()
  try{
   const note=await vault.readOpened('a.md'),fragment={...note,relPath:'a.md',permissionTier:'reference' as const,kind:'body' as const,classification:'human' as const,taskId:null,start:0,end:5,text:'正文材料。',hash:createHash('sha256').update('正文材料。').digest('hex'),sourceDeps:[],memoryDeps:[]}
-  await vault.ledgerPrepare('a.md',{taskId:'task-body',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'说明',answer:'依据正文的历史结论',material:{fragments:[fragment],truncated:false}})
+  await vault.ledgerPrepare('a.md',{taskId:'task-body',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'说明',provenance:{version:2,model:{provider:'custom',modelId:'fixture',endpointHost:'example.test'},scope:['a.md'],sources:[],tools:[],memoryDeps:[]},answer:'依据正文的历史结论',material:{fragments:[fragment],truncated:false}})
   const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'task-body',answer:'依据正文的历史结论'}),note.revision,note);await vault.ledgerComplete('a.md','task-body',saved.revision)
   const service=new WorkingMemoryService(vault,()=>null),source=await service.sourceForFragment(fragment);expect(source.materialId).not.toContain('task-body/prompt');expect(source.memoryDeps).toEqual([])
   const entry=await vault.memoryMutation(s=>s.add(s.read(),{content:'正文材料形成的记忆',layer:'demand',scope:'本库',sources:[source],semantic:'fact',attribution:'来源笔记',reviewAt:null}))
@@ -250,7 +250,7 @@ it.each(['ledger-forget','body-forget','ledger-watermark','body-watermark','adop
  try{
   const save=async(taskId:string,material?:import('../../src/main/host-material.ts').SentTaskMaterial)=>{
    let note=await vault.readOpened('a.md'),body=note.content+'/口令'+taskId+'\n\n';const start=note.content.length;body=markPrompt(body,{taskId,range:{start,end:start+('/口令'+taskId).length},expectedText:'/口令'+taskId,promptText:'口令'+taskId});await vault.write('a.md',body,note.revision,note);note=await vault.read('a.md')
-   await vault.ledgerPrepare('a.md',{taskId,startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'口令'+taskId,answer:'回答'+taskId,material})
+   await vault.ledgerPrepare('a.md',{taskId,startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'口令'+taskId,answer:'回答'+taskId,provenance:{version:2,model:{provider:'custom',modelId:'fixture',endpointHost:'example.test'},scope:['a.md'],sources:[],tools:[],memoryDeps:[]},material})
    const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId,answer:'回答'+taskId}),note.revision,note);await vault.ledgerComplete('a.md',taskId,saved.revision)
    if(mode.startsWith('adopted')){const current=await vault.read('a.md');await vault.write('a.md',current.content.replace('<!-- rgent:ai:v1 task-id=\"'+taskId+'\" -->',''),current.revision,current)}
   }
@@ -260,7 +260,7 @@ it.each(['ledger-forget','body-forget','ledger-watermark','body-watermark','adop
    tracker.commit();expect(tracker.snapshot().fragments.every(f=>f.taskId===taskId&&f.kind===kind)).toBe(true);expect(tracker.snapshot().fragments.length).toBeGreaterThan(0);return tracker.snapshot()
   }
   await save('T0');const service=new WorkingMemoryService(vault,()=>null),source=await service.sourceForPrompt('a.md','T0');const entry=await vault.memoryMutation(s=>s.add(s.read(),{content:'原始口令材料',layer:'core',scope:'本库',sources:[source],semantic:'fact',attribution:'人的口令',reviewAt:null}))
-  await save('T1',await inherited('T0'));await save('T2',await inherited('T1'));expect((await vault.ledgerRecord('a.md','T2')).chapter?.provenance?.version??1).toBe(1)
+  await save('T1',await inherited('T0'));await save('T2',await inherited('T1'));expect((await vault.ledgerRecord('a.md','T2')).chapter?.provenance?.version).toBe(2)
   expect((await vault.summaryMaterials('a.md',['T2'])).materialIds).toEqual(expect.arrayContaining(['T0/prompt','T1/prompt','T2/prompt']));expect(await service.summaryAllowed('a.md',['T2'])).toBe(true);
   if(mode==='ledger-forget'){const child=await vault.ledgerRecord('a.md','T2'),file=path.join(root,'.rgent','ledgers',child.noteId,'T2.json'),original=await readFile(file,'utf8'),bad=JSON.parse(original);bad.chapter.material.fragments[0].hash='0'.repeat(64);await writeFile(file,JSON.stringify(bad));expect(await service.summaryAllowed('a.md',['T2'])).toBe(false);await writeFile(file,original)
    const ancestor=await vault.ledgerRecord('a.md','T0'),ancestorFile=path.join(root,'.rgent','ledgers',ancestor.noteId,'T0.json'),ancestorRaw=await readFile(ancestorFile,'utf8'),moved=JSON.parse(ancestorRaw);moved.chapter.answer=moved.chapter.prompt;moved.chapter.prompt='无关新口令';await writeFile(ancestorFile,JSON.stringify(moved));expect(await service.summaryAllowed('a.md',['T2'])).toBe(false);expect((await vault.ledgerRecord('a.md','T0')).chapter?.answer).toBe('口令T0');await writeFile(ancestorFile,ancestorRaw);expect(await service.summaryAllowed('a.md',['T2'])).toBe(true)
@@ -324,7 +324,7 @@ it.each(['hash','legacy','moved-excerpt'] as const)('same-position genuinely new
  const base=await mkdtemp(path.join(os.tmpdir(),'rgent-material-summary-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'落点\n');await writeFile(path.join(root,'b.md'),'原始材料')
  const vault=new VaultSession(base,vi.fn());vault.restore()
  try{const service=new WorkingMemoryService(vault,()=>null);let b=await vault.readOpened('b.md');const s=await service.manualSource({...b,relPath:'b.md',kind:'body',start:0,end:4});if(mode==='moved-excerpt'){await vault.write('b.md',b.content+'\n其他材料',b.revision,b);b=await vault.read('b.md')}const e=await vault.memoryMutation(store=>store.add(store.read(),{content:'原材料记忆',layer:'demand',scope:'库',sources:[s],semantic:'fact',attribution:'人',reviewAt:null}))
-  const save=async(taskId:string)=>{const tracker=new TaskMaterialTracker();tracker.body(b.content,{start:0,end:mode==='moved-excerpt'?b.content.length:4},{...b,relPath:'b.md'});tracker.commit();let note=await vault.readOpened('a.md');const body=markPrompt(note.content+'\n/'+taskId,{taskId,range:{start:note.content.length+1,end:note.content.length+taskId.length+2},expectedText:'/'+taskId,promptText:taskId});await vault.write('a.md',body,note.revision,note);note=await vault.read('a.md');await vault.ledgerPrepare('a.md',{taskId,startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:taskId,answer:'派生回答',material:tracker.snapshot()});const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId,answer:'派生回答'}),note.revision,note);await vault.ledgerComplete('a.md',taskId,saved.revision)}
+  const save=async(taskId:string)=>{const tracker=new TaskMaterialTracker();tracker.body(b.content,{start:0,end:mode==='moved-excerpt'?b.content.length:4},{...b,relPath:'b.md'});tracker.commit();let note=await vault.readOpened('a.md');const body=markPrompt(note.content+'\n/'+taskId,{taskId,range:{start:note.content.length+1,end:note.content.length+taskId.length+2},expectedText:'/'+taskId,promptText:taskId});await vault.write('a.md',body,note.revision,note);note=await vault.read('a.md');await vault.ledgerPrepare('a.md',{taskId,startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:taskId,answer:'派生回答',provenance:{version:2,model:{provider:'custom',modelId:'fixture',endpointHost:'example.test'},scope:['a.md','b.md'],sources:[],tools:[],memoryDeps:[]},material:tracker.snapshot()});const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId,answer:'派生回答'}),note.revision,note);await vault.ledgerComplete('a.md',taskId,saved.revision)}
   await save('old-task');if(mode==='moved-excerpt'){await vault.write('b.md','开头\n'+b.content,b.revision,b);b=await vault.read('b.md')}if(mode==='legacy'){const file=path.join(root,'.rgent','materials.json'),data=JSON.parse(await readFile(file,'utf8'));delete data.units[0].hash;await writeFile(file,JSON.stringify(data))}
   await service.forget({sessionId:service.context().sessionId,revision:service.snapshot().revision,objectVersion:service.snapshot().objectVersion,id:e.id,version:1});if(mode==='legacy')await expect(service.manualSource({...b,relPath:'b.md',kind:'body',start:0,end:4})).rejects.toThrow('MEMORY_MATERIAL_UNVERIFIED');await vault.write('b.md','新证材料',b.revision,b);b=await vault.read('b.md');const newer=await service.manualSource({...b,relPath:'b.md',kind:'body',start:0,end:4});expect(newer.materialId).not.toBe(s.materialId);await save('new-task')
   expect(await service.summaryAllowed('a.md',['old-task'])).toBe(false);expect(await service.summaryAllowed('a.md',['new-task'])).toBe(true)
@@ -523,4 +523,23 @@ it.each(['empty','dependency','unknown','mismatch','cache','cache-edit','cache-d
   if(mode==='dependency'){expect(remaining.recent).toEqual([]);expect(remaining.entries).toEqual([]);expect(await service.summaryAllowed('a.md',['recent-task'])).toBe(false);expect(await service.summaryAllowed('a.md',['recent-next'])).toBe(false);expect(await vault.memoryMutation(store=>store.canLearn(store.read().record,[anchor]))).toBe(false)}
   if(mode==='unknown'||mode==='mismatch'||mode==='overflow'){expect(await service.summaryAllowed('a.md',['recent-task'])).toBe(false);expect(remaining.recent[0]?.status).toBe('paused');expect((await service.entries()).find(e=>e.id===child.id)?.status).toBe('paused')}
  }finally{vi.restoreAllMocks();vault.dispose();await rm(base,{recursive:true,force:true})}
+})
+
+
+it.each(['missing','v1','v2-empty'] as const)('rolled-out recent history cannot prove derived summary independence from absent recent (%s)',async mode=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-rolled-summary-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
+ const prompt='继续旧工作',marked=markPrompt('/'+prompt,{taskId:'rolled',range:{start:0,end:prompt.length+1},expectedText:'/'+prompt,promptText:prompt});await writeFile(path.join(root,'a.md'),marked)
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{
+  let note=await vault.readOpened('a.md');const original={model:{provider:'custom',modelId:'fixture',endpointHost:'example.test'},scope:['a.md'],sources:[],tools:[]}
+  await vault.ledgerPrepare('a.md',{taskId:'rolled',startedAt:new Date(Date.now()-15*86400000).toISOString(),status:'completed',prompt,answer:'原始旧回答仍可读',provenance:mode==='missing'?undefined:mode==='v1'?{version:1,...original}:{version:2,...original,memoryDeps:[]}})
+  const written=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'rolled',answer:'原始旧回答仍可读'}),note.revision,note);await vault.ledgerComplete('a.md','rolled',written.revision)
+  const service=new WorkingMemoryService(vault,()=>null),material=await service.savedMaterial('a.md','rolled'),anchor=await service.sourceForPrompt('a.md','rolled')
+  await vault.memoryMutation(store=>store.apply(store.read(),[],{taskId:'rolled',materialVersion:material.materialVersion,outcome:'applied',entryIds:[]},{sources:[anchor],scope:'a.md',recent:{taskId:'rolled',noteId:material.noteId!,materialVersion:material.materialVersion,createdAt:material.startedAt!,outcome:'completed',sections:{goal:'旧背景',completed:'',blocked:'',next:''},assistantDraft:false}}))
+  expect(service.snapshot().record.recent).toEqual([])
+  const before=service.snapshot(),historyBefore=await vault.ledgerRecord('a.md','rolled')
+  expect(await service.summaryAllowed('a.md',['rolled'])).toBe(mode==='v2-empty')
+  expect(await vault.ledgerRecord('a.md','rolled')).toEqual(historyBefore);expect((await vault.ledgerContexts('a.md'))[0]?.text).toContain('原始旧回答仍可读')
+  expect(service.snapshot().raw).toBe(before.raw)
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })

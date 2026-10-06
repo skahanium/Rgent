@@ -409,7 +409,9 @@ export class LedgerStore{
    const record=read(at.relPath,at.taskId)
    sequences.push(record.sequence);materialIds.add(at.taskId+'/prompt')
    const provenance=record.chapter!.provenance
-   for(const dep of [...(provenance?.version===2?provenance.memoryDeps:[]),...(record.chapter!.material?.fragments??[]).flatMap(f=>f.memoryDeps)])memoryDeps.set(dep.id+'@'+dep.version,{id:dep.id,version:dep.version})
+   // 摘要是派生发送用途；近期已滚出集合也不能把旧章节的未知关系当独立。原始账本阅读不经此门。
+   if(provenance?.version!==2)throw Error('MEMORY_MATERIAL_UNVERIFIED')
+   for(const dep of [...provenance.memoryDeps,...(record.chapter!.material?.fragments??[]).flatMap(f=>f.memoryDeps)])memoryDeps.set(dep.id+'@'+dep.version,{id:dep.id,version:dep.version})
    for(const f of record.chapter!.material?.fragments??[]){
     if(digest(f.text)!==f.hash)throw Error('MEMORY_MATERIAL_UNVERIFIED')
     const sourceOwner=this.requiredOwner(f.relPath);if(!acceptsObject(f.relPath,f.objectVersion,sourceOwner.objectVersion))throw Error('MEMORY_MATERIAL_UNVERIFIED')

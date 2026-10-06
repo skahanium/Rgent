@@ -1745,3 +1745,6 @@ v6 双标覆盖由同一评分器核验：两份完整、有效、身份不同�
 
 
 包4小提交独立复核发现 P2：runner continuity 默认前台 Host 后，旧 v5 非链历史入口亦受默认影响。新 v6 全部 Host 不改；runV5 显式 hostBeforeConsolidation=!!spec.chain，恢复旧非链 false／链 true。反例从 Electron 实际调用参数表达式取值，不读私人产物或运行模型；先红非链 undefined（会落新默认），修后四组合通过，日志 `/tmp/rgent-integrity-p4-v5-history-{red,green}.log`。该参数夹具最初漏给 round/blocked/frozen 环境变量的执行错误单列，不是产品红。定向入口例1／0、类型／文档／diff核验；其余小提交已通过独立审查，后半包仍施工中。
+
+
+包4整轮独立自查追加摘要门：原 summaryAllowed 只核当前 recent 的可信关系，未知/V1旧块滚出十四天集合后，历史章节被当空依赖而重新允许摘要派生发送。新增实际 store 十四天滚出+旧账本 missing/V1/V2-empty 三态；前两例先红 true→false，V2明确空关系正例与原始历史可读／字节不变保持。ledger-store.summaryMaterials 派生用途对每个递归覆盖章节要求V2，原 ledgerContexts 原始回顾通道不经过此门，不清旧数据。既有撤销／三代材料链的正例夹具补真实明确V2关系，遗忘／水位／伪哈希／错祖先断言保持；真正未知/V1旧历史由新反例明确拒绝，未把旧产物或旧评分改为新证明。日志 `/tmp/rgent-integrity-p4-summary-rolled-red.log`、`...-summary-green.log`、`...-summary-chain-green.log`；必要摘要/三代材料边界定向、类型／文档／diff核验，未做full/build/UI/模型。
