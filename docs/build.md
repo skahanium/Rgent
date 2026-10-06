@@ -1755,3 +1755,8 @@ v6 双标覆盖由同一评分器核验：两份完整、有效、身份不同�
 编辑／遗忘两例真实提交后维护失败和界面提示先红三例（`/tmp/rgent-integrity-p4-maintenance-red.log`）；整理已 applied 但提升失败诊断丢失另红一例（`/tmp/rgent-integrity-p4-promotion-red.log`，仅该提升旧空 catch 保留时复现）。失败仍可见、提交字节不反转、每次维护只一遍、新 service 读不重试、下一次成功维护解除及旧 session 拒绝回归已核。最终必要定向、类型、文档、源码差异结果见本包临时报告；不在本小提交运行完整／构建／窗口／模型门。实际维护提示截图待根任务既有窗口门，渲染定向不代称截图或人工确认。
 
 维护独立复核追加：提升内部已完成旧会话核验后，外层 Promise 续体仍可晚到；成功清诊断前必须再次 assertSession 原 context。新会话已登记 MEMORY_FILE_LIMIT，旧成功晚到原先将其删掉的真实红见 `/tmp/rgent-integrity-p4-maintenance-late-red.log`；修复仅加外层最终断言，旧 catch 仍按旧 session 拒绝，不能写新诊断。此处不扩持久存储或强制重试。
+
+
+包 4 生产旧选择退役：普通 WorkingMemoryConsolidation 构造省略 strategy 也固定共同 M4 管线；旧提议解析仅由 scripts 的具名 forHistoricalEvaluation 入口使用，生产源码禁止引用。v1／v4 baseline/review 及旧遗忘 replay 显式保持历史臂，旧 v5 false／true 前台保存参数和新 v6 全 true 不变。默认构造接受 M4、拒 proposals-only 两例先红；历史专用新接口未接线另红，不伪称已有运行失败。来源／生命周期安全夹具改合规 M4 响应，原安全断言保留；一例旧词面排序的原断言锁旧算法，明确移到历史构造。新默认的第二次格式修复 payload 不再有 sources，夹具改为复用第一次已捕获提议，修复的是测试生成器 TypeError，不改变产品分类。删 v6TerminalCategory 在先返回 MEMORY_OUTPUT_INVALID 分支后的同条件不可达分支，实际 structured/candidate-rejected 与 format 分类保持。
+
+必要回归五文件 118／0（`/tmp/rgent-integrity-p4-production-green.log`），含 production 源码接线、既有来源／授权／撤销／重试／更新、v5/v6实际入口、下一场实际使用和历史支持；红 `/tmp/rgent-integrity-p4-production-red.log`。类型、文档与差异核验后本地提交，旧冻结、规则、历史成绩或发布状态不改。两库总25场及千条成本仍待本包下一块。

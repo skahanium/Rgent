@@ -16,7 +16,7 @@ type Permit = {
 }
 type Job = Permit & {material:SavedTaskMaterial;controller:AbortController;deadline:number;timer:ReturnType<typeof setTimeout>}
 export type ConsolidationPorts = {
- /** Development validation only until both models pass the frozen v5 gate. */
+ /** 普通构造省略时也固定 M4；旧解析仅允许显式历史评测入口。 */
  strategy?:'continuity'
  service():WorkingMemoryService|null
  configuration(context:MemoryContext):ConsolidationConfiguration
@@ -171,7 +171,11 @@ export class WorkingMemoryConsolidation{
  private readonly undoBatches=new Map<string,{service:WorkingMemoryService;sessionId:string;version:string;before:WorkingEntry[];after:{id:string;version:number}[]}>()
  private readonly failedMaterials=new Map<string,{context:MemoryContext;job:import('../shared/memory.ts').MemoryJobView}>()
  private closed=false
+ private historical=false
  constructor(private readonly ports:ConsolidationPorts){}
+ /** 旧冻结评测专用，普通生产调用不以省略策略回退。 */
+ static forHistoricalEvaluation(ports:Omit<ConsolidationPorts,'strategy'>){const engine=new WorkingMemoryConsolidation(ports);engine.historical=true;return engine}
+ private get continuity(){return !this.historical}
  capture(taskId:string){
   this.discard(taskId)
   try{if(this.closed||this.permits.size+this.handoffs.size>=128)return;const service=this.ports.service();if(!service)return
@@ -290,8 +294,8 @@ export class WorkingMemoryConsolidation{
  }
  private async recheck(job:Job,sources:WorkingSource[],entries:WorkingEntry[],input=false){
   this.assert(job)
-  if(this.ports.strategy==='continuity'){const saved=await until(()=>job.service.savedMaterial(job.material.origin.relPath,job.material.taskId),job.controller.signal);if(saved.materialVersion!==job.material.materialVersion)throw Error('MEMORY_MATERIAL_CHANGED')}
-  const checkedSources=input&&this.ports.strategy==='continuity'?inheritInputs(sources,job.material,[]):sources
+  if(this.continuity){const saved=await until(()=>job.service.savedMaterial(job.material.origin.relPath,job.material.taskId),job.controller.signal);if(saved.materialVersion!==job.material.materialVersion)throw Error('MEMORY_MATERIAL_CHANGED')}
+  const checkedSources=input&&this.continuity?inheritInputs(sources,job.material,[]):sources
   for(const source of checkedSources){if(!await until(()=>job.service.verifySource(source),job.controller.signal))throw Error('MEMORY_SOURCE_CHANGED')}
   const dependencies=checkedSources.flatMap(s=>s.memoryDeps)
   const validParents=await until(()=>job.service.entries(dependencies.map(d=>d.id)),job.controller.signal)
@@ -300,7 +304,7 @@ export class WorkingMemoryConsolidation{
   this.assert(job)
  }
  private async response(job:Job,payload:unknown,sources:WorkingSource[],entries:WorkingEntry[]){
-  const content=JSON.stringify(payload),config=job.configuration,system=this.ports.strategy==='continuity'?memoryContinuitySystem:memoryConsolidationSystem
+  const content=JSON.stringify(payload),config=job.configuration,system=this.continuity?memoryContinuitySystem:memoryConsolidationSystem
   if(Buffer.byteLength(content)+Buffer.byteLength(system)>32768||conservativeTokens(content)+conservativeTokens(system)+4096>config.credential.contextTokens)throw Error('MEMORY_INPUT_LIMIT')
   await this.recheck(job,sources,entries,true)
   const iterator=this.ports.stream({...config.credential,system,purpose:'consolidation',messages:[{role:'user',content}],signal:job.controller.signal,maxOutputTokens:4096})[Symbol.asyncIterator]()
@@ -330,7 +334,7 @@ export class WorkingMemoryConsolidation{
     }catch{this.assert(job)}
    }
    // Only related, valid committed memory is sent, not the entire vault record.
-   const continuity=this.ports.strategy==='continuity',system=continuity?memoryContinuitySystem:memoryConsolidationSystem
+   const continuity=this.continuity,system=continuity?memoryContinuitySystem:memoryConsolidationSystem
    const usedIds=job.material.memoryDeps.map(d=>d.id),hints=sources.map(s=>s.text).join('\n'),preselected=continuity?updateMemoryCandidates(job.service.snapshot().record.entries,job.material.prompt,hints,usedIds):null
    const candidates=await until(()=>job.service.consolidationCandidates(sources,preselected?.map(e=>e.id)),job.controller.signal),byId=new Map(candidates.map(e=>[e.id,e]))
    const entries=continuity?updateMemoryCandidates(candidates,job.material.prompt,hints,usedIds):rankMemoryEntries(candidates.map(e=>({...e,status:'active' as const})),job.material.prompt,hints).slice(0,8).map(e=>byId.get(e.id)!)

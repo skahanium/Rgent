@@ -7,7 +7,7 @@ import { MEMORY_PIPELINE, MEMORY_PRODUCTION_STRATEGY } from '../../src/shared/me
 /**
  * 生产整理口径是产品行为：r9 认证后普通入口固定走共同管线，旧提议解析只留给历史评测臂。
  * 这层薄包装依赖 Electron，不方便直接单测；按 `ipc-channel.test.ts` 的既有做法扫源码，
- * 钉住「生产里每个构造点都显式带上受认证的策略」，避免默认值（省略＝旧路径）被无声用回。
+ * 钉住「生产里每个构造点都显式带上受认证的策略」，同时钉住历史入口不能由生产引用；普通构造省略策略也走 M4。
  */
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '../..')
@@ -68,6 +68,7 @@ describe('production memory consolidation wiring', () => {
       const code = stripComments(entry.text)
       expect(code, `${entry.file} 仍引用已退役的整理提示`).not.toContain('memoryConsolidationSystem')
       expect(code, `${entry.file} 仍引用已退役的提议解析`).not.toContain('parseMemorySuggestions')
+      expect(code, `${entry.file} 仍调用历史评测入口`).not.toContain('forHistoricalEvaluation')
     }
   })
 })

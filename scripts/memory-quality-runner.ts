@@ -173,7 +173,8 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
   }
   const strategyStream=options&&options.strategy!=='continuity'? v4StrategyStream(options.strategy,observedStream,experiment,recheckExperimental,credential.contextTokens):observedStream
   const evaluatedStream=async function*(input:ModelStepInput){const payload=JSON.parse(String(input.messages[0]?.content));actualSourceIds=(payload.sources??[]).map((s:{id:string})=>s.id);for await(const event of strategyStream(input))yield event}
-  engine=new WorkingMemoryConsolidation({...(options?.strategy==='continuity'?{strategy:'continuity' as const}:{}),service:()=>service,configuration:()=>({enabled:true,signature:'fictional-evaluation',credential,limits:{seconds:120,calls:2,tools:0}}),stream:input=>evaluatedStream({...input,signal:AbortSignal.any([input.signal,signal])}),changed:()=>{}})
+  const enginePorts:ConstructorParameters<typeof WorkingMemoryConsolidation>[0]={service:()=>service,configuration:()=>({enabled:true,signature:'fictional-evaluation',credential,limits:{seconds:120,calls:2,tools:0}}),stream:input=>evaluatedStream({...input,signal:AbortSignal.any([input.signal,signal])}),changed:()=>{}}
+  engine=options?.strategy==='continuity'?new WorkingMemoryConsolidation(enginePorts):WorkingMemoryConsolidation.forHistoricalEvaluation(enginePorts)
   const activeEngine=engine,cancel=()=>activeEngine.cancel(undefined,'MEMORY_CANCELLED');signal.addEventListener('abort',cancel,{once:true})
   try{
    if(signal.aborted)throw Error('MEMORY_CANCELLED')
@@ -268,7 +269,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
     // The controlled response requests the same entry, exercising production source and commit gates.
     const originalBasisBlocked=await session.memoryMutation(store=>!store.canLearn(store.read().record,entry.sources))
     let calls=0,validReplay=false
-    const replay=new WorkingMemoryConsolidation({service:()=>service,configuration:()=>({enabled:true,signature:'controlled-replay',credential,limits:{seconds:120,calls:2,tools:0}}),changed:()=>{},
+    const replay=WorkingMemoryConsolidation.forHistoricalEvaluation({service:()=>service,configuration:()=>({enabled:true,signature:'controlled-replay',credential,limits:{seconds:120,calls:2,tools:0}}),changed:()=>{},
      stream:async function*(input){calls++;const payload=JSON.parse(String(input.messages[0]!.content)) as {sources:{id:string;text:string}[]}
       const sourceIds=payload.sources.filter(s=>entry.sources.some(old=>old.text===s.text)).map(s=>s.id)
       validReplay=sourceIds.length>0

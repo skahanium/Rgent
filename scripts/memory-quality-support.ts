@@ -430,7 +430,6 @@ export function v6TerminalCategory(r:{status?:string;responses?:{finishReason?:s
  if(/SOURCE|MATERIAL|DEPENDENCY/.test(receipt?.reason??''))return 'source'
  if(/PERMISSION|SESSION|REFERENCE|TARGET_NOT_FOUND/.test(receipt?.reason??''))return 'admission'
  if(receipt?.outcome==='rejected'&&receipt.reason==='MEMORY_CONFIRMATION_REQUIRED')return 'semantic-rejected'
- if(receipt?.outcome==='rejected'&&receipt.reason==='MEMORY_OUTPUT_INVALID')return 'candidate-rejected'
  return 'insufficient-evidence'
 }
 /** 实际下一场装入：逐对象逐版本核对，缺终态证据保持未知。 */
