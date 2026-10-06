@@ -191,3 +191,7 @@ it('labels a real learning-material rejection with its own code instead of the o
   expect(result.evidence.learningCheck.result).toBe(false)
  }finally{spy.mockRestore()}
 })
+
+it('refuses an explicit closure target that the actual Host did not load instead of falling back',async()=>{
+ await expect(runner.runMemoryQualityCase(sample,credential,async function*(input){const p=JSON.parse(String(input.messages[0]!.content)),source=p.sources.find((s:any)=>s.classification==='command');yield {type:'text',text:JSON.stringify({recent:{goal:'蓝鹭报告',completed:'术语已确认',blocked:'',next:'继续报告',sourceIds:[source.id],assistantDraft:false},proposals:[]})};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'continuity',verifyClosure:true,closureTargetId:'not-loaded'})).rejects.toThrow('EVALUATION_CLOSURE_TARGET_UNAVAILABLE')
+})

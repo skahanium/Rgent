@@ -587,7 +587,7 @@ it.each(['missing-connection','extra-field','material-envelope'] as const)('save
    const material='x'.repeat(262142-overhead);await vault.write('a.md',material+'\n\n/写个回答',note.revision,note)
   }else{
    let note=await vault.read('a.md');const marked=markPrompt(note.content,{taskId:'old',range:{start:note.content.indexOf('/'),end:note.content.length},expectedText:'/写个回答',promptText:'写个回答'});await vault.write('a.md',marked,note.revision,note);note=await vault.read('a.md')
-   await vault.ledgerPrepare('a.md',{taskId:'old',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'写个回答',answer:'旧记录。'.repeat(2000)})
+   await vault.ledgerPrepare('a.md',{taskId:'old',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'写个回答',answer:'旧记录。'.repeat(2000),provenance:{version:2,model:{provider:'custom',modelId:'test',endpointHost:'localhost'},scope:['a.md'],sources:[],tools:[],memoryDeps:[]}})
    const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'old',answer:'旧记录。'.repeat(2000)}),note.revision,note);await vault.ledgerComplete('a.md','old',saved.revision)
    note=await vault.read('a.md');await vault.write('a.md',note.content+'\n\n/写个回答',note.revision,note)
    cache.put(key,await vault.ledgerContexts('a.md'),SUMMARY_SECTIONS.map(h=>h+'：缓存BAD').join('\n'),{modelId:'cached',connection:'cached',host:'cache.test',time:'2026-01-01T00:00:00Z',format:1})

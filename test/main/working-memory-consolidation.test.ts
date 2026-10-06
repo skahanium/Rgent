@@ -602,3 +602,13 @@ it('runs total 25 actual Host sessions across two stable libraries with five cor
   expect(new VaultCatalog(base).view().entries.map(e=>e.id)).toEqual(registered.map(e=>e.id));console.info('Memory continuous controlled',JSON.stringify({sessions,corrections,forgets,tightenings,restarts,nextSends,derivedRevocations,partial,paidCalls:0}))
  }finally{engine?.close();await engine?.idle();vault.dispose();await rm(base,{recursive:true,force:true})}
 },30000)
+
+it('rechecks the exact saved material after a safe-empty M4 terminal',async()=>{
+ let completed=false
+ const f=await fixture(async function*(){yield {type:'text',text:'{"recent":null,"proposals":[]}'};yield {type:'finish',reason:'stop'};completed=true})
+ const saved=f.service.savedMaterial.bind(f.service)
+ vi.spyOn(f.service,'savedMaterial').mockImplementation(async(...args)=>{const material=await saved(...args);return completed?{...material,materialVersion:'0'.repeat(64)}:material})
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(f.service.snapshot().record.jobs.find(j=>j.taskId==='task')).toMatchObject({outcome:'rejected',reason:'MEMORY_MATERIAL_CHANGED'})
+ expect(f.service.snapshot().record.entries).toEqual([])
+})

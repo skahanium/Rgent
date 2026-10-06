@@ -387,6 +387,31 @@ async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) 
   await page.eval(`document.querySelector('.memory-recent-entry').open=true`)
   check('近期背景四段、结果、有效期与来源可读且没有编辑入口',await page.eval(`(()=>{const row=document.querySelector('.memory-recent-entry');return row.querySelectorAll('.memory-recent-section').length===4&&['目标','已完成','受阻','下一步'].every(label=>[...row.querySelectorAll('.memory-recent-section strong')].some(n=>n.textContent===label))&&row.textContent.includes('任务结果：')&&row.textContent.includes('14 天')&&!!row.querySelector('.memory-source')&&!row.querySelector('textarea,[data-memory-action="edit"]')})()`))
   await shot(page,'memory-recent-background')
+  // 临时主进程只给既有、已核权威的 memory:get 回执附加故障视图；不改真实存储或任何操作结果。
+  const maintenanceEntries=await page.eval(`(async()=>{const state=await window.rgent.vaultGet();const r=await window.rgent.memoryGet({sessionId:state.sessionId});if(!r.ok)throw Error(r.error);return JSON.stringify(r.value.entries)})()`)
+  const maintenanceTheme=await page.eval(`window.rgent.themeGet()`)
+  await nativePage.eval(`(()=>{const ipc=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain,channel='memory:get',old=ipc._invokeHandlers.get(channel);if(!old||globalThis.__memoryMaintenanceView)throw Error('维护视图夹具冲突');globalThis.__memoryMaintenanceView={channel,old};ipc._invokeHandlers.set(channel,async(...args)=>{const result=await old(...args);return result.ok&&result.value.status==='ready'?{...result,value:{...result.value,maintenanceFailure:'MEMORY_FILE_LIMIT'}}:result});return true})()`)
+  try{
+    await page.eval(`document.querySelector('[aria-label="刷新状态"]').click()`)
+    check('已保存但维护失败回执在真实记忆页可见',await waitFor(page,`document.querySelector('.memory-status-line')?.textContent.includes('已保存')&&document.querySelector('.memory-status-line')?.textContent.includes('后续维护未完成')`))
+    check('维护失败视图保留真实已核条目',await page.eval(`(async()=>{const state=await window.rgent.vaultGet();const r=await window.rgent.memoryGet({sessionId:state.sessionId});return r.ok&&r.value.maintenanceFailure==='MEMORY_FILE_LIMIT'&&JSON.stringify(r.value.entries)===${JSON.stringify(maintenanceEntries)}})()`))
+    await page.call('Emulation.setEmulatedMedia',{features:[]})
+    for(const mode of ['day','night']){
+      await page.eval(`window.rgent.themeSet('${mode}')`)
+      if(!await waitFor(page,`document.documentElement.dataset.theme==='${mode}'`))throw Error('维护故障样张主题未同步')
+      for(const [width,height] of [[1200,800],[800,560]]){
+        await page.call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false})
+        await page.eval(`document.querySelector('.settings-main').scrollTop=0;new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`)
+        check(`维护故障 ${mode} ${width}px 保存状态与易读原因完整可见`,await page.eval(`(()=>{const main=document.querySelector('.settings-main'),line=document.querySelector('.memory-status-line'),r=line.getBoundingClientRect(),m=main.getBoundingClientRect();return line.textContent.includes('已保存')&&line.textContent.includes('后续维护未完成')&&!line.textContent.includes('MEMORY_FILE_LIMIT')&&main.scrollWidth<=main.clientWidth+1&&r.top>=m.top&&r.bottom<=m.bottom})()`))
+        await shot(page,`memory-maintenance-failure-${mode}-${width}`)
+      }
+    }
+  }finally{
+    await nativePage.eval(`(()=>{const gate=globalThis.__memoryMaintenanceView;if(gate){process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain._invokeHandlers.set(gate.channel,gate.old);delete globalThis.__memoryMaintenanceView}return true})()`)
+    await page.call('Emulation.setDeviceMetricsOverride',{width:1200,height:800,deviceScaleFactor:1,mobile:false})
+    await page.eval(`(async()=>{await window.rgent.themeSet(${JSON.stringify(maintenanceTheme)});document.querySelector('[aria-label="刷新状态"]').click()})()`)
+  }
+  check('移除故障视图后实际保存状态恢复且近期背景保留',await waitFor(page,`document.querySelector('.memory-status-line')?.textContent.includes('已保存')&&!document.querySelector('.memory-status-line')?.textContent.includes('后续维护未完成')&&!!document.querySelector('.memory-recent-entry')`))
   const recentTheme=await page.eval(`window.rgent.themeGet()`)
   await page.call('Emulation.setEmulatedMedia',{features:[]})
   for(const mode of ['day','night']){

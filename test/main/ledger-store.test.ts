@@ -226,9 +226,10 @@ it('preserves sent summary copies through gzip and blocks them after forgetting 
 })
 
 it.each(['valid','wrong-hash','wrong-field','wrong-object','missing-ancestor','cleared-ancestor','cycle'] as const)('verifies complete ledger fragment ancestry and keeps raw history readable: %s',kind=>{
- const {root,fs,store}=fixture();writeFileSync(root+'/a.md','正文');const original=store.prepare('a.md',{...task,taskId:'origin'}),originPath=root+`/.rgent/ledgers/${original.noteId}/origin.json`;writeFileSync(originPath,JSON.stringify({...original,state:'saved'}))
+ const verifiedTask={...task,provenance:{...task.provenance,version:2 as const,memoryDeps:[]}}
+ const {root,fs,store}=fixture();writeFileSync(root+'/a.md','正文');const original=store.prepare('a.md',{...verifiedTask,taskId:'origin'}),originPath=root+`/.rgent/ledgers/${original.noteId}/origin.json`;writeFileSync(originPath,JSON.stringify({...original,state:'saved'}))
  const chapter=store.contexts('a.md')[0]!;if(chapter.fields?.status!=='valid')throw Error('invalid fixture');const field=chapter.fields.prompt,note=fs.readSnapshot('a.md'),fragment={relPath:'a.md',sessionId:'s',objectVersion:note.objectVersion,revision:awaitHash('正文'),permissionTier:'reference' as const,kind:'ledger' as const,classification:'command' as const,taskId:'origin',start:field.start,end:field.end,text:field.text,hash:awaitHash(field.text),sourceDeps:[],memoryDeps:[]}
- const next=store.prepare('a.md',{...task,taskId:'derived',material:{fragments:[fragment],truncated:false}}),nextPath=root+`/.rgent/ledgers/${next.noteId}/derived.json`;writeFileSync(nextPath,JSON.stringify({...next,state:'saved'}))
+ const next=store.prepare('a.md',{...verifiedTask,taskId:'derived',material:{fragments:[fragment],truncated:false}}),nextPath=root+`/.rgent/ledgers/${next.noteId}/derived.json`;writeFileSync(nextPath,JSON.stringify({...next,state:'saved'}))
  const edited=structuredClone(next)
  if(kind==='wrong-hash')edited.chapter!.material!.fragments[0]!.hash='0'.repeat(64)
  if(kind==='wrong-field'){const f=edited.chapter!.material!.fragments[0]!;f.text='伪造';f.hash=awaitHash(f.text)}
@@ -243,9 +244,10 @@ it.each(['valid','wrong-hash','wrong-field','wrong-object','missing-ancestor','c
 })
 
 it.each(['valid','ambiguous','wrong-text'] as const)('proves the original task of a body adopted copy: %s',kind=>{
- const {root,fs,store}=fixture(),answer='唯一旧结论';writeFileSync(root+'/a.md',answer+'\n');const original=store.prepare('a.md',{...task,taskId:'original',answer}),file=root+`/.rgent/ledgers/${original.noteId}/original.json`;writeFileSync(file,JSON.stringify({...original,state:'saved'}))
- if(kind==='ambiguous'){const duplicate=store.prepare('a.md',{...task,taskId:'duplicate',answer});writeFileSync(root+`/.rgent/ledgers/${duplicate.noteId}/duplicate.json`,JSON.stringify({...duplicate,state:'saved'}))}
- const note=fs.readSnapshot('a.md'),text=kind==='wrong-text'?'假的结论':answer,fragment={relPath:'a.md',sessionId:'s',objectVersion:note.objectVersion,revision:awaitHash(answer+'\n'),permissionTier:'reference' as const,kind:'body' as const,classification:'ai' as const,taskId:'original',start:0,end:text.length,text,hash:awaitHash(text),sourceDeps:[],memoryDeps:[]},derived=store.prepare('a.md',{...task,taskId:'derived',answer:'新派生回答',material:{fragments:[fragment],truncated:false}});writeFileSync(root+`/.rgent/ledgers/${derived.noteId}/derived.json`,JSON.stringify({...derived,state:'saved'}))
+ const verifiedTask={...task,provenance:{...task.provenance,version:2 as const,memoryDeps:[]}}
+ const {root,fs,store}=fixture(),answer='唯一旧结论';writeFileSync(root+'/a.md',answer+'\n');const original=store.prepare('a.md',{...verifiedTask,taskId:'original',answer}),file=root+`/.rgent/ledgers/${original.noteId}/original.json`;writeFileSync(file,JSON.stringify({...original,state:'saved'}))
+ if(kind==='ambiguous'){const duplicate=store.prepare('a.md',{...verifiedTask,taskId:'duplicate',answer});writeFileSync(root+`/.rgent/ledgers/${duplicate.noteId}/duplicate.json`,JSON.stringify({...duplicate,state:'saved'}))}
+ const note=fs.readSnapshot('a.md'),text=kind==='wrong-text'?'假的结论':answer,fragment={relPath:'a.md',sessionId:'s',objectVersion:note.objectVersion,revision:awaitHash(answer+'\n'),permissionTier:'reference' as const,kind:'body' as const,classification:'ai' as const,taskId:'original',start:0,end:text.length,text,hash:awaitHash(text),sourceDeps:[],memoryDeps:[]},derived=store.prepare('a.md',{...verifiedTask,taskId:'derived',answer:'新派生回答',material:{fragments:[fragment],truncated:false}});writeFileSync(root+`/.rgent/ledgers/${derived.noteId}/derived.json`,JSON.stringify({...derived,state:'saved'}))
  if(kind==='valid')expect(store.summaryMaterials('a.md',['derived']).materialIds).toContain('original/prompt');else expect(()=>store.summaryMaterials('a.md',['derived'])).toThrow('MEMORY_MATERIAL_UNVERIFIED')
  expect(store.getRecord('a.md','derived').chapter?.answer).toBe('新派生回答')
 })

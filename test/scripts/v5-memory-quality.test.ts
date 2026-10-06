@@ -58,22 +58,22 @@ it('keeps a completed screen valid after two ordinary cases and permits round tw
  const firstRound=V5_QUALITY_CASES.map(c=>reviewed(c.id))
  expect(()=>support.v5ScreenDispatchGate(firstRound,V5_QUALITY_CASES[0].id,1,false,V5_QUALITY_CASES,V5_SCREEN_IDS)).not.toThrow()
 })
-// 五步链单跑约 10.7 秒，单跑约 10.7 秒，在 100 路并行下会超过 20 秒；断言不变，只放宽时限。
+// 保留三个实际来源的五场核验成本，指定实际父验证遗忘闭包；不添加虚构依赖。
 it('runs every chain foreground before paid consolidation and hands off its actual memory provenance',async()=>{
  const base=await mkdtemp(path.join(os.tmpdir(),'rgent-v5-real-chain-')),credential={provider:'custom' as const,baseURL:'https://fiction.test/v1',modelId:'fiction',apiKey:'private-secret',contextTokens:32768}
- const hostInputs:string[]=[]
+ const hostInputs:string[]=[],steps:{recentId:string;version:number}[]=[]
  const hostStart=vi.spyOn((await import('../../src/main/agent-host.ts')).AgentHost.prototype,'start')
  try{for(let step=1;step<=5;step++){
-  const priorStarts=hostStart.mock.calls.length
+  const stepStarted=performance.now(),priorStarts=hostStart.mock.calls.length
   const result=await runMemoryQualityCase({id:'actual-chain-'+step,group:'fact',heldOut:false,prompt:'继续青灯项目',body:`青灯项目第${step}份目录检查完成；下一步核对版本。`,answer:'受控助手草稿尚未确认。',expected:{required:[],forbidden:[],notes:''}},credential,async function*(input){
    expect(hostStart.mock.calls.length).toBe(priorStarts+1)
    const p=JSON.parse(String(input.messages[0]!.content))
-   // 第 5 步除近期背景外再学一条由本场来源派生的项目事实：遗忘本场日志的闭包因此有真实下游
-   // （长期条目把本场装入的近期日志记为依赖父），而不是靠近期日志自身携带依赖——后者正是
-   // a2fb8b1／d4fc2b8 修掉的级联缺陷，用缺陷撑起来的闭包宽度不构成产品保证。
-   const proposals=step===5?[{action:'add',content:'青灯项目下一步核对版本号。',layer:'demand',scope:'本库',sourceIds:p.sources.map((s:any)=>s.id),semantic:'fact',attribution:'受控夹具',reviewAt:null}]:[]
-   yield {type:'text',text:JSON.stringify({recent:{goal:'青灯项目',completed:`第${step}份目录完成（前步真实输出）`,blocked:'版本待核',next:'核对版本',sourceIds:p.sources.map((s:any)=>s.id),assistantDraft:false},proposals})};yield {type:'finish',reason:'stop'}
-  },new AbortController().signal,{strategy:'continuity',base,noteName:`chain-${step}.md`,hostBeforeConsolidation:true,verifyClosure:step===5})
+   // 第 5 步的近期与长期均引用本场三份实际材料并继承实际前台输入依赖；忘前一步实际父而非本步新建块。
+   const sourceIds=p.sources.map((s:any)=>s.id)
+   const proposals=step===5?[{action:'add',content:'青灯项目下一步核对版本号。',layer:'demand',scope:'本库',sourceIds,semantic:'fact',attribution:'受控夹具',reviewAt:null}]:[]
+   yield {type:'text',text:JSON.stringify({recent:{goal:'青灯项目',completed:`第${step}份目录完成（前步真实输出）`,blocked:'版本待核',next:'核对版本',sourceIds,assistantDraft:false},proposals})};yield {type:'finish',reason:'stop'}
+  },new AbortController().signal,{strategy:'continuity',base,noteName:`chain-${step}.md`,hostBeforeConsolidation:true,verifyClosure:step===5,...(step===5?{closureTargetId:steps[3]!.recentId}: {})})
+  console.info('V5_CHAIN_TRACE',JSON.stringify({step,elapsedMs:performance.now()-stepStarted,closure:result.controlled?.closure?.affectedIds,actualIds:result.dependencies.map((d:any)=>d.id),entries:result.entries.map((e:any)=>({id:e.id,category:e.category,sourceCount:e.sources.length,deps:[...new Set(e.sources.flatMap((s:any)=>s.memoryDeps.map((d:any)=>d.id+'@'+d.version)))]}))}))
   expect(result.completed).toBe(true)
   expect(result.foreground?.ledger.state).toBe('saved')
   expect(result.foreground?.ledger.chapter?.taskId).toBe(result.material.taskId)
@@ -82,12 +82,19 @@ it('runs every chain foreground before paid consolidation and hands off its actu
    expect(support.v5ControlledStatus(V5_QUALITY_CASES.find(c=>c.chain==='alpha'&&c.step===5)!,result)).toBe('passed');expect(result.controlled?.closure?.passed).toBe(true)
    // 账本"本场实际使用的记忆"列的是被装入条目本身（不是依赖闭包），依赖收窄不该让它掉到 1。
    expect(result.dependencies.length).toBeGreaterThan(1)
-   // 闭包必须覆盖"锚点（本场装入的近期日志）＋由本场来源派生的长期条目"：v5 合同要求近期块的遗忘闭包与长期记忆同样执行。
+   // 长期的实际父必须正是前台使用、下一场实际装入的前一步近期，不能靠假边支撑宽度。
+   const parent=steps[3]!
+   expect(result.material.memoryDeps).toEqual(expect.arrayContaining([expect.objectContaining({id:parent.recentId,version:parent.version})]))
+   expect(result.dependencies).toEqual(expect.arrayContaining([expect.objectContaining({id:parent.recentId,version:parent.version})]))
    const derived=result.entries.find((e:any)=>e.category==='long')
    expect(derived).toBeTruthy()
+   expect(derived!.sources.some((s:any)=>s.memoryDeps.some((d:any)=>d.id===parent.recentId&&d.version===parent.version))).toBe(true)
+   expect(result.controlled?.closure?.affectedIds).toContain(parent.recentId)
    expect(result.controlled?.closure?.affectedIds).toEqual(expect.arrayContaining([derived!.id]))
    expect(result.controlled?.closure?.affectedIds.length).toBeGreaterThan(1)
   }
+  const own=result.recent!.find((e:any)=>e.updateBasis?.id===result.material.taskId)!
+  expect(own).toBeTruthy();steps.push({recentId:own.id,version:own.version})
   hostInputs.push(JSON.stringify(result.foreground?.sent))
   if(step>1){expect(hostInputs.at(-1)).toContain(`第${step-1}份目录完成（前步真实输出）`);expect(result.material.memoryDeps.length).toBeGreaterThan(0)}
  }

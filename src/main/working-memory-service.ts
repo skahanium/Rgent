@@ -105,7 +105,7 @@ export class WorkingMemoryService{
    const now=current.find(e=>e.id===entry.id&&e.version===entry.version);if(!now||now.status!=='active')return false
    return now.sources.every(s=>s.memoryDeps.every(dep=>{
     const parent=current.find(e=>e.id===dep.id&&e.version===dep.version&&e.status==='active')
-    return !!parent&&!recentExpired(parent)&&(!parent.reviewAt||Date.parse(parent.reviewAt)>Date.now())&&dependenciesCurrent(parent,new Set(seen))
+    return !!parent&&!recentExpired(parent)&&(!parent.reviewAt||Date.parse(parent.reviewAt)>Date.now())&&dependenciesCurrent(parent,seen)
    }))
   }
   const checked=result.filter(e=>current.some(now=>now.id===e.id&&now.version===e.version)).map(e=>{
@@ -130,12 +130,14 @@ export class WorkingMemoryService{
  }
  private async verifyEntry(entry:WorkingEntry,all:WorkingEntry[],seen=new Set<string>()):Promise<boolean>{const effective=await this.effectiveEntries(all),current=effective.find(e=>e.id===entry.id&&e.version===entry.version)??entry;return current.status!=='paused'&&await this.verifyFailure(current,effective,seen)===null}
  /** 失败原因分开：来源本身失配（source）还是依赖已不可用（dependency）。
+  *  同一根的固定 all 快照共享 visited，完整验证一次共享祖先，失败立即向根返回。
+  *  每个被访问节点全部来源都核验；不同根、请求、发送、提交、会话之间不复用证明。
   *  依赖环按"已计入"处理——环不是来源变更，不能把整条环永久判成不可核验。 */
  private async verifyFailure(entry:WorkingEntry,all:WorkingEntry[],seen=new Set<string>()):Promise<'source'|'dependency'|null>{
   if(seen.has(entry.id))return null;seen.add(entry.id)
   if(recentExpired(entry)||!entry.sources.length)return 'source'
   if(entry.category==='recent'){const recent=entry as import('./working-memory-store.ts').WorkingRecent;try{const saved=await this.savedMaterial(recent.sources.find(s=>s.kind==='ledger'&&s.taskId===recent.recent.taskId)!.relPath,recent.recent.taskId);if(saved.noteId!==recent.recent.noteId||saved.materialVersion!==recent.recent.materialVersion)return 'source'}catch{return 'source'}}
-  for(const s of entry.sources){if(!await this.verifySource(s))return 'source';for(const dep of s.memoryDeps){const parent=all.find(e=>e.id===dep.id&&e.version===dep.version&&e.status==='active');if(!parent||parent.reviewAt&&Date.parse(parent.reviewAt)<=Date.now())return 'dependency';if(await this.verifyFailure(parent,all,new Set(seen))!==null)return 'dependency'}}
+  for(const s of entry.sources){if(!await this.verifySource(s))return 'source';for(const dep of s.memoryDeps){const parent=all.find(e=>e.id===dep.id&&e.version===dep.version&&e.status==='active');if(!parent||parent.reviewAt&&Date.parse(parent.reviewAt)<=Date.now())return 'dependency';if(await this.verifyFailure(parent,all,seen)!==null)return 'dependency'}}
   return this.agreementCurrent(entry)?null:'source'
  }
  /** 引用原话必须仍逐字存在于所引来源；失配按来源不可核验降级，不静默保留权威。 */

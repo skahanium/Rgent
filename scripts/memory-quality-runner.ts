@@ -75,7 +75,7 @@ type PaidCall={phase:'proposal'|'format-repair'|'semantic-review';payload:any;in
 
 /** Genuine production saving/consolidation/use in one disposable fictional vault. */
 export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:ModelCredential,
- stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,signal:AbortSignal,options?:{strategy:'baseline'|'review'|'continuity';base?:string;noteName?:string;hostBeforeConsolidation?:boolean;verifyClosure?:boolean;chainBlocked?:boolean;targetTaskId?:string}){
+ stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,signal:AbortSignal,options?:{strategy:'baseline'|'review'|'continuity';base?:string;noteName?:string;hostBeforeConsolidation?:boolean;verifyClosure?:boolean;closureTargetId?:string;chainBlocked?:boolean;targetTaskId?:string}){
  const base=options?.base??await mkdtemp(path.join(os.tmpdir(),'rgent-memory-quality-')),root=path.join(base,'vault')
  const qualityNote=options?.noteName??'fiction.md'
  // v6 的所有案例由真实 Host 保存 V2 材料；历史臂维持其显式版本语义。
@@ -252,7 +252,11 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
     const dispatch={snapshotSignature:permit.snapshotSignature,verified:dispatchVerified,dependencies,sameVersionVerified,versionMismatchRejected,permissionRevoked,frozenSignatureMatches,actualHostBudget}
     const paidRecent=structuredClone(service.snapshot().record.recent)
     const verifyClosure=options.verifyClosure??!options.hostBeforeConsolidation
-    const applicable=selected.length>0,closure=verifyClosure&&applicable?await verifyContinuityClosure(session,service,credential,permit,material,selected.find(e=>actualDependencies.some(d=>d.id===e.id))??selected[0]!,signal):null
+    const applicable=selected.length>0
+    // 定向闭包只能忘实际 Host 装入的同 id／version；请求的父不在其中必须拒绝，不能改选别的锚点。
+    const closureTarget=options.closureTargetId?selected.find(e=>e.id===options.closureTargetId&&actualDependencies.some(d=>d.id===e.id&&d.version===e.version)):selected.find(e=>actualDependencies.some(d=>d.id===e.id))??selected[0]
+    if(verifyClosure&&options.closureTargetId&&!closureTarget)throw Error('EVALUATION_CLOSURE_TARGET_UNAVAILABLE')
+    const closure=verifyClosure&&applicable?await verifyContinuityClosure(session,service,credential,permit,material,closureTarget!,signal):null
     const controlled={status:(!budget.within||!dispatchVerified||!sameVersionVerified||!versionMismatchRejected||!actualHostBudget.mapped||!actualHostBudget.within||selected.length&&(!permissionRevoked||!frozenSignatureMatches)||closure&&!closure.passed?'failed':applicable?'passed':'not-applicable') as 'passed'|'failed'|'not-applicable',reason:applicable?null:'no-selected-memory',budget,dispatch,closure,closureStatus:!verifyClosure?'deferred-chain-step':!applicable?'not-applicable':'verified'}
     const v6=v6Fields({before,beforeAll,entries,receipt,controlled,blocked:options.chainBlocked===true})
     return {foreground,recent:paidRecent,evidence:paidEvidence,experiment:structuredClone(experiment),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,followup,dependencies:actualDependencies,forget:null,controlled,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)},

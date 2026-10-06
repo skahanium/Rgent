@@ -562,3 +562,26 @@ it.each(['edit','forget'] as const)('keeps a committed %s visible when its one m
   spy.mockRestore();await service.recheckDeferred();expect((await service.view()).maintenanceFailure).toBeUndefined()
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
+
+it('verifies a shared ancestor once per root walk and starts a fresh walk for each call',async()=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-shared-ancestor-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'原始材料')
+ const vault=new VaultSession(base,vi.fn());vault.restore()
+ try{
+  const service=new WorkingMemoryService(vault,()=>null),note=await vault.readOpened('a.md'),source=await service.manualSource({...note,relPath:'a.md',kind:'body',start:0,end:4})
+  const add=async(content:string,memoryDeps:{id:string;version:number}[])=>vault.memoryMutation(store=>store.add(store.read(),{content,layer:'demand',scope:'库',sources:[{...source,memoryDeps}],semantic:'fact',attribution:'受控关系',reviewAt:null}))
+  const ancestor=await add('共享父',[]),dep=(entry:typeof ancestor)=>({id:entry.id,version:entry.version}),left=await add('左派生',[dep(ancestor)]),right=await add('右派生',[dep(ancestor)]),child=await add('共同派生',[dep(left),dep(right)])
+  const verify=vi.spyOn(service,'verifySource')
+  expect((await service.entries([child.id]))[0]?.status).toBe('active')
+  expect(verify).toHaveBeenCalledTimes(4)
+  verify.mockClear();expect((await service.entries([left.id]))[0]?.status).toBe('active');expect(verify).toHaveBeenCalledTimes(2)
+  // 旧图的环只是重访；环上的后续坏来源仍必须拒绝，不能因 visited 绕过。
+  const cycle=structuredClone(service.snapshot().record.entries)
+  cycle.find(e=>e.id===ancestor.id)!.sources[0]!.memoryDeps=[dep(child)]
+  const walk=(service as any).verifyFailure.bind(service),cyclicChild=cycle.find(e=>e.id===child.id)!
+  verify.mockClear();expect(await walk(cyclicChild,cycle)).toBeNull();expect(verify).toHaveBeenCalledTimes(4)
+  cycle.find(e=>e.id===right.id)!.sources[0]!.hash='0'.repeat(64)
+  expect(await walk(cyclicChild,cycle)).toBe('dependency')
+  await writeFile(path.join(root,'.rgent-permissions'),JSON.stringify({'a.md':'forbidden'}))
+  verify.mockClear();expect((await service.entries([child.id]))[0]?.status).toBe('paused');expect(verify).toHaveBeenCalled()
+ }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
+})

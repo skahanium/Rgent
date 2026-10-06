@@ -392,7 +392,8 @@ export class WorkingMemoryConsolidation{
     this.assert(job);const code=publicMemoryError(error);if(!['MEMORY_SOURCE_CHANGED','MEMORY_DEPENDENCY_CHANGED'].includes(code))throw error
     recent=undefined;proposed.dropped.push({action:'recent',outcome:'rejected',code})
    }
-   await this.recheck(job,[],entries)
+   // 旧评测空提议仍核本次输入；生产 M4 只核上述实际派生来源，保留已证独立原话。
+   await this.recheck(job,!continuity&&!groups.length&&!recent?sources:[],entries)
    const result=await job.service.vault.memoryMutation(store=>{
     this.assert(job)
     // Queuing the next task may update receipts, but cannot change this job's entry basis.
