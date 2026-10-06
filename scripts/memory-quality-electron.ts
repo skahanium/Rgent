@@ -356,7 +356,7 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
    let blocked=false
    if(spec.chain&&(spec.step??1)>1){const upstream=prior.find(r=>r.round===round&&r.caseId===`v6-chain-${spec.chain}-${(spec.step??1)-1}`);if(!upstream||!upstream.review)throw Error('EVALUATION_CHAIN_ORDER');blocked=upstream.blocked===true||upstream.structured!==true}
    v6DispatchGate(prior,spec.id,round,cases)
-   journal=new EvaluationJournal(root,frozen,V6_RULES.history.parentLimit,options.budget,undefined,{parentManifestHash:frozen.parentManifestHash,prefix:campaignPrefix,limit:V6_RULES.history.campaignLimit,perModelLimit:V6_RULES.history.perModelLimit})
+   journal=new EvaluationJournal(root,frozen,V6_RULES.history.parentLimit,options.budget,undefined,{parentManifestHash:frozen.parentManifestHash,prefix:campaignPrefix,modelSegment:campaignPrefix===V6_PREFIX?0:1,limit:V6_RULES.history.campaignLimit,perModelLimit:V6_RULES.history.perModelLimit})
    const k=key(model.modelId,round,spec.id)
    // 被监督计时器杀掉时可能已计费但结果未落盘；状态不明不得自动重派。
    for(const charged of journal.dispatchKeys().filter(charged=>charged.startsWith(prefix)))if(!existsSync(resultFile(charged)))throw Error('EVALUATION_CHARGED_UNFINISHED')

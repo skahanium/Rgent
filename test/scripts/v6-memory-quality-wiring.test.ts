@@ -249,3 +249,20 @@ describe('v6 付费记录字段', () => {
   expect(result.candidate.failureOrigin).toBeNull()
  },20000)
 })
+
+it('完整性 campaign 跨修订按真实模型累计，两模型限额互不占用',()=>{
+ const budget=mkdtempSync(path.join(os.tmpdir(),'rgent-v6-model-segment-')),prefix=V6_PREFIX+'integrity/'
+ try{
+  writeFileSync(path.join(budget,'state.json'),JSON.stringify({version:1,manifest:'parent',calls:0,limit:10,dispatches:[]}))
+  const journal=new EvaluationJournal(path.join(budget,'r10'),{version:6},10,budget,undefined,{parentManifestHash:'parent',prefix,limit:4,perModelLimit:2,modelSegment:1})
+  try{
+   journal.charge(prefix+'r10/MiniMax-M3/0/a')
+   journal.charge(prefix+'r11/MiniMax-M3/0/b')
+   expect(()=>journal.charge(prefix+'r12/MiniMax-M3/0/c')).toThrow('EVALUATION_MODEL_CALL_LIMIT')
+   expect(()=>journal.charge(prefix+'r10/deepseek-flash/0/a')).not.toThrow()
+   expect(()=>journal.charge(prefix+'r11/deepseek-flash/0/b')).not.toThrow()
+   expect(journal.localCalls).toBe(4)
+   expect(()=>journal.charge(prefix+'r12/deepseek-flash/0/c')).toThrow('EVALUATION_LOCAL_CALL_LIMIT')
+  }finally{journal.close()}
+ }finally{rmSync(budget,{recursive:true,force:true})}
+})

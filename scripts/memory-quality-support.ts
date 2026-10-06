@@ -15,7 +15,7 @@ export class EvaluationJournal {
  private state:{version:1;manifest:string;calls:number;limit:number;dispatches:{key:string;at:string}[]}
  private lock:string
  private readonly token=randomUUID()
- constructor(readonly root:string,readonly manifest:unknown,limit=1440,private readonly budgetRoot=root,approvedPreviousManifest?:unknown,private readonly campaign?:{parentManifestHash:string;prefix:string;limit:number;perModelLimit:number}){
+ constructor(readonly root:string,readonly manifest:unknown,limit=1440,private readonly budgetRoot=root,approvedPreviousManifest?:unknown,private readonly campaign?:{parentManifestHash:string;prefix:string;limit:number;perModelLimit:number;modelSegment?:number}){
   if(!Number.isSafeInteger(limit)||limit<1||limit>100000)throw Error('EVALUATION_CALL_LIMIT')
   mkdirSync(root,{recursive:true,mode:0o700});mkdirSync(budgetRoot,{recursive:true,mode:0o700});this.lock=path.join(budgetRoot,'writer.lock')
   if(existsSync(this.lock)){
@@ -48,8 +48,9 @@ export class EvaluationJournal {
   if(this.campaign){
    if(!key.startsWith(this.campaign.prefix))throw Error('EVALUATION_CAMPAIGN_KEY')
    if(this.localCalls>=this.campaign.limit)throw Error('EVALUATION_LOCAL_CALL_LIMIT')
-   const model=key.slice(this.campaign.prefix.length).split('/')[0]!,modelPrefix=this.campaign.prefix+model+'/'
-   if(this.state.dispatches.filter(d=>d.key.startsWith(modelPrefix)).length>=this.campaign.perModelLimit)throw Error('EVALUATION_MODEL_CALL_LIMIT')
+   const segment=this.campaign.modelSegment??0,modelOf=(value:string)=>value.slice(this.campaign!.prefix.length).split('/')[segment],model=modelOf(key)
+   if(!model)throw Error('EVALUATION_CAMPAIGN_KEY')
+   if(this.state.dispatches.filter(d=>d.key.startsWith(this.campaign!.prefix)&&modelOf(d.key)===model).length>=this.campaign.perModelLimit)throw Error('EVALUATION_MODEL_CALL_LIMIT')
   }
   const next=structuredClone(this.state);next.calls++;next.dispatches.push({key,at:new Date().toISOString()})
   atomicReport(path.join(this.budgetRoot,'state.json'),next);this.state=next
