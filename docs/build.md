@@ -356,7 +356,7 @@ flowchart TD
 
 最终修复本地提交 `49032c7`：初次授权绑定完整实际记忆模型配置且秘密仍只在主进程；同版本状态／来源原位刷新，保留草稿、焦点和展开；两类记忆文本框复用设置主题；账本按钮绑定实际语法树标题的原文偏移，并严格兼容来源行。正式写章 legacy／v1／v2 × LF／CRLF 六组合反例先红后绿，补修两文件 29 条通过；独立复审重跑实际写章探针六组合均为 ranges 2／buttons 2，点击 task ID 正确，四项发现全部闭合，无剩余 Critical／Important／Minor。主题夹具清理媒体覆盖后核实际 `matchMedia` 与渲染主题，不通过改根属性模拟切换。
 
-最终版本按顺序执行 `pnpm docs:check`、`pnpm test`、`pnpm build`、构建后的 `pnpm ui:check`：文档通过；73 文件 **1007 通过／2 平台跳过**；构建通过；完整窗口 **304／0**。随后固定同内容视觉 **110／0**，1200×800、800×560、1600×900 日夜六张设置图及两张已展开条目／来源图已逐张本机查看，边界、内部滚动、主题与控件一致性成立。日志分别为 `/tmp/rgent-memory-close-docs.log`、`/tmp/rgent-memory-close-test-final.log`、`/tmp/rgent-memory-close-build-final.log`、`/tmp/rgent-memory-close-ui-final.log`、`/tmp/rgent-memory-close-visual-final.log`；[日间来源样张](/tmp/rgent-memory-close-window-shots-final/memory-entry-and-source-day.png)、[夜间来源样张](/tmp/rgent-memory-close-window-shots-final/memory-entry-and-source-night.png)、[窄窗记忆页](/tmp/rgent-memory-close-visual-shots-final/reference-night-settings-memory-narrow.png)。本机两条跳过为 Windows 短路径别名及冒号数据流用例，不代称 Windows 已验证。
+最终版本按顺序执行 `pnpm docs:check`、`pnpm test`、`pnpm build`、构建后的 `pnpm ui:check`：文档通过；73 文件 **1007 通过／2 平台跳过**；构建通过；完整窗口 **304／0**。随后固定同内容视觉 **110／0**，1200×800、800×560、1600×900 日夜六张设置图及两张已展开条目／来源图已逐张本机查看，边界、内部滚动、主题与控件一致性成立。日志分别为 `/tmp/rgent-memory-close-docs.log`、`/tmp/rgent-memory-close-test-final.log`、`/tmp/rgent-memory-close-build-final.log`、`/tmp/rgent-memory-close-ui-final.log`、`/tmp/rgent-memory-close-visual-final.log`；日间／夜间来源样张与窄窗记忆页的样张路径为 `/tmp/rgent-memory-close-window-shots-final/memory-entry-and-source-day.png`、`/tmp/rgent-memory-close-window-shots-final/memory-entry-and-source-night.png`、`/tmp/rgent-memory-close-visual-shots-final/reference-night-settings-memory-narrow.png`（临时目录已由宿主清理，路径仅作记录）。本机两条跳过为 Windows 短路径别名及冒号数据流用例，不代称 Windows 已验证。
 
 本轮只提交本地，未推送、未触发 CI。对应提交的 Windows／双平台 CI、真实模型整理质量、macOS 系统拼音与 Windows 原生输入法人工操作、用户视觉确认继续分别待核；受控响应和 CDP 窗口不替代这些证据，当前阶段仍为库内记忆。
 
@@ -1558,6 +1558,26 @@ r8 的残留缺陷经过代码级复核后定位到**真实根因**（原记录�
 - **执行防呆**：驱动器加 `preflight`（先探应用数据目录可写，再派发；r7 的坑）、`nextauto`（按冻结顺序自动取下一未派发例，防漏派）、`verify`（列出缺口、重复、计费无结果）；`verify` 对 r8 数据回放时准确报出"MiniMax 第一轮缺 `v6-attribution-01`、第二轮缺 12 例"。
 - **额度**：用户 2026-10-06 批准无上限，`V6_RULES.history` 的自设宽松上限为 900／450／3000，账本 `limit` 相应更新（`calls` 与 `dispatches` 原样不动，旧备份 `state-limit1440-backup.json`）。
 - **测试**：新增 5 条失败反例（存储级 3 条、服务级 1 条、准入 1 条）先红后绿；完整 `pnpm test` 1631 通过／2 平台跳过；随后冻结 r9 重跑两模型两轮。
+
+#### v6 认证复验（revision 9，2026-10-06）
+
+冻结 `d5aca453…`（revision 9，执行提交 `02b3b87`）。与 r8 的差异只在 `executionCommit`／`runtime`／`scorer`／`rules`（产品与口径修复），`promptHash`／`configuration`／`dataset`／`weights`／`cases`／`limits` 逐项相同。
+
+**范围**：deepseek-flash 两轮各 30 例全部完成；MiniMax-M3 第一轮 30 例后判定 failed（学习分下界 65.07 < 70），按冻结规则"第一轮明确不达门不跑第二轮"**第二轮未派发**（门在计费前拒绝，`EVALUATION_ROUND_REQUIRED`，无调用消耗）。本轮实派发 92 次（其中 2 次为合同内的第二次调用）。
+
+| 模型 | 轮 | 判定（含双标注上下界） | 学习分 | 三闸（质量／可靠／证据） | `N/D/T/P` | 双标一致率 | `paused` 行 | 未过原因 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| deepseek-flash | 1 | **passed** | **93.07** | ✓／✓／✓ | 30/30/30/30 | **1.000** | 0 | `action-not-landed:1` |
+| deepseek-flash | 2 | **passed** | **98.87** | ✓／✓／✓ | 30/30/30/30 | **1.000** | 2 | — |
+| MiniMax-M3 | 1 | failed | 65.07 | ✗／✓／✓ | 30/30/30/30 | 0.867 | 0 | `action-not-landed:3`、`check-failures:3`、`annotation-disagreement:1`、`quality-lower` |
+| MiniMax-M3 | 2 | 未派发 | — | — | — | — | — | 冻结规则：第一轮不达门不跑第二轮 |
+
+- **修复要点得到验证**：r8 里两模型两轮共 4 行"更正后 `paused`、下一场装不进"（`chain-alpha-4/5`）本轮**不再出现悬空引用或来源变更暂停**；deepseek 两轮的 α4 更正条目均为 `active` 且明写替代旧顺序，α5 的顺序单元由该条目覆盖（r8 这两例两轮都是 0 分）。第二轮 alpha 链中与更正相关的样稿数量条目按设计改为 `MEMORY_DEPENDENCY_CHANGED` 暂停（2 行、可复核恢复），两轮 `claimedButNotLoadable` 均为 0。准入修复后，r8 被误拒的 `attribution-01`（deepseek 第一轮）与 `malicious-07`（MiniMax 第一轮）都正常落库。
+- **双标注 100%**：90 行全部由独立标注者 `coding-agent-reviewer-b` 提交，deepseek 两轮一致率 **1.000／1.000**；MiniMax 第一轮 26/30＝0.867，4 处分歧全部落在"分类口径／单元能否由近期背景覆盖"，按规则进不确定、不计通过。收尾阶段宿主 Electron 出现 NSXPC 启动故障，最后 24 行由**同一名独立标注者**改用无 Electron 的离线写入通道落盘（哈希与文件格式与评测进程一致、含自校验，随后审计独立复验通过）。
+- **r9 零即时否决**：r8 的 `ambiguous-10`（`ambiguous-overwrite`）在 r9 两模型两轮六个轮次均未复现——已确认事实全部保留 `active`。
+- **未决问题（登记，不阻断本轮认证）**：MiniMax 的失败集中在"落地"而非安全（`version` 传字符串、空输出、long 提议被拒、近期块空段、两例把项目事实存成长期约定）；共同管线对合同字段遵从度的要求没有放宽，`check-failures:3` 中两例正是写死分类规则的判定。
+- **预算**：本轮新增 **92 次**；campaign 381／900、每模型 deepseek 233／450、MiniMax 116／450；总账 **1210／3000**（用户 2026-10-06 批准无上限后的自设宽松上限，`calls` 与 `dispatches` 照实）。
+- **启用判断：切默认**。"单一受验模型两轮同时通过三道验收门"达成（deepseek-flash 93.07／98.87，三闸全过、双标一致率 1.00、`claimedButNotLoadable` 0）：生产 `WorkingMemoryConsolidation` 固定 `strategy:'continuity'`（常量 `MEMORY_PRODUCTION_STRATEGY`，测试钉住），旧提议解析路径不再被生产选择、仅为历史评测臂保留；质量成绩按既有格式发布到设备级 `memory-quality-status.json`（`state:'passed'`、`modelId:'deepseek-flash'`、`host:'api.deepseek.com'`、`pipeline:'continuity-m4'`、`commit`、`rounds:2`、`humanReviewed:false`），记忆页据此显示"已通过本项目质量验收。未人工复核。"，成绩对其它模型或主机会显示为 `stale`。**本机设备的记忆模型当前仍是 MiniMax-M3（未达门）**，因此记忆页现在显示的是"成绩不适用于当前模型/主机"的提示而非通过文案；受认证的组合是 deepseek-flash＋api.deepseek.com，是否改设备记忆模型属于用户设置决定，本轮不代为更改。**仍不等于记忆学习质量整体完成**：人工复核、Windows／双平台 CI／原生输入法／用户视觉等阶段待核项保持，且 MiniMax-M3 作为记忆模型未达门。
 
 #### v6 修正后管线的认证复验（revision 8，2026-10-06）
 

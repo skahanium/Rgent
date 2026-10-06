@@ -11,6 +11,7 @@ import {historicalContextPolicy} from './ledger-provenance.ts'
 import {WorkingMemoryService} from './working-memory-service.ts'
 import {readQualityEvidence} from './memory-quality-status.ts'
 import {WorkingMemoryConsolidation} from './working-memory-consolidation.ts'
+import {MEMORY_PRODUCTION_STRATEGY} from '../shared/memory.ts'
 import {memoryAuthorizationState as configuredMemoryAuthorizationState} from './model-config.ts'
 import {ReasoningStore} from './reasoning-store.ts'
 import {SummaryCache,summaryHash} from './summary-cache.ts'
@@ -1141,6 +1142,7 @@ if (ownsInstance) app.whenReady().then(() => {
   reasoningStore=new ReasoningStore(path.join(app.getPath('userData'),'reasoning-v2'))
   const contextCache=summaryCache!
   consolidation=new WorkingMemoryConsolidation({
+    strategy:MEMORY_PRODUCTION_STRATEGY,
     service:workingService,
     configuration:context=>{
       if(!modelConfig)throw Error('MEMORY_CONFIG_UNAVAILABLE')

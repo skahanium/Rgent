@@ -69,6 +69,10 @@ export type MemoryJobReceipt = {
 }
 /** 记忆整理管线标识：评测成绩与界面提示都绑定到这个版本；变化后旧成绩不再继承。 */
 export const MEMORY_PIPELINE = 'continuity-m4'
+/** 生产入口使用的整理口径。r9（`d5aca453…`，deepseek-flash 两轮 passed）之后固定为共同管线；
+ *  旧提议解析路径（`memoryConsolidationSystem`／`parseMemorySuggestions`）只保留给历史评测臂，
+ *  生产不再选择它。改这个常量等于改产品行为，必须重新冻结并复测。 */
+export const MEMORY_PRODUCTION_STRATEGY = 'continuity' as const
 /** 已发布的质量成绩：四种状态分开显示，stale 表示模型、主机或管线已变。 */
 export type MemoryQualityEvidence = {
   state: 'unverified' | 'testing' | 'passed' | 'failed' | 'insufficient'
