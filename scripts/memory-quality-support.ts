@@ -489,6 +489,13 @@ export function v6Summary(rows:V6Row[],cases:V6Case[],round:number,options:V6Sum
 }
 export function freezeV6(root:string,manifest:unknown){mkdirSync(root,{recursive:true,mode:0o700});const file=path.join(root,'v6-manifest.json');if(existsSync(file)){if(fingerprint(JSON.parse(readFileSync(file,'utf8')))!==fingerprint(manifest))throw Error('EVALUATION_REVISION_CHANGED')}else writeFileSync(file,JSON.stringify(manifest,null,2),{flag:'wx',mode:0o600});return fingerprint(manifest)}
 /** 逐例标注完成前不派发下一例；第一轮判失败不得进入第二轮。 */
+/** 停损：连续三次可重试网络失败即暂停该模型；每模型最多两次恢复周期，用尽后由人决定是否重开。
+ *  环境故障不改写成绩，但连续同一原因意味着继续派发只会烧预算。 */
+export function v6RecoveryDecision(recent:readonly {retryable:boolean}[],cycles:number,max:number):'continue'|'pause'|'exhausted'{
+ const needed=3
+ if(recent.length<needed||!recent.slice(-needed).every(r=>r.retryable))return 'continue'
+ return cycles>=max?'exhausted':'pause'
+}
 export function v6DispatchGate(rows:V6Row[],nextCase:string,round:number,cases:V6Case[]){
  if(rows.some(r=>r.review?.hardViolations?.length))throw Error('EVALUATION_MODEL_STOPPED')
  for(const r of rows){if(r.round===round&&r.caseId===nextCase)continue;if(!r.review)throw Error('EVALUATION_REVIEW_REQUIRED')}

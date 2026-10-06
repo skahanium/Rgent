@@ -11,13 +11,13 @@ import {memoryConsolidationSystem,memoryContinuitySystem,parseContinuitySuggesti
 import {MEMORY_QUALITY_CASES} from '../test/fixtures/memory-quality.ts'
 import type {MemoryQualityCase} from '../test/fixtures/memory-quality.ts'
 import {runMemoryQualityCase,memorySemanticReviewSystem} from './memory-quality-runner.ts'
-import {EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,recordedQualityReview,V4_RULES,V4_SCREEN,V4_PARENT_MANIFEST,V4_PREFIX,v4Cases,v4Selection,v4EvidenceComplete,freezeV4,v4Summary,v4DispatchGate,v4ScreenGate,v4ResumeAction,type V4Row,type V4Annotation,type V4Category,V5_RULES,V5_PREFIX,freezeV5,v5Summary,v5ScreenDispatchGate,v5TerminalCategory,v5DiagnosticTargets,v5ActionEvidence,v5ControlledStatus,type V5Row,type V5Annotation,V6_RULES,V6_PREFIX,V6_CATEGORIES,V6_SCORING_CATEGORIES,freezeV6,v6ReviewValid,v6Summary,v6DispatchGate,v6TerminalCategory,type V6Row,type V6Annotation} from './memory-quality-support.ts'
+import {EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,recordedQualityReview,V4_RULES,V4_SCREEN,V4_PARENT_MANIFEST,V4_PREFIX,v4Cases,v4Selection,v4EvidenceComplete,freezeV4,v4Summary,v4DispatchGate,v4ScreenGate,v4ResumeAction,type V4Row,type V4Annotation,type V4Category,V5_RULES,V5_PREFIX,freezeV5,v5Summary,v5ScreenDispatchGate,v5TerminalCategory,v5DiagnosticTargets,v5ActionEvidence,v5ControlledStatus,type V5Row,type V5Annotation,V6_RULES,V6_PREFIX,V6_CATEGORIES,V6_SCORING_CATEGORIES,freezeV6,v6ReviewValid,v6Summary,v6DispatchGate,v6TerminalCategory,v6RecoveryDecision,type V6Row,type V6Annotation} from './memory-quality-support.ts'
 
 import {V5_QUALITY_CASES,V5_SCREEN_IDS} from '../test/fixtures/v5-memory-quality.ts'
 import {V6_QUALITY_CASES,V6_INDEPENDENT_IDS} from '../test/fixtures/v6-memory-quality.ts'
 import type {V6Case} from '../test/fixtures/v6-memory-quality.ts'
 
-const options=JSON.parse(process.env.RGENT_MEMORY_EVAL_OPTIONS??'{}') as {root:string;budget:string;profile:string;report:string;models:string[];pilot:boolean;live:boolean;only?:string;v4?:boolean;v5?:boolean;v6?:boolean;round?:number;freeze?:boolean;diagnose?:boolean;review?:boolean;stop?:string;annotation?:string;screen?:boolean;cases?:string[]}
+const options=JSON.parse(process.env.RGENT_MEMORY_EVAL_OPTIONS??'{}') as {root:string;budget:string;profile:string;report:string;models:string[];pilot:boolean;live:boolean;only?:string;v4?:boolean;v5?:boolean;v6?:boolean;round?:number;freeze?:boolean;diagnose?:boolean;review?:boolean;stop?:string;resume?:string;annotation?:string;screen?:boolean;cases?:string[]}
 app.setName('rgent')
 app.setPath('userData',path.join(options.report,'electron-profile'))
 // Electron emits ready after its entry module has finished loading.
@@ -285,7 +285,25 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
   return {caseId:c.id,round,dispatched:paid?.dispatched===true,terminal:paid?.terminal===true,structured:paid?.structured===true,blocked:paid?.blocked===true,actionVerified:paid?.actionVerified===true,category:classify(r),calls:Array.isArray(r.responses)?r.responses.length:0,latencyMs:typeof r.latencyMs==='number'?r.latencyMs:0,receiptReason:paid?.receipt?.reason,candidate:paid?.candidate??undefined,review:a?.review??null}
  }
  const rows=(model:string):V6Row[]=>[0,1].flatMap(round=>cases.flatMap(c=>{const row=rowOf(model,round,c);return row?[row]:[]}))
- const stopFile=(model:string)=>path.join(root,'stop-'+model+'.json')
+ const stopFile=(model:string)=>path.join(root,'stop-'+model+'.json'),recoveryFile=(model:string)=>path.join(root,'recovery-'+model+'.json')
+ const cyclesOf=(model:string):{at:string;reason:string}[]=>{if(!existsSync(recoveryFile(model)))return [];try{const value=JSON.parse(readFileSync(recoveryFile(model),'utf8'));return Array.isArray(value.cycles)?value.cycles:[]}catch{return []}}
+ // 连续失败只看该模型按时间顺序的最近尝试；"可重试网络失败"= 传输失败或当次无终态。
+ const recentAttempts=(model:string)=>{
+  const state=JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8')) as {dispatches:{key:string}[]}
+  return state.dispatches.filter(d=>d.key.startsWith(V6_PREFIX+model+'/')).slice(-3).map(d=>{
+   const file=resultFile(d.key);if(!existsSync(file))return {retryable:true}
+   try{const r=JSON.parse(readFileSync(file,'utf8')),error=String(r.error??'')
+    const retryable=r.status!=='completed'||['MEMORY_SERVICE_FAILED','EVALUATION_REQUEST_FAILED','EVALUATION_ATTEMPT_TIMEOUT','MEMORY_DEADLINE'].includes(error)
+    return {retryable:retryable||(Array.isArray(r.responses)&&r.responses.length>0&&r.responses.every((p:any)=>!!p.reason&&p.reason!=='MEMORY_OUTPUT_INVALID'))}
+   }catch{return {retryable:true}}
+  })
+ }
+ const recoveryDecision=(model:string)=>v6RecoveryDecision(recentAttempts(model),cyclesOf(model).length,V6_RULES.recoveryCyclesMax)
+ if(options.resume){const model=frozen.models.find((m:any)=>m.modelId===options.resume);if(!model)throw Error('EVALUATION_MODELS_NOT_AUTHORIZED')
+  if(recoveryDecision(model.modelId)!=='pause')throw Error('EVALUATION_RESUME_NOT_REQUIRED')
+  const cycles=cyclesOf(model.modelId),next=[...cycles,{at:new Date().toISOString(),reason:'operator-resume-after-three-retryable-failures'}]
+  writeFileSync(recoveryFile(model.modelId),JSON.stringify({model:model.modelId,cycles:next,max:V6_RULES.recoveryCyclesMax},null,2),{mode:0o600})
+  console.log(JSON.stringify({resumed:model.modelId,cycles:next.length,max:V6_RULES.recoveryCyclesMax,remaining:V6_RULES.recoveryCyclesMax-next.length}))}
  if(options.stop){if(!frozen.models.some((m:any)=>m.modelId===options.stop))throw Error('EVALUATION_MODELS_NOT_AUTHORIZED');if(!existsSync(stopFile(options.stop)))writeFileSync(stopFile(options.stop),JSON.stringify({frozenHash,reason:'operator-stop',at:new Date().toISOString(),rows:rows(options.stop)},null,2),{flag:'wx',mode:0o600})}
  if(options.annotation){
   if(!options.review)throw Error('EVALUATION_REVIEW_REQUIRED')
@@ -307,6 +325,9 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
    const history=JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8'))
    if(history.limit!==V6_RULES.history.parentLimit||history.calls<V6_RULES.history.calls)throw Error('EVALUATION_HISTORY_MISMATCH')
    if(existsSync(stopFile(model.modelId)))throw Error('EVALUATION_MODEL_STOPPED')
+   const recovery=recoveryDecision(model.modelId)
+   if(recovery==='exhausted')throw Error('EVALUATION_RECOVERY_EXHAUSTED')
+   if(recovery==='pause')throw Error('EVALUATION_MODEL_PAUSED')
    const prior=rows(model.modelId)
    let blocked=false
    if(spec.chain&&(spec.step??1)>1){const upstream=prior.find(r=>r.round===round&&r.caseId===`v6-chain-${spec.chain}-${(spec.step??1)-1}`);if(!upstream||!upstream.review)throw Error('EVALUATION_CHAIN_ORDER');blocked=upstream.blocked===true||upstream.structured!==true}

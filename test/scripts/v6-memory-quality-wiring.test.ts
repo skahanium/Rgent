@@ -4,7 +4,7 @@ import {spawnSync} from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import {
- EvaluationJournal,V6_PREFIX,V6_RULES,freezeV6,v6DispatchGate,v6Summary,v6TerminalCategory,type V6Annotation,type V6Row
+ EvaluationJournal,V6_PREFIX,V6_RULES,freezeV6,v6DispatchGate,v6RecoveryDecision,v6Summary,v6TerminalCategory,type V6Annotation,type V6Row
 } from '../../scripts/memory-quality-support.ts'
 import {V6_QUALITY_CASES} from '../fixtures/v6-memory-quality.ts'
 import type {V6Case} from '../fixtures/v6-memory-quality.ts'
@@ -104,6 +104,24 @@ describe('v6 命令行只读路径', () => {
   expect(badRound.status).toBe(1)
   expect(badRound.stderr).toContain('EVALUATION_ROUND_INVALID')
   expect(run(['--v6','--round','1','--help']).status).toBe(0)
+ })
+ it('v6 暴露 --resume 且不因此要求 profile', () => {
+  expect(run(['--v6','--help']).stdout).toContain('--resume')
+  const resumeWithoutProfile=run(['--v6','--resume','MiniMax-M3'])
+  expect(resumeWithoutProfile.status).not.toBe(1)
+  expect(resumeWithoutProfile.stderr).not.toContain('Explicit profile')
+ })
+})
+describe('v6 恢复周期与停损', () => {
+ it('连续三次可重试网络失败才暂停，恢复周期用尽后必须由人决定', () => {
+  const retryable=[{retryable:true},{retryable:true}]
+  expect(v6RecoveryDecision([],0,2)).toBe('continue')
+  expect(v6RecoveryDecision(retryable,0,2)).toBe('continue')
+  expect(v6RecoveryDecision([...retryable,{retryable:true}],0,2)).toBe('pause')
+  expect(v6RecoveryDecision([{retryable:true},{retryable:true},{retryable:false}],0,2)).toBe('continue')
+  expect(v6RecoveryDecision([{retryable:true},{retryable:true},{retryable:true},{retryable:true}],1,2)).toBe('pause')
+  expect(v6RecoveryDecision([{retryable:true},{retryable:true},{retryable:true}],2,2)).toBe('exhausted')
+  expect(v6RecoveryDecision([{retryable:true},{retryable:true},{retryable:true}],3,2)).toBe('exhausted')
  })
 })
 
