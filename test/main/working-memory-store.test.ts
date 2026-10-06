@@ -337,3 +337,12 @@ it('refuses to let a replacement take its own dependents as premises',()=>{
  expect(record.jobs.at(-1)?.results).toContainEqual({action:'correct',outcome:'rejected',code:'MEMORY_DEPENDENCY_CHANGED'})
  expect(danglingRefs(record)).toEqual([])
 })
+
+it('rejects actual downstream references using the verified legacy recent projection without rewriting its disk basis',()=>{
+ const {store}=fixture(),parent=store.add(store.read(),{content:'旧事实',layer:'demand',scope:'本库',sources:[source(1)],semantic:'fact',attribution:'人',reviewAt:null})
+ const result=store.apply(store.read(),[],{taskId:'task-2',materialVersion:'b'.repeat(64),outcome:'applied',entryIds:[]},{sources:[source(2)],scope:'本库',recent:{taskId:'task-2',noteId:'note',materialVersion:'b'.repeat(64),createdAt:new Date().toISOString(),outcome:'completed',sections:{goal:'旧事实的派生工作',completed:'',blocked:'',next:''},assistantDraft:false}})
+ const basis=store.read(),proven=[...basis.record.entries,...basis.record.recent].map(e=>e.id===result.recentIds[0]?{...e,sources:e.sources.map(s=>({...s,memoryDeps:[{id:parent.id,version:1}]}))}:e)
+ const applied=store.apply(basis,[[{action:'correct',id:parent.id,version:1,input:{content:'未经独立证明的更正',layer:'demand',scope:'本库',sources:[{...source(3),memoryDeps:[{id:result.recentIds[0]!,version:1}]}],semantic:'fact',attribution:'人',reviewAt:null}}]],{taskId:'task-3',materialVersion:'c'.repeat(64),outcome:'applied',entryIds:[]},null,[],proven)
+ expect(applied.rejected).toBe(1);expect(applied.snapshot.record.entries.find(e=>e.id===parent.id)?.version).toBe(1)
+ expect(applied.snapshot.record.recent[0]?.sources[0]?.memoryDeps).toEqual([])
+})

@@ -127,22 +127,22 @@ function proposalGroups(values:unknown[],sources:WorkingSource[],entries:Working
 }
 /** 来源本身的依赖永远保留；近期背景同样续接撤销关系，不赋予事实权威。
  * 更正只免去粗上下文中的自身及其下游，不能剪掉被引用来源实际携带的边。 */
-export function inheritInputs(refs:WorkingSource[],material:SavedTaskMaterial,entries:WorkingEntry[],replacedId?:string):WorkingSource[]{
+export function inheritInputs(refs:WorkingSource[],material:SavedTaskMaterial,entries:WorkingEntry[],replacedId?:string,displayed:readonly WorkingEntry[]=[]):WorkingSource[]{
  const reverse=new Set<string>(replacedId?[replacedId]:[]);let grew=true
  while(grew){grew=false;for(const entry of entries)if(!reverse.has(entry.id)&&entry.sources.some(s=>s.memoryDeps.some(d=>reverse.has(d.id)))){reverse.add(entry.id);grew=true}}
  const replaced=entries.filter(e=>e.id===replacedId)
  const sourceDeps=[...material.sourceDeps,...replaced.flatMap(e=>e.sources.flatMap(s=>s.sourceDeps))].map(d=>({...d,permissionTier:'reference' as const}))
- const memoryDeps=[...material.memoryDeps.filter(d=>!reverse.has(d.id)).map(d=>({id:d.id,version:d.version})),...refs.flatMap(s=>s.memoryDeps),...replaced.flatMap(e=>e.sources.flatMap(s=>s.memoryDeps))]
+ const memoryDeps=[...[...material.memoryDeps,...displayed].filter(d=>!reverse.has(d.id)).map(d=>({id:d.id,version:d.version})),...refs.flatMap(s=>s.memoryDeps),...replaced.flatMap(e=>e.sources.flatMap(s=>s.memoryDeps))]
  const unique=<T>(items:T[])=>[...new Map(items.map(item=>[JSON.stringify(item),item])).values()]
- return refs.map(s=>({...structuredClone(s),sourceDeps:unique([...s.sourceDeps,...sourceDeps]),memoryDeps:unique([...s.memoryDeps,...memoryDeps])}))
+ return refs.map(s=>{const inherited={...structuredClone(s),sourceDeps:unique([...s.sourceDeps,...sourceDeps]),memoryDeps:unique([...s.memoryDeps,...memoryDeps])};if(inherited.sourceDeps.length>16||inherited.memoryDeps.length>16)throw Error('MEMORY_INPUT_LIMIT');return inherited})
 }
-function recentInput(value:unknown,sources:WorkingSource[],entries:WorkingEntry[],material:SavedTaskMaterial):WorkingRecentInput|null|undefined{
+function recentInput(value:unknown,sources:WorkingSource[],entries:WorkingEntry[],material:SavedTaskMaterial,dependencyEntries:WorkingEntry[]=entries):WorkingRecentInput|null|undefined{
  if(value===null)return null
  if(!obj(value)||Object.keys(value).sort().join()!=='assistantDraft,blocked,completed,goal,next,sourceIds'||!['goal','completed','blocked','next'].every(k=>bounded(value[k],2048))||Buffer.byteLength(['goal','completed','blocked','next'].map(k=>value[k]).join(''))>2048||typeof value.assistantDraft!=='boolean'||!Array.isArray(value.sourceIds)||!value.sourceIds.length||value.sourceIds.length>16||new Set(value.sourceIds).size!==value.sourceIds.length||!material.noteId||!material.startedAt)return undefined
  const refs=value.sourceIds.map(id=>sources.find(s=>s.id===id))
  if(refs.some(s=>!s))return undefined
  const anchor=sources.find(s=>s.taskId===material.taskId&&s.kind==='ledger'&&s.classification==='command');if(!anchor)return undefined;if(!refs.includes(anchor))refs.push(anchor)
- return {sources:inheritInputs(refs as WorkingSource[],material,entries),scope:material.origin.relPath,recent:{taskId:material.taskId,noteId:material.noteId,materialVersion:material.materialVersion,createdAt:material.startedAt,outcome:material.status,sections:{goal:String(value.goal),completed:String(value.completed),blocked:String(value.blocked),next:String(value.next)},assistantDraft:value.assistantDraft}}
+ return {sources:inheritInputs(refs as WorkingSource[],material,dependencyEntries,undefined,entries),scope:material.origin.relPath,recent:{taskId:material.taskId,noteId:material.noteId,materialVersion:material.materialVersion,createdAt:material.startedAt,outcome:material.status,sections:{goal:String(value.goal),completed:String(value.completed),blocked:String(value.blocked),next:String(value.next)},assistantDraft:value.assistantDraft}}
 }
 /** 只有明确的传输失败才重试一次：认证、证书、参数、厂商拒绝与已有部分正文都不重试。 */
 function retryableTransport(error:unknown):boolean{
@@ -337,7 +337,8 @@ export class WorkingMemoryConsolidation{
    basis=job.service.snapshot()
    const payload={task:{id:job.material.taskId,status:job.material.status,...(continuity?{assistantDraft:job.material.answer}: {})},sources:sources.map(s=>({id:s.id,text:s.text,classification:s.classification,kind:s.kind,attribution:s.relPath})),memory:entries.map(e=>({id:e.id,version:e.version,content:e.content,layer:e.layer,semantic:e.semantic,scope:e.scope,attribution:e.attribution,updatedAt:e.updatedAt,status:e.status,reviewAt:e.reviewAt,tags:e.tags}))}
    // Retain the highest ranked candidates within the existing input limits.
-   while(entries.length&&(Buffer.byteLength(JSON.stringify(payload))+Buffer.byteLength(system)>32768||conservativeTokens(JSON.stringify(payload))+conservativeTokens(system)+4096>job.configuration.credential.contextTokens)){entries.pop();payload.memory.pop()}
+   const dependencyCount=()=>new Set([...job.material.memoryDeps,...sources.flatMap(s=>s.memoryDeps),...entries].map(d=>d.id+'@'+d.version)).size
+   while(entries.length&&(continuity&&dependencyCount()>16||Buffer.byteLength(JSON.stringify(payload))+Buffer.byteLength(system)>32768||conservativeTokens(JSON.stringify(payload))+conservativeTokens(system)+4096>job.configuration.credential.contextTokens)){entries.pop();payload.memory.pop()}
    let values:unknown[],recentValue:unknown=null;const budget=job.configuration.limits.calls;let calls=0
    const ask=(nextPayload:unknown=payload)=>{calls++;return this.response(job,nextPayload,sources,entries)}
    // 第二次调用只允许用于一次网络重试或一次格式修复，二者共享同一上限；总期限不因此重算。
@@ -357,11 +358,15 @@ export class WorkingMemoryConsolidation{
    const proposed=proposalGroups(values,sources,entries,Boolean(continuity));let groups=proposed.groups
    const unknownReference=(value:unknown)=>obj(value)&&Array.isArray(value.sourceIds)&&value.sourceIds.some(id=>typeof id==='string'&&!sources.some(s=>s.id===id))
    const referenceRejected=values.some(unknownReference)||continuity&&unknownReference(recentValue)
+   // 旧近期块的可信谱系只在只读投影中恢复；粗上下文与存储拒绝使用同一份闭包证明。
+   const effectiveRecent=continuity?await until(()=>job.service.entries(basis.record.recent.map(e=>e.id)),job.controller.signal):basis.record.recent
+   const dependencyEntries=[...basis.record.entries,...effectiveRecent]
    // The original command is independent; a model's paraphrase is not proof of independence.
-   for(const group of groups)for(const change of group){const ref=change.input.sources[0],exact=change.input.sources.length===1&&ref?.classification==='command'&&ref.kind==='ledger'&&ref.taskId===job.material.taskId&&ref.materialId===job.material.taskId+'/prompt'&&ref.relPath===job.material.origin.relPath&&ref.text===job.material.prompt&&change.input.content===ref.text&&change.input.scope===job.material.origin.relPath
-    if(!exact||change.action!=='add')change.input.sources=inheritInputs(change.input.sources,job.material,[...basis.record.entries,...basis.record.recent],change.action==='add'?undefined:change.id)
-   }
-   let recent=continuity?recentInput(recentValue,sources,entries,job.material):undefined
+   groups=groups.filter(group=>{try{for(const change of group){const ref=change.input.sources[0],exact=change.input.sources.length===1&&ref?.classification==='command'&&ref.kind==='ledger'&&ref.taskId===job.material.taskId&&ref.materialId===job.material.taskId+'/prompt'&&ref.relPath===job.material.origin.relPath&&ref.text===job.material.prompt&&change.input.content===ref.text&&change.input.scope===job.material.origin.relPath
+    if(!exact||change.action!=='add')change.input.sources=inheritInputs(change.input.sources,job.material,dependencyEntries,change.action==='add'?undefined:change.id,continuity?entries:[])
+   }return true}catch(error){proposed.dropped.push({action:group[0]!.action,outcome:'rejected',code:publicMemoryError(error)});return false}})
+   let recent:WorkingRecentInput|null|undefined
+   try{recent=continuity?recentInput(recentValue,sources,entries,job.material,dependencyEntries):undefined}catch(error){proposed.dropped.push({action:'recent',outcome:'rejected',code:publicMemoryError(error)})}
    // A new derivation must not be published against a version replaced in this
    // batch. Expanding it to the new content would falsely prove equivalence.
    const replacements=groups.flatMap(g=>g.flatMap(c=>c.action==='correct'||c.action==='obsolete'?[{id:c.id,version:c.version}]:[]))
@@ -390,7 +395,7 @@ export class WorkingMemoryConsolidation{
     const current=store.read(),materialState=(r:typeof basis.record)=>JSON.stringify([r.identity,r.watermark,r.forgotten])
     if(materialState(current.record)!==materialState(basis.record))throw Error('MEMORY_CONFLICT')
     for(const used of entries)if(![...current.record.entries,...current.record.recent].some(e=>e.id===used.id&&e.version===used.version))throw Error('MEMORY_CONFLICT')
-    return store.apply(current,groups,{taskId:job.material.taskId,materialVersion:job.material.materialVersion,outcome:'applied',entryIds:[],...(dependencyRejected?{reason:'MEMORY_DEPENDENCY_CHANGED'}:referenceRejected?{reason:'MEMORY_OUTPUT_REFERENCE_INVALID'}:proposed.dropped.length?{reason:proposed.dropped[0]!.code??'MEMORY_OUTPUT_INVALID'}:continuity&&recentValue!==null&&!recent?{reason:'MEMORY_OUTPUT_INVALID'}:{})},recent,proposed.dropped)
+    return store.apply(current,groups,{taskId:job.material.taskId,materialVersion:job.material.materialVersion,outcome:'applied',entryIds:[],...(dependencyRejected?{reason:'MEMORY_DEPENDENCY_CHANGED'}:referenceRejected?{reason:'MEMORY_OUTPUT_REFERENCE_INVALID'}:proposed.dropped.length?{reason:proposed.dropped[0]!.code??'MEMORY_OUTPUT_INVALID'}:continuity&&recentValue!==null&&!recent?{reason:'MEMORY_OUTPUT_INVALID'}:{})},recent,proposed.dropped,dependencyEntries)
    })
    if(result.entryIds.length){const changed=[...result.snapshot.record.entries,...result.snapshot.record.recent].filter(e=>result.entryIds.includes(e.id));const before=[...basis.record.entries,...basis.record.recent].filter(e=>result.entryIds.includes(e.id));this.undoBatches.set(job.material.taskId,{service:job.service,sessionId:job.context.sessionId,version:job.material.materialVersion,before:structuredClone(before),after:changed.map(e=>({id:e.id,version:e.version}))});while(this.undoBatches.size>8)this.undoBatches.delete(this.undoBatches.keys().next().value!)}
    if(result.rejected)this.notify(job)

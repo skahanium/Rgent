@@ -243,9 +243,16 @@ export class WorkingMemoryService{
    const covered=await this.vault.summaryMaterials(relPath,taskIds,[...forgotten].filter(id=>!id.endsWith('/prompt')),record.watermark);this.context();if(covered.ceiling<record.watermark||covered.materialIds.some(id=>forgotten.has(id))||record.watermark>0&&covered.sequences.some(sequence=>sequence<=record.watermark))return false
    const relatedRecent=record.recent.filter(e=>covered.materialIds.includes(e.recent.taskId+'/prompt'))
    for(const recent of relatedRecent)await this.recentSources(recent)
-   if(covered.memoryDeps.length){const parents=await this.entries(covered.memoryDeps.map(d=>d.id));if(covered.memoryDeps.some(d=>!parents.some(e=>e.id===d.id&&e.version===d.version&&e.status==='active')))return false}
+   const verified=new Map<string,WorkingEntry>();let pending=covered.memoryDeps
+   while(pending.length){
+    const parents=await this.entries(pending.map(d=>d.id));if(pending.some(d=>!parents.some(e=>e.id===d.id&&e.version===d.version&&e.status==='active')))return false
+    for(const parent of parents)verified.set(parent.id+'@'+parent.version,parent)
+    pending=parents.flatMap(e=>e.sources.flatMap(s=>s.memoryDeps)).filter(d=>!verified.has(d.id+'@'+d.version))
+   }
    // A concurrent forget/reset cannot be approved using the earlier control snapshot.
-   this.context();const current=this.vault.memorySnapshot().record;return JSON.stringify([current.identity,current.watermark,current.forgotten])===JSON.stringify([record.identity,record.watermark,record.forgotten])
+   this.context();const current=this.vault.memorySnapshot().record,all=[...current.entries,...current.recent]
+   if([...verified.values()].some(proof=>!all.some(e=>e.id===proof.id&&e.version===proof.version&&e.status==='active'&&!recentExpired(e)&&(!e.reviewAt||Date.parse(e.reviewAt)>Date.now()))))return false
+   return JSON.stringify([current.identity,current.watermark,current.forgotten])===JSON.stringify([record.identity,record.watermark,record.forgotten])
   }catch{return false}
  }
  async sourceForPrompt(relPath:string,taskId:string):Promise<WorkingSource>{

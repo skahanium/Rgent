@@ -474,7 +474,7 @@ it('reports a stale dependency as MEMORY_DEPENDENCY_CHANGED and repairs a leftov
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
 
-it.each(['empty','dependency','unknown','mismatch','cache','race','overflow'] as const)('reconstructs only proven old recent ancestry without writing on reads (%s)',async mode=>{
+it.each(['empty','dependency','unknown','mismatch','cache','cache-edit','cache-disabled','cache-unrelated','race','overflow'] as const)('reconstructs only proven old recent ancestry without writing on reads (%s)',async mode=>{
  const base=await mkdtemp(path.join(os.tmpdir(),'rgent-integrity-recent-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'原始资料')
  let vault=new VaultSession(base,vi.fn());vault.restore()
  try{
@@ -485,7 +485,12 @@ it.each(['empty','dependency','unknown','mismatch','cache','race','overflow'] as
   await vault.ledgerPrepare('a.md',{taskId:'recent-task',startedAt:new Date().toISOString(),status:'completed',prompt:'继续工作',answer:'受控草稿',provenance})
   note=await vault.read('a.md');const marked=markPrompt('/继续工作',{taskId:'recent-task',range:{start:0,end:5},expectedText:'/继续工作',promptText:'继续工作'});const written=await vault.write('a.md',note.content+'\n'+upsertAiAnswer(marked,{taskId:'recent-task',answer:'受控草稿'}),note.revision,note);await vault.ledgerComplete('a.md','recent-task',written.revision)
   const material=await service.savedMaterial('a.md','recent-task'),anchor=await service.sourceForPrompt('a.md','recent-task')
-  if(mode==='cache'){
+  if(mode.startsWith('cache')){
+   if(mode!=='cache'){
+    const entries=service.entries.bind(service);let changed=false
+    vi.spyOn(service,'entries').mockImplementation(async ids=>{const proven=await entries(ids);if(!changed){changed=true;const basis=service.snapshot();if(mode==='cache-unrelated')await vault.memoryMutation(store=>store.add(store.read(),{content:'无关事实',layer:'demand',scope:'a.md',sources:[anchor],semantic:'fact',attribution:'人',reviewAt:null}));else await service.edit({sessionId:service.context().sessionId,revision:basis.revision,objectVersion:basis.objectVersion,id:parent.id,version:1},mode==='cache-edit'?{content:'已修订的父事实'}:{status:'disabled'})}return proven})
+    expect(await service.summaryAllowed('a.md',['recent-task'])).toBe(mode==='cache-unrelated');return
+   }
    expect(await service.summaryAllowed('a.md',['recent-task'])).toBe(true)
    const before=service.snapshot();await service.forget({sessionId:service.context().sessionId,revision:before.revision,objectVersion:before.objectVersion,id:parent.id,version:1})
    expect(await service.summaryAllowed('a.md',['recent-task'])).toBe(false);return

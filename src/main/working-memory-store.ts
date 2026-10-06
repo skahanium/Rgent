@@ -189,7 +189,7 @@ export class WorkingMemoryStore{
   return this.commit(basis,record)
  }
  /** Groups are isolated proposals. Related corrections either commit together or not at all. */
- apply(basis:WorkingSnapshot,groups:readonly (readonly WorkingChange[])[],receipt:MemoryJobReceipt,recentInput:WorkingRecentInput|null=null,priorResults:readonly MemoryJobGroupResult[]=[]){
+ apply(basis:WorkingSnapshot,groups:readonly (readonly WorkingChange[])[],receipt:MemoryJobReceipt,recentInput:WorkingRecentInput|null=null,priorResults:readonly MemoryJobGroupResult[]=[],dependencyEntries:readonly WorkingEntry[]=[]){
   if(groups.length>64||groups.reduce((n,g)=>n+g.length,0)>64)throw Error('MEMORY_OUTPUT_LIMIT')
   let record=structuredClone(basis.record),rejected=0,rejectionReason:string|undefined;const entryIds:string[]=[]
   const results:MemoryJobGroupResult[]=[...priorResults]
@@ -208,7 +208,7 @@ export class WorkingMemoryStore{
       const e=candidate.entries.find(e=>e.id===change.id&&e.version===change.version)
       if(!e)throw Error('MEMORY_CHANGED')
       // 替换的前提不能包含本次替换自己作废的反向依赖闭包，否则更正条目会被自己的下游拖成不可核验。
-      assertReplacementIndependent(candidate,change.id,input)
+      assertReplacementIndependent(candidate,change.id,input,dependencyEntries)
       if(change.action==='conflict'){
        if(candidate.entries.length>=1000)throw Error('MEMORY_ENTRY_LIMIT')
        const pending:WorkingEntry={...input,id:randomUUID(),version:1,category:'long',status:'disputed',state:stateFromStatus('disputed'),reason:'MEMORY_CONFIRMATION_REQUIRED',updatedAt:now,pendingTarget:{id:e.id,version:e.version},updateBasis:{kind:'consolidation',id:receipt.taskId,version:1}}
@@ -366,10 +366,11 @@ function advanceVersion(record:WorkingRecord,id:string,from:number,to:number):st
 }
 
 /** 实际来源引用自身或下游时无法证明独立更正，整组拒绝，禁止删边伪造独立依据。 */
-function assertReplacementIndependent(record:WorkingRecord,replacedId:string,input:WorkingInput):void{
+function assertReplacementIndependent(record:WorkingRecord,replacedId:string,input:WorkingInput,dependencyEntries:readonly WorkingEntry[]):void{
+ const effective=allEntries(record).map(entry=>{const proof=dependencyEntries.find(e=>e.id===entry.id&&e.version===entry.version);return proof?{...entry,sources:[...entry.sources,...proof.sources]}:entry})
  const reverse=new Set<string>([replacedId]);let grew=true
  while(grew){grew=false
-  for(const entry of allEntries(record))if(!reverse.has(entry.id)&&entry.sources.some(source=>source.memoryDeps.some(dep=>reverse.has(dep.id)))){reverse.add(entry.id);grew=true}
+  for(const entry of effective)if(!reverse.has(entry.id)&&entry.sources.some(source=>source.memoryDeps.some(dep=>reverse.has(dep.id)))){reverse.add(entry.id);grew=true}
  }
  if(input.sources.some(source=>source.memoryDeps.some(dep=>reverse.has(dep.id))))throw Error('MEMORY_DEPENDENCY_CHANGED')
 }

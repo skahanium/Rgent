@@ -1699,6 +1699,12 @@ r8 的残留缺陷经过代码级复核后定位到**真实根因**（原记录�
 
 最终必要定向：service／consolidation／session 三文件 129／0（`/tmp/rgent-integrity-p2-final.log`），覆盖真实 Host 装入旧版本后更正仍 active、fact supporting、独立 exact／改写／实际来源边、同批 stale recent 的部分提交、A→recent→recent 闭包、重启补边、缓存摘要、晚到遗忘和读不写；store 生命周期／部分提交／闭包定向 8／0（`/tmp/rgent-integrity-p2-store-session.log`，其中 session 文件未匹配，此项仅算 store 范围）。类型修正后的过期夹具定向 2／0（`/tmp/rgent-integrity-p2-type-fixture.log`）。类型与文档、diff 核验另记 `/tmp/rgent-integrity-p2-{types,docs}.log`。未运行本包完整测试、build、产品窗口、真实模型或正常配置写入；既有千条成本、r9 成绩与全部历史失败保持原适用范围。未知旧摘录没有可证明的全部清除结果；只证明不可由相关记忆块继续发送或派生。最终整合门、独立复审、Windows／CI／输入法人工／用户视觉与新指纹认证仍待总任务。
 
+包 2 独立复审修补（2026-10-06）：原提交 `2f02563` 有两项重要缺口。旧近期块可信恢复的边未进入更正闭包，真实 Host 装入旧 R 后更正 A@2 仍暂停；摘要核验后父记忆被编辑／停用仍获批准。分别先红（`/tmp/rgent-integrity-p2-review-red.log`，3 失败／1 通过）及 store 实际下游旧边拒绝反例 1 失败（`/tmp/rgent-integrity-p2-store-projection-red.log`）。现由同一只读可信投影计算粗上下文反向闭包并传入存储拒绝检查，存储将 raw 来源与已核同 id@version 的来源取并集，不删真实边、不改原 CAS 依据；更正 A@2 可用，陈旧 R 只读投影暂停。摘要递归收集已验证父闭包，最终同步快照逐个重核 id@version、active 及到期状态，无关新增不撤销批准。组合夹具最初误读 runner 的 raw recent 状态，已改为实际 service.entries 投影；原盘块可仍 active，发送／派生必须使用核验投影。
+
+同范围追加实际输入边界反例：后台实际展示的补选 candidate 可不在前台材料依赖内，近期／概括各缺撤销边（2 失败／1 全文原话通过，`/tmp/rgent-integrity-p2-candidate-red.log`）。只有裁剪后实际 payload.memory 进入粗依赖，未展示的库条目不继承，本次完整 command 的严格例外保留。前台 16 边时先减少额外候选（原反例 1 失败，`/tmp/rgent-integrity-p2-candidate-limit-red.log`）；真实来源并集仍超 16 时明确 MEMORY_INPUT_LIMIT、未调用模型、原数据保留，不能截边或扩 M4（暂移除限额守卫取得 1 失败，`/tmp/rgent-integrity-p2-candidate-overflow-red.log`）。输出局部超限按组拒绝，保留独立部分提交。旧“模型自称独立 recent”正例改为实际旧 candidate 导致 recent rejected partial，独立 add 正例用程序可证明的本次完整原话；不再凭模型文字免边。必要最终定向与类型／文档门见下方追加，未重复完整测试、构建、窗口或真实调用，独立复核待核。
+
+复审修补最后必要门：service／consolidation／store 三文件按明确用例名选择 28／0（`/tmp/rgent-integrity-p2-review-final.log`），类型通过（`/tmp/rgent-integrity-p2-review-types.log`），文档 12 文件及 diff 通过（`/tmp/rgent-integrity-p2-review-docs.log`）。`targetShown` 的本次适用范围是裁剪后的实际整理 payload.memory，固定反例另有未展示的库条目，不能用候选池或整个库代称实际输入。MEMORY_INPUT_LIMIT 的产品拒绝已据实，评测终态旧 capacity 正则尚不含 INPUT_LIMIT，分类收口留包 4；本包不改裁判门槛或历史成绩。复核及最终整合仍待核。
+
 
 包 1 显式历史复核兼容修补（2026-10-06）：旧 revision ≤9 的副标注存在内层 review 未存 frozenHash／resultHash／rulesHash、外层 key 与三 hash 严格绑定的历史形态。仅 `--v6 --replay` 在外层核验成功后生成内存评分视图，缺失字段由已核外层补入；已有内层冲突、外层缺失／冲突及新 revision 均拒绝。追加 historical-review 报告逐 key／主副角色记录 `historicalAnnotationBindings`、缺失字段和 `binding:'verified-outer-envelope'`／`originalInnerEvidence:false`，不把新补视图说成原内层证据，不改原标注或报告。新 freeze／review／live／publish 仍要求完整内外绑定。裁判动作三态以 actionState 为权威，只有未记录 state 时才回看旧 actionVerified；明确 failure 缺旧布尔仍可判定、下上界为零，success 正常计分，unknown 不翻成检查器错误。
 
