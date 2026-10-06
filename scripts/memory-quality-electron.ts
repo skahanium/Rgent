@@ -266,7 +266,8 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
  if(!options.freeze&&!options.diagnose&&!options.live&&!options.review&&!options.stop){console.log(JSON.stringify({mode:'v6-development-only',network:false,cases:cases.length,independent:V6_INDEPENDENT_IDS.length,rounds:V6_RULES.rounds,campaignLimit:V6_RULES.history.campaignLimit,perModelLimit:V6_RULES.history.perModelLimit,supervisionMs:V6_RULES.supervisionMs,categories:V6_CATEGORIES,scoring:V6_SCORING_CATEGORIES,rules:V6_RULES}));return}
  let frozen:any
  if(options.freeze){const meta=metadata();if(execFileSync('git',['status','--porcelain','--untracked-files=no'],{cwd:options.root,encoding:'utf8'}).trim())throw Error('EVALUATION_DIRTY_EXECUTION');const parent=JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8'));if(parent.limit!==V6_RULES.history.parentLimit||parent.calls<V6_RULES.history.calls)throw Error('EVALUATION_HISTORY_MISMATCH')
-  frozen={version:6,authorization:'2026-10-05-v6',executionCommit:executionCommit(),runtime:runtime(),configuration:meta.configuration,models:meta.models,cases:cases.map(c=>c.id),dataset:fingerprint(cases),weights:weightsHash(),rules:fingerprint(V6_RULES),prompt:memoryContinuitySystem,promptHash:promptHash(),scorer:scorerHash(),limits:V6_RULES.limits,parentManifestHash:parent.manifest,maxCalls:V6_RULES.history.campaignLimit}
+  const revision=Math.max(1,Number(process.env.RGENT_V6_REVISION??1)||1)
+  frozen={version:6,revision,prefix:V6_PREFIX+'r'+revision+'/',authorization:'2026-10-05-v6',executionCommit:executionCommit(),runtime:runtime(),configuration:meta.configuration,models:meta.models,cases:cases.map(c=>c.id),dataset:fingerprint(cases),weights:weightsHash(),rules:fingerprint(V6_RULES),prompt:memoryContinuitySystem,promptHash:promptHash(),scorer:scorerHash(),limits:V6_RULES.limits,parentManifestHash:parent.manifest,maxCalls:V6_RULES.history.campaignLimit}
   freezeV6(root,frozen);console.log(JSON.stringify({frozen:fingerprint(frozen),manifest:manifestFile,calls:parent.calls,executionCommit:frozen.executionCommit,promptHash:frozen.promptHash,cases:cases.length}));if(!options.live&&!options.diagnose)return}
  if(!frozen){if(!existsSync(manifestFile))throw Error('EVALUATION_FREEZE_REQUIRED');frozen=JSON.parse(readFileSync(manifestFile,'utf8'))}
  if(frozen.runtime!==runtime()||frozen.dataset!==fingerprint(cases)||frozen.weights!==weightsHash()||frozen.rules!==fingerprint(V6_RULES)||frozen.promptHash!==promptHash()||frozen.scorer!==scorerHash())throw Error('EVALUATION_REVISION_CHANGED')
@@ -274,7 +275,9 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
  if(options.diagnose||options.live){const meta=metadata();if(meta.configuration!==frozen.configuration||fingerprint(meta.models)!==fingerprint(frozen.models))throw Error('EVALUATION_PROFILE_CHANGED');const targets=options.live?meta.models.filter((m:any)=>m.modelId===options.only):meta.models;if(!targets.length)throw Error('EVALUATION_MODELS_NOT_AUTHORIZED');diagnostic=await diagnose(targets,!options.live);if(!options.live)return}
  // 已诊断环境故障不改写成模型失败；未跑满的轮次按合同记"未取得有效测量（环境）"。
  const environmentUnavailable=!!diagnostic&&diagnostic.some((r:any)=>!r.dns||!r.tls)
- const frozenHash=fingerprint(frozen),key=(model:string,round:number,id:string)=>V6_PREFIX+model+'/'+round+'/'+id
+ const frozenHash=fingerprint(frozen)
+ const prefix=String(frozen.prefix??V6_PREFIX)
+ const key=(model:string,round:number,id:string)=>prefix+model+'/'+round+'/'+id
  const resultFile=(k:string)=>path.join(root,'result-'+fingerprint(k)+'.json'),annotationFile=(k:string)=>path.join(root,'annotation-'+fingerprint(k)+'.json')
  const classify=v6TerminalCategory
  const rowOf=(model:string,round:number,c:V6Case):V6Row|null=>{
@@ -290,7 +293,7 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
  // 连续失败只看该模型按时间顺序的最近尝试；"可重试网络失败"= 传输失败或当次无终态。
  const recentAttempts=(model:string)=>{
   const state=JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8')) as {dispatches:{key:string}[]}
-  return state.dispatches.filter(d=>d.key.startsWith(V6_PREFIX+model+'/')).slice(-3).map(d=>{
+  return state.dispatches.filter(d=>d.key.startsWith(prefix+model+'/')).slice(-3).map(d=>{
    const file=resultFile(d.key);if(!existsSync(file))return {retryable:true}
    try{const r=JSON.parse(readFileSync(file,'utf8')),error=String(r.error??'')
     const retryable=r.status!=='completed'||['MEMORY_SERVICE_FAILED','EVALUATION_REQUEST_FAILED','EVALUATION_ATTEMPT_TIMEOUT','MEMORY_DEADLINE'].includes(error)
@@ -335,7 +338,7 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
    journal=new EvaluationJournal(root,frozen,V6_RULES.history.parentLimit,options.budget,undefined,{parentManifestHash:frozen.parentManifestHash,prefix:V6_PREFIX,limit:V6_RULES.history.campaignLimit,perModelLimit:V6_RULES.history.perModelLimit})
    const k=key(model.modelId,round,spec.id)
    // 被监督计时器杀掉时可能已计费但结果未落盘；状态不明不得自动重派。
-   for(const charged of journal.dispatchKeys().filter(charged=>charged.startsWith(V6_PREFIX)))if(!existsSync(resultFile(charged)))throw Error('EVALUATION_CHARGED_UNFINISHED')
+   for(const charged of journal.dispatchKeys().filter(charged=>charged.startsWith(prefix)))if(!existsSync(resultFile(charged)))throw Error('EVALUATION_CHARGED_UNFINISHED')
    if(journal.charged(k)||journal.read(k))throw Error('EVALUATION_ATTEMPT_ALREADY_DISPATCHED')
    const beforeConfig=readFileSync(path.join(options.profile,'model-config.json')),credential=loadModelCredentialReadOnly(options.profile,safeStorage,model.recordId)
    if(credential.modelId!==model.modelId||credential.baseURL!==model.baseURL||credential.contextTokens!==model.contextTokens)throw Error('EVALUATION_REVISION_CHANGED')
@@ -372,7 +375,8 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
   const campaignCalls=(prefix:string)=>state.dispatches.filter((d:any)=>d.key.startsWith(prefix)).length
   // 首调用成功率：与四项指标分列，只作诊断，不代称模型语义能力。
   const firstCall=(model:string)=>{const attempts=[0,1].flatMap(round=>cases.flatMap(c=>{const file=resultFile(key(model,round,c.id));return existsSync(file)?[JSON.parse(readFileSync(file,'utf8'))]:[]})),parsed=attempts.filter((attempt:any)=>{const first=Array.isArray(attempt.responses)?attempt.responses[0]:null;if(!first||first.reason||first.finishReason!=='stop'||typeof first.body!=='string')return false;try{parseContinuitySuggestions(first.body);return true}catch{return false}}).length;return {parsed,total:attempts.length,rate:attempts.length?parsed/attempts.length:0}}
-  const summaries=frozen.models.map((m:any)=>({model:m.modelId,recordId:m.recordId,host:m.host,calls:campaignCalls(V6_PREFIX+m.modelId+'/'),remaining:V6_RULES.history.perModelLimit-campaignCalls(V6_PREFIX+m.modelId+'/'),firstCall:firstCall(m.modelId),rounds:[0,1].map(round=>({round,summary:v6Summary(rows(m.modelId),cases,round,{environmentUnavailable})}))}))
+  const modelCalls=(modelId:string)=>state.dispatches.filter((d:any)=>d.key.startsWith(V6_PREFIX)&&d.key.includes('/'+modelId+'/')).length
+  const summaries=frozen.models.map((m:any)=>({model:m.modelId,recordId:m.recordId,host:m.host,calls:modelCalls(m.modelId),remaining:V6_RULES.history.perModelLimit-modelCalls(m.modelId),firstCall:firstCall(m.modelId),rounds:[0,1].map(round=>({round,summary:v6Summary(rows(m.modelId),cases,round,{environmentUnavailable})}))}))
   const summary={frozenHash,executionCommit:frozen.executionCommit,reportCommit:executionCommit(),at:new Date().toISOString(),calls:state.calls,previousCalls:V6_RULES.history.calls,remainingGlobal:V6_RULES.history.parentLimit-state.calls,campaignCalls:campaignCalls(V6_PREFIX),campaignLimit:V6_RULES.history.campaignLimit,environment:{unavailable:environmentUnavailable,rows:diagnostic??[]},models:summaries,formalQualityPassed:false,productionStrategyChanged:false,userSemanticConfirmation:false}
   atomicReport(path.join(root,'summary.json'),summary)
   console.log(JSON.stringify({models:summaries.map((s:any)=>({model:s.model,calls:s.calls,rounds:s.rounds.map((r:any)=>({round:r.round,verdict:r.summary.verdict,metrics:r.summary.metrics,judgeable:r.summary.judgeable,blocked:r.summary.blocked}))})),calls:state.calls,remainingGlobal:summary.remainingGlobal,campaignCalls:summary.campaignCalls,environmentUnavailable}))
