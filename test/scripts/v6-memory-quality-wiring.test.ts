@@ -209,6 +209,9 @@ describe('v6 付费记录字段', () => {
   expect(result.structured).toBe(true)
   expect(result.blocked).toBe(false)
   expect(result.actionVerified).toBe(true)
+  expect(result.actionEvidence.finalTargets).toEqual(result.receipt!.entryIds.map(id=>({id,version:result.entries.find(e=>e.id===id)!.version})))
+  expect(result.followup?.sent.length).toBe(1)
+  expect(result.dependencies).toEqual(expect.arrayContaining(result.actionEvidence.finalTargets!.map(t=>expect.objectContaining(t))))
   expect(result.candidate.expectedTarget).toBeNull()
   expect(result.candidate.targetEligible).toBe(false)
   expect(result.candidate.snapshotHash).toMatch(/^[a-f0-9]{64}$/)
@@ -224,6 +227,7 @@ describe('v6 付费记录字段', () => {
    yield {type:'finish',reason:'stop'}
   },new AbortController().signal,{strategy:'continuity',verifyClosure:false,chainBlocked:true})
   expect(result.blocked).toBe(true)
+  expect(result.followup?.sent.length).toBe(1)
   expect(result.dispatched).toBe(true)
   expect(result.terminal).toBe(true)
   expect(result.structured).toBe(false)

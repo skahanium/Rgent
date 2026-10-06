@@ -1,10 +1,15 @@
-import { copyFileSync, mkdirSync } from 'node:fs'
+import { copyFileSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import type { Plugin } from 'vite'
+import { createHash } from 'node:crypto'
 
 const root = dirname(fileURLToPath(import.meta.url))
+
+const sourceFiles=(dir:string):string[]=>readdirSync(resolve(root,dir),{withFileTypes:true}).flatMap(e=>e.isDirectory()?sourceFiles(dir+'/'+e.name):[dir+'/'+e.name])
+const runtimeFingerprint=createHash('sha256').update(JSON.stringify(['src/main','src/shared','src/markdown'].flatMap(sourceFiles).sort().map(f=>[f,readFileSync(resolve(root,f),'utf8')]))).digest('hex')
+const scoringFingerprint=createHash('sha256').update(readFileSync(resolve(root,'scripts/memory-quality-support.ts'),'utf8')).digest('hex')
 
 const nativeModule = resolve(root, 'build/Release/rgent_fs.node')
 
@@ -29,6 +34,7 @@ function copyNativeModule(): Plugin {
 
 export default defineConfig({
   main: {
+    define: {__RGENT_RUNTIME_FINGERPRINT__:JSON.stringify(runtimeFingerprint),__RGENT_SCORING_FINGERPRINT__:JSON.stringify(scoringFingerprint)},
     plugins: [externalizeDepsPlugin(), copyNativeModule()]
   },
   preload: {

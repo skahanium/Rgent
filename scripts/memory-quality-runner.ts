@@ -27,9 +27,9 @@ import type {MemoryQualityCase} from '../test/fixtures/memory-quality.ts'
  *  两处已修：重复计数只看同一议题（不再把同库无关条目算进来）；更正不再要求范围字符串全等
  *  （范围是否变、变得对不对由语义标注判定，机械核对只报告是否变过）。 */
 export function v6ActionEvidence(spec:MemoryQualityCase,facts:{before:readonly any[];entries:readonly any[];receipt:any}){
- const none={passed:false,scopeChanged:false,duplicates:0,subject:null as string|null}
+ const none={state:'unknown' as const,passed:false,scopeChanged:false,duplicates:0,subject:null as string|null}
  const action=spec.expected.action
- if(!action)return {passed:true,scopeChanged:false,duplicates:0,subject:null}
+ if(!action)return {state:'success' as const,passed:true,scopeChanged:false,duplicates:0,subject:null}
  const receipt=facts.receipt
  if(!receipt)return none
  const longActive=(list:readonly any[])=>list.filter(e=>e.category!=='recent'&&e.status==='active')
@@ -40,11 +40,11 @@ export function v6ActionEvidence(spec:MemoryQualityCase,facts:{before:readonly a
  // "同一议题"以种子／目标的范围为键；没有种子时退回本次任务产生的条目，避免把全库条目当重复。
  const subject=String((seed?.scope??target?.scope)??'').trim().toLocaleLowerCase()||null
  const duplicates=subject?after.filter(e=>String(e.scope??'').trim().toLocaleLowerCase()===subject).length:after.filter(mineOf).length
- if(spec.expected.maxActive!==undefined&&duplicates>spec.expected.maxActive)return {passed:false,scopeChanged:false,duplicates,subject}
+ if(spec.expected.maxActive!==undefined&&duplicates>spec.expected.maxActive)return {state:'failure' as const,passed:false,scopeChanged:false,duplicates,subject}
  const stable=before.length===after.length&&before.every(e=>after.some(now=>now.id===e.id&&now.version===e.version&&now.content===e.content&&now.scope===e.scope&&now.semantic===e.semantic))
  const added=after.filter(e=>!before.some(old=>old.id===e.id))
  const entryIds=Array.isArray(receipt.entryIds)?receipt.entryIds:[]
- const done=(passed:boolean,scopeChanged=false)=>({passed,scopeChanged,duplicates,subject})
+ const done=(passed:boolean,scopeChanged=false)=>({state:passed?'success' as const:'failure' as const,passed,scopeChanged,duplicates,subject,finalTargets:passed?(facts.entries.filter(e=>e.status==='active'&&(['correct','add'].includes(action)?entryIds.includes(e.id):!!target&&e.id===target.id&&e.version===target.version)).map(e=>({id:e.id,version:e.version}))):[]})
  if(action==='unchanged')return done((seed?!!target:true)&&stable)
  if(receipt.outcome!=='applied')return done(false)
  if(action==='correct'){
@@ -63,7 +63,7 @@ export function v6MechanicalAction(spec:MemoryQualityCase,facts:{before:readonly
  return v6ActionEvidence(spec,facts).passed
 }
 
-type PaidCall={phase:'proposal'|'format-repair'|'semantic-review';payload:any;body:string;finishReason:string|null;reason:string|null;startedAt:string;finishedAt?:string}
+type PaidCall={phase:'proposal'|'format-repair'|'semantic-review';payload:any;input?:unknown;body:string;finishReason:string|null;reason:string|null;startedAt:string;finishedAt?:string}
 
 /** Genuine production saving/consolidation/use in one disposable fictional vault. */
 export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:ModelCredential,
@@ -99,7 +99,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    const dispatch={phase:payload?.repair?'format-repair':payload?.material?'semantic-review':'proposal',sourceIds:ids,mapped,startedAt:new Date().toISOString(),finishedAt:undefined as string|undefined};dispatches.push(dispatch)
    if(!mapped)throw Error('MEMORY_MATERIAL_UNVERIFIED')
    // v6 留证：逐次调用的实际 payload、正文与终态；既有 dispatches 形状不变。
-   const call:PaidCall={phase:dispatch.phase as PaidCall['phase'],payload,body:'',finishReason:null,reason:null,startedAt:new Date().toISOString(),finishedAt:undefined}
+   const call:PaidCall={phase:dispatch.phase as PaidCall['phase'],payload,input:{system:input.system,messages:structuredClone(input.messages),maxOutputTokens:input.maxOutputTokens},body:'',finishReason:null,reason:null,startedAt:new Date().toISOString(),finishedAt:undefined}
    paidCalls.push(call)
    try{for await(const event of stream(input)){if(event.type==='text')call.body+=event.text;if(event.type==='finish')call.finishReason=event.reason;yield event}}
    catch(e){call.reason=e instanceof Error&&/^[A-Z_]{3,80}$/.test(e.message)?e.message:'EVALUATION_REQUEST_FAILED';throw e}
@@ -122,7 +122,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
   }
   const before=service.snapshot().record.entries,beforeAll=[...before,...service.snapshot().record.recent]
   /** v6 所需字段：派发、终态、结构化、受阻、机械动作与候选归因；只看实际发送与真实回执。 */
-  let actionEvidence:{passed:boolean;scopeChanged:boolean;duplicates:number;subject:string|null}={passed:false,scopeChanged:false,duplicates:0,subject:null}
+  let actionEvidence:{state?:'success'|'failure'|'unknown';finalTargets?:{id:string;version:number}[];passed:boolean;scopeChanged:boolean;duplicates:number;subject:string|null}={passed:false,scopeChanged:false,duplicates:0,subject:null}
   const v6Fields=(facts:{before?:any[];beforeAll?:any[];entries?:any[];receipt?:any;controlled?:any;blocked?:boolean})=>{
    const entries=facts.entries??[],beforeFact=facts.before??[],all=facts.beforeAll??beforeFact,receipt=facts.receipt??null
    const parseable=(call:PaidCall)=>{try{if(options?.strategy==='continuity')parseContinuitySuggestions(call.body);else parseMemorySuggestions(call.body);return true}catch{return false}}
@@ -133,7 +133,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    const expectedTarget=seed?seed.content:null
    const target=seed?all.find(e=>e.content===seed.content&&(!seed.semantic||e.semantic===seed.semantic)&&(!seed.scope||e.scope===seed.scope)):undefined
    const targetEligible=!!target
-   const targetShown=!!target&&paidCalls.some(call=>Array.isArray(call.payload?.memory)&&call.payload.memory.some((entry:any)=>entry&&typeof entry==='object'&&entry.id===target!.id))
+   const targetShown=!!target&&paidCalls.some(call=>Array.isArray(call.payload?.memory)&&call.payload.memory.some((entry:any)=>entry&&typeof entry==='object'&&entry.id===target!.id&&entry.version===target!.version))
    const codes=[receipt?.reason,...(Array.isArray(receipt?.results)?receipt.results.map((r:any)=>r?.code):[])].filter((code:any):code is string=>typeof code==='string')
    const serviceCodes=['MEMORY_SERVICE_FAILED','MEMORY_UNAVAILABLE','MEMORY_DEADLINE','MEMORY_CANCELLED','MEMORY_INTERRUPTED']
    const outputCodes=['MEMORY_OUTPUT_EMPTY','MEMORY_OUTPUT_TRUNCATED','MEMORY_OUTPUT_INVALID','MEMORY_OUTPUT_TOKEN_LIMIT','MEMORY_OUTPUT_LIMIT']
@@ -145,7 +145,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    const use=facts.controlled?.status==='failed'
    const failed=V6_PIPELINE.filter(stage=>({candidate,model,admission,commit,use} as Record<string,boolean>)[stage])
    return {dispatched:paidCalls.length>0,terminal,structured,blocked:facts.blocked===true,actionVerified:(()=>{const evidence=v6ActionEvidence(spec,{before:beforeFact,entries,receipt});actionEvidence=evidence;return evidence.passed})(),
-    candidate:{expectedTarget,targetEligible,targetShown,snapshotHash:fingerprint([...sentSourceIds]),failureOrigin:failed[0]??null,secondary:failed.slice(1) as string[]}}
+    candidate:{expectedTarget,targetEligible,targetShown,snapshotHash:fingerprint(paidCalls.map(call=>call.input)),failureOrigin:failed[0]??null,secondary:failed.slice(1) as string[]}}
   }
   const experiment:V4Trace={category:'insufficient-evidence',calls:0,rejectReason:null}
   let experimentalMaterial:SavedTaskMaterial|null=null,paidRecord:Record<string,unknown>|null=null,foreground:Awaited<ReturnType<typeof runControlledQualityHost>>|null=null
@@ -201,7 +201,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    if(context.status==='ready'){permit.stage(context.memoryIds);await permit.assertCurrent(credential);permit.markSent()}
    // This follow-up is an actual Host task with a controlled stream, never a paid quality sample.
    let followup:{mode:'controlled-production-host';sent:{system:string;prompt:string}[];ledger:LedgerRecord}|null=null
-   if(!signal.aborted&&!options?.hostBeforeConsolidation){
+   if(!signal.aborted){
     const relPath='followup.md',prompt=spec.prompt,raw='/'+prompt
     await writeFile(path.join(root,relPath),spec.body+'\n\n'+raw+'\n')
     const sent:{system:string;prompt:string}[]=[]
@@ -223,14 +223,14 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
     finally{signal.removeEventListener('abort',stop)}
    }
    if(options?.strategy==='continuity'){
-    const hostProof=foreground??followup,actualDependencies=hostProof?.ledger.chapter?.provenance?.version===2?hostProof.ledger.chapter.provenance.memoryDeps:[]
+    const hostProof=followup??foreground,actualDependencies=hostProof?.ledger.chapter?.provenance?.version===2?hostProof.ledger.chapter.provenance.memoryDeps:[]
     const selected=context.status==='ready'?[...permit.recall.core,...(permit.recall.recent??[]),...permit.recall.demand].filter(e=>context.memoryIds.includes(e.id)):[]
     const selectedCost=(kind:'long'|'recent'|'fact')=>selected.filter(e=>kind==='recent'?e.category==='recent':e.category!=='recent'&&(kind==='long'?e.layer==='core':e.layer==='demand')).reduce((n,e)=>n+conservativeTokens('\n'+memorySection(e)),0)
     const costs={long:selectedCost('long'),recent:selectedCost('recent'),fact:selectedCost('fact')},budgetTokens=Math.max(1,Math.min(16384,credential.contextTokens-8192)),total=costs.long+costs.recent+costs.fact
     const budget={inputBudgetTokens:budgetTokens,selectedIds:selected.map(e=>e.id),actualHostDependencies:actualDependencies,costs,total,limit:Math.min(4096,Math.floor(.2*budgetTokens)),within:total<=Math.min(4096,Math.floor(.2*budgetTokens))&&costs.long<=2048&&costs.recent<=1024&&costs.fact<=2048&&selected.filter(e=>e.category==='recent').length<=4&&selected.filter(e=>e.category!=='recent'&&e.layer==='demand').length<=8}
     let dispatchVerified=context.status==='ready';if(dispatchVerified)try{await permit.assertCurrent(credential)}catch{dispatchVerified=false}
     const dependencies=permit.dependencies(),sameVersionVerified=(await permit.validateDependencies(dependencies)).every(Boolean),versionMismatchRejected=(await permit.validateDependencies(dependencies.map(d=>({...d,version:d.version+1})))).every(v=>!v)
-    const actualHostSelected=actualDependencies.map(d=>[...beforeAll,...entries].find(e=>e.id===d.id&&e.version===d.version)).filter((e):e is typeof entries[number]=>!!e)
+    const actualHostSelected=actualDependencies.map(d=>[...beforeAll,...entries,...service.snapshot().record.recent].find(e=>e.id===d.id&&e.version===d.version)).filter((e):e is typeof entries[number]=>!!e)
     const actualHostInputBudget=foreground?.inputBudgetTokens??budgetTokens
     const actualCosts={long:0,recent:0,fact:0};for(const e of actualHostSelected)actualCosts[e.category==='recent'?'recent':e.layer==='core'?'long':'fact']+=conservativeTokens('\n'+memorySection(e))
     const actualTotal=actualCosts.long+actualCosts.recent+actualCosts.fact

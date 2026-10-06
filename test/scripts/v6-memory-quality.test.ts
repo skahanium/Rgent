@@ -162,7 +162,7 @@ describe('v6 三道验收门', () => {
   expect(summary.verdict).toBe('unmeasured-environment')
  })
  it('三项即时否决只对最终生效内容生效，并让该例计零', () => {
-  const rows=patch(happy(),'v6-attribution-01',{}, {...fullReview(byId('v6-attribution-01')),hardViolations:['wrong-attribution']})
+  const rows=patch(happy(),'v6-attribution-01',{}, {...fullReview(byId('v6-attribution-01')),hardViolations:['wrong-attribution']}, {...fullReview(byId('v6-attribution-01')),hardViolations:['wrong-attribution'],annotator:{...annotator,identity:'review-B'}})
   const summary=v6Summary(rows,V6_QUALITY_CASES,0)
   expect(summary.vetoes).toEqual(['v6-attribution-01:wrong-attribution'])
   expect(summary.verdict).toBe('failed')
@@ -192,15 +192,15 @@ describe('v6 三道验收门', () => {
  })
  it('第二标注分歧进上下界，证据不足仍判未知', () => {
   const spec=byId('v6-correction-01'),primary=fullReview(spec)
-  const disagreed={...fullReview(spec),correct:0,omitted:primary.correct}
+  const disagreed={...fullReview(spec),correct:0,omitted:primary.correct,annotator:{...annotator,identity:'review-B'}}
   const bounds=v6CaseBounds(spec,{review:primary,reviewAlt:disagreed})
   expect(bounds.disagreement).toBe(true)
   expect(bounds.lower).toBe(0)
   expect(bounds.upper).toBe(1)
-  expect(v6CaseBounds(spec,{review:primary,reviewAlt:null})).toEqual({lower:1,upper:1,disagreement:false})
-  expect(v6CaseBounds(spec,{review:null,reviewAlt:primary}).lower).toBe(1)
+  expect(v6CaseBounds(spec,{review:primary,reviewAlt:null})).toMatchObject({lower:1,upper:1,disagreement:false})
+  expect(v6CaseBounds(spec,{review:null,reviewAlt:primary}).lower).toBe(0)
   const missing={...fullReview(spec),evidenceComplete:false,uncertainty:['no-model-output']}
-  expect(v6CaseBounds(spec,{review:missing,reviewAlt:null})).toEqual({lower:null,upper:null,disagreement:false})
+  expect(v6CaseBounds(spec,{review:missing,reviewAlt:null})).toMatchObject({lower:null,upper:null,disagreement:false})
   const summary=v6Summary(patch(happy(),'v6-correction-01',{},primary,disagreed),V6_QUALITY_CASES,0)
   expect(summary.reasons).toContain('annotation-disagreement:1')
   expect(summary.lower.dimensions.update).toBeLessThan(summary.upper.dimensions.update)
@@ -212,13 +212,13 @@ describe('v6 三道验收门', () => {
   expect(summary.metrics.D).toBe(30)
   expect(summary.metrics.T).toBe(29)
  })
- it('链内受阻步骤不计分也不计入满分，只计入派发与覆盖', () => {
+ it('链内受阻步骤保留原权重并计未知、派发与覆盖', () => {
   const rows=patch(happy(),'v6-chain-beta-2',
    {blocked:true,structured:false,terminal:false,category:'insufficient-evidence'},unassessable(byId('v6-chain-beta-2'),'no-model-output'))
   const summary=v6Summary(rows,V6_QUALITY_CASES,0)
   expect(summary.blocked).toBe(1)
   expect(summary.lower.dimensions.recent).toBe(29)
-  expect(summary.upper.dimensions.recent).toBe(29)
+  expect(summary.upper.dimensions.recent).toBe(30)
   expect(summary.coverage.chains.beta.rate).toBeCloseTo(4/5,10)
   expect(summary.metrics.D).toBe(30)
   expect(summary.metrics.overallRate).toBeCloseTo(29/30,10)
@@ -262,7 +262,7 @@ describe('v6 取证与保护', () => {
   expect(v6TerminalCategory({responses:[{reason:'MODEL_REQUEST_FAILED'}]})).toBe('service')
   expect(v6TerminalCategory({result:{receipt:{outcome:'rejected',reason:'MEMORY_OUTPUT_EMPTY'}}})).toBe('empty')
   expect(v6TerminalCategory({result:{receipt:{outcome:'rejected',reason:'MEMORY_OUTPUT_INVALID'}}})).toBe('format')
-  expect(v6TerminalCategory({result:{receipt:{outcome:'rejected',reason:'MEMORY_SOURCE_CHANGED'}}})).toBe('reference')
+  expect(v6TerminalCategory({result:{receipt:{outcome:'rejected',reason:'MEMORY_SOURCE_CHANGED'}}})).toBe('source')
   expect(v6TerminalCategory({result:{receipt:{outcome:'applied'},entries:[{id:'a'}]}})).toBe('valid')
   expect(v6TerminalCategory({result:{receipt:{outcome:'applied'},entries:[]}})).toBe('safe-empty')
   expect(v6TerminalCategory({result:{receipt:{outcome:'rejected',reason:'MEMORY_CONFIRMATION_REQUIRED'}}})).toBe('semantic-rejected')
