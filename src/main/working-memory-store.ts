@@ -99,16 +99,45 @@ export function encodeWorkingMemory(record:WorkingRecord):string{
 }
 /** 读 M3 与 M4；读取不升级，下一次经授权的真实写入在同一 CAS 内转换。M2 及更早仍按不兼容处理。 */
 export function parseWorkingMemory(raw:string):WorkingRecord{
+ // 失败时用 cause 记录出错步骤，公开码保持不变（调用方与界面仍按 MEMORY_STORAGE_INVALID 判定）。
+ let step='prefix'
  try{if(Buffer.byteLength(raw)>MAX)throw Error();const prefix=/^<!-- rgent:memory:(v3|v4) data="([A-Za-z0-9_-]+)" -->\n/.exec(raw);if(!prefix)throw Error();const data=Buffer.from(prefix[2]!,'base64url');if(data.toString('base64url')!==prefix[2])throw Error();const r=JSON.parse(data.toString()) as WorkingRecord
+  step='meta'
   if(Object.keys(r).sort().join()!=='entries,forgotten,identity,jobs,nextSequence,recent,revision,version,watermark'||![3,4].includes(Number(r.version))||(r.version===3&&prefix[1]!=='v3')||(r.version===4&&prefix[1]!=='v4')||!identifier(r.identity)||!integer(r.revision)||!integer(r.nextSequence)||!integer(r.watermark)||r.watermark>r.nextSequence||!Array.isArray(r.entries)||r.entries.length>1000||!r.entries.every(e=>object(e)&&e.category==='long')||!Array.isArray(r.recent)||r.recent.length>32||!r.recent.every(e=>object(e)&&e.category==='recent')||!Array.isArray(r.jobs)||r.jobs.length>256||!Array.isArray(r.forgotten))throw Error()
+  step='forgotten'
   for(const f of r.forgotten){if(!object(f)||Object.keys(f).sort().join()!=='entryIds,materialIds,through'||!integer(f.through)||f.through>r.nextSequence||!Array.isArray(f.materialIds)||!f.materialIds.every(identifier)||!Array.isArray(f.entryIds)||f.entryIds.some(d=>!object(d)||!identifier(d.id)||!integer(d.version)||d.version<1))throw Error()}
-  for(const job of r.jobs)if(!object(job)||!identifier(job.taskId)||typeof job.materialVersion!=='string'||!/^[a-f0-9]{64}$/.test(job.materialVersion)||!['queued','running','applied','rejected','interrupted'].includes(String(job.outcome))||!Array.isArray(job.entryIds)||!job.entryIds.every(identifier)||job.reason!==undefined&&!text(job.reason,256)||job.results!==undefined&&!jobResultsValid(job.results))throw Error()
+  for(const job of r.jobs){
+   step='job-object';if(!object(job))throw Error()
+   step='job-taskId';if(!identifier(job.taskId))throw Error()
+   step='job-materialVersion';if(typeof job.materialVersion!=='string'||!/^[a-f0-9]{64}$/.test(job.materialVersion))throw Error()
+   step='job-outcome';if(!['queued','running','applied','rejected','interrupted'].includes(String(job.outcome)))throw Error()
+   step='job-entryIds';if(!Array.isArray(job.entryIds)||!job.entryIds.every(identifier))throw Error()
+   step='job-reason';if(job.reason!==undefined&&!text(job.reason,256))throw Error()
+   step='job-results';if(job.results!==undefined&&!jobResultsValid(job.results))throw Error()
+  }
   let remaining=Buffer.from(raw.slice(prefix[0].length))
-  for(const e of allEntries(r)){const marker=/^<!-- rgent:item:(v3|v4) id="([A-Za-z0-9_-]+)" bytes="(\d+)" -->\n/.exec(remaining.subarray(0,remaining.indexOf(10)+1).toString());if(!marker||marker[1]!==prefix[1]||marker[2]!==e.id||Number(marker[3])>4096)throw Error();const start=Buffer.byteLength(marker[0]),end=start+Number(marker[3]),content=remaining.subarray(start,end);const suffix=`\n<!-- rgent:end:${prefix[1]} -->\n`;if(!Buffer.from(content.toString()).equals(content)||remaining.subarray(end,end+Buffer.byteLength(suffix)).toString()!==suffix)throw Error();e.content=content.toString();remaining=remaining.subarray(end+Buffer.byteLength(suffix));if(!entryValid(e)||e.sources.some(s=>s.sequence>r.nextSequence))throw Error();if(e.category==='recent'){if(!recentValid(e)||e.content!==recentContent(e.recent))throw Error()}else if(e.category!=='long')throw Error()}
+  for(const e of allEntries(r)){step='entry-marker';const marker=/^<!-- rgent:item:(v3|v4) id="([A-Za-z0-9_-]+)" bytes="(\d+)" -->\n/.exec(remaining.subarray(0,remaining.indexOf(10)+1).toString());if(!marker||marker[1]!==prefix[1]||marker[2]!==e.id||Number(marker[3])>4096)throw Error();const start=Buffer.byteLength(marker[0]),end=start+Number(marker[3]),content=remaining.subarray(start,end);const suffix=`\n<!-- rgent:end:${prefix[1]} -->\n`;if(!Buffer.from(content.toString()).equals(content)||remaining.subarray(end,end+Buffer.byteLength(suffix)).toString()!==suffix)throw Error();e.content=content.toString();remaining=remaining.subarray(end+Buffer.byteLength(suffix));step='entry';if(!entryValid(e)||e.sources.some(s=>s.sequence>r.nextSequence))throw Error();if(e.category==='recent'){if(!recentValid(e)||e.content!==recentContent(e.recent))throw Error()}else if(e.category!=='long')throw Error()}
+  step='tail'
   if(r.recent.some(e=>recentEncodedBytes({...r,recent:[e]})>16*1024)||recentEncodedBytes(r)>128*1024||remaining.length||new Set(allEntries(r).map(e=>e.id)).size!==allEntries(r).length)throw Error();return r
- }catch{throw Error('MEMORY_STORAGE_INVALID')}
+ }catch(error){const detail=error instanceof Error&&/^[A-Za-z0-9_.:\-]{1,80}$/.test(error.message)?`${step}:${error.message}`:step;throw new Error('MEMORY_STORAGE_INVALID',{cause:Error(detail)})}
 }
 /** All authoritative changes are a single native CAS, called through the vault mutation queue. */
+/** 只做确定性表示归一：大小写、全半角与空白差异不算新事实；不做同义词或语义合并。 */
+function sameStatement(entry:{content:string;scope:string;semantic:string},input:{content:string;scope:string;semantic:string}):boolean{
+ return entry.scope===input.scope&&entry.semantic===input.semantic&&normalizedStatement(entry.content)===normalizedStatement(input.content)
+}
+function normalizedStatement(text:string):string{return text.normalize('NFKC').toLowerCase().replace(/\s+/g,' ').trim()}
+function boundedJobResults(results:readonly MemoryJobGroupResult[]):MemoryJobGroupResult[]{
+ // 拒绝原因优先保留：界面要能说明哪些没保存、为什么。
+ const ordered=[...results.filter(r=>r.outcome==='rejected'),...results.filter(r=>r.outcome!=='rejected')],out:MemoryJobGroupResult[]=[]
+ for(const result of ordered){if(out.length>=8)break;if(Buffer.byteLength(JSON.stringify([...out,result]))>256)break;out.push(result)}
+ return out
+}
+function jobResultsValid(value:unknown):value is MemoryJobGroupResult[]{
+ if(!Array.isArray(value)||value.length>8||Buffer.byteLength(JSON.stringify(value))>256)return false
+ return value.every(item=>object(item)&&Object.keys(item).every(key=>['action','outcome','code'].includes(key))&&['add','correct','conflict','obsolete','recent'].includes(String(item.action))&&['applied','rejected','unchanged'].includes(String(item.outcome))&&(item.code===undefined||typeof item.code==='string'&&/^[A-Z][A-Z_]{0,63}$/.test(item.code)))
+}
+
 export class WorkingMemoryStore{
  private observed:{raw:string;id:string}|null=null
  constructor(private readonly filesystem:SecureVaultFs|(()=>SecureVaultFs),private readonly check:()=>void){}
@@ -300,21 +329,6 @@ export function applyMemoryRecovery(raw:string,patches:MemoryRecoveryPatch[]):st
  nextRevision(record);if(!ordinaryFits(record))throw Error('MEMORY_FILE_LIMIT');return encodeWorkingMemory(record)
 }
 
-/** 只做确定性表示归一：大小写、全半角与空白差异不算新事实；不做同义词或语义合并。 */
-function sameStatement(entry:{content:string;scope:string;semantic:string},input:{content:string;scope:string;semantic:string}):boolean{
- return entry.scope===input.scope&&entry.semantic===input.semantic&&normalizedStatement(entry.content)===normalizedStatement(input.content)
-}
-function normalizedStatement(text:string):string{return text.normalize('NFKC').toLowerCase().replace(/\s+/g,' ').trim()}
-function boundedJobResults(results:readonly MemoryJobGroupResult[]):MemoryJobGroupResult[]{
- // 拒绝原因优先保留：界面要能说明哪些没保存、为什么。
- const ordered=[...results.filter(r=>r.outcome==='rejected'),...results.filter(r=>r.outcome!=='rejected')],out:MemoryJobGroupResult[]=[]
- for(const result of ordered){if(out.length>=8)break;if(Buffer.byteLength(JSON.stringify([...out,result]))>256)break;out.push(result)}
- return out
-}
-function jobResultsValid(value:unknown):value is MemoryJobGroupResult[]{
- if(!Array.isArray(value)||value.length>8||Buffer.byteLength(JSON.stringify(value))>256)return false
- return value.every(item=>object(item)&&Object.keys(item).every(key=>['action','outcome','code'].includes(key))&&['add','correct','conflict','obsolete','recent'].includes(String(item.action))&&['applied','rejected','unchanged'].includes(String(item.outcome))&&(item.code===undefined||typeof item.code==='string'&&/^[A-Z][A-Z_]{0,63}$/.test(item.code)))
-}
 function boundedReceipts(jobs:MemoryJobReceipt[]):MemoryJobReceipt[]{
  const protectedJobs=jobs.filter(j=>['queued','running','interrupted'].includes(j.outcome))
  if(protectedJobs.length>256)throw Error('MEMORY_QUEUE_FULL')

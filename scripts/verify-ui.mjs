@@ -47,7 +47,7 @@ async function probe(name, run) {
  * 阶段体不重排缩进：这次只加包裹，减少无关改动。
  */
 function stageFailed(name, error) {
-  check(`${name}：阶段中断`, false, error instanceof Error ? error.message.slice(0, 160) : String(error))
+  check(`${name}：阶段中断`, false, error instanceof Error ? (error.message + (error.cause instanceof Error ? ' / ' + error.cause.message : '')).slice(0, 200) : String(error))
 }
 
 function sleep(ms) {
