@@ -308,3 +308,17 @@ it('真实前置Host链用观测taskId解析后续目标并留证后置发送版
   expect(result.followup!.inputBudgetTokens).toBeGreaterThan(0)
  }finally{rmSync(base,{recursive:true,force:true})}
 },20000)
+
+
+it('actual Electron runner options keep v5 historical non-chain saving and all new v6 Host saving explicit',async()=>{
+ const {readFileSync}=await import('node:fs'),code=readFileSync(new URL('../../scripts/memory-quality-electron.ts',import.meta.url),'utf8')
+ const foreground=(version:5|6,chain:boolean)=>{
+  const start=code.indexOf('async function runV'+version+'('),end=version===5?code.indexOf('async function runV6('):code.length,section=code.slice(start,end)
+  const marker="controller.signal,{strategy:'continuity'",at=section.indexOf(marker)+marker.indexOf('{');expect(section.includes(marker)).toBe(true)
+  let depth=0,stop=at;for(;stop<section.length;stop++){if(section[stop]==='{')depth++;if(section[stop]==='}'&&--depth===0)break}
+  const expression=section.slice(at,stop+1)
+  return new Function('spec','model','root','path','targetTaskId','round','blocked','frozen','return ('+expression+')')({id:'fiction',chain:chain?'alpha':undefined,step:1},{modelId:'fixture'},'/fiction',path,undefined,0,false,{revision:10}).hostBeforeConsolidation
+ }
+ expect(foreground(5,false)).toBe(false);expect(foreground(5,true)).toBe(true)
+ expect(foreground(6,false)).toBe(true);expect(foreground(6,true)).toBe(true)
+})

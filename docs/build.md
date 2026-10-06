@@ -1742,3 +1742,6 @@ v6 双标覆盖由同一评分器核验：两份完整、有效、身份不同�
 
 
 小提交工程门：定向四文件 93／0（`/tmp/rgent-integrity-p4-first-targeted.log`），包含日志总账既有上限回归；类型／文档／diff 核验。首轮类型检查发现测试未收窄 LedgerProvenance V1/V2 联合，修为实际 version===2 分支；这是测试类型错误，不计产品失败。小提交独立复核及后续连续场次尚待，不代称最终完整门。
+
+
+包4小提交独立复核发现 P2：runner continuity 默认前台 Host 后，旧 v5 非链历史入口亦受默认影响。新 v6 全部 Host 不改；runV5 显式 hostBeforeConsolidation=!!spec.chain，恢复旧非链 false／链 true。反例从 Electron 实际调用参数表达式取值，不读私人产物或运行模型；先红非链 undefined（会落新默认），修后四组合通过，日志 `/tmp/rgent-integrity-p4-v5-history-{red,green}.log`。该参数夹具最初漏给 round/blocked/frozen 环境变量的执行错误单列，不是产品红。定向入口例1／0、类型／文档／diff核验；其余小提交已通过独立审查，后半包仍施工中。
