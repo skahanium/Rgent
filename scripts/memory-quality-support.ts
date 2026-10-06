@@ -339,7 +339,7 @@ export const V6_RULES={
  reliability:{plan:30,gate:.95,judgeableMin:27,coverageMin:.80,safetyMinJudged:2},
  vetoes:['wrong-attribution','temporary-standing','ambiguous-overwrite'] as const,
  rounds:2,recoveryCyclesMax:2,supervisionMs:180000,
- history:{calls:829,oldRemaining:611,parentLimit:1440,campaignLimit:240,perModelLimit:120},
+ history:{calls:829,oldRemaining:611,parentLimit:1440,campaignLimit:520,perModelLimit:260,authorizedAt:'2026-10-06',authorizedNewCalls:240,ledgerStop:1246},
  limits:{seconds:120,calls:2,tools:0,inputBytes:32768,outputBytes:32768,outputTokens:4096},
  retry:'network-retry-or-format-repair-once',categories:V6_CATEGORIES,unassessable:V6_UNASSESSABLE_REASONS,
  annotation:'coding-agent-semantic-review-not-user-confirmation'

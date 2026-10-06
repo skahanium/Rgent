@@ -304,6 +304,14 @@ it('inherits only the material, cited-source and replaced-entry dependencies',()
  // 库里其余条目不再被整批写成本条的依赖：更正它们不会让这条一起暂停。
  expect(ids).not.toContain('unrelated')
  expect(ids).not.toContain('replaced')
+ // 近期背景是会话日志、不是前提：它不作依赖父，也不继承记忆依赖。
+ const log:any=entry('log-1',1,[src('s-log')]);(log as any).category='recent'
+ const materialWithLog:any={...material,memoryDeps:[{id:'log-1',version:1},{id:'material-memory',version:2}]}
+ const [withLog]=inheritInputs([cited],materialWithLog,[log] as unknown as Parameters<typeof inheritInputs>[2],undefined)
+ expect(((withLog!.memoryDeps??[]) as unknown as {id:string}[]).map(d=>d.id)).not.toContain('log-1')
+ const [asLog]=inheritInputs([cited],materialWithLog,[log] as unknown as Parameters<typeof inheritInputs>[2],undefined,{skipMemoryDeps:true})
+ expect(asLog!.memoryDeps??[]).toEqual([])
+ expect((asLog!.sourceDeps as unknown as {id:string}[]).length).toBeGreaterThan(0)
  expect(((out!.sourceDeps??[]) as unknown as {id:string}[]).map(d=>d.id).sort()).toEqual(['file','material-file'])
 })
 it('corrects an actually Host-sent old version without self dependency and retains its upstream forgetting closure',async()=>{

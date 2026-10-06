@@ -56,7 +56,7 @@ describe('v6 冻结与派发门', () => {
 })
 
 describe('v6 计账与调用上限', () => {
- it('campaign 上限 240 与每模型 120 生效，且沿用同一份总账', () => {
+ it('campaign 上限 420 与每模型 260 生效，且沿用同一份总账', () => {
   const budget=mkdtempSync(path.join(os.tmpdir(),'rgent-v6-journal-'))
   try{
    const historyCalls=V6_RULES.history.calls

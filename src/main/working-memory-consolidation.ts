@@ -122,11 +122,14 @@ function proposalGroups(values:unknown[],sources:WorkingSource[],entries:Working
  *  旧实现把库里其余条目整批写成 memoryDeps，导致更正 A 会让与 A 无关的 B 一起暂停，并沿链继续传染
  *  （v6 冻结实测的 chain-alpha 连锁已证实）。上下文里出现过某条记忆不等于本条依赖它；
  *  账本层面的"本场实际使用依赖"另由 ledger provenance 记录，不因此丢失。 */
-export function inheritInputs(refs:WorkingSource[],material:SavedTaskMaterial,entries:WorkingEntry[],replacedId?:string):WorkingSource[]{
+export function inheritInputs(refs:WorkingSource[],material:SavedTaskMaterial,entries:WorkingEntry[],replacedId?:string,options?:{skipMemoryDeps?:boolean}):WorkingSource[]{
+ const logIds=new Set(entries.filter(e=>e.category==='recent').map(e=>e.id))
  const sourceDeps=[...material.sourceDeps,...entries.filter(e=>e.id===replacedId).flatMap(e=>e.sources.flatMap(s=>s.sourceDeps))].map(d=>({...d,permissionTier:'reference' as const}))
- const memoryDeps=[...material.memoryDeps.map(d=>({id:d.id,version:d.version})),...refs.flatMap(s=>s.memoryDeps),...entries.filter(e=>e.id===replacedId).flatMap(e=>e.sources.flatMap(s=>s.memoryDeps))]
+ // 近期背景是会话日志、不是前提：它既不作别人的依赖父，自己也不继承记忆依赖，否则"更正一条约定"
+ // 会因为日志依赖旧版本而连带把更正本身暂停（r4／r6 链式 α4 已复现）。
+ const memoryDeps=options?.skipMemoryDeps?[]:[...material.memoryDeps.filter(d=>!logIds.has(d.id)).map(d=>({id:d.id,version:d.version})),...refs.flatMap(s=>s.memoryDeps),...entries.filter(e=>e.id===replacedId).flatMap(e=>e.sources.flatMap(s=>s.memoryDeps))]
  const unique=<T>(items:T[])=>[...new Map(items.map(item=>[JSON.stringify(item),item])).values()]
- return refs.map(s=>({...structuredClone(s),sourceDeps:unique([...s.sourceDeps,...sourceDeps]),memoryDeps:unique([...s.memoryDeps,...memoryDeps].filter(d=>d.id!==replacedId))}))
+ return refs.map(s=>({...structuredClone(s),sourceDeps:unique([...s.sourceDeps,...sourceDeps]),memoryDeps:options?.skipMemoryDeps?[]:unique([...s.memoryDeps,...memoryDeps].filter(d=>d.id!==replacedId))}))
 }
 function recentInput(value:unknown,sources:WorkingSource[],entries:WorkingEntry[],material:SavedTaskMaterial):WorkingRecentInput|null|undefined{
  if(value===null)return null
@@ -134,7 +137,7 @@ function recentInput(value:unknown,sources:WorkingSource[],entries:WorkingEntry[
  const refs=value.sourceIds.map(id=>sources.find(s=>s.id===id))
  if(refs.some(s=>!s))return undefined
  const anchor=sources.find(s=>s.taskId===material.taskId&&s.kind==='ledger'&&s.classification==='command');if(!anchor)return undefined;if(!refs.includes(anchor))refs.push(anchor)
- return {sources:inheritInputs(refs as WorkingSource[],material,entries),scope:material.origin.relPath,recent:{taskId:material.taskId,noteId:material.noteId,materialVersion:material.materialVersion,createdAt:material.startedAt,outcome:material.status,sections:{goal:String(value.goal),completed:String(value.completed),blocked:String(value.blocked),next:String(value.next)},assistantDraft:value.assistantDraft}}
+ return {sources:inheritInputs(refs as WorkingSource[],material,entries,undefined,{skipMemoryDeps:true}),scope:material.origin.relPath,recent:{taskId:material.taskId,noteId:material.noteId,materialVersion:material.materialVersion,createdAt:material.startedAt,outcome:material.status,sections:{goal:String(value.goal),completed:String(value.completed),blocked:String(value.blocked),next:String(value.next)},assistantDraft:value.assistantDraft}}
 }
 /** 只有明确的传输失败才重试一次：认证、证书、参数、厂商拒绝与已有部分正文都不重试。 */
 function retryableTransport(error:unknown):boolean{
