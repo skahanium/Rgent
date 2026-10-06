@@ -4,7 +4,7 @@ import {
 } from '../fixtures/v6-memory-quality.ts'
 import type {V6Case} from '../fixtures/v6-memory-quality.ts'
 import {
- V6_RULES,freezeV6,qualitySummary,v6CaseScore,v6DispatchGate,v6ReviewValid,v6Summary,v6TerminalCategory,type V6Annotation,type V6Row
+ V6_RULES,freezeV6,qualitySummary,v6CaseScore,v6DispatchGate,v6ReviewValid,v6CaseBounds,v6Summary,v6TerminalCategory,type V6Annotation,type V6Row
 } from '../../scripts/memory-quality-support.ts'
 
 const annotator={identity:'review-agent-A',kind:'agent' as const,participatedInDesign:true,modelNameMasked:true,humanReviewed:false}
@@ -26,7 +26,7 @@ const happy=()=>V6_QUALITY_CASES.map(c=>row(c))
 const missing=(spec:V6Case):V6Annotation=>({...fullReview(spec),correct:0,omitted:spec.expected.units.length})
 /** 取得输出但无法判定：必须引用预注册理由。 */
 const unassessable=(spec:V6Case,reason='safety-source-mapping-missing'):V6Annotation=>({...fullReview(spec),evidenceComplete:false,uncertainty:[reason]})
-const patch=(rows:V6Row[],id:string,over:Partial<V6Row>,review?:V6Annotation)=>rows.map(r=>r.caseId===id?{...r,...over,...(review?{review}:{})}:r)
+const patch=(rows:V6Row[],id:string,over:Partial<V6Row>,review?:V6Annotation,reviewAlt?:V6Annotation)=>rows.map(r=>r.caseId===id?{...r,...over,...(review?{review}:{}),...(reviewAlt!==undefined?{reviewAlt}:{})}:r)
 
 describe('v6 fixture 冻结', () => {
  it('四个方向各五例、两条五步链、共三十例，分值合计一百', () => {
@@ -161,10 +161,49 @@ describe('v6 三道验收门', () => {
   expect(summary.verdict).toBe('failed')
   expect(v6CaseScore(byId('v6-attribution-01'),{...fullReview(byId('v6-attribution-01')),hardViolations:['wrong-attribution']})).toBe(0)
  })
- it('动作核验失败或不适用检查失败都判证据不足', () => {
-  expect(v6Summary(patch(happy(),'v6-correction-01',{actionVerified:false}),V6_QUALITY_CASES,0).verdict).toBe('insufficient-evidence')
-  const checks=patch(happy(),'v6-scope-01',{}, {...fullReview(byId('v6-scope-01')),checks:{attributionAndScope:false,noUnsupportedContent:true,noForbiddenContent:true}})
-  expect(v6Summary(checks,V6_QUALITY_CASES,0).verdict).toBe('insufficient-evidence')
+ it('已知失败进维度扣分：动作未落地与检查项失败都不再冒充证据不足', () => {
+  // 单例动作未落地按合同只扣该例 10 分（update 30→20 仍过 60%），可见但不翻判定。
+  const notLanded=v6Summary(patch(happy(),'v6-correction-01',{actionVerified:false}),V6_QUALITY_CASES,0)
+  expect(notLanded.verdict).toBe('passed')
+  expect(notLanded.reasons).toContain('action-not-landed:1')
+  expect(notLanded.lower.dimensions.update).toBe(20)
+  expect(notLanded.actionFailures).toBe(1)
+  // 足量已知失败才会把维度压到门槛之下，此时是 failed，而不是"证据不足"。
+  const many=['v6-correction-01','v6-ambiguous-01','v6-ambiguous-10','v6-duplicate-01'].reduce((rows,id)=>patch(rows,id,{actionVerified:false}),happy())
+  const dropped=v6Summary(many,V6_QUALITY_CASES,0)
+  expect(dropped.verdict).toBe('failed')
+  expect(dropped.reasons).toContain('action-not-landed:4')
+  // 只剩未被扣分的去重例（权重 5）仍得分。
+  expect(dropped.lower.dimensions.update).toBe(5)
+  expect(dropped.gates.evidence).toBe(true)
+  const spec=byId('v6-scope-01')
+  const checks=v6Summary(patch(happy(),'v6-scope-01',{}, {...fullReview(spec),checks:{attributionAndScope:false,noUnsupportedContent:true,noForbiddenContent:true}}),V6_QUALITY_CASES,0)
+  expect(checks.verdict).toBe('passed')
+  expect(checks.reasons).toContain('check-failures:1')
+  expect(checks.lower.dimensions.fact).toBe(16)
+  expect(checks.gates.evidence).toBe(true)
+ })
+ it('第二标注分歧进上下界，证据不足仍判未知', () => {
+  const spec=byId('v6-correction-01'),primary=fullReview(spec)
+  const disagreed={...fullReview(spec),correct:0,omitted:primary.correct}
+  const bounds=v6CaseBounds(spec,{review:primary,reviewAlt:disagreed})
+  expect(bounds.disagreement).toBe(true)
+  expect(bounds.lower).toBe(0)
+  expect(bounds.upper).toBe(1)
+  expect(v6CaseBounds(spec,{review:primary,reviewAlt:null})).toEqual({lower:1,upper:1,disagreement:false})
+  expect(v6CaseBounds(spec,{review:null,reviewAlt:primary}).lower).toBe(1)
+  const missing={...fullReview(spec),evidenceComplete:false,uncertainty:['no-model-output']}
+  expect(v6CaseBounds(spec,{review:missing,reviewAlt:null})).toEqual({lower:null,upper:null,disagreement:false})
+  const summary=v6Summary(patch(happy(),'v6-correction-01',{},primary,disagreed),V6_QUALITY_CASES,0)
+  expect(summary.reasons).toContain('annotation-disagreement:1')
+  expect(summary.lower.dimensions.update).toBeLessThan(summary.upper.dimensions.update)
+ })
+ it('零模型调用单独计数，不与派发混为一谈', () => {
+  const summary=v6Summary(patch(happy(),'v6-chain-beta-5',{calls:0,terminal:false,structured:false}),V6_QUALITY_CASES,0)
+  expect(summary.reasons).toContain('zero-call:1')
+  expect(summary.zeroCall).toBe(1)
+  expect(summary.metrics.D).toBe(30)
+  expect(summary.metrics.T).toBe(29)
  })
  it('链内受阻步骤不计分也不计入满分，只计入派发与覆盖', () => {
   const rows=patch(happy(),'v6-chain-beta-2',
