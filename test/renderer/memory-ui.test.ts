@@ -387,3 +387,13 @@ it('still reports saved groups and the rejected recent update when saved entries
  expect(body.querySelector('.memory-job')!.textContent).not.toContain('长期内容 1 条')
  dispose();body.remove()
 })
+
+it('partial results without entryIds disclose missing detail without claiming the whole job completed',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ const jobs:MemoryView['jobs']=[{taskId:'partial-no-detail',materialVersion:'m1',outcome:'applied',retryable:false,results:[{action:'correct',outcome:'applied'},{action:'recent',outcome:'rejected',code:'MEMORY_DEADLINE'}]}]
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,jobs}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ const text=body.querySelector('.memory-job')!.textContent
+ expect(text).toContain('可用部分已保存；写入明细未提供')
+ expect(text).not.toContain('本场已完成');expect(text).not.toContain('长期内容 1 条');expect(text).not.toContain('近期背景 0 块')
+ dispose();body.remove()
+})

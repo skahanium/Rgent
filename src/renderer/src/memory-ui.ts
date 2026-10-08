@@ -300,7 +300,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
       if(partial&&rejected.some(result=>result.action==='recent')&&!job.results?.some(result=>result.action==='recent'&&result.outcome==='applied'))row.append(paragraph('已保存可用部分；近期背景未更新。请查看下方原因；可在上方查看已保存内容。'))
       if(partial&&rejected.some(result=>result.action!=='recent')&&!job.results?.some(result=>result.action!=='recent'&&result.outcome==='applied'))row.append(paragraph('已保存可用部分；长期内容未保存。请查看下方原因。'))
       if(job.outcome==='applied'&&rejected.length&&!applied)row.append(paragraph('本场没有可保存的结果；请查看下方原因。'))
-      else if(job.outcome==='applied'&&!job.entryIds)row.append(paragraph('本场已完成；写入明细未提供。'))
+      else if(job.outcome==='applied'&&!job.entryIds)row.append(paragraph(partial?'可用部分已保存；写入明细未提供。':'本场已完成；写入明细未提供。'))
       else if(job.outcome==='applied'){
         const matched=(job.entryIds??[]).map(id=>view?.entries.find(e=>e.id===id))
         if(matched.every(Boolean)){
