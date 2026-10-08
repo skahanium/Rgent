@@ -124,7 +124,21 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    catch(e){call.reason=e instanceof Error&&/^[A-Z_]{3,80}$/.test(e.message)?e.message:'EVALUATION_REQUEST_FAILED';throw e}
    finally{dispatch.finishedAt=new Date().toISOString();call.finishedAt=dispatch.finishedAt}
   }
-  const evidenceSnapshot=()=>({root,sources:[...sentSourceIds].flatMap(id=>{const source=sourceProofs.get(id);return source?[structuredClone(source)]:[]}),dispatches:structuredClone(dispatches),verifications:structuredClone(verifications),capturedAt:new Date().toISOString(),learningCheck:structuredClone(learningCheck),savedMaterial:experimentalMaterial?structuredClone(experimentalMaterial):null})
+  // 原始响应结构与最终准入分别留证；patch 不是完整 recent/proposals 文档。
+  const parseable=(call:PaidCall)=>{
+   try{
+    if(options?.strategy!=='continuity')parseMemorySuggestions(call.body)
+    else if(call.payload?.repair?.mode!=='patch')parseContinuitySuggestions(call.body)
+    else{
+     let text=call.body.trim();const fence=/^```json\s*\n([\s\S]*)\n```$/i.exec(text);if(fence)text=fence[1]!
+     const patch=JSON.parse(text)
+     if(!patch||typeof patch!=='object'||Array.isArray(patch)||Object.keys(patch).some(k=>!['recent','proposals'].includes(k))||!Array.isArray(patch.proposals))return false
+     if(patch.proposals.some((item:any)=>!item||typeof item!=='object'||Object.keys(item).sort().join()!=='index,value'||!Number.isInteger(item.index)||item.index<0||item.value!==null&&(typeof item.value!=='object'||Array.isArray(item.value))))return false
+    }
+    return true
+   }catch{return false}
+  }
+  const evidenceSnapshot=()=>({root,sources:[...sentSourceIds].flatMap(id=>{const source=sourceProofs.get(id);return source?[structuredClone(source)]:[]}),dispatches:structuredClone(dispatches),verifications:structuredClone(verifications),capturedAt:new Date().toISOString(),responseStructures:paidCalls.map(call=>({phase:call.phase,structured:parseable(call)})),learningCheck:structuredClone(learningCheck),savedMaterial:experimentalMaterial?structuredClone(experimentalMaterial):null})
   await service.initialize()
   if(spec.seed){
    const seed=spec.seed,note=await session.readOpened('baseline.md'),seedTask='initial-'+spec.id,tracker=new TaskMaterialTracker()
@@ -144,19 +158,6 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
   let actionEvidence:{state?:'success'|'failure'|'unknown';finalTargets?:{id:string;version:number}[];requiresLoad?:boolean;passed:boolean;scopeChanged:boolean;duplicates:number;subject:string|null}={passed:false,scopeChanged:false,duplicates:0,subject:null}
   const v6Fields=(facts:{before?:any[];beforeAll?:any[];entries?:any[];receipt?:any;controlled?:any;blocked?:boolean})=>{
    const entries=facts.entries??[],beforeFact=facts.before??[],all=facts.beforeAll??beforeFact,receipt=facts.receipt??null
-   // 原始响应结构与最终准入分别留证；patch 不是完整 recent/proposals 文档。
-   const parseable=(call:PaidCall)=>{
-    try{
-     if(options?.strategy!=='continuity')parseMemorySuggestions(call.body)
-     else if(call.payload?.repair?.mode!=='patch')parseContinuitySuggestions(call.body)
-     else{
-      const patch=JSON.parse(call.body)
-      if(!patch||typeof patch!=='object'||Array.isArray(patch)||Object.keys(patch).some(k=>!['recent','proposals'].includes(k))||!Array.isArray(patch.proposals))return false
-      if(patch.proposals.some((item:any)=>!item||typeof item!=='object'||Object.keys(item).sort().join()!=='index,value'||!Number.isInteger(item.index)||item.index<0||item.value!==null&&(typeof item.value!=='object'||Array.isArray(item.value))))return false
-     }
-     return true
-    }catch{return false}
-   }
    const terminal=paidCalls.some(call=>!call.reason&&call.finishReason==='stop')
    // 合法空提议也算取得完整可解析结构化输出。
    const structured=paidCalls.some(call=>!call.reason&&call.finishReason==='stop'&&parseable(call))

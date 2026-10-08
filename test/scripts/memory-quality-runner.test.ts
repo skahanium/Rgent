@@ -236,3 +236,18 @@ it('records protocol repair purpose and binds every distinct serialized request'
  expect(result.evidence.dispatches[1]!.request!.content).not.toBe(result.evidence.dispatches[0]!.request!.content)
  expect(result.structured).toBe(true)
 })
+
+
+it.each(['bare','fence','prose'] as const)('counts %s patch response structure independently from the first document',async envelope=>{
+ let calls=0
+ const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){
+  calls++;const p=JSON.parse(String(input.messages[0]!.content)),source=p.sources.find((s:any)=>s.classification==='command')
+  let body:string
+  if(calls===1)body=JSON.stringify({recent:null,proposals:[{action:'add',content:'本库报告使用蓝鹭术语',scope:'本库',sourceIds:[source.id],semantic:'standing',layer:'core',attribution:'人的口令',authority:[{sourceId:source.id,quote:'以后本库'}]}]})
+  else{expect(p.repair.mode).toBe('patch');const patch=JSON.stringify({proposals:[{index:0,value:null}]});body=envelope==='fence'?'```json\n'+patch+'\n```':envelope==='prose'?'这是补丁：\n'+patch:patch}
+  yield {type:'text',text:body};yield {type:'finish',reason:'stop'}
+ },new AbortController().signal,{strategy:'continuity'})
+ expect(calls).toBe(2)
+ expect(result.evidence.responseStructures).toEqual([{phase:'proposal',structured:true},{phase:'protocol-repair',structured:envelope!=='prose'}])
+ expect(result.structured).toBe(true)
+})
