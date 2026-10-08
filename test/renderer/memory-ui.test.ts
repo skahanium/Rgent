@@ -63,7 +63,9 @@ it('discloses partial consolidation: saved groups, rejected groups and the speci
   results:[{action:'recent' as const,outcome:'applied' as const},{action:'correct' as const,outcome:'rejected' as const,code:'MEMORY_CHANGED'}]}]
  const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,entries:[recentEntry],jobs}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
  const text=body.querySelector('.memory-job')?.textContent??''
- expect(text).toContain('部分保存：已保存 1 组、未保存 1 组')
+ const title=body.querySelector('.memory-job-result')!.textContent!
+ expect(title).toContain('最近一次整理 · 部分保存 · 已保存 1 组、未保存 1 组')
+ expect(title.match(/部分保存/g)).toHaveLength(1)
  expect(text).toContain('未保存的分组：更正')
  expect(text).not.toContain('MEMORY_CHANGED')
  expect(text).toContain('记录在核对期间发生变化')

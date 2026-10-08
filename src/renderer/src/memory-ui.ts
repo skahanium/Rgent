@@ -288,7 +288,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     const jobLabel=(job:MemoryView['jobs'][number],index:number)=>{
       const {applied,rejected,partial}=jobResults(job)
       const outcome=partial?'部分保存':job.outcome==='applied'&&rejected.length&&!applied?'没有写入':({queued:'等待整理',running:'正在整理',applied:'已完成',rejected:'没有写入',interrupted:'已中断',unavailable:'暂不可用', 'handed-off':'已移交'})[job.outcome]
-      const partialNote=rejected.length?` · ${partial?`部分保存：已保存 ${applied} 组、未保存 ${rejected.length} 组`:`未保存 ${rejected.length} 组`}`:''
+      const partialNote=rejected.length?` · ${partial?`已保存 ${applied} 组、未保存 ${rejected.length} 组`:`未保存 ${rejected.length} 组`}`:''
       return `${index===0?'最近一次整理':'整理记录 '+(index+1)} · ${outcome}${partialNote}${job.reason?` · ${memoryErrorText(job.reason)}`:''}`
     }
     for(const [index,job] of [...(view?.jobs??[])].reverse().entries()){
