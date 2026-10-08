@@ -70,7 +70,7 @@ it('runs every chain foreground before paid consolidation and hands off its actu
    const p=JSON.parse(String(input.messages[0]!.content))
    // 第 5 步的近期与长期均引用本场三份实际材料并继承实际前台输入依赖；忘前一步实际父而非本步新建块。
    const sourceIds=p.sources.map((s:any)=>s.id)
-   const proposals=step===5?[{action:'add',content:'青灯项目下一步核对版本号。',layer:'demand',scope:'本库',sourceIds,semantic:'fact',attribution:'受控夹具',reviewAt:null}]:[]
+   const proposals=step===5?[{action:'add',content:'青灯项目下一步核对版本号。',scope:'本库',sourceIds,semantic:'fact',attribution:'受控夹具',reviewAt:null}]:[]
    yield {type:'text',text:JSON.stringify({recent:{goal:'青灯项目',completed:`第${step}份目录完成（前步真实输出）`,blocked:'版本待核',next:'核对版本',sourceIds,assistantDraft:false},proposals})};yield {type:'finish',reason:'stop'}
   },new AbortController().signal,{strategy:'continuity',base,noteName:`chain-${step}.md`,hostBeforeConsolidation:true,verifyClosure:step===5,...(step===5?{closureTargetId:steps[3]!.recentId}: {})})
   console.info('V5_CHAIN_TRACE',JSON.stringify({step,elapsedMs:performance.now()-stepStarted,closure:result.controlled?.closure?.affectedIds,actualIds:result.dependencies.map((d:any)=>d.id),entries:result.entries.map((e:any)=>({id:e.id,category:e.category,sourceCount:e.sources.length,deps:[...new Set(e.sources.flatMap((s:any)=>s.memoryDeps.map((d:any)=>d.id+'@'+d.version)))]}))}))
@@ -107,7 +107,7 @@ it('includes explicit correction and Chinese-seed English repetition with genuin
  const credential={provider:'custom' as const,baseURL:'https://fiction.test/v1',modelId:'fiction',apiKey:'private-secret',contextTokens:32768}
  for(const c of [correction,duplicate]){const result=await runMemoryQualityCase({id:c.id,group:c.group==='standing'?'standing':'fact',heldOut:false,prompt:c.prompt,body:c.body,answer:c.answer,seed:c.seed,expected:{required:[],forbidden:[],notes:''}},credential,async function*(input){
   const p=JSON.parse(String(input.messages[0]!.content));if(c===correction){expect(p.memory).toHaveLength(1);expect(p.memory[0].content).toBe(c.seed!.content)}
-  const old=p.memory[0];yield {type:'text',text:JSON.stringify({recent:null,proposals:c===correction?[{action:'correct',id:old.id,version:old.version,content:'石桥项目每两周检查一次。',layer:'demand',scope:'本库',semantic:'fact',attribution:'人的已确认更正',reviewAt:null,sourceIds:[p.sources.find((s:any)=>s.kind==='ledger').id]}]:[]})};yield {type:'finish',reason:'stop'}
+  const old=p.memory[0];yield {type:'text',text:JSON.stringify({recent:null,proposals:c===correction?[{action:'correct',target:old.id,content:'石桥项目每两周检查一次。',scope:'本库',semantic:'fact',attribution:'人的已确认更正',reviewAt:null,sourceIds:[p.sources.find((s:any)=>s.kind==='ledger').id]}]:[]})};yield {type:'finish',reason:'stop'}
  },new AbortController().signal,{strategy:'continuity'})
  expect(support.v5ControlledStatus(c,result)).toBe('passed');expect(result.before[0].content).toBe(c.seed!.content);expect(result.completed).toBe(true);expect(result.initialState.seeded).toBe(true);expect(result.entries.filter((e:any)=>e.category==='long'&&e.status==='active')).toHaveLength(1)
  if(c===correction)expect(result.entries[0].content).toBe('石桥项目每两周检查一次。');else expect(result.entries[0].content).toBe(c.seed!.content)
@@ -143,7 +143,12 @@ it('does not treat the unchanged applied receipt as a rejected relearning attemp
  const result=await runMemoryQualityCase({id:c.id,group:'standing',heldOut:false,prompt:c.prompt,body:c.body,answer:c.answer,seed:c.seed,expected:{required:[],forbidden:[],notes:''}},credential,async function*(){yield {type:'text',text:'{"recent":null,"proposals":[]}'};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'continuity',verifyClosure:true})
  expect(result.receipt).toMatchObject({outcome:'applied',entryIds:[]})
  expect(result.controlled?.closure?.replay.receipt).not.toEqual(result.receipt)
- expect(result.controlled?.closure?.replay.proposalRejected).toBe(true)
+ expect(result.controlled?.closure?.replay.proposalRejected).toBe(false)
+ expect(result.controlled?.closure?.replay.explicitBlock).toBe(true)
+ expect(result.controlled?.closure?.replay.receipt).toMatchObject({reason:expect.stringMatching(/SOURCE|DEPENDENCY|FORGOTTEN/)})
+ const proposal=(result.controlled?.closure?.replay.sent as any)?.proposal.proposals[0]
+ expect(proposal).not.toHaveProperty('layer')
+ expect(proposal.authority.length).toBeGreaterThan(0)
  expect(result.controlled?.closure?.replay.freshTerminal).toBe(true)
  expect(result.controlled?.closure?.replay.validProposalSources).toBe(true)
  expect(result.controlled?.closure?.passed).toBe(true)

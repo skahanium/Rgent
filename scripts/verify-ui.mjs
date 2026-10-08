@@ -2581,7 +2581,7 @@ function createControlledHostServer(memoryRequests,toolLoopRequests) {
           const source = (material.sources??[]).find(s=>s.classification==='command' && s.text.includes('长期记住'))
           // 生产整理已切共同管线（continuity-m4）：回执必须是 {recent, proposals}，长期约定必须带
           // 逐字存在于 command 来源里的 authority 原话；旧式 {proposals:[…]} 会被判格式失败。
-          const proposal = source ? [{action:'add',content:'后续回答请用中文简短表达（记忆验收）。',layer:'core',scope:'当前库',semantic:'standing',attribution:'本场人的明确长期口令',sourceIds:[source.id],reviewAt:null,authority:[{sourceId:source.id,quote:'长期记住'}]}] : []
+          const proposal = source ? [{action:'add',content:'后续回答请用中文简短表达（记忆验收）。',scope:'当前库',semantic:'standing',attribution:'本场人的明确长期口令',sourceIds:[source.id],reviewAt:null,authority:[{sourceId:source.id,quote:'长期记住'}]}] : []
           const payload = {recent:null, proposals:proposal}
           response.writeHead(200, {'content-type':'text/event-stream'})
           response.write(`data: ${JSON.stringify({id:'memory-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{content:JSON.stringify(payload)},finish_reason:null}]})}\n\n`)

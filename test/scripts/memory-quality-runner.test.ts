@@ -1,3 +1,4 @@
+import {WorkingMemoryConsolidation} from '../../src/main/working-memory-consolidation.ts'
 import {WorkingMemoryStore} from '../../src/main/working-memory-store.ts'
 import {createHash} from 'node:crypto'
 import {existsSync} from 'node:fs'
@@ -194,4 +195,44 @@ it('labels a real learning-material rejection with its own code instead of the o
 
 it('refuses an explicit closure target that the actual Host did not load instead of falling back',async()=>{
  await expect(runner.runMemoryQualityCase(sample,credential,async function*(input){const p=JSON.parse(String(input.messages[0]!.content)),source=p.sources.find((s:any)=>s.classification==='command');yield {type:'text',text:JSON.stringify({recent:{goal:'蓝鹭报告',completed:'术语已确认',blocked:'',next:'继续报告',sourceIds:[source.id],assistantDraft:false},proposals:[]})};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'continuity',verifyClosure:true,closureTargetId:'not-loaded'})).rejects.toThrow('EVALUATION_CLOSURE_TARGET_UNAVAILABLE')
+})
+
+it('binds short wire references to verified production sources and preserves the serialized request',async()=>{
+ const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){
+  const p=JSON.parse(String(input.messages[0]!.content)),source=p.sources.find((s:any)=>s.classification==='command')
+  expect(source.id).toMatch(/^s\d+_[a-f0-9]+$/)
+  yield {type:'text',text:JSON.stringify({recent:null,proposals:[{action:'add',content:'本库报告使用蓝鹭术语',scope:'本库',sourceIds:[source.id],semantic:'standing',attribution:'人的口令',reviewAt:null,authority:[{sourceId:source.id,quote:'以后本库'}]}]})}
+  yield {type:'finish',reason:'stop'}
+ },new AbortController().signal,{strategy:'continuity'})
+ expect(result.receipt?.reason).not.toBe('MEMORY_MATERIAL_UNVERIFIED')
+ expect(result.entries).toHaveLength(1)
+ expect(result.evidence.dispatches[0]?.mapped).toBe(true)
+ expect(result.evidence.dispatches[0]?.sourceIds.every(id=>result.evidence.sources.some(s=>s.id===id))).toBe(true)
+ expect(result.evidence.dispatches[0]).toHaveProperty('request.content')
+})
+
+
+it.each(['content','hash','source'] as const)('rejects a mismatched %s observation before the provider is called',async field=>{
+ const prototype=WorkingMemoryConsolidation.prototype as any,original=prototype.response
+ const spy=vi.spyOn(prototype,'response').mockImplementation(function(this:any,...args:any[]){
+  const observe=this.ports.observeRequest
+  this.ports.observeRequest=(request:any)=>{const r=structuredClone(request);if(field==='content')r.content+=' ';if(field==='hash')r.payloadFingerprint='forged';if(field==='source')r.sources[0].id='unknown';observe(r)}
+  return original.apply(this,args)
+ })
+ let calls=0
+ try{const result=await runner.runMemoryQualityCase(sample,credential,async function*(){calls++;yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'continuity'})
+  expect(calls).toBe(0);expect(result.entries).toEqual([]);expect(result.receipt?.reason).toBe('MEMORY_MATERIAL_UNVERIFIED')
+ }finally{spy.mockRestore()}
+})
+
+
+it('records protocol repair purpose and binds every distinct serialized request',async()=>{
+ let calls=0
+ const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){
+  calls++;yield {type:'text',text:calls===1?'broken':JSON.stringify({recent:null,proposals:[]})};yield {type:'finish',reason:'stop'}
+ },new AbortController().signal,{strategy:'continuity'})
+ expect(result.evidence.dispatches.map(d=>d.phase)).toEqual(['proposal','protocol-repair'])
+ for(const dispatch of result.evidence.dispatches){expect(dispatch.request?.payloadFingerprint).toBe(createHash('sha256').update(dispatch.request!.content).digest('hex'))}
+ expect(result.evidence.dispatches[1]!.request!.content).not.toBe(result.evidence.dispatches[0]!.request!.content)
+ expect(result.structured).toBe(true)
 })

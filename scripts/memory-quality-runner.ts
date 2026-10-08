@@ -1,3 +1,5 @@
+import {createHash} from 'node:crypto'
+import type {ConsolidationRequestObservation} from '../src/main/working-memory-consolidation.ts'
 import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -71,7 +73,7 @@ export function v6MechanicalAction(spec:MemoryQualityCase,facts:{before:readonly
  return v6ActionEvidence(spec,facts).passed
 }
 
-type PaidCall={phase:'proposal'|'format-repair'|'semantic-review';payload:any;input?:unknown;body:string;finishReason:string|null;reason:string|null;startedAt:string;finishedAt?:string}
+type PaidCall={request?:ConsolidationRequestObservation;phase:'proposal'|'network-retry'|'protocol-repair'|'recent-regeneration'|'format-repair'|'semantic-review';payload:any;input?:unknown;body:string;finishReason:string|null;reason:string|null;startedAt:string;finishedAt?:string}
 
 /** Genuine production saving/consolidation/use in one disposable fictional vault. */
 export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:ModelCredential,
@@ -91,7 +93,8 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
   vault=new VaultSession(base,()=>{});vault.restore()
   const session=vault,service=new WorkingMemoryService(session,()=>null)
   const sourceProofs=new Map<string,WorkingSource>(),sentSourceIds=new Set<string>(),paidCalls:PaidCall[]=[]
-  const verifications:{id:string;startedAt:string;finishedAt:string;result:boolean;phase:string;reason?:string}[]=[],dispatches:{phase:string;sourceIds:string[];mapped:boolean;startedAt:string;finishedAt?:string}[]=[]
+  let pendingRequest:ConsolidationRequestObservation|undefined
+  const verifications:{id:string;startedAt:string;finishedAt:string;result:boolean;phase:string;reason?:string}[]=[],dispatches:{phase:string;sourceIds:string[];mapped:boolean;request?:ConsolidationRequestObservation;startedAt:string;finishedAt?:string}[]=[]
   let phase='production',actualSourceIds:string[]=[]
   const learningCheck:{checkedAt:string|null;sourceIds:string[];result:boolean|null;reason:string|null}={checkedAt:null,sourceIds:[],result:null,reason:null}
   const promptSource=service.sourceForPrompt.bind(service),fragmentSource=service.sourceForFragment.bind(service),verifySource=service.verifySource.bind(service)
@@ -104,12 +107,18 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
   const observedStream=async function*(input:ModelStepInput){
    let payload:any;try{payload=JSON.parse(String(input.messages[0]?.content))}catch{}
    const sources:Record<string,unknown>[]=(payload?.sources??payload?.material?.sources??[])
-   const ids=sources.map(s=>String(s.id));ids.forEach(id=>sentSourceIds.add(id))
-   const mapped=sources.every(s=>{const proof=sourceProofs.get(String(s.id));return !!proof&&s.text===proof.text&&s.kind===proof.kind&&s.classification===proof.classification&&s.attribution===proof.relPath})
-   const dispatch={phase:payload?.repair?'format-repair':payload?.material?'semantic-review':'proposal',sourceIds:ids,mapped,startedAt:new Date().toISOString(),finishedAt:undefined as string|undefined};dispatches.push(dispatch)
+   const content=String(input.messages[0]?.content),request=pendingRequest
+   pendingRequest=undefined
+   const continuity=options?.strategy==='continuity'
+   if(continuity&&(!request||request.content!==content||request.payloadFingerprint!==createHash('sha256').update(content).digest('hex')))throw Error('MEMORY_MATERIAL_UNVERIFIED')
+   const refs=new Map((continuity?request!.sources:sources.map(s=>({ref:String(s.id),id:String(s.id)}))).map(s=>[s.ref,s.id]))
+   const ids=sources.map(s=>refs.get(String(s.id))??'')
+   const mapped=(!continuity||refs.size===request!.sources.length&&sources.length===request!.sources.length&&new Set(sources.map(s=>s.id)).size===sources.length)&&sources.every((s,i)=>{const proof=sourceProofs.get(ids[i]!);return !!proof&&s.text===proof.text&&s.kind===proof.kind&&s.classification===proof.classification&&s.attribution===proof.relPath})
+   if(mapped){ids.forEach(id=>sentSourceIds.add(id));actualSourceIds=ids}
+   const dispatch={phase:continuity?request!.purpose:payload?.repair?'format-repair':payload?.material?'semantic-review':'proposal',sourceIds:ids,mapped,...(continuity?{request:structuredClone(request!)}:{}),startedAt:new Date().toISOString(),finishedAt:undefined as string|undefined};dispatches.push(dispatch)
    if(!mapped)throw Error('MEMORY_MATERIAL_UNVERIFIED')
-   // v6 留证：逐次调用的实际 payload、正文与终态；既有 dispatches 形状不变。
-   const call:PaidCall={phase:dispatch.phase as PaidCall['phase'],payload,input:{system:input.system,messages:structuredClone(input.messages),maxOutputTokens:input.maxOutputTokens},body:'',finishReason:null,reason:null,startedAt:new Date().toISOString(),finishedAt:undefined}
+   // v6 留证：保留短引用原始请求，同时绑定程序观察到的真实对象映射。
+   const call:PaidCall={phase:dispatch.phase as PaidCall['phase'],payload,...(continuity?{request:structuredClone(request!)}:{}),input:{system:input.system,messages:structuredClone(input.messages),maxOutputTokens:input.maxOutputTokens},body:'',finishReason:null,reason:null,startedAt:new Date().toISOString(),finishedAt:undefined}
    paidCalls.push(call)
    try{for await(const event of stream(input)){if(event.type==='text')call.body+=event.text;if(event.type==='finish')call.finishReason=event.reason;yield event}}
    catch(e){call.reason=e instanceof Error&&/^[A-Z_]{3,80}$/.test(e.message)?e.message:'EVALUATION_REQUEST_FAILED';throw e}
@@ -135,7 +144,19 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
   let actionEvidence:{state?:'success'|'failure'|'unknown';finalTargets?:{id:string;version:number}[];requiresLoad?:boolean;passed:boolean;scopeChanged:boolean;duplicates:number;subject:string|null}={passed:false,scopeChanged:false,duplicates:0,subject:null}
   const v6Fields=(facts:{before?:any[];beforeAll?:any[];entries?:any[];receipt?:any;controlled?:any;blocked?:boolean})=>{
    const entries=facts.entries??[],beforeFact=facts.before??[],all=facts.beforeAll??beforeFact,receipt=facts.receipt??null
-   const parseable=(call:PaidCall)=>{try{if(options?.strategy==='continuity')parseContinuitySuggestions(call.body);else parseMemorySuggestions(call.body);return true}catch{return false}}
+   // 原始响应结构与最终准入分别留证；patch 不是完整 recent/proposals 文档。
+   const parseable=(call:PaidCall)=>{
+    try{
+     if(options?.strategy!=='continuity')parseMemorySuggestions(call.body)
+     else if(call.payload?.repair?.mode!=='patch')parseContinuitySuggestions(call.body)
+     else{
+      const patch=JSON.parse(call.body)
+      if(!patch||typeof patch!=='object'||Array.isArray(patch)||Object.keys(patch).some(k=>!['recent','proposals'].includes(k))||!Array.isArray(patch.proposals))return false
+      if(patch.proposals.some((item:any)=>!item||typeof item!=='object'||Object.keys(item).sort().join()!=='index,value'||!Number.isInteger(item.index)||item.index<0||item.value!==null&&(typeof item.value!=='object'||Array.isArray(item.value))))return false
+     }
+     return true
+    }catch{return false}
+   }
    const terminal=paidCalls.some(call=>!call.reason&&call.finishReason==='stop')
    // 合法空提议也算取得完整可解析结构化输出。
    const structured=paidCalls.some(call=>!call.reason&&call.finishReason==='stop'&&parseable(call))
@@ -143,7 +164,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    const target=v6ExpectedTarget(spec,all,options?.targetTaskId)
    const expectedTarget=target?target.id+'@'+target.version:seed?seed.content:null
    const targetEligible=!!target
-   const targetShown=!!target&&paidCalls.some(call=>Array.isArray(call.payload?.memory)&&call.payload.memory.some((entry:any)=>entry&&typeof entry==='object'&&entry.id===target!.id&&entry.version===target!.version))
+   const targetShown=!!target&&paidCalls.some(call=>Array.isArray(call.payload?.memory)&&call.payload.memory.some((entry:any)=>entry&&typeof entry==='object'&&(call.request?call.request.candidates.some(candidate=>candidate.ref===entry.id&&candidate.id===target!.id&&candidate.version===target!.version):entry.id===target!.id&&entry.version===target!.version)))
    const codes=[receipt?.reason,...(Array.isArray(receipt?.results)?receipt.results.map((r:any)=>r?.code):[])].filter((code:any):code is string=>typeof code==='string')
    const serviceCodes=['MEMORY_SERVICE_FAILED','MEMORY_UNAVAILABLE','MEMORY_DEADLINE','MEMORY_CANCELLED','MEMORY_INTERRUPTED']
    const outputCodes=['MEMORY_OUTPUT_EMPTY','MEMORY_OUTPUT_TRUNCATED','MEMORY_OUTPUT_INVALID','MEMORY_OUTPUT_TOKEN_LIMIT','MEMORY_OUTPUT_LIMIT']
@@ -172,8 +193,8 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    session.assertSession(service.context().sessionId)
   }
   const strategyStream=options&&options.strategy!=='continuity'? v4StrategyStream(options.strategy,observedStream,experiment,recheckExperimental,credential.contextTokens):observedStream
-  const evaluatedStream=async function*(input:ModelStepInput){const payload=JSON.parse(String(input.messages[0]?.content));actualSourceIds=(payload.sources??[]).map((s:{id:string})=>s.id);for await(const event of strategyStream(input))yield event}
-  const enginePorts:ConstructorParameters<typeof WorkingMemoryConsolidation>[0]={service:()=>service,configuration:()=>({enabled:true,signature:'fictional-evaluation',credential,limits:{seconds:120,calls:2,tools:0}}),stream:input=>evaluatedStream({...input,signal:AbortSignal.any([input.signal,signal])}),changed:()=>{}}
+  const evaluatedStream=async function*(input:ModelStepInput){const payload=JSON.parse(String(input.messages[0]?.content));if(options?.strategy!=='continuity')actualSourceIds=(payload.sources??[]).map((s:{id:string})=>s.id);for await(const event of strategyStream(input))yield event}
+  const enginePorts:ConstructorParameters<typeof WorkingMemoryConsolidation>[0]={observeRequest:request=>{pendingRequest=structuredClone(request)},service:()=>service,configuration:()=>({enabled:true,signature:'fictional-evaluation',credential,limits:{seconds:120,calls:2,tools:0}}),stream:input=>evaluatedStream({...input,signal:AbortSignal.any([input.signal,signal])}),changed:()=>{}}
   engine=options?.strategy==='continuity'?new WorkingMemoryConsolidation(enginePorts):WorkingMemoryConsolidation.forHistoricalEvaluation(enginePorts)
   const activeEngine=engine,cancel=()=>activeEngine.cancel(undefined,'MEMORY_CANCELLED');signal.addEventListener('abort',cancel,{once:true})
   try{
@@ -388,7 +409,7 @@ async function verifyContinuityClosure(session:VaultSession,service:WorkingMemor
  const replay=new WorkingMemoryConsolidation({strategy:'continuity',service:()=>service,configuration:()=>({enabled:true,signature:'v5-controlled-replay',credential,limits:{seconds:120,calls:2,tools:0}}),changed:()=>{},stream:async function*(input){calls++;const p=JSON.parse(String(input.messages[0]!.content)),sourceIds=p.sources.filter((s:any)=>entry.sources.some(old=>old.text===s.text&&old.kind===s.kind&&old.classification===s.classification)).map((s:any)=>s.id)
   validProposalSources=sourceIds.length>0&&sourceIds.every((id:string)=>p.sources.some((s:any)=>s.id===id))
   const recent=entry.category==='recent'?(entry as any).recent:null
-  const proposal={recent:recent?{...recent.sections,sourceIds,assistantDraft:recent.assistantDraft}:null,proposals:recent?[]:[{action:'add',content:entry.content,layer:entry.layer,semantic:entry.semantic,scope:entry.scope,attribution:entry.attribution,reviewAt:entry.reviewAt,sourceIds}]}
+  const proposal={recent:recent?{...recent.sections,sourceIds,assistantDraft:recent.assistantDraft}:null,proposals:recent?[]:[{action:'add',content:entry.content,semantic:entry.semantic,scope:entry.scope,attribution:entry.attribution,reviewAt:entry.reviewAt,sourceIds,...(entry.semantic==='standing'?{authority:p.sources.filter((s:any)=>sourceIds.includes(s.id)&&s.classification==='command').map((s:any)=>({sourceId:s.id,quote:String(s.text).slice(0,4)})).slice(0,4)}:{})}]}
   sent={sources:structuredClone(p.sources),proposal:structuredClone(proposal)}
   yield {type:'text',text:JSON.stringify(proposal)};yield {type:'finish',reason:'stop'}}})
  const cancel=()=>replay.cancel();signal.addEventListener('abort',cancel,{once:true})

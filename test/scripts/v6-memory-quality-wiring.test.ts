@@ -231,7 +231,7 @@ describe('v6 付费记录字段', () => {
   const result=await runMemoryQualityCase(spec,credential,async function*(input){
    const payload=JSON.parse(String(input.messages[0]!.content))
    const command=payload.sources.find((source:any)=>source.classification==='command')
-   yield {type:'text',text:JSON.stringify({recent:null,proposals:[{action:'add',content:'本库先给结论再给依据',layer:'core',scope:'本库',sourceIds:[command.id],semantic:'standing',attribution:'人的口令',reviewAt:null,authority:[{sourceId:command.id,quote:String(command.text).slice(0,4)}]}]})}
+   yield {type:'text',text:JSON.stringify({recent:null,proposals:[{action:'add',content:'本库先给结论再给依据',scope:'本库',sourceIds:[command.id],semantic:'standing',attribution:'人的口令',reviewAt:null,authority:[{sourceId:command.id,quote:String(command.text).slice(0,4)}]}]})}
    yield {type:'finish',reason:'stop'}
   },new AbortController().signal,{strategy:'continuity',verifyClosure:false})
   expect(result.completed).toBe(true)
@@ -325,7 +325,7 @@ it('真实前置Host链用观测taskId解析后续目标并留证后置发送版
  const base=mkdtempSync(path.join(os.tmpdir(),'rgent-v6-real-target-')),credential={provider:'custom' as const,baseURL:'https://fiction.test/v1',modelId:'fiction',apiKey:'private-secret',contextTokens:32768}
  const first={id:'v6-chain-first',group:'standing' as const,heldOut:false,prompt:'记住本库项目记录先给结论后给依据。',body:'【虚构夹具】以后项目记录先给结论后给依据。',answer:'未采纳草稿',expected:{required:[],forbidden:[],notes:'',action:'add' as const,semantic:'standing' as const,targetCategory:'entry' as const}}
  try{
-  const saved=await runMemoryQualityCase(first,credential,async function*(input){const payload=JSON.parse(String(input.messages[0]!.content)),command=payload.sources.find((v:any)=>v.classification==='command');yield {type:'text',text:JSON.stringify({recent:null,proposals:[{action:'add',content:'本库项目记录先给结论后给依据',layer:'core',scope:'本库',sourceIds:[command.id],semantic:'standing',attribution:'人的口令',reviewAt:null,authority:[{sourceId:command.id,quote:String(command.text).slice(0,4)}]}]})};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'continuity',base,noteName:'first.md',hostBeforeConsolidation:true,verifyClosure:false})
+  const saved=await runMemoryQualityCase(first,credential,async function*(input){const payload=JSON.parse(String(input.messages[0]!.content)),command=payload.sources.find((v:any)=>v.classification==='command');yield {type:'text',text:JSON.stringify({recent:null,proposals:[{action:'add',content:'本库项目记录先给结论后给依据',scope:'本库',sourceIds:[command.id],semantic:'standing',attribution:'人的口令',reviewAt:null,authority:[{sourceId:command.id,quote:String(command.text).slice(0,4)}]}]})};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'continuity',base,noteName:'first.md',hostBeforeConsolidation:true,verifyClosure:false})
   expect(saved.receipt!.taskId).not.toBe('quality-'+first.id)
   const second={...first,id:'v6-chain-repeat',prompt:'再确认一次刚才的项目记录约定，顺序没变。',body:'【虚构夹具】只是复述：先结论后依据，无新的改动。',expected:{required:[],forbidden:[],notes:'',action:'unchanged' as const,targetFromCase:first.id,targetCategory:'entry' as const}}
   const result=await runMemoryQualityCase(second,credential,async function*(){yield {type:'text',text:JSON.stringify({recent:null,proposals:[]})};yield {type:'finish',reason:'stop'}},new AbortController().signal,{strategy:'continuity',base,noteName:'repeat.md',hostBeforeConsolidation:true,verifyClosure:false,targetTaskId:saved.receipt!.taskId})
