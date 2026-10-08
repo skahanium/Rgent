@@ -10,6 +10,8 @@ function fixture(): { root: string; build: string; run: () => { status: number |
   fixtures.push(root)
   for (const name of ['AGENTS.md', 'README.md', 'CONTRIBUTING.md', 'LICENSE']) cpSync(path.join(process.cwd(), name), path.join(root, name))
   cpSync(path.join(process.cwd(), 'docs'), path.join(root, 'docs'), { recursive: true })
+  mkdirSync(path.join(root, 'src/main'), { recursive: true })
+  cpSync(path.join(process.cwd(), 'src/main/working-memory-consolidation.ts'), path.join(root, 'src/main/working-memory-consolidation.ts'))
   mkdirSync(path.join(root, 'scripts'))
   cpSync(path.join(process.cwd(), 'scripts/check-docs.mjs'), path.join(root, 'scripts/check-docs.mjs'))
   cpSync(path.join(process.cwd(), 'scripts/probe-trash.mjs'), path.join(root, 'scripts/probe-trash.mjs'))
