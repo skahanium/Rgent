@@ -219,3 +219,23 @@ it('an insufficient terminal cannot earn E2E retention from an asserted true ann
  const q=support.v4Summary([{caseId:spec.id,arm:'review',category:'insufficient-evidence',automaticApplied:false,review:{retained:spec.expected.required.length,hardViolations:[],correctNoop:true,evidenceComplete:true}}],[spec])
  expect(q.arms.review).toMatchObject({retained:0,pending:1});expect(q.diagnostic.pairedCases).toEqual([])
 })
+
+it('collaboration phase budgets are atomic, isolated and survive revision changes',()=>{
+ const root=dir(),manifest={old:true},initial=new support.EvaluationJournal(root,manifest,3000)
+ initial.charge('v6-2026-10-05/integrity/r10/deepseek-flash/0/old');initial.close()
+ const prefix='v6-2026-10-05/collaboration/',campaign={parentManifestHash:support.fingerprint(manifest),prefix,limit:272,perModelLimit:136,modelSegment:2,authorization:'2026-10-08-memory-collaboration'}
+ const j=new support.EvaluationJournal(dir(),{},3000,root,undefined,campaign)
+ const key=prefix+'r11/answers/deepseek-flash/fact/on';j.charge(key)
+ expect(()=>j.charge(key)).toThrow('EVALUATION_CASE_CALL_LIMIT')
+ expect(()=>j.charge(prefix+'r11/unknown/deepseek-flash/fact/on')).toThrow('EVALUATION_CAMPAIGN_KEY')
+ for(let i=1;i<16;i++)j.charge(prefix+'r11/answers/deepseek-flash/t'+i+'/off')
+ expect(()=>j.charge(prefix+'r12/answers/deepseek-flash/extra/on')).toThrow('EVALUATION_PHASE_MODEL_CALL_LIMIT')
+ for(let i=0;i<60;i++){const k=prefix+'r11/consolidation/deepseek-flash/0/c'+i;j.charge(k);j.charge(k)}
+ expect(()=>j.charge(prefix+'r12/consolidation/deepseek-flash/0/extra')).toThrow('EVALUATION_PHASE_MODEL_CALL_LIMIT')
+ for(let i=0;i<16;i++)j.charge(prefix+'r11/answers/MiniMax-M3/t'+i+'/off')
+ expect(()=>j.charge(prefix+'r12/answers/MiniMax-M3/extra/on')).toThrow('EVALUATION_PHASE_CALL_LIMIT')
+ for(let i=0;i<60;i++){const k=prefix+'r11/consolidation/MiniMax-M3/0/c'+i;j.charge(k);j.charge(k)}
+ expect(j.localCalls).toBe(272);expect(j.calls).toBe(273);j.close()
+ const next=new support.EvaluationJournal(dir(),{revision:12},3000,root,undefined,campaign)
+ expect(()=>next.charge(prefix+'r12/consolidation/MiniMax-M3/0/extra')).toThrow();expect(next.localCalls).toBe(272);next.close()
+})

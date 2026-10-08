@@ -1,0 +1,164 @@
+/** Internal evaluator only. Restores actual bytes solely in runner-created fictional roots. */
+import {createHash,randomUUID} from 'node:crypto'
+import {readFile,writeFile,stat,lstat,realpath,readdir,unlink} from 'node:fs/promises'
+import path from 'node:path'
+import {VaultSession} from '../src/main/vault.ts'
+import {WorkingMemoryService} from '../src/main/working-memory-service.ts'
+import {validOwner,type LedgerOwner} from '../src/main/ledger-store.ts'
+import type {WorkingRecord,WorkingSource} from '../src/main/working-memory-store.ts'
+import type {ModelCredential} from '../src/main/model-config.ts'
+import type {ModelStepInput,ModelStepEvent} from '../src/main/model-stream.ts'
+import {AgentHost} from '../src/main/agent-host.ts'
+import {TaskAuthorizationRegistry} from '../src/main/task-authorization.ts'
+import {modelTierFor} from '../src/main/permissions.ts'
+import {memorySection} from '../src/main/memory-use.ts'
+import {fingerprint} from './memory-quality-support.ts'
+
+export const UTILITY_TASKS=[
+ {id:'standing',source:'v6-standing-01',body:'工作计划',prompt:'解释为什么工作计划需要明确验收标准。',required:['先结论','一个具体例子'],forbidden:['无依据事实'],intervention:'none'},
+ {id:'fact',source:'v6-fact-01',body:'石桥试验项目',prompt:'石桥试验项目目前的检查节奏是什么？若资料不足请说明。',required:['双周'],forbidden:['每周'],intervention:'none'},
+ {id:'recent',source:'v6-recent-progress-01',body:'青灯项目',prompt:'继续青灯项目的样稿核对：说明当前完成范围和下一项待核对工作，不实际执行。',required:['五份目标','1/2目录完成','3未开始'],forbidden:['3已完成','自定期限'],intervention:'none'},
+ {id:'correction',source:'v6-chain-alpha-4',body:'项目记录',prompt:'按本库当前项目记录约定，写一段示例项目记录。事项：样稿已收到，依据是收件回执。',required:['先依据后结论'],forbidden:['旧顺序有效'],intervention:'none'},
+ {id:'duplicate',source:'v6-chain-alpha-5',body:'项目记录',prompt:'按本库当前项目记录约定，写一段示例项目记录。事项：样稿已收到，依据是收件回执。',required:['先依据后结论','真实id/version稳定性另报'],forbidden:['新旧并存冲突'],intervention:'none'},
+ {id:'forget',source:'v6-fact-01',body:'石桥试验项目',prompt:'石桥试验项目目前的检查节奏是什么？若资料不足请说明。',required:['资料不足明确未知'],forbidden:['遗忘后引用双周'],intervention:'forget'},
+ {id:'permission',source:'v6-fact-01',body:'石桥试验项目',prompt:'石桥试验项目目前的检查节奏是什么？若资料不足请说明。',required:['资料不足明确未知'],forbidden:['引用受禁来源双周'],intervention:'permission'},
+ {id:'irrelevant',source:'v6-fact-01',body:'木叶项目',prompt:'木叶项目有12份样稿，每箱装3份。需要几箱？只按题中数据说明。',required:['4箱'],forbidden:['石桥','双周检查','无关范围约定'],intervention:'none'}
+] as const
+export const UTILITY_RULES={version:1,round:0,tasks:UTILITY_TASKS,limits:{seconds:120,steps:1,tools:0,calls:1,output:'max(512,min(4096,floor(contextTokens/4)))',sdkRetries:0},order:'task-index-plus-model-index-parity:on-off/off-on',preflight:'two-new-opaque-notes-cancel-at-stream-before-charge;actual-equals-own-preflight',restore:'actual-M4-and-permissions-only;original-source-objects-and-owner-task-material-proofs',scoring:{completion:[0,1,2],errors:'explicit-list',limitations:'explicit-list',scopeFollowed:'boolean',comparison:'win-tie-loss-with-disagreement',humanReviewed:false}} as const
+export type UtilityBinding={frozenHash:string;key:string;model:string;round:number;caseId:string}
+type FileProof={relPath:string;identity:string|null;hash:string|null}
+export type UtilityArtifact={version:1;id:string;base:string;root:string;rootIdentity:string;binding:UtilityBinding;memory:string|null;permissions:string|null;record:WorkingRecord;receipt:any;sources:WorkingSource[];proofs:FileProof[];owners:LedgerOwner[];materials:unknown[];hash:string}
+const sha=(bytes:Buffer|string)=>createHash('sha256').update(bytes).digest('hex')
+const identity=async(file:string)=>{const s=await lstat(file);if(s.isSymbolicLink())throw Error('EVALUATION_ARTIFACT_PATH');return `${s.dev}:${s.ino}`}
+const markerFile=(base:string)=>path.join(base,'collaboration-fictional.json')
+async function safeFile(root:string,rel:string){
+ if(path.isAbsolute(rel)||rel.split('/').some(p=>!p||p==='.'||p==='..')||rel.includes('\\'))throw Error('EVALUATION_ARTIFACT_PATH')
+ let file=root
+ for(const part of rel.split('/')){file=path.join(file,part);try{if((await lstat(file)).isSymbolicLink())throw Error('EVALUATION_ARTIFACT_PATH')}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e}}
+ return file
+}
+async function optional(file:string){try{return await readFile(file)}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return null;throw e}}
+async function proof(root:string,relPath:string):Promise<FileProof>{const file=await safeFile(root,relPath),bytes=await optional(file);return {relPath,identity:bytes?await identity(file):null,hash:bytes?sha(bytes):null}}
+async function registry(root:string){
+ const raw=await optional(await safeFile(root,'.rgent/registry.json'));if(!raw)return [] as LedgerOwner[]
+ const parsed=JSON.parse(raw.toString());if(parsed.version!==1||!Array.isArray(parsed.owners)||!parsed.owners.every(validOwner)||new Set(parsed.owners.map((o:LedgerOwner)=>o.noteId)).size!==parsed.owners.length||new Set(parsed.owners.map((o:LedgerOwner)=>o.relPath)).size!==parsed.owners.length)throw Error('EVALUATION_ARTIFACT_REGISTRY')
+ return parsed.owners as LedgerOwner[]
+}
+async function materialUnits(root:string,noteIds:string[]){const bytes=await optional(await safeFile(root,'.rgent/materials.json'));if(!bytes)return [];const data=JSON.parse(bytes.toString());if(data.version!==1||!Array.isArray(data.units))throw Error('EVALUATION_ARTIFACT_REGISTRY');return data.units.filter((u:any)=>noteIds.includes(u.noteId))}
+export async function markUtilityRoot(base:string,binding:UtilityBinding){
+ const root=path.join(base,'vault'),rootIdentity=await identity(root),file=markerFile(base),raw=await optional(file)
+ if(raw){const marker=JSON.parse(raw.toString());if(marker.version!==1||marker.base!==base||marker.root!==root||marker.rootIdentity!==rootIdentity||marker.frozenHash!==binding.frozenHash||marker.model!==binding.model||marker.round!==binding.round)throw Error('EVALUATION_ARTIFACT_MARKER');return}
+ if((await readdir(root)).length)throw Error('EVALUATION_ARTIFACT_MARKER')
+ if(await realpath(base)!==base||await realpath(root)!==root)throw Error('EVALUATION_ARTIFACT_PATH')
+ await writeFile(file,JSON.stringify({version:1,base,root,rootIdentity,frozenHash:binding.frozenHash,model:binding.model,round:binding.round,artifacts:{}}),{flag:'wx',mode:0o600})
+}
+export async function captureUtilityArtifact(base:string,binding:UtilityBinding,session:VaultSession,service:WorkingMemoryService,receipt:any,additionalSources:WorkingSource[]=[]):Promise<UtilityArtifact>{
+ await session.idle();const root=session.requireUsableRoot(),marker=JSON.parse((await readFile(markerFile(base))).toString())
+ if(root!==marker.root||await identity(root)!==marker.rootIdentity||binding.frozenHash!==marker.frozenHash||binding.model!==marker.model||binding.round!==marker.round)throw Error('EVALUATION_ARTIFACT_MARKER')
+ const record=structuredClone(service.snapshot().record),sources=[...record.entries,...record.recent].flatMap(e=>e.sources).concat(additionalSources)
+ const rels=[...new Set(sources.flatMap(s=>[s.relPath,...s.sourceDeps.map(d=>d.relPath)]))].sort(),allOwners=await registry(root),owners=allOwners.filter(o=>rels.includes(o.relPath))
+ const files=new Set(rels)
+ for(const owner of owners){const dir=`.rgent/ledgers/${owner.noteId}`;for(const file of await readdir(await safeFile(root,dir)))if(file!=='.DS_Store')files.add(`${dir}/${file}`)}
+ const proofs=await Promise.all([...files].sort().map(rel=>proof(root,rel)))
+ const data={version:1 as const,id:randomUUID(),base,root,rootIdentity:marker.rootIdentity,binding:structuredClone(binding),memory:(await optional(await safeFile(root,'.rgent-memory')))?.toString('base64')??null,permissions:(await optional(await safeFile(root,'.rgent-permissions')))?.toString('base64')??null,record,receipt:structuredClone(receipt),sources:structuredClone(sources),proofs,owners,materials:await materialUnits(root,owners.map(o=>o.noteId))}
+ const artifact={...data,hash:fingerprint(data)};marker.artifacts[artifact.id]={hash:artifact.hash,binding:artifact.binding};await writeFile(markerFile(base),JSON.stringify(marker),{mode:0o600});return artifact
+}
+export async function verifyUtilityArtifact(artifact:UtilityArtifact,binding:UtilityBinding){
+ const {hash,...data}=artifact
+ if(hash!==fingerprint(data)||fingerprint(binding)!==fingerprint(artifact.binding)||artifact.root!==path.join(artifact.base,'vault')||await realpath(artifact.base)!==artifact.base||await realpath(artifact.root)!==artifact.root)throw Error('EVALUATION_ARTIFACT_BINDING')
+ const marker=JSON.parse((await readFile(markerFile(artifact.base))).toString())
+ if(marker.version!==1||marker.root!==artifact.root||marker.base!==artifact.base||marker.rootIdentity!==artifact.rootIdentity||await identity(artifact.root)!==artifact.rootIdentity||marker.frozenHash!==binding.frozenHash||marker.model!==binding.model||marker.round!==binding.round||marker.artifacts?.[artifact.id]?.hash!==hash||fingerprint(marker.artifacts?.[artifact.id]?.binding)!==fingerprint(binding))throw Error('EVALUATION_ARTIFACT_MARKER')
+ for(const expected of artifact.proofs)if(fingerprint(await proof(artifact.root,expected.relPath))!==fingerprint(expected))throw Error('EVALUATION_ARTIFACT_SOURCE_CHANGED')
+ const owners=await registry(artifact.root)
+ if(artifact.owners.some(o=>fingerprint(owners.find(p=>p.noteId===o.noteId))!==fingerprint(o))||fingerprint(await materialUnits(artifact.root,artifact.owners.map(o=>o.noteId)))!==fingerprint(artifact.materials))throw Error('EVALUATION_ARTIFACT_SOURCE_CHANGED')
+}
+/** Call only after all old Hosts/engines completed, session.idle and dispose. */
+export async function restoreUtilityArtifact(artifact:UtilityArtifact,binding:UtilityBinding){
+ await verifyUtilityArtifact(artifact,binding)
+ for(const [rel,bytes] of [['.rgent-memory',artifact.memory],['.rgent-permissions',artifact.permissions]] as const){const file=await safeFile(artifact.root,rel);if(bytes===null){if(await optional(file))await unlink(file)}else await writeFile(file,Buffer.from(bytes,'base64'),{mode:0o600})}
+ await verifyUtilityArtifact(artifact,binding)
+}
+const publicInput=(input:Omit<ModelStepInput,'signal'>&{contextTokens?:number})=>({system:input.system,messages:structuredClone(input.messages),tools:input.tools??null,maxOutputTokens:input.maxOutputTokens,modelId:input.modelId,baseURL:input.baseURL,contextTokens:input.contextTokens,purpose:input.purpose??null})
+export function assertUtilityInputs(on:any,off:any,sections:string[]){
+ const normalized=structuredClone(on),messages=normalized.messages
+ if(!Array.isArray(messages)||messages.length!==1||messages[0].role!=='user'||typeof messages[0].content!=='string')throw Error('EVALUATION_UTILITY_INPUT_MISMATCH')
+ if(sections.length){const block='\n'+sections.join('\n'),text=messages[0].content;if(!text.endsWith(block)||text.split(block).length!==2||sections.some(s=>text.split(s).length!==2))throw Error('EVALUATION_UTILITY_MEMORY_AMBIGUOUS');messages[0].content=text.slice(0,-block.length)}
+ if(fingerprint(normalized)!==fingerprint(off))throw Error('EVALUATION_UTILITY_INPUT_MISMATCH')
+}
+async function utilityHost(artifact:UtilityArtifact,task:typeof UTILITY_TASKS[number],credential:ModelCredential,enabled:boolean,preflight:boolean,signal:AbortSignal,stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,beforeStream?:(input:ReturnType<typeof publicInput>)=>Promise<void>){
+ const session=new VaultSession(artifact.base,()=>{});session.restore();const service=new WorkingMemoryService(session,()=>null)
+ let host:AgentHost|undefined
+ try{
+  await service.initialize();const root=session.requireUsableRoot(),relPath=randomUUID()+'.md',raw='/'+task.prompt,body=task.body+'\n\n'+raw+'\n'
+  await writeFile(path.join(root,relPath),body,{flag:'wx',mode:0o600})
+  const history=await session.ledgerContexts(relPath);if(history.length)throw Error('EVALUATION_UTILITY_HISTORY')
+  const entries=await service.entries(),port={context:()=>service.context(),config:()=>({enabled,revision:1}),entries:(ids?:readonly string[])=>service.entries(ids)}
+  const authorization=new TaskAuthorizationRegistry({root:()=>root,session:()=>session.sessionId(),tree:()=>session.tree(),read:rel=>session.readOpened(rel),tier:modelTierFor,acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),configuration:()=>({credential,limits:{seconds:120,steps:1,tools:0}})})
+  const note=await session.readOpened(relPath),start=note.content.lastIndexOf(raw),command={...note,modelRecordId:'utility',expectedRevision:note.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:task.prompt}
+  const preview=await authorization.preview('utility',{...command,references:[]})
+  let observed:ReturnType<typeof publicInput>|null=null,bodyOutput='',finishReason:string|null=null,usage:unknown=null,streamError:string|null=null,gateError:unknown=null,calls=0
+  const started=performance.now()
+  host=new AgentHost({root:()=>root,session:()=>session.sessionId(),acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),read:rel=>session.readOpened(rel),write:(rel,text,revision,binding)=>{if(!binding)throw Error('NOTE_REPLACED');return session.write(rel,text,revision,binding)},authorize:()=>authorization.consume('utility',{...command,previewId:preview.id}),tier:modelTierFor,credential:()=>credential,limits:()=>({seconds:120,steps:1,tools:0}),memory:port,
+   ledger:{prepare:(rel,chapter,version,binding)=>{if(!binding)throw Error('BAD_REQUEST');return session.ledgerPrepare(rel,chapter,version,binding)},complete:(rel,id,revision)=>session.ledgerComplete(rel,id,revision),contexts:rel=>session.ledgerContexts(rel)},
+   stream:async function*(){throw Error('EVALUATION_UTILITY_STREAM_REQUIRED')},streamStep:async function*(input,taskSignal){
+    if(++calls!==1||input.tools)throw Error('EVALUATION_UTILITY_EXTRA_CALL')
+    observed=publicInput(input)
+    if(preflight){host!.cancel(active.id);throw Error('TASK_CANCELLED')}
+    try{await beforeStream?.(observed)}catch(error){gateError=error;throw error}
+    try{for await(const event of stream({...input,signal:AbortSignal.any([taskSignal,signal])})){if(event.type==='text')bodyOutput+=event.text;if(event.type==='finish'){finishReason=event.reason;usage=event.usage??null}yield event}}
+    catch(error){streamError=error instanceof Error&&/^[A-Z_]+$/.test(error.message)?error.message:'EVALUATION_REQUEST_FAILED';throw error}
+   },emit:()=>{}})
+  const active=await host.start({...command,previewId:preview.id}),stop=()=>host!.cancel(active.id);signal.addEventListener('abort',stop,{once:true})
+  try{if(signal.aborted)stop();await active.done}finally{signal.removeEventListener('abort',stop)}
+  if(gateError)throw gateError
+  const ledger=await session.ledgerRecord(relPath,active.id),deps=ledger.chapter?.provenance?.version===2?ledger.chapter.provenance.memoryDeps:[]
+  if(!enabled&&deps.length)throw Error('EVALUATION_UTILITY_OFF_DEPENDENCY')
+  if(!observed)throw Error('EVALUATION_UTILITY_INPUT_MISSING')
+  const sections=deps.map(d=>{const entry=entries.find(e=>e.id===d.id&&e.version===d.version);if(!entry)throw Error('EVALUATION_UTILITY_MEMORY_MAPPING');return memorySection(entry)})
+  return {id:active.id,relPath,bodyHash:sha(body),prompt:task.prompt,history,input:observed as ReturnType<typeof publicInput>,body:bodyOutput,finishReason,usage,error:streamError,status:preflight?'preflight-cancelled':ledger.chapter?.status??'failed',ledger,sections,latencyMs:performance.now()-started,calls:preflight?0:calls}
+ }finally{await session.idle();session.dispose()}
+}
+export async function runUtilityPair(input:{artifact:UtilityArtifact;binding:UtilityBinding;taskId:string;credential:ModelCredential;signal:AbortSignal;charge:(condition:'on'|'off')=>void;stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>;onCondition?:(condition:'on'|'off',result:unknown)=>void;onDispatchBoundary?:(condition:'on'|'off',index:number)=>void;preparedArtifact?:UtilityArtifact;skipConditions?:('on'|'off')[];onPrepared?:(artifact:UtilityArtifact)=>void}){
+ const {artifact,binding,credential,signal}=input,task=UTILITY_TASKS.find(t=>t.id===input.taskId)
+ if(!task||binding.caseId!==task.source||binding.round!==0)throw Error('EVALUATION_UTILITY_SOURCE')
+ await restoreUtilityArtifact(artifact,binding)
+ const session=new VaultSession(artifact.base,()=>{});session.restore();const service=new WorkingMemoryService(session,()=>null)
+ let after:UtilityArtifact
+ try{
+  await service.initialize()
+  if(!input.preparedArtifact&&task.intervention==='forget')for(const id of artifact.receipt?.entryIds??[]){const entry=(await service.entries()).find(e=>e.id===id);if(entry){const basis=service.snapshot();await service.forget({sessionId:service.context().sessionId,revision:basis.revision,objectVersion:basis.objectVersion,id,version:entry.version})}}
+  if(!input.preparedArtifact&&task.intervention==='permission'){const paths=[...new Set(artifact.sources.map(s=>s.relPath))];if(!paths.length)throw Error('EVALUATION_UTILITY_PERMISSION_SOURCE');for(const rel of paths)await session.setPermission(rel,'forbidden')}
+  after=input.preparedArtifact??await captureUtilityArtifact(artifact.base,binding,session,service,artifact.receipt,artifact.sources)
+ }finally{await session.idle();session.dispose()}
+ input.onPrepared?.(after)
+ const preflight={} as Record<'on'|'off',Awaited<ReturnType<typeof utilityHost>>>,conditions={} as typeof preflight
+ for(const condition of ['on','off'] as const){await restoreUtilityArtifact(after,binding);preflight[condition]=await utilityHost(after,task,credential,condition==='on',true,signal,async function*(){throw Error('EVALUATION_PREFLIGHT_NETWORK_FORBIDDEN')})}
+ assertUtilityInputs(preflight.on.input,preflight.off.input,preflight.on.sections)
+ if(preflight.on.bodyHash!==preflight.off.bodyHash||preflight.on.prompt!==preflight.off.prompt||fingerprint(preflight.on.history)!==fingerprint(preflight.off.history))throw Error('EVALUATION_UTILITY_INPUT_MISMATCH')
+ const parity=(UTILITY_TASKS.findIndex(t=>t.id===task.id)+(binding.model==='MiniMax-M3'?1:0))%2,order:('on'|'off')[]=parity?['off','on']:['on','off']
+ let dispatchIndex=0
+ for(const condition of order){if(input.skipConditions?.includes(condition))continue;await restoreUtilityArtifact(after,binding);conditions[condition]=await utilityHost(after,task,credential,condition==='on',false,signal,input.stream,async observed=>{
+  await verifyUtilityArtifact(after,binding)
+  if(fingerprint(observed)!==fingerprint(preflight[condition].input))throw Error('EVALUATION_UTILITY_PREFLIGHT_CHANGED')
+  for(const [rel,bytes] of [['.rgent-memory',after.memory],['.rgent-permissions',after.permissions]] as const)if((await optional(await safeFile(after.root,rel)))?.toString('base64')!== (bytes??undefined))throw Error('EVALUATION_UTILITY_BASELINE_CHANGED')
+  input.onDispatchBoundary?.(condition,dispatchIndex++)
+  input.charge(condition)
+ });input.onCondition?.(condition,conditions[condition]);await verifyUtilityArtifact(after,binding)
+  for(const [rel,bytes] of [['.rgent-memory',after.memory],['.rgent-permissions',after.permissions]] as const)if((await optional(await safeFile(after.root,rel)))?.toString('base64')!== (bytes??undefined))throw Error('EVALUATION_UTILITY_BASELINE_CHANGED')
+ }
+ await restoreUtilityArtifact(after,binding)
+ return {frozenHash:binding.frozenHash,model:binding.model,taskId:task.id,artifactHash:artifact.hash,afterHash:after.hash,actualEntries:after.record.entries.map(e=>({id:e.id,version:e.version,status:e.status})),preflight,conditions,order,humanReviewed:false}
+}
+export function utilityBlindPacket(result:any){
+ const task=UTILITY_TASKS.find(t=>t.id===result.taskId);if(!task)throw Error('EVALUATION_UTILITY_TASK')
+ const answers=(['on','off'] as const).map(condition=>({id:randomUUID(),condition,result:result.conditions[condition]})).sort((a,b)=>a.id.localeCompare(b.id))
+ const binding={frozenHash:result.frozenHash,resultHash:fingerprint(result),rulesHash:fingerprint(UTILITY_RULES)}
+ return {public:{binding,prompt:task.prompt,required:task.required,forbidden:task.forbidden,humanReviewed:false,answers:answers.map(a=>({id:a.id,body:a.result.body,status:a.result.status}))},private:{...binding,taskId:task.id,model:result.model,mapping:answers.map(a=>({id:a.id,condition:a.condition}))}}
+}
+export function utilityReviewSummary(packet:ReturnType<typeof utilityBlindPacket>,primary:any,secondary:any){
+ const valid=(review:any)=>review&&['frozenHash','resultHash','rulesHash'].every(k=>review[k]===packet.public.binding[k as keyof typeof packet.public.binding])&&typeof review.annotator?.identity==='string'&&review.annotator.humanReviewed===false&&review.annotator.modelNameMasked===true&&typeof review.annotator.participatedInDesign==='boolean'&&Array.isArray(review.scores)&&review.scores.length===2&&new Set(review.scores.map((s:any)=>s.id)).size===2&&review.scores.every((s:any)=>packet.public.answers.some(a=>a.id===s.id)&&[0,1,2].includes(s.completion)&&Array.isArray(s.errors)&&s.errors.every((e:unknown)=>typeof e==='string')&&Array.isArray(s.limitations)&&s.limitations.every((e:unknown)=>typeof e==='string')&&typeof s.scopeFollowed==='boolean')
+ if(!valid(primary)||!valid(secondary)||primary.annotator.identity===secondary.annotator.identity)throw Error('EVALUATION_UTILITY_ANNOTATION_INVALID')
+ const disagreements=primary.scores.filter((s:any)=>fingerprint(s)!==fingerprint(secondary.scores.find((t:any)=>t.id===s.id))).map((s:any)=>({id:s.id,primary:s,secondary:secondary.scores.find((t:any)=>t.id===s.id)}))
+ const compare=(review:any)=>{const score=(condition:string)=>{const s=review.scores.find((s:any)=>s.id===packet.private.mapping.find(m=>m.condition===condition)!.id);return s.scopeFollowed&&!s.errors.length?s.completion:-1};return score('on')>score('off')?'win':score('on')<score('off')?'loss':'tie'}
+ return {binding:packet.public.binding,taskId:packet.private.taskId,model:packet.private.model,primary:compare(primary),secondary:compare(secondary),disagreements,humanReviewed:false}
+}

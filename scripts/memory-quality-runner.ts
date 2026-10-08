@@ -1,6 +1,7 @@
 import {createHash} from 'node:crypto'
+import {markUtilityRoot,captureUtilityArtifact,type UtilityBinding} from './memory-quality-utility.ts'
 import type {ConsolidationRequestObservation} from '../src/main/working-memory-consolidation.ts'
-import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises'
+import {mkdtemp,mkdir,writeFile,rm,realpath} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {VaultSession} from '../src/main/vault.ts'
@@ -77,14 +78,14 @@ type PaidCall={request?:ConsolidationRequestObservation;phase:'proposal'|'networ
 
 /** Genuine production saving/consolidation/use in one disposable fictional vault. */
 export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:ModelCredential,
- stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,signal:AbortSignal,options?:{strategy:'baseline'|'review'|'continuity';base?:string;noteName?:string;hostBeforeConsolidation?:boolean;verifyClosure?:boolean;closureTargetId?:string;chainBlocked?:boolean;targetTaskId?:string}){
- const base=options?.base??await mkdtemp(path.join(os.tmpdir(),'rgent-memory-quality-')),root=path.join(base,'vault')
+ stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,signal:AbortSignal,options?:{strategy:'baseline'|'review'|'continuity';base?:string;noteName?:string;hostBeforeConsolidation?:boolean;verifyClosure?:boolean;closureTargetId?:string;chainBlocked?:boolean;targetTaskId?:string;validatedRequest?:(request:ConsolidationRequestObservation)=>void;retainArtifact?:UtilityBinding}){
+ let base=options?.base??await mkdtemp(path.join(os.tmpdir(),'rgent-memory-quality-')),root=path.join(base,'vault')
  const qualityNote=options?.noteName??'fiction.md'
  // v6 的所有案例由真实 Host 保存 V2 材料；历史臂维持其显式版本语义。
  const hostBeforeConsolidation=options?.hostBeforeConsolidation??(options?.strategy==='continuity')
  let vault:VaultSession|null=null,engine:WorkingMemoryConsolidation|null=null
  try{
-  await mkdir(root,{recursive:true});await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
+  await mkdir(root,{recursive:true});if(options?.retainArtifact){base=await realpath(base);root=path.join(base,'vault')}if(options?.retainArtifact){if(!options.base)throw Error('EVALUATION_ARTIFACT_BASE_REQUIRED');await markUtilityRoot(base,options.retainArtifact)};await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
   let taskId='quality-'+spec.id;const rawPrompt='/'+spec.prompt
   const source=spec.body+'\n\n'+markPrompt(rawPrompt,{taskId,range:{start:0,end:rawPrompt.length},expectedText:rawPrompt,promptText:spec.prompt})
   const prior=options?.base?await import('node:fs/promises').then(fs=>fs.readFile(path.join(root,qualityNote),'utf8').catch(()=>'')):''
@@ -119,25 +120,14 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    if(!mapped)throw Error('MEMORY_MATERIAL_UNVERIFIED')
    // v6 留证：保留短引用原始请求，同时绑定程序观察到的真实对象映射。
    const call:PaidCall={phase:dispatch.phase as PaidCall['phase'],payload,...(continuity?{request:structuredClone(request!)}:{}),input:{system:input.system,messages:structuredClone(input.messages),maxOutputTokens:input.maxOutputTokens},body:'',finishReason:null,reason:null,startedAt:new Date().toISOString(),finishedAt:undefined}
+   if(continuity)options?.validatedRequest?.(structuredClone(request!))
    paidCalls.push(call)
    try{for await(const event of stream(input)){if(event.type==='text')call.body+=event.text;if(event.type==='finish')call.finishReason=event.reason;yield event}}
    catch(e){call.reason=e instanceof Error&&/^[A-Z_]{3,80}$/.test(e.message)?e.message:'EVALUATION_REQUEST_FAILED';throw e}
    finally{dispatch.finishedAt=new Date().toISOString();call.finishedAt=dispatch.finishedAt}
   }
   // 原始响应结构与最终准入分别留证；patch 不是完整 recent/proposals 文档。
-  const parseable=(call:PaidCall)=>{
-   try{
-    if(options?.strategy!=='continuity')parseMemorySuggestions(call.body)
-    else if(call.payload?.repair?.mode!=='patch')parseContinuitySuggestions(call.body)
-    else{
-     let text=call.body.trim();const fence=/^```json\s*\n([\s\S]*)\n```$/i.exec(text);if(fence)text=fence[1]!
-     const patch=JSON.parse(text)
-     if(!patch||typeof patch!=='object'||Array.isArray(patch)||Object.keys(patch).some(k=>!['recent','proposals'].includes(k))||!Array.isArray(patch.proposals))return false
-     if(patch.proposals.some((item:any)=>!item||typeof item!=='object'||Object.keys(item).sort().join()!=='index,value'||!Number.isInteger(item.index)||item.index<0||item.value!==null&&(typeof item.value!=='object'||Array.isArray(item.value))))return false
-    }
-    return true
-   }catch{return false}
-  }
+  const parseable=(call:PaidCall)=>options?.strategy==='continuity'?consolidationResponseStructured(call):(()=>{try{parseMemorySuggestions(call.body);return true}catch{return false}})()
   const evidenceSnapshot=()=>({root,sources:[...sentSourceIds].flatMap(id=>{const source=sourceProofs.get(id);return source?[structuredClone(source)]:[]}),dispatches:structuredClone(dispatches),verifications:structuredClone(verifications),capturedAt:new Date().toISOString(),responseStructures:paidCalls.map(call=>({phase:call.phase,structured:parseable(call)})),learningCheck:structuredClone(learningCheck),savedMaterial:experimentalMaterial?structuredClone(experimentalMaterial):null})
   await service.initialize()
   if(spec.seed){
@@ -278,10 +268,12 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
     // 定向闭包只能忘实际 Host 装入的同 id／version；请求的父不在其中必须拒绝，不能改选别的锚点。
     const closureTarget=options.closureTargetId?selected.find(e=>e.id===options.closureTargetId&&actualDependencies.some(d=>d.id===e.id&&d.version===e.version)):selected.find(e=>actualDependencies.some(d=>d.id===e.id))??selected[0]
     if(verifyClosure&&options.closureTargetId&&!closureTarget)throw Error('EVALUATION_CLOSURE_TARGET_UNAVAILABLE')
+    const utilityArtifact=options.retainArtifact?await captureUtilityArtifact(base,options.retainArtifact,session,service,receipt,[...sourceProofs.values()]):undefined
+    if(utilityArtifact&&paidRecord)paidRecord.utilityArtifact=utilityArtifact
     const closure=verifyClosure&&applicable?await verifyContinuityClosure(session,service,credential,permit,material,closureTarget!,signal):null
     const controlled={status:(!budget.within||!dispatchVerified||!sameVersionVerified||!versionMismatchRejected||!actualHostBudget.mapped||!actualHostBudget.within||selected.length&&(!permissionRevoked||!frozenSignatureMatches)||closure&&!closure.passed?'failed':applicable?'passed':'not-applicable') as 'passed'|'failed'|'not-applicable',reason:applicable?null:'no-selected-memory',budget,dispatch,closure,closureStatus:!verifyClosure?'deferred-chain-step':!applicable?'not-applicable':'verified'}
     const v6=v6Fields({before,beforeAll,entries,receipt,controlled,blocked:options.chainBlocked===true})
-    return {foreground,recent:paidRecent,evidence:paidEvidence,experiment:structuredClone(experiment),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,followup,dependencies:actualDependencies,forget:null,controlled,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)},
+    return {utilityArtifact,foreground,recent:paidRecent,evidence:paidEvidence,experiment:structuredClone(experiment),initialState:{method:'fictional-body-ledger-manual-preview-commit',seeded:!!spec.seed},completed:receipt?.outcome==='applied'&&!receipt.reason,before,entries,receipt,context,followup,dependencies:actualDependencies,forget:null,controlled,material:{...structuredClone(material),fragments:structuredClone(material.material.fragments)},
      dispatched:v6.dispatched,terminal:v6.terminal,structured:v6.structured,blocked:v6.blocked,actionVerified:v6.actionVerified,actionEvidence,candidate:v6.candidate}
    }
 
@@ -325,7 +317,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    }
    throw e
   }finally{signal.removeEventListener('abort',cancel)}
- }finally{engine?.close();await engine?.idle();vault?.dispose();if(!options?.base)await rm(base,{recursive:true,force:true})}
+ }finally{engine?.close();await engine?.idle();await vault?.idle();vault?.dispose();if(!options?.base)await rm(base,{recursive:true,force:true})}
 }
 
 export const memorySemanticReviewSystem=memoryConsolidationSystem+`
@@ -419,4 +411,41 @@ async function verifyContinuityClosure(session:VaultSession,service:WorkingMemor
   const explicitBlock=!!receipt?.reason&&/SOURCE|DEPENDENCY|FORGOTTEN/.test(receipt.reason),proposalRejected=calls>0&&validProposalSources&&!!receipt&&['applied','rejected'].includes(receipt.outcome)&&!receipt.entryIds.length&&receipt.reason==='MEMORY_OUTPUT_INVALID'
   return {passed:revoked&&originalBasisBlocked&&!remaining.length&&freshTerminal&&(explicitBlock||proposalRejected),affectedIds:[...affected],revoked,originalBasisBlocked,remaining,replay:{mode:'controlled-never-billed',calls,sent,validProposalSources,freshTerminal,explicitBlock,proposalRejected,previousReceipt,beforeRevision:beforeProbe.revision,afterRevision:afterSnapshot.revision,material:{taskId:probeMaterial.taskId,materialVersion:probeMaterial.materialVersion},receipt}}
  }finally{signal.removeEventListener('abort',cancel);replay.close();await replay.idle()}
+}
+
+/** Only the runner's validatedRequest hook feeds this gate, never model JSON. */
+export class ConsolidationPaidGate {
+ private pending:ConsolidationRequestObservation|undefined
+ private used=0
+ private started:number|undefined
+ private firstContent:string|undefined
+ constructor(private readonly clock:()=>number=()=>Date.now()){}
+ observe(request:ConsolidationRequestObservation){
+  if(this.pending||request.payloadFingerprint!==createHash('sha256').update(request.content).digest('hex'))throw Error('EVALUATION_REQUEST_OBSERVATION_INVALID')
+  const payload=JSON.parse(request.content),sources=payload.sources
+  if(!Array.isArray(sources)||sources.length!==request.sources.length||new Set(request.sources.map(s=>s.ref)).size!==sources.length||sources.some((s:any)=>!request.sources.some(r=>r.ref===s.id&&r.id)))throw Error('EVALUATION_REQUEST_OBSERVATION_INVALID')
+  this.pending=structuredClone(request)
+ }
+ consume(input:Pick<ModelStepInput,'messages'>){
+  const request=this.pending;this.pending=undefined
+  if(!request||input.messages.length!==1||input.messages[0]?.role!=='user'||input.messages[0]?.content!==request.content)throw Error('EVALUATION_REQUEST_OBSERVATION_REQUIRED')
+  if(this.used>=2)throw Error('EVALUATION_CASE_CALL_LIMIT')
+  if(this.started!==undefined&&this.clock()-this.started>=120000)throw Error('MEMORY_DEADLINE')
+  if(!this.used&&request.purpose!=='proposal'||this.used===1&&!['network-retry','protocol-repair','recent-regeneration'].includes(request.purpose))throw Error('EVALUATION_REQUEST_PHASE')
+  if(request.purpose==='network-retry'&&request.content!==this.firstContent)throw Error('EVALUATION_REQUEST_PHASE')
+  if(!this.used){this.started=this.clock();this.firstContent=request.content}
+  this.used++;return request
+ }
+}
+export function consolidationResponseStructured(call:{phase:string;payload:any;body:string}){
+ try{
+  if(call.phase==='recent-regeneration'){
+   let text=call.body.trim();const fence=/^```json\s*\n([\s\S]*)\n```$/i.exec(text);if(fence)text=fence[1]!
+   const parsed=JSON.parse(text);return !!parsed&&typeof parsed==='object'&&!Array.isArray(parsed)&&Object.keys(parsed).join()==='recent'
+  }
+  if(call.payload?.repair?.mode!=='patch'){parseContinuitySuggestions(call.body);return true}
+  let text=call.body.trim();const fence=/^```json\s*\n([\s\S]*)\n```$/i.exec(text);if(fence)text=fence[1]!
+  const patch=JSON.parse(text)
+  return !!patch&&typeof patch==='object'&&!Array.isArray(patch)&&Object.keys(patch).every(k=>['recent','proposals'].includes(k))&&Array.isArray(patch.proposals)&&patch.proposals.every((item:any)=>item&&typeof item==='object'&&Object.keys(item).sort().join()==='index,value'&&Number.isInteger(item.index)&&item.index>=0&&(item.value===null||typeof item.value==='object'&&!Array.isArray(item.value)))
+ }catch{return false}
 }

@@ -15,7 +15,7 @@ export class EvaluationJournal {
  private state:{version:1;manifest:string;calls:number;limit:number;dispatches:{key:string;at:string}[]}
  private lock:string
  private readonly token=randomUUID()
- constructor(readonly root:string,readonly manifest:unknown,limit=1440,private readonly budgetRoot=root,approvedPreviousManifest?:unknown,private readonly campaign?:{parentManifestHash:string;prefix:string;limit:number;perModelLimit:number;modelSegment?:number}){
+ constructor(readonly root:string,readonly manifest:unknown,limit=1440,private readonly budgetRoot=root,approvedPreviousManifest?:unknown,private readonly campaign?:{parentManifestHash:string;prefix:string;limit:number;perModelLimit:number;modelSegment?:number;authorization?:string}){
   if(!Number.isSafeInteger(limit)||limit<1||limit>100000)throw Error('EVALUATION_CALL_LIMIT')
   mkdirSync(root,{recursive:true,mode:0o700});mkdirSync(budgetRoot,{recursive:true,mode:0o700});this.lock=path.join(budgetRoot,'writer.lock')
   if(existsSync(this.lock)){
@@ -47,6 +47,7 @@ export class EvaluationJournal {
   if(this.state.calls>=this.state.limit)throw Error('EVALUATION_CALL_LIMIT')
   if(this.campaign){
    if(!key.startsWith(this.campaign.prefix))throw Error('EVALUATION_CAMPAIGN_KEY')
+   if(this.campaign.authorization===COLLABORATION_RULES.authorization)assertCollaborationCharge(this.state.dispatches.map(d=>d.key),key,this.campaign.prefix)
    if(this.localCalls>=this.campaign.limit)throw Error('EVALUATION_LOCAL_CALL_LIMIT')
    const segment=this.campaign.modelSegment??0,modelOf=(value:string)=>value.slice(this.campaign!.prefix.length).split('/')[segment],model=modelOf(key)
    if(!model)throw Error('EVALUATION_CAMPAIGN_KEY')
@@ -591,4 +592,27 @@ export function v6DispatchGate(rows:V6Row[],nextCase:string,round:number,cases:V
  if(rows.some(r=>r.round>round))throw Error('EVALUATION_ROUND_ORDER')
  if(!cases.some(c=>c.id===nextCase))throw Error('EVALUATION_CASES_NOT_AUTHORIZED')
  if(round===1&&v6Summary(rows.filter(r=>r.round===0),cases,0,options).verdict!=='passed')throw Error('EVALUATION_ROUND_REQUIRED')
+}
+
+/** Independent authorization; never changes the historical V6_RULES contract. */
+export const COLLABORATION_RULES={authorization:'2026-10-08-memory-collaboration',prefix:'v6-2026-10-05/collaboration/',total:272,consolidation:240,answers:32,consolidationPerModel:120,answersPerModel:16,seconds:120,supervisionMs:180000,revision:11} as const
+export function collaborationKeyParts(key:string,prefix:string=COLLABORATION_RULES.prefix){
+ if(prefix!==COLLABORATION_RULES.prefix||!key.startsWith(prefix))throw Error('EVALUATION_CAMPAIGN_KEY')
+ const parts=key.slice(prefix.length).split('/'),[revision,phase,model,a,b]=parts
+ if(parts.length!==5||!/^r[1-9][0-9]*$/.test(revision!)||!['consolidation','answers'].includes(phase!)||!['MiniMax-M3','deepseek-flash'].includes(model!)||!a||!b||!/[A-Za-z0-9]/.test(a)||!/^[-A-Za-z0-9_]+$/.test(b)||phase==='consolidation'&&!['0','1'].includes(a)||phase==='answers'&&!['on','off'].includes(b))throw Error('EVALUATION_CAMPAIGN_KEY')
+ return {revision,phase:phase as 'consolidation'|'answers',model}
+}
+export function assertCollaborationCharge(keys:string[],key:string,prefix:string=COLLABORATION_RULES.prefix){
+ const part=collaborationKeyParts(key,prefix),local=keys.filter(k=>k.startsWith(prefix)),parts=local.map(k=>collaborationKeyParts(k,prefix))
+ if(local.filter(k=>k===key).length>=(part.phase==='answers'?1:2))throw Error('EVALUATION_CASE_CALL_LIMIT')
+ if(parts.length>=272)throw Error('EVALUATION_LOCAL_CALL_LIMIT')
+ const phase=parts.filter(p=>p.phase===part.phase)
+ if(phase.length>=(part.phase==='answers'?32:240))throw Error('EVALUATION_PHASE_CALL_LIMIT')
+ if(phase.filter(p=>p.model===part.model).length>=(part.phase==='answers'?16:120))throw Error('EVALUATION_PHASE_MODEL_CALL_LIMIT')
+}
+export function collaborationSchedule(cases:V6Case[],models:string[]){
+ const groups=new Map<string,V6Case[]>();for(const c of cases){const key=c.chain?'chain-'+c.chain:c.direction;const group=groups.get(key)??[];group.push(c);groups.set(key,group)}
+ const queues=[...groups.values()].map(rows=>rows.slice().sort((a,b)=>(a.step??0)-(b.step??0))),ordered:V6Case[]=[]
+ while(queues.some(q=>q.length))for(const queue of queues){const c=queue.shift();if(c)ordered.push(c)}
+ return [0,1].flatMap(round=>ordered.flatMap((c,index)=>(index%2?models.slice().reverse():models).map(model=>({round,caseId:c.id,model}))))
 }
