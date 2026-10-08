@@ -412,6 +412,34 @@ async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) 
     await page.eval(`(async()=>{await window.rgent.themeSet(${JSON.stringify(maintenanceTheme)});document.querySelector('[aria-label="刷新状态"]').click()})()`)
   }
   check('移除故障视图后实际保存状态恢复且近期背景保留',await waitFor(page,`document.querySelector('.memory-status-line')?.textContent.includes('已保存')&&!document.querySelector('.memory-status-line')?.textContent.includes('后续维护未完成')&&!!document.querySelector('.memory-recent-entry')`))
+  // 故障视图夹具：先调用原生产 memory:get 核验，再替换展示字段；不模拟真实后台故障。
+  const collaborationTheme=await page.eval(`window.rgent.themeGet()`)
+  const collaborationBytes=readFileSync(memoryFixtureFile,'utf8')
+  await nativePage.eval(`(()=>{const ipc=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain,channel='memory:get',old=ipc._invokeHandlers.get(channel);if(!old||globalThis.__memoryCollaborationView)throw Error('协作视图夹具冲突');globalThis.__memoryCollaborationView={channel,old,scenario:'partial'};ipc._invokeHandlers.set(channel,async(...args)=>{const result=await old(...args);if(!result.ok||result.value.status!=='ready')return result;const scenario=globalThis.__memoryCollaborationView.scenario,long=result.value.entries.find(e=>e.category!=='recent'),partial=scenario==='partial',jobs=Array.from({length:5},(_,i)=>({taskId:'ui-collaboration-'+scenario+'-'+i,materialVersion:'fictional-view',outcome:'applied',entryIds:partial&&long?[long.id]:[],retryable:false,results:partial?[{action:'correct',outcome:'applied'},{action:'recent',outcome:'rejected',code:'MEMORY_DEADLINE'}]:[{action:'correct',outcome:'rejected',code:'MEMORY_OUTPUT_INVALID'},{action:'recent',outcome:'rejected',code:'MEMORY_OUTPUT_TRUNCATED'}]}));return {...result,value:{...result.value,jobs,...(scenario==='quality-scope'?{quality:{state:'passed',humanReviewed:false,stale:true}}:{})}}});return true})()`)
+  try{
+    await page.call('Emulation.setEmulatedMedia',{features:[]})
+    for(const scenario of ['partial','repair-failure','quality-scope']){
+      await nativePage.eval(`globalThis.__memoryCollaborationView.scenario=${JSON.stringify(scenario)}`)
+      await page.eval(`document.querySelector('[aria-label="刷新状态"]').click()`)
+      const expected=scenario==='partial'?'已保存可用部分；近期背景未更新':scenario==='repair-failure'?'没有写入':'旧成绩不再适用'
+      check('协作故障视图 '+scenario+' 显示真实部分结果口径',await waitFor(page,`document.querySelector('.memory-page')?.textContent.includes(${JSON.stringify(expected)})`))
+      for(const mode of ['day','night'])for(const [width,height] of [[1200,800],[800,560]]){
+        await page.eval(`window.rgent.themeSet('${mode}')`)
+        await page.call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false})
+        await waitFor(page,`document.documentElement.dataset.theme==='${mode}'`)
+        await page.eval(`(()=>{const panel=document.querySelector('[data-memory-section="jobs"]');panel.open=true;document.querySelector('.memory-job .memory-technical').open=true;document.querySelectorAll('[data-memory-section="models"],[data-memory-section="maintenance"]').forEach(e=>e.open=false);const main=document.querySelector('.settings-main');main.scrollTop=0;if(${JSON.stringify(scenario)}!=='quality-scope')document.querySelector('.memory-job').scrollIntoView({block:'start'});document.querySelector(${JSON.stringify(scenario==='quality-scope'?'[aria-label="刷新状态"]':'.memory-job .memory-technical > summary')}).focus({preventScroll:true})})()`)
+        await page.call('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9})
+        await page.call('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9})
+        check('协作故障视图 '+scenario+' '+mode+' '+width+'px 不横溢且中性焦点可见',await page.eval(`(()=>{const main=document.querySelector('.settings-main'),focus=document.activeElement,style=getComputedStyle(focus),probe=document.createElement('span');probe.style.color='var(--focus-ring)';document.body.append(probe);const color=getComputedStyle(probe).color;probe.remove();return main.scrollWidth<=main.clientWidth+1&&parseFloat(style.outlineWidth)>=2&&style.outlineColor===color&&main.scrollHeight>main.clientHeight})()`))
+        await shot(page,`memory-collaboration-${scenario}-${mode}-${width}`)
+      }
+    }
+  }finally{
+    await nativePage.eval(`(()=>{const gate=globalThis.__memoryCollaborationView;if(gate){process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain._invokeHandlers.set(gate.channel,gate.old);delete globalThis.__memoryCollaborationView}return true})()`)
+    await page.call('Emulation.setDeviceMetricsOverride',{width:1200,height:800,deviceScaleFactor:1,mobile:false})
+    await page.eval(`(async()=>{await window.rgent.themeSet(${JSON.stringify(collaborationTheme)});document.querySelector('[aria-label="刷新状态"]').click();document.querySelector('[data-memory-section="jobs"]').open=false;document.querySelector('.settings-main').scrollTop=0})()`)
+  }
+  check('协作故障视图只改展示且真实记忆字节保持',readFileSync(memoryFixtureFile,'utf8')===collaborationBytes&&await waitFor(page,`!document.querySelector('.memory-job')?.dataset.taskId?.startsWith('ui-collaboration-')`))
   const recentTheme=await page.eval(`window.rgent.themeGet()`)
   await page.call('Emulation.setEmulatedMedia',{features:[]})
   for(const mode of ['day','night']){

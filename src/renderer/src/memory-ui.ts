@@ -287,15 +287,20 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     }
     const jobLabel=(job:MemoryView['jobs'][number],index:number)=>{
       const {applied,rejected,partial}=jobResults(job)
+      const outcome=partial?'部分保存':job.outcome==='applied'&&rejected.length&&!applied?'没有写入':({queued:'等待整理',running:'正在整理',applied:'已完成',rejected:'没有写入',interrupted:'已中断',unavailable:'暂不可用', 'handed-off':'已移交'})[job.outcome]
       const partialNote=rejected.length?` · ${partial?`部分保存：已保存 ${applied} 组、未保存 ${rejected.length} 组`:`未保存 ${rejected.length} 组`}`:''
-      return `${index===0?'最近一次整理':'整理记录 '+(index+1)} · ${({queued:'等待整理',running:'正在整理',applied:'已完成',rejected:'没有写入',interrupted:'已中断',unavailable:'暂不可用', 'handed-off':'已移交'})[job.outcome]}${partialNote}${job.reason?` · ${memoryErrorText(job.reason)}`:''}`
+      return `${index===0?'最近一次整理':'整理记录 '+(index+1)} · ${outcome}${partialNote}${job.reason?` · ${memoryErrorText(job.reason)}`:''}`
     }
     for(const [index,job] of [...(view?.jobs??[])].reverse().entries()){
       const signature=JSON.stringify([job,view?.config,view?.recipient,job.entryIds?.map(id=>view?.entries.find(e=>e.id===id)?.category??null)]),previous=existing.get(job.taskId)
       if(previous?.dataset.signature===signature){previous.querySelector('.memory-job-result')!.textContent=jobLabel(job,index);jobs.append(previous);continue}
       const row=el('div','memory-job');row.dataset.taskId=job.taskId;row.dataset.signature=signature
       row.append(paragraph(jobLabel(job,index),'settings-hint memory-job-result'));const detail=el('details','memory-technical');detail.append(Object.assign(el('summary'),{textContent:'任务详情'}),paragraph(`任务编号：${job.taskId}`));row.append(detail);const request={taskId:job.taskId,materialVersion:job.materialVersion!}
-      if(job.outcome==='applied'&&!job.entryIds)row.append(paragraph('本场已完成；写入明细未提供。'))
+      const {applied,rejected,partial}=jobResults(job)
+      if(partial&&rejected.some(result=>result.action==='recent')&&!job.results?.some(result=>result.action==='recent'&&result.outcome==='applied'))row.append(paragraph('已保存可用部分；近期背景未更新。请查看下方原因；可在上方查看已保存内容。'))
+      if(partial&&rejected.some(result=>result.action!=='recent')&&!job.results?.some(result=>result.action!=='recent'&&result.outcome==='applied'))row.append(paragraph('已保存可用部分；长期内容未保存。请查看下方原因。'))
+      if(job.outcome==='applied'&&rejected.length&&!applied)row.append(paragraph('本场没有可保存的结果；请查看下方原因。'))
+      else if(job.outcome==='applied'&&!job.entryIds)row.append(paragraph('本场已完成；写入明细未提供。'))
       else if(job.outcome==='applied'){
         const matched=(job.entryIds??[]).map(id=>view?.entries.find(e=>e.id===id))
         if(matched.every(Boolean)){

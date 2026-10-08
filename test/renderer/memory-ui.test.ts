@@ -351,3 +351,39 @@ it('shows saved content together with a visible maintenance failure',async()=>{
  const line=body.querySelector('.memory-status-line')!.textContent!;expect(line).toContain('已保存');expect(line).toContain('后续维护未完成');expect(line).not.toContain('MEMORY_FILE_LIMIT')
  dispose();body.remove()
 })
+
+it.each(['partial-recent','partial-long','all-rejected','no-recent'] as const)('reports %s according to actual job results',async kind=>{
+ const body=document.createElement('div');document.body.append(body)
+ const long:MemoryEntryView={id:'long-1',version:1,content:'固定规则',layer:'core',scope:'本库',status:'active',reason:null,updatedAt:'today',sources:[]}
+ const results:NonNullable<MemoryView['jobs'][number]['results']>=kind==='partial-recent'?[{action:'correct',outcome:'applied'},{action:'recent',outcome:'rejected',code:'MEMORY_DEADLINE'}]:kind==='partial-long'?[{action:'recent',outcome:'applied'},{action:'correct',outcome:'rejected',code:'MEMORY_OUTPUT_INVALID'}]:kind==='all-rejected'?[{action:'correct',outcome:'rejected',code:'MEMORY_OUTPUT_INVALID'},{action:'recent',outcome:'rejected',code:'MEMORY_DEADLINE'}]:[{action:'correct',outcome:'applied'}]
+ const entries=kind==='partial-long'?[recentEntry]:kind==='all-rejected'?[]:[long]
+ const jobs:MemoryView['jobs']=[{taskId:'partial-job',materialVersion:'m1',outcome:'applied',retryable:false,entryIds:entries.map(e=>e.id),results}]
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,entries,jobs}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ const text=body.querySelector('.memory-job')!.textContent!
+ if(kind==='partial-recent'){expect(text).toContain('已保存可用部分；近期背景未更新');expect(text).toContain('长期内容 1 条');expect(text).not.toContain('没有写入新内容')}
+ if(kind==='partial-long'){expect(text).toContain('近期背景 1 块');expect(text).toContain('长期内容未保存')}
+ if(kind==='all-rejected'){expect(text).toContain('没有写入');expect(text).not.toContain('已完成')}
+ if(kind==='no-recent')expect(text).not.toContain('近期背景未更新')
+ dispose();body.remove()
+})
+
+it('keeps expanded job details and focus when a status refresh fails',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ const get=vi.fn().mockResolvedValueOnce({ok:true,value:{...view,jobs:[{taskId:'job-open',materialVersion:'m1',outcome:'applied',entryIds:[],results:[{action:'recent',outcome:'rejected',code:'MEMORY_DEADLINE'}],retryable:false}]}}).mockResolvedValueOnce({ok:false,error:'MEMORY_SERVICE_FAILED'})
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get,models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ const panel=body.querySelector<HTMLDetailsElement>('[data-memory-section="jobs"]')!,detail=body.querySelector<HTMLDetailsElement>('.memory-job .memory-technical')!,summary=detail.querySelector<HTMLElement>('summary')!
+ panel.open=true;detail.open=true;summary.focus();body.querySelector<HTMLButtonElement>('[aria-label="刷新状态"]')!.click();await flush()
+ expect(panel.open).toBe(true);expect(detail.open).toBe(true);expect(document.activeElement).toBe(summary)
+ expect(body.textContent).toContain('连接或服务请求失败');expect(body.textContent).not.toContain('没有自动重试')
+ dispose();body.remove()
+})
+
+it('still reports saved groups and the rejected recent update when saved entries are no longer visible',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ const jobs:MemoryView['jobs']=[{taskId:'gone',materialVersion:'m1',outcome:'applied',retryable:false,entryIds:['old-id'],results:[{action:'correct',outcome:'applied'},{action:'recent',outcome:'rejected',code:'MEMORY_DEADLINE'}]}]
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,jobs}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ expect(body.querySelector('.memory-job')!.textContent).toContain('已保存可用部分；近期背景未更新')
+ expect(body.querySelector('.memory-job')!.textContent).toContain('部分条目当前不可查看')
+ expect(body.querySelector('.memory-job')!.textContent).not.toContain('长期内容 1 条')
+ dispose();body.remove()
+})
