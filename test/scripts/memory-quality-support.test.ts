@@ -2,6 +2,7 @@ import {mkdtempSync,readFileSync,readdirSync,rmSync,writeFileSync} from 'node:fs
 import path from 'node:path'
 import os from 'node:os'
 import {afterEach,expect,it} from 'vitest'
+import {V6_QUALITY_CASES} from '../fixtures/v6-memory-quality.ts'
 import * as support from '../../scripts/memory-quality-support.ts'
 const dirs:string[]=[];const dir=()=>{const d=mkdtempSync(path.join(os.tmpdir(),'rgent-eval-journal-'));dirs.push(d);return d}
 afterEach(()=>{for(const d of dirs.splice(0))rmSync(d,{recursive:true,force:true})})
@@ -228,14 +229,26 @@ it('collaboration phase budgets are atomic, isolated and survive revision change
  const key=prefix+'r11/answers/deepseek-flash/fact/on';j.charge(key)
  expect(()=>j.charge(key)).toThrow('EVALUATION_CASE_CALL_LIMIT')
  expect(()=>j.charge(prefix+'r11/unknown/deepseek-flash/fact/on')).toThrow('EVALUATION_CAMPAIGN_KEY')
- for(let i=1;i<16;i++)j.charge(prefix+'r11/answers/deepseek-flash/t'+i+'/off')
- expect(()=>j.charge(prefix+'r12/answers/deepseek-flash/extra/on')).toThrow('EVALUATION_PHASE_MODEL_CALL_LIMIT')
- for(let i=0;i<60;i++){const k=prefix+'r11/consolidation/deepseek-flash/0/c'+i;j.charge(k);j.charge(k)}
- expect(()=>j.charge(prefix+'r12/consolidation/deepseek-flash/0/extra')).toThrow('EVALUATION_PHASE_MODEL_CALL_LIMIT')
- for(let i=0;i<16;i++)j.charge(prefix+'r11/answers/MiniMax-M3/t'+i+'/off')
- expect(()=>j.charge(prefix+'r12/answers/MiniMax-M3/extra/on')).toThrow('EVALUATION_PHASE_CALL_LIMIT')
- for(let i=0;i<60;i++){const k=prefix+'r11/consolidation/MiniMax-M3/0/c'+i;j.charge(k);j.charge(k)}
+ for(const task of support.COLLABORATION_TASK_IDS)for(const condition of ['on','off'])if(task!=='fact'||condition!=='on')j.charge(prefix+'r11/answers/deepseek-flash/'+task+'/'+condition)
+ expect(()=>j.charge(prefix+'r12/answers/deepseek-flash/fact/on')).toThrow('EVALUATION_PHASE_MODEL_CALL_LIMIT')
+ for(const round of [0,1])for(const spec of V6_QUALITY_CASES){const k=prefix+'r11/consolidation/deepseek-flash/'+round+'/'+spec.id;j.charge(k);j.charge(k)}
+ expect(()=>j.charge(prefix+'r12/consolidation/deepseek-flash/0/v6-fact-01')).toThrow('EVALUATION_PHASE_MODEL_CALL_LIMIT')
+ for(const task of support.COLLABORATION_TASK_IDS)for(const condition of ['on','off'])j.charge(prefix+'r11/answers/MiniMax-M3/'+task+'/'+condition)
+ expect(()=>j.charge(prefix+'r12/answers/MiniMax-M3/fact/on')).toThrow('EVALUATION_PHASE_CALL_LIMIT')
+ for(const round of [0,1])for(const spec of V6_QUALITY_CASES){const k=prefix+'r11/consolidation/MiniMax-M3/'+round+'/'+spec.id;j.charge(k);j.charge(k)}
  expect(j.localCalls).toBe(272);expect(j.calls).toBe(273);j.close()
  const next=new support.EvaluationJournal(dir(),{revision:12},3000,root,undefined,campaign)
- expect(()=>next.charge(prefix+'r12/consolidation/MiniMax-M3/0/extra')).toThrow();expect(next.localCalls).toBe(272);next.close()
+ expect(()=>next.charge(prefix+'r12/consolidation/MiniMax-M3/0/v6-fact-01')).toThrow();expect(next.localCalls).toBe(272);next.close()
+})
+it('reserved collaboration keys cannot downgrade to a generic budget by missing or incorrect authorization',()=>{
+ for(const authorization of [undefined,'wrong']){
+  const root=dir(),manifest={old:true},initial=new support.EvaluationJournal(root,manifest,3000);initial.close()
+  const j=new support.EvaluationJournal(dir(),{},3000,root,undefined,{parentManifestHash:support.fingerprint(manifest),prefix:support.COLLABORATION_RULES.prefix,limit:272,perModelLimit:136,modelSegment:2,authorization})
+  try{expect(()=>j.charge(support.COLLABORATION_RULES.prefix+'r11/answers/deepseek-flash/fact/on')).toThrow('EVALUATION_CAMPAIGN_AUTHORIZATION');expect(j.calls).toBe(0)}finally{j.close()}
+ }
+ const j=new support.EvaluationJournal(dir(),{},3000)
+ try{expect(()=>j.charge(support.COLLABORATION_RULES.prefix+'r11/answers/deepseek-flash/fact/on')).toThrow('EVALUATION_CAMPAIGN_AUTHORIZATION')}finally{j.close()}
+})
+it('unknown collaboration case and task aliases are rejected before charging',()=>{
+ for(const suffix of ['r11/answers/deepseek-flash/fact-alias/on','r11/consolidation/deepseek-flash/0/c999'])expect(()=>support.assertCollaborationCharge([],support.COLLABORATION_RULES.prefix+suffix)).toThrow('EVALUATION_CAMPAIGN_KEY')
 })

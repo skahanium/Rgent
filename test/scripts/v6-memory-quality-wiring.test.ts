@@ -346,7 +346,7 @@ it('actual Electron runner options keep v5 historical non-chain saving and all n
   const marker="controller.signal,{strategy:'continuity'",at=section.indexOf(marker)+marker.indexOf('{');expect(section.includes(marker)).toBe(true)
   let depth=0,stop=at;for(;stop<section.length;stop++){if(section[stop]==='{')depth++;if(section[stop]==='}'&&--depth===0)break}
   const expression=section.slice(at,stop+1)
-  return new Function('spec','model','root','path','targetTaskId','round','blocked','frozen','return ('+expression+')')({id:'fiction',chain:chain?'alpha':undefined,step:1},{modelId:'fixture'},'/fiction',path,undefined,0,false,{revision:10}).hostBeforeConsolidation
+  return new Function('spec','model','root','path','targetTaskId','round','blocked','frozen','collaboration','return ('+expression+')')({id:'fiction',chain:chain?'alpha':undefined,step:1},{modelId:'fixture'},'/fiction',path,undefined,0,false,{revision:10},false).hostBeforeConsolidation
  }
  expect(foreground(5,false)).toBe(false);expect(foreground(5,true)).toBe(true)
  expect(foreground(6,false)).toBe(true);expect(foreground(6,true)).toBe(true)

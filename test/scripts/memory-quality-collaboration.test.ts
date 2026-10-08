@@ -32,3 +32,12 @@ it('freezes a model/group interleaving schedule while preserving each chain and 
  for(const model of ['deepseek-flash','MiniMax-M3'])for(const round of [0,1])for(const chain of ['alpha','beta'])expect(plan.filter(r=>r.model===model&&r.round===round&&r.caseId.startsWith('v6-chain-'+chain)).map(r=>Number(r.caseId.slice(-1)))).toEqual([1,2,3,4,5])
  expect(new Set(plan.slice(0,12).map(r=>V6_QUALITY_CASES.find(c=>c.id===r.caseId)?.direction)).size).toBeGreaterThan(1)
 })
+it('accepts a genuine recent-only second request and rejects changed content, phase reuse and a third request',()=>{
+ const first=observation('proposal'),input={messages:[{role:'user',content:first.content}]} as any
+ const recent=observation('recent-regeneration',JSON.stringify({sources:[],task:{status:'completed'}})),gate=new protocol.ConsolidationPaidGate()
+ gate.observe(first as any);gate.consume(input);gate.observe(recent as any)
+ expect(gate.consume({messages:[{role:'user',content:recent.content}]} as any).purpose).toBe('recent-regeneration')
+ gate.observe(observation('protocol-repair') as any);expect(()=>gate.consume(input)).toThrow('EVALUATION_CASE_CALL_LIMIT')
+ const forged=new protocol.ConsolidationPaidGate();forged.observe(first as any);expect(()=>forged.consume({messages:[{role:'user',content:first.content+' '}]} as any)).toThrow('EVALUATION_REQUEST_OBSERVATION_REQUIRED')
+ const reused=new protocol.ConsolidationPaidGate();reused.observe(first as any);reused.consume(input);reused.observe(first as any);expect(()=>reused.consume(input)).toThrow('EVALUATION_REQUEST_PHASE')
+})

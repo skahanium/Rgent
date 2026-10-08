@@ -2,7 +2,7 @@ import {closeSync,existsSync,fsyncSync,mkdirSync,openSync,readFileSync,renameSyn
 import {createHash,randomUUID} from 'node:crypto'
 import path from 'node:path'
 import {MEMORY_QUALITY_CASES,type MemoryQualityCase} from '../test/fixtures/memory-quality.ts'
-import {V6_DIMENSION_MAX,V6_DIMENSION_MIN,V6_SAFETY_COVERAGE,V6_UPDATE_SPLIT_MAX,type V6Case,type V6Direction,type V6Safety} from '../test/fixtures/v6-memory-quality.ts'
+import {V6_QUALITY_CASES,V6_DIMENSION_MAX,V6_DIMENSION_MIN,V6_SAFETY_COVERAGE,V6_UPDATE_SPLIT_MAX,type V6Case,type V6Direction,type V6Safety} from '../test/fixtures/v6-memory-quality.ts'
 
 export const fingerprint=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex')
 export function atomicReport(file:string,value:unknown){
@@ -44,10 +44,13 @@ export class EvaluationJournal {
  dispatchKeys(){return this.state.dispatches.map(d=>d.key)}
  private save(){atomicReport(path.join(this.budgetRoot,'state.json'),this.state)}
  charge(key:string){
+  if(key.startsWith(COLLABORATION_RULES.prefix)||this.campaign?.prefix===COLLABORATION_RULES.prefix||this.campaign?.authorization===COLLABORATION_RULES.authorization){
+   if(this.campaign?.authorization!==COLLABORATION_RULES.authorization||this.campaign.prefix!==COLLABORATION_RULES.prefix||this.campaign.limit!==272||this.campaign.perModelLimit!==136||this.campaign.modelSegment!==2)throw Error('EVALUATION_CAMPAIGN_AUTHORIZATION')
+   assertCollaborationCharge(this.state.dispatches.map(d=>d.key),key)
+  }
   if(this.state.calls>=this.state.limit)throw Error('EVALUATION_CALL_LIMIT')
   if(this.campaign){
    if(!key.startsWith(this.campaign.prefix))throw Error('EVALUATION_CAMPAIGN_KEY')
-   if(this.campaign.authorization===COLLABORATION_RULES.authorization)assertCollaborationCharge(this.state.dispatches.map(d=>d.key),key,this.campaign.prefix)
    if(this.localCalls>=this.campaign.limit)throw Error('EVALUATION_LOCAL_CALL_LIMIT')
    const segment=this.campaign.modelSegment??0,modelOf=(value:string)=>value.slice(this.campaign!.prefix.length).split('/')[segment],model=modelOf(key)
    if(!model)throw Error('EVALUATION_CAMPAIGN_KEY')
@@ -596,10 +599,12 @@ export function v6DispatchGate(rows:V6Row[],nextCase:string,round:number,cases:V
 
 /** Independent authorization; never changes the historical V6_RULES contract. */
 export const COLLABORATION_RULES={authorization:'2026-10-08-memory-collaboration',prefix:'v6-2026-10-05/collaboration/',total:272,consolidation:240,answers:32,consolidationPerModel:120,answersPerModel:16,seconds:120,supervisionMs:180000,revision:11} as const
+export const COLLABORATION_TASK_IDS=['standing','fact','recent','correction','duplicate','forget','permission','irrelevant'] as const
 export function collaborationKeyParts(key:string,prefix:string=COLLABORATION_RULES.prefix){
  if(prefix!==COLLABORATION_RULES.prefix||!key.startsWith(prefix))throw Error('EVALUATION_CAMPAIGN_KEY')
  const parts=key.slice(prefix.length).split('/'),[revision,phase,model,a,b]=parts
  if(parts.length!==5||!/^r[1-9][0-9]*$/.test(revision!)||!['consolidation','answers'].includes(phase!)||!['MiniMax-M3','deepseek-flash'].includes(model!)||!a||!b||!/[A-Za-z0-9]/.test(a)||!/^[-A-Za-z0-9_]+$/.test(b)||phase==='consolidation'&&!['0','1'].includes(a)||phase==='answers'&&!['on','off'].includes(b))throw Error('EVALUATION_CAMPAIGN_KEY')
+ if(phase==='consolidation'&&!V6_QUALITY_CASES.some(c=>c.id===b)||phase==='answers'&&!(COLLABORATION_TASK_IDS as readonly string[]).includes(a))throw Error('EVALUATION_CAMPAIGN_KEY')
  return {revision,phase:phase as 'consolidation'|'answers',model}
 }
 export function assertCollaborationCharge(keys:string[],key:string,prefix:string=COLLABORATION_RULES.prefix){

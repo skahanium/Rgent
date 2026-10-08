@@ -80,12 +80,13 @@ type PaidCall={request?:ConsolidationRequestObservation;phase:'proposal'|'networ
 export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:ModelCredential,
  stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,signal:AbortSignal,options?:{strategy:'baseline'|'review'|'continuity';base?:string;noteName?:string;hostBeforeConsolidation?:boolean;verifyClosure?:boolean;closureTargetId?:string;chainBlocked?:boolean;targetTaskId?:string;validatedRequest?:(request:ConsolidationRequestObservation)=>void;retainArtifact?:UtilityBinding}){
  let base=options?.base??await mkdtemp(path.join(os.tmpdir(),'rgent-memory-quality-')),root=path.join(base,'vault')
- const qualityNote=options?.noteName??'fiction.md'
+ const qualityNote=options?.noteName??(options?.retainArtifact?'source/fiction.md':'fiction.md')
  // v6 的所有案例由真实 Host 保存 V2 材料；历史臂维持其显式版本语义。
  const hostBeforeConsolidation=options?.hostBeforeConsolidation??(options?.strategy==='continuity')
  let vault:VaultSession|null=null,engine:WorkingMemoryConsolidation|null=null
  try{
   await mkdir(root,{recursive:true});if(options?.retainArtifact){base=await realpath(base);root=path.join(base,'vault')}if(options?.retainArtifact){if(!options.base)throw Error('EVALUATION_ARTIFACT_BASE_REQUIRED');await markUtilityRoot(base,options.retainArtifact)};await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
+  if(options?.retainArtifact)await mkdir(path.dirname(path.join(root,qualityNote)),{recursive:true})
   let taskId='quality-'+spec.id;const rawPrompt='/'+spec.prompt
   const source=spec.body+'\n\n'+markPrompt(rawPrompt,{taskId,range:{start:0,end:rawPrompt.length},expectedText:rawPrompt,promptText:spec.prompt})
   const prior=options?.base?await import('node:fs/promises').then(fs=>fs.readFile(path.join(root,qualityNote),'utf8').catch(()=>'')):''
