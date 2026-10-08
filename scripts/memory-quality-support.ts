@@ -621,3 +621,20 @@ export function collaborationSchedule(cases:V6Case[],models:string[]){
  while(queues.some(q=>q.length))for(const queue of queues){const c=queue.shift();if(c)ordered.push(c)}
  return [0,1].flatMap(round=>ordered.flatMap((c,index)=>(index%2?models.slice().reverse():models).map(model=>({round,caseId:c.id,model}))))
 }
+
+/** Collaboration-only resume checkpoints retain the complete charged history. */
+type CollaborationRecoveryBinding={frozenHash:string;prefix:string;model:string}
+type CollaborationRecoveryCycle=CollaborationRecoveryBinding&{at:string;reason:string;dispatchCount:number;historyHash:string}
+export function collaborationRecoveryWindow<T extends {key:string}>(dispatches:T[],cycles:CollaborationRecoveryCycle[],binding:CollaborationRecoveryBinding):T[]{
+ let watermark=0
+ if(cycles.length>2)throw Error('EVALUATION_RECOVERY_INVALID')
+ for(const cycle of cycles){
+  if(cycle.frozenHash!==binding.frozenHash||cycle.prefix!==binding.prefix||cycle.model!==binding.model||!Number.isInteger(cycle.dispatchCount)||cycle.dispatchCount<=watermark||cycle.dispatchCount>dispatches.length||cycle.historyHash!==fingerprint(dispatches.slice(0,cycle.dispatchCount)))throw Error('EVALUATION_RECOVERY_INVALID')
+  watermark=cycle.dispatchCount
+ }
+ return dispatches.slice(watermark).filter(d=>d.key.startsWith(binding.prefix+binding.model+'/'))
+}
+export function collaborationResumeCycle<T extends {key:string}>(dispatches:T[],cycles:CollaborationRecoveryCycle[],binding:CollaborationRecoveryBinding):CollaborationRecoveryCycle{
+ if(cycles.length>=2||collaborationRecoveryWindow(dispatches,cycles,binding).length<3)throw Error('EVALUATION_RECOVERY_INVALID')
+ return {...binding,at:new Date().toISOString(),reason:'operator-resume-after-three-retryable-failures',dispatchCount:dispatches.length,historyHash:fingerprint(dispatches)}
+}

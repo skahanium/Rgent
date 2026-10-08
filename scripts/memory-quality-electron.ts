@@ -11,9 +11,9 @@ import {memoryConsolidationSystem,memoryContinuitySystem,parseContinuitySuggesti
 import {MEMORY_QUALITY_CASES} from '../test/fixtures/memory-quality.ts'
 import type {MemoryQualityCase} from '../test/fixtures/memory-quality.ts'
 import {runMemoryQualityCase,memorySemanticReviewSystem,ConsolidationPaidGate} from './memory-quality-runner.ts'
-import {COLLABORATION_RULES,collaborationSchedule,EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,recordedQualityReview,V4_RULES,V4_SCREEN,V4_PARENT_MANIFEST,V4_PREFIX,v4Cases,v4Selection,v4EvidenceComplete,freezeV4,v4Summary,v4DispatchGate,v4ScreenGate,v4ResumeAction,type V4Row,type V4Annotation,type V4Category,V5_RULES,V5_PREFIX,freezeV5,v5Summary,v5ScreenDispatchGate,v5TerminalCategory,v5DiagnosticTargets,v5ActionEvidence,v5ControlledStatus,type V5Row,type V5Annotation,V6_RULES,V6_PREFIX,V6_CATEGORIES,V6_SCORING_CATEGORIES,freezeV6,v6BoundReview,v6ReviewValid,v6LoadedActionState,v6Summary,v6AppliedEvidence,v6AssertDispatchAvailable,v6DoubleReview,v6DispatchGate,v6TerminalCategory,v6RecoveryDecision,type V6Row,type V6Annotation} from './memory-quality-support.ts'
+import {COLLABORATION_RULES,collaborationSchedule,collaborationRecoveryWindow,collaborationResumeCycle,EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,recordedQualityReview,V4_RULES,V4_SCREEN,V4_PARENT_MANIFEST,V4_PREFIX,v4Cases,v4Selection,v4EvidenceComplete,freezeV4,v4Summary,v4DispatchGate,v4ScreenGate,v4ResumeAction,type V4Row,type V4Annotation,type V4Category,V5_RULES,V5_PREFIX,freezeV5,v5Summary,v5ScreenDispatchGate,v5TerminalCategory,v5DiagnosticTargets,v5ActionEvidence,v5ControlledStatus,type V5Row,type V5Annotation,V6_RULES,V6_PREFIX,V6_CATEGORIES,V6_SCORING_CATEGORIES,freezeV6,v6BoundReview,v6ReviewValid,v6LoadedActionState,v6Summary,v6AppliedEvidence,v6AssertDispatchAvailable,v6DoubleReview,v6DispatchGate,v6TerminalCategory,v6RecoveryDecision,type V6Row,type V6Annotation} from './memory-quality-support.ts'
 
-import {UTILITY_RULES,UTILITY_TASKS,runUtilityPair,utilityBlindPacket,utilityReviewSummary,assertUtilityPacket,validateUtilityAnnotation,type UtilityArtifact} from './memory-quality-utility.ts'
+import {UTILITY_RULES,UTILITY_TASKS,readUtilityEvidence,recoverUtilityReport,persistUtilityPreflight,runUtilityPair,utilityBlindPacket,utilityReviewSummary,assertUtilityPacket,validateUtilityAnnotation,type UtilityArtifact} from './memory-quality-utility.ts'
 
 import {V5_QUALITY_CASES,V5_SCREEN_IDS} from '../test/fixtures/v5-memory-quality.ts'
 import {V6_QUALITY_CASES,V6_INDEPENDENT_IDS,V6_SAFETY_COVERAGE} from '../test/fixtures/v6-memory-quality.ts'
@@ -21,7 +21,7 @@ import type {V6Case} from '../test/fixtures/v6-memory-quality.ts'
 
 import {MEMORY_RUNTIME_FINGERPRINT,MEMORY_SCORING_FINGERPRINT} from '../src/main/memory-quality-status.ts'
 
-const options=JSON.parse(process.env.RGENT_MEMORY_EVAL_OPTIONS??'{}') as {root:string;budget:string;replay?:boolean;publish?:string;profile:string;report:string;models:string[];pilot:boolean;live:boolean;only?:string;v4?:boolean;v5?:boolean;v6?:boolean;round?:number;freeze?:boolean;diagnose?:boolean;review?:boolean;stop?:string;resume?:string;annotation?:string;double?:boolean;screen?:boolean;hashes?:boolean;cases?:string[];collaboration?:boolean;utility?:string;utilityExport?:boolean;utilitySummary?:boolean;next?:boolean;supervisionToken?:string}
+const options=JSON.parse(process.env.RGENT_MEMORY_EVAL_OPTIONS??'{}') as {root:string;budget:string;replay?:boolean;publish?:string;profile:string;report:string;models:string[];pilot:boolean;live:boolean;only?:string;v4?:boolean;v5?:boolean;v6?:boolean;round?:number;freeze?:boolean;diagnose?:boolean;review?:boolean;stop?:string;resume?:string;annotation?:string;double?:boolean;screen?:boolean;hashes?:boolean;cases?:string[];collaboration?:boolean;utility?:string;utilityExport?:boolean;utilityRecover?:boolean;utilitySummary?:boolean;next?:boolean;supervisionToken?:string}
 app.setName('rgent')
 app.setPath('userData',path.join(options.report,'electron-profile'))
 // Electron emits ready after its entry module has finished loading.
@@ -328,11 +328,13 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
  }
  const rows=(model:string):V6Row[]=>[0,1].flatMap(round=>cases.flatMap(c=>{const row=rowOf(model,round,c);return row?[row]:[]}))
  const stopFile=(model:string)=>path.join(root,'stop-'+model+'.json'),recoveryFile=(model:string)=>path.join(root,'recovery-'+model+'.json')
- const cyclesOf=(model:string):{at:string;reason:string}[]=>{if(!existsSync(recoveryFile(model)))return [];try{const value=JSON.parse(readFileSync(recoveryFile(model),'utf8'));return Array.isArray(value.cycles)?value.cycles:[]}catch{return []}}
+ const recoveryBinding=(model:string)=>({frozenHash,prefix,model})
+ const dispatchHistory=()=>JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8')).dispatches as {key:string}[]
+ const cyclesOf=(model:string):any[]=>{if(!existsSync(recoveryFile(model)))return [];try{const value=JSON.parse(readFileSync(recoveryFile(model),'utf8'));if(collaboration){if(value.model!==model||!Array.isArray(value.cycles))throw Error('EVALUATION_RECOVERY_INVALID');collaborationRecoveryWindow(dispatchHistory(),value.cycles,recoveryBinding(model))}return Array.isArray(value.cycles)?value.cycles:[]}catch(error){if(collaboration)throw error;return []}}
  // 连续失败只看该模型按时间顺序的最近尝试；"可重试网络失败"= 传输失败或当次无终态。
  const recentAttempts=(model:string)=>{
   const state=JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8')) as {dispatches:{key:string}[]}
-  return state.dispatches.filter(d=>d.key.startsWith(prefix+model+'/')).slice(-3).map(d=>{
+  return (collaboration?collaborationRecoveryWindow(state.dispatches,cyclesOf(model),recoveryBinding(model)):state.dispatches.filter(d=>d.key.startsWith(prefix+model+'/'))).slice(-3).map(d=>{
    const file=resultFile(d.key);if(!existsSync(file))return {retryable:true}
    try{const r=JSON.parse(readFileSync(file,'utf8')),error=String(r.error??'')
     const retryable=r.status!=='completed'||['MEMORY_SERVICE_FAILED','EVALUATION_REQUEST_FAILED','EVALUATION_ATTEMPT_TIMEOUT','MEMORY_DEADLINE'].includes(error)
@@ -343,7 +345,7 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
  const recoveryDecision=(model:string)=>v6RecoveryDecision(recentAttempts(model),cyclesOf(model).length,V6_RULES.recoveryCyclesMax)
  if(options.resume){const model=frozen.models.find((m:any)=>m.modelId===options.resume);if(!model)throw Error('EVALUATION_MODELS_NOT_AUTHORIZED')
   if(recoveryDecision(model.modelId)!=='pause')throw Error('EVALUATION_RESUME_NOT_REQUIRED')
-  const cycles=cyclesOf(model.modelId),next=[...cycles,{at:new Date().toISOString(),reason:'operator-resume-after-three-retryable-failures'}]
+  const cycles=cyclesOf(model.modelId),next=[...cycles,collaboration?collaborationResumeCycle(dispatchHistory(),cycles,recoveryBinding(model.modelId)):{at:new Date().toISOString(),reason:'operator-resume-after-three-retryable-failures'}]
   writeFileSync(recoveryFile(model.modelId),JSON.stringify({model:model.modelId,cycles:next,max:V6_RULES.recoveryCyclesMax},null,2),{mode:0o600})
   console.log(JSON.stringify({resumed:model.modelId,cycles:next.length,max:V6_RULES.recoveryCyclesMax,remaining:V6_RULES.recoveryCyclesMax-next.length}))}
  if(options.stop){if(!frozen.models.some((m:any)=>m.modelId===options.stop))throw Error('EVALUATION_MODELS_NOT_AUTHORIZED');if(!existsSync(stopFile(options.stop)))writeFileSync(stopFile(options.stop),JSON.stringify({frozenHash,reason:'operator-stop',at:new Date().toISOString(),rows:rows(options.stop)},null,2),{flag:'wx',mode:0o600})}
@@ -439,6 +441,8 @@ async function runUtilityCli(controller:AbortController,frozen:any,frozenHash:st
  const task=UTILITY_TASKS.find(t=>t.id===options.utility),model=frozen.models.find((m:any)=>m.modelId===options.only),root=options.report
  if(!task||!model)throw Error('EVALUATION_UTILITY_TASK')
  const pairKey=`${COLLABORATION_RULES.prefix}r${frozen.revision}/answers/${model.modelId}/${task.id}`,file=(kind:string)=>path.join(root,kind+'-'+fingerprint(pairKey)+'.json'),resultFile=(key:string)=>path.join(root,'result-'+fingerprint(key)+'.json')
+ const evidenceInput=()=>({root,pairKey,frozenHash,dispatches:JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8')).dispatches})
+ if(options.utilityRecover){const recovered=recoverUtilityReport(evidenceInput());console.log(JSON.stringify({recovered:true,callsAdded:0,resultHash:fingerprint(recovered.result)}));return}
  if(options.utilityExport){const packet=JSON.parse(readFileSync(file('utility-blind'),'utf8')),result=JSON.parse(readFileSync(file('utility-result'),'utf8'));assertUtilityPacket(packet,result);if(result.frozenHash!==frozenHash)throw Error('EVALUATION_REVISION_CHANGED');console.log(JSON.stringify(packet.public));return}
  if(options.review){
   const result=JSON.parse(readFileSync(file('utility-result'),'utf8')),packet=JSON.parse(readFileSync(file('utility-blind'),'utf8'))
@@ -472,18 +476,20 @@ async function runUtilityCli(controller:AbortController,frozen:any,frozenHash:st
  try{
   for(const charged of new Set(journal.dispatchKeys().filter(k=>k.startsWith(COLLABORATION_RULES.prefix+'r'+frozen.revision+'/answers/'+model.modelId+'/')))){const result=journal.read(charged) as any;if(!result||result.status!=='terminal'||result.frozenHash!==frozenHash)throw Error('EVALUATION_CHARGED_UNFINISHED')}
   const keys={on:pairKey+'/on',off:pairKey+'/off'},skip=(['on','off'] as const).filter(c=>journal.charged(keys[c])>0)
-  if(skip.length===2)throw Error('EVALUATION_ATTEMPT_ALREADY_DISPATCHED')
+  if(skip.length===2){const recovered=recoverUtilityReport(evidenceInput());console.log(JSON.stringify({recovered:true,callsAdded:0,resultHash:fingerprint(recovered.result)}));return}
+  const verified=skip.length?readUtilityEvidence(evidenceInput()):null
+  let preflightPlan:any
   const beforeConfig=readFileSync(path.join(options.profile,'model-config.json')),credential=loadModelCredentialReadOnly(options.profile,safeStorage,model.recordId)
   if(credential.modelId!==model.modelId||credential.baseURL!==model.baseURL||credential.contextTokens!==model.contextTokens)throw Error('EVALUATION_REVISION_CHANGED')
-  for(const c of skip)completed[c]=(journal.read(keys[c]) as any).result
-  const pair=await runUtilityPair({artifact,binding,sourceResultHash:fingerprint(source),taskId:task.id,credential,signal:controller.signal,preparedArtifact:submanifest?.after,skipConditions:[...skip],
+  for(const c of skip)completed[c]=verified!.conditions[c]!.answer
+  await runUtilityPair({artifact,binding,sourceResultHash:fingerprint(source),taskId:task.id,credential,signal:controller.signal,preparedArtifact:submanifest?.after,skipConditions:[...skip],
    onPrepared:after=>{if(submanifest){if(after.hash!==submanifest.after.hash)throw Error('EVALUATION_UTILITY_SOURCE_CHANGED')}else{submanifest={source:sourceBinding,after,afterHash:after.hash};writeFileSync(file('utility-source'),JSON.stringify(submanifest,null,2),{flag:'wx',mode:0o600})}},
+   onPreflight:(preflight,order)=>{preflightPlan=persistUtilityPreflight({root,pairKey,frozenHash,source:sourceBinding,afterHash:submanifest.after.hash,preflight,order})},
    onDispatchBoundary:(condition,index)=>console.log(JSON.stringify({evaluationBoundary:'utility-answer',token:options.supervisionToken,index,condition})),
-   charge:condition=>{if(!readFileSync(path.join(options.profile,'model-config.json')).equals(beforeConfig))throw Error('EVALUATION_PROFILE_CHANGED');if(journal.charged(keys[condition]))throw Error('EVALUATION_ATTEMPT_ALREADY_DISPATCHED');journal.write(keys[condition],{status:'started',key:keys[condition],frozenHash,source:sourceBinding,afterHash:submanifest.after.hash});journal.charge(keys[condition])},
+   charge:condition=>{if(!readFileSync(path.join(options.profile,'model-config.json')).equals(beforeConfig))throw Error('EVALUATION_PROFILE_CHANGED');if(journal.charged(keys[condition]))throw Error('EVALUATION_ATTEMPT_ALREADY_DISPATCHED');journal.write(keys[condition],{status:'started',key:keys[condition],frozenHash,source:sourceBinding,afterHash:submanifest.after.hash,preflightHash:preflightPlan.hash});journal.charge(keys[condition])},
    stream:streamModelStep,
-   onCondition:(condition,result)=>{const clean=JSON.parse(JSON.stringify(result).replaceAll(credential.apiKey,'[redacted]'));completed[condition]=clean;journal.finish(keys[condition],{status:'terminal',key:keys[condition],frozenHash,source:sourceBinding,afterHash:submanifest.after.hash,result:clean})}})
-  const result={...pair,conditions:completed,source:sourceBinding,calls:(['on','off'] as const).reduce((n,c)=>n+journal.charged(keys[c]),0),planned:2,validTerminal:Object.values(completed).filter((r:any)=>r.status==='completed'&&r.finishReason==='stop'&&!r.error).length}
-  saveResult(result);console.log(JSON.stringify({frozenHash,model:model.modelId,taskId:task.id,calls:result.calls,validTerminal:result.validTerminal,humanReviewed:false}))
+   onCondition:(condition,result)=>{const clean=JSON.parse(JSON.stringify(result).replaceAll(credential.apiKey,'[redacted]'));completed[condition]=clean;journal.finish(keys[condition],{status:'terminal',key:keys[condition],frozenHash,source:sourceBinding,afterHash:submanifest.after.hash,preflightHash:preflightPlan.hash,result:clean})}})
+  const {result}=recoverUtilityReport(evidenceInput());console.log(JSON.stringify({frozenHash,model:model.modelId,taskId:task.id,calls:result.calls,validTerminal:result.validTerminal,humanReviewed:false}))
  }catch(error){
   const conditions=Object.fromEntries((['on','off'] as const).map(condition=>[condition,completed[condition]??{body:'',status:journal.charged(pairKey+'/'+condition)?'charged-without-terminal':'not-dispatched',error:error instanceof Error&&/^[A-Z_]{3,80}$/.test(error.message)?error.message:'EVALUATION_UTILITY_FAILED'}]))
   const failures=existsSync(file('utility-failures'))?JSON.parse(readFileSync(file('utility-failures'),'utf8')):[]
@@ -508,11 +514,10 @@ function collaborationMechanical(model:string,attempts:any[]){
 function utilityAggregate(frozen:any,frozenHash:string){
  const state=JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8')),rows:any[]=[]
  for(const model of frozen.models)for(const task of UTILITY_TASKS){const pairKey=`${COLLABORATION_RULES.prefix}r${frozen.revision}/answers/${model.modelId}/${task.id}`,file=(kind:string)=>path.join(options.report,kind+'-'+fingerprint(pairKey)+'.json')
-  const result=existsSync(file('utility-result'))?JSON.parse(readFileSync(file('utility-result'),'utf8')):null
-  if(result&&result.frozenHash!==frozenHash)throw Error('EVALUATION_REVISION_CHANGED')
+  const evidence=readUtilityEvidence({root:options.report,pairKey,frozenHash,dispatches:state.dispatches}),result=evidence.result
   let review=null
   if(existsSync(file('utility-annotation'))&&existsSync(file('utility-annotation2'))){const packet=JSON.parse(readFileSync(file('utility-blind'),'utf8'));if(!result||packet.public.binding.resultHash!==fingerprint(result))throw Error('EVALUATION_UTILITY_ANNOTATION_INVALID');review=utilityReviewSummary(packet,JSON.parse(readFileSync(file('utility-annotation'),'utf8')),JSON.parse(readFileSync(file('utility-annotation2'),'utf8')),result)}
-  const conditions=(['on','off'] as const).map(condition=>{const key=pairKey+'/'+condition,charged=state.dispatches.filter((d:any)=>d.key===key).length,rawPath=path.join(options.report,'result-'+fingerprint(key)+'.json'),raw=existsSync(rawPath)?JSON.parse(readFileSync(rawPath,'utf8')):null,answer=raw?.result??result?.conditions?.[condition];return {condition,key,calls:charged,status:charged&&!answer?'charged-without-terminal':answer?.status??'not-dispatched',body:answer?.body??null,finishReason:answer?.finishReason??null,error:answer?.error??null,usage:answer?.usage??null,latencyMs:answer?.latencyMs??null,resultHash:raw?fingerprint(raw):null,inputHash:answer?.input?fingerprint(answer.input):null,memoryDeps:answer?.ledger?.chapter?.provenance?.memoryDeps??null}})
+  const conditions=(['on','off'] as const).map(condition=>{const key=pairKey+'/'+condition,row=evidence.conditions[condition]!,answer=row.answer;return {condition,key,calls:row.calls,status:row.status,body:answer?.body??null,finishReason:answer?.finishReason??null,error:answer?.error??null,usage:answer?.usage??null,latencyMs:answer?.latencyMs??null,resultHash:row.raw?fingerprint(row.raw):null,inputHash:answer?.input?fingerprint(answer.input):null,memoryDeps:answer?.ledger?.chapter?.provenance?.memoryDeps??null}})
   const failures=existsSync(file('utility-failures'))?JSON.parse(readFileSync(file('utility-failures'),'utf8')):[]
   rows.push({model:model.modelId,taskId:task.id,source:task.source,failures,status:result?.status??(result?'recorded':'not-dispatched'),artifactHash:result?.artifactHash??null,afterHash:result?.afterHash??null,actualEntries:result?.actualEntries??null,conditions,review})
  }

@@ -252,3 +252,17 @@ it('reserved collaboration keys cannot downgrade to a generic budget by missing 
 it('unknown collaboration case and task aliases are rejected before charging',()=>{
  for(const suffix of ['r11/answers/deepseek-flash/fact-alias/on','r11/consolidation/deepseek-flash/0/c999'])expect(()=>support.assertCollaborationCharge([],support.COLLABORATION_RULES.prefix+suffix)).toThrow('EVALUATION_CAMPAIGN_KEY')
 })
+it('collaboration resume opens a bound post-resume failure window without erasing charged keys',()=>{
+ expect(typeof support.collaborationRecoveryWindow).toBe('function')
+ const binding={frozenHash:'fixture-freeze',prefix:support.COLLABORATION_RULES.prefix+'r11/consolidation/',model:'deepseek-flash'},dispatches=V6_QUALITY_CASES.slice(0,3).map(c=>({key:binding.prefix+binding.model+'/0/'+c.id,at:new Date(0).toISOString()})),cycles:any[]=[]
+ const decision=()=>support.v6RecoveryDecision(support.collaborationRecoveryWindow(dispatches,cycles,binding).map(()=>({retryable:true})),cycles.length,2)
+ expect(decision()).toBe('pause');cycles.push(support.collaborationResumeCycle(dispatches,cycles,binding));expect(decision()).toBe('continue')
+ expect(dispatches).toHaveLength(3)
+ for(const c of V6_QUALITY_CASES.slice(3,6))dispatches.push({key:binding.prefix+binding.model+'/0/'+c.id,at:new Date(1).toISOString()})
+ expect(decision()).toBe('pause');cycles.push(support.collaborationResumeCycle(dispatches,cycles,binding));expect(decision()).toBe('continue')
+ for(const c of V6_QUALITY_CASES.slice(6,9))dispatches.push({key:binding.prefix+binding.model+'/0/'+c.id,at:new Date(2).toISOString()})
+ expect(decision()).toBe('exhausted')
+ expect(()=>support.collaborationRecoveryWindow(dispatches,[{...cycles[0],dispatchCount:2}],binding)).toThrow('EVALUATION_RECOVERY_INVALID')
+ expect(()=>support.collaborationRecoveryWindow(dispatches,cycles,{...binding,frozenHash:'wrong'})).toThrow('EVALUATION_RECOVERY_INVALID')
+ expect(()=>support.v6AssertDispatchAvailable({dispatchKeys:()=>dispatches.map(d=>d.key),charged:key=>dispatches.filter(d=>d.key===key).length,read:()=>null},binding.prefix,binding.model,dispatches[0]!.key,()=>true)).toThrow('EVALUATION_ATTEMPT_ALREADY_DISPATCHED')
+})

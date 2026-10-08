@@ -2,6 +2,7 @@
 import {createHash,randomUUID} from 'node:crypto'
 import {readFile,writeFile,stat,lstat,realpath,readdir,unlink} from 'node:fs/promises'
 import path from 'node:path'
+import {existsSync,readFileSync,writeFileSync} from 'node:fs'
 import {VaultSession} from '../src/main/vault.ts'
 import {WorkingMemoryService} from '../src/main/working-memory-service.ts'
 import {validOwner,type LedgerOwner} from '../src/main/ledger-store.ts'
@@ -12,7 +13,7 @@ import {AgentHost} from '../src/main/agent-host.ts'
 import {TaskAuthorizationRegistry} from '../src/main/task-authorization.ts'
 import {modelTierFor} from '../src/main/permissions.ts'
 import {memorySection} from '../src/main/memory-use.ts'
-import {fingerprint} from './memory-quality-support.ts'
+import {fingerprint,collaborationKeyParts} from './memory-quality-support.ts'
 
 export const UTILITY_TASKS=[
  {id:'standing',source:'v6-standing-01',body:'工作计划',prompt:'解释为什么工作计划需要明确验收标准。',required:['先结论','一个具体例子'],forbidden:['无依据事实'],intervention:'none'},
@@ -120,7 +121,7 @@ async function utilityHost(artifact:UtilityArtifact,task:typeof UTILITY_TASKS[nu
   return {id:active.id,relPath,bodyHash:sha(body),prompt:task.prompt,history,input:observed as ReturnType<typeof publicInput>,body:bodyOutput,finishReason,usage,error:streamError,status:preflight?'preflight-cancelled':ledger.chapter?.status??'failed',ledger,sections,latencyMs:performance.now()-started,calls:preflight?0:calls}
  }finally{await session.idle();session.dispose()}
 }
-export async function runUtilityPair(input:{artifact:UtilityArtifact;binding:UtilityBinding;taskId:string;credential:ModelCredential;signal:AbortSignal;charge:(condition:'on'|'off')=>void;stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>;onCondition?:(condition:'on'|'off',result:unknown)=>void;onDispatchBoundary?:(condition:'on'|'off',index:number)=>void;sourceResultHash:string;preparedArtifact?:UtilityArtifact;skipConditions?:('on'|'off')[];onPrepared?:(artifact:UtilityArtifact)=>void}){
+export async function runUtilityPair(input:{artifact:UtilityArtifact;binding:UtilityBinding;taskId:string;credential:ModelCredential;signal:AbortSignal;charge:(condition:'on'|'off')=>void;stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>;onCondition?:(condition:'on'|'off',result:unknown)=>void;onDispatchBoundary?:(condition:'on'|'off',index:number)=>void;sourceResultHash:string;preparedArtifact?:UtilityArtifact;skipConditions?:('on'|'off')[];onPrepared?:(artifact:UtilityArtifact)=>void;onPreflight?:(preflight:any,order:('on'|'off')[])=>void}){
  const {artifact,binding,credential,signal}=input,task=UTILITY_TASKS.find(t=>t.id===input.taskId)
  if(!task||binding.caseId!==task.source||binding.round!==0)throw Error('EVALUATION_UTILITY_SOURCE')
  if(!/^[a-f0-9]{64}$/.test(input.sourceResultHash))throw Error('EVALUATION_UTILITY_PREPARED_BINDING')
@@ -142,6 +143,7 @@ export async function runUtilityPair(input:{artifact:UtilityArtifact;binding:Uti
  assertUtilityInputs(preflight.on.input,preflight.off.input,preflight.on.sections)
  if(preflight.on.bodyHash!==preflight.off.bodyHash||preflight.on.prompt!==preflight.off.prompt||fingerprint(preflight.on.history)!==fingerprint(preflight.off.history))throw Error('EVALUATION_UTILITY_INPUT_MISMATCH')
  const parity=(UTILITY_TASKS.findIndex(t=>t.id===task.id)+(binding.model==='MiniMax-M3'?1:0))%2,order:('on'|'off')[]=parity?['off','on']:['on','off']
+ input.onPreflight?.(preflight,order)
  let dispatchIndex=0
  for(const condition of order){if(input.skipConditions?.includes(condition))continue;await restoreUtilityArtifact(after,binding);conditions[condition]=await utilityHost(after,task,credential,condition==='on',false,signal,input.stream,async observed=>{
   await verifyUtilityArtifact(after,binding)
@@ -177,4 +179,70 @@ export function utilityReviewSummary(packet:ReturnType<typeof utilityBlindPacket
  const disagreements=primary.scores.filter((s:any)=>fingerprint(normalized(s))!==fingerprint(normalized(secondary.scores.find((t:any)=>t.id===s.id)))).map((s:any)=>({id:s.id,primary:s,secondary:secondary.scores.find((t:any)=>t.id===s.id)}))
  const compare=(review:any)=>{const score=(condition:string)=>{const s=review.scores.find((s:any)=>s.id===packet.private.mapping.find(m=>m.condition===condition)!.id);return s.scopeFollowed&&!s.errors.length?s.completion:-1};return score('on')>score('off')?'win':score('on')<score('off')?'loss':'tie'}
  return {binding:packet.public.binding,taskId:packet.private.taskId,model:packet.private.model,primary:compare(primary),secondary:compare(secondary),disagreements,humanReviewed:false}
+}
+
+// These readers only inspect evaluator reports. They never restore a vault or open a profile.
+type UtilityEvidenceInput={root:string;pairKey:string;frozenHash:string;dispatches:{key:string}[]}
+const evidenceFile=(root:string,pairKey:string,kind:string)=>path.join(root,kind+'-'+fingerprint(pairKey)+'.json')
+const readEvidence=(file:string):any=>existsSync(file)?JSON.parse(readFileSync(file,'utf8')):null
+const requireEvidence=(valid:unknown)=>{if(!valid)throw Error('EVALUATION_UTILITY_EVIDENCE_MISMATCH')}
+const same=(a:unknown,b:unknown)=>fingerprint(a)===fingerprint(b)
+const artifactFingerprint=(a:UtilityArtifact)=>{const {hash,...data}=a;requireEvidence(hash===fingerprint(data))}
+function preflightBasis(preflight:any){return Object.fromEntries((['on','off'] as const).map(c=>[c,{input:preflight[c].input,bodyHash:preflight[c].bodyHash,prompt:preflight[c].prompt,history:preflight[c].history,sections:preflight[c].sections}]))}
+export function persistUtilityPreflight(input:{root:string;pairKey:string;frozenHash:string;source:any;afterHash:string;preflight:any;order:('on'|'off')[]}){
+ const {root,pairKey,...data}=input,file=evidenceFile(root,pairKey,'utility-preflight'),previous=readEvidence(file)
+ if(previous){const {hash,...old}=previous;requireEvidence(hash===fingerprint(old)&&same({...old,preflight:preflightBasis(old.preflight)},{...data,preflight:preflightBasis(data.preflight)}));return previous}
+ const plan={...data,hash:fingerprint(data)};writeFileSync(file,JSON.stringify(plan,null,2),{flag:'wx',mode:0o600});return plan
+}
+export function readUtilityEvidence(input:UtilityEvidenceInput){
+ const {root,pairKey,frozenHash,dispatches}=input,parts=collaborationKeyParts(pairKey+'/on'),task=UTILITY_TASKS.find(t=>pairKey.endsWith('/'+t.id))!
+ requireEvidence(parts.phase==='answers'&&task)
+ const file=(kind:string)=>evidenceFile(root,pairKey,kind),result=readEvidence(file('utility-result')),sub=readEvidence(file('utility-source')),plan=readEvidence(file('utility-preflight'))
+ const sourceKey=pairKey.slice(0,pairKey.indexOf('/answers/'))+'/consolidation/'+parts.model+'/0/'+task.source,sourceRow=readEvidence(evidenceFile(root,sourceKey,'result'))
+ const raw=Object.fromEntries((['on','off'] as const).map(c=>[c,readEvidence(evidenceFile(root,pairKey+'/'+c,'result'))]))
+ const calls=(c:string)=>dispatches.filter(d=>d.key===pairKey+'/'+c).length
+ const conditions:Record<string,{status:string;calls:number;raw:any;answer:any}>={}
+ if(sourceRow)requireEvidence(sourceRow.key===sourceKey&&sourceRow.frozenHash===frozenHash)
+ if(result)requireEvidence(result.frozenHash===frozenHash&&result.model===parts.model&&result.taskId===task.id)
+ if(!sub&&!plan&&!raw.on&&!raw.off){
+  if(result)requireEvidence(result.status==='not-dispatched-source-missing'&&result.sourceKey===sourceKey&&result.calls===0&&!calls('on')&&!calls('off')&&(!sourceRow||!sourceRow.result?.utilityArtifact)&&(!sourceRow||result.sourceResultHash===fingerprint(sourceRow)))
+  for(const c of ['on','off'])conditions[c]={status:calls(c)?'charged-without-terminal':result?.status??'not-dispatched',calls:calls(c),raw:null,answer:null}
+  return {result,source:null,after:null,plan:null,conditions}
+ }
+ requireEvidence(sourceRow?.key===sourceKey&&sourceRow.frozenHash===frozenHash&&sourceRow.result?.utilityArtifact&&sub)
+ const artifact:UtilityArtifact=sourceRow.result.utilityArtifact;artifactFingerprint(artifact)
+ const source={version:1,frozenHash,taskId:task.id,sourceKey,sourceResultHash:fingerprint(sourceRow),artifactHash:artifact.hash},after:UtilityArtifact=sub.after
+ requireEvidence(same(sub.source,source)&&after&&sub.afterHash===after.hash);artifactFingerprint(after)
+ const expectedBinding={frozenHash,key:sourceKey,model:parts.model,round:0,caseId:task.source},preparation=after.preparation
+ requireEvidence(same(artifact.binding,expectedBinding)&&same(after.binding,expectedBinding)&&preparation?.parentArtifactHash===artifact.hash&&preparation.sourceResultHash===source.sourceResultHash&&preparation.taskId===task.id&&preparation.intervention===task.intervention&&preparation.receipt.initialMemory===artifact.memory&&preparation.receipt.initialPermissions===artifact.permissions&&preparation.receipt.finalMemory===after.memory&&preparation.receipt.finalPermissions===after.permissions)
+ if(plan){
+  const {hash,...data}=plan,parity=(UTILITY_TASKS.indexOf(task)+(parts.model==='MiniMax-M3'?1:0))%2
+  requireEvidence(hash===fingerprint(data)&&plan.frozenHash===frozenHash&&same(plan.source,source)&&plan.afterHash===after.hash&&same(plan.order,parity?['off','on']:['on','off']))
+  const {on,off}=plan.preflight
+  requireEvidence(on.status==='preflight-cancelled'&&off.status==='preflight-cancelled'&&on.calls===0&&off.calls===0&&same(on.history,[])&&same(off.history,[])&&on.prompt===task.prompt&&off.prompt===task.prompt&&on.bodyHash===off.bodyHash&&same(off.sections,[]))
+  assertUtilityInputs(on.input,off.input,on.sections)
+ }
+ for(const c of ['on','off']){
+  const row=raw[c],charged=calls(c);requireEvidence(charged<=1)
+  if(row){requireEvidence(plan&&row.key===pairKey+'/'+c&&row.frozenHash===frozenHash&&['terminal','started'].includes(row.status)&&same(row.source,source)&&row.afterHash===after.hash&&row.preflightHash===plan.hash)
+   if(row.status==='terminal'){const answer=row.result,basis=plan.preflight[c];requireEvidence(charged===1&&answer?.calls===1&&same(answer.input,basis.input)&&answer.bodyHash===basis.bodyHash&&answer.prompt===basis.prompt&&same(answer.history,[])&&typeof answer.body==='string'&&['completed','failed','cancelled','limit'].includes(answer.status));if(c==='off')requireEvidence(!(answer.ledger?.chapter?.provenance?.memoryDeps??[]).length)}
+  }
+  const answer=row?.status==='terminal'?row.result:null
+  conditions[c]={status:answer?.status??(charged?'charged-without-terminal':'not-dispatched'),calls:charged,raw:row,answer}
+  if(result&&answer)requireEvidence(same(result.conditions?.[c],answer))
+ }
+ if(result)requireEvidence(plan&&same(result.source,source)&&result.artifactHash===artifact.hash&&result.afterHash===after.hash&&same(result.preflight,plan.preflight)&&same(result.order,plan.order)&&result.calls===2&&result.planned===2&&result.humanReviewed===false&&result.validTerminal===Object.values(result.conditions??{}).filter((r:any)=>r.status==='completed'&&r.finishReason==='stop'&&!r.error).length&&same(result.actualEntries,after.record.entries.map(e=>({id:e.id,version:e.version,status:e.status}))))
+ return {result,source,after,plan,conditions}
+}
+export function recoverUtilityReport(input:UtilityEvidenceInput){
+ const evidence=readUtilityEvidence(input),{source,after,plan,conditions}=evidence,file=(kind:string)=>evidenceFile(input.root,input.pairKey,kind)
+ let result=evidence.result
+ if(result?.status!=='not-dispatched-source-missing'){
+  if(!conditions.on!.answer||!conditions.off!.answer)throw Error('EVALUATION_CHARGED_UNFINISHED')
+  if(!result){result={frozenHash:input.frozenHash,model:after!.binding.model,taskId:source!.taskId,artifactHash:source!.artifactHash,afterHash:after!.hash,actualEntries:after!.record.entries.map(e=>({id:e.id,version:e.version,status:e.status})),preflight:plan.preflight,conditions:{on:conditions.on!.answer,off:conditions.off!.answer},order:plan.order,humanReviewed:false,source,calls:2,planned:2,validTerminal:Object.values(conditions).filter(r=>r.answer?.status==='completed'&&r.answer.finishReason==='stop'&&!r.answer.error).length};writeFileSync(file('utility-result'),JSON.stringify(result,null,2),{flag:'wx',mode:0o600})}
+ }
+ let packet=readEvidence(file('utility-blind'))
+ if(packet)assertUtilityPacket(packet,result)
+ else{packet=utilityBlindPacket(result);writeFileSync(file('utility-blind'),JSON.stringify(packet,null,2),{flag:'wx',mode:0o600})}
+ return {result,packet}
 }

@@ -4,8 +4,8 @@ import path from 'node:path'
 const cli=path.join(process.cwd(),'scripts/check-memory.mjs')
 it('rejects collaboration mode confusion before profile/report access and documents the explicit utility entry',()=>{
  const run=(args:string[])=>spawnSync(process.execPath,[cli,...args],{encoding:'utf8',timeout:10000})
- for(const args of [['--collaboration'],['--v6','--utility','fact'],['--v6','--collaboration','--utility-export'],['--v6','--collaboration','--publish','deepseek-flash'],['--v6','--collaboration','--utility','fact','--freeze']]){const result=run(args);expect(result.status).toBe(1);expect(result.stderr).toContain('EVALUATION_MODE_CONFLICT')}
- const help=run(['--help']);expect(help.status).toBe(0);expect(help.stdout).toContain('--utility-export');expect(help.stdout).toContain('--next')
+ for(const args of [['--collaboration'],['--utility-recover'],['--v6','--collaboration','--utility','fact','--utility-recover','--live'],['--v6','--collaboration','--utility','fact','--utility-recover','--review'],['--v6','--utility','fact'],['--v6','--collaboration','--utility-export'],['--v6','--collaboration','--publish','deepseek-flash'],['--v6','--collaboration','--utility','fact','--freeze']]){const result=run(args);expect(result.status).toBe(1);expect(result.stderr).toContain('EVALUATION_MODE_CONFLICT')}
+ const help=run(['--help']);expect(help.status).toBe(0);expect(help.stdout).toContain('--utility-export');expect(help.stdout).toContain('--utility-recover');expect(help.stdout).toContain('--next')
 })
 it('only two ordered nonce-bound program boundaries can reset answer supervision; model-like text cannot reset it',async()=>{
  const module=await import(path.join(process.cwd(),'scripts/memory-quality-supervision.mjs'))
