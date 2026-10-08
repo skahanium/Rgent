@@ -309,7 +309,7 @@ it.each(['trim','overflow'] as const)('bounds background candidate inputs when s
 })
 it.each(['recent','add'] as const)('keeps a correction and isolates its displayed old candidate from the simultaneous %s result',async kind=>{
  const f=await fixture(async function*(input){
-  const p=JSON.parse(String(input.messages[0]!.content)),target=p.memory[0],sourceIds=[p.sources[0].id]
+  const p=JSON.parse(String(input.messages[0]!.content));if(!p.memory){yield {type:'text',text:'{"recent":null}'};yield {type:'finish',reason:'stop'};return}const target=p.memory[0],sourceIds=[p.sources[0].id]
   const corrected={action:'correct',target:target.id,content:'青灯项目版本明确更正为乙',semantic:'fact',scope:'本库',sourceIds,attribution:'人的口令',reviewAt:null}
   yield {type:'text',text:JSON.stringify({recent:kind==='recent'?{goal:'青灯接续',completed:'版本更正',blocked:'',next:'',sourceIds,assistantDraft:false}:null,proposals:[corrected,...(kind==='add'?[{...corrected,action:'add',target:undefined,content:p.sources[0].text,scope:'a.md'}] :[])]})}
   yield {type:'finish',reason:'stop'}
@@ -494,7 +494,7 @@ it.each(['exact','paraphrase','own-edge','historical'] as const)('proves command
 })
 it('keeps a successful correction and reports stale recent background as a rejected partial result',async()=>{
  let oldId=''
- const f=await fixture(async function*(input){const p=JSON.parse(String(input.messages[0]!.content)),s=p.sources[0],target=p.memory.find((e:any)=>e.content==='青灯版本甲');yield {type:'text',text:JSON.stringify({recent:{goal:'按旧版本继续',completed:'',blocked:'',next:'',sourceIds:[s.id],assistantDraft:false},proposals:[{action:'correct',target:target.id,content:'青灯版本已更正',scope:'a.md',sourceIds:[s.id],semantic:'fact',attribution:'人',reviewAt:null}]})};yield {type:'finish',reason:'stop'}},'青灯版本已更正','continuity')
+ const f=await fixture(async function*(input){const p=JSON.parse(String(input.messages[0]!.content));if(!p.memory){yield {type:'text',text:'{"recent":null}'};yield {type:'finish',reason:'stop'};return}const s=p.sources[0],target=p.memory.find((e:any)=>e.content==='青灯版本甲');yield {type:'text',text:JSON.stringify({recent:{goal:'按旧版本继续',completed:'',blocked:'',next:'',sourceIds:[s.id],assistantDraft:false},proposals:[{action:'correct',target:target.id,content:'青灯版本已更正',scope:'a.md',sourceIds:[s.id],semantic:'fact',attribution:'人',reviewAt:null}]})};yield {type:'finish',reason:'stop'}},'青灯版本已更正','continuity')
  const source=await f.service.sourceForPrompt('a.md','task'),old=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'青灯版本甲',layer:'demand',scope:'a.md',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}));oldId=old.id
  f.material.memoryDeps=[{id:old.id,version:1,basisHashes:[source.basisHash],sourceDeps:[{id:source.id,version:1,hash:source.hash,relPath:'a.md',kind:'ledger',taskId:'task'}]}];vi.spyOn(f.service,'savedMaterial').mockResolvedValue(f.material)
  await f.engine.handoff(f.material);await f.engine.idle()
@@ -521,7 +521,7 @@ it('corrects a Host-loaded parent using proven legacy recent ancestry while leav
    recentId=result.recent![0]!.id
    expect(result.material.memoryDeps).toContainEqual(expect.objectContaining({id:parentId,version:1}))
    const file=path.join(base,'vault','.rgent-memory'),raw=parseWorkingMemory(await readFile(file,'utf8'))
-   raw.recent.find(e=>e.id===recentId)!.sources.forEach(source=>source.memoryDeps=[]);await writeFile(file,encodeWorkingMemory(raw))
+   delete raw.recent.find(e=>e.id===recentId)!.recent.requestBasis;raw.recent.find(e=>e.id===recentId)!.sources.forEach(source=>source.memoryDeps=[]);await writeFile(file,encodeWorkingMemory(raw))
   }
   if(step===3){
    expect(result.material.memoryDeps).toContainEqual(expect.objectContaining({id:recentId,version:1}))
@@ -580,7 +580,7 @@ it('runs total 25 actual Host sessions across two stable libraries with five cor
    const initial=step<=2,correct=step>=17&&step<=21,addAux=[3,4,9,10,15].includes(step),queryAux=queryAt.get(step),version=(main[lib]?.version??0)+1
    const prompt=initial?`${name}项目版本为甲`:correct?`${name}项目版本明确更正为第${version}版`:addAux?`${name}敏感便签暗河编号为秘钥${step}`:queryAux?`继续核对${aux.get(queryAux)!.content}`:`继续核对${name}项目版本`
    await writeFile(path.join(root,relPath),'/'+prompt+'\n');let issued=0
-   engine=new WorkingMemoryConsolidation({service:()=>service,configuration:()=>({enabled:true,signature:'continuous-25',credential,limits:{seconds:120,calls:2,tools:0}}),changed:()=>{},stream:async function*(input){issued++;const p=JSON.parse(String(input.messages[0]!.content)),source=p.sources.find((s:any)=>s.kind==='ledger'&&s.classification==='command'),old=main[lib]
+   engine=new WorkingMemoryConsolidation({service:()=>service,configuration:()=>({enabled:true,signature:'continuous-25',credential,limits:{seconds:120,calls:2,tools:0}}),changed:()=>{},stream:async function*(input){issued++;const p=JSON.parse(String(input.messages[0]!.content));if(!p.memory){yield {type:'text',text:'{"recent":null}'};yield {type:'finish',reason:'stop'};return}const source=p.sources.find((s:any)=>s.kind==='ledger'&&s.classification==='command'),old=main[lib]
     const proposals=initial||addAux||correct?[{action:correct?'correct':'add',...(correct?{target:p.memory.find((e:any)=>e.content===old!.content).id}:{}),content:prompt,scope:relPath,sourceIds:[source.id],semantic:'fact',attribution:'人的本场口令',reviewAt:null}]:[]
     yield {type:'text',text:JSON.stringify({proposals,recent:{goal:queryAux?aux.get(queryAux)!.content:`继续${name}工作`,completed:'回答已保存',blocked:'',next:`核对${name}版本`,sourceIds:[source.id],assistantDraft:false}})};yield {type:'finish',reason:'stop'}
    }})
@@ -591,7 +591,7 @@ it('runs total 25 actual Host sessions across two stable libraries with five cor
    if(queryAux){const item=aux.get(queryAux)!;expect(deps).toContainEqual(expect.objectContaining({id:item.id,version:item.version}))}
    if(forgottenValue){expect(deps.some(d=>removed.has(d.id))).toBe(false);expect(foreground.sent.every(s=>!(s.system+'\n'+s.prompt).includes(forgottenValue!))).toBe(true)}
    if(deniedStep){const item=aux.get(deniedStep)!;expect(deps.some(d=>d.id===item.id)).toBe(false);expect(foreground.sent.every(s=>!(s.system+'\n'+s.prompt).includes(item.content))).toBe(true)}
-   const effective=await service.entries(),receipt=service.snapshot().record.jobs.find(j=>j.taskId===foreground.ledger.taskId);expect(receipt?.outcome).toBe('applied');expect(issued).toBe(1);if(receipt?.results?.some(r=>r.outcome==='rejected'))partial++
+   const effective=await service.entries(),receipt=service.snapshot().record.jobs.find(j=>j.taskId===foreground.ledger.taskId);expect(receipt?.outcome).toBe('applied');expect(issued).toBe(correct?2:1);if(receipt?.results?.some(r=>r.outcome==='rejected'))partial++
    if(initial||correct){const e=effective.find(e=>e.content===prompt&&e.category==='long')!;expect(e).toBeDefined();expect(e.status).toBe('active');if(correct){expect(e.id).toBe(main[lib]!.id);expect(e.version).toBe(main[lib]!.version+1);corrections++}main[lib]={id:e.id,version:e.version,content:e.content}}
    if(addAux){const e=effective.find(e=>e.content===prompt&&e.category==='long')!;expect(e?.status).toBe('active');aux.set(step,{id:e.id,version:e.version,content:e.content,relPath,taskId:foreground.ledger.taskId})}
    for(const e of effective)known[lib]!.add(e.id)
@@ -675,4 +675,104 @@ it('locates standing authority that contains only non-command evidence',async()=
  const requests:any[]=[];const f=await fixture(async function*(input){const p=JSON.parse(String(input.messages[0]!.content));requests.push(p);yield {type:'text',text:JSON.stringify({recent:null,proposals:[suggestion(input)]})};yield {type:'finish',reason:'stop'}})
  const source=await f.service.sourceForPrompt('a.md','task');vi.spyOn(f.service,'sourceForPrompt').mockResolvedValue({...source,classification:'human'});vi.spyOn(f.service,'verifySource').mockResolvedValue(true)
  await f.engine.handoff(f.material);await f.engine.idle();expect(requests[1].repair.issues).toContainEqual(expect.objectContaining({path:'proposals[0].authority',expected:expect.stringContaining('command')}));expect(await f.service.entries()).toHaveLength(0)
+})
+
+it('regenerates recent from a fresh independent request and preserves it on the next service read',async()=>{
+ const requests:any[]=[],traces:import('../../src/main/working-memory-consolidation.ts').ConsolidationRequestObservation[]=[]
+ const f=await fixture(async function*(input){const p=JSON.parse(String(input.messages[0]!.content));requests.push(p)
+  const s=p.sources[0],second=requests.length===2
+  yield {type:'text',text:JSON.stringify(second?{recent:{goal:'核对更正后的青灯版本',completed:'',blocked:'',next:'',sourceIds:[s.id],assistantDraft:false}}:{recent:{goal:'旧草案背景',completed:'',blocked:'',next:'',sourceIds:[s.id],assistantDraft:false},proposals:[{action:'correct',target:p.memory[0].id,content:'青灯版本已更正',scope:'a.md',sourceIds:[s.id],semantic:'fact',attribution:'人'}]})};yield {type:'finish',reason:'stop'}
+ },'青灯版本已更正','continuity',false,t=>traces.push(t))
+ const source=await f.service.sourceForPrompt('a.md','task'),old=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'青灯版本甲',layer:'demand',scope:'a.md',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}))
+ f.material.memoryDeps=[{id:old.id,version:1,basisHashes:[source.basisHash],sourceDeps:[]}];vi.spyOn(f.service,'savedMaterial').mockResolvedValue(f.material)
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(requests).toHaveLength(2);expect(traces.map(t=>t.purpose)).toEqual(['proposal','recent-regeneration'])
+ expect(Object.keys(requests[1]).sort()).toEqual(['sources','task']);expect(requests[1].task).not.toHaveProperty('assistantDraft');expect(requests[1].sources[0].id).not.toBe(requests[0].sources[0].id)
+ expect(JSON.stringify(requests[1])).not.toMatch(/青灯版本甲|旧草案背景|proposals|repair/)
+ const record=f.service.snapshot().record,recent=record.recent[0]!
+ expect(record.entries.find(e=>e.id===old.id)).toMatchObject({version:2,status:'active'})
+ expect(recent?.recent.sections.goal).toBe('核对更正后的青灯版本');expect((recent?.recent as any).requestBasis).toMatchObject({version:1,assistantDraftSeen:false,taskId:'task',materialVersion:f.material.materialVersion})
+ expect((await f.service.entries([recent.id]))[0]?.status).toBe('active')
+ const restarted=new WorkingMemoryService(f.vault,()=>null);vi.spyOn(restarted,'savedMaterial').mockResolvedValue(f.material)
+ expect((await restarted.entries([recent.id]))[0]?.status).toBe('active')
+})
+
+it('records every displayed source dependency even when recent cites only the original command',async()=>{
+ const f=await fixture(async function*(input){const p=JSON.parse(String(input.messages[0]!.content));yield {type:'text',text:JSON.stringify({recent:{goal:'当前工作',completed:'',blocked:'',next:'',sourceIds:[p.sources[0].id],assistantDraft:false},proposals:[]})};yield {type:'finish',reason:'stop'}})
+ const source=await f.service.sourceForPrompt('a.md','task'),parent=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'无关键字父记录',layer:'demand',scope:'远处',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}))
+ const extra={...source,id:'extra-source',materialId:'extra-material',text:'无引用的实际输入',hash:createHash('sha256').update('无引用的实际输入').digest('hex'),memoryDeps:[{id:parent.id,version:1}]}
+ f.material.material.fragments=[{...extra,sessionId:f.material.context!.sessionId,classification:'human',memoryDeps:extra.memoryDeps.map(d=>({...d,basisHashes:[],sourceDeps:[]}))}];vi.spyOn(f.service,'savedMaterial').mockResolvedValue(f.material);vi.spyOn(f.service,'sourceForFragment').mockResolvedValue(extra);vi.spyOn(f.service,'verifySource').mockResolvedValue(true);vi.spyOn(f.service,'renewSavedBinding').mockImplementation(async s=>s)
+ await f.engine.handoff(f.material);await f.engine.idle()
+ const recent=f.service.snapshot().record.recent[0]!
+ expect(recent.sources.some(s=>s.materialId==='extra-material')).toBe(true)
+ expect(recent.sources.flatMap(s=>s.memoryDeps)).toContainEqual({id:parent.id,version:1})
+ const basis=f.service.snapshot();await f.service.forget({sessionId:f.material.context!.sessionId,revision:basis.revision,objectVersion:basis.objectVersion,id:parent.id,version:1})
+ expect(f.service.snapshot().record.recent).toHaveLength(0)
+})
+
+it.each(['empty','extra','draft','forged','failure','repair','retry'] as const)('keeps valid correction when regeneration is unavailable (%s)',async mode=>{
+ let calls=0,valid:any
+ const f=await fixture(async function*(input){calls++;const p=JSON.parse(String(input.messages[0]!.content))
+  if(calls===1&&mode==='repair'){yield {type:'text',text:'{'};yield {type:'finish',reason:'stop'};return}
+  if(calls===1&&mode==='retry')throw transport('ETIMEDOUT')
+  if(p.memory){const s=p.sources[0];valid={recent:{goal:'旧背景',completed:'',blocked:'',next:'',sourceIds:[s.id],assistantDraft:false},proposals:[{action:'correct',target:p.memory[0].id,content:'青灯版本更正乙',scope:'a.md',sourceIds:[s.id],semantic:'fact',attribution:'人'}]};yield {type:'text',text:JSON.stringify(valid)}}
+  else{if(mode==='failure')throw transport('ETIMEDOUT');const recent={goal:mode==='empty'?'':'新背景',completed:'',blocked:'',next:'',sourceIds:[p.sources[0].id],assistantDraft:mode==='draft',...(mode==='forged'?{requestBasis:{version:1}}:{})};yield {type:'text',text:JSON.stringify({recent,...(mode==='extra'?{proposals:[]}:{})})}}
+  yield {type:'finish',reason:'stop'}
+ },'青灯版本更正乙')
+ const source=await f.service.sourceForPrompt('a.md','task'),old=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'青灯版本甲',layer:'demand',scope:'a.md',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}))
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(calls).toBe(2);expect(f.service.snapshot().record.entries.find(e=>e.id===old.id)).toMatchObject({version:2,content:'青灯版本更正乙'});expect(f.service.snapshot().record.recent).toHaveLength(0)
+ expect(f.service.snapshot().record.jobs[0]).toMatchObject({outcome:'applied',results:expect.arrayContaining([{action:'correct',outcome:'applied'},expect.objectContaining({action:'recent',outcome:'rejected'})])})
+})
+
+it.each(['configuration','source'] as const)('rechecks %s inside the final mutation queue before publishing independent recent',async mode=>{
+ let calls=0
+ const f=await fixture(async function*(input){calls++;const p=JSON.parse(String(input.messages[0]!.content)),s=p.sources[0];yield {type:'text',text:JSON.stringify(calls===1?{recent:{goal:'旧背景',completed:'',blocked:'',next:'',sourceIds:[s.id],assistantDraft:false},proposals:[{action:'correct',target:p.memory[0].id,content:'青灯版本乙',scope:'a.md',sourceIds:[s.id],semantic:'fact',attribution:'人'}]}:{recent:{goal:'青灯版本乙',completed:'',blocked:'',next:'',sourceIds:[s.id],assistantDraft:false}})};yield {type:'finish',reason:'stop'}} ,'青灯版本乙')
+ const source=await f.service.sourceForPrompt('a.md','task'),old=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'青灯版本甲',layer:'demand',scope:'a.md',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}))
+ const mutate=f.vault.memoryMutation.bind(f.vault);vi.spyOn(f.vault,'memoryMutation').mockImplementation(async op=>{if(calls===2){if(mode==='configuration')f.disableConfig();else await writeFile(path.join(f.vault.root!,'.rgent-permissions'),JSON.stringify({'a.md':'forbidden'}))}return mutate(op)})
+ await f.engine.handoff(f.material);await f.engine.idle();expect(calls).toBe(2);expect(f.service.snapshot().record.entries.find(e=>e.id===old.id)?.version).toBe(1);expect(f.service.snapshot().record.recent).toHaveLength(0)
+})
+
+it('loads regenerated recent in actual Host requests before and after reopening the vault',async()=>{
+ const {runMemoryQualityCase}=await import('../../scripts/memory-quality-runner.ts')
+ const base=await mkdtemp(path.join(os.tmpdir(),'rgent-independent-recent-')),credential={provider:'custom' as const,baseURL:'https://fiction.test/v1',modelId:'fiction',apiKey:'fiction',contextTokens:32768}
+ cleanups.push(()=>rm(base,{recursive:true,force:true}));let recentId='',oldId='';const requests:any[]=[]
+ for(let step=1;step<=3;step++){
+  const result=await runMemoryQualityCase({id:'independent-recent-'+step,group:'fact',heldOut:false,prompt:step===1?'青灯项目版本甲':step===2?'青灯项目版本明确更正乙，继续核对交付清单':'继续核对青灯项目交付清单',body:'青灯项目交付清单',answer:'受旧记忆影响的助手草稿',expected:{required:[],forbidden:[],notes:''}},credential,async function*(input){
+   const p=JSON.parse(String(input.messages[0]!.content));requests.push(p);const source=p.sources.find((s:any)=>s.classification==='command'&&s.kind==='ledger'),recent={goal:'青灯项目交付清单核对',completed:'版本明确更正乙',blocked:'',next:'',sourceIds:[source.id],assistantDraft:false}
+   yield {type:'text',text:JSON.stringify(!p.memory?{recent}:{recent:step===2?recent:null,proposals:step===3?[]:[{action:step===2?'correct':'add',...(step===2?{target:p.memory.find((e:any)=>e.content==='青灯项目版本甲').id}:{}),content:step===2?'青灯项目版本明确更正乙':'青灯项目版本甲',scope:'本库',sourceIds:[source.id],semantic:'fact',attribution:'人'}]})};yield {type:'finish',reason:'stop'}
+  },new AbortController().signal,{strategy:'continuity',base,noteName:'step-'+step+'.md',hostBeforeConsolidation:true,verifyClosure:false})
+  expect(result.completed).toBe(true)
+  if(step===1)oldId=result.entries[0]!.id
+  if(step===2){const recent=result.recent!.find(e=>e.recent.taskId===result.material.taskId)!;recentId=recent.id;expect(recent.status).toBe('active');expect(result.dependencies).toContainEqual(expect.objectContaining({id:recentId,version:1}));expect(recent.sources.flatMap(s=>s.memoryDeps)).not.toContainEqual({id:oldId,version:1});expect(requests.filter(p=>!p.memory)).toHaveLength(1);expect(JSON.stringify(requests.find(p=>!p.memory))).not.toContain('受旧记忆影响')}
+  if(step===3){expect(result.material.memoryDeps).toContainEqual(expect.objectContaining({id:recentId,version:1}));expect(result.foreground!.sent.some(s=>(s.system+'\n'+s.prompt).includes('青灯项目交付清单核对'))).toBe(true)}
+ }
+})
+
+it('omits fragments affected by the corrected parent from the independent request',async()=>{
+ const requests:any[]=[]
+ const f=await fixture(async function*(input){const p=JSON.parse(String(input.messages[0]!.content));requests.push(p);const recent={goal:'青灯项目继续核对',completed:'',blocked:'',next:'',sourceIds:[p.sources[0].id],assistantDraft:false};yield {type:'text',text:JSON.stringify(p.memory?{recent,proposals:[{action:'correct',target:p.memory[0].id,content:'青灯项目版本乙',scope:'a.md',sourceIds:[p.sources[0].id],semantic:'fact',attribution:'人'}]}:{recent})};yield {type:'finish',reason:'stop'}},'青灯项目版本乙')
+ const source=await f.service.sourceForPrompt('a.md','task'),parent=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'青灯项目版本甲',layer:'demand',scope:'a.md',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}))
+ const extra={...source,id:'old-fragment',materialId:'old-material',text:'旧片段涉及青灯甲',hash:createHash('sha256').update('旧片段涉及青灯甲').digest('hex'),memoryDeps:[{id:parent.id,version:1}]}
+ f.material.material.fragments=[{...extra,sessionId:f.material.context!.sessionId,classification:'human',memoryDeps:extra.memoryDeps.map(d=>({...d,basisHashes:[],sourceDeps:[]}))}]
+ vi.spyOn(f.service,'savedMaterial').mockResolvedValue(f.material);vi.spyOn(f.service,'sourceForFragment').mockResolvedValue(extra);vi.spyOn(f.service,'verifySource').mockResolvedValue(true);vi.spyOn(f.service,'renewSavedBinding').mockImplementation(async s=>s)
+ await f.engine.handoff(f.material);await f.engine.idle();expect(requests).toHaveLength(2);expect(JSON.stringify(requests[0])).toContain('旧片段涉及青灯甲');expect(JSON.stringify(requests[1])).not.toContain('旧片段涉及青灯甲');expect(f.service.snapshot().record.recent[0]?.sources.map(s=>s.materialId)).not.toContain('old-material')
+})
+
+it('keeps the original deadline when requesting independent recent',async()=>{
+ const now=Date.now();let clock=now,calls=0;const time=vi.spyOn(Date,'now').mockImplementation(()=>clock)
+ try{
+ const f=await fixture(async function*(input){calls++;const p=JSON.parse(String(input.messages[0]!.content));if(calls===2)clock=now+120001;yield {type:'text',text:JSON.stringify(p.memory?{recent:{goal:'青灯工作',completed:'',blocked:'',next:'',sourceIds:[p.sources[0].id],assistantDraft:false},proposals:[{action:'correct',target:p.memory[0].id,content:'青灯版本乙',scope:'a.md',sourceIds:[p.sources[0].id],semantic:'fact',attribution:'人'}]}:{recent:null})};yield {type:'finish',reason:'stop'}},'青灯版本乙')
+ const source=await f.service.sourceForPrompt('a.md','task'),parent=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'青灯版本甲',layer:'demand',scope:'a.md',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}))
+ await f.engine.handoff(f.material);await f.engine.idle();expect(calls).toBe(2);expect(f.service.snapshot().record.entries.find(e=>e.id===parent.id)?.version).toBe(1);expect(f.service.snapshot().record.jobs[0]?.reason).toBe('MEMORY_DEADLINE')
+ }finally{time.mockRestore()}
+})
+
+it('keeps the regeneration prompt example valid and handles explicit insufficient recent evidence',async()=>{
+ const {memoryRecentRegenerationSystem}=await import('../../src/main/working-memory-consolidation.ts')
+ const example=JSON.parse(/只输出完整 JSON：(\{[^\n]*?\})；/.exec(memoryRecentRegenerationSystem)![1]!)
+ expect(example).toEqual({recent:null})
+ let calls=0;const f=await fixture(async function*(input){calls++;const p=JSON.parse(String(input.messages[0]!.content));yield {type:'text',text:JSON.stringify(calls===2?example:{recent:{goal:'青灯旧背景',completed:'',blocked:'',next:'',sourceIds:[p.sources[0].id],assistantDraft:false},proposals:[{action:'correct',target:p.memory[0].id,content:'青灯版本乙',scope:'a.md',sourceIds:[p.sources[0].id],semantic:'fact',attribution:'人'}]})};yield {type:'finish',reason:'stop'}},'青灯版本乙')
+ const source=await f.service.sourceForPrompt('a.md','task'),parent=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'青灯版本甲',layer:'demand',scope:'a.md',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}))
+ await f.engine.handoff(f.material);await f.engine.idle();expect(calls).toBe(2);expect(f.service.snapshot().record.entries.find(e=>e.id===parent.id)?.version).toBe(2);expect(f.service.snapshot().record.recent).toHaveLength(0);expect(f.service.snapshot().record.jobs[0]?.results).toContainEqual({action:'recent',outcome:'rejected',code:'MEMORY_DEPENDENCY_CHANGED'})
 })

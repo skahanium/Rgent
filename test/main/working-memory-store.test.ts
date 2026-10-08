@@ -346,3 +346,32 @@ it('rejects actual downstream references using the verified legacy recent projec
  expect(applied.rejected).toBe(1);expect(applied.snapshot.record.entries.find(e=>e.id===parent.id)?.version).toBe(1)
  expect(applied.snapshot.record.recent[0]?.sources[0]?.memoryDeps).toEqual([])
 })
+
+it('round trips a program request basis and rejects malformed or inconsistent receipts',()=>{
+ const r=entryRecord(0);r.nextSequence=1;const item=v3Recent(1);r.recent=[item]
+ const basis={version:1 as const,taskId:item.recent.taskId,materialVersion:item.recent.materialVersion,sourceIds:item.sources.map(s=>s.id),assistantDraftSeen:false}
+ ;(item.recent as any).requestBasis=basis
+ expect(parseWorkingMemory(encodeWorkingMemory(r)).recent[0]!.recent).toMatchObject({requestBasis:basis})
+ for(const bad of [{...basis,version:2},{...basis,taskId:'wrong'},{...basis,materialVersion:'a'.repeat(64)},{...basis,sourceIds:[]},{...basis,sourceIds:[...basis.sourceIds,...basis.sourceIds]},{...basis,extra:true}]){(item.recent as any).requestBasis=bad;expect(()=>parseWorkingMemory(encodeWorkingMemory(r))).toThrow('MEMORY_STORAGE_INVALID')}
+ ;(item.recent as any).requestBasis=basis;item.recent.assistantDraft=true;expect(()=>parseWorkingMemory(encodeWorkingMemory(r))).toThrow('MEMORY_STORAGE_INVALID')
+})
+
+it('counts request basis bytes toward the recent block limit and can forget a legal full record with receipts',()=>{
+ const {root,store}=fixture(),r=entryRecord(0);r.nextSequence=1;const item=v3Recent(1)
+ item.recent.createdAt=new Date().toISOString();item.sources=Array.from({length:16},(_,i)=>({...source(1),id:'s'+i+'x'.repeat(249),materialId:'m'+i+'x'.repeat(249)}))
+ item.recent.requestBasis={version:1,taskId:item.recent.taskId,materialVersion:item.recent.materialVersion,sourceIds:item.sources.map(s=>s.id),assistantDraftSeen:false}
+ r.recent=[item];expect(()=>parseWorkingMemory(encodeWorkingMemory(r))).toThrow('MEMORY_STORAGE_INVALID')
+ item.sources=[source(1)];item.recent.requestBasis.sourceIds=[item.sources[0]!.id]
+ let text=encodeWorkingMemory(r);let i=0
+ while(Buffer.byteLength(text)<1980000){r.jobs.push({taskId:'capacity-'+i++,materialVersion:'b'.repeat(64),outcome:'applied',entryIds:Array.from({length:200},(_,j)=>'entry-'+j+'x'.repeat(245))});text=encodeWorkingMemory(r)}
+ expect(r.jobs.length).toBeLessThan(256);expect(Buffer.byteLength(text)).toBeLessThan(2*1024*1024)
+ writeFileSync(path.join(root,'.rgent-memory'),text);const basis=store.read();store.forget(basis,item.id,item.version);expect(store.read().record.recent).toHaveLength(0)
+})
+
+it('does not accept the new request basis in a historical M3 envelope',()=>{
+ const r=entryRecord(0);r.nextSequence=1;const item=v3Recent(1);r.recent=[item]
+ item.recent.requestBasis={version:1,taskId:item.recent.taskId,materialVersion:item.recent.materialVersion,sourceIds:item.sources.map(s=>s.id),assistantDraftSeen:false}
+ const encoded=encodeWorkingMemory(r),meta=JSON.parse(Buffer.from(/data="([^"]+)"/.exec(encoded)![1]!,'base64url').toString());meta.version=3
+ const historical=encoded.replace(/data="[^"]+"/,'data="'+Buffer.from(JSON.stringify(meta)).toString('base64url')+'"').replaceAll(':v4',':v3')
+ expect(()=>parseWorkingMemory(historical)).toThrow('MEMORY_STORAGE_INVALID')
+})

@@ -69,6 +69,8 @@ export class WorkingMemoryService{
   if(!anchor)throw Error('MEMORY_SOURCE_CHANGED')
   const saved=await this.savedMaterial(anchor.relPath,recent.recent.taskId)
   if(saved.provenanceStatus!=='complete'||saved.noteId!==recent.recent.noteId||saved.materialVersion!==recent.recent.materialVersion)throw Error('MEMORY_SOURCE_CHANGED')
+  // 新回执的全部实际输入已在 sources 持久化；自身依赖仍逐项核验，不能补回未发送的旧任务上下文。
+  if(recent.recent.requestBasis)return sources
   const memoryDeps=unique([...anchor.memoryDeps,...saved.memoryDeps.map(d=>({id:d.id,version:d.version})),...saved.material.fragments.flatMap(f=>f.memoryDeps.map(d=>({id:d.id,version:d.version})))])
   const sourceDeps=unique([...anchor.sourceDeps,...saved.sourceDeps.map(d=>({...d,permissionTier:'reference' as const})),...saved.material.fragments.flatMap(f=>f.sourceDeps.map(d=>({...d,permissionTier:'reference' as const})))])
   if(memoryDeps.length>16||sourceDeps.length>16)throw Error('MEMORY_SOURCE_CHANGED')
