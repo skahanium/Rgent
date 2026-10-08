@@ -13,7 +13,7 @@ import {AgentHost} from '../src/main/agent-host.ts'
 import {TaskAuthorizationRegistry} from '../src/main/task-authorization.ts'
 import {modelTierFor} from '../src/main/permissions.ts'
 import {memorySection} from '../src/main/memory-use.ts'
-import {fingerprint,collaborationKeyParts} from './memory-quality-support.ts'
+import {fingerprint,collaborationKeyParts,collaborationRecoveryWindow,v6RecoveryDecision} from './memory-quality-support.ts'
 
 export const UTILITY_TASKS=[
  {id:'standing',source:'v6-standing-01',body:'工作计划',prompt:'解释为什么工作计划需要明确验收标准。',required:['先结论','一个具体例子'],forbidden:['无依据事实'],intervention:'none'},
@@ -245,4 +245,35 @@ export function recoverUtilityReport(input:UtilityEvidenceInput){
  if(packet)assertUtilityPacket(packet,result)
  else{packet=utilityBlindPacket(result);writeFileSync(file('utility-blind'),JSON.stringify(packet,null,2),{flag:'wx',mode:0o600})}
  return {result,packet}
+}
+
+
+/** Shared service stop gate for this frozen model, independent of certification scores. */
+type CollaborationServiceInput={root:string;frozenHash:string;prefix:string;model:string;dispatches:{key:string}[];activeConsolidation?:{key:string;responses:any[]}}
+export function collaborationServiceState(input:CollaborationServiceInput){
+ const binding={frozenHash:input.frozenHash,prefix:input.prefix,model:input.model},stop=readEvidence(path.join(input.root,'stop-'+input.model+'.json')),recovery=readEvidence(path.join(input.root,'recovery-'+input.model+'.json'))
+ if(stop&&stop.frozenHash!==input.frozenHash||recovery&&(recovery.model!==input.model||!Array.isArray(recovery.cycles)))throw Error('EVALUATION_RECOVERY_INVALID')
+ const cycles=recovery?.cycles??[],window=collaborationRecoveryWindow(input.dispatches,cycles,binding)
+ const networkFailure=(reason:any,finishReason:any)=>!!reason&&reason!=='MEMORY_OUTPUT_INVALID'||!finishReason
+ const attempts=window.slice(-3).map(dispatch=>{
+  const parts=collaborationKeyParts(dispatch.key)
+  if(parts.phase==='answers'){
+   const condition=dispatch.key.split('/').at(-1)!,pairKey=dispatch.key.slice(0,-condition.length-1)
+   const row=readUtilityEvidence({...input,pairKey}).conditions[condition]!
+   return {key:dispatch.key,retryable:!row.answer||networkFailure(row.answer.error,row.answer.finishReason)}
+  }
+  const active=input.activeConsolidation?.key===dispatch.key?input.activeConsolidation:null
+  const row=active?{key:active.key,frozenHash:input.frozenHash,status:'active',responses:active.responses}:readEvidence(evidenceFile(input.root,dispatch.key,'result'))
+  if(row&&(row.key!==dispatch.key||row.frozenHash!==input.frozenHash))throw Error('EVALUATION_REVISION_CHANGED')
+  if(!row||!active&&!['completed','interrupted'].includes(row.status))return {key:dispatch.key,retryable:true}
+  const ordinal=input.dispatches.slice(0,input.dispatches.indexOf(dispatch)+1).filter(d=>d.key===dispatch.key).length-1,response=row.responses?.[ordinal]
+  return {key:dispatch.key,retryable:!response||networkFailure(response.reason,response.finishReason)}
+ })
+ return {binding,cycles,attempts,stopped:!!stop,decision:v6RecoveryDecision(attempts,cycles.length,2)}
+}
+export function assertCollaborationServiceDispatch(input:CollaborationServiceInput){
+ const state=collaborationServiceState(input)
+ if(state.stopped)throw Error('EVALUATION_MODEL_STOPPED')
+ if(state.decision==='pause')throw Error('EVALUATION_MODEL_PAUSED')
+ if(state.decision==='exhausted')throw Error('EVALUATION_RECOVERY_EXHAUSTED')
 }

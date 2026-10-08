@@ -11,9 +11,9 @@ import {memoryConsolidationSystem,memoryContinuitySystem,parseContinuitySuggesti
 import {MEMORY_QUALITY_CASES} from '../test/fixtures/memory-quality.ts'
 import type {MemoryQualityCase} from '../test/fixtures/memory-quality.ts'
 import {runMemoryQualityCase,memorySemanticReviewSystem,ConsolidationPaidGate} from './memory-quality-runner.ts'
-import {COLLABORATION_RULES,collaborationSchedule,collaborationRecoveryWindow,collaborationResumeCycle,EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,recordedQualityReview,V4_RULES,V4_SCREEN,V4_PARENT_MANIFEST,V4_PREFIX,v4Cases,v4Selection,v4EvidenceComplete,freezeV4,v4Summary,v4DispatchGate,v4ScreenGate,v4ResumeAction,type V4Row,type V4Annotation,type V4Category,V5_RULES,V5_PREFIX,freezeV5,v5Summary,v5ScreenDispatchGate,v5TerminalCategory,v5DiagnosticTargets,v5ActionEvidence,v5ControlledStatus,type V5Row,type V5Annotation,V6_RULES,V6_PREFIX,V6_CATEGORIES,V6_SCORING_CATEGORIES,freezeV6,v6BoundReview,v6ReviewValid,v6LoadedActionState,v6Summary,v6AppliedEvidence,v6AssertDispatchAvailable,v6DoubleReview,v6DispatchGate,v6TerminalCategory,v6RecoveryDecision,type V6Row,type V6Annotation} from './memory-quality-support.ts'
+import {COLLABORATION_RULES,collaborationSchedule,collaborationResumeCycle,EvaluationJournal,atomicReport,fingerprint,modelQualitySummary,recordedQualityReview,V4_RULES,V4_SCREEN,V4_PARENT_MANIFEST,V4_PREFIX,v4Cases,v4Selection,v4EvidenceComplete,freezeV4,v4Summary,v4DispatchGate,v4ScreenGate,v4ResumeAction,type V4Row,type V4Annotation,type V4Category,V5_RULES,V5_PREFIX,freezeV5,v5Summary,v5ScreenDispatchGate,v5TerminalCategory,v5DiagnosticTargets,v5ActionEvidence,v5ControlledStatus,type V5Row,type V5Annotation,V6_RULES,V6_PREFIX,V6_CATEGORIES,V6_SCORING_CATEGORIES,freezeV6,v6BoundReview,v6ReviewValid,v6LoadedActionState,v6Summary,v6AppliedEvidence,v6AssertDispatchAvailable,v6DoubleReview,v6DispatchGate,v6TerminalCategory,v6RecoveryDecision,type V6Row,type V6Annotation} from './memory-quality-support.ts'
 
-import {UTILITY_RULES,UTILITY_TASKS,readUtilityEvidence,recoverUtilityReport,persistUtilityPreflight,runUtilityPair,utilityBlindPacket,utilityReviewSummary,assertUtilityPacket,validateUtilityAnnotation,type UtilityArtifact} from './memory-quality-utility.ts'
+import {UTILITY_RULES,UTILITY_TASKS,collaborationServiceState,assertCollaborationServiceDispatch,readUtilityEvidence,recoverUtilityReport,persistUtilityPreflight,runUtilityPair,utilityBlindPacket,utilityReviewSummary,assertUtilityPacket,validateUtilityAnnotation,type UtilityArtifact} from './memory-quality-utility.ts'
 
 import {V5_QUALITY_CASES,V5_SCREEN_IDS} from '../test/fixtures/v5-memory-quality.ts'
 import {V6_QUALITY_CASES,V6_INDEPENDENT_IDS,V6_SAFETY_COVERAGE} from '../test/fixtures/v6-memory-quality.ts'
@@ -328,13 +328,14 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
  }
  const rows=(model:string):V6Row[]=>[0,1].flatMap(round=>cases.flatMap(c=>{const row=rowOf(model,round,c);return row?[row]:[]}))
  const stopFile=(model:string)=>path.join(root,'stop-'+model+'.json'),recoveryFile=(model:string)=>path.join(root,'recovery-'+model+'.json')
- const recoveryBinding=(model:string)=>({frozenHash,prefix,model})
+ const recoveryBinding=(model:string)=>({frozenHash,prefix:collaboration?COLLABORATION_RULES.prefix+'r'+frozen.revision+'/':prefix,model})
  const dispatchHistory=()=>JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8')).dispatches as {key:string}[]
- const cyclesOf=(model:string):any[]=>{if(!existsSync(recoveryFile(model)))return [];try{const value=JSON.parse(readFileSync(recoveryFile(model),'utf8'));if(collaboration){if(value.model!==model||!Array.isArray(value.cycles))throw Error('EVALUATION_RECOVERY_INVALID');collaborationRecoveryWindow(dispatchHistory(),value.cycles,recoveryBinding(model))}return Array.isArray(value.cycles)?value.cycles:[]}catch(error){if(collaboration)throw error;return []}}
+ const cyclesOf=(model:string):any[]=>{if(collaboration)return collaborationServiceState(collaborationServiceInput(frozen,frozenHash,model)).cycles;if(!existsSync(recoveryFile(model)))return [];try{const value=JSON.parse(readFileSync(recoveryFile(model),'utf8'));return Array.isArray(value.cycles)?value.cycles:[]}catch{return []}}
  // 连续失败只看该模型按时间顺序的最近尝试；"可重试网络失败"= 传输失败或当次无终态。
  const recentAttempts=(model:string)=>{
+  if(collaboration)return collaborationServiceState(collaborationServiceInput(frozen,frozenHash,model)).attempts
   const state=JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8')) as {dispatches:{key:string}[]}
-  return (collaboration?collaborationRecoveryWindow(state.dispatches,cyclesOf(model),recoveryBinding(model)):state.dispatches.filter(d=>d.key.startsWith(prefix+model+'/'))).slice(-3).map(d=>{
+  return state.dispatches.filter(d=>d.key.startsWith(prefix+model+'/')).slice(-3).map(d=>{
    const file=resultFile(d.key);if(!existsSync(file))return {retryable:true}
    try{const r=JSON.parse(readFileSync(file,'utf8')),error=String(r.error??'')
     const retryable=r.status!=='completed'||['MEMORY_SERVICE_FAILED','EVALUATION_REQUEST_FAILED','EVALUATION_ATTEMPT_TIMEOUT','MEMORY_DEADLINE'].includes(error)
@@ -395,6 +396,7 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
     if(controller.signal.aborted||input.signal.aborted)throw Error('MEMORY_CANCELLED')
     if(!readFileSync(path.join(options.profile,'model-config.json')).equals(beforeConfig))throw Error('EVALUATION_PROFILE_CHANGED')
     if(responses.length>=V6_RULES.limits.calls)throw Error('EVALUATION_CASE_CALL_LIMIT')
+    if(collaboration)assertCollaborationServiceDispatch({...collaborationServiceInput(frozen,frozenHash,model.modelId),activeConsolidation:{key:k,responses}})
     const request=paidGate.consume(input)
     journal!.charge(k)
     const response:any={phase:request.purpose,request,input:{system:input.system,messages:input.messages,maxOutputTokens:input.maxOutputTokens},body:'',usage:null,reason:null,startedAt:new Date().toISOString()};responses.push(response)
@@ -437,6 +439,8 @@ function v6RunnerSpec(spec:V6Case):MemoryQualityCase{
 }
 
 /** Explicit development CLI; never reachable from ordinary application/tests. */
+function collaborationServiceInput(frozen:any,frozenHash:string,model:string){return {root:options.report,frozenHash,prefix:COLLABORATION_RULES.prefix+'r'+frozen.revision+'/',model,dispatches:JSON.parse(readFileSync(path.join(options.budget,'state.json'),'utf8')).dispatches as {key:string}[]}}
+
 async function runUtilityCli(controller:AbortController,frozen:any,frozenHash:string){
  const task=UTILITY_TASKS.find(t=>t.id===options.utility),model=frozen.models.find((m:any)=>m.modelId===options.only),root=options.report
  if(!task||!model)throw Error('EVALUATION_UTILITY_TASK')
@@ -477,6 +481,7 @@ async function runUtilityCli(controller:AbortController,frozen:any,frozenHash:st
   for(const charged of new Set(journal.dispatchKeys().filter(k=>k.startsWith(COLLABORATION_RULES.prefix+'r'+frozen.revision+'/answers/'+model.modelId+'/')))){const result=journal.read(charged) as any;if(!result||result.status!=='terminal'||result.frozenHash!==frozenHash)throw Error('EVALUATION_CHARGED_UNFINISHED')}
   const keys={on:pairKey+'/on',off:pairKey+'/off'},skip=(['on','off'] as const).filter(c=>journal.charged(keys[c])>0)
   if(skip.length===2){const recovered=recoverUtilityReport(evidenceInput());console.log(JSON.stringify({recovered:true,callsAdded:0,resultHash:fingerprint(recovered.result)}));return}
+  assertCollaborationServiceDispatch(collaborationServiceInput(frozen,frozenHash,model.modelId))
   const verified=skip.length?readUtilityEvidence(evidenceInput()):null
   let preflightPlan:any
   const beforeConfig=readFileSync(path.join(options.profile,'model-config.json')),credential=loadModelCredentialReadOnly(options.profile,safeStorage,model.recordId)
@@ -486,7 +491,7 @@ async function runUtilityCli(controller:AbortController,frozen:any,frozenHash:st
    onPrepared:after=>{if(submanifest){if(after.hash!==submanifest.after.hash)throw Error('EVALUATION_UTILITY_SOURCE_CHANGED')}else{submanifest={source:sourceBinding,after,afterHash:after.hash};writeFileSync(file('utility-source'),JSON.stringify(submanifest,null,2),{flag:'wx',mode:0o600})}},
    onPreflight:(preflight,order)=>{preflightPlan=persistUtilityPreflight({root,pairKey,frozenHash,source:sourceBinding,afterHash:submanifest.after.hash,preflight,order})},
    onDispatchBoundary:(condition,index)=>console.log(JSON.stringify({evaluationBoundary:'utility-answer',token:options.supervisionToken,index,condition})),
-   charge:condition=>{if(!readFileSync(path.join(options.profile,'model-config.json')).equals(beforeConfig))throw Error('EVALUATION_PROFILE_CHANGED');if(journal.charged(keys[condition]))throw Error('EVALUATION_ATTEMPT_ALREADY_DISPATCHED');journal.write(keys[condition],{status:'started',key:keys[condition],frozenHash,source:sourceBinding,afterHash:submanifest.after.hash,preflightHash:preflightPlan.hash});journal.charge(keys[condition])},
+   charge:condition=>{assertCollaborationServiceDispatch(collaborationServiceInput(frozen,frozenHash,model.modelId));if(!readFileSync(path.join(options.profile,'model-config.json')).equals(beforeConfig))throw Error('EVALUATION_PROFILE_CHANGED');if(journal.charged(keys[condition]))throw Error('EVALUATION_ATTEMPT_ALREADY_DISPATCHED');journal.write(keys[condition],{status:'started',key:keys[condition],frozenHash,source:sourceBinding,afterHash:submanifest.after.hash,preflightHash:preflightPlan.hash});journal.charge(keys[condition])},
    stream:streamModelStep,
    onCondition:(condition,result)=>{const clean=JSON.parse(JSON.stringify(result).replaceAll(credential.apiKey,'[redacted]'));completed[condition]=clean;journal.finish(keys[condition],{status:'terminal',key:keys[condition],frozenHash,source:sourceBinding,afterHash:submanifest.after.hash,preflightHash:preflightPlan.hash,result:clean})}})
   const {result}=recoverUtilityReport(evidenceInput());console.log(JSON.stringify({frozenHash,model:model.modelId,taskId:task.id,calls:result.calls,validTerminal:result.validTerminal,humanReviewed:false}))

@@ -627,12 +627,12 @@ type CollaborationRecoveryBinding={frozenHash:string;prefix:string;model:string}
 type CollaborationRecoveryCycle=CollaborationRecoveryBinding&{at:string;reason:string;dispatchCount:number;historyHash:string}
 export function collaborationRecoveryWindow<T extends {key:string}>(dispatches:T[],cycles:CollaborationRecoveryCycle[],binding:CollaborationRecoveryBinding):T[]{
  let watermark=0
- if(cycles.length>2)throw Error('EVALUATION_RECOVERY_INVALID')
+ if(cycles.length>2||!new RegExp('^'+COLLABORATION_RULES.prefix+'r[1-9][0-9]*/$').test(binding.prefix))throw Error('EVALUATION_RECOVERY_INVALID')
  for(const cycle of cycles){
   if(cycle.frozenHash!==binding.frozenHash||cycle.prefix!==binding.prefix||cycle.model!==binding.model||!Number.isInteger(cycle.dispatchCount)||cycle.dispatchCount<=watermark||cycle.dispatchCount>dispatches.length||cycle.historyHash!==fingerprint(dispatches.slice(0,cycle.dispatchCount)))throw Error('EVALUATION_RECOVERY_INVALID')
   watermark=cycle.dispatchCount
  }
- return dispatches.slice(watermark).filter(d=>d.key.startsWith(binding.prefix+binding.model+'/'))
+ return dispatches.slice(watermark).filter(d=>d.key.startsWith(binding.prefix)&&collaborationKeyParts(d.key).model===binding.model)
 }
 export function collaborationResumeCycle<T extends {key:string}>(dispatches:T[],cycles:CollaborationRecoveryCycle[],binding:CollaborationRecoveryBinding):CollaborationRecoveryCycle{
  if(cycles.length>=2||collaborationRecoveryWindow(dispatches,cycles,binding).length<3)throw Error('EVALUATION_RECOVERY_INVALID')
