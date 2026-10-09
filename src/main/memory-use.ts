@@ -21,6 +21,7 @@ export const MEMORY_SEARCH_SCHEMA = {
  description:'在本场已获准的库内记忆快照中检索资料；不读取源笔记，不扩大文件范围。最多四次。',
  inputSchema:{type:'object',properties:{query:{type:'string',minLength:1,maxLength:256}},required:['query'],additionalProperties:false}
 } as const
+export function memoryTerms(text: string): string[] { return terms(text) }
 function terms(text: string): string[] {
   const found = text.toLocaleLowerCase().match(/[\p{Script=Han}]+|(?:(?!\p{Script=Han})[\p{L}\p{N}_])+/gu) ?? []
   return [...new Set(found.flatMap(word => /\p{Script=Han}/u.test(word) ? [...Array.from(word)].flatMap((c, i, chars) => [...(i+1<chars.length?[c+chars[i+1]]:[]),...(i+2<chars.length?[c+chars[i+1]+chars[i+2]]:[]),...(chars.length===1?[c]:[])]) : [word]))]

@@ -319,6 +319,10 @@ it('无种子链目标须由预注册前步关系解析，否则未知；更正�
  const conflict=spec({action:'conflict',targetFromCase:'v6-chain-beta-3',targetCategory:'entry'})
  const fact={...prior,semantic:'fact',updateBasis:{kind:'consolidation',id:'quality-v6-chain-beta-3'}}
  expect(v6ActionEvidence(conflict,{before:[fact],entries:[fact,{id:'pending',status:'disputed',pendingTarget:{id:'target',version:1}}],targetTaskId:'quality-v6-chain-beta-3',receipt:{taskId:'now',outcome:'applied',entryIds:['pending']}})).toMatchObject({finalTargets:[{id:'target',version:1}]})
+ const addSpec=spec({action:'add',semantic:'fact',targetCategory:'entry'})
+ const decided={id:'decision',version:2,category:'entry',status:'active',semantic:'fact',content:'银桥项目采用 A 方案',scope:'本库',updateBasis:{kind:'consolidation',id:'now'}}
+ const priorDecision={...decided,version:1,content:'银桥尚无已批准安排'}
+ expect(v6ActionEvidence(addSpec,{before:[priorDecision],entries:[decided],receipt:{taskId:'now',outcome:'applied',entryIds:['decision']}})).toMatchObject({passed:true,state:'success',finalTargets:[{id:'decision',version:2}]})
 })
 
 it('真实前置Host链用观测taskId解析后续目标并留证后置发送版本',async()=>{

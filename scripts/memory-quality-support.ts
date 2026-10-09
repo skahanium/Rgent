@@ -638,3 +638,25 @@ export function collaborationResumeCycle<T extends {key:string}>(dispatches:T[],
  if(cycles.length>=2||collaborationRecoveryWindow(dispatches,cycles,binding).length<3)throw Error('EVALUATION_RECOVERY_INVALID')
  return {...binding,at:new Date().toISOString(),reason:'operator-resume-after-three-retryable-failures',dispatchCount:dispatches.length,historyHash:fingerprint(dispatches)}
 }
+/** 只读投影：链上步骤若按材料种类计入真实维。不改正式 70／各维 60% 或 v6Summary。 */
+export function v6TrueDimension(spec:V6Case):V6Direction{
+ if(!spec.chain)return spec.direction
+ if(spec.kind==='long-requirement')return 'standing'
+ if(spec.kind==='project-fact'||spec.kind==='scoped-third-party'||spec.kind==='human-decision')return 'fact'
+ if(spec.kind==='explicit-correction'||spec.kind==='repeat-after-correction'||spec.kind==='ambiguous-change')return 'update'
+ return 'recent'
+}
+export function v6ChainDimensionProjection(rows:V6Row[],cases:V6Case[],round:number,options?:Parameters<typeof v6Summary>[3]){
+ const official=v6Summary(rows,cases,round,options)
+ const remapped=cases.map(spec=>({...spec,direction:v6TrueDimension(spec),chain:undefined,step:undefined}))
+ const projected=v6Summary(rows,remapped,round,options)
+ const maxOf=(list:readonly {direction:V6Direction;weight:number}[],direction:V6Direction)=>list.filter(c=>c.direction===direction).reduce((n,c)=>n+c.weight,0)
+ const floor=(earned:number,max:number)=>({earned,max,rate:max?earned/max:1,meets:earned>=max*0.6})
+ const projectedRecent=floor(projected.lower.dimensions.recent,maxOf(remapped,'recent'))
+ return {
+  official:{recent:floor(official.lower.dimensions.recent,maxOf(cases,'recent')),update:floor(official.lower.dimensions.update,maxOf(cases,'update')),total:official.lower.total},
+  projected:{recent:projectedRecent,update:floor(projected.lower.dimensions.update,maxOf(remapped,'update')),standing:floor(projected.lower.dimensions.standing,maxOf(remapped,'standing')),fact:floor(projected.lower.dimensions.fact,maxOf(remapped,'fact')),total:projected.lower.total},
+  recentFloorStillBroken:!projectedRecent.meets,
+  note:'只读离线投影，不是认证成绩，也不改变正式链式几何'
+ }
+}

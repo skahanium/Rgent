@@ -21,6 +21,7 @@ it('recent-only and fenced patch are structured in their actual phase; a patch i
  const body='```json\n{"proposals":[{"index":1,"value":null}]}\n```'
  expect(protocol.consolidationResponseStructured({phase:'protocol-repair',payload:{repair:{mode:'patch'}},body})).toBe(true)
  expect(protocol.consolidationResponseStructured({phase:'proposal',payload:{},body})).toBe(false)
+ expect(protocol.consolidationResponseStructured({phase:'sibling-resolution',payload:{},body:JSON.stringify({obsolete:['m1'],keep:[]})})).toBe(true)
 })
 
 it('freezes a model/group interleaving schedule while preserving each chain and all 120 attempts',async()=>{
@@ -40,4 +41,7 @@ it('accepts a genuine recent-only second request and rejects changed content, ph
  gate.observe(observation('protocol-repair') as any);expect(()=>gate.consume(input)).toThrow('EVALUATION_CASE_CALL_LIMIT')
  const forged=new protocol.ConsolidationPaidGate();forged.observe(first as any);expect(()=>forged.consume({messages:[{role:'user',content:first.content+' '}]} as any)).toThrow('EVALUATION_REQUEST_OBSERVATION_REQUIRED')
  const reused=new protocol.ConsolidationPaidGate();reused.observe(first as any);reused.consume(input);reused.observe(first as any);expect(()=>reused.consume(input)).toThrow('EVALUATION_REQUEST_PHASE')
+ const sibling=observation('sibling-resolution',JSON.stringify({sources:[],memory:[]})),ask=new protocol.ConsolidationPaidGate()
+ ask.observe(first as any);ask.consume(input);ask.observe(sibling as any)
+ expect(ask.consume({messages:[{role:'user',content:sibling.content}]} as any).purpose).toBe('sibling-resolution')
 })

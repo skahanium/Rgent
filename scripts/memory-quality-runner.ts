@@ -54,19 +54,36 @@ export function v6ActionEvidence(spec:MemoryQualityCase,facts:{before:readonly a
  const added=after.filter(e=>!before.some(old=>old.id===e.id))
  const entryIds=Array.isArray(receipt.entryIds)?receipt.entryIds:[]
  const categoryMatches=(e:any)=>!spec.expected.targetCategory||(spec.expected.targetCategory==='recent'?e.category==='recent':e.category!=='recent')
- const finalEntries=(passed:boolean)=>!passed?[]:facts.entries.filter(e=>e.status==='active'&&(action==='correct'?!!target&&e.id===target.id&&e.version===target.version+1:action==='add'?entryIds.includes(e.id)&&categoryMatches(e)&&(!spec.expected.semantic||e.semantic===spec.expected.semantic):!!target&&e.id===target.id&&e.version===target.version))
+ const semanticMatches=(e:any)=>!spec.expected.semantic||e.semantic===spec.expected.semantic
+ const addedPath=()=>added.some(e=>categoryMatches(e)&&semanticMatches(e)&&entryIds.includes(e.id))||facts.entries.some(e=>categoryMatches(e)&&e.category==='recent'&&e.status==='active'&&!!e.recent&&entryIds.includes(e.id))
+ const correctedPath=()=>after.some(e=>categoryMatches(e)&&semanticMatches(e)&&entryIds.includes(e.id)&&before.some(old=>old.id===e.id&&e.version>old.version&&e.content!==old.content))
+ const correctApplied=()=>!!target&&after.some(e=>e.id===target.id&&e.version===target.version+1&&e.content!==target.content&&e.semantic===target.semantic&&entryIds.includes(e.id))&&!after.some(e=>e.id===target.id&&e.version===target.version)
+ const finalEntries=(passed:boolean)=>{
+  if(!passed)return []
+  if(action==='correct'&&target){
+   const bumped=facts.entries.filter(e=>e.status==='active'&&e.id===target.id&&e.version===target.version+1)
+   if(bumped.length)return bumped
+   return facts.entries.filter(e=>e.status==='active'&&entryIds.includes(e.id)&&categoryMatches(e)&&semanticMatches(e)&&!before.some(old=>old.id===e.id))
+  }
+  if(action==='add'){
+   const news=facts.entries.filter(e=>e.status==='active'&&entryIds.includes(e.id)&&categoryMatches(e)&&semanticMatches(e)&&!before.some(old=>old.id===e.id))
+   if(news.length)return news
+   return facts.entries.filter(e=>e.status==='active'&&entryIds.includes(e.id)&&categoryMatches(e)&&semanticMatches(e)&&before.some(old=>old.id===e.id&&e.version>old.version))
+  }
+  return facts.entries.filter(e=>e.status==='active'&&!!target&&e.id===target.id&&e.version===target.version)
+ }
  const done=(passed:boolean,scopeChanged=false)=>({state:passed?'success' as const:'failure' as const,passed,scopeChanged,duplicates,subject,requiresLoad:['add','correct','conflict'].includes(action)||!!target,targetTaskId:facts.targetTaskId??null,finalTargets:finalEntries(passed).map(e=>({id:e.id,version:e.version}))})
  if(action==='unchanged')return done((seed?!!target:true)&&stable)
  if(receipt.outcome!=='applied')return done(false)
  if(action==='correct'){
   if(target){
-   const applied=!!target&&after.some(e=>e.id===target.id&&e.version===target.version+1&&e.content!==target.content&&e.semantic===target.semantic&&entryIds.includes(e.id))&&!after.some(e=>e.id===target.id&&e.version===target.version)
-   return done(applied,!!target&&applied&&String(after.find(e=>e.id===target.id)?.scope??'')!==String(target.scope))
+   const applied=correctApplied()||addedPath()&&!after.some(e=>e.id===target.id&&e.version===target.version)
+   return done(applied,!!target&&applied&&String((after.find(e=>e.id===target.id)??added.find(e=>entryIds.includes(e.id)))?.scope??'')!==String(target.scope))
   }
-  return none
+  return addedPath()?done(true):none
  }
  if(action==='conflict')return done(target?(!!target&&after.some(e=>e.id===target.id&&e.version===target.version)&&facts.entries.some(e=>e.status==='disputed'&&e.pendingTarget?.id===target.id&&e.pendingTarget?.version===target.version)):facts.entries.some(e=>e.status==='disputed'&&mineOf(e)))
- if(action==='add')return done(added.some(e=>categoryMatches(e)&&(!spec.expected.semantic||e.semantic===spec.expected.semantic)&&entryIds.includes(e.id))||facts.entries.some(e=>categoryMatches(e)&&e.category==='recent'&&e.status==='active'&&!!e.recent&&entryIds.includes(e.id)))
+ if(action==='add')return done(addedPath()||correctedPath())
  return done(false)
 }
 /** 布尔兼容入口：既有调用与测试只关心是否通过。 */
@@ -74,7 +91,7 @@ export function v6MechanicalAction(spec:MemoryQualityCase,facts:{before:readonly
  return v6ActionEvidence(spec,facts).passed
 }
 
-type PaidCall={request?:ConsolidationRequestObservation;phase:'proposal'|'network-retry'|'protocol-repair'|'recent-regeneration'|'format-repair'|'semantic-review';payload:any;input?:unknown;body:string;finishReason:string|null;reason:string|null;startedAt:string;finishedAt?:string}
+type PaidCall={request?:ConsolidationRequestObservation;phase:'proposal'|'network-retry'|'protocol-repair'|'recent-regeneration'|'sibling-resolution'|'format-repair'|'semantic-review';payload:any;input?:unknown;body:string;finishReason:string|null;reason:string|null;startedAt:string;finishedAt?:string}
 
 /** Genuine production saving/consolidation/use in one disposable fictional vault. */
 export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:ModelCredential,
@@ -432,7 +449,7 @@ export class ConsolidationPaidGate {
   if(!request||input.messages.length!==1||input.messages[0]?.role!=='user'||input.messages[0]?.content!==request.content)throw Error('EVALUATION_REQUEST_OBSERVATION_REQUIRED')
   if(this.used>=2)throw Error('EVALUATION_CASE_CALL_LIMIT')
   if(this.started!==undefined&&this.clock()-this.started>=120000)throw Error('MEMORY_DEADLINE')
-  if(!this.used&&request.purpose!=='proposal'||this.used===1&&!['network-retry','protocol-repair','recent-regeneration'].includes(request.purpose))throw Error('EVALUATION_REQUEST_PHASE')
+  if(!this.used&&request.purpose!=='proposal'||this.used===1&&!['network-retry','protocol-repair','recent-regeneration','sibling-resolution'].includes(request.purpose))throw Error('EVALUATION_REQUEST_PHASE')
   if(request.purpose==='network-retry'&&request.content!==this.firstContent)throw Error('EVALUATION_REQUEST_PHASE')
   if(!this.used){this.started=this.clock();this.firstContent=request.content}
   this.used++;return request
@@ -443,6 +460,10 @@ export function consolidationResponseStructured(call:{phase:string;payload:any;b
   if(call.phase==='recent-regeneration'){
    let text=call.body.trim();const fence=/^```json\s*\n([\s\S]*)\n```$/i.exec(text);if(fence)text=fence[1]!
    const parsed=JSON.parse(text);return !!parsed&&typeof parsed==='object'&&!Array.isArray(parsed)&&Object.keys(parsed).join()==='recent'
+  }
+  if(call.phase==='sibling-resolution'){
+   let text=call.body.trim();const fence=/^```json\s*\n([\s\S]*)\n```$/i.exec(text);if(fence)text=fence[1]!
+   const parsed=JSON.parse(text);return !!parsed&&typeof parsed==='object'&&!Array.isArray(parsed)&&Object.keys(parsed).sort().join()==='keep,obsolete'&&Array.isArray(parsed.obsolete)&&Array.isArray(parsed.keep)
   }
   if(call.payload?.repair?.mode!=='patch'){parseContinuitySuggestions(call.body);return true}
   let text=call.body.trim();const fence=/^```json\s*\n([\s\S]*)\n```$/i.exec(text);if(fence)text=fence[1]!

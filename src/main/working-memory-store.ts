@@ -126,7 +126,11 @@ export function parseWorkingMemory(raw:string):WorkingRecord{
 /** All authoritative changes are a single native CAS, called through the vault mutation queue. */
 /** 只做确定性表示归一：大小写、全半角与空白差异不算新事实；不做同义词或语义合并。 */
 function sameStatement(entry:{content:string;scope:string;semantic:string},input:{content:string;scope:string;semantic:string}):boolean{
- return entry.scope===input.scope&&entry.semantic===input.semantic&&normalizedStatement(entry.content)===normalizedStatement(input.content)
+ return entry.semantic===input.semantic&&sameClaimIgnoringSemantic(entry,input)
+}
+/** 精确同主张：同范围且归一化正文全等；忽略 semantic，供程序补完跨类退出。 */
+export function sameClaimIgnoringSemantic(entry:{content:string;scope:string},input:{content:string;scope:string}):boolean{
+ return entry.scope===input.scope&&normalizedStatement(entry.content)===normalizedStatement(input.content)
 }
 function normalizedStatement(text:string):string{return text.normalize('NFKC').toLowerCase().replace(/\s+/g,' ').trim()}
 function boundedJobResults(results:readonly MemoryJobGroupResult[]):MemoryJobGroupResult[]{
