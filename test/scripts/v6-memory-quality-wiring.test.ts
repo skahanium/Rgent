@@ -15,7 +15,7 @@ const annotator={identity:'review-agent-A',kind:'agent' as const,participatedInD
 const fullReview=(spec:V6Case):V6Annotation=>({
  correct:spec.expected.units.length,omitted:0,wrongNew:0,hardViolations:[],
  checks:{attributionAndScope:true,noUnsupportedContent:true,noForbiddenContent:true},
- evidenceComplete:true,uncertainty:[],annotator,rulesHash:'rules',resultHash:'result',frozenHash:'frozen'
+ evidenceComplete:true,uncertainty:[],annotator,rulesHash:'rules',resultHash:'result',frozenHash:'frozen',rubricVersion:1
 })
 const byId=(id:string):V6Case=>{
  const found=V6_QUALITY_CASES.find(c=>c.id===id)
@@ -164,7 +164,9 @@ describe('v6 指标与门', () => {
   expect(unavailable.metrics.D).toBe(12)
   expect(unavailable.metrics.D).toBeLessThan(unavailable.metrics.N)
   expect(unavailable.verdict).toBe('unmeasured-environment')
-  expect(v6Summary(partial,V6_QUALITY_CASES,0).verdict).toBe('failed')
+  const incomplete=v6Summary(partial,V6_QUALITY_CASES,0)
+  expect(incomplete.reliability.passed).toBe(true)
+  expect(incomplete.verdict).toBe('insufficient-evidence')
   const full=v6Summary(happy(),V6_QUALITY_CASES,0,{environmentUnavailable:true})
   expect(full.metrics.D).toBe(full.metrics.N)
   expect(full.verdict).toBe('passed')
@@ -180,11 +182,11 @@ describe('v6 指标与门', () => {
   expect(summary.metrics.dispatchedRate).toBeCloseTo(28/30,10)
   expect(summary.metrics.responseRate).toBeCloseTo(27/28,10)
   expect(summary.metrics.structuredRate).toBeCloseTo(26/27,10)
-  expect(summary.metrics.overallRate).toBeCloseTo(26/30,10)
+  expect(summary.reliability).toMatchObject({p:26,n:27,passed:true})
+  expect(summary.metrics.overallRate).toBeCloseTo(26/27,10)
   expect(summary.serviceFailures).toBe(1)
   expect(summary.outputFailures).toBe(1)
-  expect(summary.gates.reliability).toBe(false)
-  expect(summary.reasons.some(reason=>reason.startsWith('reliability:'))).toBe(true)
+  expect(summary.gates.reliability).toBe(true)
  })
  it('partial-commit 是独立终态：不计入服务失败，也不冒充完全成功', () => {
   const partial={status:'completed',responses:[{finishReason:'stop'}],result:{receipt:{outcome:'applied',results:[{outcome:'applied'},{outcome:'rejected'}]},entries:[{id:'a'}],recent:[]}}

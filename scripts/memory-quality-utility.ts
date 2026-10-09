@@ -172,13 +172,26 @@ export function validateUtilityAnnotation(packet:ReturnType<typeof utilityBlindP
  const valid=review&&['frozenHash','resultHash','rulesHash','packetHash'].every(k=>review[k]===packet.public.binding[k as keyof typeof packet.public.binding])&&typeof review.annotator?.identity==='string'&&review.annotator.identity.trim().length>0&&review.annotator.humanReviewed===false&&review.annotator.modelNameMasked===true&&typeof review.annotator.participatedInDesign==='boolean'&&Array.isArray(review.scores)&&review.scores.length===2&&new Set(review.scores.map((s:any)=>s.id)).size===2&&review.scores.every((s:any)=>packet.public.answers.some(a=>a.id===s.id)&&[0,1,2].includes(s.completion)&&Array.isArray(s.errors)&&s.errors.every((e:unknown)=>typeof e==='string')&&Array.isArray(s.limitations)&&s.limitations.every((e:unknown)=>typeof e==='string')&&typeof s.scopeFollowed==='boolean')
  if(!valid)throw Error('EVALUATION_UTILITY_ANNOTATION_INVALID')
 }
+/** 传输失败、空取消或收费前阻断不进 win／tie／loss 分母。 */
+export function utilityPairContaminated(result:any):boolean{
+ const conds=result?.conditions??{}
+ return (['on','off'] as const).some(c=>{
+  const row=conds[c]??{}
+  const status=typeof row.status==='string'?row.status:''
+  const error=typeof row.error==='string'?row.error:''
+  if(['not-dispatched','cancelled-empty','charged-without-terminal'].includes(status))return true
+  if(status==='MODEL_REQUEST_FAILED'||error==='MODEL_REQUEST_FAILED')return true
+  return error.startsWith('EVALUATION_UTILITY')||error==='EVALUATION_REQUEST_FAILED'
+ })
+}
 export function utilityReviewSummary(packet:ReturnType<typeof utilityBlindPacket>,primary:any,secondary:any,result:any){
  assertUtilityPacket(packet,result);validateUtilityAnnotation(packet,primary);validateUtilityAnnotation(packet,secondary)
  if(primary.annotator.identity===secondary.annotator.identity)throw Error('EVALUATION_UTILITY_ANNOTATION_INVALID')
  const normalized=(s:any)=>({id:s.id,completion:s.completion,errors:[...s.errors].sort(),limitations:[...s.limitations].sort(),scopeFollowed:s.scopeFollowed})
  const disagreements=primary.scores.filter((s:any)=>fingerprint(normalized(s))!==fingerprint(normalized(secondary.scores.find((t:any)=>t.id===s.id)))).map((s:any)=>({id:s.id,primary:s,secondary:secondary.scores.find((t:any)=>t.id===s.id)}))
  const compare=(review:any)=>{const score=(condition:string)=>{const s=review.scores.find((s:any)=>s.id===packet.private.mapping.find(m=>m.condition===condition)!.id);return s.scopeFollowed&&!s.errors.length?s.completion:-1};return score('on')>score('off')?'win':score('on')<score('off')?'loss':'tie'}
- return {binding:packet.public.binding,taskId:packet.private.taskId,model:packet.private.model,primary:compare(primary),secondary:compare(secondary),disagreements,humanReviewed:false}
+ const eligible=!utilityPairContaminated(result)
+ return {binding:packet.public.binding,taskId:packet.private.taskId,model:packet.private.model,eligible,nValid:eligible?1:0,primary:eligible?compare(primary):null,secondary:eligible?compare(secondary):null,disagreements,humanReviewed:false}
 }
 
 // These readers only inspect evaluator reports. They never restore a vault or open a profile.

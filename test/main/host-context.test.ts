@@ -156,6 +156,20 @@ it('allocates structured histories by tokens, retains recent whole tasks and nev
  for(const c of first.chapters)expect(plan.refs.some(r=>r.kind==='ledger'&&r.sourceId===c.sourceId)).toBe(false)
  expect(plan.content.length).toBeLessThanOrEqual(2000)
 })
+it('assembly cuts classify overflowing core separately from demand',()=>{
+ const make=(id:string,layer:'core'|'demand',content:string)=>({
+  id,version:1,content,layer,scope:'本库',status:'active' as const,reason:null,updatedAt:'2026-10-02',
+  updateBasis:{kind:'manual' as const,id:'manual',version:1},
+  sources:[{id:'s-'+id,version:1,relPath:'a.md',objectVersion:'o',revision:'a'.repeat(64),permissionTier:'reference' as const,kind:'body' as const,taskId:null,taskMaterialHash:null,classification:'human' as const,start:0,end:1,text:'x',hash:'b'.repeat(64),basisHash:'c'.repeat(64),sourceDeps:[],memoryDeps:[]}]
+ })
+ const memory={core:[make('core-cut','core','核'.repeat(120))],recent:[],demand:[make('demand-keep','demand','需')],omittedCore:[],omittedRecent:[],omittedDemand:[]}
+ const plan=buildHostContext({source:'落点。',prompt:'问',placement:0,inputBudgetTokens:500,countTokens:(s:string)=>s.length,chapters:[],memory})
+ expect(plan.status).toBe('ready')
+ if(plan.status!=='ready')return
+ expect(plan.omitted.omittedCore).toContain('core-cut')
+ expect(plan.omitted.omittedDemand).not.toContain('core-cut')
+ expect(plan.omitted.memoryIds).toContain('core-cut')
+})
 it('returns unused summary reservation to complete recent history before requesting a lossy summary',()=>{
  const chapters=Array.from({length:2},(_,n)=>({sourceId:`task-${n}`,text:'甲'.repeat(100)}))
  const plan=buildHostContext({source:'正文。',chapters,prompt:'继续',placement:3,inputBudgetTokens:1000,countTokens:(s:string)=>s.length})

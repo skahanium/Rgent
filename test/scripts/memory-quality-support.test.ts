@@ -221,26 +221,28 @@ it('an insufficient terminal cannot earn E2E retention from an asserted true ann
  expect(q.arms.review).toMatchObject({retained:0,pending:1});expect(q.diagnostic.pairedCases).toEqual([])
 })
 
-it('collaboration phase budgets are atomic, isolated and survive revision changes',()=>{
+it('collaboration phase budgets are atomic, isolated and reject prior revision keys',()=>{
  const root=dir(),manifest={old:true},initial=new support.EvaluationJournal(root,manifest,3000)
  initial.charge('v6-2026-10-05/integrity/r10/deepseek-flash/0/old');initial.close()
  const prefix=support.COLLABORATION_RULES.prefix,campaign={parentManifestHash:support.fingerprint(manifest),prefix,limit:support.COLLABORATION_RULES.total,perModelLimit:136,modelSegment:2,authorization:support.COLLABORATION_RULES.authorization}
  const j=new support.EvaluationJournal(dir(),{},3000,root,undefined,campaign)
- const key=prefix+'r11/answers/deepseek-flash/fact/on';j.charge(key)
+ expect(()=>j.charge(prefix+'r12/answers/deepseek-flash/fact/on')).toThrow('EVALUATION_CAMPAIGN_KEY')
+ expect(()=>j.charge(prefix+'r11/consolidation/deepseek-flash/0/v6-fact-01')).toThrow('EVALUATION_CAMPAIGN_KEY')
+ const key=prefix+'r13/answers/deepseek-flash/fact/on';j.charge(key)
  expect(()=>j.charge(key)).toThrow('EVALUATION_CASE_CALL_LIMIT')
- expect(()=>j.charge(prefix+'r11/unknown/deepseek-flash/fact/on')).toThrow('EVALUATION_CAMPAIGN_KEY')
- for(const task of support.COLLABORATION_TASK_IDS)for(const condition of ['on','off'])if(task!=='fact'||condition!=='on')j.charge(prefix+'r11/answers/deepseek-flash/'+task+'/'+condition)
- j.charge(prefix+'r12/answers/deepseek-flash/fact/on')
- expect(()=>j.charge(prefix+'r12/answers/deepseek-flash/fact/on')).toThrow('EVALUATION_CASE_CALL_LIMIT')
- for(const round of [0,1])for(const spec of V6_QUALITY_CASES){const k=prefix+'r11/consolidation/deepseek-flash/'+round+'/'+spec.id;j.charge(k);j.charge(k)}
- j.charge(prefix+'r12/consolidation/deepseek-flash/0/v6-fact-01')
- for(const task of support.COLLABORATION_TASK_IDS)for(const condition of ['on','off'])j.charge(prefix+'r11/answers/MiniMax-M3/'+task+'/'+condition)
- j.charge(prefix+'r12/answers/MiniMax-M3/fact/on')
- for(const round of [0,1])for(const spec of V6_QUALITY_CASES){const k=prefix+'r11/consolidation/MiniMax-M3/'+round+'/'+spec.id;j.charge(k);j.charge(k)}
- expect(j.localCalls).toBe(275);expect(j.calls).toBe(276);j.close()
- const next=new support.EvaluationJournal(dir(),{revision:12},3000,root,undefined,campaign)
- next.charge(prefix+'r12/consolidation/MiniMax-M3/0/v6-fact-01')
- expect(next.localCalls).toBe(276)
+ expect(()=>j.charge(prefix+'r13/unknown/deepseek-flash/fact/on')).toThrow('EVALUATION_CAMPAIGN_KEY')
+ for(const task of support.COLLABORATION_TASK_IDS)for(const condition of ['on','off'])if(task!=='fact'||condition!=='on')j.charge(prefix+'r13/answers/deepseek-flash/'+task+'/'+condition)
+ for(const round of [0,1])for(const spec of V6_QUALITY_CASES){const k=prefix+'r13/consolidation/deepseek-flash/'+round+'/'+spec.id;j.charge(k);j.charge(k)}
+ expect(()=>j.charge(prefix+'r13/consolidation/deepseek-flash/0/v6-fact-01')).toThrow()
+ for(const task of support.COLLABORATION_TASK_IDS)for(const condition of ['on','off'])j.charge(prefix+'r13/answers/MiniMax-M3/'+task+'/'+condition)
+ j.charge(prefix+'r13/consolidation/MiniMax-M3/0/v6-fact-01')
+ expect(j.localCalls).toBe(153);expect(j.calls).toBe(154);j.close()
+ const next=new support.EvaluationJournal(dir(),{revision:13},3000,root,undefined,campaign)
+ next.charge(prefix+'r13/consolidation/MiniMax-M3/0/v6-standing-01')
+ expect(next.localCalls).toBe(154)
+ expect(support.COLLABORATION_RULES.revision).toBe(13)
+ expect(support.COLLABORATION_RULES.authorization).toBe('2026-10-10-memory-instrument-hygiene')
+ expect(support.COLLABORATION_RULES.historicalCalls).toBe(1444)
  next.close()
 })
 it('reserved collaboration keys cannot downgrade to a generic budget by missing or incorrect authorization',()=>{
@@ -253,7 +255,7 @@ it('reserved collaboration keys cannot downgrade to a generic budget by missing 
  try{expect(()=>j.charge(support.COLLABORATION_RULES.prefix+'r11/answers/deepseek-flash/fact/on')).toThrow('EVALUATION_CAMPAIGN_AUTHORIZATION')}finally{j.close()}
 })
 it('unknown collaboration case and task aliases are rejected before charging',()=>{
- for(const suffix of ['r11/answers/deepseek-flash/fact-alias/on','r11/consolidation/deepseek-flash/0/c999'])expect(()=>support.assertCollaborationCharge([],support.COLLABORATION_RULES.prefix+suffix)).toThrow('EVALUATION_CAMPAIGN_KEY')
+ for(const suffix of ['r12/consolidation/deepseek-flash/0/v6-fact-01','r13/answers/deepseek-flash/fact-alias/on','r13/consolidation/deepseek-flash/0/c999'])expect(()=>support.assertCollaborationCharge([],support.COLLABORATION_RULES.prefix+suffix)).toThrow('EVALUATION_CAMPAIGN_KEY')
 })
 it('collaboration resume opens a bound post-resume failure window without erasing charged keys',()=>{
  expect(typeof support.collaborationRecoveryWindow).toBe('function')

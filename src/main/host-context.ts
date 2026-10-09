@@ -1,7 +1,7 @@
 import {contextAllocations} from './context-budget.ts'
 import { createHash } from 'node:crypto'
 import { compile, compileFragment, parseMarker } from '../markdown/index.ts'
-import { MEMORY_NOTICE, memorySection, type MemoryRecall } from './memory-use.ts'
+import { MEMORY_NOTICE, memorySection, omittedMemoryIds, type MemoryRecall } from './memory-use.ts'
 import type { BlockRef, CompileResult } from '../markdown/types.ts'
 
 export interface ContextChapter {
@@ -45,7 +45,7 @@ export interface ContextSourceRef {
 }
 
 export type HostContextPlan =
-  | { status: 'ready'; content: string; refs: ContextSourceRef[]; memoryIds: string[]; omitted: { bodyBlockNumbers: number[]; ledgerChapterIds: string[]; memoryIds: string[] } }
+  | { status: 'ready'; content: string; refs: ContextSourceRef[]; memoryIds: string[]; omitted: { bodyBlockNumbers: number[]; ledgerChapterIds: string[]; memoryIds: string[]; omittedCore: string[]; omittedRecent: string[]; omittedDemand: string[] } }
   | { status: 'needs-summary'; chapters: ContextChapter[] }
   | { status: 'too-large'; reason: string }
 
@@ -202,13 +202,20 @@ export function buildHostContext(input: HostContextInput): HostContextPlan {
   if (safeCount(base) > inputBudgetTokens) return { status: 'too-large', reason: '当前口令与落点无法放入上下文' }
 
   const memoryIds = input.memory?.core.map(e => e.id) ?? []
-  const omittedMemory = [...(input.memory?.omittedDemand ?? [])]
+  const omittedCore = [...(input.memory?.omittedCore ?? [])]
+  const omittedRecent = [...(input.memory?.omittedRecent ?? [])]
+  const omittedDemand = [...(input.memory?.omittedDemand ?? [])]
   const placementText = blocks[placementAt] && !excludedBlocks.has(placementAt) ? sourceBlock(part.body, blocks[placementAt]!, placementAt + 1).text : ''
   if (safeCount(`${base}\n${placementText}`) > inputBudgetTokens) return { status: 'too-large', reason: '核心记忆、当前口令与落点无法放入上下文' }
+  for (const entry of input.memory?.recent ?? []) {
+    const next = `${base}\n${memorySection(entry)}`
+    if (safeCount(`${next}\n${placementText}`) <= inputBudgetTokens) { base = next; memoryIds.push(entry.id) }
+    else omittedRecent.push(entry.id)
+  }
   for (const entry of input.memory?.demand ?? []) {
     const next = `${base}\n${memorySection(entry)}`
     if (safeCount(`${next}\n${placementText}`) <= inputBudgetTokens) { base = next; memoryIds.push(entry.id) }
-    else omittedMemory.push(entry.id)
+    else omittedDemand.push(entry.id)
   }
   const oldChapters = chapters.length > 1 ? chapters.slice(0, -1) : chapters
   const recentChapters = chapters.length > 1 ? chapters.slice(-1) : []
@@ -247,7 +254,7 @@ export function buildHostContext(input: HostContextInput): HostContextPlan {
   }
   let content = base
   const refs: ContextSourceRef[] = []
-  const omitted = { bodyBlockNumbers: [...excludedBlocks].map(at => at + 1), ledgerChapterIds: [...deniedChapterIds], memoryIds: omittedMemory }
+  const omitted = { bodyBlockNumbers: [...excludedBlocks].map(at => at + 1), ledgerChapterIds: [...deniedChapterIds], omittedCore, omittedRecent, omittedDemand, memoryIds: omittedMemoryIds({omittedCore, omittedRecent, omittedDemand}) }
   for (const section of candidates) {
     const next = `${content}\n${section.text}`
     if (safeCount(next) <= inputBudgetTokens) {
@@ -280,7 +287,8 @@ function buildStructuredContext(input:HostContextInput):HostContextPlan{
  if(necessary>input.inputBudgetTokens)return {status:'too-large',reason:'当前口令与落点无法放入上下文'}
  const budget=input.inputBudgetTokens-count(mandatory),allocation=contextAllocations(Math.max(0,budget))
  const refs:ContextSourceRef[]=[],bodySections:string[]=[],recent:ContextChapter[]=[],memoryIds:string[]=[],memoryText:string[]=[]
- const omitted={bodyBlockNumbers:[] as number[],ledgerChapterIds:all.filter(c=>!chapters.includes(c)).map(c=>c.sourceId),memoryIds:[...(input.memory?.omittedDemand??[])]}
+ const omittedCore=[...(input.memory?.omittedCore??[])],omittedRecent=[...(input.memory?.omittedRecent??[])],omittedDemand=[...(input.memory?.omittedDemand??[])]
+ const omitted={bodyBlockNumbers:[] as number[],ledgerChapterIds:all.filter(c=>!chapters.includes(c)).map(c=>c.sourceId),omittedCore,omittedRecent,omittedDemand,memoryIds:omittedMemoryIds({omittedCore,omittedRecent,omittedDemand})}
  let bodyCost=0,historyCost=0,memoryCost=0
  // Keep a complete recent suffix; no tool or record is cut in half.
  const recentLimit=allocation.history
@@ -300,8 +308,11 @@ function buildStructuredContext(input:HostContextInput):HostContextPlan{
  const bodyLimit=Math.max(allocation.body,count('\n'+placementText))
  const deferred:number[]=[]
  for(const n of bodyOrder){if(blocked(n)){omitted.bodyBlockNumbers.push(n+1);continue}const section=sourceBlock(parsed.partition.body,blocks[n]!,n+1),cost=count('\n'+section.text);if(bodyCost+cost<=bodyLimit){bodySections.push(section.text);refs.push({kind:'body',sourceId:section.sourceId});bodyCost+=cost}else deferred.push(n)}
- const addMemory=(entry:MemoryRecall['core'][number])=>{const text=memorySection(entry),cost=count('\n'+text);if(memoryCost+cost<=allocation.memory){memoryText.push(text);memoryIds.push(entry.id);memoryCost+=cost}else omitted.memoryIds.push(entry.id)}
- for(const e of [...(input.memory?.core??[]),...(input.memory?.recent??[]),...(input.memory?.demand??[])])addMemory(e)
+ const addMemory=(entry:MemoryRecall['core'][number],bucket:'core'|'recent'|'demand')=>{const text=memorySection(entry),cost=count('\n'+text);if(memoryCost+cost<=allocation.memory){memoryText.push(text);memoryIds.push(entry.id);memoryCost+=cost}else if(bucket==='core')omitted.omittedCore.push(entry.id);else if(bucket==='recent')omitted.omittedRecent.push(entry.id);else omitted.omittedDemand.push(entry.id)}
+ for(const e of input.memory?.core??[])addMemory(e,'core')
+ for(const e of input.memory?.recent??[])addMemory(e,'recent')
+ for(const e of input.memory?.demand??[])addMemory(e,'demand')
+ omitted.memoryIds=omittedMemoryIds(omitted)
  // Body gets the returned unused reservation first. History and memory retain their hard ceilings.
  let remaining=budget-bodyCost-historyCost-memoryCost
  for(const n of deferred){const section=sourceBlock(parsed.partition.body,blocks[n]!,n+1),cost=count('\n'+section.text);if(cost<=remaining){bodySections.push(section.text);refs.push({kind:'body',sourceId:section.sourceId});remaining-=cost;bodyCost+=cost}else omitted.bodyBlockNumbers.push(n+1)}

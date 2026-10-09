@@ -936,4 +936,34 @@ it('blocks continuation-shaped standing without a long marker and still allows a
  await allowed.engine.handoff(allowed.material);await allowed.engine.idle()
  expect(allowed.service.snapshot().record.entries[0]).toMatchObject({semantic:'standing',status:'active'})
  expect(memoryContinuitySystem).toContain('禁止把「整理本次」「总结进展」「记录本次工作」当作 goal')
+ expect(memoryContinuitySystem).toContain('程序会并入材料依赖，合计超过 16 条的组拒绝')
+})
+it('does not fail a committed batch because an unused displayed candidate expires after the request',async()=>{
+ let calls=0
+ const f=await fixture(async function*(input){calls++;yield {type:'text',text:JSON.stringify({recent:null,proposals:[suggestion(input)]})};yield {type:'finish',reason:'stop'}})
+ const source=await f.service.sourceForPrompt('a.md','task')
+ const unrelated=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'无关主题的过期候选',layer:'demand',scope:'别处',sources:[source],semantic:'fact',attribution:'人',reviewAt:null},true))
+ const check=f.service.candidateCurrent.bind(f.service)
+ vi.spyOn(f.service,'candidateCurrent').mockImplementation(async entry=>{
+  if(calls>0&&entry.id===unrelated.id)return false
+  return check(entry)
+ })
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect(f.service.snapshot().record.jobs[0]?.outcome).toBe('applied')
+ expect(f.service.snapshot().record.entries.some(e=>e.content==='后续在本库使用中文')).toBe(true)
+})
+it('shrinks displayed candidates before sending a document repair',async()=>{
+ const seen:{purpose:string;memory:number}[]=[]
+ const f=await fixture(async function*(input){
+  const data=JSON.parse(String(input.messages[0]!.content))
+  if(!data.repair){yield {type:'text',text:'not-json '.repeat(400)};yield {type:'finish',reason:'stop'};return}
+  yield {type:'text',text:'{"recent":null,"proposals":[]}'};yield {type:'finish',reason:'stop'}
+ },'以后用中文','continuity',false,obs=>{const payload=JSON.parse(obs.content);seen.push({purpose:obs.purpose,memory:Array.isArray(payload.memory)?payload.memory.length:0})})
+ const source=await f.service.sourceForPrompt('a.md','task')
+ for(let i=0;i<10;i++)await f.vault.memoryMutation(store=>store.add(store.read(),{content:`中文条目${i}：`+'x'.repeat(4050),layer:'demand',scope:'本库',sources:[source],semantic:'fact',attribution:'人的说明',reviewAt:null},true))
+ await f.engine.handoff(f.material);await f.engine.idle()
+ const proposal=seen.find(s=>s.purpose==='proposal'),repair=seen.find(s=>s.purpose==='protocol-repair')
+ expect(proposal).toBeTruthy()
+ if(repair)expect(repair.memory).toBeLessThanOrEqual(proposal!.memory)
+ else expect(f.service.snapshot().record.jobs[0]?.reason).toBe('MEMORY_INPUT_LIMIT')
 })

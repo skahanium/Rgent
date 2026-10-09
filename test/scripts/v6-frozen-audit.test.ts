@@ -1,7 +1,7 @@
 import {it,expect} from 'vitest'
 import {V6_QUALITY_CASES} from '../fixtures/v6-memory-quality.ts'
 import {v6ReviewValid,v6LoadedActionState,v6Summary,v6CaseBounds,type V6Annotation,type V6Row} from '../../scripts/memory-quality-support.ts'
-const review=(i=0):V6Annotation=>({correct:V6_QUALITY_CASES[i].expected.units.length,omitted:0,wrongNew:0,hardViolations:[],checks:{attributionAndScope:true,noUnsupportedContent:true,noForbiddenContent:true},evidenceComplete:true,uncertainty:[],annotator:{identity:'a',kind:'agent',participatedInDesign:false,modelNameMasked:true,humanReviewed:false},rulesHash:'r',resultHash:'s',frozenHash:'f'})
+const review=(i=0):V6Annotation=>({correct:V6_QUALITY_CASES[i].expected.units.length,omitted:0,wrongNew:0,hardViolations:[],checks:{attributionAndScope:true,noUnsupportedContent:true,noForbiddenContent:true},evidenceComplete:true,uncertainty:[],annotator:{identity:'a',kind:'agent',participatedInDesign:false,modelNameMasked:true,humanReviewed:false},rulesHash:'r',resultHash:'s',frozenHash:'f',rubricVersion:1})
 const rows=():V6Row[]=>V6_QUALITY_CASES.map((c,i)=>({caseId:c.id,round:0,dispatched:true,terminal:true,structured:true,actionVerified:true,category:'valid',review:review(i)}))
 it('完整标注须穷尽正例单元',()=>expect(v6ReviewValid(V6_QUALITY_CASES[0],{...review(),correct:0,omitted:0})).toBe(false))
 it('未派发轮明确为 not-run',()=>expect(v6Summary([],V6_QUALITY_CASES,1).verdict).toBe('not-run'))

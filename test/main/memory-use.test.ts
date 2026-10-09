@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import type { MemoryEntry } from '../../src/shared/memory.ts'
-import { createMemoryUsePermit, recallMemory, memorySection, updateMemoryCandidates } from '../../src/main/memory-use.ts'
+import { createMemoryUsePermit, recallMemory, memorySection, updateMemoryCandidates, describeMemoryOmission } from '../../src/main/memory-use.ts'
 
 const entry = (id: string, content = '项目使用中文', layer: 'core' | 'demand' = 'core'): MemoryEntry => ({ id, version: 1, content, layer, scope: '本库', status: 'active', reason: null, updatedAt: '2026-10-02', updateBasis: { kind: 'manual', id: 'manual', version: 1 }, sources: [{ id: `source-${id}`, version: 1, relPath: 'outside.md', objectVersion: 'object', revision: 'a'.repeat(64), permissionTier: 'reference', kind: 'body', taskId: null, taskMaterialHash: null, classification: 'human', start: 0, end: 2, text: '依据', hash: 'b'.repeat(64), basisHash: 'c'.repeat(64), sourceDeps: [], memoryDeps: [] }] })
 const model = { provider: 'custom' as const, modelId: 'main', baseURL: 'https://example.com/v1', contextTokens: 16000, apiKey: 'secret' }
@@ -58,9 +58,20 @@ it('filters before local Unicode matching; caps demand at eight and reports ever
   expect(recallMemory([entry('match', '中华人民共和国项目', 'demand')], '中华', '').demand).toHaveLength(1)
 })
 it('omits core overflow and demand that exceeds its own token budget', () => {
-  expect(recallMemory([entry('large', '中'.repeat(2000))], '', '').core).toEqual([])
+  const core = recallMemory([entry('large', '中'.repeat(2000))], '', '')
+  expect(core.core).toEqual([])
+  expect(core.omittedCore).toEqual(['large'])
+  expect(core.omittedDemand).toEqual([])
   const recall = recallMemory([entry('large', '中文'.repeat(800), 'demand')], '中文', '')
-  expect(recall.demand).toEqual([]); expect(recall.omittedDemand).toEqual(['large'])
+  expect(recall.demand).toEqual([]); expect(recall.omittedDemand).toEqual(['large']); expect(recall.omittedCore).toEqual([])
+})
+it('describes omitted core as core rather than on-demand', () => {
+  const described = describeMemoryOmission({omittedCore:['mem-core'], omittedRecent:[], omittedDemand:['mem-8','mem-9']})
+  expect(described.sentence).toContain('核心记忆因预算省略 1 条')
+  expect(described.sentence).toContain('按需记忆因预算省略 2 条')
+  expect(described.traces.some(line => line.startsWith('核心记忆省略：mem-core'))).toBe(true)
+  expect(described.traces.some(line => line.startsWith('按需记忆省略：mem-8、mem-9'))).toBe(true)
+  expect(described.sentence.includes('核心') && described.traces[0]!.includes('按需记忆省略：mem-core')).toBe(false)
 })
 
 it('keeps core with prompt and placement mandatory, while omitting demand explicitly', async () => {
@@ -73,6 +84,8 @@ it('keeps core with prompt and placement mandatory, while omitting demand explic
   if (plan.status !== 'ready') return
   expect(plan.content).toContain('项目使用中文')
   expect(plan.memoryIds).toEqual(['core'])
+  expect(plan.omitted.omittedCore).toEqual([])
+  expect(plan.omitted.omittedDemand).toEqual(['optional'])
   expect(plan.omitted.memoryIds).toEqual(['optional'])
 })
 

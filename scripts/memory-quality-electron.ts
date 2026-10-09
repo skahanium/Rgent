@@ -528,5 +528,8 @@ function utilityAggregate(frozen:any,frozenHash:string){
   rows.push({model:model.modelId,taskId:task.id,source:task.source,failures,status:result?.status??(result?'recorded':'not-dispatched'),artifactHash:result?.artifactHash??null,afterHash:result?.afterHash??null,actualEntries:result?.actualEntries??null,conditions,review})
  }
  const stable=frozen.models.map((m:any)=>{const correction=rows.find(r=>r.model===m.modelId&&r.taskId==='correction')?.actualEntries,duplicate=rows.find(r=>r.model===m.modelId&&r.taskId==='duplicate')?.actualEntries;return {model:m.modelId,correction:correction??null,duplicate:duplicate??null,identicalIdsVersions:correction&&duplicate?fingerprint(correction)===fingerprint(duplicate):null}})
- console.log(JSON.stringify({frozenHash,planned:32,calls:rows.flatMap(r=>r.conditions).reduce((n,r)=>n+r.calls,0),validTerminal:rows.flatMap(r=>r.conditions).filter(r=>r.status==='completed'&&r.finishReason==='stop'&&!r.error).length,rows,identityStability:stable,humanReviewed:false,certificationScore:null}))
+ const comparable=rows.filter(r=>r.review?.eligible===true)
+ const tally={win:0,tie:0,loss:0}
+ for(const r of comparable){const side:unknown=r.review.primary===r.review.secondary?r.review.primary:null;if(side==='win'||side==='tie'||side==='loss')tally[side]++}
+ console.log(JSON.stringify({frozenHash,planned:32,calls:rows.flatMap(r=>r.conditions).reduce((n,r)=>n+r.calls,0),validTerminal:rows.flatMap(r=>r.conditions).filter(r=>r.status==='completed'&&r.finishReason==='stop'&&!r.error).length,nValid:comparable.length,comparable:tally,rows,identityStability:stable,humanReviewed:false,certificationScore:null}))
 }

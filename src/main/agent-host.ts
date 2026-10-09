@@ -3,7 +3,7 @@ import {conservativeTokens,summaryAuditFits,encodedAnswerPrefix} from './context
 import {SummaryCache,summaryGroups,SUMMARY_SECTIONS,validSummaryText,type SummaryGenerator,type SummaryResolution,summaryHash} from './summary-cache.ts'
 import type { ModelMessage, AssistantContent, ToolContent } from 'ai'
 import type { ScopedAgentTools } from './scoped-agent-tools.ts'
-import { createMemoryUsePermit, MEMORY_SEARCH_SCHEMA, type MemoryUsePort, type MemoryUsePermit } from './memory-use.ts'
+import { createMemoryUsePermit, MEMORY_SEARCH_SCHEMA, describeMemoryOmission, type MemoryUsePort, type MemoryUsePermit } from './memory-use.ts'
 import type { MemoryContext } from '../shared/memory.ts'
 import { createHash } from 'node:crypto'
 const memoryHash = (text:string) => createHash('sha256').update(text).digest('hex')
@@ -496,8 +496,9 @@ export class AgentHost {
           if(!fits(outgoingAudits)){if(!outgoingAudits.length)throw Error('LEDGER_RECORD_LIMIT');summary={text:'',sourceChapterIds:[]};noteTrace('摘要审计空间不足，省略较旧历史');continue}
           const omitted = plan.omitted.bodyBlockNumbers.length || plan.omitted.ledgerChapterIds.length
             ? `\n省略：正文 ${plan.omitted.bodyBlockNumbers.length} 块；账本 ${plan.omitted.ledgerChapterIds.length} 章。` : ''
-          const memoryOmitted = plan.omitted.memoryIds.length ? `\n按需记忆因预算省略 ${plan.omitted.memoryIds.length} 条。` : ''
-          if (plan.omitted.memoryIds.length) noteTrace(`按需记忆省略：${plan.omitted.memoryIds.slice(0,8).join('、')}${plan.omitted.memoryIds.length > 8 ? ` 等 ${plan.omitted.memoryIds.length} 条` : ''}（预算）`)
+          const describedMemory = describeMemoryOmission(plan.omitted)
+          const memoryOmitted = describedMemory.sentence
+          for (const line of describedMemory.traces) noteTrace(line)
           const outgoing: ModelMessage[] = [{ role: 'user', content: `${plan.content}${omitted}${memoryOmitted}${metadata}` }, ...messages]
           const serializedCost=conservativeTokens(JSON.stringify(outgoing))+(toolsEnabled?conservativeTokens(JSON.stringify(toolSchemas)):0)
           if(serializedCost>budget){serializationPenalty+=serializedCost-budget+64;continue}

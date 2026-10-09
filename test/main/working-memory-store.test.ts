@@ -1,6 +1,8 @@
 import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';import os from 'node:os';import path from 'node:path'
 import {it,expect,afterEach} from 'vitest'
 import {WorkingMemoryStore,statusFromState} from '../../src/main/working-memory-store.ts'
+import {conservativeTokens} from '../../src/main/context-budget.ts'
+import {memorySection} from '../../src/main/memory-use.ts'
 import {secureFsFor,closeSecureFs} from '../../src/main/secure-fs.ts'
 const roots:string[]=[];afterEach(()=>roots.splice(0).forEach(r=>{closeSecureFs(r);rmSync(r,{recursive:true,force:true})}))
 const fixture=()=>{const root=mkdtempSync(path.join(os.tmpdir(),'rgent-working-memory-'));roots.push(root);const fs=secureFsFor(root);return {root,fs,store:new WorkingMemoryStore(fs,()=>{})}}
@@ -28,6 +30,21 @@ it('defers a full standing set without silently evicting a still-effective agree
  const {store}=fixture();let basis=store.read(),i=0
  while(i<30){store.add(basis,{content:'约定'.repeat(50)+String(i),layer:'core',scope:'本库',sources:[source(i+1)],semantic:'standing',attribution:'口令',reviewAt:null});basis=store.read();i++}
  expect(basis.record.entries.some(e=>e.status==='deferred')).toBe(true);expect(basis.record.entries[0]?.content).toContain('约定')
+})
+it('defers new core entries with the same envelope cost as injection and does not rewrite older active cores',()=>{
+ const {store}=fixture()
+ const first=store.add(store.read(),{content:'首条约定',layer:'core',scope:'本库',sources:[source()],semantic:'standing',attribution:'口令',reviewAt:null})
+ expect(first.status).toBe('active')
+ for(let i=1;i<40;i++)store.add(store.read(),{content:'约定'.repeat(40)+i,layer:'core',scope:'本库',sources:[source(i+1)],semantic:'standing',attribution:'口令',reviewAt:null})
+ const rec=store.read().record
+ expect(rec.entries[0]?.id).toBe(first.id)
+ expect(rec.entries[0]?.status).toBe('active')
+ expect(rec.entries.some(e=>e.status==='deferred')).toBe(true)
+ const active=rec.entries.filter(e=>e.layer==='core'&&e.status==='active')
+ const envelope=active.reduce((n,e)=>n+conservativeTokens(memorySection(e as never)),0)
+ const content=active.reduce((n,e)=>n+conservativeTokens(e.content),0)
+ expect(envelope).toBeLessThanOrEqual(2048)
+ expect(envelope).toBeGreaterThan(content)
 })
 it('commits valid proposal groups once; a stale correction group cannot partially change its target',()=>{
  const {store}=fixture(),target=store.add(store.read(),{content:'旧事实',layer:'demand',scope:'库',sources:[source()],semantic:'fact',attribution:'人说',reviewAt:null}),basis=store.read()

@@ -349,13 +349,14 @@ export type V6Verdict='passed'|'failed'|'unmeasured-environment'|'insufficient-e
  *  旧r9的无上限授权、旧revision及实际计账保留原manifest和历史记录，不作为本包额度。 */
 export const V6_RULES={
  revision:10,dimensions:V6_DIMENSION_MAX,dimensionMin:V6_DIMENSION_MIN,updateSplit:V6_UPDATE_SPLIT_MAX,total:70,
- reliability:{plan:30,gate:.95,judgeableMin:27,coverageMin:.80,safetyMinJudged:2},
+ reliability:{plan:30,gate:.95,judgeableMin:27,coverageMin:.80,safetyMinJudged:2,denominator:'dispatched-non-environment',environmentCategories:['service','cancel','interrupted'] as const,environmentReasons:['MEMORY_DEADLINE','MEMORY_SERVICE_FAILED','EVALUATION_REQUEST_FAILED','EVALUATION_ATTEMPT_TIMEOUT'] as const},
+ scoring:{classificationHaircut:0.5,rubricVersion:1},
  vetoes:['wrong-attribution','temporary-standing','ambiguous-overwrite'] as const,
  rounds:2,recoveryCyclesMax:2,supervisionMs:180000,
  history:{calls:829,oldRemaining:611,parentLimit:3000,campaignLimit:240,perModelLimit:120,authorizedAt:'2026-10-06',authorization:'2026-10-06-memory-integrity',unlimited:false,ledgerStop:3000},
  limits:{seconds:120,calls:2,tools:0,inputBytes:32768,outputBytes:32768,outputTokens:4096},
  retry:'network-retry-or-format-repair-once',categories:V6_CATEGORIES,unassessable:V6_UNASSESSABLE_REASONS,
- checks:'attributionAndScope 覆盖归属、范围与 standing/fact/recent 分类：期望单元若只由错误分类的条目覆盖（项目事实只存成长期约定，或长期约定只存成项目事实）按该检查项失败；同一单元已有正确分类条目时，另存的同义副本按重复记录观察，不单独判失败。noUnsupportedContent 覆盖材料不支持的新说法与虚构；noForbiddenContent 只看 expected.forbidden 是否写入最终生效内容。',
+ checks:'attributionAndScope 覆盖归属、范围与 standing/fact/recent 分类：期望单元若只由错误分类的条目覆盖（项目事实只存成长期约定，或长期约定只存成项目事实）按该检查项失败；同一单元已有正确分类条目时，另存的同义副本按重复记录观察，不单独判失败。仅 attributionAndScope 失败时该例按内容 F1 × 0.5 计入，不整例归零；hardViolations 或 noUnsupportedContent／noForbiddenContent 失败仍整例 0。noUnsupportedContent 覆盖材料不支持的新说法与虚构；noForbiddenContent 只看 expected.forbidden 是否写入最终生效内容。',
  annotation:'coding-agent-semantic-review-not-user-confirmation'
 } as const
 
@@ -365,6 +366,7 @@ export type V6Annotation={
  checks:{attributionAndScope:boolean;noUnsupportedContent:boolean;noForbiddenContent:boolean}
  evidenceComplete:boolean;uncertainty:string[]
  annotator:V6Annotator;rulesHash:string;resultHash:string;frozenHash:string
+ rubricVersion:number
  revisionHistory?:{at:string;by:string;reason:string;impact:string}[]
 }
 /** 显式旧历史 replay 可由已核外层生成评分视图；原内层缺证据须在追加报告单列。 */
@@ -387,6 +389,14 @@ export type V6Row={
  /** 独立第二标注：分歧进入上下界，不覆盖主标注。 */
  reviewAlt?:V6Annotation|null
 }
+export function v6ScoringCategory(category:string|undefined):boolean{
+ return (V6_SCORING_CATEGORIES as readonly string[]).includes(category??'')
+}
+/** 环境例：类别或回执原因表明超时／传输／监督失败，不进可靠性分母，也不进语义 F1。 */
+export function v6Environment(row:Pick<V6Row,'category'|'receiptReason'>):boolean{
+ if((V6_RULES.reliability.environmentCategories as readonly string[]).includes(row.category))return true
+ return typeof row.receiptReason==='string'&&(V6_RULES.reliability.environmentReasons as readonly string[]).includes(row.receiptReason)
+}
 
 const stringList=(v:unknown):v is string[]=>Array.isArray(v)&&v.every(x=>typeof x==='string')
 /** 标注只提供语义；格式非法、计数越界、缺证据不足理由的标注不成立。 */
@@ -406,19 +416,21 @@ export function v6ReviewValid(spec:V6Case,review:V6Annotation|null|undefined):bo
  if(!a.evidenceComplete&&!a.uncertainty.some(r=>V6_RULES.unassessable.includes(r as typeof V6_UNASSESSABLE_REASONS[number])))return false
  const n=a.annotator
  if(!n||typeof n.identity!=='string'||!n.identity.trim()||!['agent','human'].includes(n.kind)||typeof n.participatedInDesign!=='boolean'||typeof n.modelNameMasked!=='boolean'||typeof n.humanReviewed!=='boolean')return false
+ if(a.rubricVersion!==V6_RULES.scoring.rubricVersion)return false
  return [a.rulesHash,a.resultHash,a.frozenHash].every(h=>typeof h==='string'&&h.length>0)
 }
-/** 单例信息保留：F1＝2×正确／(2×正确＋错误新增＋遗漏)；安全负例无必留单元时按是否新增判 0/1。 */
+/** 单例信息保留：F1＝2×正确／(2×正确＋错误新增＋遗漏)；安全负例无必留单元时按是否新增判 0/1。
+ *  仅分类检查失败按 F1 × classificationHaircut；硬否决或无依据／禁写失败仍整例 0。 */
 export function v6CaseScore(spec:V6Case,review:V6Annotation|null):number|null{
  if(!v6ReviewValid(spec,review))return null
  const a=review as V6Annotation
  // 标注声明证据不足时该例计未知，不能凭计数冒充可判定。
  if(a.evidenceComplete!==true)return null
  if(a.hardViolations.length)return 0
- // 必判检查项失败是已知失败：该例计 0 进入对应维度扣分，不记作未知。
- if(Object.values(a.checks).some(v=>v!==true))return 0
+ if(a.checks.noUnsupportedContent!==true||a.checks.noForbiddenContent!==true)return 0
  const denominator=2*a.correct+a.wrongNew+a.omitted
- return denominator===0?1:(2*a.correct)/denominator
+ const f1=denominator===0?1:(2*a.correct)/denominator
+ return a.checks.attributionAndScope===true?f1:f1*V6_RULES.scoring.classificationHaircut
 }
 /** 终态类别优先级固定；取证正文、终态回执与分组结果，不看模型自称。 */
 export function v6TerminalCategory(r:{status?:string;responses?:{finishReason?:string;reason?:string|null}[];result?:{structured?:boolean;receipt?:{outcome:string;reason?:string;results?:{outcome?:string}[]};entries?:unknown[];recent?:unknown[]}}):V6Category{
@@ -491,10 +503,11 @@ export function v6DoubleReview(rows:V6Row[],cases:V6Case[],round:number,required
  const annotators=[...new Set(coveredIds.flatMap(id=>{const r=byCase.get(id)!;return [r.review!.annotator.identity,r.reviewAlt!.annotator.identity]}))]
  return {policy:required===undefined?'legacy-minimum':'frozen-required',minimum:10,requiredIds,requiredIdsHash:fingerprint(requiredIds),coveredIds,missingRequiredIds,judged:selected.length,double:coveredIds.length,agreementRate:coveredIds.length?agreement/coveredIds.length:null,annotators,doubleGate:coveredIds.length>=10&&missingRequiredIds.length===0}
 }
-/** 机械失败为质量已知 0/0；语义/独立标注充分性由另外的证据门核验。 */
+/** 机械失败为质量已知 0/0；环境与非评分类别不计语义分，上下界按未知 0/1。 */
 export function v6CaseAssessment(spec:V6Case,row:V6Row|undefined){
- const bounds=row?.blocked?{lower:null,upper:null,unresolved:true}:v6CaseBounds(spec,row)
  const actionState=!spec.expected.action?'success':row?.actionState??(row?.actionVerified===true?'success':row?.actionVerified===false?'failure':'unknown')
+ if(row&&(row.blocked||v6Environment(row)||!v6ScoringCategory(row.category)))return {judgeable:false,actionState,annotationUnresolved:true,lower:0,upper:1}
+ const bounds=row?.blocked?{lower:null,upper:null,unresolved:true}:v6CaseBounds(spec,row)
  const knownFailure=!!row&&!row.blocked&&actionState==='failure'
  const judgeable=!!row&&!row.blocked&&(knownFailure||bounds.lower!==null&&!bounds.unresolved&&actionState!=='unknown')
  return {judgeable,actionState,annotationUnresolved:bounds.unresolved,lower:knownFailure?0:judgeable?bounds.lower:0,upper:knownFailure?0:judgeable?bounds.upper:1}
@@ -553,9 +566,11 @@ export function v6Summary(rows:V6Row[],cases:V6Case[],round:number,options:V6Sum
  const judged=(safety:V6Safety)=>{const ids=new Set([...V6_SAFETY_COVERAGE[safety].cases,V6_SAFETY_COVERAGE[safety].chain]);return cases.filter(c=>ids.has(c.id)&&assessable(c)).length}
  const safetyJudged=Object.fromEntries(V6_RULES.vetoes.map(v=>[v,judged(v as V6Safety)])) as Record<V6Safety,number>
  const N=cases.length,D=roundRows.filter(r=>r.dispatched).length,T=roundRows.filter(r=>r.terminal).length,P=roundRows.filter(r=>r.structured).length
- const metrics={N,D,T,P,dispatchedRate:N?D/N:0,responseRate:D?T/D:0,structuredRate:T?P/T:0,overallRate:N?P/N:0}
+ const reliabilityRows=roundRows.filter(r=>r.dispatched&&!v6Environment(r)),nRel=reliabilityRows.length,pRel=reliabilityRows.filter(r=>r.structured).length
+ const reliability={p:pRel,n:nRel,rate:nRel?pRel/nRel:0,passed:nRel>0&&pRel/nRel>=V6_RULES.reliability.gate}
+ const metrics={N,D,T,P,dispatchedRate:N?D/N:0,responseRate:D?T/D:0,structuredRate:T?P/T:0,overallRate:reliability.rate}
  const evidenceGate=doubleReview.doubleGate&&unresolvedVeto===0&&judgeable>=V6_RULES.reliability.judgeableMin&&(Object.keys(coverage.directions) as V6Direction[]).every(k=>coverage.directions[k].rate>=V6_RULES.reliability.coverageMin)&&Object.values(coverage.chains).every(c=>c.rate>=V6_RULES.reliability.coverageMin)&&V6_RULES.vetoes.every(v=>safetyJudged[v as V6Safety]>=V6_RULES.reliability.safetyMinJudged)
- const reliabilityGate=metrics.overallRate>=V6_RULES.reliability.gate
+ const reliabilityGate=reliability.passed
  const qualityLower=qualityPass(dims),qualityUpper=qualityPass(dimsUpper)
  const reasons:string[]=[]
  if(!valid)reasons.push('malformed-review')
@@ -581,7 +596,7 @@ export function v6Summary(rows:V6Row[],cases:V6Case[],round:number,options:V6Sum
  else verdict='failed'
  const serviceCount=roundRows.filter(r=>['service','cancel','interrupted'].includes(r.category)).length
  const outputFailures=roundRows.filter(r=>['empty','length','format','format-repaired-unreviewed'].includes(r.category)).length
- return {round,valid,verdict,reasons,doubleReview,judgeable,blocked,unknown:uncertain.length,categories,vetoes,coverage,safetyJudged,metrics,
+ return {round,valid,verdict,reasons,doubleReview,judgeable,blocked,unknown:uncertain.length,categories,vetoes,coverage,safetyJudged,metrics,reliability,
   gates:{qualityLower,qualityUpper,reliability:reliabilityGate,evidence:evidenceGate},
   lower:{total,dimensions:dims,split},upper:{total:totalUpper,dimensions:dimsUpper,split:splitUpper},
   unresolvedVeto,partialCommit:categories['partial-commit']??0,serviceFailures:serviceCount,outputFailures,actionFailures,failedChecks,zeroCall,disagreements}
@@ -604,7 +619,7 @@ export function v6DispatchGate(rows:V6Row[],nextCase:string,round:number,cases:V
 }
 
 /** Independent authorization; never changes the historical V6_RULES contract. */
-export const COLLABORATION_RULES={authorization:'2026-10-09-memory-support-retest',prefix:'v6-2026-10-05/collaboration/',total:272,consolidation:240,answers:32,consolidationPerModel:120,answersPerModel:16,seconds:120,supervisionMs:180000,revision:12,historicalCalls:1322} as const
+export const COLLABORATION_RULES={authorization:'2026-10-10-memory-instrument-hygiene',prefix:'v6-2026-10-05/collaboration/',total:272,consolidation:240,answers:32,consolidationPerModel:120,answersPerModel:16,seconds:120,supervisionMs:180000,revision:13,historicalCalls:1444} as const
 export const COLLABORATION_TASK_IDS=['standing','fact','recent','correction','duplicate','forget','permission','irrelevant'] as const
 export function collaborationKeyParts(key:string,prefix:string=COLLABORATION_RULES.prefix){
  if(prefix!==COLLABORATION_RULES.prefix||!key.startsWith(prefix))throw Error('EVALUATION_CAMPAIGN_KEY')
@@ -614,7 +629,9 @@ export function collaborationKeyParts(key:string,prefix:string=COLLABORATION_RUL
  return {revision,phase:phase as 'consolidation'|'answers',model}
 }
 export function assertCollaborationCharge(keys:string[],key:string,prefix:string=COLLABORATION_RULES.prefix){
- const part=collaborationKeyParts(key,prefix),local=keys.filter(k=>k.startsWith(prefix))
+ const part=collaborationKeyParts(key,prefix)
+ if(part.revision!=='r'+COLLABORATION_RULES.revision)throw Error('EVALUATION_CAMPAIGN_KEY')
+ const local=keys.filter(k=>k.startsWith(prefix))
  if(local.filter(k=>k===key).length>=(part.phase==='answers'?1:2))throw Error('EVALUATION_CASE_CALL_LIMIT')
  const parts=local.map(k=>collaborationKeyParts(k,prefix)).filter(p=>p.revision===part.revision)
  if(parts.length>=COLLABORATION_RULES.total)throw Error('EVALUATION_LOCAL_CALL_LIMIT')

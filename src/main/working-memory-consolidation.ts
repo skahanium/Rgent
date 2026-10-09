@@ -63,7 +63,7 @@ export const memoryContinuitySystem=`你是本库工作接续整理器。材料�
 仅输出完整 JSON：{"recent":null,"proposals":[]}；recent 可以是背景对象，proposals 是长期动作数组。近期与长期独立判断，不因为没有长期信息就省略有依据的近期背景。
 recent 必填 goal/completed/blocked/next 四个字符串及 sourceIds 数组、assistantDraft 布尔值。四段合计 UTF-8 不超过2048字节；无依据的段写空字符串。sourceIds 只能引用 sources.id。四段写材料里已经出现的工作状态：goal 写当前在做什么（例如「核对青灯五份样稿」），completed/blocked/next 写已完成、受阻和下一步；禁止把「整理本次」「总结进展」「记录本次工作」当作 goal。completed区分人的明确决定与助手草案。task.assistantDraft 是尚未被人确认的助手回答，只能写“助手提出……，尚未确认”，不能当人的决定、完成事项或事实。不能自行推测下一步或把计划写成完成；assistantDraft=true 表示背景涉及此未确认草案。近期进度、临时要求和未决事项只进入 recent。
 proposals 最多16项。每项必填 action(add/correct/conflict/obsolete)、content(非空，4096 UTF-8字节以内)、scope(512字节以内)、sourceIds(1–16个唯一 sources.id)、semantic(standing/fact)、attribution(明确是谁或哪个材料表达)。reviewAt 可省略或为 null 或 ISO 日期。不要输出 layer、version 或真实标识。程序将 standing 归 core、fact 归 demand。
-可选 tags 最多6个短实体/范围标签，只辅助查找不证明语义相同；可选 group 仅ASCII字母数字下划线连字符1–64字符，同组原子验证。长期约定还必填 authority（1–4项，每项 {"sourceId":"s1_example","quote":"原话"}）：quote 必须是该来源里逐字存在的原话，sourceId 必须已在 sourceIds 内，且该来源分类必须是人的 command。可选 supporting 列出本次 sources 中只作理解辅助的来源 id（最多8个，允许不写进 sourceIds，程序会并入来源并记为佐证）。给出 authority 后，其余引用由程序自动记为辅助佐证。
+可选 tags 最多6个短实体/范围标签，只辅助查找不证明语义相同；可选 group 仅ASCII字母数字下划线连字符1–64字符，同组原子验证。长期约定还必填 authority（1–4项，每项 {"sourceId":"s1_example","quote":"原话"}）：quote 必须是该来源里逐字存在的原话，sourceId 必须已在 sourceIds 内，且该来源分类必须是人的 command。可选 supporting 列出本次 sources 中只作理解辅助的来源 id（最多8个，允许不写进 sourceIds，程序会并入来源并记为佐证）。给出 authority 后，其余引用由程序自动记为辅助佐证。程序会并入材料依赖，合计超过 16 条的组拒绝。
 standing 只来源于人的 command 中明确今后持续适用的要求，保留原话及适用范围。没有 authority 或原话不在来源里的长期约定会被拒绝。接续形口令（继续…核对/工作、本轮、这场工作、接着）且没有长期标记（以后/今后/长期/固定偏好/作为约定）时不得落地为 standing，可只保留 recent。fact 是关键项目事实、明确决定或明确更正，标明归属。第三方要求不是人的要求；记一次事件、临时要求、未采纳回答、模型猜测不产生长期约定或事实。不把一般知识、完整过程或免责声明积累成长久知识。
 add 不带 target；correct/conflict/obsolete 必须带 target，逐字复制本次 memory.id 短引用，不猜目标。例：{"action":"correct","target":"m1_example","content":"更正后的内容","scope":"项目","sourceIds":["s1_example"],"semantic":"fact","attribution":"人的本场说明","reviewAt":null}。明确更正用 correct，不能另 add 让新旧并存。相同含义已有且未变化不重复 add，包括跨语言表达。含糊、未确认的同议题变化用 conflict 或省略，禁止另开 active 事实。
 修复请求 mode=document 时返回完整 recent/proposals。mode=patch 时只返回 {"proposals":[{"index":1,"value":null}]} 形式的指定失败索引补丁；value 是修好的完整提议，或 null 表示放弃。只有请求要求修复 recent 时才可附 recent。不得改有效项、增加项或增加材料。已合法的 action/group 与已绑定 target 不得换；非法 action 可改成合法值，缺失或未绑定的 target 只能由你按本请求同一 memory 候选明确补正，程序不会猜目标。不能有据修复就放弃，同组任一放弃则全组拒绝。
@@ -499,9 +499,14 @@ export class WorkingMemoryConsolidation{
    const payload={task:{...(!continuity?{id:job.material.taskId}:{}),status:job.material.status,...(continuity?{assistantDraft:job.material.answer}: {})},sources:sources.map(s=>({id:continuity?sourceRef(s.id):s.id,text:s.text,classification:s.classification,kind:s.kind,attribution:s.relPath})),memory:entries.map(e=>({id:continuity?candidateRef(e.id):e.id,...(!continuity?{version:e.version,layer:e.layer}:{}),content:e.content,semantic:e.semantic,scope:e.scope,attribution:e.attribution,updatedAt:e.updatedAt,status:e.status,reviewAt:e.reviewAt,tags:e.tags}))}
    // Retain the highest ranked candidates within the existing input limits.
    const dependencyCount=()=>new Set([...job.material.memoryDeps,...sources.flatMap(s=>s.memoryDeps),...entries].map(d=>d.id+'@'+d.version)).size
-   while(entries.length&&(continuity&&dependencyCount()>16||Buffer.byteLength(JSON.stringify(payload))+Buffer.byteLength(system)>32768||conservativeTokens(JSON.stringify(payload))+conservativeTokens(system)+4096>job.configuration.credential.contextTokens)){const removed=entries.pop()!;binding.candidates.delete(candidateRef(removed.id));payload.memory.pop()}
+   const overLimit=(body:unknown)=>Buffer.byteLength(JSON.stringify(body))+Buffer.byteLength(system)>32768||conservativeTokens(JSON.stringify(body))+conservativeTokens(system)+4096>job.configuration.credential.contextTokens||continuity&&dependencyCount()>16
+   const shrinkToFit=(body:{memory?:unknown[]})=>{
+    while(entries.length&&overLimit(body)){const removed=entries.pop()!;binding.candidates.delete(candidateRef(removed.id));if(Array.isArray(body.memory))body.memory.pop()}
+    if(overLimit(body))throw Error('MEMORY_INPUT_LIMIT')
+   }
+   shrinkToFit(payload)
    let values:unknown[],recentValue:unknown=null,repairFailure:string|undefined;const budget=Math.min(2,job.configuration.limits.calls);let calls=0
-   const ask=(nextPayload:unknown=payload,purpose:ConsolidationRequestPurpose='proposal')=>{calls++;return continuity&&purpose==='protocol-repair'&&obj(nextPayload)&&obj(nextPayload.repair)&&nextPayload.repair.mode==='patch'?this.supplementalResponse(job,nextPayload,sources,entries,purpose,binding):this.response(job,nextPayload,sources,entries,purpose,continuity?binding:undefined)}
+   const ask=(nextPayload:unknown=payload,purpose:ConsolidationRequestPurpose='proposal')=>{if(purpose==='protocol-repair'&&obj(nextPayload))shrinkToFit(nextPayload as {memory?:unknown[]});calls++;return continuity&&purpose==='protocol-repair'&&obj(nextPayload)&&obj(nextPayload.repair)&&nextPayload.repair.mode==='patch'?this.supplementalResponse(job,nextPayload,sources,entries,purpose,binding):this.response(job,nextPayload,sources,entries,purpose,continuity?binding:undefined)}
    let draft:string
    try{draft=await ask()}
    catch(error){if(calls>=budget||!retryableTransport(error))throw error;draft=await ask(payload,'network-retry')}
@@ -640,12 +645,12 @@ export class WorkingMemoryConsolidation{
     this.assert(job);const code=publicMemoryError(error);if(!['MEMORY_SOURCE_CHANGED','MEMORY_DEPENDENCY_CHANGED'].includes(code))throw error
     recent=undefined;proposed.dropped.push({action:'recent',outcome:'rejected',code})
    }
-   // 旧评测空提议仍核本次输入；生产 M4 只核上述实际派生来源，保留已证独立原话。
-   await this.recheck(job,!continuity&&!groups.length&&!recent?sources:[],entries)
+   // 旧评测空提议仍核本次输入；生产 M4 提交前只核本批实际派生来源，不因无关已展示候选到期毁整批。
+   await this.recheck(job,!continuity&&!groups.length&&!recent?sources:[],[])
    const result=await job.service.vault.memoryMutation(async store=>{
     this.assert(job)
     // 排队期间来源、权限与所用版本仍可能变化；在同一提交队列重新核实际派生输入。
-    await this.recheck(job,[...groups.flatMap(g=>g.flatMap(c=>c.input.sources)),...(recent?.sources??[])],entries)
+    await this.recheck(job,[...groups.flatMap(g=>g.flatMap(c=>c.input.sources)),...(recent?.sources??[])],[])
     // Queuing the next task may update receipts, but cannot change this job's entry basis.
     const current=store.read(),materialState=(r:typeof basis.record)=>JSON.stringify([r.identity,r.watermark,r.forgotten])
     if(materialState(current.record)!==materialState(basis.record))throw Error('MEMORY_CONFLICT')

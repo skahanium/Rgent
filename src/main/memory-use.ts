@@ -11,7 +11,22 @@ export type MemoryUsePort = {
   /** Omit IDs only for initial selection; every call revalidates selected IDs and recursive dependencies. */
   entries(ids?: readonly string[]): Promise<MemoryEntry[]>
 }
-export type MemoryRecall = { core: MemoryEntry[]; recent?:MemoryEntry[]; demand: MemoryEntry[]; omittedDemand: string[] }
+export type MemoryRecall = { core: MemoryEntry[]; recent?:MemoryEntry[]; demand: MemoryEntry[]; omittedCore: string[]; omittedRecent: string[]; omittedDemand: string[] }
+export type MemoryOmissionLists = { omittedCore: string[]; omittedRecent: string[]; omittedDemand: string[] }
+export function omittedMemoryIds(o: MemoryOmissionLists): string[] {
+  return [...o.omittedCore, ...o.omittedRecent, ...o.omittedDemand]
+}
+export function describeMemoryOmission(o: MemoryOmissionLists): { sentence: string; traces: string[] } {
+  const rows = [
+    {label: '核心记忆', ids: o.omittedCore},
+    {label: '近期工作背景', ids: o.omittedRecent},
+    {label: '按需记忆', ids: o.omittedDemand},
+  ].filter(row => row.ids.length)
+  return {
+    sentence: rows.length ? `\n${rows.map(row => `${row.label}因预算省略 ${row.ids.length} 条`).join('；')}。` : '',
+    traces: rows.map(row => `${row.label}省略：${row.ids.slice(0, 8).join('、')}${row.ids.length > 8 ? ` 等 ${row.ids.length} 条` : ''}（预算）`)
+  }
+}
 const costOf = conservativeTokens
 export function memorySection(entry: MemoryEntry): string {
   return `记忆 ${entry.category==='recent'?'近期工作背景':entry.layer} ${entry.id}@${entry.version}（来源 ${entry.sources.map(s => `${s.relPath}/${s.kind}${s.taskId ? `/${s.taskId}` : ''}`).join('、')}）：${JSON.stringify({content:entry.content,scope:entry.scope,semantic:entry.semantic,attribution:entry.attribution,updatedAt:entry.updatedAt,tags:entry.tags,category:entry.category??'long',...(entry.category==='recent'&&entry.recent?{taskTime:entry.recent.createdAt,taskResult:entry.recent.outcome,assistantDraft:entry.recent.assistantDraft,draftNotice:entry.recent.assistantDraft?'包含未采纳的助手草案，不能视为人的决定':null}:{})})}`
@@ -42,18 +57,18 @@ export function recallMemory(entries: readonly MemoryEntry[], prompt: string, ne
   const active = entries.filter(e => e.status === 'active')
   const core:MemoryEntry[]=[],omittedCore:string[]=[];let coreCost=0
   for(const e of active.filter(e=>e.layer==='core'&&e.category!=='recent')){const cost=costOf(memorySection(e));if(coreCost+cost<=2048){core.push(e);coreCost+=cost}else omittedCore.push(e.id)}
-  const recent:MemoryEntry[]=[];let recentCost=0
+  const recent:MemoryEntry[]=[];const omittedRecent:string[]=[];let recentCost=0
   const backgrounds=active.filter(e=>e.category==='recent').sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt))
   const related=rankMemoryEntries(backgrounds,prompt,near.slice(0,256))
-  for(const e of [...related,...backgrounds.filter(e=>!related.includes(e))]){const cost=costOf(memorySection(e))+1;if(recent.length<4&&recentCost+cost<=1024&&coreCost+recentCost+cost<=4096){recent.push(e);recentCost+=cost}else omittedCore.push(e.id)}
+  for(const e of [...related,...backgrounds.filter(e=>!related.includes(e))]){const cost=costOf(memorySection(e))+1;if(recent.length<4&&recentCost+cost<=1024&&coreCost+recentCost+cost<=4096){recent.push(e);recentCost+=cost}else omittedRecent.push(e.id)}
   const ranked = rankMemoryEntries(active.filter(e=>e.layer==='demand'&&e.category!=='recent'),prompt,near.slice(0,256))
-  const demand: MemoryEntry[] = [], omittedDemand: string[] = [...omittedCore]; let size = 0
+  const demand: MemoryEntry[] = [], omittedDemand: string[] = []; let size = 0
   for (const entry of ranked) {
     const cost = costOf(memorySection(entry)) + 1
     if (demand.length >= 8 || size + cost > 2048 || coreCost+recentCost+size+cost>4096) omittedDemand.push(entry.id)
     else { demand.push(entry); size += cost }
   }
-  return { core, recent, demand, omittedDemand }
+  return { core, recent, demand, omittedCore, omittedRecent, omittedDemand }
 }
 /** Updating is distinct from answering: lexical relevance plus bounded backfill from
  *  explicit scope/entity signals, entries this task actually used, and the most recently

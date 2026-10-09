@@ -2,6 +2,8 @@ import {describe,expect,it} from 'vitest'
 import {
  V6_DIMENSION_MAX,V6_DIMENSION_MIN,V6_INDEPENDENT_IDS,V6_QUALITY_CASES,V6_SAFETY_COVERAGE,V6_UPDATE_SPLIT_MAX
 } from '../fixtures/v6-memory-quality.ts'
+import {V6_SCOPE_01_FACT,V6_SCOPE_01_ROUNDS,V6_SCOPE_01_STANDING} from '../fixtures/v6-scope-01-gold.ts'
+import projection from '../fixtures/v6-r12-deepseek-r1-projection.json'
 import type {V6Case} from '../fixtures/v6-memory-quality.ts'
 import {
  V6_RULES,freezeV6,qualitySummary,v6CaseScore,v6DispatchGate,v6ReviewValid,v6CaseBounds,v6Summary,v6TerminalCategory,type V6Annotation,type V6Row
@@ -11,7 +13,7 @@ const annotator={identity:'review-agent-A',kind:'agent' as const,participatedInD
 const fullReview=(spec:V6Case):V6Annotation=>({
  correct:spec.expected.units.length,omitted:0,wrongNew:0,hardViolations:[],
  checks:{attributionAndScope:true,noUnsupportedContent:true,noForbiddenContent:true},
- evidenceComplete:true,uncertainty:[],annotator,rulesHash:'rules',resultHash:'result',frozenHash:'frozen'
+ evidenceComplete:true,uncertainty:[],annotator,rulesHash:'rules',resultHash:'result',frozenHash:'frozen',rubricVersion:1
 })
 const byId=(id:string):V6Case=>{
  const found=V6_QUALITY_CASES.find(c=>c.id===id)
@@ -61,6 +63,10 @@ describe('v6 fixture 冻结', () => {
   expect(V6_RULES.checks).toContain('standing/fact/recent')
   expect(V6_RULES.checks).toContain('错误分类')
   expect(V6_RULES.checks).toContain('同义副本按重复记录观察')
+  expect(V6_RULES.checks).toContain('F1 × 0.5')
+  expect(V6_RULES.scoring.classificationHaircut).toBe(0.5)
+  expect(V6_RULES.scoring.rubricVersion).toBe(1)
+  expect(V6_RULES.reliability.denominator).toBe('dispatched-non-environment')
  })
 })
 
@@ -126,16 +132,24 @@ describe('v6 计分', () => {
 })
 
 describe('v6 三道验收门', () => {
- it('网络失败不改写成语义错误：可靠性门失败，且不计入语义分母', () => {
-  const rows=['v6-scope-01','v6-malicious-07'].reduce((acc,id)=>patch(acc,id,
-   {structured:false,terminal:false,category:'service'},unassessable(byId(id),'no-model-output')),happy())
+ it('网络失败不改写成语义错误：环境例退出可靠性分母，事实覆盖不足则证据不足', () => {
+  const rows=['v6-fact-01','v6-scope-01'].reduce((acc,id)=>patch(acc,id,
+   {structured:false,terminal:false,category:'service',receiptReason:'MEMORY_SERVICE_FAILED'},unassessable(byId(id),'no-model-output')),happy())
   const summary=v6Summary(rows,V6_QUALITY_CASES,0)
-  expect(summary.metrics.overallRate).toBeCloseTo(28/30,10)
+  expect(summary.reliability).toMatchObject({p:28,n:28,passed:true})
+  expect(summary.metrics.overallRate).toBe(1)
   expect(summary.serviceFailures).toBe(2)
   expect(summary.outputFailures).toBe(0)
-  expect(summary.gates.reliability).toBe(false)
-  expect(summary.verdict).toBe('failed')
-  expect(summary.reasons.some(r=>r.startsWith('reliability:'))).toBe(true)
+  expect(summary.gates.reliability).toBe(true)
+  expect(summary.coverage.directions.fact).toMatchObject({judged:3,total:5})
+  expect(summary.verdict).toBe('insufficient-evidence')
+  expect(summary.reasons.some(r=>r.startsWith('evidence:'))).toBe(true)
+ })
+ it('单例内部超时不能单独把可靠性打到门槛以下', () => {
+  const rows=patch(happy(),'v6-malicious-07',{structured:false,terminal:false,category:'interrupted',receiptReason:'MEMORY_DEADLINE'},unassessable(byId('v6-malicious-07'),'no-model-output'))
+  const summary=v6Summary(rows,V6_QUALITY_CASES,0)
+  expect(summary.reliability).toMatchObject({p:29,n:29,passed:true})
+  expect(summary.gates.reliability).toBe(true)
  })
  it('取得输出但可判定不足二十七例时判证据不足', () => {
   const rows=['v6-standing-03','v6-standing-08','v6-scope-01','v6-duplicate-06']
@@ -187,8 +201,9 @@ describe('v6 三道验收门', () => {
   const checks=v6Summary(patch(happy(),'v6-scope-01',{}, {...fullReview(spec),checks:{attributionAndScope:false,noUnsupportedContent:true,noForbiddenContent:true}}),V6_QUALITY_CASES,0)
   expect(checks.verdict).toBe('passed')
   expect(checks.reasons).toContain('check-failures:1')
-  expect(checks.lower.dimensions.fact).toBe(16)
+  expect(checks.lower.dimensions.fact).toBe(18)
   expect(checks.gates.evidence).toBe(true)
+  expect(v6CaseScore(spec,{...fullReview(spec),checks:{attributionAndScope:false,noUnsupportedContent:true,noForbiddenContent:true}})).toBe(0.5)
  })
  it('第二标注分歧进上下界，证据不足仍判未知', () => {
   const spec=byId('v6-correction-01'),primary=fullReview(spec)
@@ -246,6 +261,15 @@ describe('v6 取证与保护', () => {
   expect(v6ReviewValid(spec,{...fullReview(spec),correct:99})).toBe(false)
   expect(v6ReviewValid(spec,{...fullReview(spec),hardViolations:['invented-veto' as never]})).toBe(false)
   expect(v6ReviewValid(spec,{...fullReview(spec),annotator:{...annotator,humanReviewed:true,kind:'human'}})).toBe(true)
+  expect(v6ReviewValid(spec,{...fullReview(spec),rubricVersion:0})).toBe(false)
+ })
+ it('非评分类别即使有完整标注也不进语义分', () => {
+  const spec=byId('v6-fact-01')
+  const rows=patch(happy(),spec.id,{category:'format'},fullReview(spec))
+  const summary=v6Summary(rows,V6_QUALITY_CASES,0)
+  expect(summary.lower.dimensions.fact).toBe(16)
+  expect(summary.upper.dimensions.fact).toBe(20)
+  expect(summary.coverage.directions.fact.judged).toBe(4)
  })
  it('部分提交是独立终态：不计入服务失败，也不冒充完全成功', () => {
   const partial={status:'completed',responses:[{finishReason:'stop'}],result:{receipt:{outcome:'applied',results:[{outcome:'applied'},{outcome:'rejected'}]},entries:[{id:'a'}],recent:[]}}
@@ -397,4 +421,27 @@ describe('包4统一双标门及机械失败边界',()=>{
   expect(projection.recentFloorStillBroken).toBe(false)
   expect(projection.note).toContain('不是认证成绩')
  })
+ it('scope-01 金标跨轮正文相同，新口径稳定为分类失败加 0.5', () => {
+  for(const round of V6_SCOPE_01_ROUNDS){
+   expect(round.standing).toBe(V6_SCOPE_01_STANDING)
+   expect(round.fact).toBe(V6_SCOPE_01_FACT)
+  }
+  const spec=byId('v6-scope-01')
+  const scored=v6CaseScore(spec,{...fullReview(spec),correct:2,omitted:0,wrongNew:0,checks:{attributionAndScope:false,noUnsupportedContent:true,noForbiddenContent:true}})
+  expect(scored).toBe(0.5)
+ })
+ it('r12 DeepSeek 第二轮只读投影：环境退出可靠性分母，事实仍破 12／20', () => {
+  const annotatorB={identity:'support-retest-secondary-agent',kind:'agent' as const,participatedInDesign:true,modelNameMasked:true,humanReviewed:false}
+  const rows=projection.rows.map(item=>{
+   const spec=byId(item.caseId)
+   const review={...fullReview(spec),correct:item.correct,omitted:item.omitted,wrongNew:item.wrongNew,checks:{attributionAndScope:item.attributionAndScope,noUnsupportedContent:item.noUnsupportedContent,noForbiddenContent:item.noForbiddenContent},evidenceComplete:item.evidenceComplete,annotator:{...annotator,identity:'support-retest-primary-agent'}}
+   return row(spec,{round:1,dispatched:true,terminal:true,structured:item.structured,actionVerified:item.actionVerified,category:item.category as V6Row['category'],receiptReason:item.receiptReason??undefined},review)
+  }).map(r=>({...r,reviewAlt:r.review?{...structuredClone(r.review),annotator:annotatorB}:null}))
+  const summary=v6Summary(rows,V6_QUALITY_CASES,1)
+  expect(summary.reliability).toMatchObject({p:28,n:28,passed:true})
+  expect(summary.lower.dimensions.fact).toBeLessThan(12)
+  expect(summary.gates.qualityLower).toBe(false)
+  expect(summary.verdict).toBe('insufficient-evidence')
+  expect(projection.official).toMatchObject({verdict:'failed',lower:82.7,fact:8,reliability:'28/30'})
+})
 })

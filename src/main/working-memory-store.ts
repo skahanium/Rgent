@@ -2,6 +2,7 @@ import {createHash,randomUUID} from 'node:crypto'
 import type {SecureVaultFs} from './secure-fs.ts'
 import type {MemoryEntry,MemoryEntryState,MemorySource,MemoryJobReceipt,MemoryJobGroupResult} from '../shared/memory.ts'
 import {conservativeTokens} from './context-budget.ts'
+import {memorySection} from './memory-use.ts'
 import {RETIRED_MEMORY} from './memory-retirement.ts'
 /** sequence is the earliest explicitly proven material age; registry units keep their actual allocation numbers. */
 export type WorkingSource=MemorySource&{materialId:string;sequence:number}
@@ -77,6 +78,8 @@ function recentInputValid(input:unknown):input is WorkingRecentInput{
  return recentValid(fake)
 }
 function recentContent(r:WorkingRecent['recent']):string{return `目标：${r.sections.goal}\n已完成：${r.sections.completed}\n受阻：${r.sections.blocked}\n下一步：${r.sections.next}`}
+function envelopeCost(entry:WorkingEntry):number{return conservativeTokens(memorySection(entry as unknown as MemoryEntry))}
+function coreActiveCost(entries:readonly WorkingEntry[]):number{return entries.filter(e=>e.layer==='core'&&e.status==='active').reduce((n,e)=>n+envelopeCost(e),0)}
 const allEntries=(record:WorkingRecord):WorkingEntry[]=>[...record.entries,...record.recent]
 const recentEncodedBytes=(record:WorkingRecord)=>Buffer.byteLength(encodeWorkingMemory(record))-Buffer.byteLength(encodeWorkingMemory({...record,recent:[]}))
 /** Reserve the actual encoded upper bound of independent forgets of every current entry.
@@ -183,14 +186,15 @@ export class WorkingMemoryStore{
   const record=structuredClone(basis.record);record.nextSequence=Math.max(record.nextSequence,...input.sources.map(s=>s.sequence));const now=new Date().toISOString()
   const duplicate=record.entries.find(e=>e.content===input.content&&e.scope===input.scope&&e.semantic===input.semantic&&e.status!=='disabled')
   if(duplicate)return duplicate
-  const coreTokens=record.entries.filter(e=>e.layer==='core'&&e.status==='active').reduce((n,e)=>n+conservativeTokens(e.content),0)
-  const status=input.layer==='core'&&coreTokens+conservativeTokens(input.content)>2048?'deferred':'active'
-  const entry:WorkingEntry={...structuredClone(input),id:randomUUID(),version:1,category:'long',status,state:stateFromStatus(status),reason:null,updatedAt:now,updateBasis:{kind:explicit?'manual':'consolidation',id:input.sources[0]!.taskId??input.sources[0]!.materialId,version:1}}
+  const id=randomUUID()
+  const probe:WorkingEntry={...structuredClone(input),id,version:1,category:'long',status:'active',state:stateFromStatus('active'),reason:null,updatedAt:now,updateBasis:{kind:explicit?'manual':'consolidation',id:input.sources[0]!.taskId??input.sources[0]!.materialId,version:1}}
+  const status=input.layer==='core'&&coreActiveCost(record.entries)+envelopeCost(probe)>2048?'deferred':'active'
+  const entry:WorkingEntry={...probe,status,state:stateFromStatus(status)}
   record.entries.push(entry);this.commit(basis,record);return entry
  }
  edit(basis:WorkingSnapshot,id:string,version:number,change:Partial<WorkingInput>&{status?:WorkingEntry['status']}){
   const record=structuredClone(basis.record),entry=record.entries.find(e=>e.id===id);if(!entry||entry.version!==version)throw Error('MEMORY_CHANGED');Object.assign(entry,structuredClone(change));if(!inputValid(entry))throw Error('BAD_MEMORY_EDIT');const priorVersion=entry.version;entry.version++;entry.updatedAt=new Date().toISOString();advanceVersion(record,entry.id,priorVersion,entry.version)
-  if(entry.layer==='core'&&entry.status==='active'&&record.entries.filter(e=>e.layer==='core'&&e.status==='active').reduce((n,e)=>n+conservativeTokens(e.content),0)>2048)entry.status='deferred'
+  if(entry.layer==='core'&&entry.status==='active'&&coreActiveCost(record.entries)>2048)entry.status='deferred'
   entry.state=stateFromStatus(entry.status,entry.state)
   return this.commit(basis,record)
  }
@@ -225,7 +229,7 @@ export class WorkingMemoryStore{
      }
      // A newly added/corrected agreement may defer itself, never evict an older active one.
      const changed=accepted.at(-1),entry=candidate.entries.find(e=>e.id===changed)
-     if(entry?.layer==='core'&&entry.status==='active'&&candidate.entries.filter(e=>e.layer==='core'&&e.status==='active').reduce((n,e)=>n+conservativeTokens(e.content),0)>2048){entry.status='deferred';entry.state=stateFromStatus('deferred',entry.state)}
+     if(entry?.layer==='core'&&entry.status==='active'&&coreActiveCost(candidate.entries)>2048){entry.status='deferred';entry.state=stateFromStatus('deferred',entry.state)}
     }
     if(!ordinaryFits(candidate))throw Error('MEMORY_FILE_LIMIT')
     record=candidate;entryIds.push(...accepted)
@@ -281,8 +285,8 @@ export class WorkingMemoryStore{
    else {removed.push(current);collection.splice(at,1)}
   }
   if(removed.length)record.forgotten.push({materialIds:[...new Set(removed.flatMap(e=>e.sources.flatMap(s=>[s.materialId,...(s.basisGroups??[])])))],entryIds:removed.map(e=>({id:e.id,version:e.version})),through:Math.max(...removed.flatMap(e=>e.sources.map(s=>s.sequence)))})
-  let cost=record.entries.filter(e=>e.layer==='core'&&e.status==='active'&&!before.some(b=>b.id===e.id)).reduce((n,e)=>n+conservativeTokens(e.content),0)
-  for(const e of record.entries.filter(e=>e.layer==='core'&&e.status==='active'&&before.some(b=>b.id===e.id))){const size=conservativeTokens(e.content);if(cost+size>2048){e.status='deferred';e.state=stateFromStatus('deferred',e.state)}else cost+=size}
+  let cost=record.entries.filter(e=>e.layer==='core'&&e.status==='active'&&!before.some(b=>b.id===e.id)).reduce((n,e)=>n+envelopeCost(e),0)
+  for(const e of record.entries.filter(e=>e.layer==='core'&&e.status==='active'&&before.some(b=>b.id===e.id))){const size=envelopeCost(e);if(cost+size>2048){e.status='deferred';e.state=stateFromStatus('deferred',e.state)}else cost+=size}
   const receipt=record.jobs.find(j=>j.taskId===taskId&&j.materialVersion===materialVersion);if(!receipt||receipt.outcome!=='applied')throw Error('MEMORY_CHANGED');receipt.outcome='rejected';receipt.reason='MEMORY_UNDONE';receipt.entryIds=[]
   return this.commit(basis,record)
  }
@@ -314,7 +318,7 @@ export class WorkingMemoryStore{
   let target=entry
   if(entry.pendingTarget){const prior=record.entries.find(e=>e.id===entry.pendingTarget!.id&&e.version===entry.pendingTarget!.version);if(!prior)throw Error('MEMORY_CHANGED');target=prior;Object.assign(target,{content:entry.content,sources:entry.sources,scope:entry.scope,layer:entry.layer,semantic:entry.semantic,attribution:entry.attribution});record.entries=record.entries.filter(e=>e.id!==entry.id)}
   target.status='active';target.state=stateFromStatus('active',target.state);target.reason=null;target.reviewAt=null;const priorVersion=target.version;target.version++;target.updatedAt=new Date().toISOString();target.updateBasis={kind:'manual',id:target.id,version:target.version};advanceVersion(record,target.id,priorVersion,target.version)
-  if(target.layer==='core'&&record.entries.filter(e=>e.layer==='core'&&e.status==='active').reduce((n,e)=>n+conservativeTokens(e.content),0)>2048){target.status='deferred';target.state=stateFromStatus('deferred',target.state)}
+  if(target.layer==='core'&&coreActiveCost(record.entries)>2048){target.status='deferred';target.state=stateFromStatus('deferred',target.state)}
   return this.commit(basis,record)
  }
  relocate(basis:WorkingSnapshot,from:string,to:string,objectVersion:string){const record=structuredClone(basis.record);let changed=false;for(const e of allEntries(record))for(const s of e.sources)if(s.relPath===from&&s.objectVersion===objectVersion){s.relPath=to;changed=true}return changed?this.commit(basis,record):basis}

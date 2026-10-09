@@ -68,8 +68,14 @@ it('blind review binds evidence and preserves independent disagreement',()=>{
  const a={...packet.public.binding,annotator:{identity:'a',humanReviewed:false,modelNameMasked:true,participatedInDesign:false},scores:packet.public.answers.map((r:any)=>({id:r.id,completion:2,errors:[],limitations:[],scopeFollowed:true}))}
  const b={...a,annotator:{...a.annotator,identity:'b'},scores:a.scores.map((r:any)=>({...r,completion:0}))}
  expect(utility.utilityReviewSummary(packet,a,b,result).disagreements).toHaveLength(2)
+ expect(utility.utilityReviewSummary(packet,a,b,result)).toMatchObject({eligible:true,nValid:1})
  expect(()=>utility.utilityReviewSummary(packet,{...a,resultHash:fingerprint('wrong')},b,result)).toThrow()
  expect(()=>utility.utilityReviewSummary(packet,a,{...b,annotator:a.annotator},result)).toThrow()
+ const failed={...result,conditions:{on:{body:'',status:'completed',error:'MODEL_REQUEST_FAILED'},off:{body:'不知道',status:'completed'}}}
+ const failedPacket=utility.utilityBlindPacket(failed)
+ const fa={...failedPacket.public.binding,annotator:{identity:'a',humanReviewed:false,modelNameMasked:true,participatedInDesign:false},scores:failedPacket.public.answers.map((r:any)=>({id:r.id,completion:2,errors:[],limitations:[],scopeFollowed:true}))}
+ const fb={...fa,annotator:{...fa.annotator,identity:'b'}}
+ expect(utility.utilityReviewSummary(failedPacket,fa,fb,failed)).toMatchObject({eligible:false,nValid:0,primary:null,secondary:null})
 })
 
 it('prepared task snapshots cannot be substituted by their unmodified parent artifact',async()=>{
