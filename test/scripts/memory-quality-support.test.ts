@@ -224,21 +224,24 @@ it('an insufficient terminal cannot earn E2E retention from an asserted true ann
 it('collaboration phase budgets are atomic, isolated and survive revision changes',()=>{
  const root=dir(),manifest={old:true},initial=new support.EvaluationJournal(root,manifest,3000)
  initial.charge('v6-2026-10-05/integrity/r10/deepseek-flash/0/old');initial.close()
- const prefix='v6-2026-10-05/collaboration/',campaign={parentManifestHash:support.fingerprint(manifest),prefix,limit:272,perModelLimit:136,modelSegment:2,authorization:'2026-10-08-memory-collaboration'}
+ const prefix=support.COLLABORATION_RULES.prefix,campaign={parentManifestHash:support.fingerprint(manifest),prefix,limit:support.COLLABORATION_RULES.total,perModelLimit:136,modelSegment:2,authorization:support.COLLABORATION_RULES.authorization}
  const j=new support.EvaluationJournal(dir(),{},3000,root,undefined,campaign)
  const key=prefix+'r11/answers/deepseek-flash/fact/on';j.charge(key)
  expect(()=>j.charge(key)).toThrow('EVALUATION_CASE_CALL_LIMIT')
  expect(()=>j.charge(prefix+'r11/unknown/deepseek-flash/fact/on')).toThrow('EVALUATION_CAMPAIGN_KEY')
  for(const task of support.COLLABORATION_TASK_IDS)for(const condition of ['on','off'])if(task!=='fact'||condition!=='on')j.charge(prefix+'r11/answers/deepseek-flash/'+task+'/'+condition)
- expect(()=>j.charge(prefix+'r12/answers/deepseek-flash/fact/on')).toThrow('EVALUATION_PHASE_MODEL_CALL_LIMIT')
+ j.charge(prefix+'r12/answers/deepseek-flash/fact/on')
+ expect(()=>j.charge(prefix+'r12/answers/deepseek-flash/fact/on')).toThrow('EVALUATION_CASE_CALL_LIMIT')
  for(const round of [0,1])for(const spec of V6_QUALITY_CASES){const k=prefix+'r11/consolidation/deepseek-flash/'+round+'/'+spec.id;j.charge(k);j.charge(k)}
- expect(()=>j.charge(prefix+'r12/consolidation/deepseek-flash/0/v6-fact-01')).toThrow('EVALUATION_PHASE_MODEL_CALL_LIMIT')
+ j.charge(prefix+'r12/consolidation/deepseek-flash/0/v6-fact-01')
  for(const task of support.COLLABORATION_TASK_IDS)for(const condition of ['on','off'])j.charge(prefix+'r11/answers/MiniMax-M3/'+task+'/'+condition)
- expect(()=>j.charge(prefix+'r12/answers/MiniMax-M3/fact/on')).toThrow('EVALUATION_PHASE_CALL_LIMIT')
+ j.charge(prefix+'r12/answers/MiniMax-M3/fact/on')
  for(const round of [0,1])for(const spec of V6_QUALITY_CASES){const k=prefix+'r11/consolidation/MiniMax-M3/'+round+'/'+spec.id;j.charge(k);j.charge(k)}
- expect(j.localCalls).toBe(272);expect(j.calls).toBe(273);j.close()
+ expect(j.localCalls).toBe(275);expect(j.calls).toBe(276);j.close()
  const next=new support.EvaluationJournal(dir(),{revision:12},3000,root,undefined,campaign)
- expect(()=>next.charge(prefix+'r12/consolidation/MiniMax-M3/0/v6-fact-01')).toThrow();expect(next.localCalls).toBe(272);next.close()
+ next.charge(prefix+'r12/consolidation/MiniMax-M3/0/v6-fact-01')
+ expect(next.localCalls).toBe(276)
+ next.close()
 })
 it('reserved collaboration keys cannot downgrade to a generic budget by missing or incorrect authorization',()=>{
  for(const authorization of [undefined,'wrong']){

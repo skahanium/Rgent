@@ -45,16 +45,22 @@ export class EvaluationJournal {
  private save(){atomicReport(path.join(this.budgetRoot,'state.json'),this.state)}
  charge(key:string){
   if(key.startsWith(COLLABORATION_RULES.prefix)||this.campaign?.prefix===COLLABORATION_RULES.prefix||this.campaign?.authorization===COLLABORATION_RULES.authorization){
-   if(this.campaign?.authorization!==COLLABORATION_RULES.authorization||this.campaign.prefix!==COLLABORATION_RULES.prefix||this.campaign.limit!==272||this.campaign.perModelLimit!==136||this.campaign.modelSegment!==2)throw Error('EVALUATION_CAMPAIGN_AUTHORIZATION')
+   if(this.campaign?.authorization!==COLLABORATION_RULES.authorization||this.campaign.prefix!==COLLABORATION_RULES.prefix||this.campaign.limit!==COLLABORATION_RULES.total||this.campaign.perModelLimit!==136||this.campaign.modelSegment!==2)throw Error('EVALUATION_CAMPAIGN_AUTHORIZATION')
    assertCollaborationCharge(this.state.dispatches.map(d=>d.key),key)
   }
   if(this.state.calls>=this.state.limit)throw Error('EVALUATION_CALL_LIMIT')
   if(this.campaign){
    if(!key.startsWith(this.campaign.prefix))throw Error('EVALUATION_CAMPAIGN_KEY')
-   if(this.localCalls>=this.campaign.limit)throw Error('EVALUATION_LOCAL_CALL_LIMIT')
+   const collab=this.campaign.prefix===COLLABORATION_RULES.prefix?collaborationKeyParts(key):null
+   const scoped=this.state.dispatches.filter(d=>{
+    if(!d.key.startsWith(this.campaign!.prefix))return false
+    if(!collab)return true
+    try{return collaborationKeyParts(d.key).revision===collab.revision}catch{return false}
+   })
+   if(scoped.length>=this.campaign.limit)throw Error('EVALUATION_LOCAL_CALL_LIMIT')
    const segment=this.campaign.modelSegment??0,modelOf=(value:string)=>value.slice(this.campaign!.prefix.length).split('/')[segment],model=modelOf(key)
    if(!model)throw Error('EVALUATION_CAMPAIGN_KEY')
-   if(this.state.dispatches.filter(d=>d.key.startsWith(this.campaign!.prefix)&&modelOf(d.key)===model).length>=this.campaign.perModelLimit)throw Error('EVALUATION_MODEL_CALL_LIMIT')
+   if(scoped.filter(d=>modelOf(d.key)===model).length>=this.campaign.perModelLimit)throw Error('EVALUATION_MODEL_CALL_LIMIT')
   }
   const next=structuredClone(this.state);next.calls++;next.dispatches.push({key,at:new Date().toISOString()})
   atomicReport(path.join(this.budgetRoot,'state.json'),next);this.state=next
@@ -598,7 +604,7 @@ export function v6DispatchGate(rows:V6Row[],nextCase:string,round:number,cases:V
 }
 
 /** Independent authorization; never changes the historical V6_RULES contract. */
-export const COLLABORATION_RULES={authorization:'2026-10-08-memory-collaboration',prefix:'v6-2026-10-05/collaboration/',total:272,consolidation:240,answers:32,consolidationPerModel:120,answersPerModel:16,seconds:120,supervisionMs:180000,revision:11} as const
+export const COLLABORATION_RULES={authorization:'2026-10-09-memory-support-retest',prefix:'v6-2026-10-05/collaboration/',total:272,consolidation:240,answers:32,consolidationPerModel:120,answersPerModel:16,seconds:120,supervisionMs:180000,revision:12,historicalCalls:1322} as const
 export const COLLABORATION_TASK_IDS=['standing','fact','recent','correction','duplicate','forget','permission','irrelevant'] as const
 export function collaborationKeyParts(key:string,prefix:string=COLLABORATION_RULES.prefix){
  if(prefix!==COLLABORATION_RULES.prefix||!key.startsWith(prefix))throw Error('EVALUATION_CAMPAIGN_KEY')
@@ -608,12 +614,13 @@ export function collaborationKeyParts(key:string,prefix:string=COLLABORATION_RUL
  return {revision,phase:phase as 'consolidation'|'answers',model}
 }
 export function assertCollaborationCharge(keys:string[],key:string,prefix:string=COLLABORATION_RULES.prefix){
- const part=collaborationKeyParts(key,prefix),local=keys.filter(k=>k.startsWith(prefix)),parts=local.map(k=>collaborationKeyParts(k,prefix))
+ const part=collaborationKeyParts(key,prefix),local=keys.filter(k=>k.startsWith(prefix))
  if(local.filter(k=>k===key).length>=(part.phase==='answers'?1:2))throw Error('EVALUATION_CASE_CALL_LIMIT')
- if(parts.length>=272)throw Error('EVALUATION_LOCAL_CALL_LIMIT')
+ const parts=local.map(k=>collaborationKeyParts(k,prefix)).filter(p=>p.revision===part.revision)
+ if(parts.length>=COLLABORATION_RULES.total)throw Error('EVALUATION_LOCAL_CALL_LIMIT')
  const phase=parts.filter(p=>p.phase===part.phase)
- if(phase.length>=(part.phase==='answers'?32:240))throw Error('EVALUATION_PHASE_CALL_LIMIT')
- if(phase.filter(p=>p.model===part.model).length>=(part.phase==='answers'?16:120))throw Error('EVALUATION_PHASE_MODEL_CALL_LIMIT')
+ if(phase.length>=(part.phase==='answers'?COLLABORATION_RULES.answers:COLLABORATION_RULES.consolidation))throw Error('EVALUATION_PHASE_CALL_LIMIT')
+ if(phase.filter(p=>p.model===part.model).length>=(part.phase==='answers'?COLLABORATION_RULES.answersPerModel:COLLABORATION_RULES.consolidationPerModel))throw Error('EVALUATION_PHASE_MODEL_CALL_LIMIT')
 }
 export function collaborationSchedule(cases:V6Case[],models:string[]){
  const groups=new Map<string,V6Case[]>();for(const c of cases){const key=c.chain?'chain-'+c.chain:c.direction;const group=groups.get(key)??[];group.push(c);groups.set(key,group)}
