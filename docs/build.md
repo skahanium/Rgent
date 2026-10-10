@@ -2079,3 +2079,29 @@ DeepSeek 另有 5 项动作未落地、4 项检查失败：`v6-correction-01` �
 | 报告与日常配置 | 原冻结、响应、两份标注及停止文件均保留；未 publish | Agent 标注非用户复核；Windows、CI、原生输入法和用户视觉仍待 |
 
 **本包工程与允许范围实测已交，但两模型未获新认证；DeepSeek 仅在五项小样本实际任务观察到收益。** 不自动推送、触发 CI、更新 master 或开放下一阶段。
+
+## 2026-10-10 失败例归属审计与准入自依赖修复
+
+范围以[局部授权](decisions.md#2026-10-10-失败例归属审计与准入自依赖修复局部授权)为准。**零模型调用**；不改 70／各维 60%／链式权重、试卷权重与题目；不改写 r9–r13 冻结判定；不 publish、不改设备发布文件。受验提交：待提交（本包只本地改动，未提交）。
+
+| 包 | 内容 | 状态与必要门 |
+|----|------|------------|
+| 1 审计 | `scripts/memory-failure-attribution.mjs` 只读归属：分类词表、假阴性清单、只读投影 | 已交：229 例；口径常数与试卷由 `test/scripts/memory-failure-attribution.test.ts` 逐项钉住 |
+| 2 修复 | 提案路径 `inheritInputs` 传自身 `id@version` 作 `skipMemory` | 已交：反例先红后绿；互依拒绝与更正自身落地两条既有断言不动 |
+| 3 文档 | 审计结论进[研究专题](memory.md#2026-10-10-失败例归属审计零调用) | 已交 |
+
+### 证据
+
+- 输入四个冻结目录：r10 `09ded560…`（60 例）、r11 `916bbf27…`（33 例）、r12 `0f20b2d6…`（90 例）、r13 `39611d5c…`（46 例），合计 **229** 个整理案例实例。分类统计、假阴性清单与逐轮投影见[研究专题](memory.md#2026-10-10-失败例归属审计零调用)；复现：`node scripts/memory-failure-attribution.mjs`。
+- 复算与冻结值同源对照：r10 两模型、r11 MiniMax、r12 MiniMax、r13 两模型的复算下界与各自冻结下界**逐位相同**；差异只出现在换过尺子的两处——r11／r12 DeepSeek 因分类 0.5 剔头 +2～2.5，r12 第 2 轮因非评分类别过滤 −3。
+- **r13 DeepSeek 首轮的「未通过」只差一个程序规则拦截**：`v6-correction-01` 的模型提议正确、目标已展示，被 `MEMORY_DEPENDENCY_CHANGED` 整组拒绝。补回该例后总分 89.17、四维全部过 60% 地板。**这是只读投影（不含证据门与否决门），不是认证成绩；r13 冻结判定仍是 failed／79.17。**
+- 反例：`test/main/working-memory-consolidation.test.ts`「admits a correction whose own command source carries the replaced version as a session edge」先红（收到 `MEMORY_DEPENDENCY_CHANGED`）后绿；`test/main/working-memory-consolidation.test.ts:786` 同批互依更正仍两条拒绝、`:498` 更正自身仍落地，均未改断言。
+- 产品改动：新增一行（`src/main/working-memory-consolidation.ts:554`）为该变更计算 `self`（`add` 为空，其余取自身 `id`＋`version`），并在下一行作为第 6 个实参传给 `inheritInputs`；`:614` 的 `staleBatchDependency` 判定语义未动，仍拦截跨条目互依。
+
+### 剩余边界
+
+- 审计是只读投影，**不产生新成绩**；要认证必须重新冻结并重跑（r14），且仍须两轮通过。
+- 待决边界：exact 命令原样 `add` 不带自身目标，同批替换依赖仍被拒绝；已用特征化测试固定现状，本包不改。
+- 未归类失分 2 例（`r11/MiniMax-M3/v6-standing-01`、`r13/MiniMax-M3/v6-chain-alpha-1`）需人工看产物。
+- 口径类拦截 22 例／42 分（期望动作词与类别）未修：属试卷与产品语义取舍，另案授权。
+- Windows／CI／原生输入法／用户视觉与人工语义复核仍待。

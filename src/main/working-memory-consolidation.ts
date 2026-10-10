@@ -551,7 +551,8 @@ export class WorkingMemoryConsolidation{
    const dependencyEntries=[...basis.record.entries,...effectiveRecent]
    // The original command is independent; a model's paraphrase is not proof of independence.
    groups=groups.filter(group=>{try{for(const change of group){const ref=change.input.sources[0],exact=change.input.sources.length===1&&ref?.classification==='command'&&ref.kind==='ledger'&&ref.taskId===job.material.taskId&&ref.materialId===job.material.taskId+'/prompt'&&ref.relPath===job.material.origin.relPath&&ref.text===job.material.prompt&&change.input.content===ref.text&&change.input.scope===job.material.origin.relPath
-    if(!exact||change.action!=='add')change.input.sources=inheritInputs(change.input.sources,job.material,dependencyEntries,change.action==='add'?undefined:change.id,continuity?entries:[])
+    const self=change.action==='add'?[]:[{id:change.id,version:change.version}]
+    if(!exact||change.action!=='add')change.input.sources=inheritInputs(change.input.sources,job.material,dependencyEntries,change.action==='add'?undefined:change.id,continuity?entries:[],self)
    }return true}catch(error){proposed.dropped.push({action:group[0]!.action,outcome:'rejected',code:publicMemoryError(error)});return false}})
    const accepted:WorkingChange[][]=[]
    for(const group of groups)try{

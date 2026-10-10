@@ -967,3 +967,45 @@ it('shrinks displayed candidates before sending a document repair',async()=>{
  if(repair)expect(repair.memory).toBeLessThanOrEqual(proposal!.memory)
  else expect(f.service.snapshot().record.jobs[0]?.reason).toBe('MEMORY_INPUT_LIMIT')
 })
+
+it('admits a correction whose own command source carries the replaced version as a session edge',async()=>{
+ // r13 v6-correction-01 形态：目标已展示、提议内容正确，但本场命令来源自带指向被更正版本的依赖
+ // （本场读过它）。自身版本必须按 id@version 剥离后准入，而不是整组拒绝。
+ let oldId=''
+ const f=await fixture(async function*(input){
+  const p=JSON.parse(String(input.messages[0]!.content)),s=p.sources[0],target=p.memory.find((e:any)=>e.content==='青灯版本甲')
+  yield {type:'text',text:JSON.stringify({recent:null,proposals:[{action:'correct',target:target.id,content:'青灯版本已更正',scope:'a.md',sourceIds:[s.id],semantic:'fact',attribution:'人',reviewAt:null}]})}
+  yield {type:'finish',reason:'stop'}
+ },'青灯版本已更正','continuity')
+ const source=await f.service.sourceForPrompt('a.md','task'),old=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'青灯版本甲',layer:'demand',scope:'a.md',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}));oldId=old.id
+ f.material.memoryDeps=[{id:old.id,version:1,basisHashes:[source.basisHash],sourceDeps:[{id:source.id,version:1,hash:source.hash,relPath:'a.md',kind:'ledger',taskId:'task'}]}]
+ vi.spyOn(f.service,'savedMaterial').mockResolvedValue(f.material)
+ vi.spyOn(f.service,'sourceForPrompt').mockResolvedValue({...source,memoryDeps:[{id:old.id,version:1}]})
+ await f.engine.handoff(f.material);await f.engine.idle()
+ const record=f.service.snapshot().record,updated=record.entries.find(e=>e.id===oldId)!
+ expect(record.jobs.at(-1)?.results).toContainEqual({action:'correct',outcome:'applied'})
+ expect(updated).toMatchObject({version:2,status:'active',content:'青灯版本已更正'})
+ expect(updated.sources.flatMap(s=>s.memoryDeps)).not.toContainEqual({id:oldId,version:1})
+})
+
+it('characterises the exact-command path as still rejecting a batch-replaced dependency',async()=>{
+ // 待决边界（本包不改）：exact 命令原样 add 不经过 inheritInputs，因此没有 self 剥离；
+ // 同批另有对该版本的 correct 时，这条 add 仍按 staleBatchDependency（:614）拒绝。correct 分支已剥离并可落地。
+ let oldId=''
+ const f=await fixture(async function*(input){
+  const p=JSON.parse(String(input.messages[0]!.content)),s=p.sources[0],target=p.memory.find((e:any)=>e.content==='青灯版本甲')
+  yield {type:'text',text:JSON.stringify({recent:null,proposals:[
+   {action:'add',content:'独立的新项目事实',scope:'a.md',sourceIds:[s.id],semantic:'fact',attribution:'人的口令',reviewAt:null},
+   {action:'correct',target:target.id,content:'青灯版本已更正',scope:'a.md',sourceIds:[s.id],semantic:'fact',attribution:'人',reviewAt:null}]})}
+  yield {type:'finish',reason:'stop'}
+ },'独立的新项目事实','continuity')
+ const source=await f.service.sourceForPrompt('a.md','task'),old=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'青灯版本甲',layer:'demand',scope:'a.md',sources:[source],semantic:'fact',attribution:'人',reviewAt:null}));oldId=old.id
+ f.material.memoryDeps=[{id:old.id,version:1,basisHashes:[source.basisHash],sourceDeps:[{id:source.id,version:1,hash:source.hash,relPath:'a.md',kind:'ledger',taskId:'task'}]}]
+ vi.spyOn(f.service,'savedMaterial').mockResolvedValue(f.material)
+ vi.spyOn(f.service,'sourceForPrompt').mockResolvedValue({...source,memoryDeps:[{id:old.id,version:1}]})
+ await f.engine.handoff(f.material);await f.engine.idle()
+ const results=f.service.snapshot().record.jobs.at(-1)?.results??[]
+ expect(results).toContainEqual({action:'add',outcome:'rejected',code:'MEMORY_DEPENDENCY_CHANGED'})
+ expect(results).toContainEqual({action:'correct',outcome:'applied'})
+ expect(f.service.snapshot().record.entries.find(e=>e.id===oldId)).toMatchObject({version:2,status:'active'})
+})

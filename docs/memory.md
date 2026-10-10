@@ -85,3 +85,79 @@ r11 暴露的不是「模型一律不会」，而是程序把可验证工作推�
 ## 2026-10-10 仪器与可见性
 
 本专题只登记源码取舍，不是第二合同。评分仪器：可靠性分母改为已派发且非环境；仅分类检查失败按内容 F1 × 0.5；`V6_SCORING_CATEGORIES` 真正过滤；标注必填 `rubricVersion=1`。产品：核心／近期因信封装不进时，Host 按类说明，不再把核心丢弃写成「按需」；存储核心水位与注入同一信封成本，只在 add／edit 时对新条目 `deferred`。提交前只核本批实际派生来源；修复请求超限先丢候选。冻结 revision 13（`39611d5c…`，执行提交 `50e1370`）：DeepSeek 首轮 failed（79.17，更新 17.5/30 破地板），MiniMax 16 例后一致否决停止；回答 8 对有效终态，双方 5 改善／3 持平／0 退步。新增 63/272，总账 1507/3000。未发布 passed。逐项证据见[施工图](build.md#r13-冻结实测实际收益与收口2026-10-10)。
+
+## 2026-10-10 失败例归属审计（零调用）
+
+只读 `.cache` 冻结产物的归属审计，用于把「未通过」拆成内容缺口、机制拦截、环境故障与否决四类。**零模型调用、零写入**；不复算官方判定，不改写任何冻结成绩。复现：`node scripts/memory-failure-attribution.mjs`（`--json` 取机器可读、`--legacy` 追加 r6/r8/r9）。分类规则与口径常数由 `test/scripts/memory-failure-attribution.test.ts` 钉住，逐项比对 `V6_RULES` 与试卷权重。
+
+输入：r10 `.cache/memory-quality/2026-10-04/integrity-r10`（`09ded560…`，60 例）、r11 `.cache/memory-quality/2026-10-08-collaboration-r11`（`916bbf27…`，33 例）、r12 `.cache/memory-quality/2026-10-09-collaboration-r12`（`0f20b2d6…`，90 例）、r13 `.cache/memory-quality/2026-10-10-collaboration-r13`（`39611d5c…`，46 例），合计 229 个整理案例实例。
+
+| 类别 | 判据 | 例数 | 按现行口径失分 |
+|------|------|------|----------------|
+| environment | 类别 `service/cancel/interrupted` 或原因属四项环境码 | 2 | 9 |
+| veto | 双标一致硬否决 | 4 | 14.5 |
+| mechanism-blocked/program-rule | 程序规则码拒收或 `failureOrigin=admission`，而模型提议成立 | 9 | 15.5 |
+| mechanism-blocked/convention | 单元已覆盖但期望动作词／类别未落地 | 22 | 42 |
+| content-gap | 有单元未覆盖或新增错误内容 | 41 | 98.86 |
+| clean（含 2 例未归类失分） | 无信号且未失分 | 151 | 5 |
+| **合计** | | **229** | **184.86** |
+
+### 假阴性清单（机制拦截、有失分；按失分降序）
+
+脚本输出 **27 条失分记录**；下表为 25 行，差额是两例（`r12/v6-scope-01`、`r12/v6-chain-beta-4`）在同一轮的两轮里各出现一次，已合并为一行并在「说明」列注明。
+
+| 轮次 | 模型 | 案例 | 维/权重 | 失分 | 子类 | 拦截信号 | 说明 | 证据 |
+|------|------|------|---------|------|------|----------|------|------|
+| r13 | deepseek-flash | v6-correction-01 | update/10 | 10 | program-rule | `MEMORY_DEPENDENCY_CHANGED`；`failureOrigin=admission` | 模型提议正确（目标已展示），程序按同批替换规则拒绝；旧「每周」仍生效 | `result-8cd5d150…` |
+| r12 | MiniMax-M3 | v6-scope-01 | fact/4 | 4 | convention/action-verb | `actionVerified=false`；分类检查失败 | 内容已覆盖，仅机制判负 | `result-6e18c3c0…` |
+| r13 | MiniMax-M3 | v6-fact-01 | fact/4 | 4 | convention/action-verb | 同上 | 内容已覆盖，仅机制判负 | `result-1b6237e6…` |
+| r13 | deepseek-flash | v6-attribution-01 | fact/4 | 4 | convention/action-verb | 同上 | 内容已覆盖，仅机制判负 | `result-5dc3cf1e…` |
+| r10 | MiniMax-M3 | v6-ambiguous-10 | update/2.5 | 2.5 | program-rule | `MEMORY_DEPENDENCY_CHANGED` | 内容已覆盖，仅机制判负 | `result-32289768…` |
+| r10 | deepseek-flash | v6-ambiguous-01 | update/2.5 | 2.5 | convention/action-verb | `actionVerified=false` | 内容已覆盖，仅机制判负 | `result-a771aa30…` |
+| r10 | deepseek-flash | v6-ambiguous-10 | update/2.5 | 2.5 | convention/action-verb | 同上 | 内容已覆盖，仅机制判负 | `result-e1fdfd04…` |
+| r11 | deepseek-flash | v6-ambiguous-10 | update/2.5 | 2.5 | convention/action-verb | 同上 | 内容已覆盖，仅机制判负 | `result-d5cdffee…` |
+| r12 | deepseek-flash | v6-ambiguous-10 | update/2.5 | 2.5 | convention/action-verb | 同上 | 内容已覆盖，仅机制判负 | `result-483428e9…` |
+| r13 | deepseek-flash | v6-ambiguous-10 | update/2.5 | 2.5 | convention/action-verb | 同上 | 内容已覆盖，仅机制判负 | `result-15d08b0e…` |
+| r11 | deepseek-flash | v6-recent-blocked-01 | recent/4 | 2 | convention/category | 分类检查失败 | 内容已覆盖，仅机制判负 | `result-36ae003c…` |
+| r12 | deepseek-flash | v6-scope-01 | fact/4 | 2 | convention/category | 同上 | 内容已覆盖，仅机制判负（两轮各一次） | `result-15028ca8…` |
+| r13 | deepseek-flash | v6-scope-01 | fact/4 | 2 | convention/category | 同上 | 内容已覆盖，仅机制判负 | `result-164409f8…` |
+| r10 | deepseek-flash | v6-chain-beta-5 | recent/1 | 1 | program-rule | `MEMORY_DEPENDENCY_CHANGED` | 拦截导致单元缺失，非模型漏存 | `result-20facd0b…` |
+| r10 | deepseek-flash | v6-chain-beta-3 | recent/1 | 1 | program-rule | 同上 | 拦截导致单元缺失，非模型漏存 | `result-94ede25c…` |
+| r11 | deepseek-flash | v6-chain-beta-3 | recent/1 | 1 | program-rule | 同上 | 内容已覆盖，仅机制判负 | `result-06efb39d…` |
+| r10 | deepseek-flash | v6-chain-beta-4 | recent/1 | 1 | convention/action-verb | `actionVerified=false` | 内容已覆盖，仅机制判负 | `result-d3d04cf3…` |
+| r11 | deepseek-flash | v6-chain-alpha-4 | recent/1 | 1 | convention/action-verb | 同上 | 旧内容因拦截仍生效，因果需人工确认 | `result-0bd5454c…` |
+| r11 | deepseek-flash | v6-chain-beta-4 | recent/1 | 1 | convention/action-verb | 同上 | 内容已覆盖，仅机制判负 | `result-1af40794…` |
+| r12 | deepseek-flash | v6-chain-beta-4 | recent/1 | 1 | convention/action-verb | 同上 | 内容已覆盖，仅机制判负（两轮各一次） | `result-46e2b83c…` |
+| r12 | MiniMax-M3 | v6-chain-beta-4 | recent/1 | 1 | convention/action-verb | 同上 | 内容已覆盖，仅机制判负 | `result-f2801ca6…` |
+| r13 | deepseek-flash | v6-chain-beta-4 | recent/1 | 1 | convention/action-verb | 同上 | 内容已覆盖，仅机制判负 | `result-6e3e923f…` |
+| r13 | MiniMax-M3 | v6-chain-alpha-2 | recent/1 | 1 | convention/action-verb | 同上 | 内容已覆盖，仅机制判负 | `result-96038a9c…` |
+| r13 | deepseek-flash | v6-chain-alpha-2 | recent/1 | 1 | convention/action-verb | 同上 | 内容已覆盖，仅机制判负 | `result-ea6299ca…` |
+| r11 | deepseek-flash | v6-chain-beta-2 | recent/1 | 0.5 | convention/category | 分类检查失败 | 内容已覆盖，仅机制判负 | `result-39f80a05…` |
+
+另有 4 例带机制信号但按现行口径未失分（仅登记，不构成假阴性）：`r10/deepseek-flash/v6-correction-01`、`r10/MiniMax-M3/v6-correction-01`、`r10/deepseek-flash/v6-chain-alpha-4`、`r13/MiniMax-M3/v6-recent-blocked-01`。
+
+未归类失分 2 例（终态 `valid`、无任何机制信号，需人工看产物）：`r11/MiniMax-M3/v6-standing-01`（-4）、`r13/MiniMax-M3/v6-chain-alpha-1`（-1）。
+
+### 只读投影（把机制拦截例记满权重；**不是认证成绩**）
+
+| 轮次 | 官方冻结下界 | 现行口径复算 | 补程序规则拒收 | 补全部机制拦截 | 四维（补程序规则） |
+|------|--------------|--------------|----------------|----------------|--------------------|
+| r10/deepseek-flash/r0 | 74.2 | 74.2 | 76.2 | 82.2 | 20／12／19.2／25 |
+| r10/MiniMax-M3/r0 | 64.9 | 64.9 | 67.4 | 67.4 | 12／8／17.4／30 |
+| r11/deepseek-flash/r0 | 70.5 | 73 | 74 | 81 | 20／16／20.5／17.5 |
+| r11/MiniMax-M3/r0 | 4 | 4 | 4 | 4 | 已执行 3/30，不判地板 |
+| r12/deepseek-flash/r0 | 87 | 89 | 89 | 92 | 20／14／25／30 |
+| r12/deepseek-flash/r1 | 82.7 | 79.7 | 79.7 | 85.2 | 20／10／27.2／22.5 |
+| r12/MiniMax-M3/r0 | 80.67 | 80.67 | 80.67 | 85.67 | 20／8／22.67／30 |
+| r13/deepseek-flash/r0 | **79.17** | 79.17 | **89.17** | 99.67 | 20／14／27.67／27.5 |
+| r13/MiniMax-M3/r0 | 37.5 | 37.5 | 37.5 | 42.5 | 已执行 16/30，不判地板 |
+
+复算与冻结值同源对照说明：r10 两模型、r11 MiniMax、r12 MiniMax、r13 两模型的复算值与冻结下界**逐位相同**；差异只出现在尺子换过的两处——r11／r12 DeepSeek 因分类 0.5 剔头 +2～2.5，r12 第 2 轮因非评分类别过滤 -3（`v6-duplicate-06` 由记分改为不可评）。
+
+### 审计结论
+
+1. **r13 DeepSeek 的「未通过」只差一个程序规则拦截**：`v6-correction-01` 模型提议正确、目标已展示，被 `MEMORY_DEPENDENCY_CHANGED` 整组拒绝；补回该例后总分 89.17、四维全部过 60% 地板（不含证据门与否决门）。冻结成绩仍是 79.17，本投影不构成认证。
+2. **口径类拦截是更大的测量债**：22 例、42 分落在「内容已覆盖但期望动作词／类别未落地」。集中在 `v6-ambiguous-10`（4 轮 3 次）、`v6-chain-beta-4`（4 轮 4 次）、`v6-scope-01`（4 轮 4 次）。
+3. **真模型缺口仍占最大块**：`content-gap` 41 例、98.86 分，是 r10–r13 失分的主体；机制类合计 31 例、57.5 分。
+4. **环境与否决各占小头但性质不同**：环境 2 例 9 分（r13 已把环境移出可靠性分母，但仍以未知压低质量下界）；否决 4 例 14.5 分全部来自 MiniMax，属安全红线，不应折算。
+5. **审计不是认证**：全部数字为只读投影，r9–r13 冻结判定一字不改；任何修复要产生新成绩，必须重新冻结并重跑。
