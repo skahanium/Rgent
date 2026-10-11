@@ -111,10 +111,17 @@ it.skipIf(!present)('reproduces the frozen r13 lower bound and separates confirm
   const wrongContainer = rows.filter((row: any) => row.class === 'content-gap' && row.sub === 'wrong-container')
   expect(wrongContainer.map((row: any) => row.caseId).sort()).toEqual(['v6-attribution-01', 'v6-chain-alpha-2', 'v6-chain-alpha-2'])
   expect(wrongContainer.reduce((n: number, row: any) => n + row.lost, 0)).toBeCloseTo(6, 6)
-  // rubric 与机读字段冲突：conflict 期望、无 entry 动作
+  // rubric 与机读字段冲突：conflict 期望、无 entry 动作；其案例必须正是人工过卷判为假阴性者
   const rubricField = rows.filter((row: any) => row.sub === 'rubric-field')
   expect(rubricField.every((row: any) => row.expectedAction === 'conflict')).toBe(true)
+  expect(rubricField.every((row: any) => row.entryActionLanded === false)).toBe(true)
+  expect([...new Set(rubricField.map((row: any) => audit.HUMAN_REVIEW[row.caseId]?.verdict))]).toEqual(['rubric-field-false-negative'])
   expect(rubricField.reduce((n: number, row: any) => n + row.lost, 0)).toBeCloseTo(11, 6)
+  // 容器判据的两侧都必须与人工过卷一致：wrong-container 全是 real-gap，convention 全是「已落地但动词/标签不符」
+  expect([...new Set(wrongContainer.map((row: any) => audit.HUMAN_REVIEW[row.caseId]?.verdict))]).toEqual(['real-gap'])
+  const convention = rows.filter((row: any) => row.sub === 'convention')
+  expect(convention.length).toBeGreaterThan(0)
+  expect(convention.every((row: any) => row.entryActionLanded === true)).toBe(true)
 })
 
 it.skipIf(!present)('renders a byte-stable report', () => {

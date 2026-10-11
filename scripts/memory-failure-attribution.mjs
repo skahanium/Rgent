@@ -168,6 +168,8 @@ const isConfirmedFalseNegative = (row) => row.programRuleBlocked || row.rubricFi
  *  三条判据来自人工过卷（方案 A）：
  *  ① rubric-field：uncertain 组 rubric 写"保留旧活动事实或建立非活动冲突候选均可"，机读字段却要 conflict，
  *     模型保留旧事实、无 entry 级动作 → 假阴性（人工作答两次独立确认）。
+ *     边界：只覆盖"什么都没落地"这一变体；同组"落地 add 而非 conflict"的变体（3 条／3.5 分）未经过卷，
+ *     留在 convention 待确认，不预设为假阴性。r12 两模型各有一条落地 conflict 且满分，说明该期望可达。
  *  ② wrong-container：期望 add/correct 的内容只落在近期块、没有任何 entry 级动作落地 →
  *     下一场不可用，属真实缺口，不算机制冤枉（人工作答确认 3 例）。
  *  ③ convention：上一版把两者混算，已按 ①② 拆开；剩余仅作观察项。 */
