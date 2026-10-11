@@ -2086,22 +2086,27 @@ DeepSeek 另有 5 项动作未落地、4 项检查失败：`v6-correction-01` �
 
 | 包 | 内容 | 状态与必要门 |
 |----|------|------------|
-| 1 审计 | `scripts/memory-failure-attribution.mjs` 只读归属：分类词表、假阴性清单、只读投影 | 已交：229 例；口径常数与试卷由 `test/scripts/memory-failure-attribution.test.ts` 逐项钉住 |
+| 1 审计 | `scripts/memory-failure-attribution.mjs` 只读归属：分类词表、假阴性清单、只读投影 | 已交：229 例；口径常数、试卷权重/动作/容器期望由 `test/scripts/memory-failure-attribution.test.ts` 逐项钉住 |
 | 2 修复 | 提案路径 `inheritInputs` 传自身 `id@version` 作 `skipMemory` | 已交：反例先红后绿；互依拒绝与更正自身落地两条既有断言不动 |
-| 3 文档 | 审计结论进[研究专题](memory.md#2026-10-10-失败例归属审计零调用) | 已交 |
+| 3 人工过卷 | 方案 A：10 例盲答 → 试卷原判据机械评分 | 已交：判读规则先冻结；修正分类词表与假阴性范围 |
+| 4 工具修正 | 按过卷结论加容器判据与 rubric 字段判据、`expectedAction`/`expectedContainer`、人工过卷列与四档投影 | 已交：8 项定向测试通过 |
+| 5 文档 | 审计与过卷结论进[研究专题](memory.md#2026-10-10-失败例归属审计零调用) | 已交 |
 
 ### 证据
 
-- 输入四个冻结目录：r10 `09ded560…`（60 例）、r11 `916bbf27…`（33 例）、r12 `0f20b2d6…`（90 例）、r13 `39611d5c…`（46 例），合计 **229** 个整理案例实例。分类统计、假阴性清单与逐轮投影见[研究专题](memory.md#2026-10-10-失败例归属审计零调用)；复现：`node scripts/memory-failure-attribution.mjs`。
+- 输入四个冻结目录：r10 `09ded560…`（60 例）、r11 `916bbf27…`（33 例）、r12 `0f20b2d6…`（90 例）、r13 `39611d5c…`（46 例），合计 **229** 个整理案例实例。分类统计、假阴性清单、逐轮投影与人工过卷逐例判定见[研究专题](memory.md#2026-10-10-失败例归属审计零调用)；复现：`node scripts/memory-failure-attribution.mjs`。
 - 复算与冻结值同源对照：r10 两模型、r11 MiniMax、r12 MiniMax、r13 两模型的复算下界与各自冻结下界**逐位相同**；差异只出现在换过尺子的两处——r11／r12 DeepSeek 因分类 0.5 剔头 +2～2.5，r12 第 2 轮因非评分类别过滤 −3。
-- **r13 DeepSeek 首轮的「未通过」只差一个程序规则拦截**：`v6-correction-01` 的模型提议正确、目标已展示，被 `MEMORY_DEPENDENCY_CHANGED` 整组拒绝。补回该例后总分 89.17、四维全部过 60% 地板。**这是只读投影（不含证据门与否决门），不是认证成绩；r13 冻结判定仍是 failed／79.17。**
+- **r13 DeepSeek 首轮的「未通过」只差一个程序规则拦截**：`v6-correction-01` 的模型提议正确、目标已展示，被 `MEMORY_DEPENDENCY_CHANGED` 整组拒绝。补回该例后总分 89.17、四维全部过 60% 地板；再补确认假阴性为 92.67。**这是只读投影（不含证据门与否决门），不是认证成绩；r13 冻结判定仍是 failed／79.17。**
+- **人工过卷（10 例）把假阴性范围收窄为两类**：程序规则拒收 9 条／15.5 分 ＋ rubric 与机读字段冲突 8 条／11 分（`uncertain` 组 rubric 写「保留旧活动事实或建立非活动冲突候选均可」，机读字段却要 `conflict`；同组 `ambiguous-01` 要 `unchanged`，字段自相矛盾）。**3 条／6 分从假阴性名单移出**：期望落成 entry 的内容只写进近期块（14 天过期）是真实缺口。待确认 `convention` 类 12 条／26 分。
+- 过卷同时暴露**方法缺陷**：题面术语（`近期工作背景`／`长期`）未先定义；上游状态带类型标签，导致第 7、9 例的容器维度不可用（脚本标 `containerReliable=false`）。下次同类实验须先给定义、上游状态不带标签。
 - 反例：`test/main/working-memory-consolidation.test.ts`「admits a correction whose own command source carries the replaced version as a session edge」先红（收到 `MEMORY_DEPENDENCY_CHANGED`）后绿；`test/main/working-memory-consolidation.test.ts:786` 同批互依更正仍两条拒绝、`:498` 更正自身仍落地，均未改断言。
 - 产品改动：新增一行（`src/main/working-memory-consolidation.ts:554`）为该变更计算 `self`（`add` 为空，其余取自身 `id`＋`version`），并在下一行作为第 6 个实参传给 `inheritInputs`；`:614` 的 `staleBatchDependency` 判定语义未动，仍拦截跨条目互依。
 
 ### 剩余边界
 
-- 审计是只读投影，**不产生新成绩**；要认证必须重新冻结并重跑（r14），且仍须两轮通过。
+- 审计与过卷都是只读投影，**不产生新成绩**；要认证必须重新冻结并重跑（r14），且仍须两轮通过。
 - 待决边界：exact 命令原样 `add` 不带自身目标，同批替换依赖仍被拒绝；已用特征化测试固定现状，本包不改。
 - 未归类失分 2 例（`r11/MiniMax-M3/v6-standing-01`、`r13/MiniMax-M3/v6-chain-alpha-1`）需人工看产物。
-- 口径类拦截 22 例／42 分（期望动作词与类别）未修：属试卷与产品语义取舍，另案授权。
+- 待确认口径类 12 条／26 分（含 `v6-fact-01`、`scope-01`、`recent-blocked-01`、`chain-beta-2` 等未过卷或容器可疑者）：属试卷与产品语义取舍，另案授权。
+- 审计脚本未覆盖：`fact-01`／`chain-beta-5`／`chain-beta-2` 等未过卷案例的人工判定；`convention` 与 `rubric-field` 的分界仍靠 `entryActionLanded` 单信号。
 - Windows／CI／原生输入法／用户视觉与人工语义复核仍待。

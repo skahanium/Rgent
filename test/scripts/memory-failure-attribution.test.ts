@@ -18,14 +18,33 @@ it('keeps the environment and scoring vocabulary identical to the frozen harness
   expect(audit.VETOES).toEqual([...V6_RULES.vetoes])
 })
 
-it('keeps the case weights and dimensions identical to the frozen paper', () => {
+it('keeps the case weights, dimensions, expected action and container identical to the frozen paper', () => {
   const expected = Object.fromEntries(
     V6_QUALITY_CASES.map((spec) => [
       spec.id,
-      { dimension: spec.direction, weight: spec.weight, ...(spec.split ? { split: spec.split } : {}), ...(spec.safety ? { safety: spec.safety } : {}) }
+      {
+        dimension: spec.direction,
+        weight: spec.weight,
+        expectedAction: spec.expected.action,
+        expectedContainer: spec.expected.targetCategory ?? (spec.direction === 'recent' ? 'recent' : 'entry'),
+        ...(spec.split ? { split: spec.split } : {}),
+        ...(spec.safety ? { safety: spec.safety } : {})
+      }
     ])
   )
   expect(audit.CASE_SPECS).toEqual(expected)
+})
+
+it('labels every human-reviewed case with a real paper case id and a known verdict', () => {
+  const ids = new Set(V6_QUALITY_CASES.map((spec) => spec.id))
+  const verdicts = new Set(['expectation-reasonable', 'rubric-field-false-negative', 'label-debt', 'real-gap', 'framework-mismatch'])
+  const entries = Object.entries(audit.HUMAN_REVIEW)
+  expect(entries).toHaveLength(10)
+  for (const [id, review] of entries as [string, { verdict: string; containerReliable: boolean }][]) {
+    expect(ids.has(id)).toBe(true)
+    expect(verdicts.has(review.verdict)).toBe(true)
+    expect(typeof review.containerReliable).toBe('boolean')
+  }
 })
 
 it('scores a single case with the current rubric: veto and forbidden content hard-zero, classification halves', () => {
@@ -44,19 +63,28 @@ it('classifies every audit bucket from mechanical signals only', () => {
     environment: false,
     programRuleBlocked: false,
     actionVerified: true,
+    expectedAction: 'add',
+    expectedContainer: 'entry',
+    entryActionLanded: true,
     category: 'valid',
     rejectedGroups: [] as string[],
     failureOrigin: null,
-    primary: { present: true, correct: 1, omitted: 0, wrongNew: 0, checks: { attributionAndScope: true, noUnsupportedContent: true, noForbiddenContent: true }, hardViolations: [] },
     lost: 0,
+    primary: { present: true, correct: 1, omitted: 0, wrongNew: 0, checks: { attributionAndScope: true, noUnsupportedContent: true, noForbiddenContent: true }, hardViolations: [] },
     ...over
   })
   expect(audit.classifyCase(row({ environment: true })).class).toBe('environment')
   expect(audit.classifyCase(row({ primary: { ...row().primary, hardViolations: ['temporary-standing'] } })).class).toBe('veto')
   expect(audit.classifyCase(row({ programRuleBlocked: true }))).toMatchObject({ class: 'mechanism-blocked', sub: 'program-rule' })
-  expect(audit.classifyCase(row({ actionVerified: false }))).toMatchObject({ class: 'mechanism-blocked', sub: 'convention', detail: 'action-verb' })
-  expect(audit.classifyCase(row({ primary: { ...row().primary, checks: { attributionAndScope: false, noUnsupportedContent: true, noForbiddenContent: true } } }))).toMatchObject({ class: 'mechanism-blocked', sub: 'convention', detail: 'category' })
-  expect(audit.classifyCase(row({ primary: { ...row().primary, correct: 0, omitted: 1 }, actionVerified: false })).class).toBe('content-gap')
+  // rubric 说"保留旧活动事实…均可"，机读字段却要 conflict：无 entry 动作即确认假阴性
+  expect(audit.classifyCase(row({ expectedAction: 'conflict', entryActionLanded: false, lost: 2.5 }))).toMatchObject({ class: 'mechanism-blocked', sub: 'rubric-field' })
+  // 期望 entry 的内容只落在近期块：真实缺口，不算机制冤枉
+  expect(audit.classifyCase(row({ expectedAction: 'add', expectedContainer: 'entry', entryActionLanded: false, lost: 4 }))).toMatchObject({ class: 'content-gap', sub: 'wrong-container' })
+  // 期望本来就是近期块：只有 recent 落地属正常，不判缺口
+  expect(audit.classifyCase(row({ expectedAction: 'add', expectedContainer: 'recent', entryActionLanded: false, lost: 0 })).class).toBe('clean')
+  expect(audit.classifyCase(row({ actionVerified: false, lost: 1 }))).toMatchObject({ class: 'mechanism-blocked', sub: 'convention', detail: 'action-verb' })
+  expect(audit.classifyCase(row({ primary: { ...row().primary, checks: { attributionAndScope: false, noUnsupportedContent: true, noForbiddenContent: true } }, lost: 2 }))).toMatchObject({ class: 'mechanism-blocked', sub: 'convention', detail: 'category' })
+  expect(audit.classifyCase(row({ primary: { ...row().primary, correct: 0, omitted: 1 }, entryActionLanded: false, lost: 4 })).class).toBe('content-gap')
   expect(audit.classifyCase(row()).class).toBe('clean')
 })
 
@@ -66,20 +94,27 @@ it('treats a receipt-only environment reason as an environment row', () => {
   expect(audit.isEnvironment({ category: 'valid', receiptReason: null })).toBe(false)
 })
 
-it.skipIf(!present)('reproduces the frozen r13 lower bound and attributes its only admission rejection', () => {
+it.skipIf(!present)('reproduces the frozen r13 lower bound and separates confirmed false negatives from real gaps', () => {
   const rows = audit.RUNS.flatMap((run: { dir: string; label: string; scoring: string }) => audit.collectRun(run))
   expect(rows.length).toBe(229)
   const r13 = rows.filter((row: any) => row.run === 'r13' && row.model === 'deepseek-flash' && row.round === 0)
   expect(r13.length).toBe(30)
-  const base = audit.projectRound(r13, 'none')
-  expect(base.total).toBe(79.17)
-  expect(base.floorPass).toBe(false)
-  const credited = audit.projectRound(r13, 'program-rule')
+  expect(audit.projectRound(r13, 'none').total).toBe(79.17)
+  expect(audit.projectRound(r13, 'program-rule').total).toBe(89.17)
+  expect(audit.projectRound(r13, 'false-negative').total).toBe(92.67)
+  expect(audit.projectRound(r13, 'none').floorPass).toBe(false)
+  expect(audit.projectRound(r13, 'false-negative').floorPass).toBe(true)
   const correction = r13.find((row: any) => row.caseId === 'v6-correction-01')
   expect(correction).toMatchObject({ class: 'mechanism-blocked', sub: 'program-rule', failureOrigin: 'admission', actionVerified: false })
   expect(correction.rejectedGroups).toContain('MEMORY_DEPENDENCY_CHANGED')
-  expect(credited.total).toBe(89.17)
-  expect(credited.floorPass).toBe(true)
+  // 人工过卷确认的三处真实缺口：期望 entry 的内容只落在近期块
+  const wrongContainer = rows.filter((row: any) => row.class === 'content-gap' && row.sub === 'wrong-container')
+  expect(wrongContainer.map((row: any) => row.caseId).sort()).toEqual(['v6-attribution-01', 'v6-chain-alpha-2', 'v6-chain-alpha-2'])
+  expect(wrongContainer.reduce((n: number, row: any) => n + row.lost, 0)).toBeCloseTo(6, 6)
+  // rubric 与机读字段冲突：conflict 期望、无 entry 动作
+  const rubricField = rows.filter((row: any) => row.sub === 'rubric-field')
+  expect(rubricField.every((row: any) => row.expectedAction === 'conflict')).toBe(true)
+  expect(rubricField.reduce((n: number, row: any) => n + row.lost, 0)).toBeCloseTo(11, 6)
 })
 
 it.skipIf(!present)('renders a byte-stable report', () => {
@@ -89,4 +124,5 @@ it.skipIf(!present)('renders a byte-stable report', () => {
   expect(first).toBe(second)
   expect(first).toContain('假阴性清单')
   expect(first).toContain('不是认证成绩')
+  expect(first).toContain('人工过卷')
 })

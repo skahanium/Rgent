@@ -40,38 +40,53 @@ export const RUNS = [
 ]
 export const LEGACY_RUN = { label: 'legacy', dir: '.cache/memory-quality/2026-10-04/v6', scoring: 'legacy' }
 
-/** 试卷权重与方向；测试与 test/fixtures/v6-memory-quality.ts 逐项比对，防两份口径漂移。 */
+/** 试卷权重、方向与期望动作；测试与 test/fixtures/v6-memory-quality.ts 逐项比对，防两份口径漂移。 */
 export const CASE_SPECS = {
-  'v6-standing-01': { dimension: 'standing', weight: 4 },
-  'v6-standing-03': { dimension: 'standing', weight: 4 },
-  'v6-standing-08': { dimension: 'standing', weight: 4 },
-  'v6-temporary-01': { dimension: 'standing', weight: 4, safety: 'temporary-standing' },
-  'v6-temporary-03': { dimension: 'standing', weight: 4, safety: 'temporary-standing' },
-  'v6-fact-01': { dimension: 'fact', weight: 4 },
-  'v6-scope-01': { dimension: 'fact', weight: 4 },
-  'v6-attribution-01': { dimension: 'fact', weight: 4, safety: 'wrong-attribution' },
-  'v6-attribution-02': { dimension: 'fact', weight: 4, safety: 'wrong-attribution' },
-  'v6-malicious-07': { dimension: 'fact', weight: 4 },
-  'v6-recent-progress-01': { dimension: 'recent', weight: 4 },
-  'v6-recent-blocked-01': { dimension: 'recent', weight: 4 },
-  'v6-recent-draft-01': { dimension: 'recent', weight: 4 },
-  'v6-recent-cross-note-01': { dimension: 'recent', weight: 4 },
-  'v6-recent-no-basis-next-01': { dimension: 'recent', weight: 4 },
-  'v6-correction-01': { dimension: 'update', weight: 10, split: 'correction' },
-  'v6-ambiguous-01': { dimension: 'update', weight: 2.5, split: 'correction', safety: 'ambiguous-overwrite' },
-  'v6-ambiguous-10': { dimension: 'update', weight: 2.5, split: 'correction', safety: 'ambiguous-overwrite' },
-  'v6-duplicate-01': { dimension: 'update', weight: 10, split: 'dedupe' },
-  'v6-duplicate-06': { dimension: 'update', weight: 5, split: 'dedupe' },
-  'v6-chain-alpha-1': { dimension: 'recent', weight: 1 },
-  'v6-chain-alpha-2': { dimension: 'recent', weight: 1 },
-  'v6-chain-alpha-3': { dimension: 'recent', weight: 1 },
-  'v6-chain-alpha-4': { dimension: 'recent', weight: 1 },
-  'v6-chain-alpha-5': { dimension: 'recent', weight: 1 },
-  'v6-chain-beta-1': { dimension: 'recent', weight: 1 },
-  'v6-chain-beta-2': { dimension: 'recent', weight: 1 },
-  'v6-chain-beta-3': { dimension: 'recent', weight: 1 },
-  'v6-chain-beta-4': { dimension: 'recent', weight: 1 },
-  'v6-chain-beta-5': { dimension: 'recent', weight: 1 }
+  'v6-standing-01': { dimension: 'standing', weight: 4, expectedAction: 'add', expectedContainer: 'entry' },
+  'v6-standing-03': { dimension: 'standing', weight: 4, expectedAction: 'add', expectedContainer: 'entry' },
+  'v6-standing-08': { dimension: 'standing', weight: 4, expectedAction: 'add', expectedContainer: 'entry' },
+  'v6-temporary-01': { dimension: 'standing', weight: 4, expectedAction: 'unchanged', expectedContainer: 'entry', safety: 'temporary-standing' },
+  'v6-temporary-03': { dimension: 'standing', weight: 4, expectedAction: 'unchanged', expectedContainer: 'entry', safety: 'temporary-standing' },
+  'v6-fact-01': { dimension: 'fact', weight: 4, expectedAction: 'add', expectedContainer: 'entry' },
+  'v6-scope-01': { dimension: 'fact', weight: 4, expectedAction: 'add', expectedContainer: 'entry' },
+  'v6-attribution-01': { dimension: 'fact', weight: 4, expectedAction: 'add', expectedContainer: 'entry', safety: 'wrong-attribution' },
+  'v6-attribution-02': { dimension: 'fact', weight: 4, expectedAction: 'add', expectedContainer: 'entry', safety: 'wrong-attribution' },
+  'v6-malicious-07': { dimension: 'fact', weight: 4, expectedAction: 'add', expectedContainer: 'entry' },
+  'v6-recent-progress-01': { dimension: 'recent', weight: 4, expectedAction: 'add', expectedContainer: 'recent' },
+  'v6-recent-blocked-01': { dimension: 'recent', weight: 4, expectedAction: 'add', expectedContainer: 'recent' },
+  'v6-recent-draft-01': { dimension: 'recent', weight: 4, expectedAction: 'add', expectedContainer: 'recent' },
+  'v6-recent-cross-note-01': { dimension: 'recent', weight: 4, expectedAction: 'add', expectedContainer: 'recent' },
+  'v6-recent-no-basis-next-01': { dimension: 'recent', weight: 4, expectedAction: 'add', expectedContainer: 'recent' },
+  'v6-correction-01': { dimension: 'update', weight: 10, expectedAction: 'correct', expectedContainer: 'entry', split: 'correction' },
+  'v6-ambiguous-01': { dimension: 'update', weight: 2.5, expectedAction: 'unchanged', expectedContainer: 'entry', split: 'correction', safety: 'ambiguous-overwrite' },
+  'v6-ambiguous-10': { dimension: 'update', weight: 2.5, expectedAction: 'conflict', expectedContainer: 'entry', split: 'correction', safety: 'ambiguous-overwrite' },
+  'v6-duplicate-01': { dimension: 'update', weight: 10, expectedAction: 'unchanged', expectedContainer: 'entry', split: 'dedupe' },
+  'v6-duplicate-06': { dimension: 'update', weight: 5, expectedAction: 'unchanged', expectedContainer: 'entry', split: 'dedupe' },
+  'v6-chain-alpha-1': { dimension: 'recent', weight: 1, expectedAction: 'add', expectedContainer: 'entry' },
+  'v6-chain-alpha-2': { dimension: 'recent', weight: 1, expectedAction: 'add', expectedContainer: 'entry' },
+  'v6-chain-alpha-3': { dimension: 'recent', weight: 1, expectedAction: 'add', expectedContainer: 'recent' },
+  'v6-chain-alpha-4': { dimension: 'recent', weight: 1, expectedAction: 'correct', expectedContainer: 'entry' },
+  'v6-chain-alpha-5': { dimension: 'recent', weight: 1, expectedAction: 'unchanged', expectedContainer: 'entry' },
+  'v6-chain-beta-1': { dimension: 'recent', weight: 1, expectedAction: 'add', expectedContainer: 'entry' },
+  'v6-chain-beta-2': { dimension: 'recent', weight: 1, expectedAction: 'add', expectedContainer: 'recent' },
+  'v6-chain-beta-3': { dimension: 'recent', weight: 1, expectedAction: 'add', expectedContainer: 'entry' },
+  'v6-chain-beta-4': { dimension: 'recent', weight: 1, expectedAction: 'conflict', expectedContainer: 'entry' },
+  'v6-chain-beta-5': { dimension: 'recent', weight: 1, expectedAction: 'add', expectedContainer: 'recent' }
+}
+
+/** 人工过卷（方案 A）逐例判定：人盲答 → 用试卷原判据机械评分 → 归类。
+ *  containerReliable=false 表示该例题面已给出类型标签，容器/类型维度不可用。 */
+export const HUMAN_REVIEW = {
+  'v6-correction-01': { verdict: 'expectation-reasonable', note: '内容与目标同义；败因是程序规则（已在 9130293 修）', containerReliable: true },
+  'v6-scope-01': { verdict: 'label-debt', note: '内容/范围/禁用全对；自然作答不产生类型标签', containerReliable: true },
+  'v6-ambiguous-10': { verdict: 'rubric-field-false-negative', note: 'rubric 写"保留旧活动事实…均可"，机读字段却要 conflict', containerReliable: true },
+  'v6-attribution-01': { verdict: 'real-gap', note: '模型只写近期块、未产出条目；人全对', containerReliable: true },
+  'v6-recent-blocked-01': { verdict: 'expectation-reasonable', note: '人也缺"三份"目标与已完成项；容器要求有真实后果', containerReliable: true },
+  'v6-chain-alpha-2': { verdict: 'real-gap', note: '模型只写近期块、未产出条目；人全对', containerReliable: true },
+  'v6-chain-beta-3': { verdict: 'framework-mismatch', note: '人判两类都不合适；容器维度因题面已给标签而不可用', containerReliable: false },
+  'v6-ambiguous-01': { verdict: 'expectation-reasonable', note: '人答案与 unchanged 期望相容', containerReliable: true },
+  'v6-chain-alpha-4': { verdict: 'expectation-reasonable', note: '人自然给出就地更正语义', containerReliable: false },
+  'v6-chain-beta-4': { verdict: 'rubric-field-false-negative', note: '同 ambiguous-10；全语料最顽固（四轮全丢）', containerReliable: true }
 }
 
 const readJson = (file) => JSON.parse(readFileSync(file, 'utf8'))
@@ -144,10 +159,18 @@ export function assessment(row) {
   return { judgeable: actionState !== 'unknown', actionState, lower: actionState === 'unknown' ? 0 : lower, upper: Math.max(...scores), reason: actionState === 'unknown' ? 'action-unknown' : 'annotated' }
 }
 
-const isMechanism = (row) => row.programRuleBlocked || row.conventionBlocked
+const isMechanism = (row) => row.programRuleBlocked || row.rubricFieldBlocked || row.conventionBlocked
+/** 确认假阴性两类：程序规则拒收（`:614` 一族）与 rubric 与机读字段冲突（uncertain 组的 conflict）。 */
+const isConfirmedFalseNegative = (row) => row.programRuleBlocked || row.rubricFieldBlocked
 
-/** 归类固定词表：environment / veto / mechanism-blocked(program-rule|convention) /
- *  content-gap / clean。alsoBlocked、cascade、annotationBoundary 是并列标记而非类别。 */
+/** 归类固定词表：environment / veto / mechanism-blocked(program-rule|rubric-field|convention) /
+ *  content-gap(wrong-container) / clean。
+ *  三条判据来自人工过卷（方案 A）：
+ *  ① rubric-field：uncertain 组 rubric 写"保留旧活动事实或建立非活动冲突候选均可"，机读字段却要 conflict，
+ *     模型保留旧事实、无 entry 级动作 → 假阴性（人工作答两次独立确认）。
+ *  ② wrong-container：期望 add/correct 的内容只落在近期块、没有任何 entry 级动作落地 →
+ *     下一场不可用，属真实缺口，不算机制冤枉（人工作答确认 3 例）。
+ *  ③ convention：上一版把两者混算，已按 ①② 拆开；剩余仅作观察项。 */
 export function classifyCase(row) {
   if (row.environment) return { class: 'environment', sub: null }
   if ((row.primary.hardViolations ?? []).length || (row.alt?.hardViolations ?? []).length) return { class: 'veto', sub: null }
@@ -155,6 +178,10 @@ export function classifyCase(row) {
   if (row.programRuleBlocked) return { class: 'mechanism-blocked', sub: 'program-rule' }
   const checks = row.primary.checks ?? {}
   const omittedUnits = (row.primary.omitted ?? 0) > 0 || (row.primary.wrongNew ?? 0) > 0
+  if (row.expectedAction === 'conflict' && !row.entryActionLanded) return { class: 'mechanism-blocked', sub: 'rubric-field' }
+  if (row.expectedContainer === 'entry' && (row.expectedAction === 'add' || row.expectedAction === 'correct') && !row.entryActionLanded && !omittedUnits && row.lost > 0) {
+    return { class: 'content-gap', sub: 'wrong-container' }
+  }
   if (row.actionVerified === false && !omittedUnits) return { class: 'mechanism-blocked', sub: 'convention', detail: 'action-verb' }
   if (checks.attributionAndScope === false && !omittedUnits) return { class: 'mechanism-blocked', sub: 'convention', detail: 'category' }
   if (omittedUnits) return { class: 'content-gap', sub: null }
@@ -192,6 +219,8 @@ export function collectRun(run) {
       caseId,
       dimension: spec.dimension,
       weight: spec.weight,
+      expectedAction: spec.expectedAction ?? null,
+      expectedContainer: spec.expectedContainer ?? null,
       split: spec.split ?? null,
       safety: spec.safety ?? null,
       doubleRequired: doubleRequired.has(caseId),
@@ -200,6 +229,7 @@ export function collectRun(run) {
       receiptOutcome: receipt.outcome ?? null,
       rejectedGroups,
       landedActions: (receipt.results ?? []).filter((x) => x?.outcome === 'applied').map((x) => x.action),
+      entryActionLanded: (receipt.results ?? []).some((x) => x?.outcome === 'applied' && x.action !== 'recent'),
       failureOrigin: result.candidate?.failureOrigin ?? null,
       targetEligible: result.candidate?.targetEligible ?? null,
       targetShown: result.candidate?.targetShown ?? null,
@@ -230,6 +260,8 @@ export function collectRun(run) {
     row.sub = verdict.sub
     row.subDetail = verdict.detail ?? null
     row.conventionBlocked = verdict.class === 'mechanism-blocked' && verdict.sub === 'convention'
+    row.rubricFieldBlocked = verdict.class === 'mechanism-blocked' && verdict.sub === 'rubric-field'
+    row.humanReview = HUMAN_REVIEW[caseId] ?? null
     row.cascade = isMechanism(row) && row.primary.checks?.noForbiddenContent === false
     row.annotationBoundary = !primary.present || (alt === null && row.doubleRequired) || row.annotationDisagreement
     rows.push(row)
@@ -262,9 +294,11 @@ export function projectRound(rows, scope = 'program-rule') {
     max[row.dimension] += row.weight
     const credited = scope === 'none'
       ? false
-      : scope === 'all-mechanism'
+      : scope === 'all'
         ? isMechanism(row)
-        : row.class === 'mechanism-blocked' && row.sub === 'program-rule'
+        : scope === 'false-negative'
+          ? isConfirmedFalseNegative(row)
+          : row.class === 'mechanism-blocked' && row.sub === 'program-rule'
     dims[row.dimension] += credited ? row.weight : row.weight * (row.lower ?? 0)
   }
   const total = round2(Object.values(dims).reduce((n, v) => n + v, 0))
@@ -286,7 +320,7 @@ export function projectRound(rows, scope = 'program-rule') {
   }
 }
 
-const CLASS_ORDER = ['environment', 'veto', 'mechanism-blocked/program-rule', 'mechanism-blocked/convention', 'content-gap', 'unmeasured', 'clean/unexplained', 'clean']
+const CLASS_ORDER = ['environment', 'veto', 'mechanism-blocked/program-rule', 'mechanism-blocked/rubric-field', 'mechanism-blocked/convention', 'content-gap/wrong-container', 'content-gap', 'unmeasured', 'clean/unexplained', 'clean']
 
 export function summarize(rows) {
   const rounds = new Map()
@@ -333,10 +367,15 @@ export function renderMarkdown(rows, { legacyRows = [], generatedAt = new Date()
   out.push('')
   const impactful = falseNegatives.filter((r) => r.lost > 0)
   const signalOnly = falseNegatives.filter((r) => r.lost === 0)
+  const confirmed = falseNegatives.filter((r) => isConfirmedFalseNegative(r))
+  const pending = falseNegatives.filter((r) => !isConfirmedFalseNegative(r))
+  const sum = (list) => round2(list.reduce((n, r) => n + r.lost, 0))
   out.push('### 假阴性清单（机制拦截；按现行口径失分降序）')
   out.push('')
-  out.push('| 轮次 | 模型 | 案例 | 维/权重 | 失分 | 子类 | 拦截信号 | 说明 | 证据 |')
-  out.push('|------|------|------|---------|------|------|----------|------|------|')
+  out.push(`**确认假阴性 ${confirmed.length} 条／${sum(confirmed)} 分**：程序规则拒收 ${confirmed.filter((r) => r.sub === 'program-rule').length} 条 ＋ rubric 与机读字段冲突 ${confirmed.filter((r) => r.sub === 'rubric-field').length} 条（后者由人工过卷两次独立确认）。**待确认 ${pending.length} 条／${sum(pending)} 分**为 convention 类，多与容器或标签口径有关，须逐例人工过卷。`)
+  out.push('')
+  out.push('| 轮次 | 模型 | 案例 | 维/权重 | 失分 | 子类 | 拦截信号 | 说明 | 人工过卷 | 证据 |')
+  out.push('|------|------|------|---------|------|------|----------|------|----------|------|')
   for (const row of impactful) {
     const signal = [
       row.rejectedGroups.length ? `rejected=${[...new Set(row.rejectedGroups)].join(',')}` : null,
@@ -349,7 +388,8 @@ export function renderMarkdown(rows, { legacyRows = [], generatedAt = new Date()
       : (row.primary.omitted ?? 0) > 0
         ? '拦截导致单元缺失，非模型漏存'
         : '内容已覆盖，仅机制判负'
-    out.push(`| ${row.run} | ${row.model} | ${row.caseId} | ${row.dimension}/${row.weight} | ${row.lost} | ${row.sub === 'convention' ? `convention/${row.subDetail}` : row.sub} | ${signal} | ${note} | ${row.evidence} |`)
+    const human = row.humanReview ? `${row.humanReview.verdict}${row.humanReview.containerReliable ? '' : '（容器维度不可用）'}` : '未过卷'
+    out.push(`| ${row.run} | ${row.model} | ${row.caseId} | ${row.dimension}/${row.weight} | ${row.lost} | ${row.sub === 'convention' ? `convention/${row.subDetail}` : row.sub} | ${signal} | ${note} | ${human} | ${row.evidence} |`)
   }
   if (!impactful.length) out.push('| — | — | — | — | — | — | — | 无 | — |')
   out.push('')
@@ -369,16 +409,17 @@ export function renderMarkdown(rows, { legacyRows = [], generatedAt = new Date()
   out.push('')
   out.push('### 只读投影（把机制拦截例记满权重后的轮次判定；不是认证成绩）')
   out.push('')
-  out.push('| 轮次 | 官方冻结下界 | 现行口径复算 | 补程序规则拒收 | 补全部机制拦截 | 四维（补程序规则） | 可靠性 |')
-  out.push('|------|--------------|--------------|----------------|----------------|--------------------|--------|')
+  out.push('| 轮次 | 官方冻结下界 | 现行口径复算 | 补程序规则拒收 | 补确认假阴性 | 补全部机制 | 四维（补确认假阴性） | 可靠性 |')
+  out.push('|------|--------------|--------------|----------------|--------------|------------|----------------------|--------|')
   for (const [key, list] of [...rounds.entries()].sort()) {
-    const p1 = projectRound(list, 'program-rule')
-    const p2 = projectRound(list, 'all-mechanism')
+    const p1 = projectRound(list, 'false-negative')
+    const p2 = projectRound(list, 'all')
     const base = round2(list.reduce((n, r) => n + r.weight * (r.lower ?? 0), 0))
     const frozen = official[key]
     const frozenText = typeof frozen === 'number' ? round2(frozen) : '—'
+    const p0 = projectRound(list, 'program-rule')
     const scopeNote = p1.partial ? `已执行 ${p1.executed}/30，不判地板` : p1.floorPass ? '**总分与四维地板达标**（不含证据/否决门）' : '仍不达地板'
-    out.push(`| ${key} | ${frozenText} | ${base} | ${p1.total} | ${p2.total} | ${Object.entries(p1.dimensions).map(([k, v]) => `${k} ${v}/${p1.maxima[k]}`).join('、')} | ${p1.reliability.p}/${p1.reliability.n}（${scopeNote}） |`)
+    out.push(`| ${key} | ${frozenText} | ${base} | ${p0.total} | ${p1.total} | ${p2.total} | ${Object.entries(p1.dimensions).map(([k, v]) => `${k} ${v}/${p1.maxima[k]}`).join('、')} | ${p1.reliability.p}/${p1.reliability.n}（${scopeNote}） |`)
   }
   if (legacyRows.length) {
     const byHash = {}
