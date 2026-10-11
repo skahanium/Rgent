@@ -52,6 +52,14 @@ export type ProbeCase = {
   selection: string
 }
 
+/** 英文对照夹具（本次专门为「容器路由判据是否要覆盖英文」取证）：
+ *  两条工作状态 + 一条长期事实对照。语料里英文 add 提议为零，所以只能这样取证。 */
+export const PROBE_ENGLISH_CASES: ProbeCase[] = [
+  {id:'probe-en-progress',prompt:'Continue the Ashgrove draft check.',body:'【fictional fixture】Ashgrove has three drafts this round. Draft 1 has been checked. Draft 2 is blocked until the version number is confirmed. Do not start draft 3 before that.',context:'none',selection:'英文工作状态：是否会被写成长期条目'},
+  {id:'probe-en-pending',prompt:'Note where the Larkspur pilot stands.',body:'【fictional fixture】The Larkspur pilot is waiting on the vendor reply; nothing is approved yet.',context:'none',selection:'英文未决状态：同上'},
+  {id:'probe-en-durable',prompt:'Record the Kestrel workshop handout format.',body:'【fictional fixture】The Kestrel workshop confirmed A3 handouts for this edition; other workshops choose independently.',context:'none',selection:'英文对照：真正的项目事实，不得被拦'}
+]
+
 export const PROBE_CASES: ProbeCase[] = Object.keys(PROBE_SELECTION).map((id) => {
   const spec = V6_QUALITY_CASES.find((item) => item.id === id)
   if (!spec) throw Error('PROBE_CASE_MISSING:' + id)
@@ -60,7 +68,7 @@ export const PROBE_CASES: ProbeCase[] = Object.keys(PROBE_SELECTION).map((id) =>
     ? `${seeded.content}（${seeded.semantic === 'standing' ? '长期约定' : '项目事实'}，范围 ${seeded.scope}）`
     : '无')
   return { id, prompt: spec.prompt, body: spec.body, context, selection: PROBE_SELECTION[id]! }
-})
+}).concat(PROBE_ENGLISH_CASES)
 
 export function probePrompt(item: ProbeCase): string {
   return [

@@ -76,7 +76,7 @@ async function main(): Promise<void> {
       const credential = loadModelCredentialReadOnly(options.profile, safeStorage, model.recordId)
       return { modelId: credential.modelId, host: new URL(credential.baseURL).host, keyPresent: credential.apiKey.length > 0 }
     })
-    console.log(JSON.stringify({ wouldCall: total, limit, arm, system: system.slice(0, 40) + '…', systemHash: fingerprint(system), maxOutputTokens: PROBE_MAX_OUTPUT_TOKENS, encryptionAvailable: safeStorage.isEncryptionAvailable(), preflight }))
+    console.log(JSON.stringify({ wouldCall: total, limit, arm, system: system.slice(0, 40) + '…', systemHash: fingerprint(system), maxOutputTokens: arm === 'protocol' ? 4096 : PROBE_MAX_OUTPUT_TOKENS, encryptionAvailable: safeStorage.isEncryptionAvailable(), preflight }))
     return
   }
 

@@ -916,6 +916,46 @@ it('asks only suspect short refs to obsolete or keep and does not rewrite the co
  expect(f.service.snapshot().record.entries.find(e=>e.id===suspect.id)?.status).toBe('obsolete')
 })
 
+it('applies a contract-correct repair patch after an invalid action instead of rejecting the batch',async()=>{
+ // r11 实测形态：首轮给出非法 action（占位），修复轮给出合规补丁，但当时整条仍以 MEMORY_OUTPUT_INVALID 被拒、
+ // 旧值继续生效（审计单列 repair-not-applied，10 分）。这里用现码复现同一序列，确认是否仍会丢。
+ let calls=0
+ const f=await fixture(async function*(input){
+  calls++
+  const p=JSON.parse(String(input.messages[0]!.content))
+  const command=p.sources[0].id
+  if(calls===1){
+   yield {type:'text',text:JSON.stringify({recent:{goal:'更正本库项目记录顺序',completed:'',blocked:'',next:'',sourceIds:[command],assistantDraft:false},
+    proposals:[{action:'corrept_placeholder',content:'占位',scope:'占位',sourceIds:[command],semantic:'fact',attribution:'占位',reviewAt:null}]})}
+  }else{
+   const target=p.memory.find((e:any)=>e.semantic==='fact')
+   yield {type:'text',text:JSON.stringify({proposals:[{index:0,value:{action:'correct',target:target.id,content:'本库项目记录先写依据再写结论',scope:'本库',sourceIds:[command],semantic:'fact',attribution:'人的明确更正',reviewAt:null}}]})}
+  }
+  yield {type:'finish',reason:'stop'}},'更正：本库项目记录改成先写依据再写结论。')
+ const source=await f.service.sourceForPrompt('a.md','task')
+ const seed=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'本库项目记录先结论后依据',layer:'demand',scope:'本库',sources:[source],semantic:'fact',attribution:'人',reviewAt:null},true))
+ f.material.memoryDeps=[{id:seed.id,version:1,basisHashes:[source.basisHash],sourceDeps:[]}];vi.spyOn(f.service,'savedMaterial').mockResolvedValue(f.material)
+ await f.engine.handoff(f.material);await f.engine.idle()
+ const job=f.service.snapshot().record.jobs[0]
+ const results=job?.results??[]
+ expect(calls).toBe(2)
+ // 根因（r11 实测 + 代码考古）：当时的字段锁把"非法 action"也锁死，合规补丁改 action 就被判 MEMORY_OUTPUT_INVALID，
+ // 与合同「非法 action 可改成合法值」矛盾；a1cbab8 换成 repairFieldLock（区分 locked/mutable）后修好。这里把本质钉住：
+ const binding={sources:new Map(),candidates:new Map([['m1_x',{} as never]])} as never
+ // 合字段（content 等）永远可改；已合法的 action／group 与已绑定 target 锁死；
+ // 非法 action、非法 group、未绑定 target 必须放开，否则合规补丁无路可走。
+ expect(repairFieldLock({action:'corrept_placeholder',content:'占位'},binding).mutable).toContain('action')
+ expect(repairFieldLock({action:'corrept_placeholder',content:'占位'},binding).mutable).toContain('content')
+ expect(repairFieldLock({action:'correct',content:'占位'},binding).locked).toContain('action')
+ expect(repairFieldLock({action:'correct',content:'占位'},binding).mutable).toContain('content')
+ expect(repairFieldLock({action:'correct',content:'占位'},binding).mutable).toContain('target')
+ expect(repairFieldLock({action:'correct',target:'m1_x',content:'占位'},binding).locked).toContain('target')
+ expect(repairFieldLock({action:'correct',target:'m1_missing',content:'占位'},binding).mutable).toContain('target')
+ // 合规补丁必须落地：旧值退出、新值生效、且不是被 MEMORY_OUTPUT_INVALID 拒。
+ expect(results.some(r=>r.code==='MEMORY_OUTPUT_INVALID')).toBe(false)
+ expect(f.service.snapshot().record.entries.find(e=>e.id===seed.id)).toMatchObject({version:2,content:'本库项目记录先写依据再写结论',status:'active'})
+})
+
 it('routes work-state-shaped content away from durable entries and leaves durable content alone',async()=>{
  // 语料标定（229 条冻结产物、115 条 add 提议）：下面这些内容当时都被写成了长期条目，全是不该落成长期条目的形态。
  const routed=[
@@ -931,7 +971,9 @@ it('routes work-state-shaped content away from durable entries and leaves durabl
   '在版本号未定之前，不开始银桥第 3 份样稿。',
   '虚构项目银桥的核对工作尚未完成，需继续进行。',
   '银桥样稿第1份已完成。',
-  '青灯项目第 3 份尚未开始核对，目前只完成目录清点。'
+  '青灯项目第 3 份尚未开始核对，目前只完成目录清点。',
+  // 英文材料下的实测产物：两个模型都用中文作答，这条工作状态提议同样必须被拦。
+  'Ashgrove 本轮共三份样稿：Draft 1 已核对；Draft 2 因版本号未确认而受阻；Draft 3 须待 Draft 2 解除阻塞后才可开始'
  ]
  for(const content of routed)expect(workStateShaped(content)).toBe(true)
  // 反向：试卷期望的长期内容与实测正确产物一条都不能被拦。
@@ -941,7 +983,10 @@ it('routes work-state-shaped content away from durable entries and leaves durabl
   '仅石纹项目的评审材料要附成本表（合同要求），此规定仅适用于该项目，不外推至其他项目。',
   '石桥试验项目采用双周检查节奏，每两周检查一次。','青灯项目本轮共五份样稿。',
   '银桥项目采用 A 方案。','本库的项目记录先写依据再写结论。','银桥小组先看预算再看美术。',
-  '本库未来中文回答使用简体；引用的繁体原文保留原样。','Record the test project rationale in plain English.'
+  '本库未来中文回答使用简体；引用的繁体原文保留原样。','Record the test project rationale in plain English.',
+  // 英文对照夹具的长期事实（探针实测两模型都正常落成条目）：不得被拦。
+  'The Kestrel workshop confirmed A3 handouts for this edition; other workshops choose independently.',
+  'Kestrel workshop 已确认本届采用 A3 讲义；其他 workshop 各自独立选择讲义格式。'
  ]
  for(const content of durable)expect(workStateShaped(content)).toBe(false)
 })

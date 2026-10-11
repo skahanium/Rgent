@@ -188,6 +188,11 @@ export function classifyCase(row) {
   const entryAdds = (row.landedActions ?? []).filter((action) => action !== 'recent').length
   if (row.expectedAction === 'conflict' && !row.entryActionLanded) return { class: 'mechanism-blocked', sub: 'rubric-field' }
   // 修复轮给出了非空补丁、程序仍以 MEMORY_OUTPUT_INVALID 拒绝、旧内容继续生效：程序侧待查（不是模型放弃）。
+  // 修复补丁给出了非空值、程序仍以 MEMORY_OUTPUT_INVALID 拒绝、旧内容继续生效。
+  // 根因（代码考古，2026-10-11）：r11 执行提交 6802a9d 的字段锁把"非法 action"也锁死
+  // （['action','group',...target].some(k => value[k] !== old[k])），合规补丁一改 action 就被判非法，
+  // 与合同「非法 action 可改成合法值」矛盾；a1cbab8 换成 repairFieldLock（区分 locked/mutable）后修好。
+  // 现码有回归测试、不复现，因此这一类只描述历史行，不进入任何投影。
   if (row.failureOrigin === 'candidate' && row.receiptReason === 'MEMORY_OUTPUT_INVALID' && row.dispatches >= 2 && !row.repairAbandoned && checks.noForbiddenContent === false) {
     return { class: 'mechanism-blocked', sub: 'repair-not-applied' }
   }
