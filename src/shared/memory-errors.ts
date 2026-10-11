@@ -49,6 +49,7 @@ export const MEMORY_ERROR_MESSAGES = {
   "MEMORY_CONFIRMATION_REQUIRED": "记忆操作未完成，已有记录保留；请刷新状态并检查来源或模型设置。",
   "MEMORY_TARGET_NOT_FOUND": "没有找到要更新的记录（可能已被更正、遗忘或不在本场候选里）；本次长期更新未保存，近期背景不受影响。",
   "MEMORY_TEMPORARY_STANDING": "接续形口令没有长期标记，未保存为长期约定；近期背景不受影响。",
+  "MEMORY_ROUTED_TO_RECENT": "这段内容读起来是当前进展，已按近期工作背景保存，未写成长期条目。",
   "MEMORY_SIBLING_REMAINS": "仍有可能同一主张的旧条目未退出；已保存的更正保留，请查看记忆内容。",
   "MEMORY_PROGRAM_COMPLETED": "程序已补完可验证的退出或修复；请查看整理记录。",
   "MEMORY_MATERIAL_FORGOTTEN": "本材料或已知原依据已遗忘，或已越过学习水位；本次自动学习已拒绝，原笔记保留。",

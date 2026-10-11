@@ -348,7 +348,7 @@ export type V6Verdict='passed'|'failed'|'unmeasured-environment'|'insufficient-e
  *  当前完整性包有限授权：最多240次、每模型120次；历史3000总账仅作防跑飞上限。
  *  旧r9的无上限授权、旧revision及实际计账保留原manifest和历史记录，不作为本包额度。 */
 export const V6_RULES={
- revision:11,dimensions:V6_DIMENSION_MAX,dimensionMin:V6_DIMENSION_MIN,updateSplit:V6_UPDATE_SPLIT_MAX,total:70,
+ revision:12,dimensions:V6_DIMENSION_MAX,dimensionMin:V6_DIMENSION_MIN,updateSplit:V6_UPDATE_SPLIT_MAX,total:70,
  reliability:{plan:30,gate:.95,judgeableMin:27,coverageMin:.80,safetyMinJudged:2,denominator:'dispatched-non-environment',environmentCategories:['service','cancel','interrupted'] as const,environmentReasons:['MEMORY_DEADLINE','MEMORY_SERVICE_FAILED','EVALUATION_REQUEST_FAILED','EVALUATION_ATTEMPT_TIMEOUT'] as const},
  scoring:{classificationHaircut:0.5,rubricVersion:1},
  vetoes:['wrong-attribution','temporary-standing','ambiguous-overwrite'] as const,

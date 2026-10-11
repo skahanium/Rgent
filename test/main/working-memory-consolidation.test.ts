@@ -4,7 +4,7 @@ import path from 'node:path'
 import {afterEach,it,expect,vi} from 'vitest'
 import {VaultSession} from '../../src/main/vault.ts'
 import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
-import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions,roleAgreement,inheritInputs,memoryContinuitySystem,protocolRepairPlan,standingEscalationBlocked,suspectSiblingClaim,repairFieldLock} from '../../src/main/working-memory-consolidation.ts'
+import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions,roleAgreement,inheritInputs,memoryContinuitySystem,protocolRepairPlan,standingEscalationBlocked,suspectSiblingClaim,repairFieldLock,workStateShaped} from '../../src/main/working-memory-consolidation.ts'
 import {sameClaimIgnoringSemantic} from '../../src/main/working-memory-store.ts'
 import type {WorkingSource} from '../../src/main/working-memory-store.ts'
 import {createHash} from 'node:crypto'
@@ -914,6 +914,67 @@ it('asks only suspect short refs to obsolete or keep and does not rewrite the co
  expect(calls).toBe(2)
  expect(f.service.snapshot().record.entries.find(e=>e.id===standing.id)).toMatchObject({version:2,status:'active'})
  expect(f.service.snapshot().record.entries.find(e=>e.id===suspect.id)?.status).toBe('obsolete')
+})
+
+it('routes work-state-shaped content away from durable entries and leaves durable content alone',async()=>{
+ // 语料标定（229 条冻结产物、115 条 add 提议）：下面这些内容当时都被写成了长期条目，全是不该落成长期条目的形态。
+ const routed=[
+  '石桥项目检查节奏可能改为每周，该变化尚未决定。',
+  '雾港项目目前只完成了目录清点，尚未做出任何方案决定。',
+  '青灯项目本轮目标是核对五份样稿；已完成第 1、2 份的目录检查；第 3 份尚未开始。',
+  '银桥项目目前没有已批准安排。',
+  '虚构项目银桥的样稿核对目标为核对三份样稿；已完成第 1 份；第 2 份受阻于待确认的版本号；版本号未定之前不开始第 3 份',
+  '《银桥记录》甲批样稿已确认通过；乙批尚在目录检查阶段，尚未送审。',
+  '银桥项目目标是核对三份样稿；已完成第 1 份；第 2 份受阻于待确认的版本号；版本号未定之前不开始第 3 份。',
+  '银桥样稿核对已完成第 1 份。',
+  '银桥第 2 份样稿受阻，原因是版本号待确认。',
+  '在版本号未定之前，不开始银桥第 3 份样稿。',
+  '虚构项目银桥的核对工作尚未完成，需继续进行。',
+  '银桥样稿第1份已完成。',
+  '青灯项目第 3 份尚未开始核对，目前只完成目录清点。'
+ ]
+ for(const content of routed)expect(workStateShaped(content)).toBe(true)
+ // 反向：试卷期望的长期内容与实测正确产物一条都不能被拦。
+ const durable=[
+  '石桥项目每两周检查一次。','石桥项目检查每两周一次，已正式替代此前的每周一次。',
+  '纸鸢组要求自己的图表必须标单位。','纸鸢组在会议中提出要求：自己的图表必须带单位（「我们的图表必须标单位」）。该要求归属纸鸢组，不是记录者或使用者的通用偏好。',
+  '仅石纹项目的评审材料要附成本表（合同要求），此规定仅适用于该项目，不外推至其他项目。',
+  '石桥试验项目采用双周检查节奏，每两周检查一次。','青灯项目本轮共五份样稿。',
+  '银桥项目采用 A 方案。','本库的项目记录先写依据再写结论。','银桥小组先看预算再看美术。',
+  '本库未来中文回答使用简体；引用的繁体原文保留原样。','Record the test project rationale in plain English.'
+ ]
+ for(const content of durable)expect(workStateShaped(content)).toBe(false)
+})
+
+it('rejects a work-state addition on the production path while the recent block still commits',async()=>{
+ const proposal=(input:ModelStepInput,content:string)=>{const data=JSON.parse(String(input.messages[0]!.content));return {action:'add',content,scope:'本库',sourceIds:[data.sources[0].id],semantic:'fact',attribution:'人在本场说明',reviewAt:null}}
+ const blocked=await fixture(async function*(input){
+  yield {type:'text',text:JSON.stringify({recent:{goal:'核对银桥三份样稿',completed:'第 1 份已完成核对',blocked:'第 2 份受阻于待确认的版本号',next:'',sourceIds:[JSON.parse(String(input.messages[0]!.content)).sources[0].id],assistantDraft:false},proposals:[proposal(input,'银桥样稿核对已完成第 1 份。')]})}
+  yield {type:'finish',reason:'stop'}},'继续虚构项目银桥的样稿核对。')
+ await blocked.engine.handoff(blocked.material);await blocked.engine.idle()
+ // 工作状态不得落成长期条目，但近期背景照常提交——拒绝不丢信息。
+ expect(blocked.service.snapshot().record.entries).toHaveLength(0)
+ expect(blocked.service.snapshot().record.recent).toHaveLength(1)
+ expect(blocked.service.snapshot().record.recent[0]?.recent.sections.completed).toBe('第 1 份已完成核对')
+ expect(blocked.service.snapshot().record.jobs[0]?.results).toContainEqual({action:'add',outcome:'rejected',code:'MEMORY_ROUTED_TO_RECENT'})
+ // 同一条口令下，真正的项目事实照常落地。
+ const allowed=await fixture(async function*(input){
+  yield {type:'text',text:JSON.stringify({recent:null,proposals:[proposal(input,'银桥项目本轮共三份样稿。')]})}
+  yield {type:'finish',reason:'stop'}},'继续虚构项目银桥的样稿核对。')
+ await allowed.engine.handoff(allowed.material);await allowed.engine.idle()
+ expect(allowed.service.snapshot().record.entries).toHaveLength(1)
+ expect(allowed.service.snapshot().record.entries[0]).toMatchObject({content:'银桥项目本轮共三份样稿。',status:'active'})
+})
+
+it('leaves the historical evaluation arm unchanged',async()=>{
+ const proposal=(input:ModelStepInput,content:string)=>{const data=JSON.parse(String(input.messages[0]!.content));return {action:'add',content,scope:'本库',sourceIds:[data.sources[0].id],semantic:'fact',attribution:'人在本场说明',reviewAt:null}}
+ // 历史臂的响应形态不同：只认 proposals，且要求 layer。
+ const historical=await fixture(async function*(input){
+  yield {type:'text',text:JSON.stringify({proposals:[{...proposal(input,'银桥样稿核对已完成第 1 份。'),layer:'demand'}]})}
+  yield {type:'finish',reason:'stop'}},'继续虚构项目银桥的样稿核对。',undefined,true)
+ await historical.engine.handoff(historical.material);await historical.engine.idle()
+ // 历史臂保持原样：路由判据只在生产 continuity 路径生效，r9–r13 可复现性不受影响。
+ expect(historical.service.snapshot().record.entries).toHaveLength(1)
 })
 
 it('blocks continuation-shaped standing without a long marker and still allows a real standing command',async()=>{

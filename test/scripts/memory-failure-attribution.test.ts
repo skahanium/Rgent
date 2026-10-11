@@ -1,7 +1,9 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
+import { readdirSync, readFileSync } from 'node:fs'
 import { V6_RULES, V6_SCORING_CATEGORIES } from '../../scripts/memory-quality-support.ts'
+import { workStateShaped } from '../../src/main/working-memory-consolidation.ts'
 import { V6_QUALITY_CASES } from '../fixtures/v6-memory-quality.ts'
 // @ts-ignore 审计脚本为 .mjs：可被 node 直接运行，不参与 tsc 类型检查
 import * as audit from '../../scripts/memory-failure-attribution.mjs'
@@ -155,4 +157,47 @@ it.skipIf(!present)('renders a byte-stable report', () => {
   expect(first).toContain('假阴性清单')
   expect(first).toContain('不是认证成绩')
   expect(first).toContain('人工过卷')
+})
+
+it('surfaces a routing rejection as a program-side rule so the audit reviews it, never hides it', () => {
+  // 程序按合同拒绝的码一律进这一族：将来若路由判据拦掉了试卷期望的长期内容，它会以「确认假阴性（程序规则）」
+  // 出现在清单里等人工过卷，而不是安静地算成模型失分。
+  expect(audit.PROGRAM_RULE_CODES).toContain('MEMORY_ROUTED_TO_RECENT')
+  expect(audit.PROGRAM_RULE_CODES).toContain('MEMORY_TEMPORARY_STANDING')
+})
+
+it.skipIf(!present)('reproduces the corpus calibration behind the work-state routing rule', () => {
+  // 判据的标定基线：229 条冻结产物、115 条 add 提议。命中必须全部是不该落成长期条目的提议，
+  // 且每条命中所在响应都另有非空近期块（拒绝不丢信息）。数字变了就说明判据或语料变了，必须重新论证。
+  const container = (id: string) => {
+    const spec = V6_QUALITY_CASES.find((item) => item.id === id)!
+    return spec.expected.targetCategory ?? (spec.direction === 'recent' ? 'recent' : 'entry')
+  }
+  let adds = 0
+  const hits: { caseId: string; container: string; carriedByRecent: boolean }[] = []
+  for (const run of audit.RUNS as { dir: string }[]) {
+    for (const name of readdirSync(run.dir).filter((entry) => entry.startsWith('result-'))) {
+      const record = JSON.parse(readFileSync(join(run.dir, name), 'utf8'))
+      const caseId = String(record.key ?? '').split('/').pop() ?? ''
+      for (const response of record.responses ?? []) {
+        const raw = String(response?.body ?? '').trim().replace(/^```json\s*/, '').replace(/\s*```$/, '')
+        if (!raw) continue
+        let parsed: any
+        try { parsed = JSON.parse(raw) } catch { continue }
+        if (!parsed || typeof parsed !== 'object') continue
+        const recent = parsed.recent
+        const carried = !!recent && typeof recent === 'object' && ['goal', 'completed', 'blocked', 'next'].some((key) => String(recent[key] ?? '').trim())
+        for (const proposal of parsed.proposals ?? []) {
+          if (!proposal || proposal.action !== 'add') continue
+          adds += 1
+          if (workStateShaped(String(proposal.content ?? ''))) hits.push({ caseId, container: container(caseId), carriedByRecent: carried })
+        }
+      }
+    }
+  }
+  expect(adds).toBe(115)
+  expect(hits).toHaveLength(13)
+  // 唯一落在长期期望案例上的是 r10 ambiguous-01：该例期望动作本来就是 unchanged（模型多加了一条生效事实）。
+  expect(hits.filter((hit) => hit.container === 'entry').map((hit) => hit.caseId)).toEqual(['v6-ambiguous-01'])
+  expect(hits.every((hit) => hit.carriedByRecent)).toBe(true)
 })

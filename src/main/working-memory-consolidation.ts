@@ -239,6 +239,17 @@ const STANDING_MARKER=/(?:以后|今后|长期|固定偏好|作为约定|from no
 export function standingEscalationBlocked(command:string):boolean{
  return CONTINUATION_SHAPE.test(command)&&!STANDING_MARKER.test(command)
 }
+/** 工作状态形态：进度、受阻、待定这类内容属于近期工作背景，不是长期知识。
+ *  标记集只收语料实证过的词，不收"看起来也该收"的词：`下一步` 在 229 条产物里零命中，
+ *  却把 v5 链式夹具第 5 步的长期事实（青灯项目下一步核对版本号）误伤，故剔除。
+ *  扩集必须先给新证据并重跑标定测试。
+ *  标定依据：229 条冻结产物里的 115 条 add 提议中命中 13 条，13 条全是本不该落成长期条目的提议
+ *  （12 条落在期望近期的案例上，1 条是对未核实变化另开生效事实）；13 条所在响应都另有非空近期块，
+ *  因此拒绝不会丢信息。试卷 28 个长期期望单元只命中 1 个，而该例期望动作是 unchanged。 */
+const WORK_STATE_SHAPE=/(?:已完成|未完成|尚未|未开始|不开始|待确认|受阻|目前)/u
+export function workStateShaped(content:string):boolean{
+ return WORK_STATE_SHAPE.test(content)
+}
 const CLAIM_STOP=new Set('本库,项目,本轮,虚构,样稿,工作,核对,记录,要求,版本,长期,以后,先,再,给,列,写,的,是,这,要,一份,五份,三份'.split(','))
 function distinctiveClaimTerms(text:string):string[]{
  let stripped=text
@@ -541,6 +552,10 @@ export class WorkingMemoryConsolidation{
    const proposed=proposalGroups(values,sources,entries,Boolean(continuity));let groups=proposed.groups.filter(group=>{
     if(continuity&&standingEscalationBlocked(job.material.prompt)&&group.some(c=>c.input.semantic==='standing'&&c.action!=='obsolete')){
      proposed.dropped.push({action:group[0]!.action,outcome:'rejected',code:'MEMORY_TEMPORARY_STANDING'});return false
+    }
+    // 容器路由：工作状态形态的新增一律不落长期条目（近期块独立提交，见合同「程序必须做完的」）。
+    if(continuity&&group.some(c=>c.action==='add'&&workStateShaped(c.input.content))){
+     proposed.dropped.push({action:group[0]!.action,outcome:'rejected',code:'MEMORY_ROUTED_TO_RECENT'});return false
     }
     return true
    })
