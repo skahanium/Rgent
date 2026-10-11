@@ -21,6 +21,8 @@
     "src/**/*",
     "test/**/*",
     "scripts/memory-quality-*.ts",
+    "scripts/memory-probe-cases.ts",
+    "scripts/memory-protocol-probe.ts",
     "electron.vite.config.ts",
     "vitest.config.ts"
   ]

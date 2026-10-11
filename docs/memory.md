@@ -226,7 +226,7 @@ r11 暴露的不是「模型一律不会」，而是程序把可验证工作推�
 | r10 `ambiguous-01`、r10／r12 `ambiguous-10`、r10 `chain-beta-4` | 8.5 | 真错（另开生效事实） | 对未核实变化另行 `add` 一条 active 事实，违反「禁止另开 active 事实」 |
 | r11／r12 `chain-alpha-4` | 2 | 真错 | 旧顺序仍生效（一个因模型在修复轮主动放弃，一个因未落地） |
 
-**新发现（未修，待查）**：`r11 DeepSeek correction-01` 丢 10 分不是模型判断问题——首轮输出 `corrept_placeholder`／占位，**修复轮给出了合规的 `correct` 补丁**（`{"index":0,"value":{"action":"correct","target":"m1_…","content":"石桥项目检查每两周一次，已替代每周一次。"}}`），程序仍以 `MEMORY_OUTPUT_INVALID` 拒绝，旧「每周」条目继续生效。单列为 `repair-not-applied`，**不计入任何投影**。
+**新发现（当时待查，已于同日查明）**：`r11 DeepSeek correction-01` 丢 10 分不是模型判断问题——首轮输出 `corrept_placeholder`／占位，**修复轮给出了合规的 `correct` 补丁**（`{"index":0,"value":{"action":"correct","target":"m1_…","content":"石桥项目检查每两周一次，已替代每周一次。"}}`），程序仍以 `MEMORY_OUTPUT_INVALID` 拒绝，旧「每周」条目继续生效。单列为 `repair-not-applied`，**不计入任何投影**；根因（r11 字段锁把非法 action 也锁死）与现码回归见下文「两笔旧账收口」。
 
 ### 二、MiniMax `ambiguous-overwrite` 触发条件（零调用）
 
@@ -285,7 +285,7 @@ WORK_STATE_SHAPE = /(?:已完成|未完成|尚未|未开始|不开始|待确认|
 
 **标记集只收语料实证过的词**：初版曾收 `下一步`（零命中），结果把 v5 链式夹具第 5 步的长期事实「青灯项目下一步核对版本号」误伤、`pnpm test` 变红——按最小干预剔除；扩集必须先给新证据并重跑标定测试（已钉进 `test/scripts/memory-failure-attribution.test.ts`）。
 
-### 实现（`src/main/working-memory-consolidation.ts:243`、`:549`）
+### 实现（`src/main/working-memory-consolidation.ts:249`（`workStateShaped`）、`:558`（守卫拒绝））
 
 - 新增导出纯函数 `workStateShaped(content)`；在既有守卫（`standingEscalationBlocked` 那条）**之后**追加一条分支：`continuity` 路径下，组内任一 `add` 命中即整组以 `MEMORY_ROUTED_TO_RECENT` 拒绝，近期块照常提交。
 - 只在生产 `continuity` 路径生效；历史评测臂（`forHistoricalEvaluation`）行为不变，r9–r13 可复现性不受影响（有回归用例）。
@@ -319,4 +319,4 @@ WORK_STATE_SHAPE = /(?:已完成|未完成|尚未|未开始|不开始|待确认|
 | `probe-en-pending`（工作状态） | 推理吃满上限、空输出（已知坑） | 未提议长期条目 ✅ |
 | `probe-en-durable`（长期对照） | `add`/`fact`，正常落成 ✅ | `add`/`fact`，正常落成 ✅ |
 
-**两个模型对英文材料都用中文作答**，6 条回答里英文提议为 0。结论：英文标记**没有证据支撑、暂不加入**；判据维持中文标记集，扩集仍须先给证据并重跑标定测试（英文对照句与那条中文工作状态提议都已钉进单元表）。限制：夹具 3 条、1 条截断，只说明本次取证范围内不构成缺口，不等于英文永远安全。
+**两个模型对英文材料都用中文作答**，6 条回答里英文提议为 0。结论：英文标记**没有证据支撑、暂不加入**；判据维持中文标记集，扩集仍须先给证据并重跑标定测试（英文对照句与那条中文工作状态提议都已钉进单元表）。限制：夹具 3 条、1 条截断，只说明本次取证范围内不构成缺口，不等于英文永远安全。信封与账：该取证 **6 次调用**（≤8），单独记账于 `.cache/memory-quality/2026-10-11-probe-en/`，总账口径 `1511 + 6 = 1517／3000`。

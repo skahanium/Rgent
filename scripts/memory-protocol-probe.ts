@@ -113,11 +113,9 @@ async function main(): Promise<void> {
       let reason: string | null = null
       try {
         for await (const event of streamModelStep({
-          provider: credential.provider,
           baseURL: credential.baseURL,
           apiKey: credential.apiKey,
           modelId: credential.modelId,
-          contextTokens: credential.contextTokens,
           system,
           messages: [{ role: 'user', content: user }],
           maxOutputTokens: arm === 'protocol' ? 4096 : PROBE_MAX_OUTPUT_TOKENS,

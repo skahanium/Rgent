@@ -2097,10 +2097,10 @@ DeepSeek 另有 5 项动作未落地、4 项检查失败：`v6-correction-01` �
 - 输入四个冻结目录：r10 `09ded560…`（60 例）、r11 `916bbf27…`（33 例）、r12 `0f20b2d6…`（90 例）、r13 `39611d5c…`（46 例），合计 **229** 个整理案例实例。分类统计、假阴性清单、逐轮投影与人工过卷逐例判定见[研究专题](memory.md#2026-10-10-失败例归属审计零调用)；复现：`node scripts/memory-failure-attribution.mjs`。
 - 复算与冻结值同源对照：r10 两模型、r11 MiniMax、r12 MiniMax、r13 两模型的复算下界与各自冻结下界**逐位相同**；差异只出现在换过尺子的两处——r11／r12 DeepSeek 因分类 0.5 剔头 +2～2.5，r12 第 2 轮因非评分类别过滤 −3。
 - **r13 DeepSeek 首轮的「未通过」只差一个程序规则拦截**：`v6-correction-01` 的模型提议正确、目标已展示，被 `MEMORY_DEPENDENCY_CHANGED` 整组拒绝。补回该例后总分 89.17、四维全部过 60% 地板；再补确认假阴性为 92.67。**这是只读投影（不含证据门与否决门），不是认证成绩；r13 冻结判定仍是 failed／79.17。**
-- **人工过卷（10 例）把假阴性范围收窄为两类**：程序规则拒收 9 条／15.5 分 ＋ rubric 与机读字段冲突 8 条／11 分（`uncertain` 组 rubric 写「保留旧活动事实或建立非活动冲突候选均可」，机读字段却要 `conflict`；同组 `ambiguous-01` 要 `unchanged`，字段自相矛盾）。**3 条／6 分从假阴性名单移出**：期望落成 entry 的内容只写进近期块（14 天过期）是真实缺口。待确认 `convention` 类 12 条／26 分，其中 3 条／3.5 分是「落地 `add` 而非 `conflict`」的未确认变体（不预设为假阴性）；r12 两模型各有一条落地 `conflict` 且满分，说明该期望可达。
+- **人工过卷（10 例）把假阴性范围收窄为两类**：程序规则拒收 9 条／15.5 分 ＋ rubric 与机读字段冲突 8 条／11 分（`uncertain` 组 rubric 写「保留旧活动事实或建立非活动冲突候选均可」，机读字段却要 `conflict`；同组 `ambiguous-01` 要 `unchanged`，字段自相矛盾）。**3 条／6 分从假阴性名单移出**：期望落成 entry 的内容只写进近期块（14 天过期）是真实缺口。待确认 `convention` 类 12 条／26 分，其中 3 条／3.5 分是「落地 `add` 而非 `conflict`」的未确认变体（不预设为假阴性）；r12 两模型各有一条落地 `conflict` 且满分，说明该期望可达。**该 12 条已于同日逐例收口并归零**，见[试卷修订、协议修复与归属收口](#2026-10-11-试卷修订协议修复与归属收口)（分类词表同时定稿）。
 - 过卷同时暴露**方法缺陷**：题面术语（`近期工作背景`／`长期`）未先定义；上游状态带类型标签，导致第 7、9 例的容器维度不可用（脚本标 `containerReliable=false`）。下次同类实验须先给定义、上游状态不带标签。
 - 反例：`test/main/working-memory-consolidation.test.ts`「admits a correction whose own command source carries the replaced version as a session edge」先红（收到 `MEMORY_DEPENDENCY_CHANGED`）后绿；`test/main/working-memory-consolidation.test.ts:786` 同批互依更正仍两条拒绝、`:498` 更正自身仍落地，均未改断言。
-- 产品改动：新增一行（`src/main/working-memory-consolidation.ts:554`）为该变更计算 `self`（`add` 为空，其余取自身 `id`＋`version`），并在下一行作为第 6 个实参传给 `inheritInputs`；`:614` 的 `staleBatchDependency` 判定语义未动，仍拦截跨条目互依。
+- 产品改动：新增一行（`src/main/working-memory-consolidation.ts:569`）为该变更计算 `self`（`add` 为空，其余取自身 `id`＋`version`），并在下一行作为第 6 个实参传给 `inheritInputs`；`:627` 的 `staleBatchDependency` 判定语义未动，仍拦截跨条目互依。
 
 ### 剩余边界
 
@@ -2135,7 +2135,7 @@ DeepSeek 另有 5 项动作未落地、4 项检查失败：`v6-correction-01` �
 - 2 例 `off-topic` 是推理 token 吃满 512 上限导致（非拒答、非判断失败）；按预注册规则未调参重跑。**下次同类对照须按模型配置推理预算。**
 - 探针测的是判断，不是正式管线能力；**不构成认证成绩**，正式成绩仍只以冻结跑为准。
 - 调用记账：探针 12 次单独记账，总账口径 **1507 + 12 = 1519／3000**（共享 journal 未改，故其自身仍显示 1507）。
-- 未做：按结论修改整理提示／协议（需另立授权）；查 MiniMax `ambiguous-overwrite` 的触发条件；`convention` 12 条／26 分的逐例过卷。
+- 未做：按结论修改整理提示／协议（需另立授权）；查 MiniMax `ambiguous-overwrite` 的触发条件；`convention` 12 条／26 分的逐例过卷。**三项均已于同日完成**，见[试卷修订、协议修复与归属收口](#2026-10-11-试卷修订协议修复与归属收口)。
 - Windows／CI／原生输入法／用户视觉与人工语义复核仍待。
 
 ## 2026-10-11 试卷修订、协议修复与归属收口
@@ -2156,7 +2156,7 @@ DeepSeek 另有 5 项动作未落地、4 项检查失败：`v6-correction-01` �
 - **试卷修订影响**：确认假阴性 8 条／11 分（`conflict`→`unchanged`）＋口径债 3 条／6 分（机械护栏）。只读投影：r13 DeepSeek 首轮 79.17 → 89.17 → 92.67 → **94.67**；r12 DeepSeek 第二轮 79.7 → 80.7 → **82.7**，事实维回到 **12/20 地板**、该轮投影**转为达门**（`test/scripts/v6-memory-quality.test.ts`「r12 DeepSeek 第二轮只读投影」钉住，含官方冻结 failed／82.7／事实维 8 不变）。**均为投影，不是认证成绩。**
 - **协议臂验证 5/8，未达预注册门槛**（≥8）：三类被修复的失败全部消失（未核实不 `obsolete` 2/2、空提议即完整回答 2/2、长期内容落成条目 4/4），但「近期 vs 长期容器路由」零改善（MiniMax `recent-blocked-01` 把进度整段落成三条长期事实）。协议臂 `systemHash` 与冻结单 `promptHash` 逐位相同（`764bb7e9…`）。
 - **真实跑器**：revision 11 下 `correction-01` 两模型均 `correct` 落地、旧值被替代（该例在 r13 丢 10 分）；冻结单 `9bddabc8…`、执行提交 `cbbbef8`、新增 2 次调用（总账 1509／3000）。其余案例因冻结协议的「边跑边双标」门（每条已派发行须先完成标注才派下一条）未继续派发，未产生未标注的付费行。
-- **未修待查**：`r11 DeepSeek correction-01` 修复轮给出合规补丁仍被 `MEMORY_OUTPUT_INVALID` 拒绝，单列 `repair-not-applied`（10 分），**不计入任何投影**。
+- **未修待查 → 已查明**：`r11 DeepSeek correction-01` 修复轮给出合规补丁仍被 `MEMORY_OUTPUT_INVALID` 拒绝，当时单列 `repair-not-applied`（10 分），**不计入任何投影**；根因与现码回归见[旧账收口](#2026-10-11-旧账收口)。
 - 工程修复三处：探针启动计时器误杀长轮次（改为就绪握手）、协议臂输出上限按生产 4096 配置（MiniMax 在 2048 下 3/4 截断）、Electron 在收紧后的本机沙箱下需 `--disable-gpu --no-sandbox`（无窗口工具、不渲染不可信内容）。
 
 ### 剩余边界
@@ -2175,7 +2175,7 @@ DeepSeek 另有 5 项动作未落地、4 项检查失败：`v6-correction-01` �
 | 包 | 内容 | 状态与必要门 |
 |----|------|------------|
 | 1 判据标定 | 口令文本预测容器 30 例错 8，改看内容形态；语料 115 条 `add` 提议命中 13 条 | 已交：标定复现钉进 `test/scripts/memory-failure-attribution.test.ts` |
-| 2 产品判据 | `workStateShaped` ＋ 守卫分支（`src/main/working-memory-consolidation.ts:243`、`:549`），码 `MEMORY_ROUTED_TO_RECENT` | 已交：只在生产 `continuity` 路径，历史臂回归用例 |
+| 2 产品判据 | `workStateShaped` ＋ 守卫分支（`src/main/working-memory-consolidation.ts:249`（`workStateShaped`）、`:558`（守卫拒绝）），码 `MEMORY_ROUTED_TO_RECENT` | 已交：只在生产 `continuity` 路径，历史臂回归用例 |
 | 3 可见性 | `src/shared/memory-errors.ts` 文案；审计 `PROGRAM_RULE_CODES` 收录该码 | 已交：互锁用例 |
 | 4 运行标识 | `V6_RULES.revision` 11 → 12 | 已交：不改 70／各维 60%／权重／题目 |
 | 5 验证 | 真机小信封（≤4 次调用） | 见证据 |
@@ -2200,3 +2200,29 @@ DeepSeek 另有 5 项动作未落地、4 项检查失败：`v6-correction-01` �
 - 反方向（该长期保存的内容只写进近期块）由提示词修复覆盖（协议臂 4/4），程序级保证需第二次调用，另立授权。
 - 残余风险：合法长期内容若同时含状态词且被近期块覆盖会被拒绝；整理记录会显示该码，人可在记忆页手工补录。
 - 不改 r9–r13 冻结判定与官方成绩；不 publish；未重跑 r14 全卷。
+
+## 2026-10-11 旧账收口
+
+范围以[旧账收口局部授权](decisions.md#2026-10-11-旧账收口局部授权)为准：查明 `repair-not-applied` 归属，并就英文工作状态是否纳入容器路由判据取证。不改 70／各维 60%／权重／试卷题目；不改写 r9–r13 冻结判定；不 publish；未跑 r14 全卷。
+
+| 包 | 内容 | 状态与必要门 |
+|----|------|------------|
+| 1 修复路径考古 | r11 执行提交 `6802a9d` 的补丁校验把非法 action 也锁死 → 合规补丁被判 `MEMORY_OUTPUT_INVALID`；`a1cbab8` 的 `repairFieldLock` 修好 | 已交：零调用；根因与修复提交写进审计脚本注释与[研究专题](memory.md#两笔旧账收口2026-10-11) |
+| 2 现码回归 | 复现 r11 同一序列（首轮非法 action → 修复轮合规补丁），断言补丁落地、旧值退出、无 `MEMORY_OUTPUT_INVALID`；钉住 `repairFieldLock` 锁／放语义 | 已交：集成用例，先红后绿（第一版断言把 content 当 locked，被测试纠正） |
+| 3 英文取证 | 新增 3 条英文虚构夹具（2 工作状态 + 1 长期对照），走协议臂 3 例 × 2 模型 = **6 次调用** | 已交：见证据 |
+| 4 判据结论 | 英文提议 0 条 → **英文标记不加**；边界改为「有取证、未观察到缺口」 | 已交：英文对照句与那条中文工作状态提议钉进单元表 |
+| 5 文档 | 两笔旧账收口写进[研究专题](memory.md#两笔旧账收口2026-10-11) | 已交 |
+
+### 证据
+
+- **修复路径**：r11 实测首轮 `action:"corrept_placeholder"` 占位、修复轮给出合规 `correct` 补丁，旧代码 `['action','group',...target].some(k => value[k] !== old[k])` 因 action 变化判非法 → 整条拒绝、旧「每周」继续生效。`repairFieldLock`（已合法 action／group 与已绑定 target 锁死；非法 action／非法 group／未绑定 target 放开；content 等永远可改）修好后 r12／r13 无同类行；现码回归测试证明不复现。该类只描述历史行、**不进入任何投影**。
+- **英文取证 6 次调用**：`probe-en-progress` MiniMax 提议了一条**中文**长期条目（含「受阻」）→ 被现有标记集拦下；DeepSeek 未提议。`probe-en-pending` 两模型均未提议长期条目（DeepSeek 该例推理吃满上限、空输出）。`probe-en-durable` 两模型均正常落成 `add`/`fact`。**6 条回答里英文提议 0 条**，与语料一致（英文 `add` 提议 0 条）。
+- 账：英文探针 6 次（≤8），单独记账 `.cache/memory-quality/2026-10-11-probe-en/`，总账口径 `1511 + 6 = 1517／3000`。
+- 自查轮附带修掉两处工程缺陷：`tsconfig.json` 原先不覆盖探针 TS（`pnpm test` 的类型检查静默跳过它们），纳入后**当场抓出两个真实类型错误**（探针给 `streamModelStep` 传了并不存在的 `provider` 与 `contextTokens` 字段，运行时被忽略、类型检查才能看见），已删并复验；同时修正因新增代码而漂移的四处行号引用。
+
+### 剩余边界
+
+- 英文只做了 3 条夹具取证（1 条截断），**不等于英文永远安全**；扩集须先给证据并重跑标定。
+- `repair-not-applied` 是历史行，不因已修而改写 r11 冻结判定。
+- 探针与考古都不构成认证成绩；未 publish、未跑 r14 全卷。
+- Windows／CI／原生输入法／用户视觉与人工语义复核仍待。
