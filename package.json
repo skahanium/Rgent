@@ -14,7 +14,8 @@
     "test": "node scripts/build-native.mjs && tsc --noEmit && vitest run",
     "docs:check": "node scripts/check-docs.mjs",
     "ui:check": "node scripts/verify-ui.mjs",
-    "memory:check": "node scripts/check-memory.mjs"
+    "memory:check": "node scripts/check-memory.mjs",
+    "probe:check": "node scripts/check-probe.mjs"
   },
   "engines": {
     "node": ">=20"
