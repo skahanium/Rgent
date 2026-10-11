@@ -13,6 +13,7 @@ if(args.includes('--help')||args.includes('-h')){
  console.log('pnpm probe:check -- --profile PATH --models RECORD_ID,RECORD_ID [--report PATH] [--cases ID,ID] [--limit 16] [--print-prompts]')
  console.log('协议剥离对照探针（方案 C）：同一批虚构材料、同一句提问，不给 JSON 协议与字段清单。')
  console.log('--print-prompts 只打印题面与将发生的调用次数，不发生任何调用。')
+ console.log('--arm protocol 用生产 continuity 提示词与同形载荷（默认 free-text：协议剥离）。')
  process.exit(0)
 }
 const pathValue=(name,fallback)=>{
@@ -28,7 +29,8 @@ const options={
  models:(value('--models')??'').split(',').filter(Boolean),
  cases:(value('--cases')??'').split(',').filter(Boolean),
  limit:Number(value('--limit')??16),
- printPrompts:args.includes('--print-prompts')
+ printPrompts:args.includes('--print-prompts'),
+ arm:value('--arm')==='protocol'?'protocol':'free-text'
 }
 if(!options.profile||!options.models.length){console.error('Explicit profile and model record IDs required.');process.exit(1)}
 if(!Number.isSafeInteger(options.limit)||options.limit<1||options.limit>16){console.error('PROBE_CALL_LIMIT');process.exit(1)}
@@ -37,12 +39,15 @@ const out=path.join(root,'out','memory-probe'),pkg=JSON.parse(readFileSync(path.
 const productionConfig=await loadConfigFromFile({command:'build',mode:'production'},path.join(root,'electron.vite.config.ts'))
 await build({define:productionConfig.config.main.define,configFile:false,logLevel:'error',build:{outDir:out,emptyOutDir:true,target:'node22',minify:false,lib:{entry:path.join(root,'scripts','memory-protocol-probe.ts'),formats:['es'],fileName:()=> 'probe.mjs'},rollupOptions:{external:['electron',...Object.keys(pkg.dependencies),...builtinModules,...builtinModules.map(n=>'node:'+n)]}}})
 copyFileSync(path.join(root,'build/Release/rgent_fs.node'),path.join(out,'rgent_fs.node'))
-const child=spawn(require('electron'),[path.join(out,'probe.mjs')],{cwd:root,stdio:['inherit','pipe','inherit'],env:{...process.env,ELECTRON_RUN_AS_NODE:undefined,RGENT_PROBE_OPTIONS:JSON.stringify(options)}})
+const child=// 无窗口开发工具：只读凭据、只发虚构材料的固定请求，不渲染不可信内容，因此关掉 GPU 与 Chromium 沙箱。
+spawn(require('electron'),['--disable-gpu','--no-sandbox',path.join(out,'probe.mjs')],{cwd:root,stdio:['inherit','pipe','inherit'],env:{...process.env,ELECTRON_RUN_AS_NODE:undefined,RGENT_PROBE_OPTIONS:JSON.stringify(options)}})
 const startupTimer=setTimeout(()=>{console.error('PROBE_STARTUP_TIMEOUT');child.kill('SIGTERM')},60000)
 // 单例硬超时：每例最多 120 秒模型请求，串行 12 例留 15 分钟总门。
 const totalTimer=setTimeout(()=>{console.error('PROBE_TOTAL_TIMEOUT');child.kill('SIGTERM')},900000)
 const clearTimers=()=>{clearTimeout(startupTimer);clearTimeout(totalTimer)}
-child.stdout.on('data',chunk=>{process.stdout.write(chunk)})
+// 首个输出即视为启动成功：启动计时器只防「进程起不来」，不能给整轮设限（整轮由总计时器管）。
+let probeReady=false
+child.stdout.on('data',chunk=>{process.stdout.write(chunk);if(!probeReady&&String(chunk).includes('PROBE_READY')){probeReady=true;clearTimeout(startupTimer)}})
 for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>child.kill(signal))
 child.on('error',()=>{clearTimers();process.exitCode=1})
 child.on('exit',code=>{clearTimers();process.exitCode=code??1})

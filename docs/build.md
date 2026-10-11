@@ -2137,3 +2137,33 @@ DeepSeek 另有 5 项动作未落地、4 项检查失败：`v6-correction-01` �
 - 调用记账：探针 12 次单独记账，总账口径 **1507 + 12 = 1519／3000**（共享 journal 未改，故其自身仍显示 1507）。
 - 未做：按结论修改整理提示／协议（需另立授权）；查 MiniMax `ambiguous-overwrite` 的触发条件；`convention` 12 条／26 分的逐例过卷。
 - Windows／CI／原生输入法／用户视觉与人工语义复核仍待。
+
+## 2026-10-11 试卷修订、协议修复与归属收口
+
+范围以[局部授权](decisions.md#2026-10-11-试卷修订协议修复与归属收口局部授权)为准。四项：归属收口（零调用）、MiniMax 否决触发条件单查（零调用）、协议表达层修复、试卷两处修订。不改 70／各维 60%／链式权重与单元禁用项；不改写 r9–r13 冻结判定；不 publish；未跑 r14 全卷。
+
+| 包 | 内容 | 状态与必要门 |
+|----|------|------------|
+| 1 归属收口 | 12 条 `convention` 逐例定性，`convention` 归零；新增 `label-debt`、`content-gap/active-fact`、`forbidden-live`、`repair-not-applied` 四类 | 已交：分类与计数由 `test/scripts/memory-failure-attribution.test.ts` 钉住 |
+| 2 触发条件 | MiniMax `ambiguous-overwrite` 根因：生产提示词从未定义 `obsolete` 的语义前提 | 已交：逐条引 r13 原始产物 |
+| 3 协议修复 | `memoryContinuitySystem` 四条明文（证据前提／空提议即完整回答／长期内容必须落条目／同议题一条生效） | 已交：提示词进冻结单 `promptHash` |
+| 4 试卷修订 | revision 11：`ambiguous-10`／`chain-beta-4` 期望改 `unchanged`；`attributionAndScope` 加机械护栏 | 已交：`V6_RULES.revision=11`；新增 2 项用例，r12 第二轮投影测试按新口径更新 |
+| 5 验证 | 真实跑器 2 例（`correction-01` 两模型）+ 协议臂探针 12 次（4 例 × 2 模型） | 已交：见证据 |
+| 6 文档 | 结论进[研究专题](memory.md#2026-10-11-归属收口试卷修订与协议修复) | 已交 |
+
+### 证据
+
+- **试卷修订影响**：确认假阴性 8 条／11 分（`conflict`→`unchanged`）＋口径债 3 条／6 分（机械护栏）。只读投影：r13 DeepSeek 首轮 79.17 → 89.17 → 92.67 → **94.67**；r12 DeepSeek 第二轮 79.7 → 80.7 → **82.7**，事实维回到 **12/20 地板**、该轮投影**转为达门**（`test/scripts/v6-memory-quality.test.ts`「r12 DeepSeek 第二轮只读投影」钉住，含官方冻结 failed／82.7／事实维 8 不变）。**均为投影，不是认证成绩。**
+- **协议臂验证 5/8，未达预注册门槛**（≥8）：三类被修复的失败全部消失（未核实不 `obsolete` 2/2、空提议即完整回答 2/2、长期内容落成条目 4/4），但「近期 vs 长期容器路由」零改善（MiniMax `recent-blocked-01` 把进度整段落成三条长期事实）。协议臂 `systemHash` 与冻结单 `promptHash` 逐位相同（`764bb7e9…`）。
+- **真实跑器**：revision 11 下 `correction-01` 两模型均 `correct` 落地、旧值被替代（该例在 r13 丢 10 分）；冻结单 `9bddabc8…`、执行提交 `cbbbef8`、新增 2 次调用（总账 1509／3000）。其余案例因冻结协议的「边跑边双标」门（每条已派发行须先完成标注才派下一条）未继续派发，未产生未标注的付费行。
+- **未修待查**：`r11 DeepSeek correction-01` 修复轮给出合规补丁仍被 `MEMORY_OUTPUT_INVALID` 拒绝，单列 `repair-not-applied`（10 分），**不计入任何投影**。
+- 工程修复三处：探针启动计时器误杀长轮次（改为就绪握手）、协议臂输出上限按生产 4096 配置（MiniMax 在 2048 下 3/4 截断）、Electron 在收紧后的本机沙箱下需 `--disable-gpu --no-sandbox`（无窗口工具、不渲染不可信内容）。
+
+### 剩余边界
+
+- 试卷修订只对**未来**冻结生效；r9–r13 的冻结判定与官方成绩在其原试卷下不变。
+- 协议修复对**容器路由无效**：需要结构性改造（例如准入层按语义把进度类内容归入近期），须另立授权；本包只加提示词明文。
+- `repair-not-applied` 与 `convention` 归零后剩余的 12 条真错未修（真错不需要修试卷）。
+- 协议臂只用虚构材料、只读 `safeStorage`，12 次调用单独记账；不构成认证成绩。
+- 未跑 r14 全卷、未 publish、未重跑任何历史轮次。
+- Windows／CI／原生输入法／用户视觉与人工语义复核仍待。

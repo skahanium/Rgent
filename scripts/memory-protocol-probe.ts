@@ -8,15 +8,19 @@ import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { loadModelCredentialReadOnly } from '../src/main/model-config.ts'
 import { streamModelStep } from '../src/main/model-stream.ts'
-import { PROBE_CALL_LIMIT, PROBE_CASES, PROBE_MAX_OUTPUT_TOKENS, PROBE_SYSTEM, probePrompt, type ProbeCase } from './memory-probe-cases.ts'
+import { memoryContinuitySystem } from '../src/main/working-memory-consolidation.ts'
+import { PROBE_ARM_LIMIT, PROBE_CALL_LIMIT, PROBE_CASES, PROBE_MAX_OUTPUT_TOKENS, PROBE_SYSTEM, probePrompt, protocolPayload, type ProbeCase } from './memory-probe-cases.ts'
 
-type Options = { root: string; profile: string; report: string; models: string[]; cases: string[]; limit: number; printPrompts?: boolean }
+type Options = { root: string; profile: string; report: string; models: string[]; cases: string[]; limit: number; printPrompts?: boolean; arm?: 'free-text' | 'protocol' }
 
 const options: Options = JSON.parse(process.env.RGENT_PROBE_OPTIONS ?? '{}')
-const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+const fingerprint = (value: unknown) => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex')
+const seedContent = (item: ProbeCase): string | null => (item.context && !item.context.includes('（') ? null : item.context.split('（')[0]?.trim() || null)
 // 与评测跑器同一身份：macOS safeStorage 按应用名取钥匙串条目，改名就读不到同一份凭据。
 // 进程自身的 userData 落在报告目录内，不碰默认 Electron 目录，也不写用户配置。
 app.setName('rgent')
+// 无窗口的主进程工具：Chromium 的 GPU 进程在部分环境下会 FATAL 退出，显式关掉。
+app.disableHardwareAcceleration()
 app.setPath('userData', path.join(options.report ?? '.', 'electron-profile'))
 
 function atomicReport(file: string, value: unknown): void {
@@ -59,29 +63,34 @@ async function main(): Promise<void> {
   if (!selected.length) throw Error('PROBE_CASES_REQUIRED')
   const meta = modelMetadata(options.profile, options.models)
   const total = selected.length * meta.models.length
-  const limit = options.limit ?? PROBE_CALL_LIMIT
+  const arm = options.arm === 'protocol' ? 'protocol' as const : 'free-text' as const
+  const system = arm === 'protocol' ? memoryContinuitySystem : PROBE_SYSTEM
+  const userOf = (item: ProbeCase) => arm === 'protocol' ? protocolPayload({ ...item, seedContent: seedContent(item) }) : probePrompt(item)
+  const limit = options.limit ?? (arm === 'protocol' ? PROBE_ARM_LIMIT : PROBE_CALL_LIMIT)
   if (total > limit || limit > PROBE_CALL_LIMIT) throw Error(`PROBE_CALL_LIMIT:${total}>${limit}`)
 
   if (options.printPrompts) {
-    for (const model of meta.models) for (const item of selected) console.log(`=== ${model.modelId} / ${item.id} ===\n${probePrompt(item)}\n`)
+    for (const model of meta.models) for (const item of selected) console.log(`=== ${model.modelId} / ${item.id} (${arm}) ===\n${userOf(item)}\n`)
     // 零调用预检：凭据必须能解密、且主机与模型名匹配，否则带着问题去花钱。
     const preflight = meta.models.map((model) => {
       const credential = loadModelCredentialReadOnly(options.profile, safeStorage, model.recordId)
       return { modelId: credential.modelId, host: new URL(credential.baseURL).host, keyPresent: credential.apiKey.length > 0 }
     })
-    console.log(JSON.stringify({ wouldCall: total, limit, system: PROBE_SYSTEM, maxOutputTokens: PROBE_MAX_OUTPUT_TOKENS, encryptionAvailable: safeStorage.isEncryptionAvailable(), preflight }))
+    console.log(JSON.stringify({ wouldCall: total, limit, arm, system: system.slice(0, 40) + '…', systemHash: fingerprint(system), maxOutputTokens: PROBE_MAX_OUTPUT_TOKENS, encryptionAvailable: safeStorage.isEncryptionAvailable(), preflight }))
     return
   }
 
+  console.log(`PROBE_READY ${arm} ${selected.length}x${meta.models.length}`)
   mkdirSync(options.report, { recursive: true, mode: 0o700 })
   const ledger = path.join(options.report, 'calls.json')
   const calls: { key: string; at: string; model: string; caseId: string; promptHash: string }[] = existsSync(ledger) ? JSON.parse(readFileSync(ledger, 'utf8')) : []
   atomicReport(path.join(options.report, 'manifest.json'), {
     at: new Date().toISOString(),
-    system: PROBE_SYSTEM,
+    arm,
+    systemHash: fingerprint(system),
     question: probePrompt({ id: '', prompt: '', body: '', context: '', selection: '' }).split('\n').at(-1),
     promptTemplateHash: fingerprint(selected.map((item) => [item.id, probePrompt(item)])),
-    maxOutputTokens: PROBE_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: arm === 'protocol' ? 4096 : PROBE_MAX_OUTPUT_TOKENS,
     limit,
     planned: total,
     configuration: meta.configuration,
@@ -96,7 +105,7 @@ async function main(): Promise<void> {
       const file = path.join(options.report, `probe-${model.modelId}-${item.id}.json`)
       if (existsSync(file)) { rows.push(JSON.parse(readFileSync(file, 'utf8'))); continue }
       if (calls.length >= limit) throw Error(`PROBE_CALL_LIMIT_REACHED:${calls.length}`)
-      const user = probePrompt(item)
+      const user = userOf(item)
       const started = Date.now()
       let body = ''
       let finishReason: string | null = null
@@ -109,9 +118,9 @@ async function main(): Promise<void> {
           apiKey: credential.apiKey,
           modelId: credential.modelId,
           contextTokens: credential.contextTokens,
-          system: PROBE_SYSTEM,
+          system,
           messages: [{ role: 'user', content: user }],
-          maxOutputTokens: PROBE_MAX_OUTPUT_TOKENS,
+          maxOutputTokens: arm === 'protocol' ? 4096 : PROBE_MAX_OUTPUT_TOKENS,
           signal: AbortSignal.timeout(120_000)
         })) {
           if (event.type === 'text') body += event.text

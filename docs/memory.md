@@ -88,18 +88,22 @@ r11 暴露的不是「模型一律不会」，而是程序把可验证工作推�
 
 ## 2026-10-10 失败例归属审计（零调用）
 
-只读 `.cache` 冻结产物的归属审计，用于把「未通过」拆成内容缺口、机制拦截、环境故障与否决四类。**零模型调用、零写入**；不复算官方判定，不改写任何冻结成绩。复现：`node scripts/memory-failure-attribution.mjs`（`--json` 取机器可读、`--legacy` 追加 r6/r8/r9 并按 `frozenHash` 分段）。分类规则、口径常数、试卷权重/动作/容器期望与人工过卷判定由 `test/scripts/memory-failure-attribution.test.ts` 逐项钉住。
+只读 `.cache` 冻结产物的归属审计，用于把「未通过」拆成内容缺口、机制拦截、环境故障与否决四类。**零模型调用、零写入**；不复算官方判定，不改写任何冻结成绩。复现：`node scripts/memory-failure-attribution.mjs`（`--json` 取机器可读、`--legacy` 追加 r6/r8/r9 并按 `frozenHash` 分段）。分类规则、口径常数、试卷权重/动作/容器期望、revision 11 试卷差异与人工过卷判定由 `test/scripts/memory-failure-attribution.test.ts` 逐项钉住。
 
-分类词表（2026-10-10 由人工过卷修正后）：
+分类词表（2026-10-11 由人工过卷与产物逐例复核后定稿；`convention` 一类已归零）：
 
 | 类别 | 判据 | 归属 |
 |------|------|------|
 | `environment` | 类别 `service/cancel/interrupted` 或原因属四项环境码 | 环境故障 |
 | `veto` | 双标一致硬否决 | 安全红线 |
 | `mechanism-blocked/program-rule` | 程序规则码拒收或 `failureOrigin=admission` | **确认假阴性** |
-| `mechanism-blocked/rubric-field` | 期望 `conflict`，而同组 rubric 写「保留旧活动事实或建立非活动冲突候选均可」，模型保留旧事实且无 entry 级动作 | **确认假阴性**（人工过卷两次独立确认） |
-| `mechanism-blocked/convention` | 期望条目已落地但动作词/标签判负 | 待人工确认 |
-| `content-gap/wrong-container` | 期望落成 entry 的内容只落在近期块、无 entry 级动作 | **真实缺口**（人工过卷确认 3 例） |
+| `mechanism-blocked/rubric-field` | 期望 `conflict` 而同组 rubric 写「保留旧活动事实或建立非活动冲突候选均可」，模型保留旧事实且无 entry 级动作；revision 11 起该期望改为 `unchanged`，两种收尾都达标 | **确认假阴性**（已修试卷） |
+| `mechanism-blocked/repair-not-applied` | 修复轮给出了非空补丁、程序仍以 `MEMORY_OUTPUT_INVALID` 拒绝、旧内容继续生效 | **确认假阴性（未修，待查）** |
+| `label-debt/instrument-misfire` | 已有正确分类条目覆盖期望单元，标注仍按分类项打折；revision 11 起由机械护栏拦下 | **口径债（已修试卷）** |
+| `label-debt/type-label` | 只落了一条分类不符的条目（项目信息记成长期约定），内容与范围正确 | **真错**（违反提示词明文：记住+项目信息≠standing） |
+| `content-gap/active-fact` | 对未核实变化另开 active 事实（含同议题重复），违反「禁止另开 active 事实」 | 真实缺口 |
+| `content-gap/forbidden-live` | 禁用内容仍生效（含修复轮主动放弃） | 真实缺口 |
+| `content-gap/wrong-container` | 期望 entry 的内容只落近期块，或期望近期的阶段状态落成长期条目 | 真实缺口 |
 | `content-gap` | 有单元未覆盖或新增错误内容 | 真实缺口 |
 | `clean` | 无信号且未失分（`clean/unexplained` 为有失分但无信号者） | — |
 
@@ -115,44 +119,36 @@ r11 暴露的不是「模型一律不会」，而是程序把可验证工作推�
 | veto | 4 | 14.5 |
 | mechanism-blocked/program-rule | 9 | 15.5 |
 | mechanism-blocked/rubric-field | 8 | 11 |
-| mechanism-blocked/convention | 12 | 26 |
-| content-gap/wrong-container | 3 | 6 |
-| content-gap | 40 | 97.86 |
+| mechanism-blocked/repair-not-applied | 1 | 10 |
+| label-debt/instrument-misfire | 3 | 6 |
+| label-debt/type-label | 2 | 8 |
+| content-gap/active-fact | 4 | 8.5 |
+| content-gap/forbidden-live | 2 | 2 |
+| content-gap/wrong-container | 6 | 9.5 |
+| content-gap | 37 | 85.86 |
 | clean/unexplained | 2 | 5 |
 | clean | 149 | 0 |
 | **合计** | **229** | **184.86** |
 
 ### 假阴性清单（机制拦截；按现行口径失分降序）
 
-**确认假阴性 17 条／26.5 分**：程序规则拒收 9 条 ＋ rubric 与机读字段冲突 8 条（后者由人工过卷两次独立确认）。**待确认 12 条／26 分**为 convention 类，多与容器或标签口径有关，须逐例人工过卷。
+**确认假阴性 17 条／26.5 分**：程序规则拒收 9 条 ＋ rubric 与机读字段冲突 8 条（后者由人工过卷两次独立确认）。**待确认 0 条／0 分**为 convention 类，多与容器或标签口径有关，须逐例人工过卷。
 
 | 轮次 | 模型 | 案例 | 维/权重 | 失分 | 子类 | 拦截信号 | 说明 | 人工过卷 | 证据 |
 |------|------|------|---------|------|------|----------|------|----------|------|
 | r13 | deepseek-flash | v6-correction-01 | update/10 | 10 | program-rule | rejected=MEMORY_DEPENDENCY_CHANGED；failureOrigin=admission；actionVerified=false | 旧内容因拦截仍生效（noForbiddenContent=false），因果需人工确认 | expectation-reasonable | result-8cd5d150c7e9…json |
-| r12 | MiniMax-M3 | v6-scope-01 | fact/4 | 4 | convention/action-verb | actionVerified=false；attributionAndScope=false | 内容已覆盖，仅机制判负 | label-debt | result-6e18c3c028cd…json |
-| r13 | MiniMax-M3 | v6-fact-01 | fact/4 | 4 | convention/action-verb | actionVerified=false；attributionAndScope=false | 内容已覆盖，仅机制判负 | 未过卷 | result-1b6237e65420…json |
 | r10 | MiniMax-M3 | v6-ambiguous-10 | update/2.5 | 2.5 | program-rule | rejected=MEMORY_DEPENDENCY_CHANGED；failureOrigin=admission；actionVerified=false | 内容已覆盖，仅机制判负 | rubric-field-false-negative | result-32289768124d…json |
-| r10 | deepseek-flash | v6-ambiguous-01 | update/2.5 | 2.5 | convention/action-verb | actionVerified=false | 内容已覆盖，仅机制判负 | expectation-reasonable | result-a771aa309967…json |
-| r10 | deepseek-flash | v6-ambiguous-10 | update/2.5 | 2.5 | convention/action-verb | actionVerified=false | 内容已覆盖，仅机制判负 | rubric-field-false-negative | result-e1fdfd04ab69…json |
 | r11 | deepseek-flash | v6-ambiguous-10 | update/2.5 | 2.5 | rubric-field | actionVerified=false | 内容已覆盖，仅机制判负 | rubric-field-false-negative | result-d5cdffee0197…json |
-| r12 | deepseek-flash | v6-ambiguous-10 | update/2.5 | 2.5 | convention/action-verb | actionVerified=false | 内容已覆盖，仅机制判负 | rubric-field-false-negative | result-483428e97010…json |
 | r13 | deepseek-flash | v6-ambiguous-10 | update/2.5 | 2.5 | rubric-field | actionVerified=false | 内容已覆盖，仅机制判负 | rubric-field-false-negative | result-15d08b0edc94…json |
-| r11 | deepseek-flash | v6-recent-blocked-01 | recent/4 | 2 | convention/category | attributionAndScope=false | 内容已覆盖，仅机制判负 | expectation-reasonable | result-36ae003ccff7…json |
-| r12 | deepseek-flash | v6-scope-01 | fact/4 | 2 | convention/category | attributionAndScope=false | 内容已覆盖，仅机制判负 | label-debt | result-15028ca88870…json |
-| r12 | deepseek-flash | v6-scope-01 | fact/4 | 2 | convention/category | attributionAndScope=false | 内容已覆盖，仅机制判负 | label-debt | result-96e68ed2eaa0…json |
-| r13 | deepseek-flash | v6-scope-01 | fact/4 | 2 | convention/category | attributionAndScope=false | 内容已覆盖，仅机制判负 | label-debt | result-164409f8840b…json |
 | r10 | deepseek-flash | v6-chain-beta-5 | recent/1 | 1 | program-rule | rejected=MEMORY_DEPENDENCY_CHANGED；failureOrigin=admission；actionVerified=false；attributionAndScope=false | 拦截导致单元缺失，非模型漏存 | 未过卷 | result-20facd0bfc36…json |
 | r10 | MiniMax-M3 | v6-chain-beta-4 | recent/1 | 1 | rubric-field | actionVerified=false | 拦截导致单元缺失，非模型漏存 | rubric-field-false-negative | result-3fd9818be612…json |
 | r10 | deepseek-flash | v6-chain-beta-3 | recent/1 | 1 | program-rule | rejected=MEMORY_DEPENDENCY_CHANGED；failureOrigin=admission；actionVerified=false | 拦截导致单元缺失，非模型漏存 | framework-mismatch（容器维度不可用） | result-94ede25cbfb7…json |
-| r10 | deepseek-flash | v6-chain-beta-4 | recent/1 | 1 | convention/action-verb | actionVerified=false | 内容已覆盖，仅机制判负 | rubric-field-false-negative | result-d3d04cf3f16e…json |
 | r11 | deepseek-flash | v6-chain-beta-3 | recent/1 | 1 | program-rule | rejected=MEMORY_DEPENDENCY_CHANGED；failureOrigin=admission；actionVerified=false | 内容已覆盖，仅机制判负 | framework-mismatch（容器维度不可用） | result-06efb39dab33…json |
-| r11 | deepseek-flash | v6-chain-alpha-4 | recent/1 | 1 | convention/action-verb | actionVerified=false | 旧内容因拦截仍生效（noForbiddenContent=false），因果需人工确认 | expectation-reasonable（容器维度不可用） | result-0bd5454c5320…json |
 | r11 | deepseek-flash | v6-chain-beta-4 | recent/1 | 1 | rubric-field | actionVerified=false | 内容已覆盖，仅机制判负 | rubric-field-false-negative | result-1af407943a80…json |
 | r12 | deepseek-flash | v6-chain-beta-4 | recent/1 | 1 | rubric-field | actionVerified=false | 内容已覆盖，仅机制判负 | rubric-field-false-negative | result-46e2b83cdd8a…json |
 | r12 | deepseek-flash | v6-chain-beta-4 | recent/1 | 1 | rubric-field | actionVerified=false | 内容已覆盖，仅机制判负 | rubric-field-false-negative | result-c810406d23a5…json |
 | r12 | MiniMax-M3 | v6-chain-beta-4 | recent/1 | 1 | rubric-field | actionVerified=false | 内容已覆盖，仅机制判负 | rubric-field-false-negative | result-f2801ca6a68c…json |
 | r13 | deepseek-flash | v6-chain-beta-4 | recent/1 | 1 | rubric-field | actionVerified=false | 内容已覆盖，仅机制判负 | rubric-field-false-negative | result-6e3e923f43f0…json |
-| r11 | deepseek-flash | v6-chain-beta-2 | recent/1 | 0.5 | convention/category | attributionAndScope=false | 内容已覆盖，仅机制判负 | 未过卷 | result-39f80a05f32e…json |
 
 另有 4 例带机制信号但按现行口径未失分（不构成假阴性，仅登记）：r10/deepseek-flash/v6-correction-01、r10/MiniMax-M3/v6-correction-01、r10/deepseek-flash/v6-chain-alpha-4、r13/MiniMax-M3/v6-recent-blocked-01。
 
@@ -163,58 +159,19 @@ r11 暴露的不是「模型一律不会」，而是程序把可验证工作推�
 | r11 | MiniMax-M3 | v6-standing-01 | standing/4 | 4 | valid | result-ce52a53b3126…json |
 | r13 | MiniMax-M3 | v6-chain-alpha-1 | recent/1 | 1 | valid | result-f81cb59f5fd2…json |
 
-### 只读投影（把机制拦截例记满权重后的轮次判定；不是认证成绩）
+### 只读投影（把机制拦截与标签类失分记满权重后的轮次判定；不是认证成绩）
 
-| 轮次 | 官方冻结下界 | 现行口径复算 | 补程序规则拒收 | 补确认假阴性 | 补全部机制 | 四维（补确认假阴性） | 可靠性 |
-|------|--------------|--------------|----------------|--------------|------------|----------------------|--------|
-| r10/MiniMax-M3/r0 | 64.9 | 64.9 | 67.4 | 68.4 | 68.4 | standing 12/20、fact 8/20、recent 18.4/30、update 30/30 | 30/30（仍不达地板） |
-| r10/deepseek-flash/r0 | 74.2 | 74.2 | 76.2 | 76.2 | 82.2 | standing 20/20、fact 12/20、recent 19.2/30、update 25/30 | 30/30（**总分与四维地板达标**（不含证据/否决门）） |
-| r11/MiniMax-M3/r0 | 4 | 4 | 4 | 4 | 4 | standing 0/4、fact 4/4、recent 0/4、update 0/0 | 3/3（已执行 3/30，不判地板） |
-| r11/deepseek-flash/r0 | 70.5 | 73 | 74 | 77.5 | 81 | standing 20/20、fact 16/20、recent 21.5/30、update 20/30 | 30/30（**总分与四维地板达标**（不含证据/否决门）） |
-| r12/MiniMax-M3/r0 | 80.67 | 80.67 | 80.67 | 81.67 | 85.67 | standing 20/20、fact 8/20、recent 23.67/30、update 30/30 | 30/30（仍不达地板） |
-| r12/deepseek-flash/r0 | 87 | 89 | 89 | 90 | 92 | standing 20/20、fact 14/20、recent 26/30、update 30/30 | 30/30（**总分与四维地板达标**（不含证据/否决门）） |
-| r12/deepseek-flash/r1 | 82.7 | 79.7 | 79.7 | 80.7 | 85.2 | standing 20/20、fact 10/20、recent 28.2/30、update 22.5/30 | 28/28（仍不达地板） |
-| r13/MiniMax-M3/r0 | 37.5 | 37.5 | 37.5 | 37.5 | 41.5 | standing 12/12、fact 0/12、recent 13/16、update 12.5/15 | 16/16（已执行 16/30，不判地板） |
-| r13/deepseek-flash/r0 | 79.17 | 79.17 | 89.17 | 92.67 | 94.67 | standing 20/20、fact 14/20、recent 28.67/30、update 30/30 | 30/30（**总分与四维地板达标**（不含证据/否决门）） |
-
-### 人工过卷（方案 A，10 例，零调用）
-
-方法：从假阴性清单与最大失分案里挑 10 例，**只给材料与库里已有条目、不给期望**，由项目所有者以自然语言写出「这一场结束后希望记忆变成什么样」；再用试卷原判据机械评分。三条判读规则在看任何后续实验结果之前冻结（期望合理／假阴性／歧义题）。
-
-| # | 案例 | 判定 | 依据 |
-|---|------|------|------|
-| 1 | `v6-correction-01` | 期望合理 | 答案与试卷同义（就地更正、不留旧值）；败因是程序规则，已在 `9130293` 修 |
-| 2 | `v6-scope-01` | 口径债 | 内容/范围/禁用全对；自然作答不产生类型标签 |
-| 3 | `v6-ambiguous-10` | **确认假阴性** | rubric 写「保留旧活动事实…均可」，机读字段却要 `conflict` |
-| 4 | `v6-attribution-01` | 期望合理 | 模型只写近期块、未产出条目；人全对 → 真实缺口 |
-| 5 | `v6-recent-blocked-01` | 期望合理 | 人也缺「三份」目标与已完成项；容器要求有真实后果 |
-| 6 | `v6-chain-alpha-2` | 期望合理 | 模型空提议；人全对 → 真实缺口 |
-| 7 | `v6-chain-beta-3` | 框架不匹配 | 人判「本轮背景／长期」两类都不合适；容器维度因题面已给标签而不可用 |
-| 8 | `v6-ambiguous-01` | 期望合理 | 答案与 `unchanged` 期望相容 |
-| 9 | `v6-chain-alpha-4` | 期望合理 | 人自然给出就地更正语义（`correct`） |
-| 10 | `v6-chain-beta-4` | **确认假阴性** | 同 `ambiguous-10`；该例四轮全丢，最顽固 |
-
-由过卷得出的三条修正（已并入上文判据与表格）：
-
-1. **确认假阴性收窄为两类**：程序规则拒收（9 条／15.5 分）与 rubric 与机读字段冲突（8 条／11 分）。`uncertain` 组是最大单一来源——同组 `ambiguous-01` 要 `unchanged`、`ambiguous-10` 要 `conflict`，**同一句 rubric 下机读字段自相矛盾**。
-   **明确边界**：`rubric-field` 只覆盖「模型什么都没落地、保留旧事实」这一变体（人工过卷两次确认）。同组还有 3 条／3.5 分（r10 DeepSeek／MiniMax 的 `ambiguous-10`、r10 DeepSeek 的 `chain-beta-4`）是「落地了 `add` 而非 `conflict`」的变体——人工过卷未覆盖该形态，仍留在 `convention` 待确认，**不预先算作假阴性**。另有 2 条（r12 DeepSeek／MiniMax `ambiguous-10`）落地 `conflict` 且满分，说明该期望本身可达。
-2. **「内容已覆盖」不等于「机制冤枉」**：期望落成 entry 的内容只写进近期块（14 天后过期）是真实缺口，3 条／6 分，已从假阴性名单移出。
-3. **容器判据有真有虚**：`scope-01` 一类只差标签（口径债）；`recent-blocked-01`、`attribution-01` 一类容器放错有真实后果（临时前置条件写成长期事实、长期事实只进近期块）。此前「约三分之二是测量债」的说法**对模型过于宽容**，已按此修正。
-
-方法缺陷（下次做同类实验必须避免）：
-
-- **题面术语未先定义**：`近期工作背景`／`长期` 是系统内部标签，直接印在题面上等于把分类框架塞给答题人；本轮到第 8 例才补齐定义（14 天硬过期／不按时间过期）。
-- **上游状态带了类型标签**：第 7、9 例的答案明显是照抄题面编号改内容，这两例的容器／类型维度因此不可用（脚本中标 `containerReliable=false`）。
-- **样本量**：10 例、每例一次，只出逐例判定，不外推比例。
-- 人工作答同样会小幅越界（把「不外推」写成「其他项目不得包含」等），说明 `noUnsupportedContent` 对人与模型一样紧。
-
-### 审计结论（2026-10-10 修正后）
-
-1. **r13 DeepSeek 首轮的「未通过」只差一个程序规则拦截**：补回 `v6-correction-01` 后 89.17、四维全过地板；再补确认假阴性为 92.67。**仍是只读投影，不是认证成绩。**
-2. **r11 DeepSeek 同样在补上确认假阴性后达地板**（73 → 77.5）；与 r12 第 1 轮的 87／89 一起说明分维地板对测量噪声极敏感。
-3. **真模型缺口仍是最大块**：`content-gap` 合计 43 例／103.86 分（含 `wrong-container` 3 例／6 分）。
-4. **环境与否决性质不同**：环境 2 例／9 分（r13 已把环境移出可靠性分母，但仍以未知压低质量下界）；否决 4 例／14.5 分全部来自 MiniMax，属安全红线，不折算。
-5. **审计不是认证**：全部数字为只读投影，r9–r13 冻结判定一字不改；任何修复要产生新成绩必须重新冻结并重跑。
+| 轮次 | 官方冻结下界 | 现行口径复算 | 补程序规则拒收 | 补确认假阴性 | 修试卷后（revision 11） | 补全部非内容缺口（上界） | 四维（修试卷后） | 可靠性 |
+|------|--------------|--------------|----------------|--------------|------------------------|------------|------------------|--------|
+| r10/MiniMax-M3/r0 | 64.9 | 64.9 | 67.4 | 68.4 | 68.4 | 68.4 | standing 12/20、fact 8/20、recent 18.4/30、update 30/30 | 30/30（仍不达地板） |
+| r10/deepseek-flash/r0 | 74.2 | 74.2 | 76.2 | 76.2 | 76.2 | 76.2 | standing 20/20、fact 12/20、recent 19.2/30、update 25/30 | 30/30（**总分与四维地板达标**（不含证据/否决门）） |
+| r11/MiniMax-M3/r0 | 4 | 4 | 4 | 4 | 4 | 4 | standing 0/4、fact 4/4、recent 0/4、update 0/0 | 3/3（已执行 3/30，不判地板） |
+| r11/deepseek-flash/r0 | 70.5 | 73 | 74 | 77.5 | 77.5 | 77.5 | standing 20/20、fact 16/20、recent 21.5/30、update 20/30 | 30/30（**总分与四维地板达标**（不含证据/否决门）） |
+| r12/MiniMax-M3/r0 | 80.67 | 80.67 | 80.67 | 81.67 | 81.67 | 85.67 | standing 20/20、fact 8/20、recent 23.67/30、update 30/30 | 30/30（仍不达地板） |
+| r12/deepseek-flash/r0 | 87 | 89 | 89 | 90 | 92 | 92 | standing 20/20、fact 16/20、recent 26/30、update 30/30 | 30/30（**总分与四维地板达标**（不含证据/否决门）） |
+| r12/deepseek-flash/r1 | 82.7 | 79.7 | 79.7 | 80.7 | 82.7 | 82.7 | standing 20/20、fact 12/20、recent 28.2/30、update 22.5/30 | 28/28（**总分与四维地板达标**（不含证据/否决门）） |
+| r13/MiniMax-M3/r0 | 37.5 | 37.5 | 37.5 | 37.5 | 37.5 | 41.5 | standing 12/12、fact 0/12、recent 13/16、update 12.5/15 | 16/16（已执行 16/30，不判地板） |
+| r13/deepseek-flash/r0 | 79.17 | 79.17 | 89.17 | 92.67 | 94.67 | 94.67 | standing 20/20、fact 16/20、recent 28.67/30、update 30/30 | 30/30（**总分与四维地板达标**（不含证据/否决门）） |
 
 ## 2026-10-11 协议剥离对照（方案 C，12 次调用）
 
@@ -251,3 +208,54 @@ r11 暴露的不是「模型一律不会」，而是程序把可验证工作推�
 1. 协议层最该动的是**表达层**——让正确判断能落地成条目与正确动作，而不是被动作词/容器/字段判负；对应上文 `convention` 12 条／26 分与 3 条容器缺口。
 2. MiniMax 的 `ambiguous-overwrite` 否决在自由文本下**不出现**，其触发条件值得单查：是否来自"必须给出一个动作"的协议压力。
 3. 探针工程本身的可复用处：零调用预检（凭据解密＋主机核对）、调用上限前置、逐例原子落盘与可续跑、独立账本不污染冻结 journal。
+
+## 2026-10-11 归属收口、试卷修订与协议修复
+
+用户批准后的四件工作，全部围绕同一批证据（[局部授权](decisions.md#2026-10-11-试卷修订协议修复与归属收口局部授权)）。
+
+### 一、`convention` 12 条／26 分逐例收口（零调用）
+
+按产物逐例定性，`convention` 一类归零；26 分拆成两半：
+
+| 行 | 分 | 定性 | 依据 |
+|----|----|------|------|
+| r12 MiniMax `scope-01` | 4 | 真错（分类） | 只落一条 `standing`（`layer: core`、scope 正确），而提示词明文：记住＋项目信息不得升为长期约定 |
+| r13 MiniMax `fact-01` | 4 | 真错（分类） | 同上，`standing`／scope `石桥试验项目` |
+| r12×2、r13 DeepSeek `scope-01` | 6 | **口径债** | 同时落了 `standing` 与 `fact`，`fact` 已覆盖期望单元，标注仍按分类项打折 |
+| r11 `recent-blocked-01`、r10／r11 `chain-beta-2` | 3.5 | 真错（容器） | 阶段状态落成长期条目；近期块虽有，长期副本会在状态过期后继续生效 |
+| r10 `ambiguous-01`、r10／r12 `ambiguous-10`、r10 `chain-beta-4` | 8.5 | 真错（另开生效事实） | 对未核实变化另行 `add` 一条 active 事实，违反「禁止另开 active 事实」 |
+| r11／r12 `chain-alpha-4` | 2 | 真错 | 旧顺序仍生效（一个因模型在修复轮主动放弃，一个因未落地） |
+
+**新发现（未修，待查）**：`r11 DeepSeek correction-01` 丢 10 分不是模型判断问题——首轮输出 `corrept_placeholder`／占位，**修复轮给出了合规的 `correct` 补丁**（`{"index":0,"value":{"action":"correct","target":"m1_…","content":"石桥项目检查每两周一次，已替代每周一次。"}}`），程序仍以 `MEMORY_OUTPUT_INVALID` 拒绝，旧「每周」条目继续生效。单列为 `repair-not-applied`，**不计入任何投影**。
+
+### 二、MiniMax `ambiguous-overwrite` 触发条件（零调用）
+
+r13 原始产物是一条**自相矛盾**的回答：`recent` 写「第一轮已验收回执有效；重新验收仅为传言，未撤回回执」，同一份 `proposals` 却对那条已确认条目发 `obsolete`（`target: m1_…`，attribution「source/fiction.md 人的说明」）。它自己的 `next` 是「核实传言来源后再决定是否更新」——想推迟，但协议没有给「不动作」的出口。
+
+根因不在模型知识，在提示词：**生产协议 `memoryContinuitySystem` 只规定了 `obsolete` 的机械形式（必须带 target），从未定义它的语义前提**（v6 历史提示词有「只有新获准证据才能更正或标过时」，生产提示词没有这一句）。r13 之后模型选择用唯一可用的状态变更动作来表达「有事发生」。
+
+### 三、试卷修订 revision 11（两处，均为「让机读判据与试卷自述一致」）
+
+1. **`uncertain` 组的 `conflict` 字段**：该组 rubric 原文写明「保留旧活动事实**或**建立非活动冲突候选**均可**」，但 `ambiguous-10`、`chain-beta-4` 的机读期望是 `conflict`，只接受后者。改为 `unchanged` 后两种收尾都达标——保留旧事实时状态稳定；非活动冲突候选不进活动集合，状态同样稳定。安全仍由 `maxActive` 与 `ambiguous-overwrite` 否决守住（新增用例覆盖：另开生效事实与作废旧条目仍判失败）。**影响 8 条记录／11 分。**
+2. **`attributionAndScope` 的机械护栏**：`V6_RULES.checks` 早已写明「同一单元已有正确分类条目时，另存的同义副本按重复记录观察，不单独判失败」，但评分器直接采信标注布尔。现在 entry 期望的例子若机械动作证据已证明正确分类条目落地（`actionVerified`），不再按本项打折；recent 期望的容器错放与未经机械确认的例子不受影响。**影响 3 条记录／6 分。**
+
+修订后的只读投影（不是认证成绩）：r13 DeepSeek 首轮 79.17 → 89.17（补程序规则）→ 92.67（补确认假阴性）→ **94.67（revision 11）**；r12 DeepSeek 第二轮 79.7 → 80.7 → **82.7，且事实维回到 12/20 地板、该轮投影转为达门**（`test/scripts/v6-memory-quality.test.ts` 钉住；官方冻结仍是 failed／82.7／事实维 8）。
+
+### 四、协议修复与验证（revision 11 探针，12 次调用）
+
+生产提示词按上述根因加四条明文：`obsolete`／`correct` 只能基于新获准证据、未核实说法不得使已确认条目退出；保留旧结论时 `proposals` 返回空数组就是完整回答；需要长期生效的事实／决定／第三方要求必须落成条目（只写 recent 不算）；同一议题只保留一条生效条目。
+
+验证＝**协议臂**：同一批虚构材料，用生产 `memoryContinuitySystem`（`systemHash` 与冻结单 `promptHash` 逐位相同）＋与 runner 同形的载荷，4 例 × 2 模型（`correction-01` 已由真实跑器验证）。预注册门槛：≥8 例提议集与期望一致判「修复有效」。
+
+| 案例 | deepseek-flash | MiniMax-M3 | 期望 |
+|------|----------------|------------|------|
+| `ambiguous-10` | `proposals: []`，recent 写明传言未查证 ✅ | `proposals: []`，recent 写「无法据此调整验收状态」 ✅ | 保留旧事实、不动作 |
+| `attribution-01` | `add`／`fact`，归属纸鸢组 ✅ | `add`／`fact`，归属纸鸢组 ✅ | 落成条目 |
+| `scope-01` | `add` 但 `semantic: standing` ⚠️ | `add`／`fact`、范围正确 ✅ | 落成条目、`fact` |
+| `recent-blocked-01` | `add` 一条长期条目 ⚠️ | `add` **三条**长期条目 ❌ | 只进近期块 |
+
+**结果 5/8，未达预注册门槛**。但失效集中在**同一处**：被修复的三类全部消失（未核实不 `obsolete` 2/2、空提议即完整回答 2/2、长期内容落成条目 4/4），而「近期 vs 长期容器路由」没有任何改善，MiniMax 甚至把工作进度整段落成长期事实。**结论：提示词修复对否决类与空提议类有效，对容器路由无效——容器需要结构性改造（例如由准入层按语义把进度类内容归入近期），不是再加一句提示。**
+
+另有两处工程记录：MiniMax 在 2048 token 上限下 3/4 截断（改为生产的 4096 后全部停止正常），这正是方案 C 已记过的「按模型配置推理预算」；探针启动器原先的 60 秒计时器会给整轮设限（已改为就绪握手），Electron 在本机沙箱策略收紧后需 `--disable-gpu --no-sandbox`（无窗口开发工具、不渲染不可信内容）。
+
+真实跑器另验一例：revision 11 下 `correction-01` 两模型均 `correct` 落地、旧值被替代（r13 该项丢 10 分）。该轮其余案例因冻结协议要求**边跑边双标**（每条已派发行须先完成标注）未继续派发；冻结单 `9bddabc8…`，执行提交 `cbbbef8`，新增 2 次调用（总账 1509）。
