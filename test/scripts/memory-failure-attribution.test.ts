@@ -19,20 +19,32 @@ it('keeps the environment and scoring vocabulary identical to the frozen harness
 })
 
 it('keeps the case weights, dimensions, expected action and container identical to the frozen paper', () => {
+  // expectedAction 分两层：CASE_SPECS 存历史（revision 10）用于归类冻结产物；revision 11 视图由
+  // PAPER_REV11_ACTIONS 覆盖，两者都必须与现夹具对得上。
   const expected = Object.fromEntries(
     V6_QUALITY_CASES.map((spec) => [
       spec.id,
       {
         dimension: spec.direction,
         weight: spec.weight,
-        expectedAction: spec.expected.action,
         expectedContainer: spec.expected.targetCategory ?? (spec.direction === 'recent' ? 'recent' : 'entry'),
         ...(spec.split ? { split: spec.split } : {}),
         ...(spec.safety ? { safety: spec.safety } : {})
       }
     ])
   )
-  expect(audit.CASE_SPECS).toEqual(expected)
+  const withoutAction = Object.fromEntries(Object.entries(audit.CASE_SPECS).map(([id, spec]: [string, any]) => {
+    const { expectedAction, ...rest } = spec
+    return [id, rest]
+  }))
+  expect(withoutAction).toEqual(expected)
+  for (const spec of V6_QUALITY_CASES) {
+    const rev11 = audit.PAPER_REV11_ACTIONS[spec.id] ?? audit.CASE_SPECS[spec.id].expectedAction
+    expect(rev11).toBe(spec.expected.action)
+  }
+  // 历史归类按 revision 10 的机读期望；revision 11 只改这两例。
+  expect(Object.keys(audit.PAPER_REV11_ACTIONS)).toEqual(['v6-ambiguous-10', 'v6-chain-beta-4'])
+  for (const id of Object.keys(audit.PAPER_REV11_ACTIONS)) expect(audit.CASE_SPECS[id].expectedAction).toBe('conflict')
 })
 
 it('labels every human-reviewed case with a real paper case id and a known verdict', () => {
@@ -109,8 +121,8 @@ it.skipIf(!present)('reproduces the frozen r13 lower bound and separates confirm
   expect(correction.rejectedGroups).toContain('MEMORY_DEPENDENCY_CHANGED')
   // 人工过卷确认的三处真实缺口：期望 entry 的内容只落在近期块
   const wrongContainer = rows.filter((row: any) => row.class === 'content-gap' && row.sub === 'wrong-container')
-  expect(wrongContainer.map((row: any) => row.caseId).sort()).toEqual(['v6-attribution-01', 'v6-chain-alpha-2', 'v6-chain-alpha-2'])
-  expect(wrongContainer.reduce((n: number, row: any) => n + row.lost, 0)).toBeCloseTo(6, 6)
+  expect(wrongContainer.map((row: any) => row.caseId).sort()).toEqual(['v6-attribution-01', 'v6-chain-alpha-2', 'v6-chain-alpha-2', 'v6-chain-beta-2', 'v6-chain-beta-2', 'v6-recent-blocked-01'])
+  expect(wrongContainer.reduce((n: number, row: any) => n + row.lost, 0)).toBeCloseTo(9.5, 6)
   // rubric 与机读字段冲突：conflict 期望、无 entry 动作；其案例必须正是人工过卷判为假阴性者
   const rubricField = rows.filter((row: any) => row.sub === 'rubric-field')
   expect(rubricField.every((row: any) => row.expectedAction === 'conflict')).toBe(true)
@@ -118,10 +130,21 @@ it.skipIf(!present)('reproduces the frozen r13 lower bound and separates confirm
   expect([...new Set(rubricField.map((row: any) => audit.HUMAN_REVIEW[row.caseId]?.verdict))]).toEqual(['rubric-field-false-negative'])
   expect(rubricField.reduce((n: number, row: any) => n + row.lost, 0)).toBeCloseTo(11, 6)
   // 容器判据的两侧都必须与人工过卷一致：wrong-container 全是 real-gap，convention 全是「已落地但动词/标签不符」
-  expect([...new Set(wrongContainer.map((row: any) => audit.HUMAN_REVIEW[row.caseId]?.verdict))]).toEqual(['real-gap'])
+  // 容器类里经过卷的例子必须是 real-gap；chain-beta-2 未过卷，允许无判定但不能有相反判定。
+  // 经过卷的容器类例子都判该失分成立（real-gap 或 expectation-reasonable）；chain-beta-2 未过卷。
+  const containerVerdicts = [...new Set(wrongContainer.map((row: any) => audit.HUMAN_REVIEW[row.caseId]?.verdict).filter(Boolean))]
+  expect(containerVerdicts.sort()).toEqual(['expectation-reasonable', 'real-gap'])
+  expect(wrongContainer.filter((row: any) => audit.HUMAN_REVIEW[row.caseId]?.verdict === 'real-gap').map((row: any) => row.caseId).sort()).toEqual(['v6-attribution-01', 'v6-chain-alpha-2', 'v6-chain-alpha-2'])
   const convention = rows.filter((row: any) => row.sub === 'convention')
-  expect(convention.length).toBeGreaterThan(0)
-  expect(convention.every((row: any) => row.entryActionLanded === true)).toBe(true)
+  expect(convention).toHaveLength(0)
+  // 标签类与新增真错类必须与人工过卷逐例定性一致（见 docs/memory.md 的归属表）。
+  const misfire = rows.filter((row: any) => row.sub === 'instrument-misfire')
+  expect(misfire.map((row: any) => row.caseId)).toEqual(['v6-scope-01', 'v6-scope-01', 'v6-scope-01'])
+  expect(misfire.reduce((n: number, row: any) => n + row.lost, 0)).toBeCloseTo(6, 6)
+  expect(rows.filter((row: any) => row.sub === 'type-label').map((row: any) => row.caseId).sort()).toEqual(['v6-fact-01', 'v6-scope-01'])
+  expect(rows.filter((row: any) => row.sub === 'active-fact').map((row: any) => row.caseId).sort()).toEqual(['v6-ambiguous-01', 'v6-ambiguous-10', 'v6-ambiguous-10', 'v6-chain-beta-4'])
+  expect(rows.filter((row: any) => row.sub === 'repair-not-applied').map((row: any) => row.caseId)).toEqual(['v6-correction-01'])
+  expect(audit.projectRound(r13, 'paper-11').total).toBe(94.67)
 })
 
 it.skipIf(!present)('renders a byte-stable report', () => {

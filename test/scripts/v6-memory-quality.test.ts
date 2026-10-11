@@ -197,13 +197,19 @@ describe('v6 三道验收门', () => {
   // 只剩未被扣分的去重例（权重 5）仍得分。
   expect(dropped.lower.dimensions.update).toBe(5)
   expect(dropped.gates.evidence).toBe(true)
-  const spec=byId('v6-scope-01')
-  const checks=v6Summary(patch(happy(),'v6-scope-01',{}, {...fullReview(spec),checks:{attributionAndScope:false,noUnsupportedContent:true,noForbiddenContent:true}}),V6_QUALITY_CASES,0)
+  const strippedOf=(spec:V6Case)=>({...fullReview(spec),checks:{attributionAndScope:false,noUnsupportedContent:true,noForbiddenContent:true}})
+  // 分类项扣分仍然存在：recent 期望的例子不受护栏影响，扣 0.5 × 4 = 2 分。
+  const recentSpec=byId('v6-recent-blocked-01')
+  const checks=v6Summary(patch(happy(),'v6-recent-blocked-01',{},strippedOf(recentSpec)),V6_QUALITY_CASES,0)
   expect(checks.verdict).toBe('passed')
   expect(checks.reasons).toContain('check-failures:1')
-  expect(checks.lower.dimensions.fact).toBe(18)
+  expect(checks.lower.dimensions.recent).toBe(28)
   expect(checks.gates.evidence).toBe(true)
-  expect(v6CaseScore(spec,{...fullReview(spec),checks:{attributionAndScope:false,noUnsupportedContent:true,noForbiddenContent:true}})).toBe(0.5)
+  expect(v6CaseScore(recentSpec,strippedOf(recentSpec))).toBe(0.5)
+  // revision 11 起：entry 期望的例子若机械证据已证明正确分类条目落地，标注布尔不再打折（见分类护栏用例）。
+  const entrySpec=byId('v6-scope-01')
+  expect(v6Summary(patch(happy(),'v6-scope-01',{},strippedOf(entrySpec)),V6_QUALITY_CASES,0).lower.dimensions.fact).toBe(20)
+  expect(v6CaseScore(entrySpec,strippedOf(entrySpec))).toBe(0.5)
  })
  it('第二标注分歧进上下界，证据不足仍判未知', () => {
   const spec=byId('v6-correction-01'),primary=fullReview(spec)
@@ -430,7 +436,7 @@ describe('包4统一双标门及机械失败边界',()=>{
   const scored=v6CaseScore(spec,{...fullReview(spec),correct:2,omitted:0,wrongNew:0,checks:{attributionAndScope:false,noUnsupportedContent:true,noForbiddenContent:true}})
   expect(scored).toBe(0.5)
  })
- it('r12 DeepSeek 第二轮只读投影：环境退出可靠性分母，事实仍破 12／20', () => {
+ it('r12 DeepSeek 第二轮只读投影：revision 11 护栏把事实维拉回地板，投影转为达门（不是认证成绩）', () => {
   const annotatorB={identity:'support-retest-secondary-agent',kind:'agent' as const,participatedInDesign:true,modelNameMasked:true,humanReviewed:false}
   const rows=projection.rows.map(item=>{
    const spec=byId(item.caseId)
@@ -439,9 +445,12 @@ describe('包4统一双标门及机械失败边界',()=>{
   }).map(r=>({...r,reviewAlt:r.review?{...structuredClone(r.review),annotator:annotatorB}:null}))
   const summary=v6Summary(rows,V6_QUALITY_CASES,1)
   expect(summary.reliability).toMatchObject({p:28,n:28,passed:true})
-  expect(summary.lower.dimensions.fact).toBeLessThan(12)
-  expect(summary.gates.qualityLower).toBe(false)
-  expect(summary.verdict).toBe('insufficient-evidence')
+  // revision 10 复算下事实维只有 10／20：scope-01 同时落了 standing 与 fact，fact 覆盖期望单元，
+  // 却因标注布尔被判分类项失败。revision 11 的机械护栏按试卷自述撤销这次打折，事实维回到 12／20 地板。
+  expect(summary.lower.dimensions.fact).toBe(12)
+  expect(summary.gates.qualityLower).toBe(true)
+  expect(summary.verdict).toBe('passed')
+  // 原冻结成绩与判定一字不改：官方仍是 failed，事实维 8／20。
   expect(projection.official).toMatchObject({verdict:'failed',lower:82.7,fact:8,reliability:'28/30'})
 })
 })

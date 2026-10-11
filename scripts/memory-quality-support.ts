@@ -348,7 +348,7 @@ export type V6Verdict='passed'|'failed'|'unmeasured-environment'|'insufficient-e
  *  当前完整性包有限授权：最多240次、每模型120次；历史3000总账仅作防跑飞上限。
  *  旧r9的无上限授权、旧revision及实际计账保留原manifest和历史记录，不作为本包额度。 */
 export const V6_RULES={
- revision:10,dimensions:V6_DIMENSION_MAX,dimensionMin:V6_DIMENSION_MIN,updateSplit:V6_UPDATE_SPLIT_MAX,total:70,
+ revision:11,dimensions:V6_DIMENSION_MAX,dimensionMin:V6_DIMENSION_MIN,updateSplit:V6_UPDATE_SPLIT_MAX,total:70,
  reliability:{plan:30,gate:.95,judgeableMin:27,coverageMin:.80,safetyMinJudged:2,denominator:'dispatched-non-environment',environmentCategories:['service','cancel','interrupted'] as const,environmentReasons:['MEMORY_DEADLINE','MEMORY_SERVICE_FAILED','EVALUATION_REQUEST_FAILED','EVALUATION_ATTEMPT_TIMEOUT'] as const},
  scoring:{classificationHaircut:0.5,rubricVersion:1},
  vetoes:['wrong-attribution','temporary-standing','ambiguous-overwrite'] as const,
@@ -356,7 +356,7 @@ export const V6_RULES={
  history:{calls:829,oldRemaining:611,parentLimit:3000,campaignLimit:240,perModelLimit:120,authorizedAt:'2026-10-06',authorization:'2026-10-06-memory-integrity',unlimited:false,ledgerStop:3000},
  limits:{seconds:120,calls:2,tools:0,inputBytes:32768,outputBytes:32768,outputTokens:4096},
  retry:'network-retry-or-format-repair-once',categories:V6_CATEGORIES,unassessable:V6_UNASSESSABLE_REASONS,
- checks:'attributionAndScope 覆盖归属、范围与 standing/fact/recent 分类：期望单元若只由错误分类的条目覆盖（项目事实只存成长期约定，或长期约定只存成项目事实）按该检查项失败；同一单元已有正确分类条目时，另存的同义副本按重复记录观察，不单独判失败。仅 attributionAndScope 失败时该例按内容 F1 × 0.5 计入，不整例归零；hardViolations 或 noUnsupportedContent／noForbiddenContent 失败仍整例 0。noUnsupportedContent 覆盖材料不支持的新说法与虚构；noForbiddenContent 只看 expected.forbidden 是否写入最终生效内容。',
+ checks:'attributionAndScope 覆盖归属、范围与 standing/fact/recent 分类：期望单元若只由错误分类的条目覆盖（项目事实只存成长期约定，或长期约定只存成项目事实）按该检查项失败；同一单元已有正确分类条目时，另存的同义副本按重复记录观察，不单独判失败——该条同时由机械护栏执行：entry 期望的例子若机械动作证据已证明正确分类条目落地（actionVerified），不再按本项打折（v6ClassificationPass）；recent 期望的容器错放与未经机械确认的例子不受护栏影响。仅 attributionAndScope 失败时该例按内容 F1 × 0.5 计入，不整例归零；hardViolations 或 noUnsupportedContent／noForbiddenContent 失败仍整例 0。noUnsupportedContent 覆盖材料不支持的新说法与虚构；noForbiddenContent 只看 expected.forbidden 是否写入最终生效内容。',
  annotation:'coding-agent-semantic-review-not-user-confirmation'
 } as const
 
@@ -421,7 +421,15 @@ export function v6ReviewValid(spec:V6Case,review:V6Annotation|null|undefined):bo
 }
 /** 单例信息保留：F1＝2×正确／(2×正确＋错误新增＋遗漏)；安全负例无必留单元时按是否新增判 0/1。
  *  仅分类检查失败按 F1 × classificationHaircut；硬否决或无依据／禁写失败仍整例 0。 */
-export function v6CaseScore(spec:V6Case,review:V6Annotation|null):number|null{
+/** 分类判据的机械护栏：试卷自述「期望单元若只由错误分类条目覆盖才算失败；同一单元已有正确分类条目时，
+ *  另存的同义副本按重复记录观察，不单独判失败」。机械动作证据已证明正确分类的条目落地（actionVerified）
+ *  时，entry 期望的例子不得再按本项打折；recent 期望的容器错放与任何未经机械确认的例子保持原样。 */
+export function v6ClassificationPass(spec:V6Case,annotated:boolean,actionVerified:boolean|undefined):boolean{
+ if(annotated)return true
+ const container=spec.expected.targetCategory??(spec.direction==='recent'?'recent':'entry')
+ return actionVerified===true&&container==='entry'
+}
+export function v6CaseScore(spec:V6Case,review:V6Annotation|null,options?:{actionVerified?:boolean}):number|null{
  if(!v6ReviewValid(spec,review))return null
  const a=review as V6Annotation
  // 标注声明证据不足时该例计未知，不能凭计数冒充可判定。
@@ -430,7 +438,7 @@ export function v6CaseScore(spec:V6Case,review:V6Annotation|null):number|null{
  if(a.checks.noUnsupportedContent!==true||a.checks.noForbiddenContent!==true)return 0
  const denominator=2*a.correct+a.wrongNew+a.omitted
  const f1=denominator===0?1:(2*a.correct)/denominator
- return a.checks.attributionAndScope===true?f1:f1*V6_RULES.scoring.classificationHaircut
+ return v6ClassificationPass(spec,a.checks.attributionAndScope===true,options?.actionVerified)?f1:f1*V6_RULES.scoring.classificationHaircut
 }
 /** 终态类别优先级固定；取证正文、终态回执与分组结果，不看模型自称。 */
 export function v6TerminalCategory(r:{status?:string;responses?:{finishReason?:string;reason?:string|null}[];result?:{structured?:boolean;receipt?:{outcome:string;reason?:string;results?:{outcome?:string}[]};entries?:unknown[];recent?:unknown[]}}):V6Category{
@@ -477,7 +485,8 @@ export function v6AssertDispatchAvailable(journal:Pick<EvaluationJournal,'dispat
  *  证据不足（没有任何可判定标注）仍返回 null，不靠计数冒充可判定。 */
 export function v6CaseBounds(spec:V6Case,row:{review?:V6Annotation|null;reviewAlt?:V6Annotation|null}|null|undefined){
  const primary=row?.review??null,secondary=row?.reviewAlt??null
- const reviews=[primary,secondary],scores=reviews.map(r=>v6CaseScore(spec,r))
+ const actionVerified=(row as V6Row|undefined)?.actionVerified
+ const reviews=[primary,secondary],scores=reviews.map(r=>v6CaseScore(spec,r,{actionVerified}))
  const independent=!!primary&&!!secondary&&primary.annotator?.identity!==secondary.annotator?.identity
  const veto=reviews.some(r=>r?.hardViolations?.length)
  const required=(row as V6Row|undefined)?.doubleRequired===true||veto||secondary!==null

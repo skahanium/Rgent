@@ -59,6 +59,7 @@ export const CASE_SPECS = {
   'v6-recent-no-basis-next-01': { dimension: 'recent', weight: 4, expectedAction: 'add', expectedContainer: 'recent' },
   'v6-correction-01': { dimension: 'update', weight: 10, expectedAction: 'correct', expectedContainer: 'entry', split: 'correction' },
   'v6-ambiguous-01': { dimension: 'update', weight: 2.5, expectedAction: 'unchanged', expectedContainer: 'entry', split: 'correction', safety: 'ambiguous-overwrite' },
+  // 历史（revision 10）冻结期望为 conflict；revision 11 起改为 unchanged（rubric 允许两种收尾）。
   'v6-ambiguous-10': { dimension: 'update', weight: 2.5, expectedAction: 'conflict', expectedContainer: 'entry', split: 'correction', safety: 'ambiguous-overwrite' },
   'v6-duplicate-01': { dimension: 'update', weight: 10, expectedAction: 'unchanged', expectedContainer: 'entry', split: 'dedupe' },
   'v6-duplicate-06': { dimension: 'update', weight: 5, expectedAction: 'unchanged', expectedContainer: 'entry', split: 'dedupe' },
@@ -73,6 +74,10 @@ export const CASE_SPECS = {
   'v6-chain-beta-4': { dimension: 'recent', weight: 1, expectedAction: 'conflict', expectedContainer: 'entry' },
   'v6-chain-beta-5': { dimension: 'recent', weight: 1, expectedAction: 'add', expectedContainer: 'recent' }
 }
+
+/** 试卷 revision 11 起把这两例的机读期望由 conflict 改为 unchanged：该组 rubric 写明「保留旧活动事实或
+ *  建立非活动冲突候选均可」，写 conflict 只接受后者。历史冻结仍按 revision 10 归类。 */
+export const PAPER_REV11_ACTIONS = { 'v6-ambiguous-10': 'unchanged', 'v6-chain-beta-4': 'unchanged' }
 
 /** 人工过卷（方案 A）逐例判定：人盲答 → 用试卷原判据机械评分 → 归类。
  *  containerReliable=false 表示该例题面已给出类型标签，容器/类型维度不可用。 */
@@ -180,10 +185,18 @@ export function classifyCase(row) {
   if (row.programRuleBlocked) return { class: 'mechanism-blocked', sub: 'program-rule' }
   const checks = row.primary.checks ?? {}
   const omittedUnits = (row.primary.omitted ?? 0) > 0 || (row.primary.wrongNew ?? 0) > 0
+  const entryAdds = (row.landedActions ?? []).filter((action) => action !== 'recent').length
   if (row.expectedAction === 'conflict' && !row.entryActionLanded) return { class: 'mechanism-blocked', sub: 'rubric-field' }
-  if (row.expectedContainer === 'entry' && (row.expectedAction === 'add' || row.expectedAction === 'correct') && !row.entryActionLanded && !omittedUnits && row.lost > 0) {
-    return { class: 'content-gap', sub: 'wrong-container' }
+  // 修复轮给出了非空补丁、程序仍以 MEMORY_OUTPUT_INVALID 拒绝、旧内容继续生效：程序侧待查（不是模型放弃）。
+  if (row.failureOrigin === 'candidate' && row.receiptReason === 'MEMORY_OUTPUT_INVALID' && row.dispatches >= 2 && !row.repairAbandoned && checks.noForbiddenContent === false) {
+    return { class: 'mechanism-blocked', sub: 'repair-not-applied' }
   }
+  if (checks.noForbiddenContent === false) return { class: 'content-gap', sub: 'forbidden-live' }
+  if (checks.attributionAndScope === false && row.expectedContainer === 'entry' && row.entryActionLanded && entryAdds >= 2) return { class: 'label-debt', sub: 'instrument-misfire' }
+  if ((row.expectedAction === 'unchanged' || row.expectedAction === 'conflict') && entryAdds > 0 && row.lost > 0) return { class: 'content-gap', sub: 'active-fact' }
+  if (row.expectedContainer === 'entry' && (row.expectedAction === 'add' || row.expectedAction === 'correct') && !row.entryActionLanded && !omittedUnits && row.lost > 0) return { class: 'content-gap', sub: 'wrong-container' }
+  if (row.expectedContainer === 'recent' && entryAdds > 0 && row.lost > 0) return { class: 'content-gap', sub: 'wrong-container' }
+  if (checks.attributionAndScope === false && row.entryActionLanded && entryAdds === 1 && row.lost > 0) return { class: 'label-debt', sub: 'type-label' }
   if (row.actionVerified === false && !omittedUnits) return { class: 'mechanism-blocked', sub: 'convention', detail: 'action-verb' }
   if (checks.attributionAndScope === false && !omittedUnits) return { class: 'mechanism-blocked', sub: 'convention', detail: 'category' }
   if (omittedUnits) return { class: 'content-gap', sub: null }
@@ -238,6 +251,8 @@ export function collectRun(run) {
       actionVerified: typeof result.actionVerified === 'boolean' ? result.actionVerified : null,
       actionState: result.actionEvidence?.state ?? null,
       structured: result.structured === true,
+      dispatches: Array.isArray(result.evidence?.dispatches) ? result.evidence.dispatches.length : 0,
+      repairAbandoned: (record.responses ?? []).some((response) => /"value"\s*:\s*null/.test(String(response?.body ?? ''))),
       dispatched: result.dispatched === true,
       entries: (result.entries ?? []).length,
       recent: (result.recent ?? []).length,
@@ -297,10 +312,12 @@ export function projectRound(rows, scope = 'program-rule') {
     const credited = scope === 'none'
       ? false
       : scope === 'all'
-        ? isMechanism(row)
-        : scope === 'false-negative'
-          ? isConfirmedFalseNegative(row)
-          : row.class === 'mechanism-blocked' && row.sub === 'program-rule'
+        ? isMechanism(row) || row.class === 'label-debt'
+        : scope === 'paper-11'
+          ? isConfirmedFalseNegative(row) || row.sub === 'instrument-misfire'
+          : scope === 'false-negative'
+            ? isConfirmedFalseNegative(row)
+            : row.class === 'mechanism-blocked' && row.sub === 'program-rule'
     dims[row.dimension] += credited ? row.weight : row.weight * (row.lower ?? 0)
   }
   const total = round2(Object.values(dims).reduce((n, v) => n + v, 0))
@@ -322,7 +339,7 @@ export function projectRound(rows, scope = 'program-rule') {
   }
 }
 
-const CLASS_ORDER = ['environment', 'veto', 'mechanism-blocked/program-rule', 'mechanism-blocked/rubric-field', 'mechanism-blocked/convention', 'content-gap/wrong-container', 'content-gap', 'unmeasured', 'clean/unexplained', 'clean']
+const CLASS_ORDER = ['environment', 'veto', 'mechanism-blocked/program-rule', 'mechanism-blocked/rubric-field', 'mechanism-blocked/repair-not-applied', 'mechanism-blocked/convention', 'label-debt/instrument-misfire', 'label-debt/type-label', 'content-gap/active-fact', 'content-gap/forbidden-live', 'content-gap/wrong-container', 'content-gap', 'unmeasured', 'clean/unexplained', 'clean']
 
 export function summarize(rows) {
   const rounds = new Map()
@@ -409,19 +426,20 @@ export function renderMarkdown(rows, { legacyRows = [], generatedAt = new Date()
     out.push('无：每一条失分都能归到环境、否决、机制拦截或内容缺口。')
   }
   out.push('')
-  out.push('### 只读投影（把机制拦截例记满权重后的轮次判定；不是认证成绩）')
+  out.push('### 只读投影（把机制拦截与标签类失分记满权重后的轮次判定；不是认证成绩）')
   out.push('')
-  out.push('| 轮次 | 官方冻结下界 | 现行口径复算 | 补程序规则拒收 | 补确认假阴性 | 补全部机制 | 四维（补确认假阴性） | 可靠性 |')
-  out.push('|------|--------------|--------------|----------------|--------------|------------|----------------------|--------|')
+  out.push('| 轮次 | 官方冻结下界 | 现行口径复算 | 补程序规则拒收 | 补确认假阴性 | 修试卷后（revision 11） | 补全部非内容缺口（上界） | 四维（修试卷后） | 可靠性 |')
+  out.push('|------|--------------|--------------|----------------|--------------|------------------------|------------|------------------|--------|')
   for (const [key, list] of [...rounds.entries()].sort()) {
-    const p1 = projectRound(list, 'false-negative')
+    const p1 = projectRound(list, 'paper-11')
     const p2 = projectRound(list, 'all')
     const base = round2(list.reduce((n, r) => n + r.weight * (r.lower ?? 0), 0))
     const frozen = official[key]
     const frozenText = typeof frozen === 'number' ? round2(frozen) : '—'
     const p0 = projectRound(list, 'program-rule')
     const scopeNote = p1.partial ? `已执行 ${p1.executed}/30，不判地板` : p1.floorPass ? '**总分与四维地板达标**（不含证据/否决门）' : '仍不达地板'
-    out.push(`| ${key} | ${frozenText} | ${base} | ${p0.total} | ${p1.total} | ${p2.total} | ${Object.entries(p1.dimensions).map(([k, v]) => `${k} ${v}/${p1.maxima[k]}`).join('、')} | ${p1.reliability.p}/${p1.reliability.n}（${scopeNote}） |`)
+    const p3 = projectRound(list, 'false-negative')
+    out.push(`| ${key} | ${frozenText} | ${base} | ${p0.total} | ${p3.total} | ${p1.total} | ${p2.total} | ${Object.entries(p1.dimensions).map(([k, v]) => `${k} ${v}/${p1.maxima[k]}`).join('、')} | ${p1.reliability.p}/${p1.reliability.n}（${scopeNote}） |`)
   }
   if (legacyRows.length) {
     const byHash = {}

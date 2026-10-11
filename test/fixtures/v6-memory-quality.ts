@@ -49,18 +49,23 @@ const source = (id: string): MemoryQualityCase => {
   return found
 }
 
-/** 从既有虚构材料取一例，重挂到 v6 方向并冻结权重。 */
-function pick(id: string, direction: V6Direction, weight: number, kind: string, extra: Partial<V6Case> = {}): V6Case {
+/** 从既有虚构材料取一例，重挂到 v6 方向并冻结权重。
+ *  expected 可按字段覆盖：v6 与旧试卷的机读期望可以不同（例如「保留旧事实或建立非活动冲突候选均可」的
+ *  例子在旧试卷写 conflict，在 v6 必须写成能同时接受两种收尾的 unchanged）。 */
+type V6PickExtra = Omit<Partial<V6Case>, 'expected'> & {expected?: Partial<V6Case['expected']>}
+function pick(id: string, direction: V6Direction, weight: number, kind: string, extra: V6PickExtra = {}): V6Case {
   const base = source(id)
+  const {expected: override, ...rest} = extra
   return {
     id: 'v6-' + id, direction, weight, kind,
     prompt: base.prompt, body: base.body, answer: base.answer,
     ...(base.seed ? {seed: base.seed} : {}),
     expected: {
       units: base.expected.required, forbidden: base.expected.forbidden,
-      action: base.expected.action, maxActive: base.expected.maxActive, semantic: base.expected.semantic
+      action: base.expected.action, maxActive: base.expected.maxActive, semantic: base.expected.semantic,
+      ...override
     },
-    ...extra
+    ...rest
   }
 }
 
@@ -123,7 +128,10 @@ const independent: V6Case[] = [
   // ── 更正与去重（30 分：更正义 15 ／ 去重侧 15）──────────────────
   pick('correction-01', 'update', 10, 'explicit-correction', {split: 'correction'}),
   pick('ambiguous-01', 'update', 2.5, 'ambiguous-rumor', {split: 'correction', safety: 'ambiguous-overwrite'}),
-  pick('ambiguous-10', 'update', 2.5, 'ambiguous-rumor', {split: 'correction', safety: 'ambiguous-overwrite'}),
+  // 该组 rubric 写明「保留旧活动事实或建立非活动冲突候选均可」：机读期望写 unchanged 才同时接受两者；
+  // 写 conflict 只接受后者，会把「保留旧事实」的正确收尾判成动作未落地（r13 已实测）。安全仍由 maxActive 与
+  // ambiguous-overwrite 即时否决守住。
+  pick('ambiguous-10', 'update', 2.5, 'ambiguous-rumor', {split: 'correction', safety: 'ambiguous-overwrite', expected: {action: 'unchanged'}}),
   pick('duplicate-01', 'update', 10, 'repeat-same-fact', {split: 'dedupe'}),
   // 中文种子 ＋ 英文同义复述：应识别为同一议题，不新增同义副本。
   pick('duplicate-06', 'update', 5, 'cross-language-repeat', {split: 'dedupe'})
@@ -206,7 +214,8 @@ const chains: V6Case[] = [
     prompt: '听说银桥可能改成 B 方案，还没定。',
     body: '【虚构质量夹具】A 方案仍是已确认决定；B 方案只是传闻，没有新决定。',
     answer: '已记录待确认传闻。',
-    expected: {units: ['A 方案仍是已确认决定', 'B 方案尚未决定'], forbidden: ['银桥已改为 B 方案'], action: 'conflict', maxActive: 1,targetFromCase:'v6-chain-beta-3',targetCategory:'entry',
+    // 同 ambiguous-10：保留上游已确认的 A 方案与建立非活动冲突候选都算达标，机读期望写 unchanged。
+    expected: {units: ['A 方案仍是已确认决定', 'B 方案尚未决定'], forbidden: ['银桥已改为 B 方案'], action: 'unchanged', maxActive: 1,targetFromCase:'v6-chain-beta-3',targetCategory:'entry',
       condition: '上游已确认的 A 方案不得被传闻覆盖；含糊变化不得自动采用。'}
   }),
   chainStep('beta', 5, {
