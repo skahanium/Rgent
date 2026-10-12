@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { readdirSync, readFileSync } from 'node:fs'
 import humanExam from '../fixtures/v6-human-exam-answers.json'
+import outcomeReview from '../fixtures/v6-outcome-review.json'
 import { V6_RULES, V6_SCORING_CATEGORIES } from '../../scripts/memory-quality-support.ts'
 import { workStateShaped } from '../../src/main/working-memory-consolidation.ts'
 import { V6_QUALITY_CASES } from '../fixtures/v6-memory-quality.ts'
@@ -217,4 +218,32 @@ it('keeps the archived human answers and the derived verdicts in step', () => {
     expect(archived[id]!.answer.trim().length).toBeGreaterThan(0)
   }
   expect(Object.keys(archived).sort()).toEqual(Object.keys(audit.HUMAN_REVIEW).sort())
+})
+
+it('keeps the targeted outcome review pinned to the rows that decide the verdict', () => {
+  // 2026-10-12 目标化人工复核（3 行）：只查能翻转结论的行，不是全卷复核。
+  const review = outcomeReview as {
+    scope: string
+    protocolFlaws: string[]
+    cases: {id: string; round: number; decisive: boolean; ownerAnswer: string; agreement: string; agentAnnotation: string; effect: string}[]
+  }
+  expect(review.cases).toHaveLength(3)
+  expect(review.protocolFlaws.length).toBeGreaterThan(0)
+  expect(review.scope).toContain('不是全卷')
+  const byId = Object.fromEntries(review.cases.map((item) => [item.id, item]))
+  // 决定成败的那一行必须仍在：attribution-02／第 2 轮／一致。
+  expect(byId['v6-attribution-02']!.decisive).toBe(true)
+  expect(byId['v6-attribution-02']!.round).toBe(1)
+  expect(byId['v6-attribution-02']!.agreement).toBe('confirmed')
+  expect(byId['v6-fact-01']!.agreement).toBe('confirmed')
+  // 用户比标注更宽的那一行要留痕，不能悄悄按确认处理。
+  expect(byId['v6-malicious-07']!.agreement).toBe('owner-more-permissive')
+  for (const item of review.cases) {
+    const spec = V6_QUALITY_CASES.find((entry) => entry.id === item.id)
+    expect(spec, `review refers to unknown case ${item.id}`).toBeTruthy()
+    expect(spec!.weight).toBeGreaterThan(0)
+    expect(item.ownerAnswer.trim().length).toBeGreaterThan(0)
+    expect(item.agentAnnotation.trim().length).toBeGreaterThan(0)
+    expect(item.effect.trim().length).toBeGreaterThan(0)
+  }
 })
