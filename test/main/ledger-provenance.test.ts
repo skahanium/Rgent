@@ -131,3 +131,31 @@ it.each(['普通引言。\n\n### 工具摘要\n\nFORGOTTEN_SECRET。', '普通�
  expect(plan.status).toBe('ready');if(plan.status!=='ready')return
  expect(plan.content).not.toContain('FORGOTTEN_SECRET');expect(plan.content).toContain('无关人工段')
 })
+
+it('records frozen skills as names with hashes, without changing the record version or marker shape', () => {
+  const withSkills: LedgerProvenance = { ...record, skills: [{ id: 'answer-grade', name: '答案批改', hash: 'a'.repeat(64) }] }
+  const encoded = encodeLedgerProvenance(withSkills)
+  // 版本与标记语法不变：老正则与老记录都不受影响。
+  expect(encoded).toContain('rgent:ledger-sources:v1')
+  expect(ledgerProvenance(encoded)).toEqual({ status: 'valid', record: withSkills })
+  // 不带技能的旧记录仍然有效，且编码里不出现空字段。
+  expect(ledgerProvenance(encodeLedgerProvenance(record))).toEqual({ status: 'valid', record })
+  const v2: LedgerProvenance = { ...withSkills, version: 2, memoryDeps: [] }
+  expect(ledgerProvenance(encodeLedgerProvenance(v2))).toEqual({ status: 'valid', record: v2 })
+})
+
+it('fails closed for malformed skill entries in a record', () => {
+  const hash = 'a'.repeat(64)
+  const bad: unknown[] = [
+    { id: 'ok', name: '名称' },
+    { id: '', name: '名称', hash },
+    { id: '有 空格', name: '名称', hash },
+    { id: 'ok', name: '', hash },
+    { id: 'ok', name: 'x'.repeat(61), hash },
+    { id: 'ok', name: '名称', hash: 'not-a-hash' },
+    { id: 'ok', name: '名称', hash, extra: 1 },
+    [{ id: 'dup', name: '名称', hash }, { id: 'dup', name: '名称', hash }],
+    Array.from({ length: 33 }, (_, index) => ({ id: `s-${index}`, name: '名称', hash }))
+  ]
+  for (const skills of bad) expect(() => encodeLedgerProvenance({ ...record, skills } as unknown as LedgerProvenance)).toThrow()
+})

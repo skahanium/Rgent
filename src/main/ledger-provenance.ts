@@ -13,6 +13,8 @@ export type LedgerProvenance = ({ version: 1 } | { version: 2; memoryDeps: Ledge
   tools: { name: string; outcome: string }[]
   /** Sources referenced by outgoing model messages, a subset of the actual reads above. */
   sentSources?: string[]
+  /** 该场冻结并随系统提示发出的技能：名称与内容哈希是「预览只显示名称」这一取舍下的可审证据。 */
+  skills?: { id: string; name: string; hash: string }[]
 }
 const PREFIX = 'rgent:ledger-sources:'
 const MAX_RECORD_BYTES = 131072
@@ -31,8 +33,14 @@ export function validMemoryDependency(v: unknown): v is LedgerMemoryDependency {
       fields(s, ['id', 'version', 'hash', 'relPath', 'kind', 'taskId']) && identity(s.id) && positive(s.version) && digest(s.hash) && notePath(s.relPath) && ['body', 'ledger'].includes(String(s.kind)) && (s.taskId === null || identity(s.taskId))) &&
     new Set(v.sourceDeps.map(s => s.id)).size === v.sourceDeps.length
 }
+const skillIdentity = (value: unknown): value is string => bounded(value, 64) && /^[A-Za-z0-9-]+$/.test(value)
 function valid(v: unknown): v is LedgerProvenance {
-  if (!fields(v, ['version', 'model', 'scope', 'sources', 'tools', ...(v && typeof v === 'object' && 'sentSources' in v ? ['sentSources'] : []), ...(v && typeof v === 'object' && 'version' in v && v.version === 2 ? ['memoryDeps'] : [])]) || (v.version !== 1 && v.version !== 2)) return false
+  if (!fields(v, ['version', 'model', 'scope', 'sources', 'tools', ...(v && typeof v === 'object' && 'sentSources' in v ? ['sentSources'] : []), ...(v && typeof v === 'object' && 'skills' in v ? ['skills'] : []), ...(v && typeof v === 'object' && 'version' in v && v.version === 2 ? ['memoryDeps'] : [])]) || (v.version !== 1 && v.version !== 2)) return false
+  if (v.skills !== undefined) {
+    if (!Array.isArray(v.skills) || v.skills.length > 32) return false
+    if (!v.skills.every(skill => fields(skill, ['id', 'name', 'hash']) && skillIdentity(skill.id) && bounded(skill.name, 60) && digest(skill.hash))) return false
+    if (new Set(v.skills.map(skill => skill.id)).size !== v.skills.length) return false
+  }
   if (v.version === 2 && (!Array.isArray(v.memoryDeps) || v.memoryDeps.length > 1000 || !v.memoryDeps.every(validMemoryDependency) || new Set(v.memoryDeps.map(d => d.id)).size !== v.memoryDeps.length)) return false
   if (!fields(v.model, ['provider', 'modelId', 'endpointHost']) || !bounded(v.model.provider) || !bounded(v.model.modelId) || !bounded(v.model.endpointHost, 512)) return false
   if (!Array.isArray(v.scope) || v.scope.length > 256 || !v.scope.every(notePath) || new Set(v.scope).size !== v.scope.length) return false

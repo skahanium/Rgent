@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 const memoryHash = (text:string) => createHash('sha256').update(text).digest('hex')
 import { validTaskMaterial, TaskMaterialTracker, type SavedTaskMaterial } from './host-material.ts'
 import { encodeLedgerProvenance, historicalContextPolicy } from './ledger-provenance.ts'
+import type {FrozenSkills} from './skills.ts'
 import { READ_ONLY_TOOL_SCHEMAS } from './scoped-agent-tools.ts'
 import { MODEL_STREAM_BOUNDS, type ModelStepEvent, type ToolSchema } from './model-stream.ts'
 import { randomUUID } from 'node:crypto'
@@ -43,6 +44,8 @@ export type HostStart = Partial<ObjectBinding> & {
   /** Main-issued preview signature; never accepted from renderer. */
   memoryAuthorizationSignature?: string
   memorySearchAuthorized?:boolean
+  /** 本场技能快照的预览签名；同样只由主进程签发。 */
+  skillsSignature?: string
   relPath: string
   range: SourceRange
   expectedText: string
@@ -70,6 +73,8 @@ export type HostDependencies = {
   root: () => string | null
   authorize?: (input: HostStart) => Promise<TaskGrant>
   assertMemoryAuthorization?: (input: HostStart) => void
+  /** 技能库在预览与启动之间变过就拒绝启动；与记忆同一处纪律。 */
+  assertSkillsAuthorization?: (input: HostStart) => void
   session?: () => string | null
   acceptsObject?: (relPath: string, expected: string, current: string) => boolean
   prepareSource?: (input:HostStart,grant:TaskGrant|undefined)=>Promise<{previousRevision:string;revision:string;sessionId:string;previousObjectVersion:string;objectVersion:string;migrated:boolean}>
@@ -94,13 +99,16 @@ export type HostDependencies = {
   createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker) => ScopedAgentTools
   /** 一个助手的设备级习惯；任务启动时取一次快照，运行中改动只影响新任务。 */
   assistant?: () => AssistantHabits | null
+  /** 本库启用的技能；同样在任务启动时冻结一次，运行中编辑只影响下一场。 */
+  skills?: () => FrozenSkills | null
   emit: (event: HostEvent) => void
 }
 
-/** 习惯只拼在系统提示末尾，并写明它不改变范围、工具与权限。 */
-function systemText(habits: AssistantHabits | null): string {
-  const block = habits ? assistantSystemBlock(habits) : null
-  return block ? `${SYSTEM_RULES}\n\n${block}` : SYSTEM_RULES
+/** 习惯与技能只拼在系统提示末尾，并写明它们不改变范围、工具与权限。
+ *  技能块由 freezeSkills 生成，已经带上同一句边界；没有可用技能时连空行都不加。 */
+function systemText(habits: AssistantHabits | null, skills: FrozenSkills | null = null): string {
+  const blocks = [habits ? assistantSystemBlock(habits) : null, skills?.block ?? null].filter((block): block is string => !!block)
+  return blocks.length ? `${SYSTEM_RULES}\n\n${blocks.join('\n\n')}` : SYSTEM_RULES
 }
 
 const SYSTEM_RULES = [
@@ -300,7 +308,8 @@ export class AgentHost {
       }
       const credential = grant?.credential ?? this.deps.credential()
       const limits = grant?.limits ?? this.deps.limits()
-      if (grant) encodeLedgerProvenance({ version: 1, model: { provider: credential.provider, modelId: credential.modelId, endpointHost: new URL(credential.baseURL).host }, scope: grant.sources.map(source => source.relPath), sources: [], tools: [], sentSources: [] })
+      const skills = this.deps.skills?.() ?? null
+      if (grant) encodeLedgerProvenance({ version: 1, model: { provider: credential.provider, modelId: credential.modelId, endpointHost: new URL(credential.baseURL).host }, scope: grant.sources.map(source => source.relPath), sources: [], tools: [], sentSources: [], ...(skills?.record.length ? { skills: skills.record } : {}) })
       const prepared=await this.deps.prepareSource?.(input,grant)
       const original = await this.deps.read(input.relPath)
       if (this.deps.root() !== root) throw new Error('VAULT_CHANGED')
@@ -317,6 +326,7 @@ export class AgentHost {
       }
       if (original.sessionId && original.objectVersion) this.bindings.set(key, { sessionId: original.sessionId, objectVersion: original.objectVersion, originalVersion: input.objectVersion ?? original.objectVersion })
       this.deps.assertMemoryAuthorization?.(input)
+      this.deps.assertSkillsAuthorization?.(input)
       const id = randomUUID()
       startedTaskId=id
       this.deps.onTaskStarted?.(id)
@@ -324,6 +334,7 @@ export class AgentHost {
       const nearby = parsedOriginal.index.blocks.filter(b => b.identity !== 'ai' && b.range.end >= input.range.start - 1024 && b.range.start <= input.range.end + 1024).map(b => original.content.slice(b.range.start, b.range.end)).join('\n').slice(0, 2048)
       const memory = this.deps.memory ? await createMemoryUsePermit(this.deps.memory, credential, input.promptText, nearby) : undefined
       this.deps.assertMemoryAuthorization?.(input)
+      this.deps.assertSkillsAuthorization?.(input)
       if(grant?.memorySnapshotSignature&&memory?.snapshotSignature!==grant.memorySnapshotSignature)throw Error('STALE_PREVIEW')
       if (memory) this.memoryUses.set(key, {permit: memory, credential})
       const materials = new TaskMaterialTracker()
@@ -342,7 +353,7 @@ export class AgentHost {
       const submitted = promptBlock(marked, id)
       const placement = submitted.position
       const habits = this.deps.assistant?.() ?? null
-      const system = systemText(habits)
+      const system = systemText(habits, skills)
       const assistantLine = habits ? assistantSummary(habits) : ''
       const budget = this.inputBudget(credential.contextTokens) - conservativeTokens(system)
       // Check that the current prompt and its nearby paragraph fit before changing disk.
@@ -370,7 +381,7 @@ export class AgentHost {
       const refused = new Map<string, number>()
       const recordProvenance=(summaries:readonly SentSummary[],includeStaged=false)=>{
         const inherited=summaries.flatMap(s=>s.dependencies.flatMap(d=>d.provenance?[d.provenance]:[]))
-        return {version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies(includeStaged)??[]),...(scoped?.memoryDependencies?.()??[]),...inherited.flatMap(p=>p.version===2?p.memoryDeps:[])].map(d=>[d.id,d])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:[...new Map([...(scoped?.dependencies()??[]),...inherited.flatMap(p=>p.sources)].map(d=>[d.relPath,d])).values()],sentSources:scoped?.sentSources()??[],tools:[...(scoped?.summary()??[]),...(memorySearchCalls?[{name:'search_memory',outcome:`执行 ${memorySearchCalls} 次，失败 ${memorySearchFailures} 次`}]:[]),...memoryToolOutcomes,...[...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`拒绝 ${label.split(':')[1]} × ${count}`}))]}
+        return {...(skills?.record.length ? { skills: skills.record } : {}), version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies(includeStaged)??[]),...(scoped?.memoryDependencies?.()??[]),...inherited.flatMap(p=>p.version===2?p.memoryDeps:[])].map(d=>[d.id,d])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:[...new Map([...(scoped?.dependencies()??[]),...inherited.flatMap(p=>p.sources)].map(d=>[d.relPath,d])).values()],sentSources:scoped?.sentSources()??[],tools:[...(scoped?.summary()??[]),...(memorySearchCalls?[{name:'search_memory',outcome:`执行 ${memorySearchCalls} 次，失败 ${memorySearchFailures} 次`}]:[]),...memoryToolOutcomes,...[...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`拒绝 ${label.split(':')[1]} × ${count}`}))]}
       }
       let lastCheckpoint = 0
       const snapshot = (status: HostEvent['status'], reason?: string, revision?: string): void => {

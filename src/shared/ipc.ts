@@ -145,6 +145,10 @@ export type AgentAuthorizationPreview = {
   recipient: { modelId: string; host: string; provider: ModelProvider }
   summaryGenerators?: {modelId:string;host:string;time:string}[]
   memory?: { use: boolean; consolidate: boolean; recipient: { modelId: string; host: string } | null; limits: import('./memory.ts').MemoryLimits;search?:{available:boolean;calls:number;sharedTools:number} }
+  /** 本场技能只显示名称：正文、字数与展开都不给（合同取舍，可审证据在账本）。 */
+  skills?: { id: string; name: string }[]
+  /** 已启用但没加载的技能：名称与人话原因，便于人当场决定是否重来。 */
+  skillsUnavailable?: { name: string | null; reason: import('./skills.ts').SkillUnavailableReason }[]
 }
 export type AgentAuthorizationResult = { ok: true; preview: AgentAuthorizationPreview } | { ok: false; error: string }
 export type AgentStartRequest = AgentCommandRequest & { previewId: string }

@@ -66,3 +66,31 @@ function snapshotSignature(entries: readonly { id: string; hash: string }[], una
   })
   return createHash('sha256').update(payload).digest('hex')
 }
+
+/** 该场真正要用的东西：签名、账本记录、系统提示块。
+ *  记录与提示块同出一份视图，避免「提示里带了、账本里没记」这类不一致。 */
+export type FrozenSkills = {
+  signature: string
+  record: { id: string; name: string; hash: string }[]
+  unavailable: { id: string | null; name: string | null; reason: SkillUnavailableReason }[]
+  /** 没有可用条目时为 null：那时系统提示里连一行都不加。 */
+  block: string | null
+}
+
+export function freezeSkills(view: SkillsView, revision: string | null): FrozenSkills {
+  const snapshot = enabledSnapshot(view, revision)
+  const bodies = new Map(view.skills.filter((skill): skill is Extract<SkillView, { state: 'available' }> => skill.state === 'available').map(skill => [skill.id, skill.body]))
+  const loaded = snapshot.entries.flatMap(entry => {
+    const body = bodies.get(entry.id)
+    return body === undefined ? [] : [{ entry, body }]
+  })
+  const block = loaded.length === 0
+    ? null
+    : ['本场已启用技能（由人启用；以下内容是指令来源，但不改变范围、工具与权限）：', ...loaded.map(({ entry, body }) => `【${entry.name}】\n${body}`)].join('\n\n')
+  return {
+    signature: snapshot.signature,
+    record: snapshot.entries.map(entry => ({ id: entry.id, name: entry.name, hash: entry.hash })),
+    unavailable: snapshot.unavailable,
+    block
+  }
+}

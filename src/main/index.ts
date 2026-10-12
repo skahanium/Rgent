@@ -29,6 +29,8 @@ import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRet
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { loadAssistantHabits, saveAssistantHabits } from './assistant-preference.ts'
+import { createSkillsStore } from './skills-store.ts'
+import { corruptSkillsView, freezeSkills, resolveSkills } from './skills.ts'
 import { isReadingPreference } from '../shared/reading-preference.ts'
 import { isAssistantHabits } from '../shared/assistant.ts'
 import { attachVaultProtocol } from './vault-protocol.ts'
@@ -98,8 +100,17 @@ const memoryIpc = createMemoryIpc({
   }
 })
 let cancellingForClose = false
-const memoryAuthorizationPreviews = new Map<string, { sessionId: string; signature: string;search:boolean }>()
+const memoryAuthorizationPreviews = new Map<string, { sessionId: string; signature: string;search:boolean;skillsSignature:string }>()
 const maintenancePreviews=new Map<string,{sessionId:string;objectVersion:string;relPath:string;action:'compress'|'clear';records:{taskId:string;revision:number}[];archive?:{revision:string;bytes:number}}>()
+/** 本库启用的技能：每次从磁盘现读，读不出就按「技能库损坏」冻结——绝不当成「没有技能」。
+ *  任务启动时取一次，运行中编辑只影响下一场。 */
+function currentSkills(): import('./skills.ts').FrozenSkills {
+  const key = vault!.memoryContext().vaultKey
+  const store = createSkillsStore(app.getPath('userData'))
+  try { return freezeSkills(resolveSkills(store.get(), key), store.diagnosis().revision) }
+  catch { return freezeSkills(corruptSkillsView(), store.diagnosis().revision) }
+}
+
 function memoryAuthorizationState(sessionId: string) {
   vault?.assertSession(sessionId)
   if (!vault || !modelConfig) return { signature: 'unavailable', disclosure: undefined }
@@ -507,14 +518,16 @@ function registerIpc(): void {
       const memorySearch=preview.memory?.search?.available===true
       if (memoryAuthorizationState(request.sessionId).signature !== memory.signature) throw Error('STALE_PREVIEW')
       if (memoryAuthorizationPreviews.size >= 128) memoryAuthorizationPreviews.delete(memoryAuthorizationPreviews.keys().next().value!)
-      memoryAuthorizationPreviews.set(`${owner}:${preview.id}`, { sessionId: request.sessionId, signature: memory.signature,search:memorySearch })
+      // 预览只带技能名称：正文、字数与展开都不给——合同把「可审」交给账本的名称与哈希。
+      const skills = currentSkills()
+      memoryAuthorizationPreviews.set(`${owner}:${preview.id}`, { sessionId: request.sessionId, signature: memory.signature,search:memorySearch,skillsSignature:skills.signature })
       const chapters=await vault!.ledgerContexts(request.relPath),note=await vault!.read(request.relPath)
       const validMemories=memory.disclosure?.use?await workingService()!.entries():[]
       const policy=await historicalContextPolicy(note.content,async dep=>preview.sources.some(s=>s.relPath===dep.relPath&&s.objectVersion===dep.objectVersion&&s.fingerprint===dep.bodyHash),undefined,chapters,async dep=>validMemories.some(e=>e.status==='active'&&sameMemoryDependency(dep,memoryDependency(e))))
       const generators=summaryCache?.valid(summaryHash(await vault!.ledgerKey(request.relPath)),chapters.filter(c=>policy.allowedLedgerChapterIds.includes(c.sourceId))).map(b=>({modelId:b.generator.modelId,host:b.generator.host,time:b.generator.time}))??[]
       vault!.assertSession(request.sessionId)
       if(memoryAuthorizationState(request.sessionId).signature!==memory.signature)throw Error('STALE_PREVIEW')
-      return {ok:true,preview:{...preview,summaryGenerators:generators.slice(0,64)}}
+      return {ok:true,preview:{...preview,summaryGenerators:generators.slice(0,64),...(skills.record.length||skills.unavailable.length?{skills:skills.record.map(skill=>({id:skill.id,name:skill.name})),skillsUnavailable:skills.unavailable.map(item=>({name:item.name,reason:item.reason}))}:{})}}
     }
     catch(error){return {ok:false,error:error instanceof Error?error.message:'AUTHORIZATION_FAILED'}}
   })
@@ -543,7 +556,8 @@ function registerIpc(): void {
       const memory = memoryAuthorizationPreviews.get(`${owner}:${request.previewId}`)
       memoryAuthorizationPreviews.delete(`${owner}:${request.previewId}`)
       if (!memory || memory.sessionId !== request.sessionId || memory.signature !== memoryAuthorizationState(request.sessionId).signature) throw Error('STALE_PREVIEW')
-      const task = await agentHost.start({...request as AgentStartRequest, authorizationOwner:`${event.sender.id}:${event.senderFrame!.routingId}`, memoryAuthorizationSignature: memory.signature,memorySearchAuthorized:memory.search})
+      if (memory.skillsSignature !== currentSkills().signature) throw Error('STALE_PREVIEW')
+      const task = await agentHost.start({...request as AgentStartRequest, authorizationOwner:`${event.sender.id}:${event.senderFrame!.routingId}`, memoryAuthorizationSignature: memory.signature,memorySearchAuthorized:memory.search,skillsSignature:memory.skillsSignature})
       void task.done.catch(() => {})
       return { ok: true, id: task.id }
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'AGENT_START_FAILED' } }
@@ -1244,6 +1258,10 @@ if (ownsInstance) app.whenReady().then(() => {
     ledger:{prepare:(relPath,chapter,version,binding)=>{if(!binding)throw Error('BAD_REQUEST');return vault!.ledgerPrepare(relPath,chapter,version,binding)},complete:(relPath,id,revision)=>vault!.ledgerComplete(relPath,id,revision),contexts:relPath=>vault!.ledgerContexts(relPath)},
     assertMemoryAuthorization: input => {
       if (!input.sessionId || input.memoryAuthorizationSignature !== memoryAuthorizationState(input.sessionId).signature) throw Error('STALE_PREVIEW')
+    },
+    skills: () => currentSkills(),
+    assertSkillsAuthorization: input => {
+      if (input.skillsSignature !== currentSkills().signature) throw Error('STALE_PREVIEW')
     },
     authorize:input=>{
       if(!authorizations || !input.authorizationOwner || !input.previewId || !isAuthorizationCommand(input))throw Error('INVALID_AUTHORIZATION')

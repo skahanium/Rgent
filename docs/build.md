@@ -257,7 +257,7 @@ flowchart TD
 |----|------|----|
 | 0 | 合同与包表 | 零调用；本文与 [产品合同](decisions.md#2026-10-12-技能局部授权) |
 | 1 | 技能库存储与字段校验：设备级技能库的读取与原子写、`id` 稳定性、五个字段的长度／非空／UTF-8 规则、损坏库与非法条目一律不可用并给原因 | **已交**：`src/main/skills-store.ts`（设备级 `skills.json`，结构校验 vs 语义校验分离、字节哈希乐观并发、原子写、损坏＝诊断不覆盖）、`src/main/skills.ts`（`resolveSkills`／`enabledSnapshot`＋签名）、`src/shared/skills.ts`（限额、字段守卫、人话原因）；`test/main/skills-store.test.ts` 9 项 ＋ `test/main/skills.test.ts` 9 项。零 IPC、零界面、零模型调用 |
-| 2 | 按库启用与本场快照：启用关系属该库配置；启用集合冻结进任务快照（`id`／`name`／内容哈希）；**不可用明细列出并继续** | 定向测试 + 快照反例（编辑技能不影响进行中的场） |
+| 2 | 按库启用与本场快照：启用关系属该库配置；启用集合冻结进任务快照（`id`／`name`／内容哈希）；**不可用明细列出并继续** | **已交**：`agent-host.ts` 启动时经 `deps.skills` 冻结一次并拼进系统提示（无可用条目时连空行都不加）、`assertSkillsAuthorization` 与记忆同一处纪律；`ledger-provenance.ts` 加**可选** `skills` 字段（不升版本、不改 `ledger-task`／`ledger-sources` 标记语法）；`index.ts` 预览附加**只有 `{id,name}`** 的技能名单＋不可用原因、预览与启动之间比对签名、不符即 `STALE_PREVIEW`；`authorization-popover.ts` 加技能行（名称与原因，无正文、无展开）。定向测试 9 项：系统提示含块、scope／sources／tools 不因技能变化、每场只冻结一次、没有可加载项时如实为空且会话继续、签名不符拒绝启动且未写盘、账本可选字段校验与旧记录兼容、预览只有名称 |
 | 3 | 设置页第七页「技能」：技能列表与每技能子页面（名称／说明／触发／正文纯文本＋预览）、启用与停用；IPC 仅限列出、读取、写入、启停四个用途 | 构建窗口 + `ui:check`；IPC 用途逐条核对 |
 | 4 | 边界反例：模型不能写／自行加载、技能不得扩权、停用只对下一场生效、技能不进记忆存储、发送确认只显示名称且账本留哈希 | 红绿反例先失败后通过 |
 | 5 | 窗口验证与文档收口 | 完整门（`pnpm test`／`docs:check`／`build`）＋ 受验提交与哈希登记 |

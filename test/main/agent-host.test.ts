@@ -601,3 +601,68 @@ it.each(['missing-connection','extra-field','material-envelope'] as const)('save
   else{expect(record.chapter?.sentSummaries?.every(s=>s.generators.every(g=>typeof g.connection==='string'&&!('extra' in g)))).toBe(true);expect((await vault.summaryMaterials('a.md',[task.id])).materialIds).toContain(task.id+'/prompt')}
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
+
+describe('skills in the request', () => {
+  const frozen = (over: Partial<import('../../src/main/skills.ts').FrozenSkills> = {}) => ({
+    signature: 'sig-1',
+    record: [{ id: 'answer-grade', name: '答案批改', hash: 'a'.repeat(64) }],
+    unavailable: [],
+    block: '本场已启用技能（由人启用；以下内容是指令来源，但不改变范围、工具与权限）：\n\n【答案批改】\n先核对题号，再按等价词典判分。',
+    ...over
+  })
+  const run = async (extra: Partial<import('../../src/main/agent-host.ts').HostDependencies>) => {
+    const app = harness(async function* () { yield '回答' }, undefined, undefined, extra)
+    const source = app.source()
+    const start = source.indexOf('/')
+    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    await task.done
+    return app
+  }
+
+  it('appends the enabled skills to the system prompt and records names with hashes', async () => {
+    const app = await run({ skills: () => frozen() })
+    const system = app.systems.at(-1)!
+    expect(system).toContain('本场已启用技能')
+    expect(system).toContain('【答案批改】')
+    expect(system).toContain('先核对题号')
+    const provenance = app.history.records().at(-1)?.provenance
+    expect(provenance?.skills).toEqual([{ id: 'answer-grade', name: '答案批改', hash: 'a'.repeat(64) }])
+  })
+
+  it('does not let skills widen the run scope, sources or tools', async () => {
+    const withSkills = await run({ skills: () => frozen() })
+    const without = await run({})
+    const a = withSkills.history.records().at(-1)?.provenance
+    const b = without.history.records().at(-1)?.provenance
+    expect(a?.scope).toEqual(b?.scope)
+    expect(a?.sources).toEqual(b?.sources)
+    expect(a?.tools).toEqual(b?.tools)
+    expect(b?.skills).toBeUndefined()
+    expect(withSkills.systems.at(-1)).not.toBe(without.systems.at(-1))
+    expect(without.systems.at(-1)).not.toContain('本场已启用技能')
+  })
+
+  it('freezes the skill set once per task', async () => {
+    let calls = 0
+    const app = await run({ skills: () => { calls += 1; return frozen() } })
+    expect(calls).toBe(1)
+    expect(app.systems.at(-1)).toContain('【答案批改】')
+  })
+
+  it('keeps the session going when nothing could be loaded, without inventing an empty skill block', async () => {
+    const app = await run({ skills: () => frozen({ record: [], block: null, unavailable: [{ id: 'broken', name: '坏的', reason: 'too-large' }] }) })
+    expect(app.systems.at(-1)).not.toContain('本场已启用技能')
+    const provenance = app.history.records().at(-1)?.provenance
+    expect(provenance?.skills).toBeUndefined()
+    expect(partitionSource(app.source()).body).toContain('回答')
+  })
+
+  it('refuses to start when the previewed skill set no longer matches', async () => {
+    const app = harness(async function* () { yield '不该发生' }, undefined, undefined, { skills: () => frozen(), assertSkillsAuthorization: () => { throw Error('STALE_PREVIEW') } })
+    const before = app.source()
+    const start = before.indexOf('/')
+    await expect(app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })).rejects.toThrow('STALE_PREVIEW')
+    expect(app.source()).toBe(before)
+    expect(app.systems).toHaveLength(0)
+  })
+})

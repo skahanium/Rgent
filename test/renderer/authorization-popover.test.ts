@@ -114,3 +114,25 @@ it('does not confirm from a standalone keyCode 229 even when isComposing is fals
   expect(popup.isOpen()).toBe(true)
   popup.close()
 })
+
+it('lists skill names only, and explains what was enabled but not loaded', async () => {
+  const withSkills={...preview,skills:[{id:'answer-grade',name:'答案批改'}],skillsUnavailable:[{name:'过期规则',reason:'set-too-large' as const}]}
+  openAuthorizationPopover({anchor:{left:100,top:100,bottom:120},origin:'a.md',entries:[],preview:async()=>({ok:true as const,preview:withSkills}),send:async()=>({ok:true as const,id:'task'})})
+  const dialog=document.querySelector<HTMLDialogElement>('.overlay-authorization')!
+  await vi.waitFor(()=>expect(dialog.querySelector('.authorization-skills')?.textContent).toContain('答案批改'))
+  const text=dialog.querySelector('.authorization-skills')!.textContent!
+  expect(text).toContain('本场技能：答案批改')
+  expect(text).toContain('已启用但未加载：过期规则')
+  expect(text).toContain('正文合计超过')
+  expect(text).toContain('账本记有名称与内容哈希')
+  // 只有名称与原因：卡片里没有正文，也没有可展开的控件。
+  expect(text).not.toContain('先核对题号')
+  expect(dialog.querySelector('.authorization-skills details')).toBeNull()
+  expect(dialog.querySelector('.authorization-skills button')).toBeNull()
+})
+
+it('says no skills when the session has none', async () => {
+  openAuthorizationPopover({anchor:{left:100,top:100,bottom:120},origin:'a.md',entries:[],preview:async()=>({ok:true as const,preview}),send:async()=>({ok:true as const,id:'task'})})
+  const dialog=document.querySelector<HTMLDialogElement>('.overlay-authorization')!
+  await vi.waitFor(()=>expect(dialog.querySelector('.authorization-skills')?.textContent).toBe('本场无技能。'))
+})
