@@ -1,6 +1,7 @@
 import { parseVaultTransition, type VaultTransition, type VaultRestoreReceipt } from '../shared/vault-management.ts'
 import type { LifecycleFlushPhase, RecoveryFlushContext } from '../shared/flush.ts'
 import { boundEvent, isVaultChannel, isVaultEvent } from '../shared/vault-binding.ts'
+import type { SkillsEnabledRequest, SkillsGetRequest, SkillsResult, SkillsSaveRequest } from '../shared/skills.ts'
 import type { MemorySessionRequest, MemoryConfigRequest, MemoryManualRequest, MemoryCommitRequest, MemoryItemRequest, MemoryEditRequest, MemoryJobRequest, MemoryResult, MemoryView, MemoryPreview } from '../shared/memory.ts'
 import { contextBridge, ipcRenderer } from 'electron'
 import {
@@ -127,6 +128,9 @@ const api = {
   chromeTextSet: (value: ChromeTextPreference): Promise<ChromeTextSetResult> => invoke(IPC.chromeTextSet, value),
   remoteImageGet: (request: RemoteImageGetRequest): Promise<RemoteImageGetResult> =>
     invoke(IPC.remoteImageGet, request),
+  skillsGet: (request: SkillsGetRequest): Promise<SkillsResult> => invoke(IPC.skillsGet, request),
+  skillsSave: (request: SkillsSaveRequest): Promise<SkillsResult> => invoke(IPC.skillsSave, request),
+  skillsSetEnabled: (request: SkillsEnabledRequest): Promise<SkillsResult> => invoke(IPC.skillsSetEnabled, request),
   assistantGet: (): Promise<AssistantResult> => invoke(IPC.assistantGet),
   assistantSet: (habits: AssistantHabits): Promise<AssistantResult> => invoke(IPC.assistantSet, habits),
   modelConfigGet: (): Promise<ModelConfigResult> => invoke(IPC.modelConfigGet),

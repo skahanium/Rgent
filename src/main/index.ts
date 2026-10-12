@@ -31,6 +31,7 @@ import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPre
 import { loadAssistantHabits, saveAssistantHabits } from './assistant-preference.ts'
 import { createSkillsStore } from './skills-store.ts'
 import { corruptSkillsView, freezeSkills, resolveSkills } from './skills.ts'
+import { skillFieldsReason, skillId } from '../shared/skills.ts'
 import { isReadingPreference } from '../shared/reading-preference.ts'
 import { isAssistantHabits } from '../shared/assistant.ts'
 import { attachVaultProtocol } from './vault-protocol.ts'
@@ -410,7 +411,7 @@ function registerIpc(): void {
       if (!trusted(event)) throw new Error('BAD_SENDER')
       const current = vault,session = current?.sessionId() ?? null
       const actual = isVaultChannel(channel) ? boundArguments(args, session) : args
-      if (vaultSwitch?.busy && [IPC.agentStart, IPC.agentAuthorizationPreview, IPC.noteCreate, IPC.folderCreate, IPC.relocationPreview, IPC.relocationCommit, IPC.lifecycleRetry, IPC.noteSaveCopyPreview, IPC.noteSaveCopyCommit, IPC.permissionsSet, IPC.memoryConfigSave, IPC.memoryPreviewCommit, IPC.memoryItemEdit, IPC.memoryItemDisable, IPC.memoryItemForget, IPC.memoryJobRetryPreview, IPC.ledgerMaintenance, IPC.ledgerMigrate, IPC.ledgerRepair].includes(channel as never)) throw Error('VAULT_SWITCH_BUSY')
+      if (vaultSwitch?.busy && [IPC.agentStart, IPC.agentAuthorizationPreview, IPC.noteCreate, IPC.folderCreate, IPC.relocationPreview, IPC.relocationCommit, IPC.lifecycleRetry, IPC.noteSaveCopyPreview, IPC.noteSaveCopyCommit, IPC.permissionsSet, IPC.memoryConfigSave, IPC.memoryPreviewCommit, IPC.memoryItemEdit, IPC.memoryItemDisable, IPC.memoryItemForget, IPC.memoryJobRetryPreview, IPC.skillsSave, IPC.skillsSetEnabled, IPC.ledgerMaintenance, IPC.ledgerMigrate, IPC.ledgerRepair].includes(channel as never)) throw Error('VAULT_SWITCH_BUSY')
       const result = isVaultChannel(channel) && current ? await current.runBound(session, () => listener(event, ...actual)) : await listener(event, ...actual)
       if (isVaultChannel(channel) && session !== (vault?.sessionId() ?? null)) throw Error('VAULT_CHANGED')
       return result
@@ -435,6 +436,90 @@ function registerIpc(): void {
       send(IPC.memoryChanged,session)
     }
     return result
+  })
+  /** 技能库视图：列表即读取（正文一并返回），损坏时如实标 corrupt，不显示成「还没有技能」。 */
+  const skillsLibraryView = (sessionId: string): import('../shared/skills.ts').SkillsLibraryView => {
+    const store = createSkillsStore(app.getPath('userData'))
+    const diagnosis = store.diagnosis()
+    const empty = { sessionId, revision: diagnosis.revision, corrupt: true, ignored: 0, skills: [] }
+    if (diagnosis.invalid) return empty
+    let view
+    try { view = resolveSkills(store.get(), vault!.memoryContext().vaultKey) } catch { return empty }
+    return {
+      sessionId, revision: diagnosis.revision, corrupt: false, ignored: view.ignored,
+      skills: view.skills.map(skill => skill.state === 'available'
+        ? { id: skill.id, name: skill.name, description: skill.description, triggers: skill.triggers, body: skill.body, bytes: skill.bytes, reason: null, enabled: skill.enabled }
+        : { id: skill.id ?? '', name: skill.name ?? '', description: '', triggers: [], body: '', bytes: 0, reason: skill.reason, enabled: skill.enabled })
+    }
+  }
+  const withSkillsVault = <T,>(event: Electron.IpcMainInvokeEvent, sessionId: string, run: () => T): T => {
+    const currentVault = vault, session = currentVault?.sessionId()
+    if (!currentVault || !session || session !== sessionId) throw Error('VAULT_CHANGED')
+    const result = run()
+    currentVault.assertSession(session)
+    return result
+  }
+  registerTrustedHandle(IPC.skillsGet, async (event, value: unknown): Promise<import('../shared/skills.ts').SkillsResult> => {
+    if (!trusted(event) || !value || typeof value !== 'object' || typeof (value as { sessionId?: unknown }).sessionId !== 'string') return { ok: false, error: 'BAD_REQUEST' }
+    const request = value as import('../shared/skills.ts').SkillsGetRequest
+    try { return { ok: true, view: withSkillsVault(event, request.sessionId, () => skillsLibraryView(request.sessionId)) } }
+    catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'SKILLS_FAILED' } }
+  })
+  registerTrustedHandle(IPC.skillsSave, async (event, value: unknown): Promise<import('../shared/skills.ts').SkillsResult> => {
+    if (!trusted(event) || !value || typeof value !== 'object') return { ok: false, error: 'BAD_REQUEST' }
+    const request = value as Partial<import('../shared/skills.ts').SkillsSaveRequest>
+    const sessionId = request.sessionId
+    if (typeof sessionId !== 'string' || (request.expectedRevision !== null && typeof request.expectedRevision !== 'string')) return { ok: false, error: 'BAD_REQUEST' }
+    if (request.operation !== 'create' && request.operation !== 'update' && request.operation !== 'remove') return { ok: false, error: 'BAD_REQUEST' }
+    try {
+      return { ok: true, view: withSkillsVault(event, sessionId, () => {
+        const store = createSkillsStore(app.getPath('userData'))
+        const config = store.get()
+        const now = new Date().toISOString()
+        let next = config
+        if (request.operation === 'remove') {
+          const id = (request as { id?: unknown }).id
+          if (!skillId(id)) throw Error('BAD_REQUEST')
+          next = {
+            ...config,
+            skills: config.skills.filter(skill => skill.id !== id),
+            vaults: Object.fromEntries(Object.entries(config.vaults).map(([key, entry]) => [key, { enabled: entry.enabled.filter(enabled => enabled !== id) }]))
+          }
+        } else {
+          const draft = (request as { draft?: unknown }).draft
+          const reason = skillFieldsReason(draft)
+          // 校验不过就把原因当错误码回给界面：界面用同一份人话文案，不自己编。
+          if (reason !== null) throw Error(reason)
+          const clean = draft as import('../shared/skills.ts').SkillsDraft
+          if (request.operation === 'create') {
+            next = { ...config, skills: [...config.skills, { id: randomUUID(), ...clean, triggers: [...clean.triggers], createdAt: now, updatedAt: now }] }
+          } else {
+            const id = (request as { id?: unknown }).id
+            if (!skillId(id) || !config.skills.some(skill => skill.id === id)) throw Error('SKILLS_UNKNOWN_ID')
+            next = { ...config, skills: config.skills.map(skill => skill.id === id ? { ...skill, ...clean, triggers: [...clean.triggers], updatedAt: now } : skill) }
+          }
+        }
+        store.write(next, request.expectedRevision ?? null)
+        return skillsLibraryView(sessionId)
+      }) }
+    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'SKILLS_FAILED' } }
+  })
+  registerTrustedHandle(IPC.skillsSetEnabled, async (event, value: unknown): Promise<import('../shared/skills.ts').SkillsResult> => {
+    if (!trusted(event) || !value || typeof value !== 'object') return { ok: false, error: 'BAD_REQUEST' }
+    const request = value as Partial<import('../shared/skills.ts').SkillsEnabledRequest>
+    const sessionId = request.sessionId
+    if (typeof sessionId !== 'string' || typeof request.enabled !== 'boolean' || !skillId(request.id) || (request.expectedRevision !== null && typeof request.expectedRevision !== 'string')) return { ok: false, error: 'BAD_REQUEST' }
+    try {
+      return { ok: true, view: withSkillsVault(event, sessionId, () => {
+        const store = createSkillsStore(app.getPath('userData'))
+        const config = store.get()
+        const key = vault!.memoryContext().vaultKey
+        const current = config.vaults[key]?.enabled ?? []
+        const next = request.enabled ? [...new Set([...current, request.id!])] : current.filter(id => id !== request.id)
+        store.setEnabled(key, next, request.expectedRevision ?? null)
+        return skillsLibraryView(sessionId)
+      }) }
+    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'SKILLS_FAILED' } }
   })
   const configResult = (): ModelConfigResult => modelConfig
     ? { ok: true, config: modelConfig.getPublic() }

@@ -25,9 +25,11 @@ export type IconName =
   | 'model'
   | 'run'
   | 'memory'
+  | 'skill'
   | 'refresh'
 
 const PATHS: Record<IconName, string[]> = {
+  skill: ['M12 3 4 6.5v11L12 21l8-3.5v-11L12 3Z', 'M4 6.5 12 10l8-3.5', 'M12 10v11'],
   folder: ['M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 2h4.5A1.5 1.5 0 0 1 14 6.5v5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z'],
   'folder-plus': ['M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 2h4.5A1.5 1.5 0 0 1 14 6.5v5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z', 'M8 7v4', 'M6 9h4'],
   'folder-open': ['M6 4l4 4-4 4'],

@@ -2,6 +2,8 @@ import { ledgerEmptyText, ledgerErrorText } from '../../shared/ledger-errors.ts'
 import type { VaultWorkspace } from '../../shared/vault-management.ts'
 import type { MemoryView, MemoryManualRequest, MemoryResult } from '../../shared/memory.ts'
 import { memoryErrorText, renderMemoryPreview, ledgerRememberCommand, type MemoryPageHandlers } from './memory-ui.ts'
+import type { SkillsPageHandlers } from './settings-skills.ts'
+import type { SkillsResult } from '../../shared/skills.ts'
 import { IPC, type AgentEvent, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type PublicModelConfig, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { RecoveryDraftGate, reportFlush, saveWorkspacePosition } from '../../shared/flush.ts'
@@ -224,6 +226,7 @@ export async function start(root: HTMLElement): Promise<void> {
       }
     },
     memory: memoryHandlers,
+    skills: skillsHandlers,
     getMode: () => window.rgent.themeGet(),
     setMode: (mode) => window.rgent.themeSet(mode),
     getReading: () => window.rgent.readingGet(),
@@ -272,6 +275,16 @@ export async function start(root: HTMLElement): Promise<void> {
       cancel: r => window.rgent.memoryJobCancel({ ...r, sessionId }).then(accept),
       maintenance: r => window.rgent.memoryMaintenancePreview({ ...r, sessionId }),
       commit: r => window.rgent.memoryPreviewCommit({ ...r, sessionId }).then(accept)
+    }
+  }
+  function skillsHandlers(): SkillsPageHandlers | null {
+    const sessionId = vaultSession
+    if (!sessionId) return null
+    const accept = (result: SkillsResult): SkillsResult => (vaultSession !== sessionId ? { ok: false, error: 'VAULT_CHANGED' } : result)
+    return {
+      get: () => window.rgent.skillsGet({ sessionId }).then(accept),
+      save: request => window.rgent.skillsSave({ ...request, sessionId }).then(accept),
+      setEnabled: request => window.rgent.skillsSetEnabled({ ...request, sessionId }).then(accept)
     }
   }
   async function refreshMemory(): Promise<void> {

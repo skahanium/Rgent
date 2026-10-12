@@ -884,3 +884,30 @@ it('reports library busy state to native and global entry guards until cancellat
  document.querySelector<HTMLButtonElement>('[data-vault-open="b"]')!.click();expect(panel.isBusy()).toBe(true)
  reject(Error('VAULT_SWITCH_CANCELLED'));await vaultFlush();expect(panel.isBusy()).toBe(false);panel.close()
 })
+
+it('adds the skills page to the agent group only when the host can serve it', async () => {
+  const overlay = (skills: unknown) => createSettingsOverlay({
+    getMode: async () => 'day',
+    setMode: async (mode: string) => ({ ok: true, mode }),
+    ...(skills ? { skills } : {})
+  } as never)
+
+  const withSkills = overlay(() => ({ get: async () => ({ ok: true, view: { sessionId: 's', revision: null, corrupt: false, ignored: 0, skills: [] } }), save: async () => ({ ok: false, error: 'BAD_REQUEST' }), setEnabled: async () => ({ ok: false, error: 'BAD_REQUEST' }) }))
+  withSkills.open()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const nav = Array.from(document.querySelectorAll('.settings-nav-item, .settings-nav-current')).map(node => node.textContent)
+  expect(nav).toContain('技能')
+  const button = Array.from(document.querySelectorAll<HTMLButtonElement>('.settings-nav-item, .settings-nav-current')).find(node => node.textContent === '技能')!
+  button.click()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(document.querySelector('.settings-page-title')?.textContent).toBe('技能')
+  expect(document.body.textContent).toContain('还没有技能')
+  withSkills.close()
+
+  const without = overlay(null)
+  without.open()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const bare = Array.from(document.querySelectorAll('.settings-nav-item, .settings-nav-current')).map(node => node.textContent)
+  expect(bare).not.toContain('技能')
+  without.close()
+})

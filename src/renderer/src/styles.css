@@ -1944,3 +1944,17 @@ a[href]:focus-visible,
 .workspace-recovery { position: relative; z-index: 1; display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; margin: .5rem 1rem; padding: .75rem 1rem; border: 1px solid var(--border-subtle); border-radius: .5rem; background: var(--surface-overlay); font: .8rem var(--font-ui); }
 .workspace-recovery[hidden] { display: none; }
 .workspace-recovery > span { flex: 1 1 14rem; }
+
+/* 技能页：列表 + 每技能子页面（名称／说明／触发／正文纯文本＋预览）。 */
+.settings-section-title { margin: 0; color: var(--text-heading); font-size: 0.95rem; font-weight: 600; }
+.skills-page { display: grid; gap: 12px; }
+.skills-list { display: grid; }
+.skill-row { display: grid; gap: 6px; padding: 12px 0; border-top: 1px solid var(--border-subtle); }
+.skill-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.skill-name { color: var(--text-heading); font-weight: 600; }
+.skill-toggle { width: 18px; height: 18px; cursor: pointer; }
+.skill-editor { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-nav); }
+.settings-field textarea.settings-input { width: 100%; min-height: 72px; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-overlay); color: var(--text-heading); font: 0.84rem/1.5 var(--font-ui); resize: vertical; }
+.settings-field textarea.settings-input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.settings-field textarea.skill-body { min-height: 180px; }
+.skill-preview { padding: 10px 12px; border: 1px dashed var(--border-subtle); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 0.84rem; }

@@ -9,6 +9,7 @@ import { isReadingPreference, READING_FONTS } from '../../shared/reading-prefere
 import { CHROME_TEXT_SIZES, isChromeTextPreference, type ChromeTextPreference } from '../../shared/reading-preference.ts'
 import type { ChromeTextSetResult } from '../../shared/ipc.ts'
 import { mountModelPage, modelPageAvailable, type ModelPageHandlers } from './settings-model.ts'
+import { mountSkillsPage, type SkillsPageHandlers } from './settings-skills.ts'
 import { ASSISTANT_LIMITS, ASSISTANT_TONE_LABELS, ASSISTANT_TONES, DEFAULT_ASSISTANT_HABITS, isAssistantHabits, type AssistantHabits, type AssistantTone } from '../../shared/assistant.ts'
 import { openOverlay, type Overlay } from './overlay.ts'
 import { applyChromeTextPreference, applyReadingPreference } from './reading.ts'
@@ -18,6 +19,7 @@ import { icon, type IconName } from './icons.ts'
 export type SettingsHandlers = {
   vault?: VaultManagerHandlers
   memory?: () => MemoryPageHandlers | null
+  skills?: () => SkillsPageHandlers | null
 
   getMode: () => Promise<ThemeMode>
   setMode: (mode: ThemeMode) => Promise<ThemeSetResult>
@@ -43,7 +45,7 @@ export type SettingsHandlers = {
   onClose?: () => void
 }
 
-type SettingsPage = '笔记库' | '界面' | '助手' | '记忆' | '模型' | '运行'
+type SettingsPage = '笔记库' | '界面' | '助手' | '记忆' | '技能' | '模型' | '运行'
 
 export type SettingsOverlay = {
   /** 打开设置；可指定落到哪一页（底栏模型模块的「配置」用它直达「模型」页）。 */
@@ -121,6 +123,8 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         disposeModelPage = null
         disposeAssistantPage?.()
         disposeAssistantPage = null
+        disposeSkillsPage?.()
+        disposeSkillsPage = null
         handlers.onClose?.()
       }
     })
@@ -172,10 +176,11 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     addNav('界面', 'appearance')
     const assistantReady = Boolean(handlers.getAssistant && handlers.setAssistant)
     const modelsReady = modelPageAvailable(handlers) && Boolean(handlers.setLimits)
-    if (assistantReady || modelsReady || handlers.memory) {
+    if (assistantReady || modelsReady || handlers.memory || handlers.skills) {
       navGroup('Agent')
       if (assistantReady) addNav('助手', 'assistant')
       if (handlers.memory) addNav('记忆', 'memory')
+      if (handlers.skills) addNav('技能', 'skill')
       if (modelsReady) {
         addNav('模型', 'model')
         addNav('运行', 'run')
@@ -215,6 +220,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       openedPage = name
       if (name !== '模型') { disposeModelPage?.(); disposeModelPage = null }
       if (name !== '助手') disposeAssistantPage?.()
+      if (name !== '技能') { disposeSkillsPage?.(); disposeSkillsPage = null }
       for (const [label, button] of navButtons) {
         button.className = label === name ? 'settings-nav-current' : 'settings-nav-item'
         if (label === name) button.setAttribute('aria-current', 'page')
@@ -224,6 +230,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       else if (name === '界面') main.replaceChildren(...themeNodes)
       else if (name === '助手') renderAssistantPage()
       else if (name === '记忆') renderMemoryPage()
+      else if (name === '技能') renderSkillsPage()
       else if (name === '模型') renderModelPage()
       else void renderRunPage()
     }
@@ -446,6 +453,15 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       if (!memory) { showError(error, '请先选择笔记库。'); return }
       memoryBody=body;memoryNodes=Array.from(main.childNodes)
       disposeMemoryPage = mountMemoryPage({ body, isCurrent: () => current.isOpen() && openedPage === '记忆', onChanged: () => handlers.onModelConfigChanged?.() }, memory)
+    }
+
+    let disposeSkillsPage: (() => void) | null = null
+    function renderSkillsPage(): void {
+      disposeSkillsPage?.()
+      const { body, error } = pageFrame('技能', '技能是你写给这个助手的说明文：在当前库启用后，下一场任务会带上它的正文。只有你能创建、编辑、启用或停用；模型不能写技能，也不能自己启用。')
+      const skills = handlers.skills?.()
+      if (!skills) { showError(error, '请先选择笔记库。'); return }
+      disposeSkillsPage = mountSkillsPage({ body, isCurrent: () => current.isOpen() && openedPage === '技能' }, skills)
     }
 
     let disposeModelPage: (() => void) | null = null

@@ -105,7 +105,7 @@ export function skillTriggers(value: unknown): string[] | null {
 const stamp = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 40 && !CONTROL.test(value)
 
 /** 逐条按固定顺序判定：第一条不满足的规则即原因，界面因此只有一种解释。 */
-export function skillRecordReason(value: unknown): SkillUnavailableReason | null {
+export function skillFieldsReason(value: unknown): SkillUnavailableReason | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 'corrupt-store'
   const record = value as Partial<SkillRecord>
   const name = cleanSkillText(record.name, SKILL_LIMITS.name)
@@ -121,8 +121,52 @@ export function skillRecordReason(value: unknown): SkillUnavailableReason | null
   return null
 }
 
-export function isSkillRecord(value: unknown): value is SkillRecord {
-  if (skillRecordReason(value) !== null) return false
+export function skillRecordReason(value: unknown): SkillUnavailableReason | null {
+  const fields = skillFieldsReason(value)
+  if (fields !== null) return fields
   const record = value as Partial<SkillRecord>
-  return skillId(record.id) && stamp(record.createdAt) && stamp(record.updatedAt)
+  return skillId(record.id) && stamp(record.createdAt) && stamp(record.updatedAt) ? null : 'corrupt-store'
 }
+
+export function isSkillRecord(value: unknown): value is SkillRecord {
+  return skillRecordReason(value) === null
+}
+
+/** 新建／编辑时人写的那四个字段。 */
+export type SkillsDraft = { name: string; description: string; triggers: string[]; body: string }
+
+/** 界面列表与 IPC 共用的库视图：正文一并返回（列表即读取，不另开通道）。 */
+export type SkillsLibraryEntry = {
+  id: string
+  name: string
+  description: string
+  triggers: string[]
+  body: string
+  bytes: number
+  /** null＝可用；否则是人话原因对应的码。 */
+  reason: SkillUnavailableReason | null
+  enabled: boolean
+}
+
+export type SkillsLibraryView = {
+  sessionId: string
+  revision: string | null
+  /** 技能库不可读：列表为空但原因明确，界面不得显示成「还没有技能」。 */
+  corrupt: boolean
+  ignored: number
+  skills: SkillsLibraryEntry[]
+}
+
+export type SkillsResult = { ok: true; view: SkillsLibraryView } | { ok: false; error: string }
+
+export type SkillsGetRequest = { sessionId: string }
+
+/** 三种写入操作；页面与主进程共用同一个联合，避免 Omit 把分支字段吃掉。 */
+export type SkillsSaveOperation =
+  | { operation: 'create'; draft: SkillsDraft }
+  | { operation: 'update'; id: string; draft: SkillsDraft }
+  | { operation: 'remove'; id: string }
+
+export type SkillsSaveRequest = SkillsSaveOperation & { sessionId: string; expectedRevision: string | null }
+
+export type SkillsEnabledRequest = { sessionId: string; id: string; enabled: boolean; expectedRevision: string | null }
