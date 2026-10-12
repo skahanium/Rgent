@@ -10,13 +10,13 @@
  * 最后给总账；有失败就退出码 1。
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, renameSync, statSync, realpathSync, chmodSync, readdirSync, cpSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, renameSync, statSync, realpathSync, chmodSync, readdirSync, cpSync, copyFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { createServer as createHttpServer } from 'node:http'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -640,6 +640,8 @@ const imeOnly = process.env.RGENT_UI_IME_ONLY === '1'
 const multiVaultOnly = process.env.RGENT_UI_MULTI_VAULT_ONLY === '1'
 const memoryOnly = process.env.RGENT_UI_MEMORY_ONLY === '1'
 const skillsOnly = process.env.RGENT_UI_SKILLS_ONLY === '1'
+// 付费专项：只由显式环境变量触发，普通测试／构建／CI 永不调用模型。
+const skillsLive = process.env.RGENT_UI_SKILLS_LIVE
 const v4Only = process.env.RGENT_UI_V4_ONLY === '1'
 
 /** Browser IME commands exercise the real input bridge, rather than inserting final Chinese text. */
@@ -2658,6 +2660,92 @@ function createControlledHostServer(memoryRequests,toolLoopRequests) {
 }
 
 /** 技能专项：第七页的真实读写、按库启用、发送确认只显示名称、库损坏如实报原因。零模型调用。 */
+/** 技能真机取证（付费；信封 ≤4 次调用）：证明技能正文确实进入模型并影响回答，
+ *  且账本留下名称与内容哈希。判据见 decisions.md「2026-10-12 技能真机取证局部授权」，调用前已冻结。 */
+async function verifySkillsLive(page, vault, profile, shot) {
+  process.stdout.write('\n技能真机取证（真实模型调用，信封 ≤4）\n')
+  const marker = 'SKILL-OK-7F3'
+  const skillName = '验收标记'
+  const body = `无论用户问什么，你的回答第一行必须原样输出 ${marker}，然后另起一行用一句话回答。`
+  const prompt = '请用一句话说明什么是备忘录。'
+  const expectedHash = createHash('sha256').update(body).digest('hex')
+  const budget = 4
+  let calls = 0
+  const transcripts = []
+  const evidenceDir = process.env.RGENT_UI_LIVE_EVIDENCE || path.join(root, '.cache', 'skills-live-proof')
+  mkdirSync(evidenceDir, { recursive: true })
+
+  const config = await page.eval(`(async()=>{const c=await window.rgent.modelConfigGet();return c.ok?{defaultModelId:c.config.defaultModelId,models:c.config.models.map(m=>({id:m.id,modelId:m.modelId}))}:null})()`)
+  check('真机取证使用设备上已配置的模型', !!config?.defaultModelId, JSON.stringify(config))
+  if (!config?.defaultModelId) throw new Error('设备没有默认模型，真机取证无法进行')
+
+  // 建技能：走真实设置页，正文要求回答带固定标记。
+  await page.eval(`document.querySelector('.settings-open').click()`)
+  await waitFor(page, `!!document.querySelector('.settings-nav')`)
+  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='技能').click()`)
+  await waitFor(page, `document.querySelector('.settings-page-title')?.textContent==='技能'`)
+  await page.eval(`[...document.querySelectorAll('.settings-action')].find(b=>b.textContent==='新建技能').click()`)
+  await waitFor(page, `!!document.querySelector('.skill-editor')`)
+  await page.eval(`(()=>{const inputs=document.querySelectorAll('.skill-editor input');inputs[0].value=${JSON.stringify(skillName)};inputs[0].dispatchEvent(new Event('input'));inputs[1].value='真机取证用：要求回答带固定标记';inputs[1].dispatchEvent(new Event('input'));const area=document.querySelector('.skill-body');area.value=${JSON.stringify(body)};area.dispatchEvent(new Event('input'))})()`)
+  await page.eval(`[...document.querySelectorAll('.settings-action')].find(b=>b.textContent==='保存').click()`)
+  check('技能经真实页面落盘', await waitFor(page, `document.querySelector('.skills-list')?.textContent.includes(${JSON.stringify(skillName)})`))
+  check('基线场之前技能处于未启用', await page.eval(`document.querySelector('.skill-toggle')?.checked===false`))
+  await page.key('Escape', 'Escape', 0, 27)
+
+  const ask = async (rel) => {
+    writeFileSync(path.join(vault, rel), '')
+    await selectBrowserFolder(page, '')
+    if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(n=>n.dataset.path===${JSON.stringify(rel)})`)) throw new Error(`夹具未进入目录：${rel}`)
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(rel)}).click()`)
+    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(rel)}`)) throw new Error(`夹具未打开：${rel}`)
+    await page.eval(`document.querySelector('.cm-content').focus()`)
+    await page.call('Input.insertText', { text: `/${prompt}` })
+    await page.key('Enter', 'Enter', 0, 13)
+    if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 60000)) throw new Error('授权浮层未就绪')
+    const preview = await page.eval(`document.querySelector('.authorization-skills')?.textContent||''`)
+    await page.key('Enter', 'Enter', 0, 13)
+    calls += 1
+    const finished = await waitFor(page, `(async()=>{if((await window.rgent.agentTasks()).length>0)return false;const n=await window.rgent.noteRead(${JSON.stringify(rel)});const r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(rel)}});return r.ok&&r.value.records.some(rec=>String(rec.chapter?.answer??'').length>0)})()`, 180000)
+    const record = await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(rel)});const r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(rel)}});if(!r.ok)return {error:r.error};const rec=r.value.records.at(-1);return rec?{prompt:rec.chapter.prompt,answer:rec.chapter.answer,provenance:rec.chapter.provenance}:{error:'NO_RECORD'}})()`)
+    transcripts.push({ rel, preview, finished, record })
+    return { preview, finished, record }
+  }
+
+  // 判据 1：基线场（技能未启用）不得出现标记。
+  const baseline = await ask('技能基线.md')
+  check('基线场真实回答不含技能标记', baseline.finished && !String(baseline.record.answer ?? '').includes(marker), JSON.stringify({ finished: baseline.finished, answer: String(baseline.record.answer ?? '').slice(0, 120) }))
+  // 判据 5：技能正文不得出现在发送确认里。
+  check('基线场发送确认不出现技能正文或标记', !baseline.preview.includes(marker) && !baseline.preview.includes('等价词典'))
+
+  // 启用该技能（按库启用），再做第二场。
+  await page.eval(`document.querySelector('.settings-open').click()`)
+  await waitFor(page, `!!document.querySelector('.settings-nav')`)
+  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='技能').click()`)
+  await waitFor(page, `!!document.querySelector('.skill-toggle')`)
+  await page.eval(`(()=>{const t=document.querySelector('.skill-toggle');t.checked=true;t.dispatchEvent(new Event('change'))})()`)
+  check('启用写入本库启用集合', await waitFor(page, `document.querySelector('.skills-list')?.textContent.includes('本库已启用')`))
+  await page.key('Escape', 'Escape', 0, 27)
+
+  const enabled = await ask('技能启用.md')
+  const answer = String(enabled.record.answer ?? '')
+  check('启用场真实回答以技能要求的标记开头', enabled.finished && answer.trimStart().startsWith(marker), JSON.stringify(answer.slice(0, 160)))
+  const skills = enabled.record.provenance?.skills ?? null
+  check('账本记下该技能的名称与内容哈希', Array.isArray(skills) && skills.length === 1 && skills[0].name === skillName && skills[0].hash === expectedHash, JSON.stringify({ skills, expectedHash }))
+  check('发送确认只出现技能名称', enabled.preview.includes(`本场技能：${skillName}`) && !enabled.preview.includes(marker) && !enabled.preview.includes('第一行必须'), JSON.stringify(enabled.preview))
+  // 判据 4：两场范围、来源与工具逐项相同。
+  const shape = record => JSON.stringify({ tools: record?.provenance?.tools ?? null, sources: (record?.provenance?.sources ?? []).map(s => s.relPath) })
+  const scopeOnlyOwnNote = (record, rel) => { const scope = record?.provenance?.scope ?? null; return Array.isArray(scope) && scope.length === 1 && scope[0] === rel }
+  check('技能没有扩大范围、来源或工具',
+    shape(baseline.record) === shape(enabled.record) && scopeOnlyOwnNote(baseline.record, '技能基线.md') && scopeOnlyOwnNote(enabled.record, '技能启用.md'),
+    JSON.stringify({ baseline: shape(baseline.record), enabled: shape(enabled.record), scopes: [baseline.record?.provenance?.scope ?? null, enabled.record?.provenance?.scope ?? null] }))
+  check('真机取证没有超过调用信封', calls <= budget, `${calls}/${budget}`)
+
+  const evidence = path.join(evidenceDir, `${new Date().toISOString().replace(/[:.]/g, '-')}.json`)
+  writeFileSync(evidence, JSON.stringify({ at: new Date().toISOString(), model: config, marker, skill: { name: skillName, body, hash: expectedHash }, prompt, calls, budget, transcripts }, null, 2))
+  process.stdout.write(`真机取证证据：${evidence}\n真机调用：${calls}/${budget}\n`)
+  await shot(page, 'skills-live-enabled')
+}
+
 async function verifySkills(page, vault, profile, shot) {
   process.stdout.write('\n技能页与发送确认\n')
   await page.eval(`document.querySelector('.settings-open').click()`)
@@ -2742,6 +2830,13 @@ async function main() {
     writeFileSync(path.join(sibling,'same.png'),Buffer.concat([png,Buffer.from('B')]))
     const entries=[{id:'vault-a',label:'研究库 A',path:realpathSync.native(vault),pinned:true},{id:'vault-b',label:'写作库 B',path:realpathSync.native(sibling),pinned:false}].map(e=>{const st=statSync(e.path,{bigint:true});return {...e,rootIdentity:`${st.dev}:${st.ino}`,lastUsed:null}})
     writeFileSync(path.join(profile,'vault-catalog.json'),JSON.stringify({version:1,entries,lastVaultId:'vault-a'}))
+  }
+  if (skillsLive === '1') {
+    // 真实凭据只从设备 profile 读一次并复制进一次性临时 profile：不动用户笔记库、技能库与偏好。
+    const liveProfile = process.env.RGENT_UI_LIVE_PROFILE || path.join(homedir(), 'Library', 'Application Support', 'rgent')
+    const source = path.join(liveProfile, 'model-config.json')
+    if (!existsSync(source)) throw new Error(`技能真机取证需要设备上已配置的模型：缺少 ${source}`)
+    copyFileSync(source, path.join(profile, 'model-config.json'))
   }
   if (visualOnly) seedVisualVault(vault)
 
@@ -2890,6 +2985,33 @@ async function main() {
       await waitFor(page,`document.querySelectorAll('.tree-row').length>0`)
       try{await verifyMemoryIntegration(page,vault,shot,memoryRequests,nativePage)}catch(error){stageFailed('库内记忆专项',error)}
       check('记忆专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode=failures===0?0:1
+      return
+    }
+    if(skillsLive){
+      // dry：用受控假模型做一次零成本干跑，先把夹具与判据跑通；'1' 才花真实调用。
+      if(process.env.RGENT_UI_SKILLS_LIVE==='dry'){
+        const mock=createHttpServer((request,response)=>{
+          let raw=''
+          request.on('data',chunk=>{raw+=String(chunk)})
+          request.on('end',()=>{
+            const decoded=JSON.parse(raw)
+            const text=raw.includes('SKILL-OK-7F3')?`SKILL-OK-7F3\n受控回答：技能正文确实进了系统提示。`:'受控回答：本场没有技能。'
+            response.writeHead(200,{'content-type':'text/event-stream'})
+            response.write(`data: ${JSON.stringify({id:'skills-live',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{content:text},finish_reason:null}]})}\n\n`)
+            response.write(`data: ${JSON.stringify({id:'skills-live',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`)
+            response.end('data: [DONE]\n\n')
+          })
+        })
+        await new Promise(resolve=>mock.listen(0,'127.0.0.1',resolve))
+        hostServer=mock
+        const configured=await configureControlledHost(page,`http://127.0.0.1:${mock.address().port}/v1`)
+        check('技能真机取证干跑初始化受控模型',configured===true)
+        if(!configured)throw Error('干跑受控模型初始化失败')
+      }
+      try{await verifySkillsLive(page,vault,profile,shot)}catch(error){stageFailed('技能真机取证',error)}
+      check('技能真机取证没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
       process.exitCode=failures===0?0:1
       return
