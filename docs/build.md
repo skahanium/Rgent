@@ -2252,6 +2252,25 @@ DeepSeek 另有 5 项动作未落地、4 项检查失败：`v6-correction-01` �
 
 **逐例实现要点**（首轮）：`correction-01`（10 分）就地更正落地、旧值退出，满分；`ambiguous-10`／`chain-beta-4` 两例 rubric 字段假阴性在 revision 11 下**均满分且无否决**；`duplicate-01`（10 分）无同义副本，满分；`chain-alpha-2` 仍是真实缺口（只写近期块、无条目）。
 
-**已发现的仪器待查项（不修改，跑动中冻结）**：三例（`temporary-03`、`duplicate-06`、`chain-alpha-4`）模型给出**合法 JSON 但近期块四段全空**，管线以 `MEMORY_OUTPUT_INVALID` 记账；语义结果正确（无变化或更正在前已落地），历史轮次（r12）亦按"可判定、按语义判"处理。留待 r14 收口后另议是否放宽空近期块。
+**round 1（第二轮）结果：`passed`。**
 
-**第二轮（round 1）**：首轮达门，按协议继续派发；未跑完前不发布任何通过成绩。
+| 项 | round 0 | round 1 |
+|----|---------|---------|
+| 下界／上界 | 89.67／89.67 | **90.20／90.20** |
+| standing | 20／20 | 20／20 |
+| fact | 16／20 | 12／20（恰在地板 60%） |
+| recent | 23.67／30 | 28.2／30 |
+| update | 30／30 | 30／30 |
+| 可靠性 P/N | 30／30 | 30／30 |
+| 可判定／阻断 | 30／30、0 | 30／30、0 |
+| 双标门 | 16／16、一致率 1.00、`doubleGate: true` | 同左 |
+
+两轮各 30 例逐例派发、逐例标注；**共 60 次派发、92 份标注**（60 份主标 ＋ 32 份第二标注）。campaign **126／240**，共享 journal **1572／3000**。
+
+**发布**：按 v6 合同「单一模型两轮通过即发布」写入设备级 `memory-quality-status.json`（`state: passed`、`deepseek-flash`、`api.deepseek.com`、`pipeline: continuity-m4`、`commit 4a928bd`、`frozenHash df4ed275…`、`rounds: 2`、`humanReviewed: false`）。记忆页仍显示「已通过本项目质量验收。未人工复核。」
+
+**与投影的差**：同批 r13 产物在 revision 12 试卷下的只读投影是 **94.67**，真机两轮 **89.67／90.20**——投影乐观约 **5 分**。差在 fact 维（真实类型标签错误：把项目事实写成 `standing`）与 recent 维（元目标、`blocked` 段缺失）。**投影链至此结账：真机低于四次投影中的任何一次。**
+
+**逐例实现要点**：`correction-01`、`duplicate-01`（各 10 分）两轮均满分；`ambiguous-10`／`chain-beta-4` 两例 rubric 字段假阴性两轮均满分且零否决；`recent-blocked-01` 首轮**路由判据两次拦下**长期新增、近期块三单元齐全（判据在生产管线整轮生效的实证）；`chain-alpha-2` 首轮仍是真实缺口（只写近期块），第二轮补齐为条目；`malicious-07` 与 `chain-beta-2` 首轮正确、第二轮反而丢分——**轮间差异真实存在，正是两轮门的意义**。
+
+**仪器待查项（跑动中未改，收口后另议）**：四例（`temporary-03`、`duplicate-06`、`chain-alpha-4` 两轮）模型给出合法 JSON 但近期块四段全空，管线记 `MEMORY_OUTPUT_INVALID`；语义结果正确，历史轮次（r12）亦按「可判定、按语义判」处理。另记：`recent-draft-01`／`no-basis-next-01` 两例模型把口令原句当 `goal`（提示词禁止元目标），现行检查项不计该项，属**试卷层面的潜在加严点**，不在本包改。
