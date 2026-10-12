@@ -106,7 +106,9 @@ const maintenancePreviews=new Map<string,{sessionId:string;objectVersion:string;
 /** 本库启用的技能：每次从磁盘现读，读不出就按「技能库损坏」冻结——绝不当成「没有技能」。
  *  任务启动时取一次，运行中编辑只影响下一场。 */
 function currentSkills(): import('./skills.ts').FrozenSkills {
-  const key = vault!.memoryContext().vaultKey
+  // 没有活动库时技能无从启用：按「本场无技能」冻结，而不是抛裸 TypeError 让预览报未知错误。
+  if (!vault) return freezeSkills({ state: 'ready', skills: [], ignored: 0 }, null)
+  const key = vault.memoryContext().vaultKey
   const store = createSkillsStore(app.getPath('userData'))
   try { return freezeSkills(resolveSkills(store.get(), key), store.diagnosis().revision) }
   catch { return freezeSkills(corruptSkillsView(), store.diagnosis().revision) }

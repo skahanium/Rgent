@@ -1946,7 +1946,7 @@ a[href]:focus-visible,
 .workspace-recovery > span { flex: 1 1 14rem; }
 
 /* 技能页：列表 + 每技能子页面（名称／说明／触发／正文纯文本＋预览）。 */
-.settings-section-title { margin: 0; color: var(--text-heading); font-size: 0.95rem; font-weight: 600; }
+.skill-editor .settings-section-title { margin: 0; color: var(--text-heading); font-size: 0.95rem; font-weight: 600; }
 .skills-page { display: grid; gap: 12px; }
 .skills-list { display: grid; }
 .skill-row { display: grid; gap: 6px; padding: 12px 0; border-top: 1px solid var(--border-subtle); }

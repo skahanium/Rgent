@@ -1,6 +1,4 @@
 import type { AgentAuthorizationPreview, AgentAuthorizationResult, AgentStartResult, TreeEntry } from '@shared'
-import { SKILL_REASON_TEXT, type SkillUnavailableReason } from '../../shared/skills.ts'
-const skillReasonText=(reason:SkillUnavailableReason):string=>SKILL_REASON_TEXT[reason]
 import { openOverlay, type Overlay } from './overlay.ts'
 import { icon } from './icons.ts'
 import { hostErrorText } from './host-errors.ts'
@@ -63,9 +61,10 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
 
       if(memory?.use)memoryDisclosure.textContent+=memory.search?.available?` 本场可检索记忆，最多 ${memory.search.calls} 次，计入已批准的 ${memory.search.sharedTools} 次工具额度。`:' 本场仅本机自动召回，不增加工具额度。'
       const skillNames=(prepared.skills??[]).map(skill=>skill.name)
-      const unavailable=(prepared.skillsUnavailable??[]).map(item=>`${item.name??'未命名技能'}（${skillReasonText(item.reason)}）`)
+      const unavailable=(prepared.skillsUnavailable??[]).map(item=>item.name??'未命名技能')
+      // 合同取舍：这里只出现名称——正文、字数、原因文本都不在这张卡上；原因在设置页「技能」，证据在账本。
       skillsDisclosure.textContent=skillNames.length||unavailable.length
-        ? `${skillNames.length?`本场技能：${skillNames.join('、')}。`:''}${unavailable.length?`已启用但未加载：${unavailable.join('、')}。`:''}技能内容不在此处展开，账本记有名称与内容哈希。`
+        ? `${skillNames.length?`本场技能：${skillNames.join('、')}。`:''}${unavailable.length?`已启用但未加载：${unavailable.join('、')}（原因见设置页「技能」）。`:''}技能内容不在此处展开，账本记有名称与内容哈希。`
         : '本场无技能。'
       if(prepared.summaryGenerators?.length){const generators=document.createElement('p');generators.textContent='本篇账本可复用历史摘要（仍须在发送前核验）：'+prepared.summaryGenerators.map(g=>`${g.modelId} · ${g.host} · ${g.time}`).join('；');manifest.append(generators)}
       const title=document.createElement('p');title.textContent='本场固定对象：';manifest.append(title)

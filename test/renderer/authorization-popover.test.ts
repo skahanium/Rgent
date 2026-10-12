@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, afterEach, expect, it, vi } from 'vitest'
 import { openAuthorizationPopover } from '../../src/renderer/src/authorization-popover.ts'
+import { SKILL_REASON_TEXT } from '../../src/shared/skills.ts'
 beforeEach(()=>{
   Object.defineProperty(HTMLDialogElement.prototype,'showModal',{configurable:true,value:function(){this.setAttribute('open','')}})
   Object.defineProperty(HTMLDialogElement.prototype,'close',{configurable:true,value:function(){this.removeAttribute('open');this.dispatchEvent(new Event('close'))}})
@@ -123,8 +124,11 @@ it('lists skill names only, and explains what was enabled but not loaded', async
   const text=dialog.querySelector('.authorization-skills')!.textContent!
   expect(text).toContain('本场技能：答案批改')
   expect(text).toContain('已启用但未加载：过期规则')
-  expect(text).toContain('正文合计超过')
+  expect(text).toContain('原因见设置页「技能」')
   expect(text).toContain('账本记有名称与内容哈希')
+  // 合同取舍：原因文本、正文、体量都不在这张卡上。
+  expect(text).not.toContain('正文合计超过')
+  expect(text).not.toContain(SKILL_REASON_TEXT['set-too-large'])
   // 只有名称与原因：卡片里没有正文，也没有可展开的控件。
   expect(text).not.toContain('先核对题号')
   expect(dialog.querySelector('.authorization-skills details')).toBeNull()

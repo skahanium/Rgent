@@ -71,7 +71,7 @@ export type SkillSnapshot = {
 const CONTROL = /[\u0000-\u001f\u007f]/u
 
 /** 去空白必须一致（存的就是修剪后的值），且不含控制字符；多行字段允许 LF/CRLF。 */
-export function cleanSkillText(value: unknown, max: number, multiline = false): string | null {
+function cleanSkillText(value: unknown, max: number, multiline = false): string | null {
   if (typeof value !== 'string' || value !== value.trim() || value.length > max) return null
   if (CONTROL.test(multiline ? value.replace(/\r\n|\n/gu, '') : value)) return null
   return value
@@ -88,12 +88,12 @@ export function utf8Bytes(value: string): number {
   return new TextEncoder().encode(value).length
 }
 
-export function isUtf8Text(value: string): boolean {
+function isUtf8Text(value: string): boolean {
   return !LONE_SURROGATE.test(value)
 }
 
 /** 正文按字节算上限：先看是不是合法 UTF-8 文本，再看长度。 */
-export function skillBody(value: unknown): string | null {
+function skillBody(value: unknown): string | null {
   if (typeof value !== 'string' || value !== value.trim() || value.length === 0) return null
   if (CONTROL.test(value.replace(/\r\n|\n/gu, ''))) return null
   if (!isUtf8Text(value)) return null
@@ -101,7 +101,7 @@ export function skillBody(value: unknown): string | null {
   return value
 }
 
-export function skillTriggers(value: unknown): string[] | null {
+function skillTriggers(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length > SKILL_LIMITS.triggers) return null
   const out: string[] = []
   for (const item of value) {
@@ -137,10 +137,6 @@ export function skillRecordReason(value: unknown): SkillUnavailableReason | null
   if (fields !== null) return fields
   const record = value as Partial<SkillRecord>
   return skillId(record.id) && stamp(record.createdAt) && stamp(record.updatedAt) ? null : 'corrupt-store'
-}
-
-export function isSkillRecord(value: unknown): value is SkillRecord {
-  return skillRecordReason(value) === null
 }
 
 /** 新建／编辑时人写的那四个字段。 */
