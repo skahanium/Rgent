@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const files = ['AGENTS.md', 'README.md', 'CONTRIBUTING.md', ...[
-  'README.md', 'architecture.md', 'build.md', 'decisions.md', 'frontend.md', 'handbook.md',
+  'README.md', 'architecture.md', 'build.md', 'build-history.md', 'decisions.md', 'frontend.md', 'handbook.md',
   'opensource.md', 'topics.md', 'vision.md', 'memory.md'
 ].map((name) => `docs/${name}`)]
 const errors = []
@@ -40,7 +40,13 @@ for (const file of files) {
   for (const match of withoutCode.matchAll(/!?\[[^\]\n]*\]\(([^)]+)\)/g)) {
     const raw = match[1].trim().replace(/^<|>$/g, '')
     const [target, hash] = raw.split('#')
-    if (!target) continue
+    if (!target) {
+      // 同文件锚点也要核：标题一改就会悄悄失效，以前这里直接跳过。
+      if (hash && file.endsWith('.md') && !anchorsOf(source).has(decodeURIComponent(hash).toLowerCase())) {
+        errors.push(`${file}: 锚点不存在：${match[1]}`)
+      }
+      continue
+    }
     if (/^[a-z][a-z\d+.-]*:/i.test(target)) continue
     const resolved = path.resolve(root, path.dirname(file), decodeURIComponent(target))
     if (!existsSync(resolved)) {

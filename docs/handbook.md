@@ -1,6 +1,6 @@
 # 施工守则
 
-动手前先读 [已拍板决定](decisions.md) 和 [施工图](build.md) 的当前阶段。工程题看 [施工对象](topics.md)。本文是纪律，不是功能清单。理念见 [vision.md](vision.md)，结构见 [architecture.md](architecture.md)。
+动手前先读 [已拍板决定](decisions.md) 和 [施工图](build.md) 的当前阶段（按日期的整轮历史在[施工历史](build-history.md)，只描述当时）。工程题看 [施工对象](topics.md)。本文是纪律，不是功能清单。理念见 [vision.md](vision.md)，结构见 [architecture.md](architecture.md)。
 
 编码 Agent 从仓库根目录 [AGENTS.md](../AGENTS.md) 进。
 
