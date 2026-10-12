@@ -270,7 +270,7 @@ flowchart TD
 
 | # | 待核 | 触发条件 | 不可代证 |
 |---|------|----------|----------|
-| 1 | 技能页的**用户视觉确认**（`skills-1200`／`skills-800`／`skills-authorization-1200` 三张样张） | 用户随时可看；样张随窗口检查产出 | 机器检查通过不等于用户确认 |
+| 1 | 技能页的**用户视觉确认**（三张样张已生成：`artifacts/skills-ui/skills-1200.png`、`skills-800.png`、`skills-authorization-1200.png`；用 `RGENT_UI_SKILLS_ONLY=1 RGENT_UI_SCREENSHOTS=artifacts/skills-ui pnpm ui:check` 可重出） | 用户随时可看；样张随窗口检查产出 | 机器检查通过不等于用户确认；我自己目检过样张并据此修掉「页内标题与说明重复」，但那不等于用户确认 |
 | 2 | 技能专项的 **Windows 腿**（第七页与发送确认在 Windows 构建窗口下的表现） | 用户取得 Windows 环境时 | macOS 窗口检查不能代证 |
 | 3 | 真机证明「技能确实进入模型」（一次真实调用：启用一条技能，看模型回答是否依其正文） | 需另批 **≤4** 次调用（本轮信封为零调用，未做） | 系统提示含技能块的单元测试不代证真机行为 |
 

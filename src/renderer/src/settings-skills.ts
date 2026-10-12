@@ -61,10 +61,8 @@ export function mountSkillsPage(host: SkillsPageHost, handlers: SkillsPageHandle
 
   function render(): void {
     if (disposed) return
+    // 标题与页首说明由设置壳的 pageFrame 提供，这里不再重复一遍。
     root.replaceChildren()
-    const title = el('h3', 'settings-section-title'); title.textContent = '技能'
-    root.append(title)
-    root.append(paragraph('技能是你写给这个助手的说明文，只在当前库启用后、下一场任务里生效。只有你能创建、编辑、启用或停用；模型不能写技能、也不能自己启用。'))
     const actions = el('div', 'settings-actions')
     actions.append(button('新建技能', () => { draft = emptyDraft(); notice = null; render() }))
     actions.append(button('重新载入', reload))

@@ -23,3 +23,6 @@ pnpm-debug.log*
 .pdm-build/
 __pycache__/
 .pytest_cache/
+
+# 本机生成的界面样张，不进仓库
+artifacts/
