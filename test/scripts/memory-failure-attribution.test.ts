@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { readdirSync, readFileSync } from 'node:fs'
+import humanExam from '../fixtures/v6-human-exam-answers.json'
 import { V6_RULES, V6_SCORING_CATEGORIES } from '../../scripts/memory-quality-support.ts'
 import { workStateShaped } from '../../src/main/working-memory-consolidation.ts'
 import { V6_QUALITY_CASES } from '../fixtures/v6-memory-quality.ts'
@@ -200,4 +201,20 @@ it.skipIf(!present)('reproduces the corpus calibration behind the work-state rou
   // 唯一落在长期期望案例上的是 r10 ambiguous-01：该例期望动作本来就是 unchanged（模型多加了一条生效事实）。
   expect(hits.filter((hit) => hit.container === 'entry').map((hit) => hit.caseId)).toEqual(['v6-ambiguous-01'])
   expect(hits.every((hit) => hit.carriedByRecent)).toBe(true)
+})
+
+it('keeps the archived human answers and the derived verdicts in step', () => {
+  // 方案 A 的原始答卷按所有者确认回填到夹具（来源与会话时间写在文件头）；判定常量必须与之一一对应，
+  // 任一侧改动而另一侧没跟着改就会被这里抓住。
+  const archived = Object.fromEntries(humanExam.cases.map((item) => [item.id, item]))
+  expect(humanExam.cases).toHaveLength(10)
+  expect(humanExam.blind).toBe(true)
+  expect(humanExam.transcribedBy).toBe('agent')
+  expect(new Set(humanExam.cases.map((item) => item.id)).size).toBe(10)
+  for (const [id, review] of Object.entries(audit.HUMAN_REVIEW) as [string, { verdict: string }][]) {
+    expect(archived[id], `archive is missing ${id}`).toBeTruthy()
+    expect(archived[id]!.verdict).toBe(review.verdict)
+    expect(archived[id]!.answer.trim().length).toBeGreaterThan(0)
+  }
+  expect(Object.keys(archived).sort()).toEqual(Object.keys(audit.HUMAN_REVIEW).sort())
 })
