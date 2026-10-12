@@ -81,12 +81,23 @@ export function skillId(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= SKILL_LIMITS.id && /^[A-Za-z0-9-]+$/u.test(value)
 }
 
-/** 正文按字节算上限：先看 UTF-8 往返是否成立（能挡住孤立代理项），再看长度。 */
+/** 孤立代理项不是合法 UTF-8：主进程与渲染层共用这一条，不依赖 Buffer。 */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u
+
+export function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).length
+}
+
+export function isUtf8Text(value: string): boolean {
+  return !LONE_SURROGATE.test(value)
+}
+
+/** 正文按字节算上限：先看是不是合法 UTF-8 文本，再看长度。 */
 export function skillBody(value: unknown): string | null {
   if (typeof value !== 'string' || value !== value.trim() || value.length === 0) return null
   if (CONTROL.test(value.replace(/\r\n|\n/gu, ''))) return null
-  if (Buffer.from(value, 'utf8').toString('utf8') !== value) return null
-  if (Buffer.byteLength(value, 'utf8') > SKILL_LIMITS.bodyBytes) return null
+  if (!isUtf8Text(value)) return null
+  if (utf8Bytes(value) > SKILL_LIMITS.bodyBytes) return null
   return value
 }
 
@@ -114,9 +125,9 @@ export function skillFieldsReason(value: unknown): SkillUnavailableReason | null
   if (description === null || description.length === 0) return 'invalid-description'
   if (skillTriggers(record.triggers) === null) return 'invalid-triggers'
   const body = record.body
-  if (typeof body !== 'string' || Buffer.from(body, 'utf8').toString('utf8') !== body) return 'not-utf8'
+  if (typeof body !== 'string' || !isUtf8Text(body)) return 'not-utf8'
   if (body.trim().length === 0) return 'empty-body'
-  if (Buffer.byteLength(body, 'utf8') > SKILL_LIMITS.bodyBytes) return 'too-large'
+  if (utf8Bytes(body) > SKILL_LIMITS.bodyBytes) return 'too-large'
   if (skillBody(body) === null) return 'empty-body'
   return null
 }

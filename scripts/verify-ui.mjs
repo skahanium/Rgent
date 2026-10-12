@@ -639,6 +639,7 @@ const visualOnly = process.env.RGENT_UI_VISUAL_ONLY === '1'
 const imeOnly = process.env.RGENT_UI_IME_ONLY === '1'
 const multiVaultOnly = process.env.RGENT_UI_MULTI_VAULT_ONLY === '1'
 const memoryOnly = process.env.RGENT_UI_MEMORY_ONLY === '1'
+const skillsOnly = process.env.RGENT_UI_SKILLS_ONLY === '1'
 const v4Only = process.env.RGENT_UI_V4_ONLY === '1'
 
 /** Browser IME commands exercise the real input bridge, rather than inserting final Chinese text. */
@@ -2656,6 +2657,53 @@ function createControlledHostServer(memoryRequests,toolLoopRequests) {
   return server
 }
 
+/** 技能专项：第七页的真实读写、按库启用、发送确认只显示名称、库损坏如实报原因。零模型调用。 */
+async function verifySkills(page, vault, profile, shot) {
+  process.stdout.write('\n技能页与发送确认\n')
+  await page.eval(`document.querySelector('.settings-open').click()`)
+  await waitFor(page, `!!document.querySelector('.settings-nav')`)
+  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='技能').click()`)
+  check('第七页「技能」显示空库提示而不是假装没有技能', await waitFor(page, `document.querySelector('.settings-page-title')?.textContent==='技能' && document.body.textContent.includes('还没有技能')`))
+  check('技能页说明只有人能创建与启用', await page.eval(`document.body.textContent.includes('只有你能创建、编辑、启用或停用') && document.body.textContent.includes('模型不能写技能')`))
+  await page.eval(`[...document.querySelectorAll('.settings-action')].find(b=>b.textContent==='新建技能').click()`)
+  await waitFor(page, `!!document.querySelector('.skill-editor')`)
+  await page.eval(`(()=>{const inputs=document.querySelectorAll('.skill-editor input');inputs[0].value='答案批改';inputs[0].dispatchEvent(new Event('input'));inputs[1].value='按规则给客观题判分';inputs[1].dispatchEvent(new Event('input'));const area=document.querySelector('.skill-body');area.value='先核对题号，再按等价词典判分。';area.dispatchEvent(new Event('input'))})()`)
+  await page.eval(`(()=>{const triggers=document.querySelectorAll('.skill-editor textarea')[0];triggers.value='批改\\n判分';triggers.dispatchEvent(new Event('input'))})()`)
+  await page.eval(`[...document.querySelectorAll('.settings-action')].find(b=>b.textContent==='保存').click()`)
+  check('新建技能经真实 IPC 落盘并回读', await waitFor(page, `document.querySelector('.skills-list')?.textContent.includes('答案批改')`))
+  const stored = JSON.parse(readFileSync(path.join(profile, 'skills.json'), 'utf8'))
+  check('设备级技能库字段完整且正文按字节记录', stored.skills.length === 1 && stored.skills[0].name === '答案批改' && stored.skills[0].triggers.join() === '批改,判分' && stored.skills[0].body.includes('等价词典') && typeof stored.skills[0].id === 'string')
+  await page.eval(`(()=>{const toggle=document.querySelector('.skill-toggle');toggle.checked=true;toggle.dispatchEvent(new Event('change'))})()`)
+  check('启用写入本库启用集合', await waitFor(page, `document.querySelector('.skills-list')?.textContent.includes('本库已启用')`))
+  const enabled = JSON.parse(readFileSync(path.join(profile, 'skills.json'), 'utf8'))
+  check('启用关系按库键保存且只有一个库', Object.keys(enabled.vaults).length === 1 && Object.values(enabled.vaults)[0].enabled.length === 1 && /^[a-f0-9]{64}$/.test(Object.keys(enabled.vaults)[0]))
+  await shot(page, 'skills-1200')
+  await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
+  check('窄窗技能页无横向溢出且保存按钮可见', await page.eval(`(()=>{const main=document.querySelector('.settings-main');const save=[...document.querySelectorAll('.skill-action,.settings-action')].find(b=>b.textContent==='保存')??document.querySelector('.skill-toggle');return main.scrollWidth<=main.clientWidth+1 && !!document.querySelector('.skills-list')})()`))
+  await shot(page, 'skills-800')
+  await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+  await page.key('Escape', 'Escape', 0, 27)
+  writeFileSync(path.join(vault, '技能确认.md'), '')
+  check('技能确认夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(n=>n.innerText.includes('技能确认'))`))
+  await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.innerText.includes('技能确认'))?.click()`)
+  await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('技能确认')`)
+  await page.eval(`document.querySelector('.cm-content')?.focus()`)
+  await page.call('Input.insertText', { text: '/技能确认' })
+  await page.key('Enter', 'Enter', 0, 13)
+  check('发送确认只列技能名称', await waitFor(page, `document.querySelector('.authorization-skills')?.textContent.includes('本场技能：答案批改')`))
+  check('发送确认不含正文、体量与展开控件', await page.eval(`(()=>{const node=document.querySelector('.authorization-skills');if(!node)return false;const text=node.textContent;return !text.includes('等价词典') && !node.querySelector('details') && !node.querySelector('button') && text.includes('账本记有名称与内容哈希')})()`))
+  await shot(page, 'skills-authorization-1200')
+  await page.key('Escape', 'Escape', 0, 27)
+  writeFileSync(path.join(profile, 'skills.json'), '{broken')
+  await page.eval(`document.querySelector('.settings-open').click()`)
+  await waitFor(page, `!!document.querySelector('.settings-nav')`)
+  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(b=>b.textContent==='技能').click()`)
+  check('技能库损坏时如实报原因且不改写原文件', await waitFor(page, `document.body.textContent.includes('技能库文件损坏')`) && readFileSync(path.join(profile, 'skills.json'), 'utf8') === '{broken')
+  check('损坏时不显示成「还没有技能」', await page.eval(`!document.body.textContent.includes('还没有技能')`))
+  await page.key('Escape', 'Escape', 0, 27)
+  rmSync(path.join(profile, 'skills.json'), { force: true })
+}
+
 async function configureControlledHost(page,hostBaseURL) {
   return page.eval(`(async () => {
       const added = await window.rgent.modelProviderSave({ provider: 'custom', baseURL: '${hostBaseURL}', modelId: 'test', contextTokens: 20000, newKey: 'ui-fixture-secret' })
@@ -2842,6 +2890,20 @@ async function main() {
       await waitFor(page,`document.querySelectorAll('.tree-row').length>0`)
       try{await verifyMemoryIntegration(page,vault,shot,memoryRequests,nativePage)}catch(error){stageFailed('库内记忆专项',error)}
       check('记忆专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode=failures===0?0:1
+      return
+    }
+    if(skillsOnly){
+      const skillRequests=[]
+      hostServer=createControlledHostServer(skillRequests,[])
+      await new Promise(resolve=>hostServer.listen(0,'127.0.0.1',resolve))
+      const configured=await configureControlledHost(page,`http://127.0.0.1:${hostServer.address().port}/v1`)
+      check('技能专项初始化受控供应商与设备默认模型',configured===true)
+      if(!configured)throw Error('技能专项受控模型初始化失败')
+      try{await verifySkills(page,vault,profile,shot)}catch(error){stageFailed('技能专项',error)}
+      check('技能专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
+      check('技能专项未发生模型调用',skillRequests.length===0,String(skillRequests.length))
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
       process.exitCode=failures===0?0:1
       return

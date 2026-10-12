@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { SKILL_LIMITS, skillId, skillRecordReason, type SkillSnapshot, type SkillUnavailableReason, type SkillView, type SkillsView } from '../shared/skills.ts'
+import { SKILL_LIMITS, skillId, skillRecordReason, utf8Bytes, type SkillSnapshot, type SkillUnavailableReason, type SkillView, type SkillsView } from '../shared/skills.ts'
 import type { SkillsDeviceConfig } from './skills-store.ts'
 
 /** 技能库 → 逐条视图。语义不合的条目只标「不可用并给原因」，绝不连累其他条目，
@@ -25,7 +25,7 @@ export function resolveSkills(config: SkillsDeviceConfig, vaultKey: string): Ski
       description: record.description,
       triggers: [...record.triggers],
       body,
-      bytes: Buffer.byteLength(body, 'utf8'),
+      bytes: utf8Bytes(body),
       hash: createHash('sha256').update(body).digest('hex'),
       enabled
     })
