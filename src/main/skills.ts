@@ -1,59 +1,68 @@
-import path from 'node:path'
-import { secureFsFor } from './secure-fs.ts'
-import { hasHiddenSegment, isNotePath, resolveInVault } from './paths.ts'
-import { SKILL_LIMITS, type SkillRegistration, type SkillsView, type SkillUnavailableReason, type SkillView } from '../shared/skills.ts'
+import { createHash } from 'node:crypto'
+import { SKILL_LIMITS, skillId, skillRecordReason, type SkillSnapshot, type SkillUnavailableReason, type SkillView, type SkillsView } from '../shared/skills.ts'
+import type { SkillsDeviceConfig } from './skills-store.ts'
 
-/** 只读发现与校验：把「按库注册」的技能逐条核成可用／不可用。
- *  读库内文件走原生安全层（`secureFsFor` 的 list／readSnapshot）：符号链接、越界与非常规文件在这里就被挡住，
- *  不靠字符串比较兜底。失败一律给原因，不降级成「没有这个技能」。零写入、零模型调用。 */
-export function readRegisteredSkills(root: string, registrations: readonly SkillRegistration[]): SkillsView {
-  const fs = secureFsFor(root)
+/** 技能库 → 逐条视图。语义不合的条目只标「不可用并给原因」，绝不连累其他条目，
+ *  也绝不降级成「没有这个技能」。零写入、零模型调用。 */
+export function resolveSkills(config: SkillsDeviceConfig, vaultKey: string): SkillsView {
+  const enabledIds = new Set(config.vaults[vaultKey]?.enabled ?? [])
   const skills: SkillView[] = []
-  for (const registration of registrations.slice(0, SKILL_LIMITS.maxCount)) {
-    const unavailable = (reason: SkillUnavailableReason): SkillView => ({ id: registration.id, relPath: registration.relPath, state: 'unavailable', reason })
-    const relPath = registration.relPath
-    // 顺序即原因精度：越界（含 `..`、绝对路径）比「隐藏段」更该被说清楚，而两者都必须拒绝。
-    // 隐藏路径不加载是刻意的：点号路径是本应用自己的地盘（权限名单等），把它的正文送去模型
-    // 比露给画布更严重，所以按失败关闭处理。
-    if (!isNotePath(relPath)) { skills.push(unavailable('not-a-note')); continue }
-    if (!resolveInVault(root, relPath)) { skills.push(unavailable('outside-vault')); continue }
-    if (hasHiddenSegment(relPath)) { skills.push(unavailable('hidden-path')); continue }
-    const parent = path.posix.dirname(relPath) === '.' ? '' : path.posix.dirname(relPath)
-    const name = path.posix.basename(relPath)
-    let size: number
-    try {
-      const entry = fs.list(parent).find(candidate => candidate.name === name)
-      if (!entry) { skills.push(unavailable('missing')); continue }
-      // 目录、符号链接与其他非常规文件都不是可加载的技能。
-      if (entry.kind !== 'file') { skills.push(unavailable('not-ordinary-file')); continue }
-      size = entry.size
-    } catch (error) {
-      if (error instanceof Error && error.message === 'ENOENT') { skills.push(unavailable('missing')); continue }
-      throw error
+  const seen = new Set<string>()
+  for (const record of config.skills.slice(0, SKILL_LIMITS.maxCount)) {
+    const enabled = enabledIds.has(record.id)
+    const duplicate = seen.has(record.id)
+    seen.add(record.id)
+    const reason: SkillUnavailableReason | null = !skillId(record.id) ? 'corrupt-store' : duplicate ? 'duplicate-id' : skillRecordReason(record)
+    if (reason !== null || duplicate) {
+      skills.push({ id: typeof record.id === 'string' ? record.id : null, name: typeof record.name === 'string' ? record.name : null, state: 'unavailable', reason: reason ?? 'duplicate-id', enabled })
+      continue
     }
-    if (size === 0) { skills.push(unavailable('empty')); continue }
-    if (size > SKILL_LIMITS.maxBytes) { skills.push(unavailable('too-large')); continue }
-    let bytes: Buffer, objectVersion: string
-    try {
-      const snapshot = fs.readSnapshot(relPath)
-      bytes = snapshot.bytes
-      objectVersion = snapshot.objectVersion
-    } catch (error) {
-      if (error instanceof Error && (error.message === 'ENOENT' || error.message === 'UNSAFE_PATH')) { skills.push(unavailable(error.message === 'ENOENT' ? 'missing' : 'not-ordinary-file')); continue }
-      throw error
-    }
-    const content = bytes.toString('utf8')
-    // 与账本同一处做法：解码后再编码必须逐字节相同，否则不是合法 UTF-8 文本。
-    if (!Buffer.from(content, 'utf8').equals(bytes)) { skills.push(unavailable('not-utf8')); continue }
-    skills.push({ id: registration.id, relPath, state: 'available', title: titleOf(content, name), bytes: size, objectVersion, content })
+    const body = record.body
+    skills.push({
+      id: record.id,
+      name: record.name,
+      state: 'available',
+      description: record.description,
+      triggers: [...record.triggers],
+      body,
+      bytes: Buffer.byteLength(body, 'utf8'),
+      hash: createHash('sha256').update(body).digest('hex'),
+      enabled
+    })
   }
-  return { skills, ignored: Math.max(0, registrations.length - SKILL_LIMITS.maxCount) }
+  return { state: 'ready', skills, ignored: Math.max(0, config.skills.length - SKILL_LIMITS.maxCount) }
 }
 
-/** 标题取首个一级标题；没有就用首个非空行；再不行退回文件名。截断只影响显示名，不改正文。 */
-function titleOf(content: string, fileName: string): string {
-  const heading = content.split('\n').find(line => /^#\s+\S/.test(line))
-  const fallback = content.split('\n').map(line => line.trim()).find(line => line.length > 0)
-  const raw = (heading ? heading.replace(/^#\s+/, '') : fallback ?? fileName.replace(/\.md$/i, '')).trim()
-  return raw.length > SKILL_LIMITS.maxTitleChars ? `${raw.slice(0, SKILL_LIMITS.maxTitleChars)}…` : raw
+/** 技能库不可读时的视图：没有可用条目，但原因明确。 */
+export function corruptSkillsView(): SkillsView {
+  return { state: 'corrupt', skills: [], ignored: 0 }
+}
+
+/** 该场要冻结的东西：启用的可用条目（含内容哈希）＋ 不可用明细；合计超限即整集合失败关闭。
+ *  签名只由「冻结了什么」与技能库修订共同决定，供预览与启动之间比对。 */
+export function enabledSnapshot(view: SkillsView, revision: string | null): SkillSnapshot {
+  if (view.state === 'corrupt') {
+    const unavailable = [{ id: null, name: null, reason: 'corrupt-store' as const }]
+    return { entries: [], unavailable, signature: snapshotSignature([], unavailable, revision) }
+  }
+  const enabled = view.skills.filter(skill => skill.enabled)
+  const available = enabled.filter((skill): skill is Extract<SkillView, { state: 'available' }> => skill.state === 'available')
+  const total = available.reduce((sum, skill) => sum + skill.bytes, 0)
+  const overBudget = total > SKILL_LIMITS.totalBytes
+  const entries = overBudget ? [] : available.map(skill => ({ id: skill.id, name: skill.name, hash: skill.hash, bytes: skill.bytes }))
+  const unavailable = enabled.map(skill => ({
+    id: skill.id,
+    name: skill.name,
+    reason: skill.state === 'unavailable' ? skill.reason : overBudget ? ('set-too-large' as const) : null
+  })).filter((item): item is { id: string | null; name: string | null; reason: SkillUnavailableReason } => item.reason !== null)
+  return { entries, unavailable, signature: snapshotSignature(entries, unavailable, revision) }
+}
+
+function snapshotSignature(entries: readonly { id: string; hash: string }[], unavailable: readonly { id: string | null; reason: SkillUnavailableReason }[], revision: string | null): string {
+  const payload = JSON.stringify({
+    revision,
+    entries: entries.map(entry => `${entry.id}@${entry.hash}`).sort(),
+    unavailable: unavailable.map(item => `${item.id ?? '-'}:${item.reason}`).sort()
+  })
+  return createHash('sha256').update(payload).digest('hex')
 }
