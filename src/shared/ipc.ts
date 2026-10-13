@@ -49,6 +49,8 @@ export const IPC = {
   chromeTextSet: 'chrome-text:set',
   remoteImageGet: 'image:get',
   assistantGet: 'assistant:get',
+  agentWriteConfirm: 'agent:write-confirm',
+  agentWriteRequest: 'agent:write-request',
   skillsGet: 'skills:get',
   skillsSave: 'skills:save',
   skillsSetEnabled: 'skills:set-enabled',
@@ -153,6 +155,10 @@ export type AgentAuthorizationPreview = {
   /** 已启用但没加载的技能：名称与人话原因，便于人当场决定是否重来。 */
   skillsUnavailable?: { name: string | null; reason: import('./skills.ts').SkillUnavailableReason }[]
 }
+/** 「建」的人确认：主进程发起请求，渲染层只回一个是否同意。 */
+export type AgentWritePreview = { requestId: string; relPath: string; body: string }
+export type AgentWriteDecision = { requestId: string; approved: boolean }
+
 export type AgentAuthorizationResult = { ok: true; preview: AgentAuthorizationPreview } | { ok: false; error: string }
 export type AgentStartRequest = AgentCommandRequest & { previewId: string }
 export type AgentStartResult = { ok: true; id: string } | { ok: false; error: string }

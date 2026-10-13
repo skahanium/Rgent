@@ -25,6 +25,7 @@ import { modelModuleGroups, renderStatusbar, statusModel, wordsOf, type StatusMo
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
 import { openAuthorizationPopover } from './authorization-popover.ts'
+import { installWriteConfirm } from './write-confirm.ts'
 import { hostErrorText } from './host-errors.ts'
 import { slashAtCaret } from './slash.ts'
 import { createFileBrowser, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
@@ -518,6 +519,12 @@ export async function start(root: HTMLElement): Promise<void> {
       updateStatus()
     }).catch(() => { /* 读写失败时保留窗口稿，后续保存仍会复核修订值。 */ })
   })
+  // 「建」的人确认：主进程发起请求，这里只摆一张卡并回一个是否同意。
+  installWriteConfirm({
+    onRequest: handler => window.rgent.onAgentWriteRequest(handler),
+    decide: decision => window.rgent.agentWriteConfirm(decision)
+  })
+
   window.rgent.onMemoryChanged(session => {
     if (session !== vaultSession) return
     void refreshMemory()
