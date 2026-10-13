@@ -729,7 +729,8 @@ it('模型请求改名：人同意才走库层迁移，随后本场收尾并留�
   expect(await task.done).toEqual({ status: 'cancelled', reason: 'vault-change' })
   expect(asked[0]).toMatchObject({ kind: 'rename', source: 'b.md', target: '归档笔记.md' })
   expect(app.moved).toEqual([{ id: 'lib-1', repairLinks: true }])
-  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'rename_note')?.outcome).toContain('ok (1)')
+  // 账本要能审：新身份与影响面都在 outcome 里。
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'rename_note')?.outcome).toBe('ok:归档笔记.md·引用0·权限0 (1)')
   expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('改名')
 })
 

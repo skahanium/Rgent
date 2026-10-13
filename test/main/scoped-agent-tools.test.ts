@@ -197,8 +197,8 @@ describe('append_to_note（补任务发起篇）', () => {
 
 describe('rename_note ／ move_note（结构操作）', () => {
   const structural = (over: Partial<{ rename: unknown; move: unknown }> = {}) => ({
-    rename: async (relPath: string, newName: string) => ({ ok: true as const, target: `${relPath.slice(0, relPath.lastIndexOf('/') + 1)}${newName}.md`, moved: 1 }),
-    move: async (relPath: string, targetFolder: string) => { const name = relPath.slice(relPath.lastIndexOf('/') + 1); return { ok: true as const, target: targetFolder ? `${targetFolder}/${name}` : name, moved: 2 } },
+    rename: async (relPath: string, newName: string) => ({ ok: true as const, target: `${relPath.slice(0, relPath.lastIndexOf('/') + 1)}${newName}.md`, moved: 1, linkChanges: 0, permissionChanges: 0 }),
+    move: async (relPath: string, targetFolder: string) => { const name = relPath.slice(relPath.lastIndexOf('/') + 1); return { ok: true as const, target: targetFolder ? `${targetFolder}/${name}` : name, moved: 2, linkChanges: 2, permissionChanges: 1 } },
     ...over
   })
 
@@ -213,7 +213,8 @@ describe('rename_note ／ move_note（结构操作）', () => {
     expect(await tools.execute('rename_note', { relPath: '资料/参考.md', newName: '新名' }, signal())).toEqual({ target: '资料/新名.md', moved: 1 })
     expect(await tools.execute('move_note', { relPath: '资料/参考.md', targetFolder: '归档' }, signal())).toEqual({ target: '归档/参考.md', moved: 2 })
     // 汇总按调用顺序：先改名后挪。
-    expect(tools.summary()).toEqual([{ name: 'rename_note', outcome: 'ok (1)' }, { name: 'move_note', outcome: 'ok (1)' }])
+    // 账本里要看得见落到哪、影响了几处引用与权限：结构操作的成功不只是「ok」。
+    expect(tools.summary()).toEqual([{ name: 'rename_note', outcome: 'ok:资料/新名.md·引用0·权限0 (1)' }, { name: 'move_note', outcome: 'ok:归档/参考.md·引用2·权限1 (1)' }])
   })
 
   it('门拒绝时原因原样报给模型并记 refused:<原因>', async () => {
@@ -226,7 +227,7 @@ describe('rename_note ／ move_note（结构操作）', () => {
   it('参数与取消守住：缺字段、错类型、取消都不惊动迁移', async () => {
     const f = await fixture()
     let called = 0
-    const tools = createScopedAgentTools(f.grant, 'task', { ...f.deps, write: structural({ rename: async () => { called += 1; return { ok: true as const, target: 'x.md', moved: 1 } } }) as never })
+    const tools = createScopedAgentTools(f.grant, 'task', { ...f.deps, write: structural({ rename: async () => { called += 1; return { ok: true as const, target: 'x.md', moved: 1, linkChanges: 0, permissionChanges: 0 } } }) as never })
     await expect(tools.execute('rename_note', { relPath: 'a.md' }, signal())).rejects.toThrow('INVALID_TOOL_ARGUMENTS')
     await expect(tools.execute('move_note', { relPath: 'a.md' }, signal())).rejects.toThrow('INVALID_TOOL_ARGUMENTS')
     const aborted = new AbortController(); aborted.abort()

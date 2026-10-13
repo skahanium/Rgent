@@ -752,8 +752,8 @@ export class AgentHost {
       const committed = await gate.commitStruct({ previewId: preview.previewId })
       if (!committed.ok) return committed
       this.structuralMoves.add(taskId)
-      // 工具层只需要「成了没、落到哪、动了几项」，不把库层的 move 清单透给模型。
-      return { ok: true as const, target: committed.target, moved: committed.moved.length }
+      // 工具层只需要「成了没、落到哪、动了几项、影响面多大」，不把库层的 move 清单透给模型。
+      return { ok: true as const, target: committed.target, moved: committed.moved.length, linkChanges: preview.linkChanges, permissionChanges: preview.permissionChanges }
     }
     return {
       append: (text: string) => gate.append({ text }),

@@ -298,11 +298,5 @@ export function createWriteGate(deps: WriteGateDeps) {
       structPreviews.delete(previewId)
     },
 
-    /** 结构额度：下一轮工具化时直接用预览／提交自动消耗；留给测试与状态检查。 */
-    takeStructural(): boolean {
-      if (structural >= WRITE_LIMITS.structuralPerSession) return false
-      structural += 1
-      return true
-    }
   }
 }

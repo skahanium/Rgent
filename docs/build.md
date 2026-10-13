@@ -240,7 +240,7 @@ flowchart TD
 |---|----|------|------|
 | 0 | 合同与包表 | 登记可动对象、落点规则、保护不放宽、引用修复边界、确认粒度、限额与失败语义；收窄硬停 | 用户批准；`docs:check` 通过 |
 | 1 | 写入门结构性动作 | `rename`／`move` 的预览与提交：范围＋非发起篇＋目标校验＋权限不放宽＋引用修复边界＋一次性令牌＋结构额度 | **已交**：`previewStruct`／`commitStruct`／`discardStruct`；**权限判据不复刻**——库层 `previewRelocation` 自己按 `tierFor` 前后比对并抛 `PERMISSION_DOWNGRADE`，门只透出。`test/main/agent-write.test.ts` **11 条**结构反例（越权／发起篇／另有任务／隐藏段／附件夹／重名／非法名／库层降级／范围外引用／令牌重放／额度耗尽） |
-| 2 | 工具与宿主接线 | 工具 `rename_note`／`move_note`＋宿主能力（复用库迁移与既有确认入口）＋账本记新身份 | **已交**：工具层 `test/main/scoped-agent-tools.test.ts` **5 条**；宿主 `test/main/agent-host.test.ts` **3 条**端到端（同意→库层提交被调用＋账本 `rename_note ok (1)`；拒绝→零迁移＋`refused:DECLINED`；无迁移能力→不宣告）。**本场来源被搬走后本场按 `vault-change` 收尾**（已写内容与账本保留），不继续读旧路径造假失败 |
+| 2 | 工具与宿主接线 | 工具 `rename_note`／`move_note`＋宿主能力（复用库迁移与既有确认入口）＋账本记新身份 | **已交**：工具层 `test/main/scoped-agent-tools.test.ts` **5 条**；宿主 `test/main/agent-host.test.ts` **3 条**端到端（同意→库层提交被调用＋账本记 `ok:<新路径>·引用N·权限M (1)`；拒绝→零迁移＋`refused:DECLINED`；无迁移能力→不宣告）。**本场来源被搬走后本场按 `vault-change` 收尾**（已写内容与账本保留），不继续读旧路径造假失败 |
 | 3 | 确认卡与主进程 | 确认载荷扩成「旧路径 → 新路径 ＋ 引用 N 处 ＋ 权限 M 处」；主进程抽出人与 AI 共用的迁移路径 | **已交**：确认载荷联合（建／改名／挪）；`relocationPreviewShared`／`relocationCommitShared` 由 IPC 与 AI 共用，两处错误码一致；**请求者自己不进"停任务"名单**（否则工具调用被半路掐断，实测抓到）；界面卡 `test/renderer/write-confirm.test.ts` **2 条**（旧→新＋影响面＋按钮分别是「改名」「移动」） |
 | 2 | 工具与宿主接线 | 工具 `rename_note`／`move_note`＋宿主能力（复用库迁移与既有确认入口）＋账本记新身份 | 宿主端到端：改名／挪真的落盘且账本留痕 |
 | 3 | 确认卡与主进程 | 确认载荷扩成「旧路径 → 新路径 ＋ 引用 N 处 ＋ 权限 M 处」；主进程抽出人与 AI 共用的迁移路径 | 界面文案与窗口证据 |

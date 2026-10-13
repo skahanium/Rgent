@@ -65,7 +65,7 @@ export const WRITE_TOOL_SCHEMAS = {
 
 /** 宿主提供的写入能力：门在宿主侧构造，这里只调用并记账。
  *  create 只在宿主既有人确认、又能真的落盘时才出现。 */
-export type StructuralOutcome = { ok: true; target: string; moved: number } | { ok: false; reason: string }
+export type StructuralOutcome = { ok: true; target: string; moved: number; linkChanges: number; permissionChanges: number } | { ok: false; reason: string }
 export type ScopedWriteTool = {
   append(text: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }>
   create?(name: string, body: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }>
@@ -361,7 +361,8 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
             ? await deps.write!.rename!(request.relPath!, request.newName!, signal)
             : await deps.write!.move!(request.relPath!, request.targetFolder ?? '', signal)
           if (!result.ok) { outcome = `refused:${result.reason}`; throw Error(result.reason) }
-          outcome = 'ok'
+          // 账本要能审：落到哪、影响了几处引用与权限，都记进 outcome（量都很小，字符串有界）。
+          outcome = `ok:${result.target}·引用${result.linkChanges}·权限${result.permissionChanges}`
           return { target: result.target, moved: result.moved }
         }
         if (name === 'create_note') {
