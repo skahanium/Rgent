@@ -602,6 +602,64 @@ it.each(['missing-connection','extra-field','material-envelope'] as const)('save
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
 
+function writeToolHarness(options: { text?: string } = {}) {
+  let content = '人写的段落。\n\n/问\n'
+  let revision = 1
+  const history = hostLedgerFixture()
+  const requests: Parameters<NonNullable<import('../../src/main/agent-host.ts').HostDependencies['streamStep']>>[0][] = []
+  const credential = { provider: 'custom' as const, baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 32000, apiKey: 'fixture' }
+  const source = (relPath: string) => ({ sourceId: relPath === 'a.md' ? 'origin' : 'extra', relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: 'f',
+    tier: 'reference' as const, kind: 'body' as const, taskId: null, taskMaterialHash: null, classification: 'human' as const, start: 0, end: 2, hash: 'a'.repeat(64), basisHash: 'b'.repeat(64), sourceDeps: [], memoryDeps: [] })
+  const grant = { id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', sources: [source('a.md'), source('b.md')], credential, limits: { seconds: 30, steps: 4, tools: 4 },
+    assertActive() {}, validateSources: async () => {}, acknowledgeOrigin() {}, revoke() {},
+    assertWriteTarget(path: string) { if (path !== 'a.md') throw Error('OUTSIDE_TASK_SCOPE') },
+    assertLive: async () => {} }
+  const read = async (path: string) => path === 'b.md' ? { content: '外篇正文', revision: 'b', sessionId: 's', objectVersion: 'o' } : { content, revision: String(revision), sessionId: 's', objectVersion: 'o' }
+  const write = async (_path: string, next: string, expected: string) => {
+    if (expected !== String(revision)) throw Error('CONFLICT')
+    if (partitionSource(next).ledger !== null) throw Error('LEDGER_IN_BODY')
+    content = next; revision += 1
+    return String(revision)
+  }
+  const host = new AgentHost({ ledger: history.ledger, root: () => '/vault', read, write, tier: async () => 'reference', credential: () => credential, limits: () => grant.limits,
+    authorize: async () => grant, session: () => 's', stream: async function* () {},
+    createReadOnlyTools: (granted, id, _memory, _materials, writeTool) => createScopedAgentTools(granted, id, { read, tier: async () => 'reference', acceptsObject: () => false, write: writeTool }),
+    streamStep: async function* (input) {
+      requests.push(input)
+      if (requests.length === 1) { yield { type: 'tool-call', id: 'call-1', name: 'append_to_note', input: { text: options.text ?? '补一段依据。' } }; yield { type: 'finish', reason: 'tool-calls' } }
+      else { yield { type: 'text', text: '已答。' }; yield { type: 'finish', reason: 'stop' } }
+    },
+    emit: () => {} })
+  const run = () => host.start({ relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: '1', range: { start: content.indexOf('/问'), end: content.indexOf('/问') + 2 }, expectedText: '/问', promptText: '问' })
+  return { host, history, requests, run, content: () => content }
+}
+
+/** 包 2：补任务发起篇——模型请求经真门、真组合器落到正文并进账本。 */
+it('让模型经 append_to_note 只往发起篇追加一个新块并记进账本', async () => {
+  const app = writeToolHarness()
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  const body = partitionSource(app.content()).body
+  expect(body.startsWith('人写的段落。')).toBe(true)
+  expect(body).toContain('补一段依据。')
+  expect((body.match(/rgent:ai:v1/g) ?? []).length).toBeGreaterThanOrEqual(2)
+  expect(partitionSource(app.content()).ledger).toBeNull()
+  expect(Object.keys(app.requests[0]!.tools!)).toEqual(expect.arrayContaining(['append_to_note', 'read_library']))
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'append_to_note')?.outcome).toContain('ok (1)')
+  expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('补发起篇')
+})
+
+it('超限的追加被拒并如实记 refused:OVER_LIMIT_BYTES，正文不被写坏', async () => {
+  // 4000 个汉字 = 12 KB：过了 schema 的字符上限，但撞上合同里的 8 KiB 字节线。
+  const app = writeToolHarness({ text: '汉'.repeat(4000) })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  const body = partitionSource(app.content()).body
+  expect(body.startsWith('人写的段落。')).toBe(true)
+  expect(body).not.toContain('汉汉汉')
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'append_to_note')?.outcome).toContain('refused:OVER_LIMIT_BYTES')
+})
+
 describe('skills in the request', () => {
   const frozen = (over: Partial<import('../../src/main/skills.ts').FrozenSkills> = {}) => ({
     signature: 'sig-1',

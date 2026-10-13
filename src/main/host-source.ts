@@ -73,6 +73,11 @@ function markerTaskId(source: string, range: SourceRange): string | null {
   return parseMarker(source.slice(range.start, range.end))?.attrs['task-id'] ?? null
 }
 
+/** 追加块（part=append）不是「本次回答」：最终保存不得把它当成要替换的答案块。 */
+function isAppendMarker(source: string, range: SourceRange): boolean {
+  return parseMarker(source.slice(range.start, range.end))?.attrs['part'] === 'append'
+}
+
 function escapedModelText(text: string): string {
   // 累积流每次重投影：即使还没有 rgent 名称或闭合符，也不能让注释吞进后文。
   return text.replaceAll('<!--', '&lt;!--').replaceAll('-->', '--&gt;')
@@ -138,7 +143,7 @@ function locatedPrompt(source: string, taskId: string): { blockEnd: number; firs
     const between = compiled.index.markers.filter((item) =>
       item.range.start >= preceding.range.end && item.range.end <= block.range.start)
     const own = between.at(-1)
-    if (between.length !== 1 || own?.identity !== 'ai' || markerTaskId(source, own.range) !== taskId) break
+    if (between.length !== 1 || own?.identity !== 'ai' || markerTaskId(source, own.range) !== taskId || isAppendMarker(source, own.range)) break
     if (firstAnswer == null) firstAnswer = lineStart(source, own.range.start)
     answerEnd = block.range.end
     lastAnswerType = block.type
@@ -175,6 +180,18 @@ function renderedAnswer(taskId: string, input: string, newline: string): string 
   // 都会并进同一个块（`</table>` 结尾也一样）。这里补出分隔空行，让边界重新成立。
   // 人的写盘仍由 assertLedgerPreserved 拒绝，不在这里替他补。
   return parsed.index.blocks.at(-1)?.type === 'html' ? rendered + newline + newline : rendered
+}
+
+/** 追加一个新的 AI 块：只往正文末尾加，不改已有块、不动人写文本，也不碰账本分区。
+ *  写入门会独立核「新内容 = 原文 + 一个 AI 块」，这里只负责产出守约的内容。 */
+export function appendAiBlock(source: string, write: { taskId: string; text: string }): string {
+  const taskId = taskKey(write.taskId)
+  const newline = lineEnding(source)
+  // part=append 让最终回答保存不会把追加块当成「本次回答」而替换掉它。
+  const block = `${markerLine('ai', { 'task-id': taskId, part: 'append' })}${newline}${write.text.replace(/\n/g, newline)}`
+  const body = source.replace(/[\s\n]*$/u, '')
+  const separator = body.length === 0 ? '' : newline + newline
+  return `${body}${separator}${block}${newline}${newline}`
 }
 
 export function upsertAiAnswer(source: string, write: AnswerWrite): string {

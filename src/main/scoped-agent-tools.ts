@@ -14,7 +14,25 @@ export const READ_ONLY_TOOL_SCHEMAS = {
   search_library: { description: '仅搜索本场获准笔记标题和正文，返回来源及命中片段；结果有分页和省略说明。', inputSchema: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 512 }, cursor: { type: 'string', maxLength: 256 } }, required: ['query'], additionalProperties: false } }
 } as const
 
+/** 写类工具：本轮只有"补任务发起篇"。可用与否由宿主决定（默认无工具档不出现）。 */
+export const WRITE_TOOL_SCHEMAS = {
+  append_to_note: {
+    description: '只往本场发起篇正文末尾追加一个新块，用来补充依据或结论。不能改人写文本、不能动账本，也不能写别的笔记；超限会被拒。',
+    inputSchema: {
+      type: 'object',
+      properties: { text: { type: 'string', minLength: 1, maxLength: 8192, description: '要追加的正文（纯文本或 Markdown）。' } },
+      required: ['text'],
+      additionalProperties: false
+    }
+  }
+} as const
+
+/** 宿主提供的写入能力：门在宿主侧构造，这里只调用并记账。 */
+export type ScopedWriteTool = { append(text: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }> }
+
 export interface ScopedAgentTools {
+  /** 这套工具是否带写入能力；宿主据此决定要不要把写工具宣告给模型。 */
+  writes?: boolean
   contextPolicy(source: string, signal: AbortSignal, chapters?: ContextChapter[]): Promise<{ allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[] }>
   execute(name: string, input: unknown, signal: AbortSignal): Promise<unknown>
   assertCurrent(signal: AbortSignal): Promise<void>
@@ -33,6 +51,8 @@ type Dependencies = {
   validateMemoryBatch?: (dependencies: readonly LedgerMemoryDependency[]) => Promise<boolean[]>
   validateMemory?: (dependency: LedgerMemoryDependency) => Promise<boolean>
   acceptsObject(path: string, expected: string, current: string): boolean
+  /** 只有宿主给了写入能力时，「补任务发起篇」才会出现在工具清单里。 */
+  write?: ScopedWriteTool
 }
 type Policy = { bodyTasks: Map<number,string[]>; memoryByChapter: Map<string, LedgerMemoryDependency[]>; memoryByTask: Map<string, LedgerMemoryDependency[]>; allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[]; byChapter: Map<string, LedgerSource[]>; byTask: Map<string, LedgerSource[]> }
 type Loaded = { path: string; snapshot: NoteSnapshot; parsed: CompileResult; body: string; policy: Policy; proof: LedgerSource }
@@ -52,7 +72,7 @@ function args(value: unknown, required: string[], optional: string[]): Record<st
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('INVALID_TOOL_ARGUMENTS')
   const object = value as Record<string, unknown>
   if (Object.keys(object).some(key => ![...required, ...optional].includes(key)) || required.some(key => !(key in object))) throw Error('INVALID_TOOL_ARGUMENTS')
-  for (const [key, v] of Object.entries(object)) if (typeof v !== 'string' || !v.trim() || v.length > (key === 'query' ? 512 : 256)) throw Error('INVALID_TOOL_ARGUMENTS')
+  for (const [key, v] of Object.entries(object)) if (typeof v !== 'string' || !v.trim() || v.length > (key === 'query' ? 512 : key === 'text' ? 8192 : 256)) throw Error('INVALID_TOOL_ARGUMENTS')
   return object as Record<string, string>
 }
 /** Only receives a fixed, main-process grant; it never sees the human global index. */
@@ -269,16 +289,27 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
     return base(items, at === hits.length, at < hits.length ? next({ ...state, index: at }) : undefined, hits.length - at)
   }
   return {
+    writes: !!deps.write,
     async contextPolicy(source, signal, chapters) {
       active(signal); originParsed = compile(source); originPolicy = await policy(source, signal, originParsed,chapters); active(signal)
       return { allowedLedgerChapterIds: [...originPolicy.allowedLedgerChapterIds], excludedAiTaskIds: [...originPolicy.excludedAiTaskIds] }
     },
     async execute(name, input, signal) {
-      const label = name === 'read_library' || name === 'search_library' ? name : 'unknown'
+      const writeEnabled = !!deps.write
+      const known = name === 'read_library' || name === 'search_library' || (writeEnabled && name === 'append_to_note')
+      const label = known ? name : 'unknown'
       let outcome = 'refused'
       try {
         active(signal)
-        if (label === 'unknown') throw Error('UNKNOWN_TOOL')
+        if (!known) throw Error('UNKNOWN_TOOL')
+        if (name === 'append_to_note') {
+          const appended = args(input, ['text'], [])
+          await check(signal)
+          const result = await deps.write!.append(appended.text!, signal)
+          if (!result.ok) { outcome = `refused:${result.reason}`; throw Error(result.reason) }
+          outcome = 'ok'
+          return { revision: result.revision, bytes: result.bytes }
+        }
         const request = args(input, name === 'search_library' ? ['query'] : [], name === 'search_library' ? ['cursor'] : ['sourceId', 'cursor'])
         await check(signal)
         // read_library 不带 sourceId 时是列表续页：列表分页只有 nextCursor，没有第二个工具名。

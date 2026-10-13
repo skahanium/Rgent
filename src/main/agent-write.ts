@@ -50,10 +50,11 @@ export type WriteGateDeps = {
   assertLive: () => Promise<void> | void
   read: () => Promise<Snapshot>
   write: (relPath: string, content: string, expectedRevision: string, binding?: WriteBinding) => Promise<{ revision: string; objectVersion?: string }>
-  create: (relPath: string, body: string) => Promise<{ relPath: string; revision: string; objectVersion?: string }>
-  exists: (relPath: string) => Promise<boolean> | boolean
+  /** 以下三项只有「建」需要；本轮补工具不传也能用。 */
+  create?: (relPath: string, body: string) => Promise<{ relPath: string; revision: string; objectVersion?: string }>
+  exists?: (relPath: string) => Promise<boolean> | boolean
   /** 目标目录是否落在某个笔记的同名附件夹子树里；是则返回该附件夹路径。 */
-  attachmentFolder: (relPath: string) => Promise<string | null> | string | null
+  attachmentFolder?: (relPath: string) => Promise<string | null> | string | null
   /** 包 2 提供真正的 AI 块写入器；门只校验它是否守约。 */
   composeAppend: (previous: string, text: string) => string
   now?: () => number
@@ -73,7 +74,7 @@ const reasonOf = (error: unknown): string => (error instanceof Error && error.me
 const byteLength = (value: string): number => Buffer.byteLength(value, 'utf8')
 
 const LEDGER_MARKER = /<!--\s*rgent:ledger(?:-task|-sources)?:/u
-const AI_MARKER = /<!--\s*rgent:ai:v1\s*-->/u
+const AI_MARKER = /<!--\s*rgent:ai:v1(?:\s[^>]*)?-->/u
 
 export function createWriteGate(deps: WriteGateDeps) {
   const now = deps.now ?? (() => Date.now())
@@ -113,8 +114,8 @@ export function createWriteGate(deps: WriteGateDeps) {
     if (hasHiddenSegment(relPath)) return failure('HIDDEN_PATH')
     if (!isNotePath(relPath)) return failure('BAD_NAME')
     if (relPath === deps.origin()) return failure('TARGET_EXISTS')
-    if (await deps.attachmentFolder(dirOf(relPath))) return failure('ATTACHMENT_SUBTREE')
-    if (await deps.exists(relPath)) return failure('TARGET_EXISTS')
+    if (await deps.attachmentFolder?.(dirOf(relPath))) return failure('ATTACHMENT_SUBTREE')
+    if (await deps.exists?.(relPath)) return failure('TARGET_EXISTS')
     return { ok: true, relPath }
   }
 
@@ -122,7 +123,7 @@ export function createWriteGate(deps: WriteGateDeps) {
     state,
 
     /** 补任务发起篇：唯一的正文写入。 */
-    async append(request: { text: string; expectedRevision: string }): Promise<AppendResult> {
+    async append(request: { text: string; expectedRevision?: string }): Promise<AppendResult> {
       const origin = deps.origin()
       const size = byteLength(request.text)
       if (size > WRITE_LIMITS.bytesPerAppend || bytes + size > WRITE_LIMITS.bytesPerSession) return failure(size > WRITE_LIMITS.bytesPerAppend ? 'OVER_LIMIT_BYTES' : 'OVER_LIMIT_SESSION')
@@ -132,7 +133,9 @@ export function createWriteGate(deps: WriteGateDeps) {
         await deps.assertLive()
         const snapshot = await deps.read()
         if (snapshot.sessionId !== undefined && snapshot.sessionId !== deps.session()) return failure('VAULT_CHANGED')
-        if (snapshot.revision !== request.expectedRevision) return failure('CONFLICT')
+        // 给了期望修订就按它核（工具层用它挡住「人在同篇编辑」）；没给就用刚读到的修订，
+        // 真正的竞态由库写入自己的 CAS 兜底。
+        if (request.expectedRevision !== undefined && snapshot.revision !== request.expectedRevision) return failure('CONFLICT')
         const next = deps.composeAppend(snapshot.content, request.text)
         if (!assertAppendInvariant(snapshot.content, next)) return failure('INVARIANT_VIOLATION')
         const written = await deps.write(origin, next, snapshot.revision, snapshot.objectVersion ? { objectVersion: snapshot.objectVersion } : undefined)
@@ -146,6 +149,7 @@ export function createWriteGate(deps: WriteGateDeps) {
 
     /** 建的第一步：校验并给出目标路径，签发一次性预览令牌；此时不落盘。 */
     async previewCreate(request: { name: string }): Promise<PreviewCreateResult> {
+      if (!deps.create) return failure('NOT_ALLOWED')
       try {
         deps.assertWriteTarget(deps.origin())
         await deps.assertLive()
@@ -162,6 +166,7 @@ export function createWriteGate(deps: WriteGateDeps) {
 
     /** 建的第二步：消费令牌、复核额度与字节，然后经受信库服务创建。 */
     async commitCreate(request: { previewId: string; body: string }): Promise<CommitCreateResult> {
+      if (!deps.create) return failure('NOT_ALLOWED')
       const preview = previews.get(request.previewId)
       if (!preview) return failure('STALE_PREVIEW')
       previews.delete(request.previewId)
@@ -176,7 +181,7 @@ export function createWriteGate(deps: WriteGateDeps) {
         const target = await targetFor(preview.name)
         if (!target.ok) return target
         if (target.relPath !== preview.relPath) return failure('STALE_PREVIEW')
-        const created = await deps.create(target.relPath, request.body)
+        const created = await deps.create!(target.relPath, request.body)
         notes += 1
         bytes += size
         return { ok: true, relPath: created.relPath, revision: created.revision, objectVersion: created.objectVersion, bytes: size }

@@ -10,12 +10,13 @@ const memoryHash = (text:string) => createHash('sha256').update(text).digest('he
 import { validTaskMaterial, TaskMaterialTracker, type SavedTaskMaterial } from './host-material.ts'
 import { encodeLedgerProvenance, historicalContextPolicy } from './ledger-provenance.ts'
 import type {FrozenSkills} from './skills.ts'
-import { READ_ONLY_TOOL_SCHEMAS } from './scoped-agent-tools.ts'
+import { READ_ONLY_TOOL_SCHEMAS, WRITE_TOOL_SCHEMAS, type ScopedWriteTool } from './scoped-agent-tools.ts'
+import { createWriteGate } from './agent-write.ts'
 import { MODEL_STREAM_BOUNDS, type ModelStepEvent, type ToolSchema } from './model-stream.ts'
 import { randomUUID } from 'node:crypto'
 import { AgentTasks, type TaskResult, type StopReason } from './agent-tasks.ts'
 import { buildHostContext, type ContextChapter, type ContextSummary } from './host-context.ts'
-import { markPrompt, upsertAiAnswer, type LedgerChapterWrite, type SentSummary } from './host-source.ts'
+import { appendAiBlock, markPrompt, upsertAiAnswer, type LedgerChapterWrite, type SentSummary } from './host-source.ts'
 import { assistantSystemBlock, assistantSummary, type AssistantHabits } from '../shared/assistant.ts'
 import type { ModelCredential, RunLimits } from './model-config.ts'
 import type { SourceRange } from '../markdown/types.ts'
@@ -54,7 +55,7 @@ export type HostStart = Partial<ObjectBinding> & {
 
 export /** 过程只记「调了什么、结果如何」，不铺工具返回的正文。 */
 function toolTraceLine(call: { name: string; input: unknown }, failure?: string): string {
-  const label = call.name === 'read_library' ? '读库' : call.name === 'search_library' ? '搜库' : call.name==='search_memory'?'检索记忆':call.name
+  const label = call.name === 'read_library' ? '读库' : call.name === 'search_library' ? '搜库' : call.name === 'append_to_note' ? '补发起篇' : call.name==='search_memory'?'检索记忆':call.name
   const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
   const query = typeof input.query === 'string' ? input.query.replace(/\s+/g, ' ').slice(0, 80) : ''
   const what = (label === '搜库'||label==='检索记忆') && query ? `${label}「${query}」` : label
@@ -96,7 +97,7 @@ export type HostDependencies = {
   /** Handoff outcome only, never a claim that consolidation succeeded. Sink must be local and synchronous. */
   onTaskMaterialResult?: (result: {sessionId?: string; taskId: string; status: 'handed-off' | 'unavailable' | 'failed'; reason?: string}) => void
   memory?: MemoryUsePort
-  createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker) => ScopedAgentTools
+  createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker, write?: ScopedWriteTool) => ScopedAgentTools
   /** 一个助手的设备级习惯；任务启动时取一次快照，运行中改动只影响新任务。 */
   assistant?: () => AssistantHabits | null
   /** 本库启用的技能；同样在任务启动时冻结一次，运行中编辑只影响下一场。 */
@@ -339,11 +340,16 @@ export class AgentHost {
       if (memory) this.memoryUses.set(key, {permit: memory, credential})
       const materials = new TaskMaterialTracker()
       const savedMaterial = {tracker:materials,context:memory?.context ?? null}
-      const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials)
       const libraryToolsEnabled = Boolean(grant && grant.sources.length > 1)
+      // 写类工具只在"有工具档"的场里出现：默认无工具档不给模型任何工具，写也不例外。
+      const write = grant && libraryToolsEnabled ? this.writeCapability(grant, root, input.relPath, id) : undefined
+      const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials, write)
+      // 宣告与白名单必须同源：工具集没有写入能力就不宣告，宣告了就必须在白名单里。
+      const writeEnabled = Boolean(write && scoped?.writes)
       const memorySearchEnabled=input.memorySearchAuthorized===true&&!!grant&&!!memory?.searchable&&!!this.deps.streamStep&&this.supportsMemorySearch(credential)
       const toolsEnabled=libraryToolsEnabled||memorySearchEnabled
-      const toolSchemas={...(libraryToolsEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
+      // 只有当这套工具**确实**带写入能力时才把写工具宣告给模型，避免宣告了却执行不了。
+      const toolSchemas={...(libraryToolsEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?WRITE_TOOL_SCHEMAS:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
       let memorySearchCalls=0,memorySearchFailures=0
       const memoryToolOutcomes:{name:string;outcome:string}[]=[]
       let successfulLibraryTool=false
@@ -559,7 +565,7 @@ export class AgentHost {
           const results: ToolContent = []
           for (const call of calls) {
             await guard()
-            const registered = libraryToolsEnabled&&(call.name === 'read_library' || call.name === 'search_library')||call.name==='search_memory'&&memorySearchEnabled
+            const registered = libraryToolsEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||call.name==='search_memory'&&memorySearchEnabled
             const duplicate = usedIds.has(call.id)
             usedIds.add(call.id)
             // Duplicate IDs cannot enter provider messages. A fresh internal refusal ID preserves their order.
@@ -568,7 +574,7 @@ export class AgentHost {
             let reportedByTool = false
             let value: unknown
             if (!failure) {
-              activity = call.name === 'read_library' ? '读库' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
+              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
               try {
                 if(call.name==='search_memory'){
                   const args=call.input as Record<string,unknown>
@@ -582,7 +588,10 @@ export class AgentHost {
               catch (error) {
                 const reason = error instanceof Error ? error.message : 'TOOL_FAILED'
                 if(call.name==='search_memory'&&!['INVALID_TOOL_ARGUMENTS','MEMORY_SEARCH_LIMIT'].includes(reason)){memorySearchFailures++;memoryToolOutcomes.push({name:'search_memory',outcome:`失败：第 ${memorySearchCalls} 次检索，后续发送停止`});noteTrace(`工具 检索记忆：失败（${reason}）`)}
-                if (!['MEMORY_SEARCH_LIMIT','UNKNOWN_TOOL', 'INVALID_TOOL_ARGUMENTS', 'OUTSIDE_TASK_SCOPE', 'INVALID_TOOL_CURSOR', 'SOURCE_METADATA_TOO_LARGE'].includes(reason)) throw error
+                if (!['MEMORY_SEARCH_LIMIT','UNKNOWN_TOOL', 'INVALID_TOOL_ARGUMENTS', 'OUTSIDE_TASK_SCOPE', 'INVALID_TOOL_CURSOR', 'SOURCE_METADATA_TOO_LARGE',
+                  // 写门的可预期拒绝：如实报给模型并继续，不把整场弄失败；库/授权类故障仍然致命。
+                  'OVER_LIMIT_BYTES','OVER_LIMIT_APPENDS','OVER_LIMIT_NOTES','OVER_LIMIT_SESSION','NOT_ALLOWED',
+                  'BAD_NAME','TARGET_EXISTS','ATTACHMENT_SUBTREE','HIDDEN_PATH','CONFLICT','INVARIANT_VIOLATION'].includes(reason)) throw error
                 failure = reason
                 reportedByTool = call.name!=='search_memory'
               }
@@ -660,6 +669,20 @@ export class AgentHost {
     const tier = await this.deps.tier(root, relPath)
     if (this.deps.root() !== root || (binding && this.deps.session?.() !== binding.sessionId)) throw new Error('VAULT_CHANGED')
     if (tier !== 'reference') throw new Error('NOTE_NOT_REFERENCE')
+  }
+
+  /** 写类工具的能力面：门用宿主自己的读／写与授权检查搭起来，工具层拿不到裸通道。 */
+  private writeCapability(grant: TaskGrant, root: string, relPath: string, taskId: string): ScopedWriteTool {
+    const gate = createWriteGate({
+      origin: () => relPath,
+      session: () => this.deps.session?.() ?? null,
+      assertWriteTarget: path => grant.assertWriteTarget(path),
+      assertLive: () => grant.assertLive('write', relPath),
+      read: () => this.readBound(root, relPath),
+      write: async (path, content, revision) => ({ revision: await this.writeBound(root, path, content, revision) }),
+      composeAppend: (previous, text) => appendAiBlock(previous, { taskId, text })
+    })
+    return { append: (text: string) => gate.append({ text }) }
   }
 
   private async mutateNote(root: string, relPath: string, change: (source: string) => string, trustedFinalization = false): Promise<string> {

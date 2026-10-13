@@ -14,7 +14,8 @@ async function fixture(content='# B\n\nneedle 正文\n') {
     tree:async()=>[...records.keys()].map(relPath=>({name:relPath,relPath,kind:'note' as const})),configuration:()=>({credential:{provider:'custom',baseURL:'https://model.example/v1',modelId:'m',contextTokens:16000,apiKey:'secret'},limits:{seconds:300,steps:12,tools:24}})})
   const request={modelRecordId:'model-record',relPath:'a.md',sessionId:'s',objectVersion:'oa',expectedRevision:'ra',range:{start:0,end:2},expectedText:'/问',promptText:'问',references:['b.md']}
   const p=await registry.preview('owner',request);const grant=await registry.consume('owner',{...request,previewId:p.id});reads.length=0
-  return {records,reads,grant,tools:createScopedAgentTools(grant,'task',{read,tier,acceptsObject}),deny:(path:string)=>{denied=path},hook:(fn:(path:string)=>Promise<void>)=>{hook=fn}}
+  const deps={read,tier,acceptsObject}
+  return {records,reads,grant,deps,tools:createScopedAgentTools(grant,'task',deps),deny:(path:string)=>{denied=path},hook:(fn:(path:string)=>Promise<void>)=>{hook=fn}}
 }
 const signal=()=>new AbortController().signal
 
@@ -154,4 +155,42 @@ it.each(['已采纳秘密 needle','引言。\n\n### 工具摘要\n\n已采纳秘
  expect(JSON.stringify(read)).toContain('无关人工正文')
  const search:any=await f.tools.execute('search_library',{query:'needle'},signal())
  expect(search.items).toEqual([])
+})
+
+describe('append_to_note（补任务发起篇）', () => {
+  it('没有写入能力时按未知工具拒，工具清单里也不出现', async () => {
+    const f = await fixture()
+    await expect(f.tools.execute('append_to_note', { text: '补一段' }, signal())).rejects.toThrow('UNKNOWN_TOOL')
+    expect(f.tools.summary()).toEqual([{ name: 'unknown', outcome: 'refused (1)' }])
+  })
+
+  it('有写入能力时执行，并把修订与字节数交给记账', async () => {
+    const f = await fixture()
+    const calls: string[] = []
+    const tools = createScopedAgentTools(f.grant, 'task', { ...f.deps, write: { append: async (text: string) => { calls.push(text); return { ok: true as const, revision: 'r2', bytes: 4 } } } })
+    expect(await tools.execute('append_to_note', { text: '补一段依据。' }, signal())).toEqual({ revision: 'r2', bytes: 4 })
+    expect(calls).toEqual(['补一段依据。'])
+    expect(tools.summary()).toEqual([{ name: 'append_to_note', outcome: 'ok (1)' }])
+  })
+
+  it('门拒绝时把原因原样报给模型，并记 refused:<原因> 进账本', async () => {
+    const f = await fixture()
+    const tools = createScopedAgentTools(f.grant, 'task', { ...f.deps, write: { append: async () => ({ ok: false as const, reason: 'OVER_LIMIT_BYTES' }) } })
+    await expect(tools.execute('append_to_note', { text: '太长' }, signal())).rejects.toThrow('OVER_LIMIT_BYTES')
+    expect(tools.summary()).toEqual([{ name: 'append_to_note', outcome: 'refused:OVER_LIMIT_BYTES (1)' }])
+  })
+
+  it('参数与取消都守住，且不惊动写入能力', async () => {
+    const f = await fixture()
+    const attempts: string[] = []
+    const tools = createScopedAgentTools(f.grant, 'task', { ...f.deps, write: { append: async (text: string) => { attempts.push(text); return { ok: true as const, revision: 'r2', bytes: 1 } } } })
+    await expect(tools.execute('append_to_note', {}, signal())).rejects.toThrow('INVALID_TOOL_ARGUMENTS')
+    await expect(tools.execute('append_to_note', { text: '   ' }, signal())).rejects.toThrow('INVALID_TOOL_ARGUMENTS')
+    await expect(tools.execute('append_to_note', { text: 42 }, signal())).rejects.toThrow('INVALID_TOOL_ARGUMENTS')
+    await expect(tools.execute('append_to_note', { text: 'x'.repeat(8193) }, signal())).rejects.toThrow('INVALID_TOOL_ARGUMENTS')
+    await expect(tools.execute('write_note', { text: '越界工具名' }, signal())).rejects.toThrow('UNKNOWN_TOOL')
+    const aborted = new AbortController(); aborted.abort()
+    await expect(tools.execute('append_to_note', { text: '取消' }, aborted.signal)).rejects.toThrow('TASK_CANCELLED')
+    expect(attempts).toEqual([])
+  })
 })
