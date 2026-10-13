@@ -14,7 +14,7 @@ function fixture() {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'rgent-review-pack-'))
   dirs.push(dir)
   const row = (key: string, id: string, prompt: string, units: number, entries: unknown[], receipt: Record<string, unknown>) => ({
-    key, model: 'deepseek-flash', round: 0, frozenHash: 'frozen-1', status: 'completed',
+    key, model: { recordId: 'rec-1', modelId: 'deepseek-flash', host: 'api.deepseek.com' }, round: 0, frozenHash: 'frozen-1', status: 'completed',
     case: { id, prompt, body: '【虚构质量夹具】材料正文。', expected: { units: Array.from({ length: units }, (_, at) => ({ at })) } },
     responses: [{ phase: 'proposal', body: '{}' }],
     result: { recent: [], entries, receipt: { outcome: 'applied', ...receipt } }
@@ -40,6 +40,9 @@ it('卡片只给材料与终态，不给试卷期望也不给 Agent 判定', () 
   // 英文材料行必须有中文重述，否则不出题。
   expect(b.chineseMaterial).toBe(false)
   expect(b.gloss).toContain('通俗英文')
+  expect(a.model).toBe('deepseek-flash · api.deepseek.com')
+  // 复核包是要给人读的：任何一个字段漏了归一都会整列变成 [object Object]。
+  expect(renderPack(cards, { run: dir, frozenHash: 'f' })).not.toContain('[object Object]')
   const text = JSON.stringify(cards)
   expect(text).not.toContain('expected')
   expect(text).not.toContain('rulesHash')

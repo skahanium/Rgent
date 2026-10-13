@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { compile, partitionSource } from '../../src/markdown/index.ts'
-import { appendLedgerChapter, markPrompt, upsertAiAnswer, MAX_LEDGER_REASONING } from '../../src/main/host-source.ts'
+import { appendAiBlock, appendLedgerChapter, markPrompt, upsertAiAnswer, MAX_LEDGER_REASONING } from '../../src/main/host-source.ts'
 
 const taskId = 'task-123'
 
@@ -250,4 +250,20 @@ it('leaves an editable human paragraph after a streamed answer at EOF without ch
 it('localizes memory retrieval in the readable ledger tool summary',()=>{
  const result=appendLedgerChapter('正文\n',{taskId:'memory-tool',startedAt:'now',status:'completed',prompt:'问',answer:'答',provenance:{version:2,memoryDeps:[],model:{provider:'custom',modelId:'m',endpointHost:'model.test'},scope:['a.md'],sources:[],tools:[{name:'search_memory',outcome:'执行 1 次；m@1；摘要 火星约定'}]}})
  expect(result).toContain('检索记忆：执行 1 次');expect(result).not.toContain('search_memory：')
+})
+
+// 写工具的格式缺陷（2026-10-13 复核抓到）：CRLF 笔记里模型自带 \r\n 会被替换成 \r\r\n。
+it('CRLF 笔记追加 AI 块不会把换行写坏', () => {
+  const source = '第一段\r\n\r\n/问\r\n'
+  const next = appendAiBlock(source, { taskId: 'task', text: '第一行\r\n第二行' })
+  expect(next).toContain('第一行\r\n第二行')
+  expect(next).not.toContain('\r\r')
+  // 收尾标记与正文一起，都以本篇的换行结尾。
+  expect(next.endsWith('\r\n\r\n')).toBe(true)
+})
+
+it('LF 笔记追加仍用 LF，且归一不会吞掉空行', () => {
+  const next = appendAiBlock('第一段\n\n/问\n', { taskId: 'task', text: '甲\r\n\r\n乙' })
+  expect(next).toContain('甲\n\n乙')
+  expect(next).not.toContain('\r')
 })

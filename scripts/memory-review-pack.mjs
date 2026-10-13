@@ -62,7 +62,17 @@ export function cardOf(result, gloss = {}) {
     key: result.key,
     caseId: spec.id ?? null,
     round: result.round ?? null,
-    model: result.model ?? null,
+    // 真实产物里 model 是对象（{modelId, host, ...}）；夹具当年用的是字符串，所以这里必须显式归一，
+    // 否则卡片表头会整列渲染成 [object Object]。
+    model: (() => {
+      const raw = result.model
+      if (typeof raw === 'string') return raw
+      if (!raw || typeof raw !== 'object') return null
+      const value = raw
+      const id = typeof value.modelId === 'string' ? value.modelId : typeof value.recordId === 'string' ? value.recordId : null
+      const host = typeof value.host === 'string' ? value.host : null
+      return id ? (host ? `${id} · ${host}` : id) : null
+    })(),
     chineseMaterial: isChinese(prompt),
     /** 中文重述由人写（不机器翻译）：材料是英文的行必须在 gloss 里有对应条目。 */
     gloss: gloss[result.key] ?? gloss[spec.id] ?? null,

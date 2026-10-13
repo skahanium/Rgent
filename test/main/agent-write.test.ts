@@ -77,17 +77,19 @@ describe('write gate · 补任务发起篇', () => {
     expect(app.written).toHaveLength(2)
   })
 
-  it('单场累计写入超过 32 KiB 就拒', async () => {
+  it('单场累计写入超过 32 KiB 就拒（新建的字节也算进去）', async () => {
     const app = harness()
-    const chunk = 'x'.repeat(WRITE_LIMITS.bytesPerAppend)
-    expect((await app.gate.append({ text: chunk, expectedRevision: 'r1' })).ok).toBe(true)
-    app.setRevision('r2')
-    expect((await app.gate.append({ text: chunk, expectedRevision: 'r2' })).ok).toBe(true)
-    app.setRevision('r2')
-    // 第三次会先撞每篇两次的上限；换一篇不可能（只有发起篇可写），所以直接核累计计数。
-    const state = await app.gate.append({ text: chunk, expectedRevision: 'r2' })
-    expect(state.ok).toBe(false)
-    expect(app.written).toHaveLength(2)
+    // 三次 8 KiB 新建＝24 KiB，再要一篇 8 KiB＋1 就撞单场上限；此时篇数（4）还没到上限。
+    for (let at = 0; at < 3; at += 1) {
+      const preview = await app.gate.previewCreate({ name: `第${at}篇` })
+      expect(preview.ok).toBe(true)
+      const committed = await app.gate.commitCreate({ previewId: (preview as { previewId: string }).previewId, body: 'x'.repeat(WRITE_LIMITS.bytesPerAppend) })
+      expect(committed.ok).toBe(true)
+    }
+    const last = await app.gate.previewCreate({ name: '压线篇' })
+    expect(last.ok).toBe(true)
+    expect(await app.gate.commitCreate({ previewId: (last as { previewId: string }).previewId, body: 'x'.repeat(WRITE_LIMITS.bytesPerAppend + 1) })).toEqual({ ok: false, reason: 'OVER_LIMIT_SESSION' })
+    expect(app.created).toHaveLength(3)
   })
 
   it('人正在写（修订已变）时冲突失败，不自动合并', async () => {

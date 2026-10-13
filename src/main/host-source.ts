@@ -174,7 +174,7 @@ function renderedAnswer(taskId: string, input: string, newline: string): string 
     }
   }
   const rendered = parsed.index.blocks.map((block) =>
-    `${markerLine('ai', { 'task-id': taskId })}${newline}${answer.slice(block.range.start, block.range.end).replace(/\n/g, newline)}`
+    `${markerLine('ai', { 'task-id': taskId })}${newline}${answer.slice(block.range.start, block.range.end).replace(/\r\n|\r/g, '\n').replace(/\n/g, newline)}`
   ).join(newline + newline)
   // CommonMark 的 HTML 块以空行结束，不以闭合标签结束：紧贴其后的账本锚点或人写段落
   // 都会并进同一个块（`</table>` 结尾也一样）。这里补出分隔空行，让边界重新成立。
@@ -188,7 +188,8 @@ export function appendAiBlock(source: string, write: { taskId: string; text: str
   const taskId = taskKey(write.taskId)
   const newline = lineEnding(source)
   // part=append 让最终回答保存不会把追加块当成「本次回答」而替换掉它。
-  const block = `${markerLine('ai', { 'task-id': taskId, part: 'append' })}${newline}${write.text.replace(/\n/g, newline)}`
+  // 先把模型文本的换行归一成 \n，再按本篇换行输出：否则 CRLF 笔记里模型自带的 \r\n 会变成 \r\r\n。
+  const block = `${markerLine('ai', { 'task-id': taskId, part: 'append' })}${newline}${write.text.replace(/\r\n|\r/g, '\n').replace(/\n/g, newline)}`
   const body = source.replace(/[\s\n]*$/u, '')
   const separator = body.length === 0 ? '' : newline + newline
   return `${body}${separator}${block}${newline}${newline}`
