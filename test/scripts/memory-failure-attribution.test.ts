@@ -211,6 +211,10 @@ it('keeps the archived human answers and the derived verdicts in step', () => {
   expect(humanExam.cases).toHaveLength(10)
   expect(humanExam.blind).toBe(true)
   expect(humanExam.transcribedBy).toBe('agent')
+  // 归属确认链要能被钉住：第一次确认发生在外部复审看不到的会话里，2026-10-13 由所有者按原文二次确认。
+  expect(humanExam.confirmedByOwner).toContain('2026-10-11')
+  expect(humanExam.confirmation.at).toBe('2026-10-13')
+  expect(humanExam.confirmation.how).toContain('是我的')
   expect(new Set(humanExam.cases.map((item) => item.id)).size).toBe(10)
   for (const [id, review] of Object.entries(audit.HUMAN_REVIEW) as [string, { verdict: string }][]) {
     expect(archived[id], `archive is missing ${id}`).toBeTruthy()
