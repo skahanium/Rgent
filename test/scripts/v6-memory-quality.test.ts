@@ -454,3 +454,26 @@ describe('包4统一双标门及机械失败边界',()=>{
   expect(projection.official).toMatchObject({verdict:'failed',lower:82.7,fact:8,reliability:'28/30'})
 })
 })
+
+// 5b：近况没实质按 recent 维度打折（不是整例 0、不进否决）；旧标注缺该键照旧有效。
+it('近况没实质只在 recent 维度打折，有实质时不受影响',()=>{
+ const recentSpec=byId('v6-recent-blocked-01')
+ const legacy=fullReview(recentSpec)
+ expect(v6CaseScore(recentSpec,legacy)).toBe(1)
+ expect(v6CaseScore(recentSpec,{...legacy,checks:{...legacy.checks,workingStateSubstance:false}})).toBeCloseTo(V6_RULES.scoring.recentGoalHaircut,10)
+ const standingSpec=byId('v6-standing-03')
+ const standing=fullReview(standingSpec)
+ expect(v6CaseScore(standingSpec,{...standing,checks:{...standing.checks,workingStateSubstance:false}})).toBe(1)
+})
+it('可选检查项：缺键的旧标注照旧有效，未知键与非法值仍判无效',()=>{
+ const spec=byId('v6-recent-blocked-01'),review=fullReview(spec)
+ expect(v6ReviewValid(spec,review)).toBe(true)
+ expect(v6ReviewValid(spec,{...review,checks:{...review.checks,workingStateSubstance:false}})).toBe(true)
+ expect(v6ReviewValid(spec,{...review,checks:{...review.checks,unknownCheck:true} as never})).toBe(false)
+ expect(v6ReviewValid(spec,{...review,checks:{...review.checks,workingStateSubstance:'yes'} as never})).toBe(false)
+})
+it('试卷自述写明这一项与它的打折口径',()=>{
+ expect(V6_RULES.checks).toContain('workingStateSubstance')
+ expect(V6_RULES.checks).toContain('recentGoalHaircut')
+ expect(V6_RULES.vetoes).not.toContain('meta-goal')
+})

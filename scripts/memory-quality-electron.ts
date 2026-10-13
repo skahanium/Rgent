@@ -21,7 +21,14 @@ import type {V6Case} from '../test/fixtures/v6-memory-quality.ts'
 
 import {MEMORY_RUNTIME_FINGERPRINT,MEMORY_SCORING_FINGERPRINT} from '../src/main/memory-quality-status.ts'
 
-const options=JSON.parse(process.env.RGENT_MEMORY_EVAL_OPTIONS??'{}') as {root:string;budget:string;replay?:boolean;publish?:string;profile:string;report:string;models:string[];pilot:boolean;live:boolean;only?:string;v4?:boolean;v5?:boolean;v6?:boolean;round?:number;freeze?:boolean;diagnose?:boolean;review?:boolean;stop?:string;resume?:string;annotation?:string;double?:boolean;screen?:boolean;hashes?:boolean;cases?:string[];collaboration?:boolean;utility?:string;utilityExport?:boolean;utilityRecover?:boolean;utilitySummary?:boolean;next?:boolean;supervisionToken?:string}
+/** 覆盖口径：一次发布的「在范围内行」＝该冻结哈希下被本次 summary 计入的那些标注行（annotationEvidence 里已有的行）；
+ * 当且仅当每一行的标注都满足 annotator.kind==='human' && annotator.humanReviewed===true 时人工复核覆盖才算完整，空集合一律不完整。 */
+export function humanReviewCoverage(rows:readonly {annotator?:{kind?:string;humanReviewed?:boolean}}[]):{complete:boolean;humans:number;total:number}{
+ const humans=rows.filter(row=>row.annotator?.kind==='human'&&row.annotator.humanReviewed===true).length
+ return {complete:rows.length>0&&humans===rows.length,humans,total:rows.length}
+}
+
+const options=JSON.parse(process.env.RGENT_MEMORY_EVAL_OPTIONS??'{}') as {root:string;budget:string;replay?:boolean;publish?:string;requireHumanReview?:boolean;profile:string;report:string;models:string[];pilot:boolean;live:boolean;only?:string;v4?:boolean;v5?:boolean;v6?:boolean;round?:number;freeze?:boolean;diagnose?:boolean;review?:boolean;stop?:string;resume?:string;annotation?:string;double?:boolean;screen?:boolean;hashes?:boolean;cases?:string[];collaboration?:boolean;utility?:string;utilityExport?:boolean;utilityRecover?:boolean;utilitySummary?:boolean;next?:boolean;supervisionToken?:string}
 app.setName('rgent')
 app.setPath('userData',path.join(options.report,'electron-profile'))
 // Electron emits ready after its entry module has finished loading.
@@ -427,7 +434,15 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
   // 双标注复核：逐模型轮报告独立第二标注的覆盖率与计数一致率，不代称用户人工确认。
   const reviewProtocol=summaries.map((m:any)=>({model:m.model,rounds:m.rounds.map((r:any)=>({round:r.round,...r.summary.doubleReview}))}))
   const summary={frozenHash,...v6AppliedEvidence(frozen,cases),annotationEvidence:[...annotationEvidence.values()],executionCommit:frozen.executionCommit,reportCommit:executionCommit(),at:new Date().toISOString(),reviewProtocol,calls:state.calls,previousCalls:V6_RULES.history.calls,remainingGlobal:V6_RULES.history.parentLimit-state.calls,campaignCalls:campaignCalls(revisionCampaignPrefix),campaignLimit:collaboration?COLLABORATION_RULES.total:V6_RULES.history.campaignLimit,authorization:frozen.authorization,environment:{unavailable:environmentUnavailable,rows:diagnostic??[]},models:summaries,formalQualityPassed:false,productionStrategyChanged:false,userSemanticConfirmation:false}
-  if(options.publish){if(options.replay||!options.profile||frozen.runtime!==runtime()||frozen.rules!==fingerprint(V6_RULES)||frozen.scorer!==scorerHash())throw Error('EVALUATION_PUBLICATION_INVALID');const model=summaries.find((m:any)=>m.model===options.publish);if(!model||!model.rounds.every((r:any)=>r.summary.verdict==='passed'&&r.summary.doubleReview.doubleGate))throw Error('EVALUATION_PUBLICATION_INVALID');atomicReport(path.join(options.profile,'memory-quality-status.json'),{state:'passed',modelId:model.model,host:model.host,pipeline:'continuity-m4',runtimeFingerprint:runtime(),scoringFingerprint:MEMORY_SCORING_FINGERPRINT,verifiedAt:new Date().toISOString(),commit:frozen.executionCommit,humanReviewed:false,rounds:2,frozenHash})}
+  if(options.publish){
+  if(options.replay||!options.profile||frozen.runtime!==runtime()||frozen.rules!==fingerprint(V6_RULES)||frozen.scorer!==scorerHash())throw Error('EVALUATION_PUBLICATION_INVALID')
+  const model=summaries.find((m:any)=>m.model===options.publish)
+  if(!model||!model.rounds.every((r:any)=>r.summary.verdict==='passed'&&r.summary.doubleReview.doubleGate))throw Error('EVALUATION_PUBLICATION_INVALID')
+  // 人工复核覆盖由在范围内行的标注决定，不再硬编码；--require-human-review 是独立显式选择，
+  // 所以历史发布流程默认行为不变。拒绝发生在写任何文件之前，不留下半成品状态文件。
+  const coverage=humanReviewCoverage([...annotationEvidence.values()])
+  if(options.requireHumanReview&&!coverage.complete)throw Error('EVALUATION_HUMAN_REVIEW_INCOMPLETE')
+  atomicReport(path.join(options.profile,'memory-quality-status.json'),{state:'passed',modelId:model.model,host:model.host,pipeline:'continuity-m4',runtimeFingerprint:runtime(),scoringFingerprint:MEMORY_SCORING_FINGERPRINT,verifiedAt:new Date().toISOString(),commit:frozen.executionCommit,humanReviewed:coverage.complete,rounds:2,frozenHash})}
   writeFileSync(path.join(root,(options.replay?'historical-review-':'summary-')+randomUUID()+'.json'),JSON.stringify({...summary,historicalReview:options.replay===true,...(options.replay?{historicalAnnotationBindings:[...historicalAnnotationBindings.values()]}:{}),runtimeFingerprint:runtime(),scoringFingerprint:MEMORY_SCORING_FINGERPRINT},null,2),{flag:'wx',mode:0o600})
   console.log(JSON.stringify({models:summaries.map((s:any)=>({model:s.model,calls:s.calls,rounds:s.rounds.map((r:any)=>({round:r.round,verdict:r.summary.verdict,metrics:r.summary.metrics,judgeable:r.summary.judgeable,blocked:r.summary.blocked}))})),calls:state.calls,remainingGlobal:summary.remainingGlobal,campaignCalls:summary.campaignCalls,environmentUnavailable}))
  }finally{journal?.close()}

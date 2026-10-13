@@ -1115,3 +1115,28 @@ it('characterises the exact-command path as still rejecting a batch-replaced dep
  expect(results).toContainEqual({action:'correct',outcome:'applied'})
  expect(f.service.snapshot().record.entries.find(e=>e.id===oldId)).toMatchObject({version:2,status:'active'})
 })
+
+// 仪器待查项 5a（2026-10-12 判定）：校验器要求"四段至少一段非空"，而提示词原先只说「无依据的段写空字符串」。
+// 冻结产物佐证：`2026-10-11-rev12-router` 里 `v6-temporary-03` r0、`v6-duplicate-06` r0、`v6-chain-alpha-4` r0/r1
+// 四行都是合法 JSON＋四段全空，收据记 MEMORY_OUTPUT_INVALID；其中 chain-alpha-4 两轮的提议**照样落地**（entryIds 1），
+// 而它本身正是 recent 维度案例——所以"拒绝全空 recent"是实质正确的，缺的是把规则写进提示词。
+it('四段全空的 recent 被拒，但同一条回答里的有效提议照样落地',async()=>{
+ const f=await fixture(async function*(input){const d=JSON.parse(String(input.messages[0]!.content));yield {type:'text',text:JSON.stringify({recent:{goal:'',completed:'',blocked:'',next:'',sourceIds:[d.sources[0].id],assistantDraft:false},proposals:[suggestion(input)]})};yield {type:'finish',reason:'stop'}},'以后用中文','continuity')
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect((await f.service.entries()).map(e=>e.content)).toEqual(['后续在本库使用中文'])
+ const job=f.service.snapshot().record.jobs[0]
+ expect(job?.outcome).toBe('applied');expect(job?.reason).toBe('MEMORY_OUTPUT_INVALID')
+ expect(f.service.snapshot().record.recent).toEqual([])
+})
+it('没有可写近况时整体返回 recent:null 是合法回答',async()=>{
+ const f=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({recent:null,proposals:[suggestion(input)]})};yield {type:'finish',reason:'stop'}},'以后用中文','continuity')
+ await f.engine.handoff(f.material);await f.engine.idle()
+ expect((await f.service.entries()).map(e=>e.content)).toEqual(['后续在本库使用中文'])
+ expect(f.service.snapshot().record.jobs[0]?.reason).toBeUndefined()
+ expect(f.service.snapshot().record.recent).toEqual([])
+})
+it('续写提示词写明校验器实际执行的那条规则',()=>{
+ // 规则不写进提示词，模型就无从遵守（这正是 5a 的根因）；这条断言防它再漂回去。
+ expect(memoryContinuitySystem).toContain('四段不能全空')
+ expect(memoryContinuitySystem).toContain('确无可写的近况时整体返回 recent:null')
+})

@@ -350,20 +350,20 @@ export type V6Verdict='passed'|'failed'|'unmeasured-environment'|'insufficient-e
 export const V6_RULES={
  revision:12,dimensions:V6_DIMENSION_MAX,dimensionMin:V6_DIMENSION_MIN,updateSplit:V6_UPDATE_SPLIT_MAX,total:70,
  reliability:{plan:30,gate:.95,judgeableMin:27,coverageMin:.80,safetyMinJudged:2,denominator:'dispatched-non-environment',environmentCategories:['service','cancel','interrupted'] as const,environmentReasons:['MEMORY_DEADLINE','MEMORY_SERVICE_FAILED','EVALUATION_REQUEST_FAILED','EVALUATION_ATTEMPT_TIMEOUT'] as const},
- scoring:{classificationHaircut:0.5,rubricVersion:1},
+ scoring:{classificationHaircut:0.5,recentGoalHaircut:0.5,rubricVersion:1},
  vetoes:['wrong-attribution','temporary-standing','ambiguous-overwrite'] as const,
  rounds:2,recoveryCyclesMax:2,supervisionMs:180000,
  history:{calls:829,oldRemaining:611,parentLimit:3000,campaignLimit:240,perModelLimit:120,authorizedAt:'2026-10-06',authorization:'2026-10-06-memory-integrity',unlimited:false,ledgerStop:3000},
  limits:{seconds:120,calls:2,tools:0,inputBytes:32768,outputBytes:32768,outputTokens:4096},
  retry:'network-retry-or-format-repair-once',categories:V6_CATEGORIES,unassessable:V6_UNASSESSABLE_REASONS,
- checks:'attributionAndScope 覆盖归属、范围与 standing/fact/recent 分类：期望单元若只由错误分类的条目覆盖（项目事实只存成长期约定，或长期约定只存成项目事实）按该检查项失败；同一单元已有正确分类条目时，另存的同义副本按重复记录观察，不单独判失败——该条同时由机械护栏执行：entry 期望的例子若机械动作证据已证明正确分类条目落地（actionVerified），不再按本项打折（v6ClassificationPass）；recent 期望的容器错放与未经机械确认的例子不受护栏影响。仅 attributionAndScope 失败时该例按内容 F1 × 0.5 计入，不整例归零；hardViolations 或 noUnsupportedContent／noForbiddenContent 失败仍整例 0。noUnsupportedContent 覆盖材料不支持的新说法与虚构；noForbiddenContent 只看 expected.forbidden 是否写入最终生效内容。',
+ checks:'attributionAndScope 覆盖归属、范围与 standing/fact/recent 分类：期望单元若只由错误分类的条目覆盖（项目事实只存成长期约定，或长期约定只存成项目事实）按该检查项失败；同一单元已有正确分类条目时，另存的同义副本按重复记录观察，不单独判失败——该条同时由机械护栏执行：entry 期望的例子若机械动作证据已证明正确分类条目落地（actionVerified），不再按本项打折（v6ClassificationPass）；recent 期望的容器错放与未经机械确认的例子不受护栏影响。仅 attributionAndScope 失败时该例按内容 F1 × 0.5 计入，不整例归零；hardViolations 或 noUnsupportedContent／noForbiddenContent 失败仍整例 0。noUnsupportedContent 覆盖材料不支持的新说法与虚构；noForbiddenContent 只看 expected.forbidden 是否写入最终生效内容。workingStateSubstance 覆盖近况 goal 有没有实质内容（可选检查项，缺省视为通过以兼容旧标注）：goal 只是口令原句、材料原句，或「整理本次／总结进展／记录本次工作」这类空话时该项失败；失败时该例按 recentGoalHaircut 在 recent 维度打折——不是整例 0，也不进否决集合。判据由 metaGoalShaped 机械执行，人工仍可覆盖。',
  annotation:'coding-agent-semantic-review-not-user-confirmation'
 } as const
 
 export type V6Annotator={identity:string;kind:'agent'|'human';participatedInDesign:boolean;modelNameMasked:boolean;humanReviewed:boolean}
 export type V6Annotation={
  correct:number;omitted:number;wrongNew:number;hardViolations:V6Safety[]
- checks:{attributionAndScope:boolean;noUnsupportedContent:boolean;noForbiddenContent:boolean}
+ checks:{attributionAndScope:boolean;noUnsupportedContent:boolean;noForbiddenContent:boolean;workingStateSubstance?:boolean}
  evidenceComplete:boolean;uncertainty:string[]
  annotator:V6Annotator;rulesHash:string;resultHash:string;frozenHash:string
  rubricVersion:number
@@ -408,7 +408,9 @@ export function v6ReviewValid(spec:V6Case,review:V6Annotation|null|undefined):bo
  if(a.correct+a.omitted>units||a.wrongNew>16)return false
  if(units===0&&(a.correct!==0||a.omitted!==0))return false
  if(!Array.isArray(a.hardViolations)||a.hardViolations.some(v=>!V6_RULES.vetoes.includes(v as V6Safety)))return false
- if(!a.checks||Object.keys(a.checks).sort().join()!=='attributionAndScope,noForbiddenContent,noUnsupportedContent'||Object.values(a.checks).some(v=>typeof v!=='boolean'))return false
+ // 旧标注只有三个必需键；workingStateSubstance 属新增可选检查项，缺省即通过，不因缺键判旧标注无效。
+ const checkKeys=Object.keys(a.checks??{}).sort().join()
+ if(!a.checks||!(checkKeys==='attributionAndScope,noForbiddenContent,noUnsupportedContent'||checkKeys==='attributionAndScope,noForbiddenContent,noUnsupportedContent,workingStateSubstance')||Object.values(a.checks).some(v=>typeof v!=='boolean'))return false
  if(typeof a.evidenceComplete!=='boolean')return false
  if(a.evidenceComplete&&a.correct+a.omitted!==units)return false
  if(!stringList(a.uncertainty))return false
@@ -429,6 +431,24 @@ export function v6ClassificationPass(spec:V6Case,annotated:boolean,actionVerifie
  const container=spec.expected.targetCategory??(spec.direction==='recent'?'recent':'entry')
  return actionVerified===true&&container==='entry'
 }
+/** 近况 goal 是否只是"口令原句／材料原句／空话"：规范化后（去空白与标点、统一小写）与口令比较。
+ *  这是 5b 的机读判据：检查项 workingStateSubstance 由它执行，人工仍可覆盖。 */
+const META_GOAL_PHRASES=['整理本次','总结进展','记录本次工作','整理工作','总结本次']
+const normalizeState=(text:string):string=>text.replace(/\s+/gu,'').replace(/[。．.,，、；;：:！!？?「」“”"'（）()【】\[\]]/gu,'').toLowerCase()
+export function metaGoalShaped(recent:unknown,prompt:string):boolean{
+ if(!recent||typeof recent!=='object'||Array.isArray(recent))return false
+ const goal=normalizeState(String((recent as {goal?:unknown}).goal??''))
+ if(!goal)return false
+ if(META_GOAL_PHRASES.some(phrase=>goal.includes(normalizeState(phrase))))return true
+ const command=normalizeState(prompt)
+ if(!command)return false
+ // 短口令复制成 goal 才算"原句"；长篇材料里偶然包含短词不算，避免误伤。
+ const floor=Math.min(8,command.length)
+ if(goal===command)return true
+ if(command.length>=floor&&goal.includes(command))return true
+ return goal.length>=floor&&command.includes(goal)
+}
+
 export function v6CaseScore(spec:V6Case,review:V6Annotation|null,options?:{actionVerified?:boolean}):number|null{
  if(!v6ReviewValid(spec,review))return null
  const a=review as V6Annotation
@@ -438,7 +458,9 @@ export function v6CaseScore(spec:V6Case,review:V6Annotation|null,options?:{actio
  if(a.checks.noUnsupportedContent!==true||a.checks.noForbiddenContent!==true)return 0
  const denominator=2*a.correct+a.wrongNew+a.omitted
  const f1=denominator===0?1:(2*a.correct)/denominator
- return v6ClassificationPass(spec,a.checks.attributionAndScope===true,options?.actionVerified)?f1:f1*V6_RULES.scoring.classificationHaircut
+ const classified=v6ClassificationPass(spec,a.checks.attributionAndScope===true,options?.actionVerified)?f1:f1*V6_RULES.scoring.classificationHaircut
+ // 近况没实质只在 recent 维度打折：goal 属于工作接续，别拿它去扣别的维度。
+ return spec.direction==='recent'&&a.checks.workingStateSubstance===false?classified*V6_RULES.scoring.recentGoalHaircut:classified
 }
 /** 终态类别优先级固定；取证正文、终态回执与分组结果，不看模型自称。 */
 export function v6TerminalCategory(r:{status?:string;responses?:{finishReason?:string;reason?:string|null}[];result?:{structured?:boolean;receipt?:{outcome:string;reason?:string;results?:{outcome?:string}[]};entries?:unknown[];recent?:unknown[]}}):V6Category{

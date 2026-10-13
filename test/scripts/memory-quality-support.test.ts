@@ -271,3 +271,17 @@ it('collaboration resume opens a bound post-resume failure window without erasin
  expect(()=>support.collaborationRecoveryWindow(dispatches,cycles,{...binding,frozenHash:'wrong'})).toThrow('EVALUATION_RECOVERY_INVALID')
  expect(()=>support.v6AssertDispatchAvailable({dispatchKeys:()=>dispatches.map(d=>d.key),charged:key=>dispatches.filter(d=>d.key===key).length,read:()=>null},binding.prefix+'consolidation/',binding.model,dispatches[0]!.key,()=>true)).toThrow('EVALUATION_ATTEMPT_ALREADY_DISPATCHED')
 })
+
+// 仪器待查项 5b（2026-10-12 判定）：goal 写口令原句／空话此前没有任何检查项计价。
+// 判据由 metaGoalShaped 机械执行；检查项 workingStateSubstance 用它，但人工仍可覆盖。
+it('近况 goal 的原句判据：口令复制与空话命中，实质目标不误伤',()=>{
+ expect(support.metaGoalShaped({goal:'以后用中文'},'以后用中文')).toBe(true)
+ expect(support.metaGoalShaped({goal:' 以后用中文。 '},'以后用中文')).toBe(true)
+ expect(support.metaGoalShaped({goal:'记录本次工作'},'青灯样稿核对')).toBe(true)
+ expect(support.metaGoalShaped({goal:'核对青灯五份样稿'},'以后用中文')).toBe(false)
+ // 短词偶然出现在长口令里不算复制，避免误伤。
+ expect(support.metaGoalShaped({goal:'核对'},'核对青灯五份样稿')).toBe(false)
+ expect(support.metaGoalShaped({goal:''},'以后用中文')).toBe(false)
+ expect(support.metaGoalShaped(null,'以后用中文')).toBe(false)
+ expect(support.metaGoalShaped({goal:42},'以后用中文')).toBe(false)
+})

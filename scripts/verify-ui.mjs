@@ -459,7 +459,8 @@ async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) 
   check('近期遗忘预览明确保留原文且取消保留背景',await waitFor(page,`document.querySelector('.memory-recent-entry .memory-forget-warning')?.textContent.includes('原笔记与账本不变')`))
   await shot(page,'memory-recent-forget-preview')
   await page.eval(`document.querySelector('.memory-recent-entry [data-memory-action="cancel-forget"]').click()`)
-  check('取消近期遗忘回到按钮且未删除背景',await page.eval(`!!document.querySelector('.memory-recent-entry')&&!document.querySelector('.memory-recent-entry .memory-forget-warning')&&document.activeElement?.textContent==='删除并遗忘'`))
+  // 焦点恢复是异步落位的（取消后要重建那条记忆项），必须等：紧跟点击直接断言在机器忙时会偶发。
+  check('取消近期遗忘回到按钮且未删除背景',await waitFor(page,`!!document.querySelector('.memory-recent-entry')&&!document.querySelector('.memory-recent-entry .memory-forget-warning')&&document.activeElement?.textContent==='删除并遗忘'`))
 
   await page.eval(`document.querySelector('.memory-entry:not(.memory-recent-entry)').open=true; document.querySelector('.memory-entry:not(.memory-recent-entry) [data-memory-action="edit"]').click(); document.querySelector('.memory-entry:not(.memory-recent-entry) .memory-source').open=true; document.querySelector('.memory-entry:not(.memory-recent-entry)').scrollIntoView({block:'start'})`)
   await shot(page,'memory-entry-and-source')
@@ -1516,7 +1517,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   await waitFor(page,`!!document.querySelector('[data-vault-action="open"]')`)
   await page.eval(`document.querySelector('[data-vault-action="open"]').focus();document.querySelector('[data-vault-action="open"]').click()`)
   await waitFor(page,`document.querySelector('.vault-settings')?.getAttribute('aria-busy')==='false'`)
-  check('取消选库后恢复原操作焦点',await page.eval(`document.activeElement?.getAttribute('data-vault-action')==='open'`))
+  check('取消选库后恢复原操作焦点',await waitFor(page,`document.activeElement?.getAttribute('data-vault-action')==='open'`))
   check('取消选库保持旧会话、选区和设置页',await page.eval(`(async()=>{const view=document.querySelector('.cm-content').cmTile.root.view;return (await window.rgent.vaultGet()).sessionId===globalThis.__oldSession && view.state.selection.main.anchor===30 && !!document.querySelector('.vault-settings')})()`))
   await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showOpenDialog=globalThis.__oldOpenDialog;true`)
   // Re-selecting this same root committed a newer catalog revision while the
@@ -1659,7 +1660,8 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   writeFileSync(path.join(sibling,'同名.md'),'磁盘冲突改动\n'+beforeConflict)
   await page.eval(`(()=>{const view=document.querySelector('.cm-content').cmTile.root.view;view.dispatch({changes:{from:0,insert:'窗口冲突改动\\n'}});const b=document.querySelector('[data-vault-open="vault-a"]');b.focus();b.click()})()`)
   await waitFor(page,`!!document.querySelector('.conflict') || document.querySelector('.vault-settings')?.getAttribute('aria-busy')==='false' && !!document.querySelector('.vault-settings-status')?.textContent`)
-  check('切库正文冲突不替换设置且保留名称、展开与焦点',await page.eval(`document.querySelector('.overlay-settings')===globalThis.__conflictSettings && !document.querySelector('.conflict') && document.querySelector('[data-vault-id="vault-a"] input')?.value==='保存冲突前的名称草稿' && document.querySelector('[data-vault-id="vault-a"] .vault-settings-path')?.open===true && document.activeElement?.dataset.vaultOpen==='vault-a'`))
+  // 冲突处理后的焦点同样是异步落位的：这一段改用等待，其余断言逐字保持原样。
+  check('切库正文冲突不替换设置且保留名称、展开与焦点',await waitFor(page,`document.querySelector('.overlay-settings')===globalThis.__conflictSettings && !document.querySelector('.conflict') && document.querySelector('[data-vault-id="vault-a"] input')?.value==='保存冲突前的名称草稿' && document.querySelector('[data-vault-id="vault-a"] .vault-settings-path')?.open===true && document.activeElement?.dataset.vaultOpen==='vault-a'`))
   check('切库正文冲突明确要求先处理保存而两份稿都保留',await page.eval(`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelector('.cm-content')?.textContent.includes('窗口冲突改动') && document.querySelector('.vault-settings-status')?.textContent.includes('冲突')`) && readFileSync(path.join(sibling,'同名.md'),'utf8').startsWith('磁盘冲突改动'))
   if(await page.eval(`!!document.querySelector('.vault-settings')`))for(const theme of ['day','night']) {
     await page.eval(`window.rgent.themeSet('${theme}')`)
@@ -4128,7 +4130,7 @@ async function main() {
       await page.eval(`document.querySelector('.lifecycle-retry').focus(); document.querySelector('.lifecycle-retry').click()`)
       check('成员变化拒绝重试并保留记录与附件原位', await waitFor(page, `document.querySelector('.lifecycle-recovery [role=status]')?.textContent.includes('恢复记录')`) &&
         readFileSync(path.join(vault, '.rgent-lifecycle'), 'utf8') === journal && existsSync(path.join(vault, '生命周期', '复原', '附件.png')))
-      check('失败重试后键盘焦点仍在恢复浮层', await page.eval(`document.querySelector('.lifecycle-recovery').contains(document.activeElement)`))
+      check('失败重试后键盘焦点仍在恢复浮层', await waitFor(page, `document.querySelector('.lifecycle-recovery')?.contains(document.activeElement)`))
       rmSync(path.join(vault, '生命周期', '复原', '外部新增.txt'))
       await page.eval(`document.querySelector('.lifecycle-retry').click()`)
       check('安全重试续跑附件且正文与权限保持不变', await waitFor(page, `document.querySelector('.lifecycle-recovery [role=status]')?.textContent === '文件操作已完成。'`) &&
@@ -4147,7 +4149,8 @@ async function main() {
       check('恢复后补存无关任务的回答与一章账本', unrelatedSaved, unrelatedSaved ? '' : await page.eval(`(async () => JSON.stringify({taskId:${JSON.stringify(unrelatedTask.id)},tasks:await window.rgent.agentTasks(),source:(await window.rgent.noteRead('生命周期/无关生成.md')).content}))()`))
       const recoveredUnrelatedSource = await page.eval(`(async ()=>(await window.rgent.noteRead('生命周期/无关生成.md')).content)()`)
 
-      check('成功重试后焦点转到浮层关闭按钮', await page.eval(`document.querySelector('.lifecycle-recovery').contains(document.activeElement) && document.activeElement.textContent === '关闭'`))
+      // 焦点是异步落位的：这里必须等，不能紧跟异步操作直接断言——否则机器一忙就会偶发失败（构造性竞态）。
+      check('成功重试后焦点转到浮层关闭按钮', await waitFor(page, `document.querySelector('.lifecycle-recovery')?.contains(document.activeElement) && document.activeElement.textContent === '关闭'`))
       await page.key('Escape', 'Escape', 0, 27)
       check('重试后 tab、文件树与状态一起更新', await waitFor(page, `document.querySelector('.lifecycle-warning').hidden && document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '生命周期/已恢复.md'`))
       check('状态入口隐藏后关闭浮层回到可见工作区控件', await waitFor(page, `document.activeElement?.classList.contains('tree-toggle')`))
