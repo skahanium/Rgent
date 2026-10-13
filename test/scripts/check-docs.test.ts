@@ -139,9 +139,15 @@ describe('docs stage invariants', () => {
   })
 
   it('rejects a current matrix object that names a different existing stage', () => {
-    const { build, run } = fixture()
+    const { root, build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const changed = source.replace(/^(\| )[^|\n]+( \|[^\n]*\*\*当前\*\*)/m, '$1库内 AI 工具$2')
+    // 当前阶段会随施工推进而改；这里动态挑一个**不是**当前的已有阶段，避免把阶段名写死。
+    const stage = /^## 当前阶段\s*\n+\*\*([^*]+)\*\*/m.exec(readFileSync(path.join(root, 'AGENTS.md'), 'utf8'))?.[1]
+    const order = /^## 依赖顺序\s*\n[\s\S]*?```text\s*\n([\s\S]*?)\n```/m.exec(source)?.[1] ?? ''
+    const others = order.split(/\r?\n/).map(line => line.trim().replace(/^→\s*/, '').split('（')[0]!.trim()).filter(Boolean)
+    const other = others.find(name => name && name !== stage)
+    expect(other, '依赖顺序里应当有当前阶段之外的阶段').toBeTruthy()
+    const changed = source.replace(/^(\| )[^|\n]+( \|[^\n]*\*\*当前\*\*)/m, `$1${other}$2`)
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
