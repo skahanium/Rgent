@@ -43,9 +43,12 @@ export class EvaluationJournal {
  charged(key:string){return this.state.dispatches.filter(d=>d.key===key).length}
  dispatchKeys(){return this.state.dispatches.map(d=>d.key)}
  private save(){atomicReport(path.join(this.budgetRoot,'state.json'),this.state)}
- charge(key:string){
+ /** 只读的额度预检：派发前先问一次，别等进了产品管线才被账本拒绝——
+  *  那样拒绝会穿透产品侧错误映射，被折成 MEMORY_UNAVAILABLE 记成「服务失败、0 调用」。 */
+ assertChargeable(key:string){this.checkCharge(key)}
+ private checkCharge(key:string){
   if(key.startsWith(COLLABORATION_RULES.prefix)||this.campaign?.prefix===COLLABORATION_RULES.prefix||this.campaign?.authorization===COLLABORATION_RULES.authorization){
-   if(this.campaign?.authorization!==COLLABORATION_RULES.authorization||this.campaign.prefix!==COLLABORATION_RULES.prefix||this.campaign.limit!==COLLABORATION_RULES.total||this.campaign.perModelLimit!==136||this.campaign.modelSegment!==2)throw Error('EVALUATION_CAMPAIGN_AUTHORIZATION')
+   if(this.campaign?.authorization!==COLLABORATION_RULES.authorization||this.campaign.prefix!==COLLABORATION_RULES.prefix||this.campaign.limit!==COLLABORATION_RULES.total||this.campaign.perModelLimit!==136)throw Error('EVALUATION_CAMPAIGN_AUTHORIZATION')
    assertCollaborationCharge(this.state.dispatches.map(d=>d.key),key)
   }
   if(this.state.calls>=this.state.limit)throw Error('EVALUATION_CALL_LIMIT')
@@ -62,6 +65,9 @@ export class EvaluationJournal {
    if(!model)throw Error('EVALUATION_CAMPAIGN_KEY')
    if(scoped.filter(d=>modelOf(d.key)===model).length>=this.campaign.perModelLimit)throw Error('EVALUATION_MODEL_CALL_LIMIT')
   }
+ }
+ charge(key:string){
+  this.checkCharge(key)
   const next=structuredClone(this.state);next.calls++;next.dispatches.push({key,at:new Date().toISOString()})
   atomicReport(path.join(this.budgetRoot,'state.json'),next);this.state=next
  }

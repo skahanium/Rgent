@@ -396,6 +396,9 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
    const k=key(model.modelId,round,spec.id)
    // 被监督计时器杀掉时可能已计费但结果未落盘；状态不明不得自动重派。
    // 同一次尝试会落一份 attempt-<key 指纹>-<uuid> 记录；用它的份数给「未触达模型」的重派加上限。
+   // 额度预检必须发生在进入产品管线之前：否则账本的额度拒绝会穿透产品侧的错误映射，
+   // 被折成 MEMORY_UNAVAILABLE 记成"服务失败、0 调用"，硬性预算停止就此伪装成一次网络抖动（r13／r14 实测）。
+   journal.assertChargeable(k)
    const priorAttempts=readdirSync(options.report).filter(name=>name.startsWith('attempt-'+fingerprint(k)+'-')).length
    v6AssertDispatchAvailable(journal,prefix,model.modelId,k,charged=>{try{const row=JSON.parse(readFileSync(resultFile(charged),'utf8'));return row.key===charged&&row.frozenHash===frozenHash&&['completed','interrupted'].includes(row.status)}catch{return false}},priorAttempts)
    const beforeConfig=readFileSync(path.join(options.profile,'model-config.json')),credential=loadModelCredentialReadOnly(options.profile,safeStorage,model.recordId)

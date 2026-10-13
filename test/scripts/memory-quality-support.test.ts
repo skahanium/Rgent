@@ -322,3 +322,21 @@ describe('未触达模型的请求可以有限次重派', () => {
     expect(() => support.v6AssertDispatchAvailable(unfinished, prefix, 'deepseek-flash', key, () => false, 0)).toThrow('EVALUATION_CHARGED_UNFINISHED')
   })
 })
+
+// 额度预检：必须能在进产品管线之前问出来。过去账本的额度拒绝发生在产品管线内部，
+// 被产品侧错误映射折成 MEMORY_UNAVAILABLE，记成"服务失败、0 调用"（r13／r14 实测）。
+it('额度可以在派发前只读预检，且不记账', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'rgent-journal-'))
+  try {
+    const journal = new (support as unknown as { EvaluationJournal: new (...args: unknown[]) => { calls: number; assertChargeable(key: string): void; charge(key: string): void } }).EvaluationJournal(
+      dir, { fingerprint: 'f' }, 10, path.join(dir, 'budget')
+    )
+    expect(() => journal.assertChargeable('v6/x/0/a')).not.toThrow()
+    expect(journal.calls).toBe(0)
+    journal.charge('v6/x/0/a')
+    expect(journal.calls).toBe(1)
+    for (let at = 0; at < 9; at += 1) journal.charge(`v6/x/0/${at}`)
+    expect(journal.calls).toBe(10)
+    expect(() => journal.assertChargeable('v6/x/0/over')).toThrow('EVALUATION_CALL_LIMIT')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
