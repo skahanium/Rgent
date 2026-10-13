@@ -602,7 +602,7 @@ it.each(['missing-connection','extra-field','material-envelope'] as const)('save
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
 
-function writeToolHarness(options: { text?: string } = {}) {
+function writeToolHarness(options: { text?: string; calls?: { id: string; name: string; input: unknown }[]; confirm?: (request: { relPath: string; body: string; signal: AbortSignal }) => Promise<boolean>; noCreate?: boolean } = {}) {
   let content = '人写的段落。\n\n/问\n'
   let revision = 1
   const history = hostLedgerFixture()
@@ -614,7 +614,12 @@ function writeToolHarness(options: { text?: string } = {}) {
     assertActive() {}, validateSources: async () => {}, acknowledgeOrigin() {}, revoke() {},
     assertWriteTarget(path: string) { if (path !== 'a.md') throw Error('OUTSIDE_TASK_SCOPE') },
     assertLive: async () => {} }
-  const read = async (path: string) => path === 'b.md' ? { content: '外篇正文', revision: 'b', sessionId: 's', objectVersion: 'o' } : { content, revision: String(revision), sessionId: 's', objectVersion: 'o' }
+  const created: { relPath: string; body: string }[] = []
+  const read = async (path: string) => {
+    if (path === 'b.md') return { content: '外篇正文', revision: 'b', sessionId: 's', objectVersion: 'o' }
+    if (path === 'a.md') return { content, revision: String(revision), sessionId: 's', objectVersion: 'o' }
+    throw Error('ENOENT')
+  }
   const write = async (_path: string, next: string, expected: string) => {
     if (expected !== String(revision)) throw Error('CONFLICT')
     if (partitionSource(next).ledger !== null) throw Error('LEDGER_IN_BODY')
@@ -624,14 +629,22 @@ function writeToolHarness(options: { text?: string } = {}) {
   const host = new AgentHost({ ledger: history.ledger, root: () => '/vault', read, write, tier: async () => 'reference', credential: () => credential, limits: () => grant.limits,
     authorize: async () => grant, session: () => 's', stream: async function* () {},
     createReadOnlyTools: (granted, id, _memory, _materials, writeTool) => createScopedAgentTools(granted, id, { read, tier: async () => 'reference', acceptsObject: () => false, write: writeTool }),
+    ...(options.confirm ? { confirmWrite: options.confirm } : {}),
+    ...(options.noCreate ? {} : {
+      createNote: async (relPath: string, body: string) => { created.push({ relPath, body }); return { relPath, revision: 'c1', objectVersion: 'co1' } },
+      attachmentFolder: async () => null
+    }),
     streamStep: async function* (input) {
       requests.push(input)
-      if (requests.length === 1) { yield { type: 'tool-call', id: 'call-1', name: 'append_to_note', input: { text: options.text ?? '补一段依据。' } }; yield { type: 'finish', reason: 'tool-calls' } }
+      if (requests.length === 1) {
+        for (const call of options.calls ?? [{ id: 'call-1', name: 'append_to_note', input: { text: options.text ?? '补一段依据。' } }]) yield { type: 'tool-call', ...call } as never
+        yield { type: 'finish', reason: 'tool-calls' }
+      }
       else { yield { type: 'text', text: '已答。' }; yield { type: 'finish', reason: 'stop' } }
     },
     emit: () => {} })
   const run = () => host.start({ relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: '1', range: { start: content.indexOf('/问'), end: content.indexOf('/问') + 2 }, expectedText: '/问', promptText: '问' })
-  return { host, history, requests, run, content: () => content }
+  return { host, history, requests, run, content: () => content, created }
 }
 
 /** 包 2：补任务发起篇——模型请求经真门、真组合器落到正文并进账本。 */
@@ -658,6 +671,43 @@ it('超限的追加被拒并如实记 refused:OVER_LIMIT_BYTES，正文不被写
   expect(body.startsWith('人写的段落。')).toBe(true)
   expect(body).not.toContain('汉汉汉')
   expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'append_to_note')?.outcome).toContain('refused:OVER_LIMIT_BYTES')
+})
+
+/** 包 3：建——模型提议、人点一下、才落盘。 */
+it('人同意后新建笔记：落点在发起篇所在目录，并记进账本与工具轨迹', async () => {
+  const asked: string[] = []
+  const app = writeToolHarness({
+    calls: [{ id: 'c1', name: 'create_note', input: { name: '新笔记', body: '新笔记正文。' } }],
+    confirm: async request => { asked.push(request.relPath); return true }
+  })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  expect(asked).toEqual(['新笔记.md'])
+  expect(app.created).toEqual([{ relPath: '新笔记.md', body: '新笔记正文。' }])
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'create_note')?.outcome).toContain('ok (1)')
+  expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('建笔记')
+})
+
+it('人拒绝就不落盘，账本记 refused:DECLINED，整场照常收尾', async () => {
+  const app = writeToolHarness({
+    calls: [{ id: 'c1', name: 'create_note', input: { name: '不想要的', body: '正文' } }],
+    confirm: async () => false
+  })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  expect(app.created).toEqual([])
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'create_note')?.outcome).toContain('refused:DECLINED')
+})
+
+it('没有确认入口时不宣告建工具，硬叫也只能吃 TOOL_NOT_ALLOWED', async () => {
+  const app = writeToolHarness({ calls: [{ id: 'c1', name: 'create_note', input: { name: '偷建', body: '正文' } }], noCreate: true })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('create_note')
+  expect(app.created).toEqual([])
+  // 未注册的工具照既有规矩记在 unknown 名下，不借用工具名；轨迹里如实写"未执行"。
+  expect(app.history.records().at(-1)?.provenance?.tools?.some(item => item.name === 'create_note')).toBe(false)
+  expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('未执行')
 })
 
 describe('skills in the request', () => {

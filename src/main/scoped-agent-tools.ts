@@ -24,15 +24,33 @@ export const WRITE_TOOL_SCHEMAS = {
       required: ['text'],
       additionalProperties: false
     }
+  },
+  create_note: {
+    description: '在发起篇所在目录新建一篇笔记，内容由你给出。落点不能选，重名会被拒；会先给人看预览，人点了同意才真的建。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', minLength: 1, maxLength: 120, description: '笔记名，不带路径与扩展名。' },
+        body: { type: 'string', minLength: 1, maxLength: 32768, description: '新笔记的正文。' }
+      },
+      required: ['name', 'body'],
+      additionalProperties: false
+    }
   }
 } as const
 
-/** 宿主提供的写入能力：门在宿主侧构造，这里只调用并记账。 */
-export type ScopedWriteTool = { append(text: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }> }
+/** 宿主提供的写入能力：门在宿主侧构造，这里只调用并记账。
+ *  create 只在宿主既有人确认、又能真的落盘时才出现。 */
+export type ScopedWriteTool = {
+  append(text: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }>
+  create?(name: string, body: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }>
+}
 
 export interface ScopedAgentTools {
   /** 这套工具是否带写入能力；宿主据此决定要不要把写工具宣告给模型。 */
   writes?: boolean
+  /** 是否带「建」的能力（需要人确认与落盘两条都在）。 */
+  creates?: boolean
   contextPolicy(source: string, signal: AbortSignal, chapters?: ContextChapter[]): Promise<{ allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[] }>
   execute(name: string, input: unknown, signal: AbortSignal): Promise<unknown>
   assertCurrent(signal: AbortSignal): Promise<void>
@@ -72,7 +90,7 @@ function args(value: unknown, required: string[], optional: string[]): Record<st
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('INVALID_TOOL_ARGUMENTS')
   const object = value as Record<string, unknown>
   if (Object.keys(object).some(key => ![...required, ...optional].includes(key)) || required.some(key => !(key in object))) throw Error('INVALID_TOOL_ARGUMENTS')
-  for (const [key, v] of Object.entries(object)) if (typeof v !== 'string' || !v.trim() || v.length > (key === 'query' ? 512 : key === 'text' ? 8192 : 256)) throw Error('INVALID_TOOL_ARGUMENTS')
+  for (const [key, v] of Object.entries(object)) if (typeof v !== 'string' || !v.trim() || v.length > (key === 'query' ? 512 : key === 'text' ? 8192 : key === 'body' ? 32768 : 256)) throw Error('INVALID_TOOL_ARGUMENTS')
   return object as Record<string, string>
 }
 /** Only receives a fixed, main-process grant; it never sees the human global index. */
@@ -290,18 +308,27 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
   }
   return {
     writes: !!deps.write,
+    creates: !!deps.write?.create,
     async contextPolicy(source, signal, chapters) {
       active(signal); originParsed = compile(source); originPolicy = await policy(source, signal, originParsed,chapters); active(signal)
       return { allowedLedgerChapterIds: [...originPolicy.allowedLedgerChapterIds], excludedAiTaskIds: [...originPolicy.excludedAiTaskIds] }
     },
     async execute(name, input, signal) {
       const writeEnabled = !!deps.write
-      const known = name === 'read_library' || name === 'search_library' || (writeEnabled && name === 'append_to_note')
+      const known = name === 'read_library' || name === 'search_library' || (writeEnabled && name === 'append_to_note') || (!!deps.write?.create && name === 'create_note')
       const label = known ? name : 'unknown'
       let outcome = 'refused'
       try {
         active(signal)
         if (!known) throw Error('UNKNOWN_TOOL')
+        if (name === 'create_note') {
+          const request = args(input, ['name', 'body'], [])
+          await check(signal)
+          const created = await deps.write!.create!(request.name!, request.body!, signal)
+          if (!created.ok) { outcome = `refused:${created.reason}`; throw Error(created.reason) }
+          outcome = 'ok'
+          return { revision: created.revision, bytes: created.bytes }
+        }
         if (name === 'append_to_note') {
           const appended = args(input, ['text'], [])
           await check(signal)

@@ -190,6 +190,11 @@ export function createWriteGate(deps: WriteGateDeps) {
       }
     },
 
+    /** 人在预览里点了「不建」：丢弃令牌，不落盘。 */
+    discardCreate(previewId: string): void {
+      previews.delete(previewId)
+    },
+
     /** 下一轮改名／挪用；本轮只提供计数与消耗，不注册工具。 */
     takeStructural(): boolean {
       if (structural >= WRITE_LIMITS.structuralPerSession) return false

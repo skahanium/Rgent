@@ -55,7 +55,7 @@ export type HostStart = Partial<ObjectBinding> & {
 
 export /** 过程只记「调了什么、结果如何」，不铺工具返回的正文。 */
 function toolTraceLine(call: { name: string; input: unknown }, failure?: string): string {
-  const label = call.name === 'read_library' ? '读库' : call.name === 'search_library' ? '搜库' : call.name === 'append_to_note' ? '补发起篇' : call.name==='search_memory'?'检索记忆':call.name
+  const label = call.name === 'read_library' ? '读库' : call.name === 'search_library' ? '搜库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name==='search_memory'?'检索记忆':call.name
   const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
   const query = typeof input.query === 'string' ? input.query.replace(/\s+/g, ' ').slice(0, 80) : ''
   const what = (label === '搜库'||label==='检索记忆') && query ? `${label}「${query}」` : label
@@ -98,6 +98,12 @@ export type HostDependencies = {
   onTaskMaterialResult?: (result: {sessionId?: string; taskId: string; status: 'handed-off' | 'unavailable' | 'failed'; reason?: string}) => void
   memory?: MemoryUsePort
   createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker, write?: ScopedWriteTool) => ScopedAgentTools
+  /** 「建」需要人在预览里点一下同意；没有这个入口就不宣告该工具。 */
+  confirmWrite?: (request: { relPath: string; body: string; signal: AbortSignal }) => Promise<boolean>
+  /** 「建」真正落盘：由主进程用库服务实现（含对象身份）。 */
+  createNote?: (relPath: string, body: string) => Promise<{ relPath: string; revision: string; objectVersion?: string }>
+  /** 目标目录是否落在某篇笔记的同名附件夹子树里。 */
+  attachmentFolder?: (relPath: string) => Promise<string | null> | string | null
   /** 一个助手的设备级习惯；任务启动时取一次快照，运行中改动只影响新任务。 */
   assistant?: () => AssistantHabits | null
   /** 本库启用的技能；同样在任务启动时冻结一次，运行中编辑只影响下一场。 */
@@ -346,10 +352,11 @@ export class AgentHost {
       const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials, write)
       // 宣告与白名单必须同源：工具集没有写入能力就不宣告，宣告了就必须在白名单里。
       const writeEnabled = Boolean(write && scoped?.writes)
+      const createEnabled = Boolean(write?.create && scoped?.creates)
       const memorySearchEnabled=input.memorySearchAuthorized===true&&!!grant&&!!memory?.searchable&&!!this.deps.streamStep&&this.supportsMemorySearch(credential)
       const toolsEnabled=libraryToolsEnabled||memorySearchEnabled
       // 只有当这套工具**确实**带写入能力时才把写工具宣告给模型，避免宣告了却执行不了。
-      const toolSchemas={...(libraryToolsEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?WRITE_TOOL_SCHEMAS:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
+      const toolSchemas={...(libraryToolsEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
       let memorySearchCalls=0,memorySearchFailures=0
       const memoryToolOutcomes:{name:string;outcome:string}[]=[]
       let successfulLibraryTool=false
@@ -565,7 +572,7 @@ export class AgentHost {
           const results: ToolContent = []
           for (const call of calls) {
             await guard()
-            const registered = libraryToolsEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||call.name==='search_memory'&&memorySearchEnabled
+            const registered = libraryToolsEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||call.name==='search_memory'&&memorySearchEnabled
             const duplicate = usedIds.has(call.id)
             usedIds.add(call.id)
             // Duplicate IDs cannot enter provider messages. A fresh internal refusal ID preserves their order.
@@ -574,7 +581,7 @@ export class AgentHost {
             let reportedByTool = false
             let value: unknown
             if (!failure) {
-              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
+              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
               try {
                 if(call.name==='search_memory'){
                   const args=call.input as Record<string,unknown>
@@ -591,7 +598,7 @@ export class AgentHost {
                 if (!['MEMORY_SEARCH_LIMIT','UNKNOWN_TOOL', 'INVALID_TOOL_ARGUMENTS', 'OUTSIDE_TASK_SCOPE', 'INVALID_TOOL_CURSOR', 'SOURCE_METADATA_TOO_LARGE',
                   // 写门的可预期拒绝：如实报给模型并继续，不把整场弄失败；库/授权类故障仍然致命。
                   'OVER_LIMIT_BYTES','OVER_LIMIT_APPENDS','OVER_LIMIT_NOTES','OVER_LIMIT_SESSION','NOT_ALLOWED',
-                  'BAD_NAME','TARGET_EXISTS','ATTACHMENT_SUBTREE','HIDDEN_PATH','CONFLICT','INVARIANT_VIOLATION'].includes(reason)) throw error
+                  'BAD_NAME','TARGET_EXISTS','ATTACHMENT_SUBTREE','HIDDEN_PATH','CONFLICT','INVARIANT_VIOLATION','DECLINED'].includes(reason)) throw error
                 failure = reason
                 reportedByTool = call.name!=='search_memory'
               }
@@ -680,9 +687,27 @@ export class AgentHost {
       assertLive: () => grant.assertLive('write', relPath),
       read: () => this.readBound(root, relPath),
       write: async (path, content, revision) => ({ revision: await this.writeBound(root, path, content, revision) }),
-      composeAppend: (previous, text) => appendAiBlock(previous, { taskId, text })
+      composeAppend: (previous, text) => appendAiBlock(previous, { taskId, text }),
+      ...(this.deps.createNote ? { create: (relPath: string, body: string) => this.deps.createNote!(relPath, body) } : {}),
+      ...(this.deps.attachmentFolder ? { attachmentFolder: (relPath: string) => this.deps.attachmentFolder!(relPath) } : {}),
+      // 「建」的重名判定：读得到就是已存在；只把"查无此篇"当作不存在，其他错误照旧抛出。
+      exists: async (relPath: string) => {
+        try { await this.deps.read(relPath); return true }
+        catch (error) { if (error instanceof Error && /ENOENT|NOT_FOUND|UNSAFE_PATH/u.test(error.message)) return false; throw error }
+      }
     })
-    return { append: (text: string) => gate.append({ text }) }
+    const create = this.deps.confirmWrite && this.deps.createNote
+      ? async (name: string, body: string, signal: AbortSignal) => {
+        const preview = await gate.previewCreate({ name })
+        if (!preview.ok) return preview
+        if (signal.aborted) { gate.discardCreate(preview.previewId); return { ok: false as const, reason: 'TASK_CANCELLED' } }
+        let approved = false
+        try { approved = await this.deps.confirmWrite!({ relPath: preview.relPath, body, signal }) } catch { approved = false }
+        if (!approved) { gate.discardCreate(preview.previewId); return { ok: false as const, reason: signal.aborted ? 'TASK_CANCELLED' : 'DECLINED' } }
+        return gate.commitCreate({ previewId: preview.previewId, body })
+      }
+      : undefined
+    return { append: (text: string) => gate.append({ text }), ...(create ? { create } : {}) }
   }
 
   private async mutateNote(root: string, relPath: string, change: (source: string) => string, trustedFinalization = false): Promise<string> {
