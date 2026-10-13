@@ -194,3 +194,49 @@ describe('append_to_note（补任务发起篇）', () => {
     expect(attempts).toEqual([])
   })
 })
+
+describe('rename_note ／ move_note（结构操作）', () => {
+  const structural = (over: Partial<{ rename: unknown; move: unknown }> = {}) => ({
+    rename: async (relPath: string, newName: string) => ({ ok: true as const, target: `${relPath.slice(0, relPath.lastIndexOf('/') + 1)}${newName}.md`, moved: 1 }),
+    move: async (relPath: string, targetFolder: string) => { const name = relPath.slice(relPath.lastIndexOf('/') + 1); return { ok: true as const, target: targetFolder ? `${targetFolder}/${name}` : name, moved: 2 } },
+    ...over
+  })
+
+  it('没有结构能力时按未知工具拒', async () => {
+    const f = await fixture()
+    await expect(f.tools.execute('rename_note', { relPath: 'a.md', newName: '新名' }, signal())).rejects.toThrow('UNKNOWN_TOOL')
+  })
+
+  it('有结构能力时执行并回报落到哪、动了几项', async () => {
+    const f = await fixture()
+    const tools = createScopedAgentTools(f.grant, 'task', { ...f.deps, write: structural() as never })
+    expect(await tools.execute('rename_note', { relPath: '资料/参考.md', newName: '新名' }, signal())).toEqual({ target: '资料/新名.md', moved: 1 })
+    expect(await tools.execute('move_note', { relPath: '资料/参考.md', targetFolder: '归档' }, signal())).toEqual({ target: '归档/参考.md', moved: 2 })
+    // 汇总按调用顺序：先改名后挪。
+    expect(tools.summary()).toEqual([{ name: 'rename_note', outcome: 'ok (1)' }, { name: 'move_note', outcome: 'ok (1)' }])
+  })
+
+  it('门拒绝时原因原样报给模型并记 refused:<原因>', async () => {
+    const f = await fixture()
+    const tools = createScopedAgentTools(f.grant, 'task', { ...f.deps, write: structural({ rename: async () => ({ ok: false as const, reason: 'ORIGIN_LOCKED' }) }) as never })
+    await expect(tools.execute('rename_note', { relPath: 'a.md', newName: '新名' }, signal())).rejects.toThrow('ORIGIN_LOCKED')
+    expect(tools.summary()).toEqual([{ name: 'rename_note', outcome: 'refused:ORIGIN_LOCKED (1)' }])
+  })
+
+  it('参数与取消守住：缺字段、错类型、取消都不惊动迁移', async () => {
+    const f = await fixture()
+    let called = 0
+    const tools = createScopedAgentTools(f.grant, 'task', { ...f.deps, write: structural({ rename: async () => { called += 1; return { ok: true as const, target: 'x.md', moved: 1 } } }) as never })
+    await expect(tools.execute('rename_note', { relPath: 'a.md' }, signal())).rejects.toThrow('INVALID_TOOL_ARGUMENTS')
+    await expect(tools.execute('move_note', { relPath: 'a.md' }, signal())).rejects.toThrow('INVALID_TOOL_ARGUMENTS')
+    const aborted = new AbortController(); aborted.abort()
+    await expect(tools.execute('rename_note', { relPath: 'a.md', newName: '新名' }, aborted.signal)).rejects.toThrow('TASK_CANCELLED')
+    expect(called).toBe(0)
+  })
+
+  it('挪到库根是合法参数：空字符串不算缺值', async () => {
+    const f = await fixture()
+    const tools = createScopedAgentTools(f.grant, 'task', { ...f.deps, write: structural() as never })
+    expect(await tools.execute('move_note', { relPath: '资料/参考.md', targetFolder: '' }, signal())).toEqual({ target: '参考.md', moved: 2 })
+  })
+})

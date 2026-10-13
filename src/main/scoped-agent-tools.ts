@@ -25,6 +25,30 @@ export const WRITE_TOOL_SCHEMAS = {
       additionalProperties: false
     }
   },
+  rename_note: {
+    description: '给本场授权范围内的一篇笔记改名（不含正在写入的发起篇）。会先给人看预览，人点了同意才真的改；库里有引用会一并修好。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        relPath: { type: 'string', minLength: 1, maxLength: 256, description: '要改名的笔记路径（本场来源清单里的 relPath）。' },
+        newName: { type: 'string', minLength: 1, maxLength: 120, description: '新名字，不带路径与扩展名。' }
+      },
+      required: ['relPath', 'newName'],
+      additionalProperties: false
+    }
+  },
+  move_note: {
+    description: '把本场授权范围内的一篇笔记挪到库里已有的某个目录（不含正在写入的发起篇）。文件名不变；会先给人看预览，人点了同意才真的挪。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        relPath: { type: 'string', minLength: 1, maxLength: 256, description: '要移动的笔记路径（本场来源清单里的 relPath）。' },
+        targetFolder: { type: 'string', maxLength: 256, description: '目标目录（相对库根；空字符串表示库根）。' }
+      },
+      required: ['relPath', 'targetFolder'],
+      additionalProperties: false
+    }
+  },
   create_note: {
     description: '在发起篇所在目录新建一篇笔记，内容由你给出。落点不能选，重名会被拒；会先给人看预览，人点了同意才真的建。',
     inputSchema: {
@@ -41,9 +65,13 @@ export const WRITE_TOOL_SCHEMAS = {
 
 /** 宿主提供的写入能力：门在宿主侧构造，这里只调用并记账。
  *  create 只在宿主既有人确认、又能真的落盘时才出现。 */
+export type StructuralOutcome = { ok: true; target: string; moved: number } | { ok: false; reason: string }
 export type ScopedWriteTool = {
   append(text: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }>
   create?(name: string, body: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }>
+  /** 结构操作（改名／挪）：要人确认与库层迁移两条都在才出现。 */
+  rename?(relPath: string, newName: string, signal: AbortSignal): Promise<StructuralOutcome>
+  move?(relPath: string, targetFolder: string, signal: AbortSignal): Promise<StructuralOutcome>
 }
 
 export interface ScopedAgentTools {
@@ -51,6 +79,8 @@ export interface ScopedAgentTools {
   writes?: boolean
   /** 是否带「建」的能力（需要人确认与落盘两条都在）。 */
   creates?: boolean
+  /** 是否带结构操作（改名／挪）。 */
+  renames?: boolean
   contextPolicy(source: string, signal: AbortSignal, chapters?: ContextChapter[]): Promise<{ allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[] }>
   execute(name: string, input: unknown, signal: AbortSignal): Promise<unknown>
   assertCurrent(signal: AbortSignal): Promise<void>
@@ -86,11 +116,11 @@ function awaiting<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
     promise.then(value => { signal.removeEventListener('abort', abort); if (signal.aborted) reject(Error('TASK_CANCELLED')); else resolve(value) }, error => { signal.removeEventListener('abort', abort); reject(error) })
   })
 }
-function args(value: unknown, required: string[], optional: string[]): Record<string, string> {
+function args(value: unknown, required: string[], optional: string[], allowEmpty: string[] = []): Record<string, string> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('INVALID_TOOL_ARGUMENTS')
   const object = value as Record<string, unknown>
   if (Object.keys(object).some(key => ![...required, ...optional].includes(key)) || required.some(key => !(key in object))) throw Error('INVALID_TOOL_ARGUMENTS')
-  for (const [key, v] of Object.entries(object)) if (typeof v !== 'string' || !v.trim() || v.length > (key === 'query' ? 512 : key === 'text' ? 8192 : key === 'body' ? 32768 : 256)) throw Error('INVALID_TOOL_ARGUMENTS')
+  for (const [key, v] of Object.entries(object)) if (typeof v !== 'string' || (!v.trim() && !allowEmpty.includes(key)) || v.length > (key === 'query' ? 512 : key === 'text' ? 8192 : key === 'body' ? 32768 : 256)) throw Error('INVALID_TOOL_ARGUMENTS')
   return object as Record<string, string>
 }
 /** Only receives a fixed, main-process grant; it never sees the human global index. */
@@ -309,18 +339,31 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
   return {
     writes: !!deps.write,
     creates: !!deps.write?.create,
+    renames: !!(deps.write?.rename && deps.write?.move),
     async contextPolicy(source, signal, chapters) {
       active(signal); originParsed = compile(source); originPolicy = await policy(source, signal, originParsed,chapters); active(signal)
       return { allowedLedgerChapterIds: [...originPolicy.allowedLedgerChapterIds], excludedAiTaskIds: [...originPolicy.excludedAiTaskIds] }
     },
     async execute(name, input, signal) {
       const writeEnabled = !!deps.write
-      const known = name === 'read_library' || name === 'search_library' || (writeEnabled && name === 'append_to_note') || (!!deps.write?.create && name === 'create_note')
+      const known = name === 'read_library' || name === 'search_library' || (writeEnabled && name === 'append_to_note') || (!!deps.write?.create && name === 'create_note') || (!!deps.write?.rename && (name === 'rename_note' || name === 'move_note'))
       const label = known ? name : 'unknown'
       let outcome = 'refused'
       try {
         active(signal)
         if (!known) throw Error('UNKNOWN_TOOL')
+        if (name === 'rename_note' || name === 'move_note') {
+          const request = name === 'rename_note'
+            ? args(input, ['relPath', 'newName'], [])
+            : args(input, ['relPath', 'targetFolder'], [], ['targetFolder'])
+          await check(signal)
+          const result = name === 'rename_note'
+            ? await deps.write!.rename!(request.relPath!, request.newName!, signal)
+            : await deps.write!.move!(request.relPath!, request.targetFolder ?? '', signal)
+          if (!result.ok) { outcome = `refused:${result.reason}`; throw Error(result.reason) }
+          outcome = 'ok'
+          return { target: result.target, moved: result.moved }
+        }
         if (name === 'create_note') {
           const request = args(input, ['name', 'body'], [])
           await check(signal)

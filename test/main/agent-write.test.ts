@@ -174,3 +174,118 @@ describe('write gate · 建', () => {
     expect(probe).not.toHaveBeenCalled()
   })
 })
+
+/** 结构工具（改名／挪）：可动对象、落点、库层权限拒绝的透出、引用修复边界、额度与令牌。 */
+const STRUCT_SOURCE = '资料/参考篇.md'
+type StructuralOver = Partial<NonNullable<WriteGateDeps['structural']>>
+function structHarness(over: StructuralOver = {}, depsOver: Partial<WriteGateDeps> = {}) {
+  const previews: { kind: 'note'; source: string; target: string }[] = []
+  const commits: { id: string; repairLinks: boolean }[] = []
+  const base: WriteGateDeps = {
+    origin: () => ORIGIN, session: () => 's1',
+    assertWriteTarget: () => {}, assertLive: async () => {},
+    read: async () => ({ content: MARKED, revision: 'r1', objectVersion: 'o1', sessionId: 's1' }),
+    write: async () => ({ revision: 'r2' }),
+    composeAppend: (previous, text) => `${previous}\n<!-- rgent:ai:v1 -->\n${text}\n`,
+    structural: {
+      // 现实中 grant.sources 含发起篇本身：对它的拒绝理由是「它是这一场的写入目标」，不是「不在范围里」，
+      // 所以这条顺序（先认发起篇）必须被钉住。
+      authorized: relPath => relPath === STRUCT_SOURCE || relPath === '资料/另一篇.md' || relPath === ORIGIN,
+      origin: () => ORIGIN,
+      otherTaskRunning: () => false,
+      preview: async request => {
+        previews.push(request)
+        return { id: 'rel-1', source: request.source, target: request.target, moves: [{ from: request.source, to: request.target }], linkChanges: [], permissionChanges: [] }
+      },
+      commit: async (id, repairLinks) => { commits.push({ id, repairLinks }); return { moved: [{ from: STRUCT_SOURCE, to: '资料/新名.md' }] } },
+      ...over
+    }
+  }
+  return { gate: createWriteGate({ ...base, ...depsOver }), previews, commits }
+}
+
+describe('write gate · 改名与挪', () => {
+  it('授权范围内改名：预览给出旧→新，人同意后提交且结构额度只吃一次', async () => {
+    const app = structHarness()
+    const preview = await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '新名' })
+    expect(preview).toMatchObject({ ok: true, kind: 'rename', source: STRUCT_SOURCE, target: '资料/新名.md' })
+    expect(app.previews).toHaveLength(1)
+    expect(app.commits).toHaveLength(0)
+    expect(await app.gate.commitStruct({ previewId: (preview as { previewId: string }).previewId })).toMatchObject({ ok: true, target: '资料/新名.md' })
+    expect(app.commits).toEqual([{ id: 'rel-1', repairLinks: true }])
+    expect(app.gate.state().structural).toBe(1)
+  })
+
+  it('挪到另一个目录：目标路径由当前文件名与目标目录拼出来', async () => {
+    const app = structHarness()
+    expect(await app.gate.previewStruct({ kind: 'move', relPath: STRUCT_SOURCE, targetFolder: '归档' })).toMatchObject({ ok: true, target: '归档/参考篇.md' })
+    expect(await app.gate.previewStruct({ kind: 'move', relPath: STRUCT_SOURCE, targetFolder: '' })).toMatchObject({ ok: true, target: '参考篇.md' })
+  })
+
+  it('发起篇自己不能动：这一场正拿它当写入目标', async () => {
+    const app = structHarness()
+    expect(await app.gate.previewStruct({ kind: 'rename', relPath: ORIGIN, newName: '改名' })).toEqual({ ok: false, reason: 'ORIGIN_LOCKED' })
+  })
+
+  it('授权范围外的笔记一律拒', async () => {
+    const app = structHarness()
+    expect(await app.gate.previewStruct({ kind: 'rename', relPath: '别处/别人的.md', newName: '改名' })).toEqual({ ok: false, reason: 'OUTSIDE_TASK_SCOPE' })
+  })
+
+  it('另有任务在跑时不结构操作', async () => {
+    const app = structHarness({ otherTaskRunning: () => true })
+    expect(await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '新名' })).toEqual({ ok: false, reason: 'OTHER_TASK_RUNNING' })
+    expect(app.previews).toHaveLength(0)
+  })
+
+  it('库层拒绝权限降级时原样透出，不自己复刻一套判据', async () => {
+    const app = structHarness({ preview: async () => { throw Error('PERMISSION_DOWNGRADE') } })
+    expect(await app.gate.previewStruct({ kind: 'move', relPath: STRUCT_SOURCE, targetFolder: '公开' })).toEqual({ ok: false, reason: 'PERMISSION_DOWNGRADE' })
+  })
+
+  it('落点非法：隐藏段、附件夹子树、已存在的目标、非法名字', async () => {
+    const hidden = structHarness({}, { attachmentFolder: () => null })
+    expect(await hidden.gate.previewStruct({ kind: 'move', relPath: STRUCT_SOURCE, targetFolder: '.隐藏' })).toEqual({ ok: false, reason: 'HIDDEN_PATH' })
+    const attached = structHarness({}, { attachmentFolder: () => '资料/参考篇' })
+    expect(await attached.gate.previewStruct({ kind: 'move', relPath: STRUCT_SOURCE, targetFolder: '资料/参考篇' })).toEqual({ ok: false, reason: 'ATTACHMENT_SUBTREE' })
+    const existing = structHarness({}, { exists: async relPath => relPath === '资料/新名.md' })
+    expect(await existing.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '新名' })).toEqual({ ok: false, reason: 'TARGET_EXISTS' })
+    expect(await hidden.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '带/斜杠' })).toEqual({ ok: false, reason: 'BAD_NAME' })
+  })
+
+  it('范围外有引用需要修复时整件事拒掉，交给人做', async () => {
+    const app = structHarness({
+      preview: async request => ({ id: 'rel-3', source: request.source, target: request.target, moves: [], linkChanges: [{ relPath: '别处/引用者.md' }], permissionChanges: [] })
+    })
+    expect(await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '新名' })).toEqual({ ok: false, reason: 'LINK_REPAIR_OUT_OF_SCOPE' })
+  })
+
+  it('范围外引用不需要修复时放行：门只看会不会动到范围外的正文', async () => {
+    const app = structHarness({
+      preview: async request => ({ id: 'rel-4', source: request.source, target: request.target, moves: [], linkChanges: [{ relPath: STRUCT_SOURCE }], permissionChanges: [{ from: '资料/参考篇.md', to: '资料/新名.md', tier: 'reference' }] })
+    })
+    expect(await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '新名' })).toMatchObject({ ok: true, linkChanges: 1, permissionChanges: 1 })
+  })
+
+  it('令牌一次性：重放与丢弃后提交都被拒', async () => {
+    const app = structHarness()
+    const preview = await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '新名' })
+    const id = (preview as { previewId: string }).previewId
+    expect((await app.gate.commitStruct({ previewId: id })).ok).toBe(true)
+    expect(await app.gate.commitStruct({ previewId: id })).toEqual({ ok: false, reason: 'STALE_PREVIEW' })
+    const second = await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '又一个' })
+    app.gate.discardStruct((second as { previewId: string }).previewId)
+    expect(await app.gate.commitStruct({ previewId: (second as { previewId: string }).previewId })).toEqual({ ok: false, reason: 'STALE_PREVIEW' })
+    expect(app.gate.state().structural).toBe(1)
+  })
+
+  it('结构额度三次用完即拒', async () => {
+    const app = structHarness()
+    for (let at = 0; at < WRITE_LIMITS.structuralPerSession; at += 1) {
+      const preview = await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: `第${at}名` })
+      expect(preview.ok).toBe(true)
+      await app.gate.commitStruct({ previewId: (preview as { previewId: string }).previewId })
+    }
+    expect(await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '再来' })).toEqual({ ok: false, reason: 'OVER_LIMIT_STRUCTURAL' })
+  })
+})

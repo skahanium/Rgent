@@ -26,7 +26,7 @@ function mount() {
 
 it('摆出落点与正文，并把焦点放在「建」上', () => {
   const app = mount()
-  app.send({ requestId: 'r1', relPath: '工作/新笔记.md', body: '新笔记正文。' })
+  app.send({ requestId: 'r1', kind: 'create', relPath: '工作/新笔记.md', body: '新笔记正文。' })
   const dialog = app.dialog()!
   expect(dialog.textContent).toContain('将新建：工作/新笔记.md')
   expect(dialog.textContent).toContain('新笔记正文。')
@@ -35,7 +35,7 @@ it('摆出落点与正文，并把焦点放在「建」上', () => {
 
 it('点「建」回一个同意，且同一请求只回一次', () => {
   const app = mount()
-  app.send({ requestId: 'r1', relPath: '新笔记.md', body: '正文' })
+  app.send({ requestId: 'r1', kind: 'create', relPath: '新笔记.md', body: '正文' })
   const accept = app.dialog()!.querySelector<HTMLButtonElement>('.write-confirm-accept')!
   accept.click()
   accept.click()
@@ -46,7 +46,7 @@ it('点「建」回一个同意，且同一请求只回一次', () => {
 
 it('点「不建」回一个拒绝，什么都不写', () => {
   const app = mount()
-  app.send({ requestId: 'r2', relPath: '新笔记.md', body: '正文' })
+  app.send({ requestId: 'r2', kind: 'create', relPath: '新笔记.md', body: '正文' })
   app.dialog()!.querySelector<HTMLButtonElement>('.write-confirm-cancel')!.click()
   expect(app.decide).toHaveBeenCalledWith({ requestId: 'r2', approved: false })
   expect(app.dialog()).toBeNull()
@@ -54,7 +54,7 @@ it('点「不建」回一个拒绝，什么都不写', () => {
 
 it('按 Esc 当作不建', () => {
   const app = mount()
-  app.send({ requestId: 'r3', relPath: '新笔记.md', body: '正文' })
+  app.send({ requestId: 'r3', kind: 'create', relPath: '新笔记.md', body: '正文' })
   // 浏览器里 Esc 落在模态 <dialog> 上就是 cancel 事件；浮层正是照它收口的。
   document.querySelector<HTMLDialogElement>('.overlay-write-confirm')!.dispatchEvent(new Event('cancel', { cancelable: true }))
   expect(app.decide).toHaveBeenCalledWith({ requestId: 'r3', approved: false })
@@ -62,9 +62,28 @@ it('按 Esc 当作不建', () => {
 
 it('前一张没答就来了新请求：旧请求按不建结清，纸面上只留一张卡', () => {
   const app = mount()
-  app.send({ requestId: 'r4', relPath: '第一篇.md', body: '甲' })
-  app.send({ requestId: 'r5', relPath: '第二篇.md', body: '乙' })
+  app.send({ requestId: 'r4', kind: 'create', relPath: '第一篇.md', body: '甲' })
+  app.send({ requestId: 'r5', kind: 'create', relPath: '第二篇.md', body: '乙' })
   expect(app.decide).toHaveBeenCalledWith({ requestId: 'r4', approved: false })
   expect(document.querySelectorAll('.overlay-write-confirm')).toHaveLength(1)
   expect(app.dialog()!.textContent).toContain('第二篇.md')
+})
+
+it('结构操作的卡片摆出旧→新与影响面，按钮说的是改名', () => {
+  const app = mount()
+  app.send({ requestId: 'r9', kind: 'rename', source: '资料/参考篇.md', target: '资料/新名.md', moves: 1, linkChanges: 2, permissionChanges: 1 })
+  const dialog = app.dialog()!
+  expect(dialog.textContent).toContain('将改名：资料/参考篇.md → 资料/新名.md')
+  expect(dialog.textContent).toContain('会影响 2 处引用、1 处权限')
+  expect(dialog.querySelector('.write-confirm-accept')!.textContent).toBe('改名')
+  expect(dialog.querySelector('.write-confirm-body')).toBeNull()
+  app.dialog()!.querySelector<HTMLButtonElement>('.write-confirm-accept')!.click()
+  expect(app.decide).toHaveBeenCalledWith({ requestId: 'r9', approved: true })
+})
+
+it('挪动的卡片按钮说的是移动', () => {
+  const app = mount()
+  app.send({ requestId: 'r10', kind: 'move', source: '参考篇.md', target: '归档/参考篇.md', moves: 1, linkChanges: 0, permissionChanges: 0 })
+  expect(app.dialog()!.querySelector('.write-confirm-accept')!.textContent).toBe('移动')
+  expect(app.dialog()!.textContent).toContain('将移动：参考篇.md → 归档/参考篇.md')
 })

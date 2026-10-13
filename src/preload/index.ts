@@ -82,7 +82,11 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, value: unknown): void => {
       const args = boundEvent(value, mountedSession)
       const preview = args?.[0] as import('../shared/ipc.ts').AgentWritePreview | undefined
-      if (preview && typeof preview === 'object' && typeof preview.requestId === 'string' && typeof preview.relPath === 'string' && typeof preview.body === 'string') fn(preview)
+      if (!preview || typeof preview !== 'object' || typeof preview.requestId !== 'string') return
+      const valid = preview.kind === 'create'
+        ? typeof preview.relPath === 'string' && typeof preview.body === 'string'
+        : (preview.kind === 'rename' || preview.kind === 'move') && typeof preview.source === 'string' && typeof preview.target === 'string'
+      if (valid) fn(preview)
     }
     ipcRenderer.on(IPC.agentWriteRequest, listener)
     return () => ipcRenderer.removeListener(IPC.agentWriteRequest, listener)

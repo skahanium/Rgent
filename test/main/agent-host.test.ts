@@ -602,7 +602,7 @@ it.each(['missing-connection','extra-field','material-envelope'] as const)('save
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
 
-function writeToolHarness(options: { text?: string; calls?: { id: string; name: string; input: unknown }[]; confirm?: (request: { relPath: string; body: string; signal: AbortSignal }) => Promise<boolean>; noCreate?: boolean } = {}) {
+function writeToolHarness(options: { text?: string; calls?: { id: string; name: string; input: unknown }[]; confirm?: (request: import('../../src/main/agent-host.ts').AgentWriteConfirm) => Promise<boolean>; noCreate?: boolean; relocation?: boolean } = {}) {
   let content = '人写的段落。\n\n/问\n'
   let revision = 1
   const history = hostLedgerFixture()
@@ -615,6 +615,7 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
     assertWriteTarget(path: string) { if (path !== 'a.md') throw Error('OUTSIDE_TASK_SCOPE') },
     assertLive: async () => {} }
   const created: { relPath: string; body: string }[] = []
+  const moved: { id: string; repairLinks: boolean }[] = []
   const read = async (path: string) => {
     if (path === 'b.md') return { content: '外篇正文', revision: 'b', sessionId: 's', objectVersion: 'o' }
     if (path === 'a.md') return { content, revision: String(revision), sessionId: 's', objectVersion: 'o' }
@@ -631,6 +632,10 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
     authorize: async () => grant, session: () => 's', stream: async function* () {},
     createReadOnlyTools: (granted, id, _memory, _materials, writeTool) => createScopedAgentTools(granted, id, { read, tier: async () => 'reference', acceptsObject: () => false, write: writeTool }),
     ...(options.confirm ? { confirmWrite: options.confirm } : {}),
+    ...(options.relocation ? {
+      relocationPreview: async (request: { kind: 'note'; source: string; target: string }) => ({ id: 'lib-1', source: request.source, target: request.target, moves: [{ from: request.source, to: request.target }], linkChanges: [], permissionChanges: [] }),
+      relocationCommit: async (id: string, repairLinks: boolean) => { moved.push({ id, repairLinks }); return { moved: [{ from: 'b.md', to: '归档笔记.md' }] } }
+    } : {}),
     ...(options.noCreate ? {} : {
       createNote: async (relPath: string, body: string) => { created.push({ relPath, body }); return { relPath, revision: 'c1', objectVersion: 'co1' } },
       attachmentFolder: async () => null
@@ -645,7 +650,7 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
     },
     emit: () => {} })
   const run = () => host.start({ relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: '1', range: { start: content.indexOf('/问'), end: content.indexOf('/问') + 2 }, expectedText: '/问', promptText: '问' })
-  return { host, history, requests, run, content: () => content, created }
+  return { host, history, requests, run, content: () => content, created, moved }
 }
 
 /** 包 2：补任务发起篇——模型请求经真门、真组合器落到正文并进账本。 */
@@ -679,7 +684,7 @@ it('人同意后新建笔记：落点在发起篇所在目录，并记进账本�
   const asked: string[] = []
   const app = writeToolHarness({
     calls: [{ id: 'c1', name: 'create_note', input: { name: '新笔记', body: '新笔记正文。' } }],
-    confirm: async request => { asked.push(request.relPath); return true }
+    confirm: async request => { if (request.kind !== 'create') throw Error('UNEXPECTED_CONFIRM'); asked.push(request.relPath); return true }
   })
   const task = await app.run()
   expect(await task.done).toEqual({ status: 'completed' })
@@ -708,6 +713,44 @@ it('没有确认入口时不宣告建工具，硬叫也只能吃 TOOL_NOT_ALLOWE
   expect(app.created).toEqual([])
   // 未注册的工具照既有规矩记在 unknown 名下，不借用工具名；轨迹里如实写"未执行"。
   expect(app.history.records().at(-1)?.provenance?.tools?.some(item => item.name === 'create_note')).toBe(false)
+  expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('未执行')
+})
+
+/** 结构工具（改名／挪）：预览＋一次点击，之后本场按「库在任务底下变了」收尾。 */
+it('模型请求改名：人同意才走库层迁移，随后本场收尾并留痕', async () => {
+  const asked: import('../../src/main/agent-host.ts').AgentWriteConfirm[] = []
+  const app = writeToolHarness({
+    calls: [{ id: 'c1', name: 'rename_note', input: { relPath: 'b.md', newName: '归档笔记' } }],
+    relocation: true,
+    confirm: async request => { asked.push(request); return true }
+  })
+  const task = await app.run()
+  // 本场来源被搬走：已写内容与账本保留，但不继续读旧路径（否则只会假失败）。
+  expect(await task.done).toEqual({ status: 'cancelled', reason: 'vault-change' })
+  expect(asked[0]).toMatchObject({ kind: 'rename', source: 'b.md', target: '归档笔记.md' })
+  expect(app.moved).toEqual([{ id: 'lib-1', repairLinks: true }])
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'rename_note')?.outcome).toContain('ok (1)')
+  expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('改名')
+})
+
+it('模型请求挪动：人拒绝就什么都不动，本场照常收尾', async () => {
+  const app = writeToolHarness({
+    calls: [{ id: 'c1', name: 'move_note', input: { relPath: 'b.md', targetFolder: '归档' } }],
+    relocation: true,
+    confirm: async () => false
+  })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  expect(app.moved).toEqual([])
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'move_note')?.outcome).toContain('refused:DECLINED')
+})
+
+it('没有库层迁移时不宣告结构工具，硬叫也只吃未注册', async () => {
+  const app = writeToolHarness({ calls: [{ id: 'c1', name: 'rename_note', input: { relPath: 'b.md', newName: '偷改' } }] })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('rename_note')
+  expect(app.history.records().at(-1)?.provenance?.tools?.some(item => item.name === 'rename_note')).toBe(false)
   expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('未执行')
 })
 

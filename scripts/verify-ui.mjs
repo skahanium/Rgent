@@ -607,10 +607,11 @@ async function verifyScopedHost(page, vault, shot, requests) {
 /** 包 4 窗口收口：写类工具在真窗口里的四条路——建·同意、建·不建、补·安静、补·超限。
  *  模型是受控主机脚本，真实供应商一律未配置（零真实调用）。 */
 async function verifyWriteTools(page, vault, shot, requests) {
-  const fixtures = ['写作建一.md', '写作建二.md', '写作补.md', '写作超限.md']
+  const fixtures = ['写作建一.md', '写作建二.md', '写作补.md', '写作超限.md', '写作改名.md', '写作越权.md', '写作挪.md', '写作挪参考.md']
   for (const name of fixtures) writeFileSync(path.join(vault, name), '')
   writeFileSync(path.join(vault, '写作参考.md'), '# 参考\n\n受控参考正文。\n')
-  check('写工具夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter(n=>/写作/.test(n.innerText)).length===5`))
+  mkdirSync(path.join(vault, '归档'), { recursive: true })
+  check('写工具夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter(n=>/写作/.test(n.innerText)).length===9`))
   // 受控供应商是通过 IPC 配的，渲染层的模型快照要打开一次设置页才会刷新；
   // 不刷新的话按 Enter 只会得到「请选择可用模型」，任务根本不会开始。
   await page.eval(`document.querySelector('.settings-open').click()`)
@@ -627,8 +628,17 @@ async function verifyWriteTools(page, vault, shot, requests) {
     await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
     return true
   }
+  const ledgerPanel = async (note, condition) => {
+    await page.eval(`document.querySelector('.ledger-close')?.click()`)
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(note)})?.click()`)
+    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(note)}`)) return false
+    await page.eval(`document.querySelector('.ledger-open')?.click()`)
+    if (!await waitFor(page, `!!document.querySelector('.ledger-body details')`)) return false
+    await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
+    return await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return ${condition}})()`)
+  }
   // 每个场景用一篇干净的发起篇：光标从头开始，口令一定落在正文里。
-  const start = async (note, prompt) => {
+  const start = async (note, prompt, reference = '写作参考.md') => {
     await selectBrowserFolder(page, '')
     if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(n=>n.dataset.path===${JSON.stringify(note)})`)) return `目录里没有 ${note}`
     await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(note)}).click()`)
@@ -641,7 +651,7 @@ async function verifyWriteTools(page, vault, shot, requests) {
       return '授权弹窗没出现：' + state
     }
     // 选一篇额外参考：这样本场才是"有工具档"，写工具才会出现。
-    const point = await page.eval(`(() => { const input=[...document.querySelectorAll('.authorization-choices input')].find(input=>input.value==='写作参考.md'); if(!input||input.disabled)return null; input.scrollIntoView({block:'nearest'}); const r=input.getBoundingClientRect(); return { x: r.left+r.width/2, y: r.top+r.height/2 } })()`)
+    const point = await page.eval(`(() => { const input=[...document.querySelectorAll('.authorization-choices input')].find(input=>input.value===${JSON.stringify(reference)}); if(!input||input.disabled)return null; input.scrollIntoView({block:'nearest'}); const r=input.getBoundingClientRect(); return { x: r.left+r.width/2, y: r.top+r.height/2 } })()`)
     if (!point) return false
     await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
     await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
@@ -679,21 +689,26 @@ async function verifyWriteTools(page, vault, shot, requests) {
   check('超限追加被拒且正文没被写坏', (await settle()) && await page.eval(`(async () => { const body=(await window.rgent.noteRead('写作超限.md')).content.split('<!-- rgent:ledger')[0]; return !body.includes('汉汉汉') })()`))
   check('拒绝原因如实报给模型', requests.some(request => request.messages.some(message => message.role === 'tool' && String(message.content).includes('OVER_LIMIT_BYTES'))))
 
+  // 五、改名：授权范围内的参考篇才能动；发起篇自己一律拒。
+  check('打开越权发起篇开工', await start('写作越权.md', '越权样张'))
+  check('发起篇自己的结构操作不出卡片，账本记 ORIGIN_LOCKED', (await settle()) && !(await page.eval(`!!document.querySelector('.overlay-write-confirm')`)) && requests.some(request => request.messages.some(message => message.role === 'tool' && String(message.content).includes('ORIGIN_LOCKED'))))
+  await shot(page, 'write-structural-origin-refused-1200')
+
+  check('打开改名发起篇并授权参考篇', await start('写作改名.md', '改名样张'))
+  check('改名卡片摆出旧路径 → 新路径与影响面', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将改名：写作参考.md → 写作参考改.md') && text.includes('处引用')})()`))
+  await shot(page, 'write-rename-1200')
+  check('点「改名」后文件真的换了名字', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `!document.querySelector('.status-task')`, 30000) && existsSync(path.join(vault, '写作参考改.md')) && !existsSync(path.join(vault, '写作参考.md')))
+
+  check('打开挪动发起篇并授权另一篇参考', await start('写作挪.md', '挪样张', '写作挪参考.md'))
+  check('挪动卡片摆出旧路径 → 新路径', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将移动：写作挪参考.md → 归档/写作挪参考.md')})()`))
+  check('点「移动」后文件真的挪进目标目录', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `!document.querySelector('.status-task')`, 30000) && existsSync(path.join(vault, '归档', '写作挪参考.md')) && !existsSync(path.join(vault, '写作挪参考.md')))
+
   // 账本：面板上看"未执行（超限）"的如实记录，数据上看三场各自的工具留痕。
   await page.eval(`document.querySelector('.ledger-open')?.click()`)
   await waitFor(page, `!!document.querySelector('.ledger-body details')`)
   await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
   await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`)
-  check('账本面板如实写「未执行（超限）」并带工具名', await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return text.includes('append_to_note') && text.includes('refused:OVER_LIMIT_BYTES') && text.includes('未执行（OVER_LIMIT_BYTES）')})()`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,260)??'(无账本面板)'`))
-  const ledgerPanel = async (note, condition) => {
-    await page.eval(`document.querySelector('.ledger-close')?.click()`)
-    await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(note)})?.click()`)
-    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(note)}`)) return false
-    await page.eval(`document.querySelector('.ledger-open')?.click()`)
-    if (!await waitFor(page, `!!document.querySelector('.ledger-body details')`)) return false
-    await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
-    return await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return ${condition}})()`)
-  }
+  check('账本面板如实写「未执行（超限）」并带工具名', await ledgerPanel('写作超限.md', `text.includes('append_to_note') && text.includes('refused:OVER_LIMIT_BYTES') && text.includes('未执行（OVER_LIMIT_BYTES）')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,260)??'(无账本面板)'`))
   check('建的账本留痕看得见', await ledgerPanel('写作建一.md', `text.includes('create_note') && text.includes('ok (1)')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
   check('补的账本留痕看得见', await ledgerPanel('写作补.md', `text.includes('append_to_note') && text.includes('ok (1)')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
   await shot(page, 'write-ledger-1200')
@@ -2735,7 +2750,7 @@ function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequest
         }
         // 只按写工具专项自己的口令识别：工具链场景现在也带写工具，按工具名匹配会把它整个劫持走。
         const writeBody = JSON.stringify(decoded.messages)
-        const writePrompts = ['建样张一', '建样张二', '补样张', '超限样张']
+        const writePrompts = ['建样张一', '建样张二', '补样张', '超限样张', '改名样张', '挪样张', '越权样张']
         if (writePrompts.some(prompt => writeBody.includes(prompt))) {
           writeRequests.push(decoded)
           const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'write-ui', object: 'chat.completion.chunk', created: 1, model: decoded.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
@@ -2744,13 +2759,20 @@ function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequest
           if (!results.length) {
             // 第一轮：按口令提出一次写请求；工具名只在"有工具档"的场里出现。
             const prompts = writeBody
-            const call = prompts.includes('建样张二')
-              ? { name: 'create_note', input: { name: '写工具二', body: '第二篇受控正文。' } }
-              : prompts.includes('建样张一')
-                ? { name: 'create_note', input: { name: '写工具样张', body: '# 写工具样张\n\n受控正文。' } }
-                : prompts.includes('超限样张')
-                  ? { name: 'append_to_note', input: { text: '汉'.repeat(4000) } }
-                  : { name: 'append_to_note', input: { text: '补充依据。' } }
+            const call = prompts.includes('越权样张')
+              // 越权场景：请模型改「正在写入的发起篇」自己——门必须按 ORIGIN_LOCKED 拒。
+              ? { name: 'rename_note', input: { relPath: '写作越权.md', newName: '偷改发起篇' } }
+              : prompts.includes('改名样张')
+                ? { name: 'rename_note', input: { relPath: '写作参考.md', newName: '写作参考改' } }
+                : prompts.includes('挪样张')
+                  ? { name: 'move_note', input: { relPath: '写作挪参考.md', targetFolder: '归档' } }
+                  : prompts.includes('建样张二')
+                ? { name: 'create_note', input: { name: '写工具二', body: '第二篇受控正文。' } }
+                : prompts.includes('建样张一')
+                  ? { name: 'create_note', input: { name: '写工具样张', body: '# 写工具样张\n\n受控正文。' } }
+                  : prompts.includes('超限样张')
+                    ? { name: 'append_to_note', input: { text: '汉'.repeat(4000) } }
+                    : { name: 'append_to_note', input: { text: '补充依据。' } }
             const [name, args] = [call.name, JSON.stringify(call.input)]
             emit({ tool_calls: [{ index: 0, id: `ui-write-${name}`, type: 'function', function: { name, arguments: args } }] })
             emit({}, 'tool_calls')

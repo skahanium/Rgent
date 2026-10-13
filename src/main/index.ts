@@ -25,7 +25,7 @@ import { IPC, type VaultState } from '../shared/ipc.ts'
 import type { ChromeTextSetResult } from '../shared/ipc.ts'
 import { loadChromeTextPreference, saveChromeTextPreference } from './theme-preference.ts'
 import { isChromeTextPreference } from '../shared/reading-preference.ts'
-import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, ModelAddRequest, ModelConfigResult, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
+import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, RelocationPreviewRequest, RelocationPreviewView, ModelAddRequest, ModelConfigResult, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { loadAssistantHabits, saveAssistantHabits } from './assistant-preference.ts'
@@ -185,6 +185,69 @@ async function verifyVaultImage(current:VaultSession,snapshot:import('../shared/
  current.assertSession(c.sessionId)
  return verifyImageSource(snapshot,request,text)
 }
+  /** 人与 AI 共用的一条迁移路径：结构门、停任务、冲稿、库层预览／提交只有调用者不同。
+ *  人走 IPC，AI 走宿主的结构工具；两条路都不另造迁移实现，错误码也一致。 */
+async function relocationPreviewShared(request: RelocationPreviewRequest, owner?: string): Promise<RelocationPreviewView> {
+  const currentVault = vault
+  if (!currentVault) throw new Error('NO_VAULT')
+  const token = currentVault.captureSession()
+  const root = currentVault.root!
+  if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
+  await agentHost?.whenLaunchesSettled()
+  currentVault.assertSession(token)
+  // 人从界面迁移要停掉受影响的任务；AI 自己请求的结构操作不能停掉它自己（owner），
+  // 否则工具调用会被半路掐断、账本上只剩一次 cancelled。
+  const affected = agentHost?.active().filter((task) => task.id !== owner && task.root === root &&
+    (task.relPath === request.source ||
+      (request.kind === 'folder' && task.relPath.startsWith(`${request.source}/`)) ||
+      (request.kind === 'note' && task.relPath.startsWith(`${request.source.slice(0, -3)}/`)))) ?? []
+  for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
+  if (agentHost?.hasPending(root)) throw new Error('PREVIOUS_TASK_UNSAVED')
+  if (!mainWindow || !(await flushBeforeStructure(mainWindow))) throw new Error('UNSAVED_DRAFT')
+  currentVault.assertSession(token)
+  const preview = await currentVault.previewRelocation(request, token)
+  currentVault.assertSession(token)
+  return {
+    id: preview.id, sessionId: preview.sessionId, kind: preview.kind, source: preview.source, target: preview.target,
+    moves: preview.moves,
+    linkChanges: preview.linkChanges.map(({ relPath, newPath, changes }) => ({ relPath, newPath, count: changes.length })),
+    permissionChanges: preview.permissionChanges
+  }
+}
+
+async function relocationCommitShared(id: string, repairLinks: boolean, owner?: string): Promise<{ moved: { from: string; to: string }[]; unrepaired: string[] }> {
+  const currentVault = vault
+  const win = mainWindow
+  if (!currentVault || !win || !currentVault.root) throw new Error('BAD_REQUEST')
+  const token = currentVault.captureSession()
+  const root = currentVault.root
+  const preview = currentVault.relocationPreviewById(id)
+  if (!preview) throw new Error('STALE_PREVIEW')
+  if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
+  structureGate.begin({
+    root,
+    exact: [preview.source, ...(repairLinks ? preview.linkChanges.map((item) => item.relPath) : [])],
+    prefixes: preview.kind === 'folder' ? [preview.source] : [preview.source.slice(0, -3)]
+  })
+  try {
+    await agentHost?.whenLaunchesSettled()
+    currentVault.assertSession(token)
+    const affected = agentHost?.active().filter((task) => task.id !== owner && task.root === root && agentHost!.scopePaths(task.id).some(path => structureGate.affects(root, path))) ?? []
+    // 请求者自己不算「别的任务」：它正是发起方，收尾由宿主在工具返回之后负责。
+    if (agentHost?.active().some((task) => task.id !== owner && task.root === root && !agentHost!.scopePaths(task.id).some(path => structureGate.affects(root, path)))) {
+      throw new Error('OTHER_TASK_RUNNING')
+    }
+    for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
+    if (agentHost?.hasPending(root)) throw new Error('PREVIOUS_TASK_UNSAVED')
+    if (!(await flushBeforeStructure(win))) throw new Error('UNSAVED_DRAFT')
+    currentVault.assertSession(token)
+    structureGate.seal()
+    const outcome = await currentVault.commitRelocation(id, repairLinks, token)
+    currentVault.assertSession(token)
+    return { moved: outcome.moved.map(({ from, to }) => ({ from, to })), unrepaired: outcome.unrepaired }
+  } finally { structureGate.finish() }
+}
+
 function send(channel: string, payload?: unknown): void {
   if (channel === IPC.treeChanged || channel === IPC.noteExternalChange || channel === IPC.vaultLost) {
     for (const [controller, active] of imageControllers) {
@@ -1057,64 +1120,19 @@ function registerIpc(): void {
   })
   registerTrustedHandle(IPC.relocationPreview, async (event, value: unknown): Promise<RelocationPreviewResult> => {
     const request = parseRelocationPreviewRequest(value)
-    const currentVault = vault
-    if (!trusted(event) || !request || !currentVault) return { ok: false, error: 'BAD_PATH' }
+    if (!trusted(event) || !request || !vault) return { ok: false, error: 'BAD_PATH' }
     try {
-      const token = currentVault.captureSession()
-      const root = currentVault.root!
-      if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
-      await agentHost?.whenLaunchesSettled()
-      currentVault.assertSession(token)
-      const affected = agentHost?.active().filter((task) => task.root === root &&
-        (task.relPath === request.source ||
-          (request.kind === 'folder' && task.relPath.startsWith(`${request.source}/`)) ||
-          (request.kind === 'note' && task.relPath.startsWith(`${request.source.slice(0, -3)}/`)))) ?? []
-      for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
-      if (agentHost?.hasPending(root)) throw new Error('PREVIOUS_TASK_UNSAVED')
-      if (!mainWindow || !(await flushBeforeStructure(mainWindow))) throw new Error('UNSAVED_DRAFT')
-      currentVault.assertSession(token)
-      const preview = await currentVault.previewRelocation(request, token)
-      currentVault.assertSession(token)
-      return { ok: true, preview: {
-        id: preview.id, sessionId: preview.sessionId, kind: preview.kind, source: preview.source, target: preview.target,
-        moves: preview.moves,
-        linkChanges: preview.linkChanges.map(({ relPath, newPath, changes }) => ({ relPath, newPath, count: changes.length })),
-        permissionChanges: preview.permissionChanges
-      } }
+      // 与 AI 结构工具同一条路径：抽取后的共用实现，行为与错误码完全一致。
+      return { ok: true, preview: await relocationPreviewShared(request) }
     } catch (error) { return { ok: false, error: lifecycleError(error, 'PREVIEW_FAILED') } }
   })
   registerTrustedHandle(IPC.relocationCommit, async (event, value: unknown): Promise<RelocationCommitResult> => {
     const request = parseRelocationCommitRequest(value)
-    const win = mainWindow
-    const currentVault = vault
-    if (!trusted(event) || !request || !currentVault || !win || !currentVault.root) return { ok: false, error: 'BAD_REQUEST' }
-    const token = currentVault.captureSession()
-    const root = currentVault.root
-    const preview = currentVault.relocationPreviewById(request.id)
-    if (!preview) return { ok: false, error: 'STALE_PREVIEW' }
-    if (structureGate.isBusy()) return { ok: false, error: 'STRUCTURE_BUSY' }
-    structureGate.begin({
-      root,
-      exact: [preview.source, ...(request.repairLinks ? preview.linkChanges.map((item) => item.relPath) : [])],
-      prefixes: preview.kind === 'folder' ? [preview.source] : [preview.source.slice(0, -3)]
-    })
+    if (!trusted(event) || !request || !vault) return { ok: false, error: 'BAD_REQUEST' }
     try {
-      await agentHost?.whenLaunchesSettled()
-      currentVault.assertSession(token)
-      const affected = agentHost?.active().filter((task) => task.root === root && agentHost!.scopePaths(task.id).some(path => structureGate.affects(root, path))) ?? []
-      if (agentHost?.active().some((task) => task.root === root && !agentHost!.scopePaths(task.id).some(path => structureGate.affects(root, path)))) {
-        throw new Error('OTHER_TASK_RUNNING')
-      }
-      for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
-      if (agentHost?.hasPending(root)) throw new Error('PREVIOUS_TASK_UNSAVED')
-      if (!(await flushBeforeStructure(win))) throw new Error('UNSAVED_DRAFT')
-      currentVault.assertSession(token)
-      structureGate.seal()
-      const outcome = await currentVault.commitRelocation(request.id, request.repairLinks, token)
-      currentVault.assertSession(token)
-      return { ok: true, moved: outcome.moved.map(({ from, to }) => ({ from, to })), unrepaired: outcome.unrepaired }
+      const outcome = await relocationCommitShared(request.id, request.repairLinks)
+      return { ok: true, moved: outcome.moved, unrepaired: outcome.unrepaired }
     } catch (error) { return { ok: false, error: lifecycleError(error, 'COMMIT_FAILED') } }
-    finally { structureGate.finish() }
   })
   registerTrustedHandle(IPC.lifecycleStatus, async (event) => {
     if (!trusted(event) || !vault) throw new Error('NO_VAULT')
@@ -1363,7 +1381,7 @@ if (ownsInstance) app.whenReady().then(() => {
     assertMemoryAuthorization: input => {
       if (!input.sessionId || input.memoryAuthorizationSignature !== memoryAuthorizationState(input.sessionId).signature) throw Error('STALE_PREVIEW')
     },
-    confirmWrite: ({ relPath, body, signal }) => {
+    confirmWrite: request => {
       const session = vault?.sessionId()
       if (!session || !mainWindow || mainWindow.isDestroyed()) return Promise.resolve(false)
       return new Promise<boolean>(resolve => {
@@ -1377,11 +1395,17 @@ if (ownsInstance) app.whenReady().then(() => {
           resolve(approved)
         }
         const timer = setTimeout(() => settle(false), 120_000)
-        signal.addEventListener('abort', () => settle(false), { once: true })
+        request.signal.addEventListener('abort', () => settle(false), { once: true })
         pendingWriteConfirms.set(requestId, { sessionId: session, settle })
-        send(IPC.agentWriteRequest, { requestId, relPath, body })
+        // 建与结构操作各有自己的载荷；界面照 kind 渲染。
+        send(IPC.agentWriteRequest, request.kind === 'create'
+          ? { requestId, kind: 'create' as const, relPath: request.relPath, body: request.body }
+          : { requestId, kind: request.kind, source: request.source, target: request.target, moves: request.moves, linkChanges: request.linkChanges, permissionChanges: request.permissionChanges })
       })
     },
+    // AI 的结构操作走同一条共用迁移路径（含引用修复与权限不放宽），不另造实现。
+    relocationPreview: (request, owner) => relocationPreviewShared({ kind: request.kind, source: request.source, target: request.target }, owner),
+    relocationCommit: (previewId, repairLinks, owner) => relocationCommitShared(previewId, repairLinks, owner),
     createNote: async (relPath, body) => {
       if (!vault) throw Error('NO_VAULT')
       const at = relPath.lastIndexOf('/')

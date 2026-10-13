@@ -12,6 +12,9 @@ import { encodeLedgerProvenance, historicalContextPolicy } from './ledger-proven
 import type {FrozenSkills} from './skills.ts'
 import { READ_ONLY_TOOL_SCHEMAS, WRITE_TOOL_SCHEMAS, type ScopedWriteTool } from './scoped-agent-tools.ts'
 import { createWriteGate } from './agent-write.ts'
+
+/** 人确认的两种载荷：建与结构操作。 */
+export type AgentWriteConfirm = ({ kind: 'create'; relPath: string; body: string } | { kind: 'rename' | 'move'; source: string; target: string; moves: number; linkChanges: number; permissionChanges: number }) & { signal: AbortSignal }
 import { MODEL_STREAM_BOUNDS, type ModelStepEvent, type ToolSchema } from './model-stream.ts'
 import { randomUUID } from 'node:crypto'
 import { AgentTasks, type TaskResult, type StopReason } from './agent-tasks.ts'
@@ -55,7 +58,7 @@ export type HostStart = Partial<ObjectBinding> & {
 
 export /** 过程只记「调了什么、结果如何」，不铺工具返回的正文。 */
 function toolTraceLine(call: { name: string; input: unknown }, failure?: string): string {
-  const label = call.name === 'read_library' ? '读库' : call.name === 'search_library' ? '搜库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name==='search_memory'?'检索记忆':call.name
+  const label = call.name === 'read_library' ? '读库' : call.name === 'search_library' ? '搜库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name==='search_memory'?'检索记忆':call.name
   const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
   const query = typeof input.query === 'string' ? input.query.replace(/\s+/g, ' ').slice(0, 80) : ''
   const what = (label === '搜库'||label==='检索记忆') && query ? `${label}「${query}」` : label
@@ -99,7 +102,11 @@ export type HostDependencies = {
   memory?: MemoryUsePort
   createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker, write?: ScopedWriteTool) => ScopedAgentTools
   /** 「建」需要人在预览里点一下同意；没有这个入口就不宣告该工具。 */
-  confirmWrite?: (request: { relPath: string; body: string; signal: AbortSignal }) => Promise<boolean>
+  /** 人确认：建是「落点＋正文」，改名／挪是「旧路径 → 新路径＋影响面」。 */
+  confirmWrite?: (request: AgentWriteConfirm) => Promise<boolean>
+  /** 结构操作的库层预览／提交：由主进程用库自己的迁移实现（含引用修复与权限不放宽）。 */
+  relocationPreview?: (request: { kind: 'note'; source: string; target: string }, ownerTaskId?: string) => Promise<import('./agent-write.ts').StructuralPreview>
+  relocationCommit?: (previewId: string, repairLinks: boolean, ownerTaskId?: string) => Promise<{ moved: { from: string; to: string }[] }>
   /** 「建」真正落盘：由主进程用库服务实现（含对象身份）。 */
   createNote?: (relPath: string, body: string) => Promise<{ relPath: string; revision: string; objectVersion?: string }>
   /** 目标目录是否落在某篇笔记的同名附件夹子树里。 */
@@ -133,6 +140,8 @@ export class AgentHost {
   private readonly scoped = new Map<string, ScopedAgentTools>()
   private readonly memoryUses = new Map<string, { permit: MemoryUsePermit; credential: ModelCredential }>()
   private readonly checkpoints = new Map<string, Promise<void>>()
+  /** 本场搬过来源的痕迹：结构操作成功后本场收尾，避免继续读旧路径造成假失败。 */
+  private readonly structuralMoves = new Set<string>()
   private readonly finalizing = new Set<string>()
   private readonly rechecking = new Map<string, Promise<void>>()
   private readonly launching = new Set<string>()
@@ -353,10 +362,11 @@ export class AgentHost {
       // 宣告与白名单必须同源：工具集没有写入能力就不宣告，宣告了就必须在白名单里。
       const writeEnabled = Boolean(write && scoped?.writes)
       const createEnabled = Boolean(write?.create && scoped?.creates)
+      const structuralEnabled = Boolean(write?.rename && write?.move && scoped?.renames)
       const memorySearchEnabled=input.memorySearchAuthorized===true&&!!grant&&!!memory?.searchable&&!!this.deps.streamStep&&this.supportsMemorySearch(credential)
       const toolsEnabled=libraryToolsEnabled||memorySearchEnabled
       // 只有当这套工具**确实**带写入能力时才把写工具宣告给模型，避免宣告了却执行不了。
-      const toolSchemas={...(libraryToolsEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
+      const toolSchemas={...(libraryToolsEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(structuralEnabled?{rename_note:WRITE_TOOL_SCHEMAS.rename_note,move_note:WRITE_TOOL_SCHEMAS.move_note}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
       let memorySearchCalls=0,memorySearchFailures=0
       const memoryToolOutcomes:{name:string;outcome:string}[]=[]
       let successfulLibraryTool=false
@@ -572,7 +582,7 @@ export class AgentHost {
           const results: ToolContent = []
           for (const call of calls) {
             await guard()
-            const registered = libraryToolsEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||call.name==='search_memory'&&memorySearchEnabled
+            const registered = libraryToolsEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||structuralEnabled&&(call.name==='rename_note'||call.name==='move_note')||call.name==='search_memory'&&memorySearchEnabled
             const duplicate = usedIds.has(call.id)
             usedIds.add(call.id)
             // Duplicate IDs cannot enter provider messages. A fresh internal refusal ID preserves their order.
@@ -581,7 +591,7 @@ export class AgentHost {
             let reportedByTool = false
             let value: unknown
             if (!failure) {
-              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
+              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
               try {
                 if(call.name==='search_memory'){
                   const args=call.input as Record<string,unknown>
@@ -598,7 +608,7 @@ export class AgentHost {
                 if (!['MEMORY_SEARCH_LIMIT','UNKNOWN_TOOL', 'INVALID_TOOL_ARGUMENTS', 'OUTSIDE_TASK_SCOPE', 'INVALID_TOOL_CURSOR', 'SOURCE_METADATA_TOO_LARGE',
                   // 写门的可预期拒绝：如实报给模型并继续，不把整场弄失败；库/授权类故障仍然致命。
                   'OVER_LIMIT_BYTES','OVER_LIMIT_APPENDS','OVER_LIMIT_NOTES','OVER_LIMIT_SESSION','NOT_ALLOWED',
-                  'BAD_NAME','TARGET_EXISTS','ATTACHMENT_SUBTREE','HIDDEN_PATH','CONFLICT','INVARIANT_VIOLATION','DECLINED'].includes(reason)) throw error
+                  'BAD_NAME','TARGET_EXISTS','ATTACHMENT_SUBTREE','HIDDEN_PATH','CONFLICT','INVARIANT_VIOLATION','DECLINED','ORIGIN_LOCKED','OTHER_TASK_RUNNING','OVER_LIMIT_STRUCTURAL','LINK_REPAIR_OUT_OF_SCOPE','PERMISSION_DOWNGRADE','STALE_PREVIEW','STRUCTURE_BUSY','UNSAVED_DRAFT','PREVIOUS_TASK_UNSAVED'].includes(reason)) throw error
                 failure = reason
                 reportedByTool = call.name!=='search_memory'
               }
@@ -618,6 +628,8 @@ export class AgentHost {
           }
           messages.push({ role: 'assistant', content: parts }, { role: 'tool', content: results })
           if (conservativeTokens(JSON.stringify(messages)) > budget) throw Error('MODEL_CONTEXT_LIMIT')
+          // 本场来源刚被搬走：账本与已写内容保留，但继续读旧路径只会假失败，按「库在任务底下变了」收尾。
+          if (this.structuralMoves.delete(id)) this.cancel(id, 'vault-change')
           if (answer) await wait(checkpoint())
         }
       }, async (status, reason) => {
@@ -688,6 +700,14 @@ export class AgentHost {
       read: () => this.readBound(root, relPath),
       write: async (path, content, revision) => ({ revision: await this.writeBound(root, path, content, revision) }),
       composeAppend: (previous, text) => appendAiBlock(previous, { taskId, text }),
+      ...(this.deps.relocationPreview && this.deps.relocationCommit && grant.sources.length ? { structural: {
+        authorized: (path: string) => grant.sources.some(source => source.relPath === path),
+        origin: () => relPath,
+        otherTaskRunning: () => this.active().some(task => task.id !== taskId),
+        // 把本场任务 id 交给迁移路径：它不能把自己停掉。
+        preview: (request: { kind: 'note'; source: string; target: string }) => this.deps.relocationPreview!(request, taskId),
+        commit: (previewId: string, repairLinks: boolean) => this.deps.relocationCommit!(previewId, repairLinks, taskId)
+      } } : {}),
       ...(this.deps.createNote ? { create: (relPath: string, body: string) => this.deps.createNote!(relPath, body) } : {}),
       ...(this.deps.attachmentFolder ? { attachmentFolder: (relPath: string) => this.deps.attachmentFolder!(relPath) } : {}),
       // 「建」的重名判定：读得到就是已存在；只把"查无此篇"当作不存在，其他错误照旧抛出。
@@ -703,12 +723,46 @@ export class AgentHost {
         if (!preview.ok) return preview
         if (signal.aborted) { gate.discardCreate(preview.previewId); return { ok: false as const, reason: 'TASK_CANCELLED' } }
         let approved = false
-        try { approved = await this.deps.confirmWrite!({ relPath: preview.relPath, body, signal }) } catch { approved = false }
+        try { approved = await this.deps.confirmWrite!({ kind: 'create', relPath: preview.relPath, body, signal }) } catch { approved = false }
         if (!approved) { gate.discardCreate(preview.previewId); return { ok: false as const, reason: signal.aborted ? 'TASK_CANCELLED' : 'DECLINED' } }
         return gate.commitCreate({ previewId: preview.previewId, body })
       }
       : undefined
-    return { append: (text: string) => gate.append({ text }), ...(create ? { create } : {}) }
+    const structural = this.deps.relocationPreview && this.deps.relocationCommit
+      ? {
+        // 授权范围＝本场来源清单（含发起篇）；发起篇自身的结构操作由门按 ORIGIN_LOCKED 拒。
+        authorized: (path: string) => grant.sources.some(source => source.relPath === path),
+        origin: () => relPath,
+        otherTaskRunning: () => this.active().some(task => task.id !== taskId),
+        // 把本场任务 id 交给迁移路径：它不能把自己停掉。
+        preview: (request: { kind: 'note'; source: string; target: string }) => this.deps.relocationPreview!(request, taskId),
+        commit: (previewId: string, repairLinks: boolean) => this.deps.relocationCommit!(previewId, repairLinks, taskId)
+      }
+      : undefined
+    // 结构操作失败一律不落盘；成功则本场收尾（来源已搬迁，继续读旧路径会假失败）。
+    const move = async (kind: 'rename' | 'move', source: string, target: string, signal: AbortSignal) => {
+      const preview = kind === 'rename'
+        ? await gate.previewStruct({ kind: 'rename', relPath: source, newName: target })
+        : await gate.previewStruct({ kind: 'move', relPath: source, targetFolder: target })
+      if (!preview.ok) return preview
+      if (signal.aborted) { gate.discardStruct(preview.previewId); return { ok: false as const, reason: 'TASK_CANCELLED' } }
+      let approved = false
+      try { approved = await this.deps.confirmWrite!({ kind: preview.kind, source: preview.source, target: preview.target, moves: preview.moves, linkChanges: preview.linkChanges, permissionChanges: preview.permissionChanges, signal }) } catch { approved = false }
+      if (!approved) { gate.discardStruct(preview.previewId); return { ok: false as const, reason: signal.aborted ? 'TASK_CANCELLED' : 'DECLINED' } }
+      const committed = await gate.commitStruct({ previewId: preview.previewId })
+      if (!committed.ok) return committed
+      this.structuralMoves.add(taskId)
+      // 工具层只需要「成了没、落到哪、动了几项」，不把库层的 move 清单透给模型。
+      return { ok: true as const, target: committed.target, moved: committed.moved.length }
+    }
+    return {
+      append: (text: string) => gate.append({ text }),
+      ...(create ? { create } : {}),
+      ...(structural ? {
+        rename: (source: string, newName: string, signal: AbortSignal) => move('rename', source, newName, signal),
+        move: (source: string, targetFolder: string, signal: AbortSignal) => move('move', source, targetFolder, signal)
+      } : {})
+    }
   }
 
   private async mutateNote(root: string, relPath: string, change: (source: string) => string, trustedFinalization = false): Promise<string> {

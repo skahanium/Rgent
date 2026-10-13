@@ -35,6 +35,10 @@ export type WriteReason =
   | 'INVARIANT_VIOLATION'
   | 'STALE_PREVIEW'
   | 'NOT_ALLOWED'
+  | 'ORIGIN_LOCKED'
+  | 'OTHER_TASK_RUNNING'
+  | 'OVER_LIMIT_STRUCTURAL'
+  | 'LINK_REPAIR_OUT_OF_SCOPE'
 
 export type WriteFailure = { ok: false; reason: WriteReason | string }
 export type Snapshot = { content: string; revision: string; objectVersion?: string; sessionId?: string }
@@ -55,10 +59,37 @@ export type WriteGateDeps = {
   exists?: (relPath: string) => Promise<boolean> | boolean
   /** 目标目录是否落在某个笔记的同名附件夹子树里；是则返回该附件夹路径。 */
   attachmentFolder?: (relPath: string) => Promise<string | null> | string | null
+  /** 结构操作（改名／挪）：只有宿主把库层迁移接上时才可用。 */
+  structural?: StructuralDeps
   /** 包 2 提供真正的 AI 块写入器；门只校验它是否守约。 */
   composeAppend: (previous: string, text: string) => string
   now?: () => number
 }
+
+/** 库层迁移预览：判据在库层（含 `PERMISSION_DOWNGRADE`），门只用它做范围与边界判断。 */
+export type StructuralPreview = {
+  id: string
+  source: string
+  target: string
+  moves: { from: string; to: string }[]
+  linkChanges: { relPath: string }[]
+  permissionChanges: { from: string; to: string; tier: string }[]
+}
+export type StructuralDeps = {
+  /** 本场授权范围内的笔记（含发起篇）。 */
+  authorized: (relPath: string) => boolean
+  /** 发起篇：本场不对它做结构操作。 */
+  origin: () => string
+  /** 本场之外还有任务在跑。 */
+  otherTaskRunning: () => boolean
+  preview: (request: { kind: 'note'; source: string; target: string }) => Promise<StructuralPreview>
+  commit: (previewId: string, repairLinks: boolean) => Promise<{ moved: { from: string; to: string }[] }>
+}
+export type StructuralPreviewResult = {
+  ok: true; previewId: string; kind: 'rename' | 'move'; source: string; target: string
+  moves: number; linkChanges: number; permissionChanges: number
+} | WriteFailure
+export type StructuralCommitResult = { ok: true; target: string; moved: { from: string; to: string }[] } | WriteFailure
 
 export type AppendResult = { ok: true; relPath: string; revision: string; bytes: number } | WriteFailure
 export type PreviewCreateResult = { ok: true; previewId: string; relPath: string } | WriteFailure
@@ -80,6 +111,7 @@ export function createWriteGate(deps: WriteGateDeps) {
   const now = deps.now ?? (() => Date.now())
   const appends = new Map<string, number>()
   const previews = new Map<string, { relPath: string; name: string; expiresAt: number }>()
+  const structPreviews = new Map<string, { kind: 'rename' | 'move'; source: string; target: string; libId: string; expiresAt: number }>()
   let notes = 0
   let bytes = 0
   let structural = 0
@@ -103,6 +135,22 @@ export function createWriteGate(deps: WriteGateDeps) {
     if (!AI_MARKER.test(tail)) return false
     if (LEDGER_MARKER.test(tail)) return false
     return partitionSource(next).ledger === null
+  }
+
+  /** 改名：名字必须对消毒是恒等操作（只补 .md），落点固定在原目录。 */
+  function renameTarget(relPath: string, newName: string): { ok: true; relPath: string } | WriteFailure {
+    const base = newName.trim().replace(/\.md$/iu, '')
+    if (!base || sanitizeNoteName(base) !== `${base}.md`) return failure('BAD_NAME')
+    return { ok: true, relPath: join(dirOf(relPath), `${base}.md`) }
+  }
+
+  /** 挪：只换目录，文件名不动；目标目录本身要是个干净路径。 */
+  function moveTarget(relPath: string, targetFolder: string): { ok: true; relPath: string } | WriteFailure {
+    const folder = targetFolder.trim().replace(/\/+$/u, '')
+    if (folder === '.' || folder === '..' || folder.startsWith('/') || folder.includes('\\') || /^[a-z]+:/iu.test(folder)) return failure('BAD_NAME')
+    if (folder.split('/').some(part => part === '.' || part === '..')) return failure('BAD_NAME')
+    const name = relPath.slice(relPath.lastIndexOf('/') + 1)
+    return { ok: true, relPath: folder ? `${folder}/${name}` : name }
   }
 
   /** 建的目标先过名称、路径形态与附件夹子树三关；重名与额度由调用方在预览阶段一并核。 */
@@ -195,7 +243,62 @@ export function createWriteGate(deps: WriteGateDeps) {
       previews.delete(previewId)
     },
 
-    /** 下一轮改名／挪用；本轮只提供计数与消耗，不注册工具。 */
+    /** 结构操作第一步：范围、落点、库层预览（含权限不放宽的库层判据）与一次性令牌。
+     *  判据不复刻：库层的 `PERMISSION_DOWNGRADE` 与 `STRUCTURE_BUSY` 原样透出。 */
+    async previewStruct(request: { kind: 'rename' | 'move'; relPath: string; newName?: string; targetFolder?: string }): Promise<StructuralPreviewResult> {
+      const deps0 = deps.structural
+      if (!deps0) return failure('NOT_ALLOWED')
+      if (structural >= WRITE_LIMITS.structuralPerSession) return failure('OVER_LIMIT_STRUCTURAL')
+      // 先认发起篇：它在授权范围内，但正是这一场要写入的目标，结构操作一律拒。
+      if (request.relPath === deps0.origin()) return failure('ORIGIN_LOCKED')
+      if (!deps0.authorized(request.relPath)) return failure('OUTSIDE_TASK_SCOPE')
+      if (deps0.otherTaskRunning()) return failure('OTHER_TASK_RUNNING')
+      if (!isNotePath(request.relPath)) return failure('BAD_NAME')
+      const target = request.kind === 'rename'
+        ? renameTarget(request.relPath, request.newName ?? '')
+        : moveTarget(request.relPath, request.targetFolder ?? '')
+      if (!target.ok) return target
+      if (target.relPath === request.relPath) return failure('TARGET_EXISTS')
+      if (hasHiddenSegment(target.relPath)) return failure('HIDDEN_PATH')
+      if (!isNotePath(target.relPath)) return failure('BAD_NAME')
+      if (await deps.attachmentFolder?.(dirOf(target.relPath))) return failure('ATTACHMENT_SUBTREE')
+      if (await deps.exists?.(target.relPath)) return failure('TARGET_EXISTS')
+      try {
+        const preview = await deps0.preview({ kind: 'note', source: request.relPath, target: target.relPath })
+        // 引用修复只允许落在授权范围内：范围外要改正文，整件事交给人做。
+        if (preview.linkChanges.some(change => !deps0!.authorized(change.relPath))) return failure('LINK_REPAIR_OUT_OF_SCOPE')
+        const previewId = randomUUID()
+        structPreviews.set(previewId, { kind: request.kind, source: request.relPath, target: target.relPath, libId: preview.id, expiresAt: now() + PREVIEW_TTL_MS })
+        return { ok: true, previewId, kind: request.kind, source: request.relPath, target: target.relPath, moves: preview.moves.length, linkChanges: preview.linkChanges.length, permissionChanges: preview.permissionChanges.length }
+      } catch (error) {
+        return failure(reasonOf(error))
+      }
+    },
+
+    /** 结构操作第二步：消费令牌，交库层迁移（引用修复一并走它），成功才吃额度。 */
+    async commitStruct(request: { previewId: string }): Promise<StructuralCommitResult> {
+      const deps0 = deps.structural
+      const pending = structPreviews.get(request.previewId)
+      if (!deps0 || !pending) return failure('STALE_PREVIEW')
+      structPreviews.delete(request.previewId)
+      if (pending.expiresAt <= now()) return failure('STALE_PREVIEW')
+      if (structural >= WRITE_LIMITS.structuralPerSession) return failure('OVER_LIMIT_STRUCTURAL')
+      if (!deps0.authorized(pending.source)) return failure('OUTSIDE_TASK_SCOPE')
+      try {
+        const result = await deps0.commit(pending.libId, true)
+        structural += 1
+        return { ok: true, target: pending.target, moved: result.moved }
+      } catch (error) {
+        return failure(reasonOf(error))
+      }
+    },
+
+    /** 人没点同意：丢弃令牌，什么都不做。 */
+    discardStruct(previewId: string): void {
+      structPreviews.delete(previewId)
+    },
+
+    /** 结构额度：下一轮工具化时直接用预览／提交自动消耗；留给测试与状态检查。 */
     takeStructural(): boolean {
       if (structural >= WRITE_LIMITS.structuralPerSession) return false
       structural += 1
