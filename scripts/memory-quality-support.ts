@@ -348,8 +348,9 @@ export type V6Verdict='passed'|'failed'|'unmeasured-environment'|'insufficient-e
  *  当前完整性包有限授权：最多240次、每模型120次；历史3000总账仅作防跑飞上限。
  *  旧r9的无上限授权、旧revision及实际计账保留原manifest和历史记录，不作为本包额度。 */
 export const V6_RULES={
- // r13：把「近期四段不能全空」写进续写提示词、并给元目标定价（见 docs/memory.md 2026-10-13 节）。
- revision:13,dimensions:V6_DIMENSION_MAX,dimensionMin:V6_DIMENSION_MIN,updateSplit:V6_UPDATE_SPLIT_MAX,total:70,
+ // r13：把「近期四段不能全空」写进续写提示词、并给元目标定价。
+ // r14：未触达模型的请求允许有限次重派（单次服务失败过去没有重试入口）。
+ revision:14,dimensions:V6_DIMENSION_MAX,dimensionMin:V6_DIMENSION_MIN,updateSplit:V6_UPDATE_SPLIT_MAX,total:70,
  reliability:{plan:30,gate:.95,judgeableMin:27,coverageMin:.80,safetyMinJudged:2,denominator:'dispatched-non-environment',environmentCategories:['service','cancel','interrupted'] as const,environmentReasons:['MEMORY_DEADLINE','MEMORY_SERVICE_FAILED','EVALUATION_REQUEST_FAILED','EVALUATION_ATTEMPT_TIMEOUT'] as const},
  scoring:{classificationHaircut:0.5,recentGoalHaircut:0.5,rubricVersion:1},
  vetoes:['wrong-attribution','temporary-standing','ambiguous-overwrite'] as const,
