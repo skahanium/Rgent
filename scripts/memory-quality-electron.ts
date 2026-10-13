@@ -395,7 +395,9 @@ async function runV6(controller:AbortController,sourceFiles:(dir:string)=>string
    journal=new EvaluationJournal(root,frozen,V6_RULES.history.parentLimit,options.budget,undefined,{parentManifestHash:frozen.parentManifestHash,prefix:campaignPrefix,modelSegment:collaboration?2:campaignPrefix===V6_PREFIX?0:1,limit:collaboration?COLLABORATION_RULES.total:V6_RULES.history.campaignLimit,perModelLimit:collaboration?136:V6_RULES.history.perModelLimit,...(collaboration?{authorization:COLLABORATION_RULES.authorization}:{})})
    const k=key(model.modelId,round,spec.id)
    // 被监督计时器杀掉时可能已计费但结果未落盘；状态不明不得自动重派。
-   v6AssertDispatchAvailable(journal,prefix,model.modelId,k,charged=>{try{const row=JSON.parse(readFileSync(resultFile(charged),'utf8'));return row.key===charged&&row.frozenHash===frozenHash&&['completed','interrupted'].includes(row.status)}catch{return false}})
+   // 同一次尝试会落一份 attempt-<key 指纹>-<uuid> 记录；用它的份数给「未触达模型」的重派加上限。
+   const priorAttempts=readdirSync(options.report).filter(name=>name.startsWith('attempt-'+fingerprint(k)+'-')).length
+   v6AssertDispatchAvailable(journal,prefix,model.modelId,k,charged=>{try{const row=JSON.parse(readFileSync(resultFile(charged),'utf8'));return row.key===charged&&row.frozenHash===frozenHash&&['completed','interrupted'].includes(row.status)}catch{return false}},priorAttempts)
    const beforeConfig=readFileSync(path.join(options.profile,'model-config.json')),credential=loadModelCredentialReadOnly(options.profile,safeStorage,model.recordId)
    if(credential.modelId!==model.modelId||credential.baseURL!==model.baseURL||credential.contextTokens!==model.contextTokens)throw Error('EVALUATION_REVISION_CHANGED')
    const responses:any[]=[],paidGate=new ConsolidationPaidGate()

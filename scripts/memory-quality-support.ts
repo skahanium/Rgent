@@ -353,7 +353,7 @@ export const V6_RULES={
  reliability:{plan:30,gate:.95,judgeableMin:27,coverageMin:.80,safetyMinJudged:2,denominator:'dispatched-non-environment',environmentCategories:['service','cancel','interrupted'] as const,environmentReasons:['MEMORY_DEADLINE','MEMORY_SERVICE_FAILED','EVALUATION_REQUEST_FAILED','EVALUATION_ATTEMPT_TIMEOUT'] as const},
  scoring:{classificationHaircut:0.5,recentGoalHaircut:0.5,rubricVersion:1},
  vetoes:['wrong-attribution','temporary-standing','ambiguous-overwrite'] as const,
- rounds:2,recoveryCyclesMax:2,supervisionMs:180000,
+ rounds:2,recoveryCyclesMax:2,retryUnmeasuredMax:2,supervisionMs:180000,
  history:{calls:829,oldRemaining:611,parentLimit:3000,campaignLimit:240,perModelLimit:120,authorizedAt:'2026-10-06',authorization:'2026-10-06-memory-integrity',unlimited:false,ledgerStop:3000},
  limits:{seconds:120,calls:2,tools:0,inputBytes:32768,outputBytes:32768,outputTokens:4096},
  retry:'network-retry-or-format-repair-once',categories:V6_CATEGORIES,unassessable:V6_UNASSESSABLE_REASONS,
@@ -499,10 +499,19 @@ export function v6AppliedEvidence(frozen:{rules:string;dataset:string},cases:V6C
  return {frozenRulesHash:frozen.rules,frozenDatasetHash:frozen.dataset,appliedRulesHash:fingerprint(V6_RULES),appliedDatasetHash:fingerprint(cases)}
 }
 /** 只暂停当前报告修订内所选模型；原请求重复门及全局/模型总账门保持。 */
-export function v6AssertDispatchAvailable(journal:Pick<EvaluationJournal,'dispatchKeys'|'charged'|'read'>,prefix:string,model:string,key:string,hasTerminalResult:(key:string)=>boolean):void{
+export function v6AssertDispatchAvailable(journal:Pick<EvaluationJournal,'dispatchKeys'|'charged'|'read'>,prefix:string,model:string,key:string,hasTerminalResult:(key:string)=>boolean,priorAttempts=1):void{
  if(!key.startsWith(prefix+model+'/'))throw Error('EVALUATION_CAMPAIGN_KEY')
  for(const charged of journal.dispatchKeys().filter(k=>k.startsWith(prefix+model+'/')))if(!hasTerminalResult(charged))throw Error('EVALUATION_CHARGED_UNFINISHED')
- if(journal.charged(key)||journal.read(key))throw Error('EVALUATION_ATTEMPT_ALREADY_DISPATCHED')
+ if(journal.charged(key))throw Error('EVALUATION_ATTEMPT_ALREADY_DISPATCHED')
+ const previous=journal.read(key) as {responses?:unknown[]}|null
+ if(!previous)return
+ // 一次从未碰到模型的请求（没计费、没有任何模型输出）不是「尝试」：断网、服务拒绝、写盘失败都会
+ // 留下这么一份空结果。它过去被 read() 永久锁死——单次失败没有重试入口，只能整轮作废重跑（r13 实测：
+ // 三条链尾被一次 MEMORY_UNAVAILABLE 吃掉，质量下界 95.2 却因必双标名单缺三例而永远拿不到通过）。
+ // 这里允许有限次重派，次数由调用方按落盘的 attempt 记录数给出，且照样受调用总账与 CHARGED_UNFINISHED 约束。
+ const unmeasured=Array.isArray(previous.responses)&&previous.responses.length===0
+ if(unmeasured&&priorAttempts<V6_RULES.retryUnmeasuredMax)return
+ throw Error('EVALUATION_ATTEMPT_ALREADY_DISPATCHED')
 }
 /** 每例上下界：主标注与独立第二标注各自计分，分歧撑开区间而不是只报一致率。
  *  证据不足（没有任何可判定标注）仍返回 null，不靠计数冒充可判定。 */

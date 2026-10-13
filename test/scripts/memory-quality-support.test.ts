@@ -2,6 +2,8 @@ import {mkdtempSync,readFileSync,readdirSync,rmSync,writeFileSync} from 'node:fs
 import path from 'node:path'
 import os from 'node:os'
 import {afterEach,expect,it} from 'vitest'
+
+import {describe} from 'vitest'
 import {V6_QUALITY_CASES} from '../fixtures/v6-memory-quality.ts'
 import * as support from '../../scripts/memory-quality-support.ts'
 const dirs:string[]=[];const dir=()=>{const d=mkdtempSync(path.join(os.tmpdir(),'rgent-eval-journal-'));dirs.push(d);return d}
@@ -284,4 +286,39 @@ it('近况 goal 的原句判据：口令复制与空话命中，实质目标不�
  expect(support.metaGoalShaped({goal:''},'以后用中文')).toBe(false)
  expect(support.metaGoalShaped(null,'以后用中文')).toBe(false)
  expect(support.metaGoalShaped({goal:42},'以后用中文')).toBe(false)
+})
+
+// 单次服务失败过去没有重试入口：结果文件一旦存在（哪怕没计费、没有模型输出）就被 read() 永久锁死，
+// 只能整轮作废重跑。r13 实测到这一点（三条链尾被 MEMORY_UNAVAILABLE 吃掉、质量下界 95.2 却拿不到通过）。
+describe('未触达模型的请求可以有限次重派', () => {
+  const journal = (dispatches: string[], results: Record<string, { responses?: unknown[] } | null>) => ({
+    dispatchKeys: () => dispatches,
+    charged: (key: string) => dispatches.filter(item => item === key).length,
+    read: (key: string) => results[key] ?? null
+  })
+  const terminal = () => true
+  const prefix = 'v6-2026-10-05/integrity/r13/'
+  const key = `${prefix}deepseek-flash/0/v6-chain-beta-3`
+
+  it('没计费、没有模型输出的旧结果不锁死重派（次数未用满）', () => {
+    const j = journal(['other/key'], { [key]: { responses: [] } })
+    expect(() => support.v6AssertDispatchAvailable(j, prefix, 'deepseek-flash', key, terminal, 0)).not.toThrow()
+  })
+
+  it('重派次数用满后仍然锁死', () => {
+    const j = journal(['other/key'], { [key]: { responses: [] } })
+    expect(() => support.v6AssertDispatchAvailable(j, prefix, 'deepseek-flash', key, terminal, 2)).toThrow('EVALUATION_ATTEMPT_ALREADY_DISPATCHED')
+  })
+
+  it('有模型输出的旧结果一律锁死：那是真尝试，不能靠重跑刷成绩', () => {
+    const j = journal(['other/key'], { [key]: { responses: [{ content: 'x' }] } })
+    expect(() => support.v6AssertDispatchAvailable(j, prefix, 'deepseek-flash', key, terminal, 0)).toThrow('EVALUATION_ATTEMPT_ALREADY_DISPATCHED')
+  })
+
+  it('已计费的尝试一律锁死，且被计时器杀掉留下的未落盘行先报未完成', () => {
+    const charged = journal([key], { [key]: { responses: [] } })
+    expect(() => support.v6AssertDispatchAvailable(charged, prefix, 'deepseek-flash', key, terminal, 0)).toThrow('EVALUATION_ATTEMPT_ALREADY_DISPATCHED')
+    const unfinished = journal([key], {})
+    expect(() => support.v6AssertDispatchAvailable(unfinished, prefix, 'deepseek-flash', key, () => false, 0)).toThrow('EVALUATION_CHARGED_UNFINISHED')
+  })
 })
