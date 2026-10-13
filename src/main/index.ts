@@ -1430,11 +1430,13 @@ if (ownsInstance) app.whenReady().then(() => {
     },
     stream: (input, signal) => streamModelText({ ...input, signal }),
     streamStep: (input, signal) => streamModelStep({ ...input, signal }),
-    createReadOnlyTools: (grant, taskId, memory, materials) => createScopedAgentTools(grant, taskId, {
+    // 第五个入参是写能力：必须原样转发，否则工具集看不到写工具，宿主也不会宣告它们。
+    createReadOnlyTools: (grant, taskId, memory, materials, write) => createScopedAgentTools(grant, taskId, {
       read: relPath => vault!.read(relPath), tier: modelTierFor,
       validateMemory: dep => memory?.validateDependency(dep) ?? Promise.resolve(false),
       validateMemoryBatch: deps => memory?.validateDependencies(deps) ?? Promise.resolve(deps.map(() => false)), materials,
-      acceptsObject: (relPath, expected, current) => vault?.acceptsObject(relPath, expected, current) ?? false
+      acceptsObject: (relPath, expected, current) => vault?.acceptsObject(relPath, expected, current) ?? false,
+      ...(write ? { write } : {})
     }),
     emit: ({ root, ...event }) => {
       if (vault?.root === root && event.sessionId === vault.sessionId()) send(IPC.agentEvent, event)

@@ -551,13 +551,16 @@ async function verifyScopedHost(page, vault, shot, requests) {
   await page.call('Input.insertText', { text: '/工具查证' })
   const choose = async () => {
     await page.key('Enter', 'Enter', 0, 13)
-    if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)) return false
+    if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)) {
+      process.stdout.write('DEBUG_START popover ' + await page.eval(`JSON.stringify({ editor: document.querySelector('.cm-content')?.innerText, popover: !!document.querySelector('.overlay-authorization'), send: document.querySelector('.authorization-send')?.disabled ?? null, status: document.querySelector('.status-task')?.textContent ?? null })`) + '\n')
+      return false
+    }
     check('新场工具授权默认仅发起篇', await page.eval(`document.querySelectorAll('.authorization-manifest li').length===1 && [...document.querySelectorAll('.authorization-choices input')].every(input=>!input.checked)`))
     // HTMLElement.click() does not focus a checkbox. A refresh disables the initially
     // focused send button, so native mouse clicks must establish focus before refresh.
     for (const [at, name] of ['工具参考.md', '工具其他.md'].entries()) {
       const point = await page.eval(`(() => { const input=[...document.querySelectorAll('.authorization-choices input')].find(input=>input.value===${JSON.stringify(name)}); if(!input || input.disabled)return null;input.scrollIntoView({block:'nearest'});const r=input.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2} })()`)
-      if (!point) return false
+      if (!point) return '没找到写作参考的勾选框'
       await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
       await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
       if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===${at+2} && !!document.querySelector('.authorization-send:not(:disabled)')`)) return false
@@ -579,9 +582,13 @@ async function verifyScopedHost(page, vault, shot, requests) {
   check('参考原文变化后重新展示清单，第一次确认未发模型请求', refreshed && requests.length === 0 && await page.eval(`(async ()=>(await window.rgent.agentTasks()).length===0)()`), await page.eval(`(async ()=>JSON.stringify({status:document.querySelector('.authorization-status')?.textContent,focus:document.activeElement?.outerHTML.slice(0,150),tasks:await window.rgent.agentTasks()}))()`))
   if (!refreshed) throw Error('授权刷新后未恢复可确认焦点；停止依赖链验收。')
   await page.key('Enter', 'Enter', 0, 13)
-  check('工具链运行底栏显示实际模型步且保留停止入口', await waitFor(page, `document.querySelector('.status-task')?.textContent.includes('模型第 3 步') && !!document.querySelector('.status-task-stop')`))
+  check('工具链运行底栏显示实际模型步且保留停止入口', await waitFor(page, `document.querySelector('.status-task')?.textContent.includes('模型第 3 步') && !!document.querySelector('.status-task-stop')`), await page.eval(`JSON.stringify({status:document.querySelector('.status')?.textContent?.slice(0,180)??null,popover:!!document.querySelector('.overlay-authorization'),card:!!document.querySelector('.overlay-write-confirm'),body:document.querySelector('.cm-content')?.innerText?.slice(0,60)??null})`))
   const done = await waitFor(page, `(async () => {const note=await window.rgent.noteRead('工具发起.md');return note.content.includes('工具查证完成：已核对参考原文。') && (await window.rgent.agentTasks()).length===0})()`)
-  check('真实搜库、读库、回答三步写回本篇', done && requests.length === 3 && requests.every(request=>request.tools?.length===2))
+  // 有工具档的场里，模型同时看到读、搜、补、建四个工具：写工具不再需要额外授权步骤。
+  const toolNames = request => (request.tools ?? []).map(tool => tool.function?.name)
+  check('有工具档的场同时提供读、搜、补、建四个工具', requests.length === 3 && requests.every(request => ['read_library','search_library','append_to_note','create_note'].every(name => toolNames(request).includes(name))), JSON.stringify(toolNames(requests[0] ?? {})))
+  check('真实搜库、读库、回答三步写回本篇', done && requests.length === 3)
+  check('这轮模型只读不写：正文没有追加块也未新建', await page.eval(`(async () => { const note=await window.rgent.noteRead('工具发起.md'); return !note.content.includes('part=\"append\"') })()`))
   check('首步只发送来源清单，后续请求携带实际命中及原文', requests.length === 3 && !JSON.stringify(requests[0]).includes('受控正文证据') && JSON.stringify(requests[1]).includes('受控正文证据') && JSON.stringify(requests[2]).includes('来源复核'))
   check('工具输出和隐藏推理不落正文', await page.eval(`(async () => { const note=await window.rgent.noteRead('工具发起.md');const body=note.content.split('<!-- rgent:ledger:v1 -->')[0];return !body.includes('受控正文证据') && !body.includes('隐藏工具推理') })()`))
   await page.eval(`document.querySelector('.ledger-open')?.click()`)
@@ -594,6 +601,102 @@ async function verifyScopedHost(page, vault, shot, requests) {
   await shot(page, 'tool-ledger-1200')
   await page.eval(`document.querySelector('.ledger-close')?.click()`)
   await page.call('Emulation.clearDeviceMetricsOverride', {})
+}
+
+/** 包 4 窗口收口：写类工具在真窗口里的四条路——建·同意、建·不建、补·安静、补·超限。
+ *  模型是受控主机脚本，真实供应商一律未配置（零真实调用）。 */
+async function verifyWriteTools(page, vault, shot, requests) {
+  const fixtures = ['写作建一.md', '写作建二.md', '写作补.md', '写作超限.md']
+  for (const name of fixtures) writeFileSync(path.join(vault, name), '')
+  writeFileSync(path.join(vault, '写作参考.md'), '# 参考\n\n受控参考正文。\n')
+  check('写工具夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter(n=>/写作/.test(n.innerText)).length===5`))
+  // 受控供应商是通过 IPC 配的，渲染层的模型快照要打开一次设置页才会刷新；
+  // 不刷新的话按 Enter 只会得到「请选择可用模型」，任务根本不会开始。
+  await page.eval(`document.querySelector('.settings-open').click()`)
+  await waitFor(page, `!!document.querySelector('.settings-nav')`)
+  await page.key('Escape', 'Escape', 0, 27)
+  await waitFor(page, `!document.querySelector('.settings-nav')`)
+  // 侧栏默认收起：先展开，才点得开笔记。
+  check('展开目录树', await page.eval(`(() => { const button = document.querySelector('.tree-toggle'); if (button.getAttribute('aria-expanded') !== 'true') button.click(); return true })()`) && await waitFor(page, `document.querySelector('.tree-toggle')?.getAttribute('aria-expanded')==='true'`))
+
+  const clickSelector = async (selector) => {
+    const point = await page.eval(`(() => { const el=document.querySelector('${selector}'); if(!el)return null; const r=el.getBoundingClientRect(); return { x: r.left+r.width/2, y: r.top+r.height/2 } })()`)
+    if (!point) return false
+    await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    return true
+  }
+  // 每个场景用一篇干净的发起篇：光标从头开始，口令一定落在正文里。
+  const start = async (note, prompt) => {
+    await selectBrowserFolder(page, '')
+    if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(n=>n.dataset.path===${JSON.stringify(note)})`)) return `目录里没有 ${note}`
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(note)}).click()`)
+    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(note)}`)) return `tab 没打开 ${note}：` + await page.eval(`JSON.stringify({tabs:[...document.querySelectorAll('.tab')].map(t=>({rel:t.dataset.rel,text:t.innerText})),cm:!!document.querySelector('.cm-content')})`)
+    await page.eval(`document.querySelector('.cm-content').focus()`)
+    await page.call('Input.insertText', { text: `/${prompt}` })
+    await page.key('Enter', 'Enter', 0, 13)
+    if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 60000)) {
+      const state = await page.eval(`JSON.stringify({editor:document.querySelector('.cm-content')?.innerText,notice:document.querySelector('.status')?.textContent??null,tab:document.querySelector('.tab[aria-selected=true]')?.dataset.rel??null,session:document.querySelector('.tab[aria-selected=true]')?.dataset.session??null,statuses:[...document.querySelectorAll('.status *')].map(n=>n.textContent).filter(Boolean).slice(0,4)})`)
+      return '授权弹窗没出现：' + state
+    }
+    // 选一篇额外参考：这样本场才是"有工具档"，写工具才会出现。
+    const point = await page.eval(`(() => { const input=[...document.querySelectorAll('.authorization-choices input')].find(input=>input.value==='写作参考.md'); if(!input||input.disabled)return null; input.scrollIntoView({block:'nearest'}); const r=input.getBoundingClientRect(); return { x: r.left+r.width/2, y: r.top+r.height/2 } })()`)
+    if (!point) return false
+    await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===2`)) return '清单没变成 2 条'
+    await page.key('Enter', 'Enter', 0, 13)
+    return true
+  }
+  const settle = () => waitFor(page, `!document.querySelector('.status-task')`)
+
+  // 一、建·同意：卡片出现 -> 点「建」-> 真的落盘。
+  const started = await start('写作建一.md', '建样张一')
+  check('打开建样张发起篇并带着额外参考开工', started === true, started === true ? '' : String(started))
+  check('任务真的开始跑了', await waitFor(page, `!!document.querySelector('.status-task')`, 20000), await page.eval(`document.querySelector('.status')?.textContent?.slice(0,120)??null`))
+  check('模型提议新建时弹出确认卡', await waitFor(page, `!!document.querySelector('.overlay-write-confirm[open]')`, 30000), await page.eval(`JSON.stringify({status:document.querySelector('.status')?.textContent?.slice(0,160)??null,editor:document.querySelector('.cm-content')?.innerText?.slice(0,80)})`))
+  check('卡片摆出落点与正文，且没有改路径的入口', await page.eval(`(() => { const text=document.querySelector('.overlay-write-confirm')?.textContent||''; return text.includes('将新建：写工具样张.md') && text.includes('写工具样张') })()`))
+  await shot(page, 'write-confirm-1200')
+  check('点「建」后落盘到发起篇所在目录', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `!!document.querySelector('.tree-note')?.parentElement || true`) && existsSync(path.join(vault, '写工具样张.md')))
+  check('新笔记内容就是模型给的那份', readFileSync(path.join(vault, '写工具样张.md'), 'utf8').includes('受控正文。'))
+  check('建完照常收尾，回答落在发起篇', (await settle()) && await page.eval(`(async () => (await window.rgent.noteRead('写作建一.md')).content.includes('写工具核验完成。'))()`))
+  await shot(page, 'write-created-1200')
+
+  // 二、建·不建：卡片出现 -> 点「不建」-> 什么都不写。
+  check('打开第二篇发起篇开工', await start('写作建二.md', '建样张二'))
+  check('第二张确认卡带自己的落点', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将新建：写工具二.md')})()`))
+  check('点「不建」后没有落盘', (await clickSelector('.write-confirm-cancel')) && (await settle()) && !existsSync(path.join(vault, '写工具二.md')))
+  check('拒绝后整场照常收尾', await page.eval(`(async () => (await window.rgent.noteRead('写作建二.md')).content.includes('写工具核验完成。'))()`))
+
+  // 三、补·安静：不弹窗，只往发起篇追加一个新块。
+  check('打开补样张发起篇开工', await start('写作补.md', '补样张'))
+  check('补不额外弹窗且追加落到发起篇', (await settle()) && !(await page.eval(`!!document.querySelector('.overlay-write-confirm')`)) && await page.eval(`(async () => { const body=(await window.rgent.noteRead('写作补.md')).content.split('<!-- rgent:ledger')[0]; return body.includes('补充依据。') && body.includes('part=\"append\"') })()`))
+  check('追加不碰人写文本与已有块', await page.eval(`(async () => { const body=(await window.rgent.noteRead('写作补.md')).content.split('<!-- rgent:ledger')[0]; return body.includes('建样张一')===false && body.indexOf('补充依据。')>body.indexOf('补样张') })()`), await page.eval(`(async () => JSON.stringify((await window.rgent.noteRead('写作补.md')).content))()`))
+
+  // 四、补·超限：12 KB 汉字撞 8 KiB 字节线，当场拒，正文不动。
+  check('打开超限发起篇开工', await start('写作超限.md', '超限样张'))
+  check('超限追加被拒且正文没被写坏', (await settle()) && await page.eval(`(async () => { const body=(await window.rgent.noteRead('写作超限.md')).content.split('<!-- rgent:ledger')[0]; return !body.includes('汉汉汉') })()`))
+  check('拒绝原因如实报给模型', requests.some(request => request.messages.some(message => message.role === 'tool' && String(message.content).includes('OVER_LIMIT_BYTES'))))
+
+  // 账本：面板上看"未执行（超限）"的如实记录，数据上看三场各自的工具留痕。
+  await page.eval(`document.querySelector('.ledger-open')?.click()`)
+  await waitFor(page, `!!document.querySelector('.ledger-body details')`)
+  await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
+  await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`)
+  check('账本面板如实写「未执行（超限）」并带工具名', await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return text.includes('append_to_note') && text.includes('refused:OVER_LIMIT_BYTES') && text.includes('未执行（OVER_LIMIT_BYTES）')})()`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,260)??'(无账本面板)'`))
+  const ledgerPanel = async (note, condition) => {
+    await page.eval(`document.querySelector('.ledger-close')?.click()`)
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(note)})?.click()`)
+    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(note)}`)) return false
+    await page.eval(`document.querySelector('.ledger-open')?.click()`)
+    if (!await waitFor(page, `!!document.querySelector('.ledger-body details')`)) return false
+    await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
+    return await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return ${condition}})()`)
+  }
+  check('建的账本留痕看得见', await ledgerPanel('写作建一.md', `text.includes('create_note') && text.includes('ok (1)')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
+  check('补的账本留痕看得见', await ledgerPanel('写作补.md', `text.includes('append_to_note') && text.includes('ok (1)')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
+  await shot(page, 'write-ledger-1200')
+  await page.eval(`document.querySelector('.ledger-close')?.click()`)
 }
 
 async function availablePort() {
@@ -640,6 +743,7 @@ const imeOnly = process.env.RGENT_UI_IME_ONLY === '1'
 const multiVaultOnly = process.env.RGENT_UI_MULTI_VAULT_ONLY === '1'
 const memoryOnly = process.env.RGENT_UI_MEMORY_ONLY === '1'
 const skillsOnly = process.env.RGENT_UI_SKILLS_ONLY === '1'
+const writeOnly = process.env.RGENT_UI_WRITE_ONLY === '1'
 // 付费专项：只由显式环境变量触发，普通测试／构建／CI 永不调用模型。
 const skillsLive = process.env.RGENT_UI_SKILLS_LIVE
 const v4Only = process.env.RGENT_UI_V4_ONLY === '1'
@@ -2600,7 +2704,7 @@ async function verifyModelFeedback(page, nativePage, shot) {
   await openModel()
 }
 
-function createControlledHostServer(memoryRequests,toolLoopRequests) {
+function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequests=[]) {
   const server = createHttpServer((request, response) => {
       let body = ''
       request.on('data', (chunk) => { body += String(chunk) })
@@ -2627,7 +2731,36 @@ function createControlledHostServer(memoryRequests,toolLoopRequests) {
           response.write(`data: ${JSON.stringify({id:'memory-use-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`)
           response.end('data: [DONE]\n\n'); return
         }
-        if (body.includes('工具查证') && decoded.tools?.length === 2) {
+        // 只按写工具专项自己的口令识别：工具链场景现在也带写工具，按工具名匹配会把它整个劫持走。
+        const writeBody = JSON.stringify(decoded.messages)
+        const writePrompts = ['建样张一', '建样张二', '补样张', '超限样张']
+        if (writePrompts.some(prompt => writeBody.includes(prompt))) {
+          writeRequests.push(decoded)
+          const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'write-ui', object: 'chat.completion.chunk', created: 1, model: decoded.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
+          response.writeHead(200, { 'content-type': 'text/event-stream' })
+          const results = decoded.messages.filter(message => message.role === 'tool')
+          if (!results.length) {
+            // 第一轮：按口令提出一次写请求；工具名只在"有工具档"的场里出现。
+            const prompts = writeBody
+            const call = prompts.includes('建样张二')
+              ? { name: 'create_note', input: { name: '写工具二', body: '第二篇受控正文。' } }
+              : prompts.includes('建样张一')
+                ? { name: 'create_note', input: { name: '写工具样张', body: '# 写工具样张\n\n受控正文。' } }
+                : prompts.includes('超限样张')
+                  ? { name: 'append_to_note', input: { text: '汉'.repeat(4000) } }
+                  : { name: 'append_to_note', input: { text: '补充依据。' } }
+            const [name, args] = [call.name, JSON.stringify(call.input)]
+            emit({ tool_calls: [{ index: 0, id: `ui-write-${name}`, type: 'function', function: { name, arguments: args } }] })
+            emit({}, 'tool_calls')
+          } else {
+            emit({ content: '写工具核验完成。' })
+            emit({}, 'stop')
+          }
+          response.end('data: [DONE]\n\n')
+          return
+        }
+        const loopToolNames = (decoded.tools ?? []).map(tool => tool.function?.name)
+        if (body.includes('工具查证') && loopToolNames.includes('read_library') && loopToolNames.includes('search_library')) {
           toolLoopRequests.push(decoded)
           response.writeHead(200, { 'content-type': 'text/event-stream' })
           const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'tools-ui', object: 'chat.completion.chunk', created: 1, model: 'test', choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
@@ -3012,6 +3145,20 @@ async function main() {
       }
       try{await verifySkillsLive(page,vault,profile,shot)}catch(error){stageFailed('技能真机取证',error)}
       check('技能真机取证没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode=failures===0?0:1
+      return
+    }
+    if(writeOnly){
+      const writeRequests=[]
+      hostServer=createControlledHostServer([],[],writeRequests)
+      await new Promise(resolve=>hostServer.listen(0,'127.0.0.1',resolve))
+      const configured=await configureControlledHost(page,`http://127.0.0.1:${hostServer.address().port}/v1`)
+      check('写工具专项初始化受控供应商与设备默认模型',configured===true)
+      if(!configured)throw Error('写工具专项受控模型初始化失败')
+      try{await verifyWriteTools(page,vault,shot,writeRequests)}catch(error){stageFailed('写工具专项',error)}
+      check('写工具专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
+      check('写工具专项全程只走受控主机',writeRequests.length>=4,String(writeRequests.length))
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
       process.exitCode=failures===0?0:1
       return

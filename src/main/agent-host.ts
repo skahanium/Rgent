@@ -693,7 +693,8 @@ export class AgentHost {
       // 「建」的重名判定：读得到就是已存在；只把"查无此篇"当作不存在，其他错误照旧抛出。
       exists: async (relPath: string) => {
         try { await this.deps.read(relPath); return true }
-        catch (error) { if (error instanceof Error && /ENOENT|NOT_FOUND|UNSAFE_PATH/u.test(error.message)) return false; throw error }
+        // 真库把 ENOENT 归一化成 NOTE_MISSING；只认这两种"查无此篇"，别的错误照旧抛出。
+        catch (error) { if (error instanceof Error && /^(ENOENT|NOTE_MISSING)$|NOT_FOUND|UNSAFE_PATH/u.test(error.message)) return false; throw error }
       }
     })
     const create = this.deps.confirmWrite && this.deps.createNote

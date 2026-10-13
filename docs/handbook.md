@@ -23,7 +23,7 @@
 - Host 阶段用 Electron `safeStorage` 加密密钥，密文只存应用数据目录；解密材料由操作系统保护。不要把真实密钥、库内容、权限名单样例写成真实秘密。
 - 测试不把真实 API Key 写进仓库。
 - 改壳、preload 或 sandbox 之后：`pnpm test` 必须过，且 `pnpm build` 后窗口能起来。sandbox 下 preload 必须是可加载的 CommonJS（`out/preload/index.cjs`）。
-- 当前阶段提交前跑 `pnpm docs:check`；CI 按[变更范围分层](#ci-分层)。代码门在 macOS、Windows 上以锁文件安装，先构建与原生装载检查，再运行 `pnpm test` 与功能 `pnpm ui:check`；纯文档不触发产品构建。窗口检查按范围收口：默认 `pnpm ui:check` 跑全窗口，`RGENT_UI_MULTI_VAULT_ONLY=1`／`RGENT_UI_V4_ONLY=1`／`RGENT_UI_MEMORY_ONLY=1`／`RGENT_UI_SKILLS_ONLY=1` 分别跑多库、v4、记忆、技能专项；改动库管理、记忆、v4 或技能路径时跑对应专项并分别记录数字，不用默认范围代称专项已验。
+- 当前阶段提交前跑 `pnpm docs:check`；CI 按[变更范围分层](#ci-分层)。代码门在 macOS、Windows 上以锁文件安装，先构建与原生装载检查，再运行 `pnpm test` 与功能 `pnpm ui:check`；纯文档不触发产品构建。窗口检查按范围收口：默认 `pnpm ui:check` 跑全窗口，`RGENT_UI_MULTI_VAULT_ONLY=1`／`RGENT_UI_V4_ONLY=1`／`RGENT_UI_MEMORY_ONLY=1`／`RGENT_UI_SKILLS_ONLY=1`／`RGENT_UI_WRITE_ONLY=1` 分别跑多库、v4、记忆、技能、写类工具专项；改动库管理、记忆、v4、技能或写类工具路径时跑对应专项并分别记录数字，不用默认范围代称专项已验。写类工具专项走受控假模型（本地 HTTP 受控主机），**不配置真实供应商**。
 - **付费入口只在显式标志下运行**：`memory:check --live／--freeze／--diagnose／--publish`、`RGENT_UI_SKILLS_LIVE=1`（真实模型）等一切会花钱的入口，普通测试、构建与 CI **从不设置**；技能真机取证的零成本干跑用 `RGENT_UI_SKILLS_LIVE=dry`。花钱前先把判据与信封写进合同（预注册），失败按原样记录、不调参重跑，专项账目与共享 journal 分开计。
 - **证据落可复现目录**：窗口样张与真机取证原始件写 `artifacts/`（已 gitignore）或检查自身的输出目录，**不要写 `/tmp`**——施工图只登记结论与路径，原始件不进仓库。历史章节里指向 `/tmp` 的旧证据不再可复现，只作当时记录读。
 - 文档里引用代码位置时**先写符号名**（函数／常量／类型），需要时再附行号：行号会随重构漂移，符号名不会。

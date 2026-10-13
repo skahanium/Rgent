@@ -618,7 +618,8 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
   const read = async (path: string) => {
     if (path === 'b.md') return { content: '外篇正文', revision: 'b', sessionId: 's', objectVersion: 'o' }
     if (path === 'a.md') return { content, revision: String(revision), sessionId: 's', objectVersion: 'o' }
-    throw Error('ENOENT')
+    // 真库把"查无此篇"归一化成 NOTE_MISSING，夹具照它写，否则重名判定测不准。
+    throw Error('NOTE_MISSING')
   }
   const write = async (_path: string, next: string, expected: string) => {
     if (expected !== String(revision)) throw Error('CONFLICT')
