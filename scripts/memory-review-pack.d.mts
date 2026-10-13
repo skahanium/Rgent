@@ -13,6 +13,7 @@ export type ReviewCard = {
   storedNothing: boolean
   receipt: { outcome: string | null; reason: string | null }
   annotated: boolean
+  imported: ImportedVerdict | null
 }
 export type ReviewAnswer = { key: string; acceptable: string; missing?: string; shouldNot?: string; note?: string }
 export type ReviewAnnotation = {
@@ -31,7 +32,9 @@ export type ReviewAnnotation = {
 export const MAPPING_NOTE: string
 export function latestRun(): string
 export function cardOf(result: unknown, gloss?: Record<string, string>): Omit<ReviewCard, 'annotated'>
-export function buildCards(runDir: string, gloss?: Record<string, string>): ReviewCard[]
+export function buildCards(runDir: string, gloss?: Record<string, string>, imported?: Record<string, ImportedVerdict>): ReviewCard[]
 export function annotationOf(card: ReviewCard, answer: ReviewAnswer, bindings: { rulesHash: string; resultHash: string; frozenHash: string }, rubricVersion: number, units?: number): ReviewAnnotation | null
-export function convertAnswers(runDir: string, answers: { rows?: ReviewAnswer[] }, gloss?: Record<string, string>): { converted: ReviewAnnotation[]; skipped: { key: string; why: string }[]; rubricVersion: number }
+export type ImportedVerdict = { caseId: string; round: number; acceptable: string; missing?: string; shouldNot?: string; note?: string; source?: string; importedAt?: string }
+export function loadImported(file?: string): Record<string, ImportedVerdict>
+export function convertAnswers(runDir: string, answers: { rows?: ReviewAnswer[] }, gloss?: Record<string, string>, imported?: Record<string, ImportedVerdict>): { converted: ReviewAnnotation[]; skipped: { key: string; why: string }[]; rubricVersion: number }
 export function renderPack(cards: ReviewCard[], meta: { run: string; frozenHash: string | null }): string

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, expect, it } from 'vitest'
-import { buildCards, convertAnswers } from '../../scripts/memory-review-pack.mjs'
+import { buildCards, convertAnswers, renderPack } from '../../scripts/memory-review-pack.mjs'
 
 // 包 C：全卷人工复核包。出题纪律来自首版失败教训（test/fixtures/v6-outcome-review.json 的 protocolFlaws）：
 // 给中文重述、给终态、**不给试卷期望也不给 Agent 判定**，人只答自己的判断。
@@ -79,4 +79,22 @@ it('单元数为 2 而人列了 2 条遗漏时，正确数不会变成负数', (
   const { converted } = convertAnswers(dir, { rows: [{ key: 'k-a', acceptable: 'no', missing: '甲\n乙\n丙', shouldNot: '', note: '' }] })
   expect(converted[0]!.review.omitted).toBe(2)
   expect(converted[0]!.review.correct).toBe(0)
+})
+
+it('导入行不重问：题面只读，转换时答案文件里没有也按已复核认领', () => {
+  const dir = fixture()
+  const imported = { 'v6-a/0': { caseId: 'v6-a', round: 0, acceptable: 'yes', missing: '', shouldNot: '', note: '已判过：记对了', source: 'test/fixtures/v6-outcome-review.json', importedAt: '2026-10-12' } }
+  const cards = buildCards(dir, {}, imported)
+  expect(cards.find(card => card.key === 'k-a')!.imported).toMatchObject({ note: '已判过：记对了' })
+  expect(cards.find(card => card.key === 'k-b')!.imported).toBeNull()
+  const { converted } = convertAnswers(dir, { rows: [] }, {}, imported)
+  expect(converted.map(item => item.key)).toEqual(['k-a'])
+  expect(converted[0]!.review.humanVerdict).toMatchObject({ acceptable: 'yes', importedFrom: 'test/fixtures/v6-outcome-review.json' })
+})
+
+it('英文材料行没有中文重述时，题面仍然出得出来（生成器另有警告）', () => {
+  const dir = fixture()
+  const cards = buildCards(dir, {})
+  expect(cards.find(card => card.key === 'k-b')!.gloss).toBeNull()
+  expect(renderPack(cards, { run: dir, frozenHash: 'f' })).toContain('这一行材料原文是英文')
 })

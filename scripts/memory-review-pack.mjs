@@ -75,14 +75,27 @@ export function cardOf(result, gloss = {}) {
   }
 }
 
-export function buildCards(runDir, gloss = {}) {
+/** 载入"已复核（导入）"的三行：判词逐字来自目标化复核夹具，不重问。 */
+export function loadImported(file = path.join(root, 'test', 'fixtures', 'memory-review-imported.json')) {
+  if (!existsSync(file)) return {}
+  const fixture = readJson(file), out = {}
+  for (const row of fixture.rows ?? []) out[`${row.caseId}/${row.round}`] = { ...row, source: fixture.source, importedAt: fixture.importedAt }
+  return out
+}
+
+export function buildCards(runDir, gloss = {}, imported = {}) {
   const files = readdirSync(runDir).filter(name => name.startsWith('result-') && name.endsWith('.json')).sort()
   const annotated = new Set()
   for (const name of readdirSync(runDir).filter(name => /^annotation-.*\.json$/u.test(name))) {
     const value = readJson(path.join(runDir, name))
     if (typeof value?.key === 'string') annotated.add(value.key)
   }
-  return files.map(name => ({ ...cardOf(readJson(path.join(runDir, name)), gloss), annotated: annotated.has(readJson(path.join(runDir, name)).key) }))
+  return files.map(name => {
+    const result = readJson(path.join(runDir, name))
+    const card = cardOf(result, gloss)
+    const id = `${result.case?.id ?? ''}/${result.round ?? ''}`
+    return { ...card, annotated: annotated.has(result.key), imported: imported[id] ?? null }
+  })
 }
 
 /** 答案 → 评测标注。计数由 mapping 决定，判词原样保留，标注者身份固定为人工。
@@ -105,13 +118,13 @@ export function annotationOf(card, answer, bindings, rubricVersion, units = 0) {
       annotator: { identity: 'owner-human', kind: 'human', participatedInDesign: false, modelNameMasked: true, humanReviewed: true },
       rulesHash: bindings.rulesHash, resultHash: bindings.resultHash, frozenHash: bindings.frozenHash,
       rubricVersion,
-      humanVerdict: { acceptable, missing: answer.missing ?? '', shouldNot: answer.shouldNot ?? '', note: answer.note ?? '' }
+      humanVerdict: { acceptable, missing: answer.missing ?? '', shouldNot: answer.shouldNot ?? '', note: answer.note ?? '', ...(answer.importedFrom ? { importedFrom: answer.importedFrom } : {}) }
     }
   }
 }
 
-export function convertAnswers(runDir, answers, gloss = {}) {
-  const cards = new Map(buildCards(runDir, gloss).map(card => [card.key, card]))
+export function convertAnswers(runDir, answers, gloss = {}, imported = loadImported()) {
+  const cards = new Map(buildCards(runDir, gloss, imported).map(card => [card.key, card]))
   const units = new Map()
   for (const name of readdirSync(runDir).filter(name => name.startsWith('result-') && name.endsWith('.json'))) {
     const result = readJson(path.join(runDir, name))
@@ -126,7 +139,10 @@ export function convertAnswers(runDir, answers, gloss = {}) {
     if (Number.isSafeInteger(value.review.rubricVersion)) rubricVersion = value.review.rubricVersion
   }
   const converted = [], skipped = []
-  for (const answer of answers.rows ?? []) {
+  const rows = [...(answers.rows ?? [])]
+  // 导入行即使答案文件里没有，也要按已复核转换，否则会看起来"没人复核过"。
+  for (const card of cards.values()) if (card.imported && !rows.some(row => row.key === card.key)) rows.push({ key: card.key, ...card.imported, importedFrom: card.imported.source })
+  for (const answer of rows) {
     const card = cards.get(answer.key)
     const binding = bindings.get(answer.key)
     if (!card || !binding) { skipped.push({ key: answer.key, why: card ? '没有该行的标注绑定' : '没有该行的评测产物' }); continue }
@@ -150,7 +166,7 @@ export function renderPack(cards, meta) {
     const recent = card.recent.map(item => ['goal', 'completed', 'blocked', 'next']
       .filter(field => item[field]).map(field => `<li>${field}：${escapeHtml(item[field])}</li>`).join('')).join('')
     const stored = card.stored.map(item => `<li>[${escapeHtml(item.semantic)}／${escapeHtml(item.scope)}] ${escapeHtml(item.content)}</li>`).join('')
-    return `<section class="card" data-key="${escapeHtml(card.key)}">
+    return `<section class="card" data-key="${escapeHtml(card.key)}" data-imported="${escapeHtml(JSON.stringify(card.imported ? { acceptable: card.imported.acceptable, missing: card.imported.missing ?? '', shouldNot: card.imported.shouldNot ?? '', note: card.imported.note ?? '', source: card.imported.source ?? '' } : null))}">
   <h2>第 ${index + 1} 行 · ${escapeHtml(card.caseId ?? '')}${card.round === null ? '' : ` · 第 ${card.round + 1} 轮`}</h2>
   <p class="meta">${escapeHtml(card.model ?? '')} · 收据：${escapeHtml(card.receipt.outcome ?? '')}${card.receipt.reason ? `（${escapeHtml(card.receipt.reason)}）` : ''}</p>
   ${card.annotated ? '' : '<p class="warn">这一行此前没有主标注（补录行）：你的判断会成为它的第一份人工标注。</p>'}
@@ -162,7 +178,10 @@ export function renderPack(cards, meta) {
   ${card.storedNothing ? '<p><strong>什么都没留。</strong></p>' : ''}
   ${stored ? `<ul>${stored}</ul>` : ''}
   ${recent ? `<ul>${recent}</ul>` : ''}
-  <div class="answers">${QUESTIONS.map(([field, title, hint, contrast]) => `
+  ${card.imported ? `<div class="imported"><strong>已复核（导入，${escapeHtml(String(card.imported.importedAt ?? ''))}）</strong>
+    <p>判词：${escapeHtml(card.imported.note ?? '')}</p>${card.imported.missing ? `<p>遗漏：${escapeHtml(card.imported.missing)}</p>` : ''}${card.imported.shouldNot ? `<p>不该留：${escapeHtml(card.imported.shouldNot)}</p>` : ''}
+    <p class="hint">这一行不重问：判词逐字来自<code>${escapeHtml(card.imported.source ?? '')}</code>，导出答案时原样带上。</p></div>` : ''}
+  <div class="answers"${card.imported ? ' hidden' : ''}>${QUESTIONS.map(([field, title, hint, contrast]) => `
     <label>${title}<span class="hint">${hint}</span>
       ${field === 'acceptable'
         ? `<span class="choices">${['yes', 'no', 'unsure'].map(value => `<label><input type="radio" name="${escapeHtml(card.key)}-acceptable" value="${value}">${value === 'yes' ? '可以接受' : value === 'no' ? '不可以接受' : '看不懂'}</label>`).join('')}</span>`
@@ -180,7 +199,7 @@ export function renderPack(cards, meta) {
  .meta,.hint,.contrast{color:#999;font-size:13px}.warn{color:#fc6}
  label{display:block;margin:.6em 0}.choices label{display:inline-block;margin-right:12px}
  textarea{width:100%;background:#0f0f0f;color:#eee;border:1px solid #444;border-radius:6px;padding:6px}
- .contrast{display:block;margin-top:2px}button{font:inherit;padding:8px 16px;border-radius:8px;border:1px solid #555;background:#222;color:#eee}
+ .contrast{display:block;margin-top:2px}.imported{margin:.6em 0;padding:8px 12px;border:1px dashed #4a6;border-radius:8px}button{font:inherit;padding:8px 16px;border-radius:8px;border:1px solid #555;background:#222;color:#eee}
  #progress{position:sticky;top:0;background:#111;padding:8px 0;display:flex;gap:12px;align-items:center;justify-content:center;z-index:2}
 </style>
 <header><h1>记忆全卷人工复核（${cards.length} 行）</h1>
@@ -191,7 +210,10 @@ export function renderPack(cards, meta) {
 ${cards.map(row).join('\n')}
 <script>
 const cards=[...document.querySelectorAll('.card')]
-const read=card=>({key:card.dataset.key,acceptable:card.querySelector('input[type=radio]:checked')?.value??'',missing:card.querySelector('[data-field=missing]')?.value??'',shouldNot:card.querySelector('[data-field=shouldNot]')?.value??'',note:card.querySelector('[data-field=note]')?.value??''})
+const read=card=>{
+ const imported=JSON.parse(card.dataset.imported||'null')
+ if(imported)return {key:card.dataset.key,acceptable:imported.acceptable,missing:imported.missing??'',shouldNot:imported.shouldNot??'',note:imported.note??'',importedFrom:imported.source??''}
+ return {key:card.dataset.key,acceptable:card.querySelector('input[type=radio]:checked')?.value??'',missing:card.querySelector('[data-field=missing]')?.value??'',shouldNot:card.querySelector('[data-field=shouldNot]')?.value??'',note:card.querySelector('[data-field=note]')?.value??''}}
 const refresh=()=>{document.getElementById('count').textContent='已答 '+cards.filter(c=>read(c).acceptable).length+'/'+cards.length}
 document.addEventListener('input',refresh);refresh()
 document.getElementById('export').onclick=()=>{
@@ -223,14 +245,18 @@ function main() {
     process.stdout.write(`已转换 ${converted.length} 行，跳过 ${skipped.length} 行；标注在 ${dir}\n`)
     return
   }
-  const cards = buildCards(runDir, gloss)
+  const cards = buildCards(runDir, gloss, loadImported())
   const annotation = readdirSync(runDir).find(name => name.startsWith('annotation') && name.endsWith('.json'))
   const frozenHash = annotation ? readJson(path.join(runDir, annotation)).frozenHash : null
+  const missingGloss = cards.filter(card => !card.chineseMaterial && !card.gloss)
+  if (missingGloss.length) process.stdout.write(`警告：${missingGloss.length} 行材料是英文但没有中文重述（${missingGloss.map(card => card.caseId).join('、')}）——按题面纪律不该这样出题。\n`)
   writeFileSync(path.join(outDir, 'index.html'), renderPack(cards, { run: runDir, frozenHash }))
   writeFileSync(path.join(outDir, 'answers.template.json'), JSON.stringify({
     version: 1, protocol: '全卷人工语义复核：只看材料与系统终态，不看试卷期望与 Agent 判定',
     mapping: MAPPING_NOTE,
-    rows: cards.map(card => ({ key: card.key, caseId: card.caseId, round: card.round, acceptable: '', missing: '', shouldNot: '', note: '' }))
+    rows: cards.map(card => card.imported
+      ? { key: card.key, caseId: card.caseId, round: card.round, acceptable: card.imported.acceptable, missing: card.imported.missing ?? '', shouldNot: card.imported.shouldNot ?? '', note: card.imported.note ?? '', importedFrom: card.imported.source }
+      : { key: card.key, caseId: card.caseId, round: card.round, acceptable: '', missing: '', shouldNot: '', note: '' })
   }, null, 2))
   process.stdout.write(`复核包已生成：${path.join(outDir, 'index.html')}（${cards.length} 行）\n`)
 }

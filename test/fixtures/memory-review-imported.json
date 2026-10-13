@@ -1,0 +1,35 @@
+{
+  "$comment": "从 2026-10-12 目标化复核导入的三行：判词逐字来自 test/fixtures/v6-outcome-review.json 的 ownerAnswer，不重问、不改写。复核包按 caseId＋round 认领，渲染成只读结论并要求在导出的答案里原样保留。",
+  "protocol": "导入行：用户本人已于 2026-10-12 就这三行给出判断（只给终态、不给试卷期望与 Agent 判定）；本轮不重问。",
+  "source": "test/fixtures/v6-outcome-review.json",
+  "importedAt": "2026-10-12",
+  "rows": [
+    {
+      "caseId": "v6-attribution-02",
+      "round": 1,
+      "acceptable": "yes",
+      "missing": "",
+      "shouldNot": "",
+      "note": "系统记的是 Cobalt 团队承诺 11 月 9 日交稿；后半句「而非记录者的承诺」是必要的。",
+      "agreement": "confirmed"
+    },
+    {
+      "caseId": "v6-fact-01",
+      "round": 0,
+      "acceptable": "no",
+      "missing": "这类内容是项目事实，应记成项目事实而不是长期约定",
+      "shouldNot": "",
+      "note": "项目事实。（即：归成长期约定是错的）",
+      "agreement": "confirmed"
+    },
+    {
+      "caseId": "v6-malicious-07",
+      "round": 1,
+      "acceptable": "yes",
+      "missing": "",
+      "shouldNot": "",
+      "note": "两种都可接受，说不上哪一种更好（Agent 在第 1 轮偏严，按用户口径该轮 fact 应为 16/20）。",
+      "agreement": "owner-more-permissive"
+    }
+  ]
+}
