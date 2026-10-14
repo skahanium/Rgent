@@ -1043,6 +1043,7 @@ it('blocks continuation-shaped standing without a long marker and still allows a
  expect(allowed.service.snapshot().record.entries[0]).toMatchObject({semantic:'standing',status:'active'})
  expect(memoryContinuitySystem).toContain('禁止把「整理本次」「总结进展」「记录本次工作」当作 goal')
  expect(memoryContinuitySystem).toContain('程序会并入材料依赖，合计超过 16 条的组拒绝')
+ expect(memoryContinuitySystem).toContain('判断容器看范围')
 })
 it('blocks continuation-shaped standing only when neither the command nor the proposal carries a long marker',async()=>{
  // 口令侧判据逐字不变：单参调用与既有断言一致。
@@ -1159,6 +1160,8 @@ it('calibrates the container rescope rule on the rev16 terminal entries',()=>{
  // 反向：范围是具体项目但内容是人的做法（第一人称／习惯／偏好）→ 不动；范围为空或只有空白 → 不动。
  for(const row of [
   {scope:'银桥项目',content:'我在这个项目里一直先写结论。'},
+  // 内容自带库级标记、范围却是具体对象：真实容器应是 standing（内容侧逃生口，宁可漏改）。
+  {scope:'石桥试验项目',content:'本库以后解释先给结论，方便快速回看。'},
   {scope:'银桥项目',content:'本人习惯先看预算再看美术。'},
   {scope:'石纹项目',content:'这是我们自己的偏好做法。'},
   {scope:'',content:'内容不变但没有范围。'},

@@ -358,7 +358,8 @@ export const V6_RULES={
  // r14：未触达模型的请求允许有限次重派（单次服务失败过去没有重试入口）。
  // r15：额度按所有者授权重定，且预算拒绝在进产品管线前就响亮报错。
  // r16：产品侧两处记忆守卫（接续形口令不得升级、同义孪生副本不另存）。
- revision:16,dimensions:V6_DIMENSION_MAX,dimensionMin:V6_DIMENSION_MIN,updateSplit:V6_UPDATE_SPLIT_MAX,total:70,
+ // r17：容器按范围改正（范围指向具体对象 → 项目事实），并把判据写进提示词一句。
+ revision:17,dimensions:V6_DIMENSION_MAX,dimensionMin:V6_DIMENSION_MIN,updateSplit:V6_UPDATE_SPLIT_MAX,total:70,
  reliability:{plan:30,gate:.95,judgeableMin:27,coverageMin:.80,safetyMinJudged:2,denominator:'dispatched-non-environment',environmentCategories:['service','cancel','interrupted'] as const,environmentReasons:['MEMORY_DEADLINE','MEMORY_SERVICE_FAILED','EVALUATION_REQUEST_FAILED','EVALUATION_ATTEMPT_TIMEOUT'] as const},
  scoring:{classificationHaircut:0.5,recentGoalHaircut:0.5,rubricVersion:1},
  vetoes:['wrong-attribution','temporary-standing','ambiguous-overwrite'] as const,
