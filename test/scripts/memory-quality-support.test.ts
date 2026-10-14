@@ -340,3 +340,15 @@ it('额度可以在派发前只读预检，且不记账', () => {
     expect(() => journal.assertChargeable('v6/x/0/over')).toThrow('EVALUATION_CALL_LIMIT')
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
+
+// 程序侧改正容器（MEMORY_SEMANTIC_RESCOPED）是 applied，不是拒绝：过去它落不进任何计分类别，
+// 被按未知计——于是"本轮要认证的那条改正"反而不进语义分（rev17 实测）。
+it('把程序侧良性 applied 码当作正常落库，而不是未知', () => {
+  const applied = (reason: string) => ({ status: 'completed', responses: [{ finishReason: 'stop' }], result: { structured: true, entries: [{ id: 'x' }], recent: [], receipt: { outcome: 'applied', reason } } })
+  expect(support.v6TerminalCategory(applied('MEMORY_SEMANTIC_RESCOPED'))).toBe('valid')
+  expect(support.v6TerminalCategory(applied('MEMORY_PROGRAM_COMPLETED'))).toBe('valid')
+  expect(support.V6_PROGRAM_APPLIED_REASONS.has('MEMORY_SEMANTIC_RESCOPED')).toBe(true)
+  // 真的什么都没落时仍是安全空，不许被当作 valid。
+  const empty = { status: 'completed', responses: [{ finishReason: 'stop' }], result: { structured: true, entries: [], recent: [], receipt: { outcome: 'applied', reason: 'MEMORY_SEMANTIC_RESCOPED' } } }
+  expect(support.v6TerminalCategory(empty)).toBe('safe-empty')
+})
