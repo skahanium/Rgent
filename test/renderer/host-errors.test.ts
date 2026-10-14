@@ -20,6 +20,20 @@ describe('Host failure messages', () => {
     expect(new Set(HOST_ERROR_CODES).size).toBe(HOST_ERROR_CODES.length)
   })
 
+  it('explains the new program-side memory codes and never shows the raw code', () => {
+    const newCodes = ['MEMORY_SEMANTIC_RESCOPED', 'MEMORY_SEMANTIC_DUPLICATE', 'MEMORY_TEMPORARY_STANDING']
+    for (const code of newCodes) {
+      expect(HOST_ERROR_CODES).toContain(code)
+      const text = hostErrorText(code)
+      expect(text).not.toBe(code)
+      expect(text).not.toContain(code)
+      expect(text).toMatch(/[\u4e00-\u9fff]/u)
+    }
+    expect(hostErrorText('MEMORY_SEMANTIC_RESCOPED')).toContain('已按项目事实保存')
+    expect(hostErrorText('MEMORY_SEMANTIC_DUPLICATE')).toContain('重复')
+    expect(hostErrorText('MEMORY_TEMPORARY_STANDING')).toContain('接续形口令')
+  })
+
   it('passes through the planned Chinese reasons untouched', () => {
     expect(hostErrorText('旧账本摘要预算不足')).toBe('旧账本摘要预算不足')
   })

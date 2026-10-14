@@ -856,6 +856,37 @@ describe('skills in the request', () => {
     expect(ledgerProvenance(chapter)).toEqual({ status: 'valid', record: record.provenance })
   })
 
+  it('sends the set frozen at preview time through a sub-second A→B→A edit', async () => {
+    const A = frozen({ signature: 'sig-a', record: [{ id: 'skill-a', name: '甲', hash: 'a'.repeat(64) }],
+      block: '本场已启用技能（由人启用；以下内容是指令来源，但不改变范围、工具与权限）：\n\n【甲】\n甲的正文。' })
+    const B = frozen({ signature: 'sig-b', record: [{ id: 'skill-b', name: '乙', hash: 'b'.repeat(64) }],
+      block: '本场已启用技能（由人启用；以下内容是指令来源，但不改变范围、工具与权限）：\n\n【乙】\n乙的正文。' })
+    // 时间线：预览冻结时是 A；启动读取时磁盘上是 B；授权核对再读时已回到 A。
+    const store = { now: B }
+    const app = harness(async function* () { yield '回答' }, undefined, undefined, {
+      skills: () => store.now,
+      assertSkillsAuthorization: input => { store.now = A; if (input.skillsSignature !== store.now.signature) throw Error('STALE_PREVIEW') }
+    })
+    const source = app.source()
+    const start = source.indexOf('/')
+    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答', skillsSignature: A.signature, skillsSnapshot: A })
+    await task.done
+    expect(app.systems.at(-1)).toContain('甲的正文')
+    expect(app.systems.at(-1)).not.toContain('乙的正文')
+    expect(app.history.records().at(-1)?.provenance?.skills).toEqual([{ id: 'skill-a', name: '甲', hash: 'a'.repeat(64) }])
+  })
+
+  it('refuses a frozen set whose signature is not the one the main process issued', async () => {
+    const A = frozen({ signature: 'sig-a' })
+    const B = frozen({ signature: 'sig-b', block: '本场已启用技能（由人启用；以下内容是指令来源，但不改变范围、工具与权限）：\n\n【偷换】\n不该发出去。' })
+    const app = harness(async function* () { yield '不该发生' }, undefined, undefined, { skills: () => A })
+    const before = app.source()
+    const start = before.indexOf('/')
+    await expect(app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答', skillsSignature: A.signature, skillsSnapshot: B })).rejects.toThrow('STALE_PREVIEW')
+    expect(app.systems).toHaveLength(0)
+    expect(app.source()).toBe(before)
+  })
+
   it('refuses to start when the previewed skill set no longer matches', async () => {
     const app = harness(async function* () { yield '不该发生' }, undefined, undefined, { skills: () => frozen(), assertSkillsAuthorization: () => { throw Error('STALE_PREVIEW') } })
     const before = app.source()

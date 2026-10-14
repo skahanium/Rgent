@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, expect, it } from 'vitest'
-import { buildCards, convertAnswers, renderPack } from '../../scripts/memory-review-pack.mjs'
+import { buildCards, convertAnswers, glossWarnings, renderPack } from '../../scripts/memory-review-pack.mjs'
 
 // 包 C：全卷人工复核包。出题纪律来自首版失败教训（test/fixtures/v6-outcome-review.json 的 protocolFlaws）：
 // 给中文重述、给终态、**不给试卷期望也不给 Agent 判定**，人只答自己的判断。
@@ -100,4 +101,35 @@ it('英文材料行没有中文重述时，题面仍然出得出来（生成器�
   const cards = buildCards(dir, {})
   expect(cards.find(card => card.key === 'k-b')!.gloss).toBeNull()
   expect(renderPack(cards, { run: dir, frozenHash: 'f' })).toContain('这一行材料原文是英文')
+})
+
+it('英文材料行缺中文重述时真的产出告警文案，补上重述就没有', () => {
+  const dir = fixture()
+  const warnings = glossWarnings(buildCards(dir, {}))
+  expect(warnings).toHaveLength(1)
+  expect(warnings[0]).toContain('警告')
+  expect(warnings[0]).toContain('中文重述')
+  expect(warnings[0]).toContain('v6-b')
+  expect(warnings[0]).not.toContain('v6-a')
+  expect(glossWarnings(buildCards(dir, { 'v6-b': '同一条偏好之前提过：以后用通俗英文解释。' }))).toEqual([])
+  // 已复核（导入）行照旧不重问；出题纪律的告警对它一视同仁，不改它的行为。
+  const imported = { 'v6-b/0': { caseId: 'v6-b', round: 0, acceptable: 'yes', missing: '', shouldNot: '', note: '已判过', source: 'fixture', importedAt: '2026-10-12' } }
+  const cards = buildCards(dir, {}, imported)
+  expect(glossWarnings(cards)).toHaveLength(1)
+  expect(cards.find(card => card.key === 'k-b')!.imported).toMatchObject({ note: '已判过' })
+})
+
+it('生成器把缺中文重述写到标准输出和生成日志，产物照旧', () => {
+  const dir = fixture()
+  const out = mkdtempSync(path.join(os.tmpdir(), 'rgent-review-out-'))
+  dirs.push(out)
+  const run = spawnSync(process.execPath, [path.join(process.cwd(), 'scripts', 'memory-review-pack.mjs'), '--run', dir, '--out', out], { encoding: 'utf8', timeout: 20000 })
+  expect(run.status).toBe(0)
+  expect(run.stdout).toContain('警告：1 行材料是英文但没有中文重述')
+  expect(run.stdout).toContain('v6-b')
+  expect(run.stdout).toContain('generation.log')
+  expect(readFileSync(path.join(out, 'generation.log'), 'utf8')).toContain('v6-b')
+  const html = readFileSync(path.join(out, 'index.html'), 'utf8')
+  expect(html).toContain('这一行材料原文是英文')
+  expect(html).not.toContain('[object Object]')
 })

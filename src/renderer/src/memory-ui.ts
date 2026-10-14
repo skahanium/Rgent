@@ -5,6 +5,10 @@ import { icon } from './icons.ts'
 import { modelModuleGroups } from './statusbar.ts'
 
 export { memoryErrorText } from '../../shared/memory-errors.ts'
+/** 程序侧下发的「良性 applied」码：容器改判（范围指向具体对象）与程序补完的精确退出。
+ *  它们不是新保存的一组，只是对同一批里已经落库的那一组的说明（与评测仪器的
+ *  `V6_PROGRAM_APPLIED_REASONS` 同一族）。 */
+const PROGRAM_NOTE_CODES=new Set(['MEMORY_SEMANTIC_RESCOPED','MEMORY_PROGRAM_COMPLETED'])
 const el=<K extends keyof HTMLElementTagNameMap>(tag:K,className?:string)=>{const n=document.createElement(tag);if(className)n.className=className;return n}
 const paragraph=(text:string,className='settings-hint')=>{const p=el('p',className);p.textContent=text;return p}
 const button=(text:string,run:()=>void)=>{const b=el('button','settings-action');b.type='button';b.textContent=text;b.addEventListener('click',run);return b}
@@ -280,14 +284,18 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     jobs.replaceChildren();jobsPanel.querySelector('summary')!.textContent=`最近整理记录 · 正在整理 ${view?.running.active??0} / 等待整理 ${view?.running.pending??0}`
     if(!view?.jobs.length)jobs.append(paragraph('还没有整理记录。获准任务保存后，整理结果会显示在这里。'))
     const actionLabel:Record<string,string>={add:'新增',correct:'更正',conflict:'争议',obsolete:'过时',recent:'近期背景'}
+    // 程序侧的「已处理」注记：它解释同一批里某组被程序改正（容器改判）或补完（精确退出），
+    // 那一组本身已经算过一次保存。计进「已保存 N 组」就等于同一组算两次——账目必须对得上。
+    const programNotes=(results:readonly {outcome?:string;code?:string}[])=>results.filter(result=>result.outcome==='applied'&&!!result.code&&PROGRAM_NOTE_CODES.has(result.code))
     const jobResults=(job:MemoryView['jobs'][number])=>{
       const results=job.results??[]
-      const applied=results.filter(result=>result.outcome==='applied').length,rejected=results.filter(result=>result.outcome==='rejected')
-      return {applied,rejected,partial:applied>0&&rejected.length>0}
+      const notes=programNotes(results)
+      const applied=results.filter(result=>result.outcome==='applied'&&!notes.includes(result)).length,rejected=results.filter(result=>result.outcome==='rejected')
+      return {applied,rejected,partial:applied>0&&rejected.length>0,notes}
     }
     const jobLabel=(job:MemoryView['jobs'][number],index:number)=>{
-      const {applied,rejected,partial}=jobResults(job)
-      const outcome=partial?'部分保存':job.outcome==='applied'&&rejected.length&&!applied?'没有写入':({queued:'等待整理',running:'正在整理',applied:'已完成',rejected:'没有写入',interrupted:'已中断',unavailable:'暂不可用', 'handed-off':'已移交'})[job.outcome]
+      const {applied,rejected,partial,notes}=jobResults(job)
+      const outcome=partial?'部分保存':job.outcome==='applied'&&rejected.length&&!applied&&!notes.length?'没有写入':({queued:'等待整理',running:'正在整理',applied:'已完成',rejected:'没有写入',interrupted:'已中断',unavailable:'暂不可用', 'handed-off':'已移交'})[job.outcome]
       const partialNote=rejected.length?` · ${partial?`已保存 ${applied} 组、未保存 ${rejected.length} 组`:`未保存 ${rejected.length} 组`}`:''
       return `${index===0?'最近一次整理':'整理记录 '+(index+1)} · ${outcome}${partialNote}${job.reason?` · ${memoryErrorText(job.reason)}`:''}`
     }
@@ -296,10 +304,10 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
       if(previous?.dataset.signature===signature){previous.querySelector('.memory-job-result')!.textContent=jobLabel(job,index);jobs.append(previous);continue}
       const row=el('div','memory-job');row.dataset.taskId=job.taskId;row.dataset.signature=signature
       row.append(paragraph(jobLabel(job,index),'settings-hint memory-job-result'));const detail=el('details','memory-technical');detail.append(Object.assign(el('summary'),{textContent:'任务详情'}),paragraph(`任务编号：${job.taskId}`));row.append(detail);const request={taskId:job.taskId,materialVersion:job.materialVersion!}
-      const {applied,rejected,partial}=jobResults(job)
+      const {applied,rejected,partial,notes}=jobResults(job)
       if(partial&&rejected.some(result=>result.action==='recent')&&!job.results?.some(result=>result.action==='recent'&&result.outcome==='applied'))row.append(paragraph('已保存可用部分；近期背景未更新。请查看下方原因；可在上方查看已保存内容。'))
       if(partial&&rejected.some(result=>result.action!=='recent')&&!job.results?.some(result=>result.action!=='recent'&&result.outcome==='applied'))row.append(paragraph('已保存可用部分；长期内容未保存。请查看下方原因。'))
-      if(job.outcome==='applied'&&rejected.length&&!applied)row.append(paragraph('本场没有可保存的结果；请查看下方原因。'))
+      if(job.outcome==='applied'&&rejected.length&&!applied&&!notes.length)row.append(paragraph('本场没有可保存的结果；请查看下方原因。'))
       else if(job.outcome==='applied'&&!job.entryIds)row.append(paragraph(partial?'可用部分已保存；写入明细未提供。':'本场已完成；写入明细未提供。'))
       else if(job.outcome==='applied'){
         const matched=(job.entryIds??[]).map(id=>view?.entries.find(e=>e.id===id))
@@ -308,6 +316,9 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
           row.append(paragraph(`${jobResults(job).partial?'部分保存：':''}更新近期背景 ${recent} 块 · 新增/更新长期内容 ${long} 条；可在上方查看或删除并遗忘。`))
         }else row.append(paragraph(`本场写入 ${job.entryIds?.length??0} 项；部分条目当前不可查看。`))
       }
+      {const notes=jobResults(job).notes
+       // 程序侧处理也给人话：它解释「这一组为什么没被算成新保存的一组」，不留机读码。
+       if(notes.length)row.append(paragraph(`程序侧说明：${notes.map(result=>memoryErrorText(result.code!)).join('；')}`))}
       {const rejected=jobResults(job).rejected
        if(rejected.length)row.append(paragraph(`未保存的分组：${rejected.slice(0,4).map(result=>`${actionLabel[result.action]??result.action}${result.code?`（${memoryErrorText(result.code)}）`:''}`).join('、')}${rejected.length>4?` 等 ${rejected.length} 组`:''}`))}
       if(previous?.querySelector('.memory-preview'))row.append(paragraph('任务材料、状态或整理配置已变化；原预览已失效，请重新预览。'))

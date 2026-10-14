@@ -213,6 +213,23 @@ export async function createNote(root: string, name: string, parent = ''): Promi
   return relPath
 }
 
+/** 「建」用的原子创建：正文与文件一次出现，中途失败不留空笔记。
+ *  原生层先在同目录写 O_EXCL 临时文件，再用排他发布把它接到目标名——目标已存在即失败
+ *  （绝不覆盖），任何失败都会清掉临时文件。因此不需要（也没有）删除路径来回收半成品。 */
+export async function createNoteWithBody(root: string, name: string, parent = '', content: string): Promise<{ relPath: string; revision: string; objectVersion: string }> {
+  const fileName = sanitizeNoteName(name)
+  verifiedParent(root, parent)
+  const relPath = parent ? `${parent}/${fileName}` : fileName
+  mustResolve(root, relPath)
+  try {
+    const objectVersion = secureFsFor(root).replace(relPath, null, content)
+    return { relPath, revision: revisionOf(content), objectVersion }
+  } catch (err) {
+    if (err instanceof Error && (err.message === 'CONFLICT' || err.message === 'EEXIST')) throw new VaultPathError('已有同名笔记')
+    throw err
+  }
+}
+
 export async function createFolder(root: string, name: string, parent = ''): Promise<string> {
   verifiedParent(root, parent)
   const folderName = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/^\.+/u, '_') || '未命名文件夹'

@@ -93,6 +93,14 @@ export function loadImported(file = path.join(root, 'test', 'fixtures', 'memory-
   return out
 }
 
+/** 出题纪律的机读告警：材料原文是英文的行必须有中文重述（`gloss`），没有就说出来。
+ *  只说，不改行：题面照出、已复核（导入）行照旧不重问——纪律问题要人自己回去补重述。 */
+export function glossWarnings(cards) {
+  const missing = cards.filter(card => !card.chineseMaterial && !card.gloss)
+  if (!missing.length) return []
+  return [`警告：${missing.length} 行材料是英文但没有中文重述（${missing.map(card => card.caseId).join('、')}）——按题面纪律不该这样出题。`]
+}
+
 export function buildCards(runDir, gloss = {}, imported = {}) {
   const files = readdirSync(runDir).filter(name => name.startsWith('result-') && name.endsWith('.json')).sort()
   const annotated = new Set()
@@ -258,8 +266,10 @@ function main() {
   const cards = buildCards(runDir, gloss, loadImported())
   const annotation = readdirSync(runDir).find(name => name.startsWith('annotation') && name.endsWith('.json'))
   const frozenHash = annotation ? readJson(path.join(runDir, annotation)).frozenHash : null
-  const missingGloss = cards.filter(card => !card.chineseMaterial && !card.gloss)
-  if (missingGloss.length) process.stdout.write(`警告：${missingGloss.length} 行材料是英文但没有中文重述（${missingGloss.map(card => card.caseId).join('、')}）——按题面纪律不该这样出题。\n`)
+  // 英文材料行缺中文重述：真的告警——标准输出一行一条，同时写进跟随产物留下的生成日志。
+  const warnings = glossWarnings(cards)
+  for (const warning of warnings) process.stdout.write(`${warning}\n`)
+  if (warnings.length) writeFileSync(path.join(outDir, 'generation.log'), `${warnings.join('\n')}\n`)
   writeFileSync(path.join(outDir, 'index.html'), renderPack(cards, { run: runDir, frozenHash }))
   writeFileSync(path.join(outDir, 'answers.template.json'), JSON.stringify({
     version: 1, protocol: '全卷人工语义复核：只看材料与系统终态，不看试卷期望与 Agent 判定',
@@ -268,7 +278,7 @@ function main() {
       ? { key: card.key, caseId: card.caseId, round: card.round, acceptable: card.imported.acceptable, missing: card.imported.missing ?? '', shouldNot: card.imported.shouldNot ?? '', note: card.imported.note ?? '', importedFrom: card.imported.source }
       : { key: card.key, caseId: card.caseId, round: card.round, acceptable: '', missing: '', shouldNot: '', note: '' })
   }, null, 2))
-  process.stdout.write(`复核包已生成：${path.join(outDir, 'index.html')}（${cards.length} 行）\n`)
+  process.stdout.write(`复核包已生成：${path.join(outDir, 'index.html')}（${cards.length} 行${warnings.length ? `；${warnings.length} 行材料是英文但没有中文重述，见 generation.log` : ''}）\n`)
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main()

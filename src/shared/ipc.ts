@@ -30,6 +30,8 @@ export const IPC = {
   lifecycleFlushDone: 'lifecycle:flush-done',
   lifecycleStatus: 'lifecycle:status',
   lifecycleRetry: 'lifecycle:retry',
+  recoveryScan: 'lifecycle:recovery-scan',
+  recoveryConfirm: 'lifecycle:recovery-confirm',
   noteExternalChange: 'note:external-change',
   vaultLost: 'vault:lost',
   menuOpenVault: 'menu:open-vault',
@@ -224,6 +226,8 @@ export type TreeEntry = {
   tier?: 'follow' | 'forbidden'
   /** Companion owner resolved by the native library service; display metadata only. */
   attachmentOf?: string
+  /** 外部消失但尚未核验恢复；显示标记，不是授权。 */
+  recovery?: boolean
   children?: TreeEntry[]
 }
 
@@ -306,6 +310,17 @@ export type NoteWriteResult = {
   ok: false
   error: 'CONFLICT' | 'BAD_PATH' | 'NO_VAULT' | 'NOTE_BUSY' | 'IO_ERROR' | 'NOTE_MISSING' | 'NOTE_REPLACED' | 'NOTE_UNREADABLE' | 'VAULT_CHANGED' | 'LEDGER_BOUNDARY_INVALID' | 'LIFECYCLE_RECOVERY_REQUIRED'
 }
+
+/** 外部消失与恢复核验：只有全部分支判据通过才 `restored`；其余分支如实上报并保持失效。 */
+export type RecoveryVerdict =
+  | 'restored' | 'still-missing' | 'object-replaced' | 'content-changed'
+  | 'attachments-missing' | 'attachments-changed' | 'permission-denied' | 'permission-changed' | 'ledger-unverified'
+export type RecoveryRow = { relPath: string; verdict: RecoveryVerdict; message: string; canRestore: boolean }
+export type RecoveryScanView = { sessionId: string; rows: RecoveryRow[] }
+export type RecoveryScanRequest = { sessionId: string }
+export type RecoveryScanResult = { ok: true; value: RecoveryScanView } | { ok: false; error: string }
+export type RecoveryConfirmRequest = { sessionId: string; relPath: string }
+export type RecoveryConfirmResult = { ok: true; verdict: RecoveryVerdict; restored: boolean; message: string } | { ok: false; error: string }
 
 export type FlushDonePayload = {
   ok: boolean

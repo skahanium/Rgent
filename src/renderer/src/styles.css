@@ -757,6 +757,8 @@ a[href]:focus-visible,
 .resource-scroll .tree-row { min-height: 34px; }
 .attachment-folder .tree-label { line-height: 1.4; }
 .attachment-label { display: block; color: var(--text-muted); font-size: .7rem; font-weight: 400; overflow: hidden; text-overflow: ellipsis; }
+/* 外部消失未核验：只是如实标记，不是授权。 */
+.tree-recovery { display: block; color: var(--warning, var(--text-muted)); font-size: .7rem; font-weight: 400; }
 
 /* 文件夹平时是文件夹图标，悬停或聚焦时同一位置换成展开／折叠的图标。 */
 .tree-dir .icon-folder-open { display: none; }

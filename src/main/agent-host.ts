@@ -50,6 +50,10 @@ export type HostStart = Partial<ObjectBinding> & {
   memorySearchAuthorized?:boolean
   /** 本场技能快照的预览签名；同样只由主进程签发。 */
   skillsSignature?: string
+  /** 授权／预览时冻结的那一份技能集合：系统提示块与账本记录都取自它。
+   *  只由主进程随 `skillsSignature` 一起给出；发送路径不得再回存储重算——
+   *  否则「亚秒级 A→B→A 双编辑」能让 B 的正文搭 A 的预览签名发出去。 */
+  skillsSnapshot?: FrozenSkills
   relPath: string
   range: SourceRange
   expectedText: string
@@ -113,7 +117,7 @@ export type HostDependencies = {
   attachmentFolder?: (relPath: string) => Promise<string | null> | string | null
   /** 一个助手的设备级习惯；任务启动时取一次快照，运行中改动只影响新任务。 */
   assistant?: () => AssistantHabits | null
-  /** 本库启用的技能；同样在任务启动时冻结一次，运行中编辑只影响下一场。 */
+  /** 兜底读取本库技能：只在调用方没给预览快照时用（生产路径一律给快照，见 `HostStart.skillsSnapshot`）。 */
   skills?: () => FrozenSkills | null
   emit: (event: HostEvent) => void
 }
@@ -324,7 +328,10 @@ export class AgentHost {
       }
       const credential = grant?.credential ?? this.deps.credential()
       const limits = grant?.limits ?? this.deps.limits()
-      const skills = this.deps.skills?.() ?? null
+      // 技能集合只认授权／预览时冻结的那一份：有主进程签发的签名就必须配同一份快照，
+      // 对不上即拒。`deps.skills` 只留给没有预览签名的宿主（测试夹具）。
+      const skills = input.skillsSnapshot ?? this.deps.skills?.() ?? null
+      if (input.skillsSignature !== undefined && skills?.signature !== input.skillsSignature) throw Error('STALE_PREVIEW')
       if (grant) encodeLedgerProvenance({ version: 1, model: { provider: credential.provider, modelId: credential.modelId, endpointHost: new URL(credential.baseURL).host }, scope: grant.sources.map(source => source.relPath), sources: [], tools: [], sentSources: [], ...(skills?.record.length ? { skills: skills.record } : {}) })
       const prepared=await this.deps.prepareSource?.(input,grant)
       const original = await this.deps.read(input.relPath)

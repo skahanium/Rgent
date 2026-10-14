@@ -38,6 +38,14 @@ it('explains a semantic duplicate standing proposal without claiming the fact co
  expect(memoryErrorText('MEMORY_SEMANTIC_DUPLICATE')).toContain('未另行保存')
 })
 
+it('keeps the new program-side container codes readable in the shared map',()=>{
+ for(const [code,fragment] of [['MEMORY_SEMANTIC_RESCOPED','已按项目事实保存'],['MEMORY_SEMANTIC_DUPLICATE','未另行保存'],['MEMORY_TEMPORARY_STANDING','接续形口令']] as const){
+  expect(MEMORY_ERROR_CODES).toContain(code)
+  expect(memoryErrorText(code)).toContain(fragment)
+  expect(memoryErrorText(code)).not.toContain(code)
+ }
+})
+
 it('does not claim that every result was lost or invent the automatic retry count',()=>{
  for(const code of ['MEMORY_SERVICE_FAILED','MEMORY_OUTPUT_EMPTY','MEMORY_OUTPUT_TRUNCATED','MEMORY_OUTPUT_TOKEN_LIMIT','MEMORY_OUTPUT_LIMIT','MEMORY_DEADLINE']){
   expect(memoryErrorText(code)).not.toMatch(/本次未写入|没有写入新内容|未提交新记忆|未提交本次结果|没有自动重试/)

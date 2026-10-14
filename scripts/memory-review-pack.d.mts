@@ -36,5 +36,7 @@ export function buildCards(runDir: string, gloss?: Record<string, string>, impor
 export function annotationOf(card: ReviewCard, answer: ReviewAnswer, bindings: { rulesHash: string; resultHash: string; frozenHash: string }, rubricVersion: number, units?: number): ReviewAnnotation | null
 export type ImportedVerdict = { caseId: string; round: number; acceptable: string; missing?: string; shouldNot?: string; note?: string; source?: string; importedAt?: string }
 export function loadImported(file?: string): Record<string, ImportedVerdict>
+/** 英文材料行缺中文重述时的告警文案；没有缺就是空数组（只说，不改行）。 */
+export function glossWarnings(cards: ReviewCard[]): string[]
 export function convertAnswers(runDir: string, answers: { rows?: ReviewAnswer[] }, gloss?: Record<string, string>, imported?: Record<string, ImportedVerdict>): { converted: ReviewAnnotation[]; skipped: { key: string; why: string }[]; rubricVersion: number }
 export function renderPack(cards: ReviewCard[], meta: { run: string; frozenHash: string | null }): string

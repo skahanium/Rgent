@@ -159,6 +159,15 @@ export function createFileBrowser(host: HTMLElement, options: BrowserOptions): F
     row.append(icon(entry.kind === 'dir' ? 'folder' : iconForFile(entry.name), 'icon-type'))
     const label = document.createElement('span'); label.className = 'tree-label'; label.textContent = entry.kind === 'note' ? titleOf(entry.name) : entry.name
     row.append(label); row.title = entry.relPath; addBadge(row, entry.tier)
+    // 外部消失未核验：树上是如实标记，不是授权；入口在设置「笔记库」。
+    if (entry.recovery) {
+      row.dataset.recoveryPending = 'true'
+      const marker = document.createElement('span')
+      marker.className = 'tree-recovery'
+      marker.textContent = '待核验'
+      marker.title = '此对象曾在库外消失：核验通过前不自动保存、也不供 AI 使用。'
+      label.append(marker)
+    }
     if (entry.kind === 'dir') {
       const owner = attachmentOwners.get(entry.relPath)
       if (owner) {

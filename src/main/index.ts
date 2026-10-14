@@ -101,7 +101,9 @@ const memoryIpc = createMemoryIpc({
   }
 })
 let cancellingForClose = false
-const memoryAuthorizationPreviews = new Map<string, { sessionId: string; signature: string;search:boolean;skillsSignature:string }>()
+/** 预览时冻结的那一份技能集合随预览一起留存：启动只许发这一份，不再回存储重算。
+ *  只留签名不够——亚秒级 A→B→A 双编辑能让启动路径读到 B 的正文、而两端的签名都还是 A。 */
+const memoryAuthorizationPreviews = new Map<string, { sessionId: string; signature: string;search:boolean;skills:import('./skills.ts').FrozenSkills }>()
 /** 「建」的人确认：主进程签发请求，渲染层只回是否同意；换库或关窗一律按不建结清。 */
 const pendingWriteConfirms = new Map<string, { sessionId: string; settle: (approved: boolean) => void }>()
 function clearWriteConfirms(): void {
@@ -483,7 +485,7 @@ function registerIpc(): void {
       if (!trusted(event)) throw new Error('BAD_SENDER')
       const current = vault,session = current?.sessionId() ?? null
       const actual = isVaultChannel(channel) ? boundArguments(args, session) : args
-      if (vaultSwitch?.busy && [IPC.agentStart, IPC.agentAuthorizationPreview, IPC.noteCreate, IPC.folderCreate, IPC.relocationPreview, IPC.relocationCommit, IPC.lifecycleRetry, IPC.noteSaveCopyPreview, IPC.noteSaveCopyCommit, IPC.permissionsSet, IPC.memoryConfigSave, IPC.memoryPreviewCommit, IPC.memoryItemEdit, IPC.memoryItemDisable, IPC.memoryItemForget, IPC.memoryJobRetryPreview, IPC.skillsSave, IPC.skillsSetEnabled, IPC.agentWriteConfirm, IPC.ledgerMaintenance, IPC.ledgerMigrate, IPC.ledgerRepair].includes(channel as never)) throw Error('VAULT_SWITCH_BUSY')
+      if (vaultSwitch?.busy && [IPC.agentStart, IPC.agentAuthorizationPreview, IPC.noteCreate, IPC.folderCreate, IPC.relocationPreview, IPC.relocationCommit, IPC.lifecycleRetry, IPC.recoveryScan, IPC.recoveryConfirm, IPC.noteSaveCopyPreview, IPC.noteSaveCopyCommit, IPC.permissionsSet, IPC.memoryConfigSave, IPC.memoryPreviewCommit, IPC.memoryItemEdit, IPC.memoryItemDisable, IPC.memoryItemForget, IPC.memoryJobRetryPreview, IPC.skillsSave, IPC.skillsSetEnabled, IPC.agentWriteConfirm, IPC.ledgerMaintenance, IPC.ledgerMigrate, IPC.ledgerRepair].includes(channel as never)) throw Error('VAULT_SWITCH_BUSY')
       const result = isVaultChannel(channel) && current ? await current.runBound(session, () => listener(event, ...actual)) : await listener(event, ...actual)
       if (isVaultChannel(channel) && session !== (vault?.sessionId() ?? null)) throw Error('VAULT_CHANGED')
       return result
@@ -686,8 +688,9 @@ function registerIpc(): void {
       if (memoryAuthorizationState(request.sessionId).signature !== memory.signature) throw Error('STALE_PREVIEW')
       if (memoryAuthorizationPreviews.size >= 128) memoryAuthorizationPreviews.delete(memoryAuthorizationPreviews.keys().next().value!)
       // 预览只带技能名称：正文、字数与展开都不给——合同把「可审」交给账本的名称与哈希。
+      // 冻结的那一份正文随预览留存（人看不到，但启动时发出去的就是它）。
       const skills = currentSkills()
-      memoryAuthorizationPreviews.set(`${owner}:${preview.id}`, { sessionId: request.sessionId, signature: memory.signature,search:memorySearch,skillsSignature:skills.signature })
+      memoryAuthorizationPreviews.set(`${owner}:${preview.id}`, { sessionId: request.sessionId, signature: memory.signature,search:memorySearch,skills })
       const chapters=await vault!.ledgerContexts(request.relPath),note=await vault!.read(request.relPath)
       const validMemories=memory.disclosure?.use?await workingService()!.entries():[]
       const policy=await historicalContextPolicy(note.content,async dep=>preview.sources.some(s=>s.relPath===dep.relPath&&s.objectVersion===dep.objectVersion&&s.fingerprint===dep.bodyHash),undefined,chapters,async dep=>validMemories.some(e=>e.status==='active'&&sameMemoryDependency(dep,memoryDependency(e))))
@@ -723,8 +726,9 @@ function registerIpc(): void {
       const memory = memoryAuthorizationPreviews.get(`${owner}:${request.previewId}`)
       memoryAuthorizationPreviews.delete(`${owner}:${request.previewId}`)
       if (!memory || memory.sessionId !== request.sessionId || memory.signature !== memoryAuthorizationState(request.sessionId).signature) throw Error('STALE_PREVIEW')
-      if (memory.skillsSignature !== currentSkills().signature) throw Error('STALE_PREVIEW')
-      const task = await agentHost.start({...request as AgentStartRequest, authorizationOwner:`${event.sender.id}:${event.senderFrame!.routingId}`, memoryAuthorizationSignature: memory.signature,memorySearchAuthorized:memory.search,skillsSignature:memory.skillsSignature})
+      // 技能库在预览与启动之间变过（签名不同）就拒绝；没变则**发预览冻结的那一份正文**。
+      if (memory.skills.signature !== currentSkills().signature) throw Error('STALE_PREVIEW')
+      const task = await agentHost.start({...request as AgentStartRequest, authorizationOwner:`${event.sender.id}:${event.senderFrame!.routingId}`, memoryAuthorizationSignature: memory.signature,memorySearchAuthorized:memory.search,skillsSignature:memory.skills.signature,skillsSnapshot:memory.skills})
       void task.done.catch(() => {})
       return { ok: true, id: task.id }
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'AGENT_START_FAILED' } }
@@ -960,6 +964,27 @@ function registerIpc(): void {
       })
       return {ok:true,value:result}
     }catch(error){const code=error instanceof Error?error.message:'';return {ok:false,error:['BAD_REQUEST','STALE_PREVIEW','STALE_RECOVERY','VAULT_CHANGED','STRUCTURE_BUSY','UNSAVED_DRAFT','PERMISSIONS_INVALID','LEDGER_RECOVERY_AMBIGUOUS','LEDGER_REGISTRY_INVALID','LIFECYCLE_RECOVERY_REQUIRED'].includes(code)?code:'LEDGER_REGISTRY_INVALID'}}
+  })
+  // 外部消失的重扫与核验恢复：只有人能点，判据全在库层；这里不加任何删除或替代路径。
+  registerTrustedHandle(IPC.recoveryScan,async(_event,value:unknown):Promise<import('../shared/ipc.ts').RecoveryScanResult>=>{
+    const current=vault
+    try{
+      if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
+      const r=value as Record<string,unknown>
+      if(Object.keys(r).sort().join()!=='sessionId'||typeof r.sessionId!=='string')throw Error('BAD_REQUEST')
+      if(!current)throw Error('NO_VAULT');current.assertSession(r.sessionId)
+      return {ok:true,value:await current.recoveryScan()}
+    }catch(error){const code=error instanceof Error?error.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED','LIFECYCLE_RECOVERY_REQUIRED','MISSING_RECORD_LIMIT'].includes(code)?code:'RECOVERY_UNAVAILABLE'}}
+  })
+  registerTrustedHandle(IPC.recoveryConfirm,async(_event,value:unknown):Promise<import('../shared/ipc.ts').RecoveryConfirmResult>=>{
+    const current=vault
+    try{
+      if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
+      const r=value as Record<string,unknown>
+      if(Object.keys(r).sort().join()!=='relPath,sessionId'||typeof r.sessionId!=='string'||typeof r.relPath!=='string'||r.relPath.length>4096)throw Error('BAD_REQUEST')
+      if(!current)throw Error('NO_VAULT');current.assertSession(r.sessionId)
+      return {ok:true,...await current.recoveryConfirm(r.relPath)}
+    }catch(error){const code=error instanceof Error?error.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED','STALE_PREVIEW','LIFECYCLE_RECOVERY_REQUIRED'].includes(code)?code:'RECOVERY_UNAVAILABLE'}}
   })
   registerTrustedHandle(IPC.ledgerReasoning,async(_event,value:unknown):Promise<import('../shared/ledger.ts').LedgerReasoningResult>=>{
     const current=vault
@@ -1406,13 +1431,11 @@ if (ownsInstance) app.whenReady().then(() => {
     // AI 的结构操作走同一条共用迁移路径（含引用修复与权限不放宽），不另造实现。
     relocationPreview: (request, owner) => relocationPreviewShared({ kind: request.kind, source: request.source, target: request.target }, owner),
     relocationCommit: (previewId, repairLinks, owner) => relocationCommitShared(previewId, repairLinks, owner),
+    // 「建」一次落盘：正文与文件原子出现，不先建空笔记再写（写失败会留下没法清理的半成品）。
     createNote: async (relPath, body) => {
       if (!vault) throw Error('NO_VAULT')
       const at = relPath.lastIndexOf('/')
-      const created = await vault.create(at < 0 ? relPath : relPath.slice(at + 1), at < 0 ? '' : relPath.slice(0, at))
-      const snapshot = await vault.readOpened(created)
-      const revision = await vault.write(created, body, snapshot.revision, snapshot as never)
-      return { relPath: created, revision: typeof revision === 'string' ? revision : revision.revision, objectVersion: typeof revision === 'string' ? snapshot.objectVersion : revision.objectVersion }
+      return vault.createWithContent(at < 0 ? relPath : relPath.slice(at + 1), at < 0 ? '' : relPath.slice(0, at), body)
     },
     attachmentFolder: async relPath => {
       const root = vault?.requireUsableRoot()

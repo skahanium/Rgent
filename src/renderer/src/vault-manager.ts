@@ -1,12 +1,13 @@
 import { LEDGER_ERROR_MESSAGES, ledgerErrorText } from '../../shared/ledger-errors.ts'
 import type { LedgerRepairRequest, LedgerRepairResult, LedgerRecoveryView } from '../../shared/ledger.ts'
-import type { LifecycleStatus } from '../../shared/ipc.ts'
+import type { LifecycleStatus, RecoveryConfirmResult, RecoveryScanResult, RecoveryScanView, RecoveryVerdict } from '../../shared/ipc.ts'
 import type { VaultCatalogEntry, VaultCatalogView, VaultRootPreview, VaultCatalogChangeRequest, VaultCatalogChangeResult } from '../../shared/vault-management'
 import { icon, type IconName } from './icons'
 
 type Catalog = VaultCatalogChangeResult & { activeId?: string | null; activeUnavailable?:boolean }
 export type VaultManagerHandlers = {
   recovery?: {state():Promise<LifecycleStatus>;repair(request:LedgerRepairRequest):Promise<LedgerRepairResult>}
+  externalRecovery?: {scan():Promise<RecoveryScanResult>;confirm(relPath:string):Promise<RecoveryConfirmResult>}
   get(): Promise<Catalog>
   open(id: string): Promise<void>
   pick(create: boolean): Promise<void>
@@ -85,10 +86,47 @@ export function mountVaultManager(context: {
   }
   if(handlers.recovery)void handlers.recovery.state().then(state=>{if(alive()){recoveryState=state;showRecovery()}},()=>{if(alive()){recovery.hidden=false;recoveryMessage.textContent='当前库的恢复状态无法读取，请重新打开本页。'}})
 
+  // 外部消失（在库外被删或移走）的对象：只核验、只上报，不提供删除或替代路径。
+  const external = element('section','vault-settings-recovery');external.hidden=true
+  const externalMessage=element('p','vault-settings-hint'),externalRows=element('ul',''),externalActions=element('div','vault-settings-shortcuts')
+  external.append(element('h3','','外部消失与恢复核验'),externalMessage,externalRows,externalActions);root.append(external)
+  let externalView:RecoveryScanView|null=null
+  const verdictLabels:Record<RecoveryVerdict,string>={restored:'可以核验恢复','still-missing':'仍在库外','object-replaced':'原路径换成了另一个对象','content-changed':'内容已变','attachments-missing':'附件夹缺失（降级）','attachments-changed':'附件子树已变','permission-denied':'权限档禁止','permission-changed':'权限档与记录不一致','ledger-unverified':'账本登记无法核验'}
+  function showExternal(){
+    externalRows.replaceChildren();externalActions.replaceChildren()
+    if(!externalView)return
+    external.hidden=false
+    if(externalView.rows.length===0){externalMessage.textContent='没有已登记对象在库外消失。恢复由人在访达／资源管理器执行，这里只做核验。';externalActions.append(rescan);return}
+    externalMessage.textContent='这些对象曾在库外消失。来源对 AI 保持失效，记忆不会被自动遗忘；只有内容、同名附件夹与权限档都与记录一致才恢复可用。'
+    for(const row of externalView.rows){
+      const item=element('li','',`${row.relPath} · ${verdictLabels[row.verdict]}：${row.message}`)
+      item.dataset.recoveryVerdict=row.verdict
+      if(row.canRestore){const confirm=button('核验并恢复',()=>{void run('正在核验恢复…',async()=>{
+        const result=await handlers.externalRecovery!.confirm(row.relPath)
+        if(!alive())return
+        if(!result.ok)throw Error(result.error)
+        await rescanRows()
+        status.textContent=result.message
+      })});confirm.dataset.recoveryConfirm=row.relPath;item.append(confirm)}
+      externalRows.append(item)
+    }
+    externalActions.append(rescan)
+  }
+  async function rescanRows():Promise<void>{
+    const result=await handlers.externalRecovery!.scan()
+    if(!alive())return
+    if(!result.ok)throw Error(result.error)
+    externalView=result.value;showExternal()
+  }
+  const rescan=button('重扫并核验恢复',()=>{void run('正在重扫核验…',async()=>{await rescanRows();if(alive())status.textContent='重扫完成。'})})
+  rescan.dataset.recoveryScan='true'
+  if(handlers.externalRecovery){external.hidden=false;externalMessage.textContent='可重扫并核验外部消失的对象。';externalActions.append(rescan)}
+
   function refreshControls(): void {
     root.setAttribute('aria-busy', String(busy))
     open.disabled = busy; create.disabled = busy
     for(const action of recoveryActions.querySelectorAll<HTMLButtonElement>('button'))action.disabled=busy||action.dataset.recoveryRefused==='true'
+    for(const action of externalActions.querySelectorAll<HTMLButtonElement>('button'))action.disabled=busy
     for (const row of rows.values()) {
       for (const action of row.root.querySelectorAll<HTMLButtonElement>('button')) action.disabled = busy
       row.input.disabled = busy

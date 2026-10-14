@@ -52,7 +52,8 @@ const LIFECYCLE_ERRORS: Record<string, string> = {
   UNSAVED_DRAFT: '有草稿尚未保存，请先处理保存冲突。',
   PREVIOUS_TASK_UNSAVED: '运行任务的内容尚未保存，请先处理再修改文件位置。',
   LIFECYCLE_RECOVERY_REQUIRED: '文件操作中断且无法自动核对。恢复记录仍在库中；AI 访问已暂停，请人工检查。',
-  STRUCTURE_BUSY: '另一个文件位置操作正在进行，请稍后重试。'
+  STRUCTURE_BUSY: '另一个文件位置操作正在进行，请稍后重试。',
+  PATH_RESERVED: '这个路径的原笔记曾在库外消失。请先在设置「笔记库」核验恢复，再决定是否复用该名称。'
 }
 const lifecycleErrorText = (error: unknown): string => {
   const message = error instanceof Error ? error.message : String(error)
@@ -216,6 +217,15 @@ export async function start(root: HTMLElement): Promise<void> {
   const settingsOverlay = createSettingsOverlay({
     vault: {
       recovery:{state:()=>window.rgent.lifecycleStatus(),repair:async request=>{const result=await window.rgent.ledgerRepair(request);await refreshLifecycle();return result}},
+      // 外部消失的重扫与核验：只有人能点，成功恢复后重读树与已开窗口，让对象重新可用。
+      externalRecovery:{
+        scan:async()=>vaultSession?window.rgent.recoveryScan({sessionId:vaultSession}):{ok:false,error:'NO_VAULT'} as const,
+        confirm:async relPath=>{
+          const result:import('../../shared/ipc.ts').RecoveryConfirmResult=vaultSession?await window.rgent.recoveryConfirm({sessionId:vaultSession,relPath}):{ok:false,error:'NO_VAULT'}
+          if(result.ok&&result.restored){await refreshTree();await checkOpenNotes()}
+          return result
+        }
+      },
       get: () => window.rgent.vaultCatalog(),
       open: id => changeVault(() => window.rgent.vaultOpen(id)),
       pick: create => changeVault(() => window.rgent.vaultPick(create)),

@@ -47,7 +47,23 @@ type PendingMove = {
 export type RepairWrite={path:string;before:string|null;beforeId:string|null;after:string;receipt?:string}
 export type MemoryRecoveryPlan={beforeHash:string;beforeId:string;afterHash:string;patches:MemoryRecoveryPatch[];receipt?:string}
 export type PendingLedgerRepair={kind:'ledger-repair';rootIdentity:string;sessionId:string;mode:'rebuild'|'restore';fingerprints:Fingerprint[];writes:RepairWrite[];permissionRaw:string|null;memory?:MemoryRecoveryPlan}
-type Journal = { version: 1; active: PendingMove | PendingLedgerRepair | LedgerPublication | null }
+/** 附件证据沿用登记记录（`LedgerOwner.recoveryEvidence`）的既有字段形状。 */
+export type MissingAttachment = { relPath: string; kind: 'file' | 'dir'; hash?: string }
+/** 外部消失（对象在库外被删或移走）的生命周期记录。字段取自既有登记：身份、内容哈希、
+ *  附件证据与消失时的权限档。写在同一本 `.rgent-lifecycle` 的 version 1 信封里，不新增
+ *  存储格式；不占用 `active`——`active` 仍是待恢复的中断，只由移动与账本恢复占用。 */
+export type MissingObject = {
+  relPath: string
+  noteId: string
+  objectVersion: string
+  bodyRevision: string
+  attachments: MissingAttachment[]
+  rootIdentity: string
+  permissionTier: import('../shared/ipc.ts').PermissionTier
+  detectedAt: string
+}
+type Journal = { version: 1; active: PendingMove | PendingLedgerRepair | LedgerPublication | null; missing?: MissingObject[] }
+const MISSING_LIMIT = 64
 
 function validPath(relPath: string, allowHidden = false): boolean {
   if (!relPath || relPath.startsWith('/') || relPath.includes('\\') || (!allowHidden && hasHiddenSegment(relPath))) return false
@@ -134,6 +150,59 @@ export class VaultLifecycle {
   }
 
   peek(id: string): RelocationPreview | null { return this.previews.get(id)?.view ?? null }
+
+  /** 未核验的外部消失记录；只读，不改变 `active` 的中断语义。 */
+  missingObjects(): MissingObject[] {
+    this.assertCurrent()
+    return (this.loadJournal().missing ?? []).map((item) => structuredClone(item))
+  }
+
+  /** 有记录的对象在核验通过前不继承身份：来源核验、任务绑定与写回一律失败关闭。 */
+  hasMissing(relPath: string): boolean {
+    this.assertCurrent()
+    return (this.loadJournal().missing ?? []).some((item) => item.relPath === relPath)
+  }
+
+  /** 登记只按原字节 CAS 追加，不经过队列，也不覆盖既有记录（最早那次的外部消失证据保留）。 */
+  recordMissing(entry: MissingObject): boolean {
+    this.assertCurrent()
+    if (!validMissing(entry)) throw new Error('BAD_REQUEST')
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const raw = this.readOptional(JOURNAL)
+      const journal = parseJournal(raw)
+      if (journal.active) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      const missing = journal.missing ?? []
+      if (missing.some((item) => item.relPath === entry.relPath)) return false
+      if (missing.length >= MISSING_LIMIT) throw new Error('MISSING_RECORD_LIMIT')
+      try {
+        this.saveJournal({ version: 1, active: null, missing: [...missing, entry] }, raw)
+        return true
+      } catch (error) {
+        if (attempt === 2) throw error
+      }
+    }
+    return false
+  }
+
+  /** 核验通过才清除记录；清除后该路径重新回到既有的对象身份判据。 */
+  clearMissing(relPath: string): boolean {
+    this.assertCurrent()
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const raw = this.readOptional(JOURNAL)
+      const journal = parseJournal(raw)
+      if (journal.active) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      const missing = journal.missing ?? []
+      if (!missing.some((item) => item.relPath === relPath)) return false
+      const next = missing.filter((item) => item.relPath !== relPath)
+      try {
+        this.saveJournal({ version: 1, active: null, missing: next }, raw)
+        return true
+      } catch (error) {
+        if (attempt === 2) throw error
+      }
+    }
+    return false
+  }
 
   async preview(input: RelocationRequest): Promise<RelocationPreview> {
     this.assertCurrent()
@@ -482,7 +551,13 @@ export class VaultLifecycle {
   }
 
   private saveJournal(next: Journal, expected = this.readOptional(JOURNAL)): string {
-    const raw = `${JSON.stringify(next)}\n`
+    // 外部消失记录不随移动／账本恢复的 journal 重写而消失；调用方显式给出 missing 时以它为准。
+    let preserved = next.missing
+    if (preserved === undefined) {
+      try { preserved = parseJournal(expected).missing } catch { preserved = [] }
+    }
+    const payload: Journal = { ...next, ...(preserved?.length ? { missing: preserved } : {}) }
+    const raw = `${JSON.stringify(payload)}\n`
     secureFsFor(this.root).replace(JOURNAL, expected, raw)
     return raw
   }
@@ -616,7 +691,10 @@ function parseJournal(raw: string | null): Journal {
         !('active' in parsed) || ((parsed as Journal).active !== null && !validPending((parsed as Journal).active)&&!validRepair((parsed as Journal).active)&&!validLedgerPublication((parsed as Journal).active))) {
       throw new Error('BAD_JOURNAL')
     }
-    return parsed as Journal
+    const missing = (parsed as Journal).missing
+    if (missing !== undefined && (!Array.isArray(missing) || missing.length > MISSING_LIMIT || !missing.every(validMissing) ||
+        new Set(missing.map((item) => item.relPath)).size !== missing.length)) throw new Error('BAD_JOURNAL')
+    return { version: 1, active: (parsed as Journal).active, ...(missing?.length ? { missing } : {}) }
   } catch { throw new Error('LIFECYCLE_RECOVERY_REQUIRED') }
 }
 
@@ -702,6 +780,24 @@ function validPending(value: unknown): value is PendingMove {
     (item.permissionBefore !== null || item.permissionAfter === null) &&
     (item.permissionAfter !== null || item.permissionBefore === null) &&
     typeof item.repairLinks === 'boolean'
+}
+
+function validMissing(value: unknown): value is MissingObject {
+  if (!value || typeof value !== 'object') return false
+  const item = value as MissingObject
+  if (Object.keys(item).sort().join() !== ['attachments', 'bodyRevision', 'detectedAt', 'noteId', 'objectVersion', 'permissionTier', 'relPath', 'rootIdentity'].sort().join()) return false
+  return validPath(item.relPath) && isNotePath(item.relPath) &&
+    typeof item.noteId === 'string' && item.noteId.length > 0 && item.noteId.length < 128 &&
+    typeof item.objectVersion === 'string' && item.objectVersion.length > 0 && item.objectVersion.length < 512 &&
+    typeof item.bodyRevision === 'string' && /^[a-f0-9]{64}$/.test(item.bodyRevision) &&
+    typeof item.rootIdentity === 'string' && /^\d+:\d+$/.test(item.rootIdentity) &&
+    typeof item.detectedAt === 'string' && Number.isFinite(Date.parse(item.detectedAt)) &&
+    (item.permissionTier === 'reference' || item.permissionTier === 'follow' || item.permissionTier === 'forbidden') &&
+    Array.isArray(item.attachments) && item.attachments.length <= 4096 &&
+    item.attachments.every((part) => !!part && typeof part === 'object' &&
+      typeof part.relPath === 'string' && !part.relPath.split('/').some((name) => !name || name === '.' || name === '..') &&
+      ((part.kind === 'dir' && part.hash === undefined) ||
+        (part.kind === 'file' && typeof part.hash === 'string' && /^[a-f0-9]{64}$/.test(part.hash))))
 }
 
 function validPermissionRaw(raw: unknown): raw is string | null {

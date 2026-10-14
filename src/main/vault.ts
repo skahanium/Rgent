@@ -7,12 +7,12 @@ import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { dialog, type BrowserWindow } from 'electron'
-import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest } from '../shared/ipc.ts'
-import { createFolder, createNote, listVaultTree, parseStoredVault, readNoteSnapshot, requireOrdinaryNotes as verifyOrdinaryNotes, revisionOf, serializeStoredVault, writeNote } from './notes-fs.ts'
+import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, RecoveryRow, RecoveryScanView, RecoveryVerdict, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest } from '../shared/ipc.ts'
+import { createFolder, createNote, createNoteWithBody, listVaultTree, parseStoredVault, readNoteSnapshot, requireOrdinaryNotes as verifyOrdinaryNotes, revisionOf, serializeStoredVault, writeNote } from './notes-fs.ts'
 import { VaultMutationQueue } from './vault-mutation-queue.ts'
-import { VaultLifecycle, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite } from './vault-lifecycle.ts'
+import { VaultLifecycle, type MissingObject, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite } from './vault-lifecycle.ts'
 import { isOwnEcho, type RecentWrite } from './echo.ts'
-import { hasHiddenSegment, isNotePath, resolveInVault } from './paths.ts'
+import { hasHiddenSegment, isNotePath, resolveInVault, sanitizeNoteName } from './paths.ts'
 import { effectivePermissionEntries, loadPermissions, loadPermissionSnapshot, modelTierFor, setPermission as savePermission, tierFor } from './permissions.ts'
 import type { TaskGrant } from './task-authorization.ts'
 import { closeSecureFs, secureFsFor } from './secure-fs.ts'
@@ -195,6 +195,10 @@ export class VaultSession {
     const policy = await loadPermissions(root)
     this.assertSession(token); this.requireUsableRoot()
     if (policy.status === 'ready') markTiers(entries, effectivePermissionEntries(root, policy.entries))
+    // 标记只是显示：记录读不了也不该让整棵树打不开，失败关闭仍由对象与来源判据负责。
+    let missing: readonly { relPath: string }[] = []
+    try { missing = this.lifecycle?.missingObjects() ?? [] } catch { missing = [] }
+    markRecovery(entries, missing)
     return entries
   }
 
@@ -448,12 +452,16 @@ export class VaultSession {
       return snapshot
     } catch (error) {
       this.assertSession(token)
-      throw noteReadError(error)
+      const failure = noteReadError(error)
+      if (failure.message === 'NOTE_MISSING') await this.recordExternalDisappearance(relPath)
+      throw failure
     }
   }
 
   acceptsObject(relPath: string, expected: string, current: string): boolean {
     this.assertCall()
+    // 外部消失且尚未核验恢复的对象不继承身份：来源核验、任务绑定与写回一律失败关闭。
+    if (this.missingRecord(relPath)) return false
     const seen = new Set<string>()
     const links = this.successors.get(relPath)
     while (!seen.has(expected)) {
@@ -464,6 +472,134 @@ export class VaultSession {
       expected = next
     }
     return false
+  }
+
+  /** 未核验的外部消失记录。记录本身读不了就失败关闭；库根不可用不是记录问题，
+   *  交给既有的 NOTE_UNREADABLE 路径，也不在这里预先打开库根句柄。 */
+  private missingRecord(relPath: string): boolean {
+    try { return this.lifecycle?.hasMissing(relPath) ?? false }
+    catch { return this.hasUsableRoot() }
+  }
+
+  /** 外部消失登记一条生命周期记录。字段全部取自既有登记（身份、内容哈希、附件证据、
+   *  消失时的权限档），写进同一本 `.rgent-lifecycle`，不新增存储格式。
+   *  本轮没有程序删除，所以任何路径消失都是外部消失。 */
+  private async recordExternalDisappearance(relPath: string): Promise<void> {
+    try {
+      const root = this.root, ledger = this.ledgerStore
+      if (!root || !ledger || !isNotePath(relPath) || this.lifecycle?.hasMissing(relPath)) return
+      try { secureFsFor(root).resolve(relPath); return }
+      catch (error) { if (!(error instanceof Error && error.message === 'ENOENT')) return }
+      let owners: ReturnType<LedgerStore['recoveryOwners']>['owners']
+      // 只有已登记身份的对象才有可核验的记录；未登记笔记消失不造记录。
+      try { owners = ledger.recoveryOwners().owners } catch { return }
+      const owner = owners.find((item) => item.relPath === relPath)
+      if (!owner) return
+      const snapshot = await loadPermissionSnapshot(root)
+      const effective = snapshot.state.status === 'ready' ? effectivePermissionEntries(root, snapshot.state.entries) : null
+      // 权限名单读不了就按最严档记录：核验时不会冒充通过。
+      const permissionTier: PermissionTier = effective ? tierFor(owner.relPath, effective) : 'forbidden'
+      this.lifecycle?.recordMissing({
+        relPath: owner.relPath, noteId: owner.noteId, objectVersion: owner.objectVersion,
+        bodyRevision: owner.bodyRevision, attachments: owner.recoveryEvidence?.attachments ?? [],
+        rootIdentity: this.rootIdentity ?? vaultRootIdentity(root), permissionTier, detectedAt: new Date().toISOString()
+      })
+    } catch { /* 登记失败不改变既有的失败关闭：读写仍按 NOTE_MISSING 处理。 */ }
+  }
+
+  /** 消失的对象在被核验恢复前占着自己的路径：同路径新建会顶替它的身份，一律拒绝。 */
+  private refuseReservedPath(name: string, parent: string): void {
+    const fileName = sanitizeNoteName(name)
+    if (this.missingRecord(parent ? `${parent}/${fileName}` : fileName)) throw new Error('PATH_RESERVED')
+  }
+
+  /** 只读重扫：清点外部消失的记录，给出核验判据的分支结论。 */
+  async recoveryScan(): Promise<RecoveryScanView> {
+    const token = this.captureSession()
+    await this.lifecycleReady
+    this.assertSession(token)
+    return this.mutations.run(async () => {
+      this.assertSession(token); this.requireUsableRoot()
+      const rows = await this.recoveryRows()
+      this.assertSession(token)
+      return { sessionId: token, rows }
+    })
+  }
+
+  /** 核验通过才清除生命周期记录；不通过则对象与来源继续对 AI 失效，并如实上报分支。 */
+  async recoveryConfirm(relPath: string): Promise<{ verdict: RecoveryVerdict; restored: boolean; message: string }> {
+    const token = this.captureSession()
+    await this.lifecycleReady
+    this.assertSession(token)
+    if (!isNotePath(relPath)) throw new Error('BAD_PATH')
+    return this.mutations.run(async () => {
+      this.assertSession(token); this.requireStableStructure()
+      const row = (await this.recoveryRows()).find((item) => item.relPath === relPath)
+      if (!row) throw new Error('STALE_PREVIEW')
+      if (row.verdict !== 'restored') return { verdict: row.verdict, restored: false, message: row.message }
+      this.assertSession(token)
+      if (!this.lifecycle!.clearMissing(relPath)) throw new Error('STALE_PREVIEW')
+      // 身份连续且登记一致：重新读取以恢复运行时绑定与来源可用。
+      await this.read(relPath)
+      this.assertSession(token)
+      return { verdict: 'restored' as const, restored: true, message: '核验通过：内容、附件与权限档都与记录一致；该对象与相关来源恢复可用。' }
+    })
+  }
+
+  private async recoveryRows(): Promise<RecoveryRow[]> {
+    const root = this.requireUsableRoot(), ledger = this.ledgerStore
+    if (!ledger) return []
+    let owners: ReturnType<LedgerStore['recoveryOwners']>['owners'] | null = null
+    try { owners = ledger.recoveryOwners().owners } catch { owners = null }
+    // 程序不在场时（关闭期间、换库期间）消失的登记对象也要被看见，不能只靠运行时监视。
+    if (owners) for (const owner of owners) {
+      if (this.missingRecord(owner.relPath)) continue
+      try { secureFsFor(root).resolve(owner.relPath); continue }
+      catch (error) { if (!(error instanceof Error && error.message === 'ENOENT')) continue }
+      await this.recordExternalDisappearance(owner.relPath)
+    }
+    const records = this.lifecycle?.missingObjects() ?? []
+    const rows: RecoveryRow[] = []
+    for (const record of records) rows.push(await this.recoveryRow(record, owners))
+    return rows
+  }
+
+  /** 核验判据全部取自既有记录：内容哈希对 `owner.bodyRevision`、附件对既有证据、权限对三档名单。 */
+  private async recoveryRow(record: MissingObject, owners: ReturnType<LedgerStore['recoveryOwners']>['owners'] | null): Promise<RecoveryRow> {
+    const row = (verdict: RecoveryVerdict, message: string, canRestore = false): RecoveryRow => ({ relPath: record.relPath, verdict, message, canRestore })
+    const root = this.requireUsableRoot(), fs = secureFsFor(root), ledger = this.ledgerStore!
+    let current: string | null = null
+    try { current = fs.resolve(record.relPath).at(-1)?.id ?? null }
+    catch (error) { if (!(error instanceof Error && error.message === 'ENOENT')) current = null }
+    if (current === null) return row('still-missing', '文件仍不在原路径。若已从系统废纸篓放回，请重扫本页。')
+    if (current !== record.objectVersion) return row('object-replaced', '原路径现在放着另一个对象（同名替换篇）；同一库根内不继承身份，需要整库恢复才能重新关联。')
+    const owner = owners?.find((item) => item.relPath === record.relPath) ?? null
+    if (!owner || owner.objectVersion !== current) return row('ledger-unverified', '账本登记与当前对象不一致，不能宣告恢复。')
+    if (!owner.recoveryEvidence) return row('ledger-unverified', '该登记缺少库根与附件历史证据，只保留历史；来源继续暂停。')
+    let content: string
+    try { content = fs.readSnapshot(record.relPath).bytes.toString('utf8') }
+    catch { return row('ledger-unverified', '当前无法读取该对象。') }
+    if (revisionOf(content) !== owner.bodyRevision) return row('content-changed', '内容与登记记录不一致；对象与来源对 AI 保持失效，且不自动遗忘记忆。')
+    let attachments: MissingObject['attachments']
+    try { attachments = ledger.attachmentEvidence(record.relPath) }
+    catch { return row('ledger-unverified', '附件子树无法核验。') }
+    const recorded = owner.recoveryEvidence.attachments
+    if (JSON.stringify(attachments) !== JSON.stringify(recorded)) {
+      const stem = record.relPath.slice(0, -3)
+      const hadFolder = recorded.some((part) => part.relPath === stem && part.kind === 'dir')
+      const hasFolder = attachments.some((part) => part.relPath === stem && part.kind === 'dir')
+      if (hadFolder && !hasFolder) return row('attachments-missing', '同名附件夹没有一起放回；这是降级状态，不冒充核验通过。')
+      return row('attachments-changed', '附件子树与登记证据不一致；对象与来源对 AI 保持失效。')
+    }
+    const snapshot = await loadPermissionSnapshot(root)
+    if (snapshot.state.status !== 'ready') return row('permission-denied', '权限名单无法核验，暂不恢复。')
+    const tier = tierFor(record.relPath, effectivePermissionEntries(root, snapshot.state.entries))
+    if (tier === 'forbidden') return row('permission-denied', '当前权限档禁止 AI 使用该笔记。')
+    const labels: Record<PermissionTier, string> = { reference: '参考', follow: '跟随', forbidden: '禁止' }
+    if (tier !== record.permissionTier) return row('permission-changed', `权限档在对象不在时从「${labels[record.permissionTier]}」变成「${labels[tier]}」，按原档恢复的判据不成立。`)
+    const ownership = ledger.inspectOwner(record.relPath)
+    if (!ownership || ownership.status !== 'verified') return row('ledger-unverified', '账本归属无法核验，不能宣告恢复。')
+    return row('restored', '内容、附件与权限档都与记录一致，可以核验恢复。', true)
   }
 
   latestFor(relPath: string, expected: string): NoteSnapshot | null {
@@ -484,13 +620,23 @@ export class VaultSession {
   > {
     this.assertSession(binding.sessionId)
     const base = { sessionId: binding.sessionId, relPath, objectVersion: binding.objectVersion }
+    if (this.missingRecord(relPath)) {
+      // 记录在案的外部消失：文件不在就是 missing；文件已回来但核验未过，不能当作已验证的原对象。
+      let present = false
+      if (this.root && this.hasUsableRoot()) {
+        try { present = !!secureFsFor(this.root).resolve(relPath) } catch { present = false }
+      }
+      return { ...base, status: present ? 'unreadable' : 'missing' }
+    }
     try {
       const snapshot = await this.read(relPath)
       if (!this.acceptsObject(relPath, binding.objectVersion, snapshot.objectVersion)) return { ...base, status: 'replaced' }
       return { status: 'ready', snapshot }
     } catch (error) {
       this.assertSession(binding.sessionId)
-      return { ...base, status: error instanceof Error && error.message === 'NOTE_MISSING' ? 'missing' : 'unreadable' }
+      const missing = error instanceof Error && error.message === 'NOTE_MISSING'
+      if (missing) await this.recordExternalDisappearance(relPath)
+      return { ...base, status: missing ? 'missing' : 'unreadable' }
     }
   }
 
@@ -506,6 +652,12 @@ export class VaultSession {
         this.requireUsableRoot()
         const lifecycle=this.lifecycle?.status()
         if(lifecycle?.status==='invalid'||lifecycle?.operation?.kind==='ledger-repair')throw Error('LIFECYCLE_RECOVERY_REQUIRED')
+        if(this.missingRecord(relPath)){
+          // 写回前检查：外部消失未核验时，路径不在按缺失拒绝，文件已回来也不能当作原对象续写。
+          let present=false
+          try{present=!!secureFsFor(root).resolve(relPath)}catch{/* 路径不在就是缺失 */}
+          throw Error(present?'NOTE_UNREADABLE':'NOTE_MISSING')
+        }
         const current = await readNoteSnapshot(root, relPath)
         this.assertSession(token)
         this.requireUsableRoot()
@@ -524,8 +676,10 @@ export class VaultSession {
         return binding ? { ...saved, sessionId: token } : saved.revision
       } catch (error) {
         this.assertSession(token)
+        const failure=noteReadError(error)
+        if(failure.message==='NOTE_MISSING')await this.recordExternalDisappearance(relPath)
         if (error instanceof Error && ['CONFLICT', 'NOTE_REPLACED', 'LEDGER_BOUNDARY_INVALID', 'LIFECYCLE_RECOVERY_REQUIRED'].includes(error.message)) throw error
-        throw noteReadError(error)
+        throw failure
       }
     })
   }
@@ -755,11 +909,32 @@ export class VaultSession {
     const token = this.captureSession(); const root = this.requireUsableRoot()
     const relPath = await this.mutations.run(async () => {
       this.assertSession(token); this.requireUsableRoot()
+      this.refuseReservedPath(name, parent)
       return createNote(root, name, parent)
     })
     this.assertSession(token); this.requireUsableRoot()
     this.index.markDirty()
     return relPath
+  }
+
+  /** 「建」的原子落地：正文与文件一次出现（库层排他创建），写失败不留空笔记。
+   *  走与 `create` 同一条写入队列与索引失效，不新增删除路径来回收半成品。 */
+  async createWithContent(name: string, parent: string, content: string): Promise<{ relPath: string; revision: string; objectVersion: string }> {
+    const token = this.captureSession(); const root = this.requireUsableRoot()
+    const result = await this.mutations.run(async () => {
+      this.assertSession(token); this.requireUsableRoot()
+      // 与人的写入同一条边界：正文里不许藏着机器账本分区，新笔记不能带着「假历史」出生。
+      if (partitionSource(content).ledger !== null) throw new Error('LEDGER_BOUNDARY_INVALID')
+      this.refuseReservedPath(name, parent)
+      const created = await createNoteWithBody(root, name, parent, content)
+      this.assertSession(token); this.requireUsableRoot()
+      return created
+    })
+    this.assertSession(token); this.requireUsableRoot()
+    this.remember(result.relPath, { content, revision: result.revision, objectVersion: result.objectVersion, sessionId: token })
+    this.lastWrites.set(result.relPath, { revision: result.revision, objectVersion: result.objectVersion, at: Date.now() })
+    this.index.markDirty()
+    return result
   }
 
   async createFolder(name: string, parent = ''): Promise<string> {
@@ -1052,6 +1227,14 @@ function markTiers(entries: TreeEntry[], rules: readonly PermissionEntry[]): voi
     const tier = tierFor(entry.relPath, rules)
     if (tier !== 'reference') entry.tier = tier
     if (entry.children) markTiers(entry.children, rules)
+  }
+}
+
+/** 外部消失未核验的对象在树上如实标记；文件不在时它本就不在列表里。 */
+function markRecovery(entries: TreeEntry[], missing: readonly { relPath: string }[]): void {
+  for (const entry of entries) {
+    if (missing.some((item) => item.relPath === entry.relPath)) entry.recovery = true
+    if (entry.children) markRecovery(entry.children, missing)
   }
 }
 

@@ -175,6 +175,20 @@ describe('write gate · 建', () => {
     const probe = vi.fn()
     expect(probe).not.toHaveBeenCalled()
   })
+
+  it('新建中途失败不留账：不计数、不占额度，重新预览还能建', async () => {
+    const app = harness({ create: async () => { throw Error('IO_ERROR') } })
+    const preview = await app.gate.previewCreate({ name: '新笔记' })
+    const id = (preview as { previewId: string }).previewId
+    expect(await app.gate.commitCreate({ previewId: id, body: '正文' })).toEqual({ ok: false, reason: 'IO_ERROR' })
+    // 半成品没有落盘，也没吃掉额度：篇数与字节都还是 0。
+    expect(app.created).toHaveLength(0)
+    expect(app.gate.state().notes).toBe(0)
+    expect(app.gate.state().bytes).toBe(0)
+    // 令牌一次性（重放被拒是设计），重新预览一次仍然建得出来。
+    expect(await app.gate.commitCreate({ previewId: id, body: '正文' })).toEqual({ ok: false, reason: 'STALE_PREVIEW' })
+    expect((await app.gate.previewCreate({ name: '新笔记' })).ok).toBe(true)
+  })
 })
 
 /** 结构工具（改名／挪）：可动对象、落点、库层权限拒绝的透出、引用修复边界、额度与令牌。 */

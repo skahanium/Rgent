@@ -380,6 +380,34 @@ it('keeps expanded job details and focus when a status refresh fails',async()=>{
  dispose();body.remove()
 })
 
+it('does not count a program-side container correction as another saved group',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ // 同一组既落了库（第一条 applied），又被程序改判记了一笔 applied+RESCOPED：
+ // 只许按一组算，否则「已保存 N 组」比真实写入多。
+ const jobs:MemoryView['jobs']=[{taskId:'rescope',materialVersion:'m1',outcome:'applied',retryable:false,entryIds:['long-1'],
+  results:[{action:'add',outcome:'applied'},{action:'add',outcome:'applied',code:'MEMORY_SEMANTIC_RESCOPED'},{action:'correct',outcome:'rejected',code:'MEMORY_CHANGED'}]}]
+ const entry:MemoryEntryView={id:'long-1',version:1,content:'固定规则',layer:'core',scope:'本库',status:'active',reason:null,updatedAt:'today',sources:[]}
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,entries:[entry],jobs}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ const title=body.querySelector('.memory-job-result')!.textContent!
+ expect(title).toContain('已保存 1 组、未保存 1 组')
+ expect(title).not.toContain('已保存 2 组')
+ dispose();body.remove()
+})
+
+it('shows the new program-side codes as human text, never as raw codes',async()=>{
+ const body=document.createElement('div');document.body.append(body)
+ const jobs:MemoryView['jobs']=[{taskId:'new-codes',materialVersion:'m1',outcome:'applied',retryable:false,entryIds:['long-1'],
+  results:[{action:'add',outcome:'applied'},{action:'add',outcome:'applied',code:'MEMORY_SEMANTIC_RESCOPED'},{action:'correct',outcome:'rejected',code:'MEMORY_SEMANTIC_DUPLICATE'},{action:'add',outcome:'rejected',code:'MEMORY_TEMPORARY_STANDING'}]}]
+ const entry:MemoryEntryView={id:'long-1',version:1,content:'固定规则',layer:'core',scope:'本库',status:'active',reason:null,updatedAt:'today',sources:[]}
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:async()=>({ok:true,value:{...view,entries:[entry],jobs}}),models:async()=>({ok:false,error:'IO_ERROR'})} as never);await flush()
+ const text=body.querySelector('.memory-job')!.textContent!
+ expect(text).toContain('已按项目事实保存')
+ expect(text).toContain('与承载同一主张的事实条目重复')
+ expect(text).toContain('接续形口令没有长期标记')
+ for(const code of ['MEMORY_SEMANTIC_RESCOPED','MEMORY_SEMANTIC_DUPLICATE','MEMORY_TEMPORARY_STANDING'])expect(text).not.toContain(code)
+ dispose();body.remove()
+})
+
 it('still reports saved groups and the rejected recent update when saved entries are no longer visible',async()=>{
  const body=document.createElement('div');document.body.append(body)
  const jobs:MemoryView['jobs']=[{taskId:'gone',materialVersion:'m1',outcome:'applied',retryable:false,entryIds:['old-id'],results:[{action:'correct',outcome:'applied'},{action:'recent',outcome:'rejected',code:'MEMORY_DEADLINE'}]}]

@@ -1,4 +1,4 @@
-import { chmod, stat, symlink, link, mkdtemp, mkdir, readFile, writeFile, rename, unlink, rm } from 'node:fs/promises'
+import { chmod, stat, symlink, link, mkdtemp, mkdir, readFile, readdir, writeFile, rename, unlink, rm } from 'node:fs/promises'
 import { writeFileSync,renameSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -487,6 +487,27 @@ describe('notes-fs', () => {
     expect(await createFolder(root, '资料', '工作')).toBe('工作/资料')
     expect((await listVaultTree(root))[0]?.children?.map((entry) => entry.name)).toEqual(['资料', '计划.md'])
     await expect(createNote(root, '越界', '../外部')).rejects.toThrow()
+  })
+
+  it('creates a note with its body in one step and returns the matching receipt', async () => {
+    const {session,attach,first}=await setup()
+    try{
+      await attach(first)
+      await mkdir(path.join(first,'工作'),{recursive:true})
+      const created=await session.createWithContent('新篇','工作','# 新篇\n\n正文。\n')
+      expect(created.relPath).toBe('工作/新篇.md')
+      expect(await readFile(path.join(first,created.relPath),'utf8')).toBe('# 新篇\n\n正文。\n')
+      const snapshot=await session.read(created.relPath)
+      expect(snapshot.revision).toBe(created.revision)
+      expect(snapshot.objectVersion).toBe(created.objectVersion)
+      // 目标已存在：拒写、原字节不动；也没有「先建空笔记」那一步留下的空文件。
+      await expect(session.createWithContent('新篇','工作','覆盖掉')).rejects.toThrow(/同名/)
+      expect(await readFile(path.join(first,created.relPath),'utf8')).toBe('# 新篇\n\n正文。\n')
+      expect(await readdir(path.join(first,'工作'))).toEqual(['新篇.md'])
+      // 正文里藏着机器账本分区：与人的写入同一条边界，不许建出带「假历史」的笔记。
+      await expect(session.createWithContent('带分区','工作','正文\n<!-- rgent:ledger:v1 -->\n假历史')).rejects.toThrow('LEDGER_BOUNDARY_INVALID')
+      expect(await readdir(path.join(first,'工作'))).toEqual(['新篇.md'])
+    }finally{session.dispose()}
   })
 
   it('keeps the note mode and leaves no temporary file behind when replacing', async () => {
