@@ -26,7 +26,7 @@ export const VETOES = ['wrong-attribution', 'temporary-standing', 'ambiguous-ove
 export const CLASSIFICATION_HAIRCUT = 0.5
 /** 程序规则拒收码：出现这些码才说明“程序拒绝了本可成立的提议”。
  *  MEMORY_OUTPUT_INVALID 不在此列——它表示模型自己的输出不成立。 */
-export const PROGRAM_RULE_CODES = ['MEMORY_DEPENDENCY_CHANGED', 'MEMORY_SOURCE_CHANGED', 'MEMORY_CONFIRMATION_REQUIRED', 'MEMORY_TARGET_NOT_FOUND', 'MEMORY_TEMPORARY_STANDING', 'MEMORY_ROUTED_TO_RECENT']
+export const PROGRAM_RULE_CODES = ['MEMORY_DEPENDENCY_CHANGED', 'MEMORY_SOURCE_CHANGED', 'MEMORY_CONFIRMATION_REQUIRED', 'MEMORY_TARGET_NOT_FOUND', 'MEMORY_TEMPORARY_STANDING', 'MEMORY_ROUTED_TO_RECENT', 'MEMORY_SEMANTIC_RESCOPED']
 /** 非评分终态类别：不进语义分，按未知（下界 0）计。 */
 export const SCORING_CATEGORIES = ['valid', 'safe-empty', 'partial-commit', 'semantic-rejected', 'candidate-rejected']
 export const DIMENSION_FLOORS = { standing: 12, fact: 12, recent: 18, update: 18 }

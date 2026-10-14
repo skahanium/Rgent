@@ -4,7 +4,7 @@ import path from 'node:path'
 import {afterEach,it,expect,vi} from 'vitest'
 import {VaultSession} from '../../src/main/vault.ts'
 import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
-import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions,roleAgreement,inheritInputs,memoryContinuitySystem,protocolRepairPlan,standingEscalationBlocked,suspectSiblingClaim,claimTwinCoverage,scopesCompatible,duplicateClaimContainer,repairFieldLock,workStateShaped} from '../../src/main/working-memory-consolidation.ts'
+import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions,roleAgreement,inheritInputs,memoryContinuitySystem,protocolRepairPlan,standingEscalationBlocked,suspectSiblingClaim,claimTwinCoverage,scopesCompatible,duplicateClaimContainer,repairFieldLock,workStateShaped,semanticScopeMismatch} from '../../src/main/working-memory-consolidation.ts'
 import {sameClaimIgnoringSemantic} from '../../src/main/working-memory-store.ts'
 import type {WorkingSource} from '../../src/main/working-memory-store.ts'
 import {createHash} from 'node:crypto'
@@ -1117,9 +1117,9 @@ it('calibrates the twin-claim coverage threshold on the rev15 run data',()=>{
  // 负类：同一项目／同一范围、主张不同，全部放行。
  for(const [fact,factScope,standing,standingScope] of [
   ['本库的项目记录先写结论再写依据，这是长期要求。','本库项目记录','本库项目记录改成先写依据再写结论，替代原来的顺序。','本库项目记录'],
-  ['青灯项目本轮共五份样稿，数量已清点确认。','青灯项目本轮样稿数量','青灯项目本轮按「先结论再列依据」整理，方便快速过目。','青灯项目本轮工作'],
-  ['本库未来解释默认使用易懂英文。','本库','本库未来中文回答使用简体；引用的繁体原文保留原样。','本库中文输出语言'],
-  ['银桥项目采用 A 方案。','银桥项目','银桥小组的评审规则：先看预算再看美术，归属为合作方银桥小组的流程要求，不属于本人偏好。','合作方银桥小组'],
+  ['青灯项目本轮共五份样稿，数量已清点确认。','青灯项目本轮样稿数量','青灯项目本轮按「先结论再列依据」整理，方便快速过目。','青灯项目本轮工作','fact'],
+  ['本库未来解释默认使用易懂英文。','本库','本库未来中文回答使用简体；引用的繁体原文保留原样。','本库中文输出语言','standing'],
+  ['银桥项目采用 A 方案。','银桥项目','银桥小组的评审规则：先看预算再看美术，归属为合作方银桥小组的流程要求，不属于本人偏好。','合作方银桥小组','standing'],
   // 同名不同指：石桥项目 vs 石桥试验项目 覆盖已过线，靠范围判据挡下。
   ['石桥项目每两周检查一次（替代此前的每周一次）。','石桥项目检查节奏','石桥试验项目每两周检查一次（不是每周）；该节奏由团队于 2026-09-18 确认。','石桥试验项目'],
   // 口令侧构造负例（运行数据里没有逐字对应条目，按同项目不同主张写出）：核对先看版本号、每周五提交评审组、目标。
@@ -1130,6 +1130,71 @@ it('calibrates the twin-claim coverage threshold on the rev15 run data',()=>{
  expect(scopesCompatible('石纹项目','石纹项目评审材料')).toBe(true)
  expect(scopesCompatible('本库','本库项目记录')).toBe(true)
  expect(scopesCompatible('石桥项目检查节奏','石桥试验项目')).toBe(false)
+})
+it('calibrates the container rescope rule on the rev16 terminal entries',()=>{
+ // 数据来源：.cache/memory-quality/2026-10-14-rev16/result-*.json 的 result.entries 终态条目（只读，无模型调用）。
+ // 两轮共 21 条 semantic=standing 的长期条目：18 条 scope 含库级标记（本库／全库／全局／通用／所有／全部），
+ // 都是合法的长期约定；3 条 scope 是具体对象、内容全是项目／本场事实——评测判 attributionAndScope=false 的
+ // 正是这 3 条。下表 n 是实测出现次数（21＝18＋3），text 逐字取自产物；改判据必须让这组断言重新变绿或重新论证。
+ const rows=[
+  {n:3,rescope:false,scope:'本库项目记录',content:'本库的项目记录先写结论再写依据，这是长期要求。'},
+  {n:2,rescope:false,scope:'本库项目记录',content:'本库的项目记录改为先写依据、再写结论，替代原来的先结论后依据顺序，作为长期要求。'},
+  {n:3,rescope:false,scope:'本库所有项目记录',content:'本库的项目记录先写结论再写依据，这是长期要求。'},
+  {n:2,rescope:false,scope:'本库所有项目记录',content:'本库的项目记录先写依据，再给结论，替代原来的顺序。'},
+  {n:1,rescope:false,scope:'本库全部任务说明',content:'本库以后列步骤最多五项，超出时先分阶段。'},
+  {n:1,rescope:false,scope:'本库工作步骤的组织方式',content:'本库列步骤最多五项，超出时先分阶段。'},
+  {n:1,rescope:false,scope:'本库解释表达方式',content:'在本库解释时先给结论，再用一个具体例子。'},
+  {n:1,rescope:false,scope:'本库内的解释与写作表达',content:'在本库解释时先给结论，再举一个例子。'},
+  {n:1,rescope:false,scope:'本库中文回答与引用格式',content:'本库未来中文回答使用简体；引用的繁体原文保留原样。'},
+  {n:1,rescope:false,scope:'本库中文回答与引用格式',content:'本库今后中文回答使用简体；引用的繁体原文保留原样，不擅自转换。'},
+  {n:2,rescope:false,scope:'本库',content:'本库未来解释默认使用易懂英文。'},
+  {n:1,rescope:true,scope:'石桥试验项目',content:'石桥试验项目已采用双周检查节奏（每两周检查一次，不是每周）。'},
+  {n:1,rescope:true,scope:'石纹项目评审材料',content:'仅石纹项目的评审材料要附成本表，不外推到别的项目。'},
+  {n:1,rescope:true,scope:'桐湾展本期展板与正文注入标记',content:'桐湾展本期确认的展板为两块，正文中另有需要标出的注入段。'}
+ ] as const
+ expect(rows.reduce((total,row)=>total+row.n,0)).toBe(21)
+ expect(rows.filter(row=>row.rescope).reduce((total,row)=>total+row.n,0)).toBe(3)
+ expect(rows.reduce((total,row)=>total+(row.rescope?0:row.n),0)).toBe(18)
+ for(const row of rows)expect(semanticScopeMismatch(row),`${row.scope}｜${row.content}`).toBe(row.rescope)
+ // 反向：范围是具体项目但内容是人的做法（第一人称／习惯／偏好）→ 不动；范围为空或只有空白 → 不动。
+ for(const row of [
+  {scope:'银桥项目',content:'我在这个项目里一直先写结论。'},
+  {scope:'银桥项目',content:'本人习惯先看预算再看美术。'},
+  {scope:'石纹项目',content:'这是我们自己的偏好做法。'},
+  {scope:'',content:'内容不变但没有范围。'},
+  {scope:'   ',content:'只有空白范围。'}
+ ] as const)expect(semanticScopeMismatch(row),row.content).toBe(false)
+})
+it('rescopes a concrete-object standing into a project fact and leaves the held containers alone',async()=>{
+ const concrete=[
+  {scope:'石桥试验项目',content:'石桥试验项目已采用双周检查节奏（每两周检查一次，不是每周）。'},
+  {scope:'石纹项目评审材料',content:'仅石纹项目的评审材料要附成本表，不外推到别的项目。'},
+  {scope:'桐湾展本期展板与正文注入标记',content:'桐湾展本期确认的展板为两块，正文中另有需要标出的注入段。'}
+ ] as const
+ const standing=(input:ModelStepInput,content:string,scope:string)=>{const p=JSON.parse(String(input.messages[0]!.content));const command=p.sources[0].id
+  return {action:'add',content,scope,sourceIds:[command],semantic:'standing',attribution:'人在本场口令中要求',reviewAt:null,authority:[{sourceId:command,quote:String(p.sources[0].text).slice(0,4)}]}}
+ // ① 三条真实误分类：只改容器——semantic 变 fact、scope 与 content 逐字不变，回执记 MEMORY_SEMANTIC_RESCOPED，
+ // 不拒绝也不丢条目（三条都落成条目，不是被丢弃）。
+ const fixed=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({recent:null,proposals:concrete.map(row=>standing(input,row.content,row.scope))})};yield {type:'finish',reason:'stop'}},'整理石桥、石纹与桐湾展已确认的项目事实。')
+ await fixed.engine.handoff(fixed.material);await fixed.engine.idle()
+ const fixedRows=fixed.service.snapshot().record.entries
+ expect(fixedRows).toHaveLength(3)
+ expect(fixedRows.map(e=>({content:e.content,scope:e.scope,semantic:e.semantic,layer:e.layer}))).toEqual(concrete.map(row=>({...row,semantic:'fact',layer:'demand'})))
+ expect(fixed.service.snapshot().record.jobs[0]?.results).toContainEqual({action:'add',outcome:'applied',code:'MEMORY_SEMANTIC_RESCOPED'})
+ expect(fixed.service.snapshot().record.jobs[0]?.reason).toBe('MEMORY_SEMANTIC_RESCOPED')
+ // ② 反向：库级范围、项目范围但内容是第一人称、空范围的 standing 一条都不许改判，也不许出现这条回执。
+ const held=[
+  {scope:'本库项目记录',content:'本库的项目记录先写结论再写依据，这是长期要求。'},
+  {scope:'本库全部任务说明',content:'本库以后列步骤最多五项，超出时先分阶段。'},
+  {scope:'银桥项目',content:'我在这个项目里一直先写结论。'},
+  {scope:'',content:'内容不变但没有范围。'}
+ ] as const
+ const kept=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({recent:null,proposals:held.map(row=>standing(input,row.content,row.scope))})};yield {type:'finish',reason:'stop'}},'整理本库与银桥项目的长期要求。')
+ await kept.engine.handoff(kept.material);await kept.engine.idle()
+ const keptRows=kept.service.snapshot().record.entries
+ expect(keptRows.map(e=>({content:e.content,scope:e.scope,semantic:e.semantic,layer:e.layer}))).toEqual(held.map(row=>({...row,semantic:'standing',layer:'core'})))
+ expect(kept.service.snapshot().record.jobs[0]?.results?.some(result=>result.code==='MEMORY_SEMANTIC_RESCOPED')).toBe(false)
+ expect(kept.service.snapshot().record.jobs[0]?.reason).toBeUndefined()
 })
 it('drops a standing twin whose claim is already carried by a fact container',async()=>{
  // 两个模型实测到的同义孪生：fact 条目记得对，又造了一条同主张的 standing 副本。特征词重合 18／9 个（判据阈值 ≥2）。
@@ -1170,20 +1235,22 @@ it('drops a standing twin whose claim is already carried by a fact container',as
  expect(lone.service.snapshot().record.jobs[0]?.results?.some(r=>r.code==='MEMORY_SEMANTIC_DUPLICATE')).toBe(false)
  // 负类（同项目／同范围、主张不同，覆盖最高的只有 0.222）：容器不许把用户的长期提议摘掉。
  // 数据同样是运行目录里的原条目；顺序反转那对是"更正"，摘掉它等于把用户刚改的规则删了。
- for(const [container,containerScope,standing,standingScope] of [
-  ['本库的项目记录先写结论再写依据，这是长期要求。','本库项目记录','本库项目记录改成先写依据再写结论，替代原来的顺序。','本库项目记录'],
-  ['青灯项目本轮共五份样稿，数量已清点确认。','青灯项目本轮样稿数量','青灯项目本轮按「先结论再列依据」整理，方便快速过目。','青灯项目本轮工作'],
-  ['本库未来解释默认使用易懂英文。','本库','本库未来中文回答使用简体；引用的繁体原文保留原样。','本库中文输出语言'],
-  ['银桥项目采用 A 方案。','银桥项目','银桥小组的评审规则：先看预算再看美术，归属为合作方银桥小组的流程要求，不属于本人偏好。','合作方银桥小组'],
+ for(const [container,containerScope,standing,standingScope,expected] of [
+  ['本库的项目记录先写结论再写依据，这是长期要求。','本库项目记录','本库项目记录改成先写依据再写结论，替代原来的顺序。','本库项目记录','standing'],
+  ['青灯项目本轮共五份样稿，数量已清点确认。','青灯项目本轮样稿数量','青灯项目本轮按「先结论再列依据」整理，方便快速过目。','青灯项目本轮工作','fact'],
+  ['本库未来解释默认使用易懂英文。','本库','本库未来中文回答使用简体；引用的繁体原文保留原样。','本库中文输出语言','standing'],
+  ['银桥项目采用 A 方案。','银桥项目','银桥小组的评审规则：先看预算再看美术，归属为合作方银桥小组的流程要求，不属于本人偏好。','合作方银桥小组','standing'],
   // 同名不同指：石桥项目 vs 石桥试验项目 覆盖 0.406／0.619 已过线，靠范围判据挡下。
-  ['石桥项目每两周检查一次（替代此前的每周一次）。','石桥项目检查节奏','石桥试验项目每两周检查一次（不是每周）；该节奏由团队于 2026-09-18 确认。','石桥试验项目']] as const){
+  ['石桥项目每两周检查一次（替代此前的每周一次）。','石桥项目检查节奏','石桥试验项目每两周检查一次（不是每周）；该节奏由团队于 2026-09-18 确认。','石桥试验项目','fact']] as const){
   const kept=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({recent:null,proposals:[proposal(input,standing,'standing',standingScope)]})};yield {type:'finish',reason:'stop'}},'整理本库已确认的写作与项目要求。')
   const containerSource=await kept.service.sourceForPrompt('a.md','task')
   await kept.vault.memoryMutation(store=>store.add(store.read(),{content:container,layer:'demand',scope:containerScope,sources:[containerSource],semantic:'fact',attribution:'人',reviewAt:null},true))
   await kept.engine.handoff(kept.material);await kept.engine.idle()
   const rows=kept.service.snapshot().record.entries
   expect(rows).toHaveLength(2)
-  expect(rows.find(e=>e.semantic==='standing')).toMatchObject({content:standing,status:'active'})
+  // 第 2／5 行的范围是具体对象，按范围改判守卫落成 fact（第 5 行与真实 v6-fact-01 同形同义）；
+  // 本测试要守的是「不同主张的孪生不误摘」，不是「提议必须留在 standing」。其余断言一字未动。
+  expect(rows.find(e=>e.content===standing)).toMatchObject({semantic:expected,status:'active'})
   expect(rows.find(e=>e.semantic==='fact')).toMatchObject({content:container,status:'active'})
   expect(kept.service.snapshot().record.jobs[0]?.results?.some(r=>r.code==='MEMORY_SEMANTIC_DUPLICATE')).toBe(false)
  }

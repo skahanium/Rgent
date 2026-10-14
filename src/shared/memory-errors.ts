@@ -51,6 +51,7 @@ export const MEMORY_ERROR_MESSAGES = {
   "MEMORY_TEMPORARY_STANDING": "接续形口令没有长期标记，未保存为长期约定；近期背景不受影响。",
   "MEMORY_ROUTED_TO_RECENT": "这段内容读起来是当前进展，已按近期工作背景保存，未写成长期条目。",
   "MEMORY_SEMANTIC_DUPLICATE": "这条长期提议与承载同一主张的事实条目重复，未另行保存；已有内容不受影响。",
+  "MEMORY_SEMANTIC_RESCOPED": "这条提议的范围指向具体对象，已按项目事实保存，内容与范围原样保留。",
   "MEMORY_SIBLING_REMAINS": "仍有可能同一主张的旧条目未退出；已保存的更正保留，请查看记忆内容。",
   "MEMORY_PROGRAM_COMPLETED": "程序已补完可验证的退出或修复；请查看整理记录。",
   "MEMORY_MATERIAL_FORGOTTEN": "本材料或已知原依据已遗忘，或已越过学习水位；本次自动学习已拒绝，原笔记保留。",
