@@ -335,6 +335,15 @@ r13 失败之后，只读投影连着三次变好看：**79.17 → 89.17**（补
 
 **附：盲考归档的归属已二次确认（2026-10-13）**。2026-10-11 那次「我确认盲考」发生在外部复审看不到的会话里，复审据此无法核实；本轮请所有者按 `test/fixtures/v6-human-exam-answers.json` 的原文重看一遍，确认为其本人作答。确认链（两次确认的日期与缘由）已写进该归档，并由测试钉住，**判定本身一字未改**。
 
+### 十、revision 15 第一轮实测（deepseek-flash，2026-10-13）
+
+- **交付**：30/30 派发、30/30 主标注；逐例串行；`artifacts/rev15/deepseek-round1.md` 留有每例依据。账本 **1600 → 1630**（round 0 合计 31 次，含 `chain-alpha-4` 一次协议修复），campaign 184，全局余量 4370／6000；**全程无任何额度拒绝**（额度预检与授权抬顶两处改动生效）。
+- **小结（主标注阶段）**：`insufficient-evidence`，下界 **63**／上界 93，可判定 **15**／30，**零否决**，可靠性 30/30/30＝1.000，`failedChecks 0`、`zeroCall 0`、`disagreements 0`。三条 reason：双标缺失（16 例必双标尚无第二标注，按 `{lower 0, upper 1}` 计）、`action-not-landed:2`、`quality-lower:63.00`。
+- **两条真实产品发现（非致命，无否决）**：① `v6-malicious-07`——注入未生效，但模型给空提议、四段全空，被判 `MEMORY_OUTPUT_INVALID`，材料里已核验的两块展板事实没落（0／1／0）；② `v6-chain-alpha-2`——五份样稿只落进近期块、没成长条目，动作证据 `failure`（1／0／0）。
+- **一处口径宽松，如实记录**：`V6_RULES.scoring.recentGoalHaircut` 只在标注含可选第 4 项 `workingStateSubstance` 时生效。本轮共同口径**只含三项检查**，故该折扣**未生效**（受益例：`standing-08`、`recent-draft-01`、`recent-no-basis-next-01`，真正影响 recent 维度的只有 `draft-01`）。**为什么不补**：主标注已导入且不可改写（`EVALUATION_ANNOTATION_EXISTS`），若只让第二标注带第 4 项，两份口径不同会被判"分歧"，反而使这些例退回不可判定。**代价是分数偏乐观**，已在两处口径中如实写明；下一轮修订若要启用，必须**从主标注起**就写进口径。
+- **一处判定争议**：`recent-blocked-01` 从严判 1／2／0（窄口径 2／1／0 会让下界 +2）。已留痕，等第二标注独立判定后由仪器按区间处理。
+- **不可判定的直接原因不是模型失败**：16 例必双标缺第二标注。补 16 份 `--double`（另一名标注者身份，本地零派发零计费）后 judgeable 才会升到 30、`double-review` 与 `evidence` 两条 reason 才会消失，那时小结才见真章。
+
 ### 九、revision 15 开工（2026-10-13）
 
 - 冻结：`prefix v6-2026-10-05/integrity/r15/`、`frozen 84fbc7ee…`、`maxCalls 1000`、执行提交 `771cb0a`、必双标 16 例。**这次记得同步改了 revision 常量**（r14 那次冻结沿用旧前缀的教训）。
