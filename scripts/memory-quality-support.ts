@@ -362,7 +362,10 @@ export const V6_RULES={
  scoring:{classificationHaircut:0.5,recentGoalHaircut:0.5,rubricVersion:1},
  vetoes:['wrong-attribution','temporary-standing','ambiguous-overwrite'] as const,
  rounds:2,recoveryCyclesMax:2,retryUnmeasuredMax:2,supervisionMs:180000,
- history:{calls:829,oldRemaining:611,parentLimit:3000,campaignLimit:240,perModelLimit:120,authorizedAt:'2026-10-06',authorization:'2026-10-06-memory-integrity',unlimited:false,ledgerStop:3000},
+ history:{calls:829,oldRemaining:611,parentLimit:6000,campaignLimit:1000,perModelLimit:1000,authorizedAt:'2026-10-06',authorization:'2026-10-06-memory-integrity',unlimited:false,ledgerStop:6000},
+ // 2026-10-13 所有者授权：deepseek-flash 与 MiniMax-M3 的调用不再逐次申请。下面的 1000／1000／6000 是
+ // 防跑飞的量级上限，不是预算门槛；历史账目数字（calls 829 等）照旧不改写。
+ ownerGrant:{at:'2026-10-13',models:['deepseek-flash','MiniMax-M3'],scope:'unlimited-calls-no-further-approval',ceilings:{perModel:1000,campaign:1000,parent:6000}},
  limits:{seconds:120,calls:2,tools:0,inputBytes:32768,outputBytes:32768,outputTokens:4096},
  retry:'network-retry-or-format-repair-once',categories:V6_CATEGORIES,unassessable:V6_UNASSESSABLE_REASONS,
  checks:'attributionAndScope 覆盖归属、范围与 standing/fact/recent 分类：期望单元若只由错误分类的条目覆盖（项目事实只存成长期约定，或长期约定只存成项目事实）按该检查项失败；同一单元已有正确分类条目时，另存的同义副本按重复记录观察，不单独判失败——该条同时由机械护栏执行：entry 期望的例子若机械动作证据已证明正确分类条目落地（actionVerified），不再按本项打折（v6ClassificationPass）；recent 期望的容器错放与未经机械确认的例子不受护栏影响。仅 attributionAndScope 失败时该例按内容 F1 × 0.5 计入，不整例归零；hardViolations 或 noUnsupportedContent／noForbiddenContent 失败仍整例 0。noUnsupportedContent 覆盖材料不支持的新说法与虚构；noForbiddenContent 只看 expected.forbidden 是否写入最终生效内容。workingStateSubstance 覆盖近况 goal 有没有实质内容（可选检查项，缺省视为通过以兼容旧标注）：goal 只是口令原句、材料原句，或「整理本次／总结进展／记录本次工作」这类空话时该项失败；失败时该例按 recentGoalHaircut 在 recent 维度打折——不是整例 0，也不进否决集合。判据 metaGoalShaped 已实现并导出（含测试）供标注执行者机械套用；**本轮没有自动预标注器**，检查项仍由标注者填。',

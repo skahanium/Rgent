@@ -56,22 +56,23 @@ describe('v6 冻结与派发门', () => {
 })
 
 describe('v6 计账与调用上限', () => {
- it('campaign 上限 420 与每模型 260 生效，且沿用同一份总账', () => {
+ // 上限本身已按所有者授权抬到量级上限（1000／1000），所以这里用一组小数字验语义，不再依赖全局门槛。
+ it('campaign 与每模型上限各自生效，且沿用同一份总账', () => {
   const budget=mkdtempSync(path.join(os.tmpdir(),'rgent-v6-journal-'))
   try{
    const historyCalls=V6_RULES.history.calls
    writeFileSync(path.join(budget,'state.json'),JSON.stringify({version:1,manifest:'parent-manifest',calls:historyCalls,limit:V6_RULES.history.parentLimit,dispatches:Array.from({length:historyCalls},(_,i)=>({key:'v5-2026-10-05/legacy/'+i,at:new Date(0).toISOString()}))}))
-   const journal=new EvaluationJournal(path.join(budget,'v6'),{version:6},V6_RULES.history.parentLimit,budget,undefined,{parentManifestHash:'parent-manifest',prefix:V6_PREFIX,limit:V6_RULES.history.campaignLimit,perModelLimit:V6_RULES.history.perModelLimit})
+   const journal=new EvaluationJournal(path.join(budget,'v6'),{version:6},V6_RULES.history.parentLimit,budget,undefined,{parentManifestHash:'parent-manifest',prefix:V6_PREFIX,limit:4,perModelLimit:2})
    try{
-    for(let i=0;i<V6_RULES.history.perModelLimit;i++)journal.charge(`${V6_PREFIX}MiniMax-M3/0/case-${i}`)
+    for(let i=0;i<2;i++)journal.charge(`${V6_PREFIX}MiniMax-M3/0/case-${i}`)
     expect(()=>journal.charge(`${V6_PREFIX}MiniMax-M3/0/overflow`)).toThrow('EVALUATION_MODEL_CALL_LIMIT')
-    for(let i=0;i<V6_RULES.history.perModelLimit;i++)journal.charge(`${V6_PREFIX}deepseek-flash/0/case-${i}`)
-    expect(journal.localCalls).toBe(V6_RULES.history.campaignLimit)
-    expect(journal.calls).toBe(historyCalls+V6_RULES.history.campaignLimit)
+    for(let i=0;i<2;i++)journal.charge(`${V6_PREFIX}deepseek-flash/0/case-${i}`)
+    expect(journal.localCalls).toBe(4)
+    expect(journal.calls).toBe(historyCalls+4)
     expect(()=>journal.charge(`${V6_PREFIX}MiniMax-M3/1/late`)).toThrow('EVALUATION_LOCAL_CALL_LIMIT')
     expect(()=>journal.charge('v5-2026-10-05/MiniMax-M3/0/mixed')).toThrow('EVALUATION_CAMPAIGN_KEY')
     const state=JSON.parse(readFileSync(path.join(budget,'state.json'),'utf8'))
-    expect(state.calls).toBe(historyCalls+V6_RULES.history.campaignLimit)
+    expect(state.calls).toBe(historyCalls+4)
     expect(state.limit).toBe(V6_RULES.history.parentLimit)
     expect(state.dispatches.length).toBe(state.calls)
    }finally{journal.close()}
