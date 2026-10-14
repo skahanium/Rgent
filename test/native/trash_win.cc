@@ -23,6 +23,9 @@ namespace fs = std::filesystem;
 // Never answer Yes to destructive prompts. Non-recyclable media/prompt timeouts leave
 // evidence incomplete; FOF_WANTNUKEWARNING retains the permanent-destruction warning.
 static constexpr DWORD flags = FOFX_RECYCLEONDELETE | FOF_NOERRORUI | FOFX_EARLYFAILURE | FOF_SILENT | FOF_WANTNUKEWARNING;
+// Legacy shell delete flags. FOF_ALLOWUNDO is the documented Recycle Bin request for this API;
+// it is unrelated to the IFileOperation flags above, which do not accept FOF_ALLOWUNDO.
+static constexpr FILEOP_FLAGS shellFlags = static_cast<FILEOP_FLAGS>(FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT | FOF_WANTNUKEWARNING);
 static std::string Utf8(const std::wstring &s) {
   if (s.empty()) return {};
   int n = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0, nullptr, nullptr);
@@ -160,11 +163,28 @@ static ComPtr<IFileOperation> Operation(DWORD operationFlags) {
 int wmain(int argc,wchar_t **argv) {
   const std::vector<std::wstring> modes={L"ordinary",L"initial-file-replace",L"queued-file-replace",L"predelete-file-replace",L"initial-parent-move",L"queued-parent-move",L"predelete-parent-move",L"initial-junction",L"queued-junction",L"predelete-junction",L"same-name",L"partial",L"leaf-pin",L"parent-pin-replace"};
   if (argc!=2 || std::find(modes.begin(),modes.end(),argv[1])==modes.end()) return 2;
-  std::wstring mode=argv[1]; HRESULT init=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED); if (FAILED(init)) { std::cout<<"{\"probeError\":\"STA initialization failed\",\"experimentComplete\":false,\"fixtureReclaimed\":false}\n"; return 1; }
+  std::wstring mode=argv[1];
+  // Candidate selection only. The judgment below is identical for every API branch.
+  std::wstring api=L"file-operation";
+  { wchar_t buffer[64]{}; DWORD n=GetEnvironmentVariableW(L"RGENT_TRASH_API",buffer,63); if (n>0 && n<63) api.assign(buffer,n); }
+  if (api!=L"file-operation" && api!=L"shfileoperation") {
+    std::cout<<"{\"schemaVersion\":1,\"platform\":\"Windows\",\"mode\":"<<Q(Utf8(mode))<<",\"trashApi\":"<<Q(Utf8(api))<<",\"probeError\":\"unsupported RGENT_TRASH_API\",\"experimentComplete\":false,\"fixtureReclaimed\":false}\n";
+    return 2;
+  }
+  const bool shellApi=api==L"shfileoperation";
+  // The legacy API has no progress sink, so race injections that need delete-time callbacks and
+  // the deny-delete pin modes have no meaning here. Windows "partial" is produced by the sink
+  // aborting item two, which this API cannot express. Refuse instead of reporting a weaker pass.
+  if (shellApi && (mode.starts_with(L"queued-") || mode.starts_with(L"predelete-") || mode==L"leaf-pin" || mode==L"parent-pin-replace" || mode==L"partial")) {
+    std::cout<<"{\"schemaVersion\":1,\"platform\":\"Windows\",\"mode\":"<<Q(Utf8(mode))<<",\"trashApi\":"<<Q(Utf8(api))<<",\"probeError\":\"mode requires the file-operation API\",\"experimentComplete\":false,\"fixtureReclaimed\":false}\n";
+    return 2;
+  }
+  HRESULT init=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED); if (FAILED(init)) { std::cout<<"{\"probeError\":\"STA initialization failed\",\"experimentComplete\":false,\"fixtureReclaimed\":false}\n"; return 1; }
   fs::path base; std::vector<Row> rows; std::map<std::string,std::string> owned;
   std::map<std::string,fs::path> ownedPaths;
   std::string error,rootId; HRESULT perform=E_PENDING,abortHr=E_PENDING; BOOL aborted=TRUE;
   bool cleanup=false,complete=false,accounted=false,injected=false,injectionBlocked=false; DWORD injectionError=0;
+  int shellResult=0; BOOL shellAborted=FALSE; bool binMeasured=false; long long binDeltaItems=0,binDeltaBytes=0;
   Handle leaf,parentPin,identityPin;
   try {
     wchar_t temp[MAX_PATH+1]; Check(GetTempPathW(MAX_PATH,temp)>0,"temp directory");
@@ -216,28 +236,49 @@ int wmain(int argc,wchar_t **argv) {
     };
     Check(Read(note)==rows[0].expected && InVault(note,vaultIdentity),"initial fixture precheck");
     if (mode.starts_with(L"initial-")) inject();
-    auto operation=Operation(flags); std::vector<ComPtr<IShellItem>> sources; std::vector<ComPtr<IFileOperationProgressSink>> sinks;
-    for (size_t i=0;i<rows.size();i++) {
-      sources.push_back(Item(rows[i].source));
-      ComPtr<IFileOperationProgressSink> sink; sink.Attach(new Sink(rows,i,base/L"receipts.jsonl",[&](size_t index,IShellItem *item) {
-        auto &row=rows[index]; row.prePath=ItemPath(item);
-        row.preIdentity=Read(row.prePath)==row.expected; row.preInVault=InVault(row.prePath,vaultIdentity);
-        row.finalCheck=row.preIdentity && row.preInVault;
-        if (mode==L"partial" && index==1) return E_ABORT;
-        if ((mode.starts_with(L"predelete-") || mode==L"parent-pin-replace") && index==0) {
-          if (!rows[index].finalCheck) return E_ABORT;
-          try { inject(); } catch (const std::exception &e) { error=e.what(); return E_ABORT; }
-        }
-        return S_OK;
-      }));
-      rows[i].queued=operation->DeleteItem(sources.back().Get(),sink.Get()); sinks.push_back(sink);
-      if (FAILED(rows[i].queued)) throw std::runtime_error("queue DeleteItem: "+std::to_string(rows[i].queued));
+    ComPtr<IFileOperation> operation; std::vector<ComPtr<IShellItem>> sources; std::vector<ComPtr<IFileOperationProgressSink>> sinks;
+    if (shellApi) {
+      // Legacy shell delete over the same fixtures. This API returns no per-item receipt, so the
+      // exact-receipt judgment cannot pass on this branch; the Recycle Bin counters are recorded
+      // as the only available sign that the item was recycled rather than destroyed.
+      SHQUERYRBINFO before{}; before.cbSize=sizeof(before);
+      const bool binReadable=SUCCEEDED(SHQueryRecycleBinW(volume,&before));
+      std::wstring list;
+      for (const auto &r:rows) { list+=r.source.native(); list.push_back(L'\0'); }
+      list.push_back(L'\0');
+      SHFILEOPSTRUCTW shell{}; shell.wFunc=FO_DELETE; shell.pFrom=list.c_str(); shell.fFlags=shellFlags;
+      shellResult=SHFileOperationW(&shell); shellAborted=shell.fAnyOperationsAborted!=FALSE;
+      SHQUERYRBINFO after{}; after.cbSize=sizeof(after);
+      if (binReadable && SUCCEEDED(SHQueryRecycleBinW(volume,&after))) { binMeasured=true; binDeltaItems=after.i64NumItems-before.i64NumItems; binDeltaBytes=after.i64Size-before.i64Size; }
+      perform=shellResult==0?S_OK:E_FAIL; abortHr=S_OK; aborted=shellAborted?TRUE:FALSE;
+      // A receipt-free destructive call is never admitted as completed evidence.
+      complete=false; cleanup=false;
+    } else {
+      operation=Operation(flags);
+      for (size_t i=0;i<rows.size();i++) {
+        sources.push_back(Item(rows[i].source));
+        ComPtr<IFileOperationProgressSink> sink; sink.Attach(new Sink(rows,i,base/L"receipts.jsonl",[&](size_t index,IShellItem *item) {
+          auto &row=rows[index]; row.prePath=ItemPath(item);
+          row.preIdentity=Read(row.prePath)==row.expected; row.preInVault=InVault(row.prePath,vaultIdentity);
+          row.finalCheck=row.preIdentity && row.preInVault;
+          if (mode==L"partial" && index==1) return E_ABORT;
+          if ((mode.starts_with(L"predelete-") || mode==L"parent-pin-replace") && index==0) {
+            if (!rows[index].finalCheck) return E_ABORT;
+            try { inject(); } catch (const std::exception &e) { error=e.what(); return E_ABORT; }
+          }
+          return S_OK;
+        }));
+        rows[i].queued=operation->DeleteItem(sources.back().Get(),sink.Get()); sinks.push_back(sink);
+        if (FAILED(rows[i].queued)) throw std::runtime_error("queue DeleteItem: "+std::to_string(rows[i].queued));
+      }
+      if (mode.starts_with(L"queued-")) inject();
+      perform=operation->PerformOperations();
+      abortHr=operation->GetAnyOperationsAborted(&aborted); // Always, even after a failed PerformOperations.
     }
-    if (mode.starts_with(L"queued-")) inject();
-    perform=operation->PerformOperations();
-    abortHr=operation->GetAnyOperationsAborted(&aborted); // Always, even after a failed PerformOperations.
     leaf.close(); parentPin.close(); identityPin.close();
     complete=SUCCEEDED(abortHr) && error.empty(); cleanup=true;
+    // The receipt-free branch is never admissible: no landing path can be verified or reclaimed.
+    if (shellApi) { complete=false; cleanup=false; }
     if ((mode.starts_with(L"predelete-") || mode==L"parent-pin-replace") && !injected) complete=false;
     for (size_t i=0;i<rows.size();i++) {
       auto &r=rows[i]; r.sourceExists=fs::exists(r.source);
@@ -280,7 +321,7 @@ int wmain(int argc,wchar_t **argv) {
   } catch (const std::exception &e) { error=e.what(); complete=false; cleanup=false; accounted=false; }
   leaf.close(); parentPin.close(); identityPin.close();
   std::ostringstream out;
-  out<<"{\"schemaVersion\":1,\"platform\":\"Windows\",\"mode\":"<<Q(Utf8(mode))<<",\"fixtureRoot\":"<<Q(Utf8(base.native()))<<",\"completed\":"<<B(perform!=E_PENDING)<<",\"experimentComplete\":"<<B(complete)<<",\"performHRESULT\":"<<(long)perform<<",\"getAnyOperationsAbortedHRESULT\":"<<(long)abortHr<<",\"anyOperationsAborted\":"<<B(aborted!=FALSE)<<",\"injected\":"<<B(injected)<<",\"injectionBlocked\":"<<B(injectionBlocked)<<",\"injectionWin32Error\":"<<injectionError<<",\"probeError\":"<<Q(error)<<",\"fixtureReclaimed\":"<<B(cleanup)<<",\"residualFixture\":"<<Q(cleanup?"":Utf8(base.native()))<<",\"systemPutBackVerified\":false,\"cleanupKind\":\"exact-Shell-receipt-MoveItem-to-fixture\",\"items\":[";
+  out<<"{\"schemaVersion\":1,\"platform\":\"Windows\",\"mode\":"<<Q(Utf8(mode))<<",\"trashApi\":"<<Q(Utf8(api))<<",\"noExactReceiptInApi\":"<<B(shellApi)<<",\"shellDeleteReturn\":"<<shellResult<<",\"shellAborted\":"<<B(shellAborted!=FALSE)<<",\"binCountersMeasured\":"<<B(binMeasured)<<",\"binDeltaItems\":"<<binDeltaItems<<",\"binDeltaBytes\":"<<binDeltaBytes<<",\"fixtureRoot\":"<<Q(Utf8(base.native()))<<",\"completed\":"<<B(perform!=E_PENDING)<<",\"experimentComplete\":"<<B(complete)<<",\"performHRESULT\":"<<(long)perform<<",\"getAnyOperationsAbortedHRESULT\":"<<(long)abortHr<<",\"anyOperationsAborted\":"<<B(aborted!=FALSE)<<",\"injected\":"<<B(injected)<<",\"injectionBlocked\":"<<B(injectionBlocked)<<",\"injectionWin32Error\":"<<injectionError<<",\"probeError\":"<<Q(error)<<",\"fixtureReclaimed\":"<<B(cleanup)<<",\"residualFixture\":"<<Q(cleanup?"":Utf8(base.native()))<<",\"systemPutBackVerified\":false,\"cleanupKind\":\"exact-Shell-receipt-MoveItem-to-fixture\",\"items\":[";
   for (size_t i=0;i<rows.size();i++) { auto &r=rows[i]; if (i) out<<','; out<<"{\"source\":"<<Q(Utf8(r.source.native()))<<",\"expected\":"<<Json(r.expected)<<",\"actual\":"<<Json(r.actual)<<",\"queuedHRESULT\":"<<(long)r.queued<<",\"preDeleteCalled\":"<<B(r.pre)<<",\"preDeleteHRESULT\":"<<(long)r.preResult<<",\"finalPrecheckPassed\":"<<B(r.finalCheck)<<",\"postDeleteCalled\":"<<B(r.postCalled)<<",\"postDeleteHRESULT\":"<<(long)r.post<<",\"receipt\":"<<Q(r.receiptName)<<",\"receiptPath\":"<<Q(Utf8(r.receiptPath.native()))<<",\"expectedIdentityAndHash\":"<<B(r.actual==r.expected)<<",\"ownedFixture\":"<<B(r.owned)<<",\"originalExists\":"<<B(r.sourceExists)<<",\"reclaimed\":"<<B(r.reclaimed)<<",\"reclaimHRESULT\":"<<(long)r.restore<<",\"reclaimAbortedHRESULT\":"<<(long)r.restoreAbortedHr<<",\"reclaimAborted\":"<<B(r.restoreAborted!=FALSE)<<'}'; }
   out<<"],\"prechecks\":[";
   for (size_t i=0;i<rows.size();i++) { const auto &r=rows[i]; if (i) out<<','; out<<"{\"path\":"<<Q(Utf8(r.prePath.native()))<<",\"identityAndHash\":"<<B(r.preIdentity)<<",\"inVault\":"<<B(r.preInVault)<<'}'; }

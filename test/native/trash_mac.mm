@@ -36,18 +36,32 @@ static NSDictionary *Object(NSString *p) { return @{ @"identity":Identity(p), @"
 static void Move(NSString *from, NSString *to) {
   if (rename(from.fileSystemRepresentation, to.fileSystemRepresentation)) @throw @"fixture rename failed";
 }
+static long IntendedMode(NSString *p) {
+  struct stat s;
+  if (lstat(p.fileSystemRepresentation, &s)) return -1;
+  return (long)(s.st_mode & 07777);
+}
+// Either API branch feeds the identical judgment below. Only candidate selection changes.
+static NSString *TrashApi(void) {
+  NSString *raw = NSProcessInfo.processInfo.environment[@"RGENT_TRASH_API"];
+  if (raw.length == 0) return @"workspace";
+  if ([raw isEqual:@"workspace"] || [raw isEqual:@"file-manager"]) return raw;
+  fprintf(stderr, "{\"probeError\":\"unsupported RGENT_TRASH_API\"}\n");
+  exit(2);
+}
 int main(int argc, char **argv) {
   @autoreleasepool {
     NSSet *modes = [NSSet setWithArray:@[@"ordinary", @"file-replace", @"parent-swap", @"parent-link", @"reference-outside", @"same-name", @"partial"]];
     if (argc != 2 || ![modes containsObject:@(argv[1])]) return 2;
     NSString *mode = @(argv[1]);
+    NSString *api = TrashApi();
     char templatePath[] = "/private/tmp/rgent-trash-proof-XXXXXX";
     char *baseRaw = mkdtemp(templatePath);
     if (!baseRaw) return 2;
     NSString *base = @(baseRaw);
     fprintf(stderr, "{\"fixtureRoot\":\"%s\"}\n", base.UTF8String);
     struct stat rootBefore; lstat(base.fileSystemRepresentation, &rootBefore);
-    NSMutableDictionary *result = [@{ @"schemaVersion":@1, @"platform":@"macOS", @"mode":mode, @"fixtureRoot":base,
+    NSMutableDictionary *result = [@{ @"schemaVersion":@1, @"platform":@"macOS", @"mode":mode, @"trashApi":api, @"fixtureRoot":base,
       @"systemPutBackVerified":@NO, @"cleanupKind":@"exact-receipt-rename-to-fixture", @"completed":@NO,
       @"experimentComplete":@NO, @"fixtureReclaimed":@NO, @"residualFixture":base } mutableCopy];
     int pinned = -1;
@@ -102,16 +116,52 @@ int main(int argc, char **argv) {
         [expectations addObject:@{ @"identity":@"missing", @"sha256":@"missing" }];
       }
       result[@"expectedObjectStillInVaultAtDispatch"] = @([expectedPath hasPrefix:[vault stringByAppendingString:@"/"]]);
+      // Modes must be read before dispatch: afterwards the intended object may already be in the trash.
+      NSMutableArray<NSNumber *> *modesBefore = [NSMutableArray array];
+      NSMutableArray<NSDictionary *> *atDispatch = [NSMutableArray array];
+      for (NSUInteger i = 0; i < urls.count; i++) {
+        [modesBefore addObject:@(IntendedMode(i == 0 ? expectedPath : urls[i].path))];
+        // What actually occupies the dispatched location when the destructive call is made.
+        BOOL referenceForm = [urls[i].absoluteString containsString:@"/.file/id="];
+        [atDispatch addObject:Object(i == 0 && referenceForm ? expectedPath : urls[i].path)];
+      }
       __block BOOL done = NO;
       __block NSDictionary *receipts = nil;
       __block NSError *error = nil;
+      __block NSArray<NSString *> *itemErrors = @[];
       dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSWorkspace sharedWorkspace] recycleURLs:urls completionHandler:^(NSDictionary *newURLs, NSError *e) {
+        NSMutableArray<NSString *> *errors = [NSMutableArray array];
+        if ([api isEqual:@"file-manager"]) {
+          // Synchronous single-item candidate, which reports its own landing URL.
+          NSMutableDictionary *collected = [NSMutableDictionary dictionary];
+          NSError *firstError = nil;
+          for (NSURL *source in urls) {
+            NSURL *landing = nil; NSError *itemError = nil;
+            BOOL accepted = [[NSFileManager defaultManager] trashItemAtURL:source resultingItemURL:&landing error:&itemError];
+            if (accepted && landing) { collected[source] = landing; [errors addObject:@""]; }
+            else {
+              if (!firstError) firstError = itemError;
+              [errors addObject:itemError ? [NSString stringWithFormat:@"%@ %ld", itemError.domain, (long)itemError.code] : @"refused without error"];
+            }
+          }
           NSMutableArray *manifest = [NSMutableArray array];
-          for (NSURL *source in newURLs) [manifest addObject:@{ @"source":source.absoluteString, @"receipt":[newURLs[source] absoluteString], @"actual":Object([newURLs[source] path]) }];
+          for (NSURL *source in collected) [manifest addObject:@{ @"source":source.absoluteString, @"receipt":[collected[source] absoluteString], @"actual":Object([collected[source] path]) }];
           [[NSJSONSerialization dataWithJSONObject:manifest options:0 error:nil] writeToFile:[base stringByAppendingPathComponent:@"receipts.json"] atomically:YES];
-          receipts = newURLs; error = e; done = YES;
-        }];
+          receipts = collected; error = firstError; itemErrors = errors; done = YES;
+        } else {
+          [[NSWorkspace sharedWorkspace] recycleURLs:urls completionHandler:^(NSDictionary *newURLs, NSError *e) {
+            NSMutableArray *manifest = [NSMutableArray array];
+            for (NSURL *source in newURLs) [manifest addObject:@{ @"source":source.absoluteString, @"receipt":[newURLs[source] absoluteString], @"actual":Object([newURLs[source] path]) }];
+            [[NSJSONSerialization dataWithJSONObject:manifest options:0 error:nil] writeToFile:[base stringByAppendingPathComponent:@"receipts.json"] atomically:YES];
+            // The batch API only returns one error, so a per-item failure is attributed to the batch.
+            for (NSURL *source in urls) {
+              if (newURLs[source]) [errors addObject:@""];
+              else if (e) [errors addObject:[NSString stringWithFormat:@"batch %@ %ld", e.domain, (long)e.code]];
+              else [errors addObject:@"no receipt and no error"];
+            }
+            receipts = newURLs; error = e; itemErrors = errors; done = YES;
+          }];
+        }
       });
       NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:30];
       while (!done && deadline.timeIntervalSinceNow > 0) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
@@ -132,6 +182,16 @@ int main(int argc, char **argv) {
         NSMutableDictionary *row = [@{ @"source":original.absoluteString, @"receipt":trash.absoluteString ?: @"", @"expected":wanted,
           @"actual":actual, @"expectedIdentityAndHash":@(match), @"ownedFixture":@(ours), @"originalExists":@(originalExists),
           @"reclaimed":@NO } mutableCopy];
+        // Observations only; none of them feeds experimentComplete. A file-reference URL has no
+        // meaningful basename, so item 0 compares the receipt against the tracked intended path.
+        NSString *intendedPath = (i == 0) ? expectedPath : original.path;
+        row[@"itemError"] = i < itemErrors.count ? itemErrors[i] : @"";
+        row[@"receiptName"] = trash.lastPathComponent ?: @"";
+        row[@"namePreserved"] = @(trash != nil && [trash.lastPathComponent isEqualToString:intendedPath.lastPathComponent]);
+        row[@"intendedMode"] = modesBefore[i];
+        row[@"atDispatch"] = atDispatch[i];
+        row[@"dispatchedObjectIsExpected"] = @([atDispatch[i] isEqual:wanted]);
+        row[@"receiptMode"] = @(trash ? IntendedMode(trash.path) : -1);
         if (trash) {
           NSString *reclaimed = [base stringByAppendingPathComponent:[NSString stringWithFormat:@"reclaimed-%lu", (unsigned long)i]];
           if (!ours || rename(trash.path.fileSystemRepresentation, reclaimed.fileSystemRepresentation) || ![Object(reclaimed) isEqual:actual]) cleanup = NO;
@@ -150,7 +210,7 @@ int main(int argc, char **argv) {
       if (!accounted) { complete = NO; cleanup = NO; result[@"probeError"] = @"A fixture object has no verified surviving path or reclaimed receipt"; }
       result[@"ownedFixtureObjectsAccounted"] = @(accounted);
       close(pinned); pinned = -1;
-      result[@"items"] = rows; result[@"experimentComplete"] = @(complete);
+      result[@"items"] = rows; result[@"itemErrors"] = itemErrors; result[@"experimentComplete"] = @(complete);
       struct stat rootAfter;
       cleanup = cleanup && !lstat(base.fileSystemRepresentation, &rootAfter) && rootBefore.st_dev == rootAfter.st_dev && rootBefore.st_ino == rootAfter.st_ino;
       if (cleanup) {
