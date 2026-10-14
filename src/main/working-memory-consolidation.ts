@@ -236,8 +236,15 @@ export function protocolRepairPlan(input:{validCount:number;failedCount:number;c
 }
 const CONTINUATION_SHAPE=/(?:继续.{0,24}(?:核对|工作|本轮)|本轮|这场工作|核对工作|接着|(?:continue|keep checking).{0,24}(?:check|work|round|session)|this (?:round|session))/iu
 const STANDING_MARKER=/(?:以后|今后|长期|固定偏好|作为约定|from now on|standing preference|permanently)/iu
-export function standingEscalationBlocked(command:string):boolean{
- return CONTINUATION_SHAPE.test(command)&&!STANDING_MARKER.test(command)
+/** 内容侧的长期标记比口令侧宽：口令是接续形时，内容本身写下持续适用的词面也算长期约定。 */
+const CONTENT_STANDING_MARKER=/(?:以后|今后|长期|固定|默认|每次|一律|作为约定|偏好|from now on|standing|permanent)/iu
+/** 接续形口令的升级拦截：只有两侧都拿不出长期证据（口令无长期标记、内容也没写）时才拦。
+ *  合取而非并集：口令带"以后／今后"这类长期标记就是用户明确要求长期适用，
+ *  内容没写只是模型措辞不同，拦下等于静默删掉用户刚要求的长期约定。
+ *  代价是漏拦（口令带标记而提议其实只是临时内容），漏拦只多一条重复。 */
+export function standingEscalationBlocked(command:string,content?:string):boolean{
+ if(!CONTINUATION_SHAPE.test(command)||STANDING_MARKER.test(command))return false
+ return content===undefined||!CONTENT_STANDING_MARKER.test(content)
 }
 /** 工作状态形态：进度、受阻、待定这类内容属于近期工作背景，不是长期知识。
  *  标记集只收语料实证过的词，不收"看起来也该收"的词：`下一步` 在 229 条产物里零命中，
@@ -260,6 +267,33 @@ export function suspectSiblingClaim(old:{content:string;scope:string},sibling:{c
  if(sameClaimIgnoringSemantic(old,sibling))return false
  const theirs=new Set(distinctiveClaimTerms(sibling.content))
  return distinctiveClaimTerms(old.content).filter(t=>theirs.has(t)).length>=2
+}
+/** 双向覆盖：共同特征词占两侧各自特征词的比例（max 侧与 min 侧各算一次）。
+ *  只用于"换容器重述"的判据与标定，不改 `sameClaimIgnoringSemantic` 的精确同主张语义。 */
+export function claimTwinCoverage(old:{content:string},sibling:{content:string}):{shared:number;max:number;min:number}{
+ const mine=distinctiveClaimTerms(old.content),theirs=new Set(distinctiveClaimTerms(sibling.content))
+ const shared=mine.filter(t=>theirs.has(t)).length
+ if(!mine.length||!theirs.size)return {shared:0,max:0,min:0}
+ return {shared,max:shared/Math.max(mine.length,theirs.size),min:shared/Math.min(mine.length,theirs.size)}
+}
+/** 范围相容：规范化（全半角统一、大小写、去空白）后相等，或一方是另一方的加长写法。
+ *  不用特征词交集判范围：石桥项目／石桥试验项目 只共享"石桥"，交集判据会把同名不同指的范围并起来，
+ *  实测那类对的双向覆盖能到 0.591／0.481，会被误拦成孪生。 */
+const CLAIM_TWIN_COVERAGE=0.35
+function compactScope(scope:string):string{return scope.normalize('NFKC').toLowerCase().replace(/\s+/g,'')}
+export function scopesCompatible(left:string,right:string):boolean{
+ const a=compactScope(left),b=compactScope(right)
+ return a===b||a.includes(b)||b.includes(a)
+}
+/** 承载同一主张的孪生容器：范围相容 + 双向覆盖都过线（先过 suspectSiblingClaim 的共同特征词门槛）。
+ *  两个方向都要求：本库项目记录顺序反转（更正）min=1.000 而 max=0.222，只看单向会把用户的更正当重复删掉。
+ *  阈值 0.35 由真实数据标定，见标定测试的注释；两类不相容时一律放行——漏拦只是多一条重复，
+ *  误伤是把用户的真事静默删掉。 */
+export function duplicateClaimContainer(old:{content:string;scope:string},sibling:{content:string;scope:string}):boolean{
+ if(sameClaimIgnoringSemantic(old,sibling))return true
+ if(!scopesCompatible(old.scope,sibling.scope)||!suspectSiblingClaim(old,sibling))return false
+ const {max,min}=claimTwinCoverage(old,sibling)
+ return max>=CLAIM_TWIN_COVERAGE&&min>=CLAIM_TWIN_COVERAGE
 }
 function applyWirePatch(parsed:{recent:unknown;proposals:unknown[]},raw:string,failed:Set<number>,recentFailed:boolean,binding:WireBinding){
  let text=raw.trim();const fence=/^```json\s*\n([\s\S]*)\n```$/i.exec(text);if(fence)text=fence[1]!
@@ -550,7 +584,7 @@ export class WorkingMemoryConsolidation{
     values=checked.values;recentValue=checked.recent
    }else{values=parsed.proposals;recentValue=parsed.recent}
    const proposed=proposalGroups(values,sources,entries,Boolean(continuity));let groups=proposed.groups.filter(group=>{
-    if(continuity&&standingEscalationBlocked(job.material.prompt)&&group.some(c=>c.input.semantic==='standing'&&c.action!=='obsolete')){
+    if(continuity&&group.some(c=>c.input.semantic==='standing'&&c.action!=='obsolete'&&standingEscalationBlocked(job.material.prompt,c.input.content))){
      proposed.dropped.push({action:group[0]!.action,outcome:'rejected',code:'MEMORY_TEMPORARY_STANDING'});return false
     }
     // 容器路由：工作状态形态的新增一律不落长期条目（近期块独立提交，见合同「程序必须做完的」）。
@@ -577,6 +611,19 @@ export class WorkingMemoryConsolidation{
     proposed.dropped.push({action:group[0]!.action,outcome:'rejected',code})
    }
    groups=accepted
+   // 语义孪生：standing 新增与承载同一主张的 fact 容器（既有条目或同批提议）重复时只留 fact 容器——
+   // 内容已由 fact 条目承载，拒绝不丢信息；没有 fact 兄弟时照旧放行，不在 add 上凭空合并。
+   // 判据按真实数据标定（范围相容 + 双向覆盖 ≥0.35），只有项目名撞车、主张不同的条目不达线。
+   if(continuity){
+    const replaced=new Set(groups.flatMap(g=>g.flatMap(c=>c.action==='add'?[]:[c.id])))
+    const containers:(WorkingEntry|WorkingInput)[]=[...basis.record.entries.filter(e=>e.status==='active'&&e.semantic==='fact'&&!replaced.has(e.id)),...groups.flatMap(g=>g.flatMap(c=>c.action==='add'&&c.input.semantic==='fact'?[c.input]:[]))]
+    groups=groups.flatMap(group=>{
+     const kept=group.filter(change=>!(change.action==='add'&&change.input.semantic==='standing'&&containers.some(f=>duplicateClaimContainer(f,change.input))))
+     if(kept.length===group.length)return [group]
+     if(kept.length)return [kept]
+     proposed.dropped.push({action:group[0]!.action,outcome:'rejected',code:'MEMORY_SEMANTIC_DUPLICATE'});return []
+    })
+   }
    const asObsolete=(entry:WorkingEntry):WorkingChange=>({action:'obsolete',id:entry.id,version:entry.version,input:{content:entry.content,layer:entry.layer,scope:entry.scope,sources:structuredClone(entry.sources),semantic:entry.semantic,attribution:entry.attribution,reviewAt:entry.reviewAt,...(entry.tags?{tags:entry.tags}:{}),...(entry.agreement?{agreement:entry.agreement}:{})}})
    const targeted=new Set(groups.flatMap(g=>g.flatMap(c=>c.action==='add'?[]:[c.id])))
    const extras:WorkingChange[][]=[];let suspects:WorkingEntry[]=[]

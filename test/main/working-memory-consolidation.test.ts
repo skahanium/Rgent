@@ -4,7 +4,7 @@ import path from 'node:path'
 import {afterEach,it,expect,vi} from 'vitest'
 import {VaultSession} from '../../src/main/vault.ts'
 import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
-import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions,roleAgreement,inheritInputs,memoryContinuitySystem,protocolRepairPlan,standingEscalationBlocked,suspectSiblingClaim,repairFieldLock,workStateShaped} from '../../src/main/working-memory-consolidation.ts'
+import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions,roleAgreement,inheritInputs,memoryContinuitySystem,protocolRepairPlan,standingEscalationBlocked,suspectSiblingClaim,claimTwinCoverage,scopesCompatible,duplicateClaimContainer,repairFieldLock,workStateShaped} from '../../src/main/working-memory-consolidation.ts'
 import {sameClaimIgnoringSemantic} from '../../src/main/working-memory-store.ts'
 import type {WorkingSource} from '../../src/main/working-memory-store.ts'
 import {createHash} from 'node:crypto'
@@ -1043,6 +1043,150 @@ it('blocks continuation-shaped standing without a long marker and still allows a
  expect(allowed.service.snapshot().record.entries[0]).toMatchObject({semantic:'standing',status:'active'})
  expect(memoryContinuitySystem).toContain('禁止把「整理本次」「总结进展」「记录本次工作」当作 goal')
  expect(memoryContinuitySystem).toContain('程序会并入材料依赖，合计超过 16 条的组拒绝')
+})
+it('blocks continuation-shaped standing only when neither the command nor the proposal carries a long marker',async()=>{
+ // 口令侧判据逐字不变：单参调用与既有断言一致。
+ expect(standingEscalationBlocked('继续虚构项目青灯的核对工作。')).toBe(true)
+ expect(standingEscalationBlocked('继续核对，并作为以后的固定节奏')).toBe(false)
+ // 合取语义：口令自己写了长期标记就是用户明确要求长期，内容没写只是模型措辞不同，必须放行。
+ // （上一版并集语义在这里返回 true，会把用户明确要求的长期约定静默删掉。）
+ expect(standingEscalationBlocked('继续核对，并作为以后的固定节奏','青灯项目每两周检查一次，不是每周。')).toBe(false)
+ expect(standingEscalationBlocked('继续核对，并作为以后的固定节奏','本库项目记录先写结论再写依据。')).toBe(false)
+ expect(standingEscalationBlocked('请记住：以后在本库解释先给结论再举一个例子','本库解释先给结论再举一个例子')).toBe(false)
+ // 只有两侧都没有长期证据才拦：口令无标记 + 内容无标记（MiniMax 实测案例：内容即口令原文）。
+ expect(standingEscalationBlocked('继续虚构项目青灯的核对工作。','继续虚构项目青灯的核对工作。')).toBe(true)
+ expect(standingEscalationBlocked('继续虚构项目青灯的核对工作。','青灯项目每两周检查一次，不是每周。')).toBe(true)
+ // 口令无标记但内容自己写明持续适用 → 放行。
+ expect(standingEscalationBlocked('继续虚构项目青灯的核对工作。','青灯项目每两周检查一次；以后每次都照这个节奏。')).toBe(false)
+ const standing=(input:ModelStepInput,content:string)=>{const p=JSON.parse(String(input.messages[0]!.content));const command=p.sources[0].id
+  return {action:'add',content,scope:'本库',sourceIds:[command],semantic:'standing',attribution:'人在本场口令中要求',reviewAt:null,authority:[{sourceId:command,quote:String(p.sources[0].text).slice(0,4)}]}}
+ // 口令无长期标记、内容也没写：仍按临时口令拦下；近期背景照常提交。
+ const blocked=await fixture(async function*(input){const p=JSON.parse(String(input.messages[0]!.content))
+  yield {type:'text',text:JSON.stringify({recent:{goal:'核对青灯五份样稿',completed:'',blocked:'',next:'',sourceIds:[p.sources[0].id],assistantDraft:false},proposals:[standing(input,'青灯项目每两周检查一次，不是每周。')]})}
+  yield {type:'finish',reason:'stop'}},'继续虚构项目青灯的核对工作。')
+ await blocked.engine.handoff(blocked.material);await blocked.engine.idle()
+ expect(blocked.service.snapshot().record.entries).toHaveLength(0)
+ expect(blocked.service.snapshot().record.recent[0]?.recent.sections.goal).toBe('核对青灯五份样稿')
+ expect(blocked.service.snapshot().record.jobs[0]?.results).toContainEqual({action:'add',outcome:'rejected',code:'MEMORY_TEMPORARY_STANDING'})
+ // 反向：口令写明「作为以后的固定节奏」、提议内容不带任何长期词，standing 必须落地。
+ const allowed=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({recent:null,proposals:[standing(input,'青灯项目每两周检查一次，不是每周。')]})};yield {type:'finish',reason:'stop'}},'继续核对，并作为以后的固定节奏。')
+ await allowed.engine.handoff(allowed.material);await allowed.engine.idle()
+ expect(allowed.service.snapshot().record.entries).toHaveLength(1)
+ expect(allowed.service.snapshot().record.entries[0]).toMatchObject({content:'青灯项目每两周检查一次，不是每周。',semantic:'standing',status:'active'})
+ // 试卷里最常见的长期约定（「请记住：以后…」）照旧落地，不能被判据误伤。
+ const explicit=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({recent:null,proposals:[standing(input,'本库解释先给结论再举一个例子；以后每次解释都照这个顺序。')]})};yield {type:'finish',reason:'stop'}},'请记住：以后在本库解释先给结论再举一个例子。')
+ await explicit.engine.handoff(explicit.material);await explicit.engine.idle()
+ expect(explicit.service.snapshot().record.entries).toHaveLength(1)
+ expect(explicit.service.snapshot().record.entries[0]).toMatchObject({content:'本库解释先给结论再举一个例子；以后每次解释都照这个顺序。',semantic:'standing',status:'active'})
+})
+it('calibrates the twin-claim coverage threshold on the rev15 run data',()=>{
+ // 数据来源：.cache/memory-quality/2026-10-13-rev15/result-*.json 的 result.entries
+ //（rev15 共 89 条长期条目，active 去重 41 条；另用 411 个历史 result 文件做过同样的成对扫描回归）。
+ // 特征词 = distinctiveClaimTerms（去 CLAIM_STOP 后的 2/3 字词）；覆盖 = 共同特征词 ÷ 各自特征词数，
+ // max 侧与 min 侧各算一次（就是双向包含：只被项目名撞车时两侧都低）。
+ // 正类（同一主张、换容器；fact 容器 vs standing 提议）实测：
+ //   石桥试验项目 0.562／0.621（18 个共同特征词，scope 都是「石桥试验项目」）；
+ //   石桥试验项目 短孪生 0.621／0.818；石纹项目 0.375／0.391（9 个共同特征词，达线正类里最低）；
+ //   石纹项目另两个容器 0.476／0.476、0.417／0.476；达线正类整体 0.375–1.000。
+ // 负类（同项目／同范围、主张不同）实测：
+ //   本库项目记录顺序反转（更正）0.222／1.000（负类最高）；青灯样稿数量 vs 青灯本轮工作 0.077／0.083；
+ //   本库英文 vs 本库中文简体 0.065／0.095；银桥 A 方案 vs 银桥小组评审规则 0.025／0.333；
+ //   本库项目记录 vs 本库列步骤 0.000／0.000。
+ //   负类最高 0.222，而 min 侧能到 1.000（顺序反转那对只共享"依据／结论"两个词），所以必须双向都过线。
+ //   另有已判 disputed 的浮砂对（验收 vs 重开说法）0.235／0.471，同样在阈值之下，不入用例。
+ // 阈值取 0.35：高于负类最高值 0.222、低于正类最低值 0.375，向「宁可漏」一侧偏
+ // （漏拦只是多一条重复，误伤是把用户的真事静默删掉）。
+ // 代价如实记下：阈值之下放行了几对更弱的重述（实测 0.174–0.333，含"写作偏好 vs 本库解释"、
+ // "石桥试验项目的团队于 2026-09-18 确认… vs 石桥试验项目已经采用双周检查节奏"），属可接受的漏拦。
+ // 范围判据必须是「同一范围的加长写法」：石桥项目 vs 石桥试验项目 覆盖 0.406／0.619 已经过线，
+ // 只有范围判据能挡下这种同名不同指；改用特征词交集判范围会把它们并成同一范围。
+ const cover=(left:string,right:string)=>claimTwinCoverage({content:left},{content:right})
+ // 正类：两对都是运行数据里的原条目，覆盖数字就是数据里量出来的。
+ const bridge=cover('石桥试验项目已采用双周检查节奏（每两周检查一次，不是每周）。','石桥试验项目每两周检查一次（不是每周）；该节奏由团队于 2026-09-18 确认。')
+ expect(bridge.shared).toBe(18);expect(bridge.max).toBeCloseTo(0.562,3);expect(bridge.min).toBeCloseTo(0.621,3)
+ const seal=cover('石纹项目已确认评审材料含成本表，属于该项目合同要求。','石纹项目的评审材料需要附成本表，且该要求不外推到其他项目。')
+ expect(seal.shared).toBe(9);expect(seal.max).toBeCloseTo(0.375,3);expect(seal.min).toBeCloseTo(0.391,3)
+ expect(bridge.max).toBeGreaterThan(0.35);expect(seal.max).toBeGreaterThan(0.35)   // 最弱的一对正类也在阈值之上
+ for(const [fact,standing,scope] of [
+  ['石桥试验项目已采用双周检查节奏（每两周检查一次，不是每周）。','石桥试验项目每两周检查一次（不是每周）；该节奏由团队于 2026-09-18 确认。','石桥试验项目'],
+  ['石桥试验项目已采用双周检查节奏（每两周检查一次，不是每周）。','石桥试验项目已经采用双周检查节奏','石桥试验项目'],
+  ['石纹项目已确认评审材料含成本表，属于该项目合同要求。','石纹项目的评审材料需要附成本表，且该要求不外推到其他项目。','石纹项目'],
+  ['石纹项目已确认评审材料含成本表，属于该项目合同要求。','仅石纹项目的评审材料要附成本表，不外推到别的项目。','石纹项目评审材料'],
+  ['石纹项目评审材料含成本表已确认，是该项目合同要求。','仅石纹项目的评审材料要附成本表，不外推到别的项目；这是该项目合同要求。','石纹项目评审材料']] as const)
+  expect(duplicateClaimContainer({content:fact,scope}, {content:standing,scope})).toBe(true)
+ // 负类：同一项目／同一范围、主张不同，全部放行。
+ for(const [fact,factScope,standing,standingScope] of [
+  ['本库的项目记录先写结论再写依据，这是长期要求。','本库项目记录','本库项目记录改成先写依据再写结论，替代原来的顺序。','本库项目记录'],
+  ['青灯项目本轮共五份样稿，数量已清点确认。','青灯项目本轮样稿数量','青灯项目本轮按「先结论再列依据」整理，方便快速过目。','青灯项目本轮工作'],
+  ['本库未来解释默认使用易懂英文。','本库','本库未来中文回答使用简体；引用的繁体原文保留原样。','本库中文输出语言'],
+  ['银桥项目采用 A 方案。','银桥项目','银桥小组的评审规则：先看预算再看美术，归属为合作方银桥小组的流程要求，不属于本人偏好。','合作方银桥小组'],
+  // 同名不同指：石桥项目 vs 石桥试验项目 覆盖已过线，靠范围判据挡下。
+  ['石桥项目每两周检查一次（替代此前的每周一次）。','石桥项目检查节奏','石桥试验项目每两周检查一次（不是每周）；该节奏由团队于 2026-09-18 确认。','石桥试验项目'],
+  // 口令侧构造负例（运行数据里没有逐字对应条目，按同项目不同主张写出）：核对先看版本号、每周五提交评审组、目标。
+  ['石桥试验项目已采用双周检查节奏（每两周检查一次，不是每周）。','石桥试验项目','石桥试验项目的核对先看版本号，这是长期要求。','石桥试验项目'],
+  ['石纹项目已确认评审材料含成本表，属于该项目合同要求。','石纹项目','石纹项目的评审组要求每周五提交一次材料清单，这是长期要求。','石纹项目'],
+  ['青灯项目本轮共五份样稿，数量已清点确认。','青灯项目本轮样稿数量','青灯项目本轮目标是核对五份样稿，这是长期要求。','青灯项目本轮目标']] as const)
+  expect(duplicateClaimContainer({content:fact,scope:factScope},{content:standing,scope:standingScope})).toBe(false)
+ expect(scopesCompatible('石纹项目','石纹项目评审材料')).toBe(true)
+ expect(scopesCompatible('本库','本库项目记录')).toBe(true)
+ expect(scopesCompatible('石桥项目检查节奏','石桥试验项目')).toBe(false)
+})
+it('drops a standing twin whose claim is already carried by a fact container',async()=>{
+ // 两个模型实测到的同义孪生：fact 条目记得对，又造了一条同主张的 standing 副本。特征词重合 18／9 个（判据阈值 ≥2）。
+ const twins=[{fact:'石桥试验项目已采用双周检查节奏（每两周检查一次，不是每周）。',standing:'石桥试验项目每两周检查一次（不是每周）；该节奏由团队于 2026-09-18 确认。'},
+  {fact:'石纹项目已确认评审材料含成本表，属于该项目合同要求。',standing:'石纹项目的评审材料需要附成本表，且该要求不外推到其他项目。'}]
+ for(const {fact,standing} of twins){
+  expect(sameClaimIgnoringSemantic({content:fact,scope:'本库'},{content:standing,scope:'本库'})).toBe(false)
+  expect(suspectSiblingClaim({content:fact,scope:'本库'},{content:standing,scope:'本库'})).toBe(true)
+ }
+ const proposal=(input:ModelStepInput,content:string,semantic:'fact'|'standing',scope='本库')=>{const p=JSON.parse(String(input.messages[0]!.content));const command=p.sources[0].id
+  return {action:'add',content,scope,sourceIds:[command],semantic,attribution:'人的本场说明',reviewAt:null,...(semantic==='standing'?{authority:[{sourceId:command,quote:String(p.sources[0].text).slice(0,4)}]}:{})}}
+ // 同批 fact 兄弟：standing 那条被拦，fact 那条留下——不重分类，内容不丢。
+ for(const {fact,standing} of twins){
+  const f=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({recent:null,proposals:[proposal(input,fact,'fact'),proposal(input,standing,'standing')]})};yield {type:'finish',reason:'stop'}},'整理石桥与石纹项目已确认的检查节奏与材料要求。')
+  await f.engine.handoff(f.material);await f.engine.idle()
+  expect(f.service.snapshot().record.entries.map(e=>e.content)).toEqual([fact])
+  expect(f.service.snapshot().record.entries[0]).toMatchObject({semantic:'fact',status:'active'})
+  expect(f.service.snapshot().record.jobs[0]?.results).toContainEqual({action:'add',outcome:'rejected',code:'MEMORY_SEMANTIC_DUPLICATE'})
+  expect(f.service.snapshot().record.jobs[0]?.results).toContainEqual({action:'add',outcome:'applied'})
+ }
+ // 既有 fact 条目同样是容器：只提议 standing 孪生时也被拦，旧条目原样保留。
+ const {fact,standing}=twins[0]!
+ const seeded=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({recent:null,proposals:[proposal(input,standing,'standing')]})};yield {type:'finish',reason:'stop'}},'整理石桥试验项目已确认的检查节奏。')
+ const seedSource=await seeded.service.sourceForPrompt('a.md','task')
+ await seeded.vault.memoryMutation(store=>store.add(store.read(),{content:fact,layer:'demand',scope:'本库',sources:[seedSource],semantic:'fact',attribution:'人',reviewAt:null},true))
+ await seeded.engine.handoff(seeded.material);await seeded.engine.idle()
+ expect(seeded.service.snapshot().record.entries.map(e=>e.content)).toEqual([fact])
+ expect(seeded.service.snapshot().record.jobs[0]?.results).toContainEqual({action:'add',outcome:'rejected',code:'MEMORY_SEMANTIC_DUPLICATE'})
+ // 没有承载同一主张的 fact 兄弟时照旧放行：不同主张的长期规则不与既有事实合并。
+ const lone=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({recent:null,proposals:[proposal(input,'本库的项目记录先写依据再写结论，以后每次都这样。','standing')]})};yield {type:'finish',reason:'stop'}},'整理石桥试验项目已确认的检查节奏。')
+ const loneSource=await lone.service.sourceForPrompt('a.md','task')
+ await lone.vault.memoryMutation(store=>store.add(store.read(),{content:fact,layer:'demand',scope:'本库',sources:[loneSource],semantic:'fact',attribution:'人',reviewAt:null},true))
+ await lone.engine.handoff(lone.material);await lone.engine.idle()
+ const loneRows=lone.service.snapshot().record.entries
+ expect(loneRows).toHaveLength(2)
+ expect(loneRows.find(e=>e.semantic==='standing')).toMatchObject({content:'本库的项目记录先写依据再写结论，以后每次都这样。',status:'active'})
+ expect(loneRows.find(e=>e.semantic==='fact')).toMatchObject({content:fact,status:'active'})
+ expect(lone.service.snapshot().record.jobs[0]?.results?.some(r=>r.code==='MEMORY_SEMANTIC_DUPLICATE')).toBe(false)
+ // 负类（同项目／同范围、主张不同，覆盖最高的只有 0.222）：容器不许把用户的长期提议摘掉。
+ // 数据同样是运行目录里的原条目；顺序反转那对是"更正"，摘掉它等于把用户刚改的规则删了。
+ for(const [container,containerScope,standing,standingScope] of [
+  ['本库的项目记录先写结论再写依据，这是长期要求。','本库项目记录','本库项目记录改成先写依据再写结论，替代原来的顺序。','本库项目记录'],
+  ['青灯项目本轮共五份样稿，数量已清点确认。','青灯项目本轮样稿数量','青灯项目本轮按「先结论再列依据」整理，方便快速过目。','青灯项目本轮工作'],
+  ['本库未来解释默认使用易懂英文。','本库','本库未来中文回答使用简体；引用的繁体原文保留原样。','本库中文输出语言'],
+  ['银桥项目采用 A 方案。','银桥项目','银桥小组的评审规则：先看预算再看美术，归属为合作方银桥小组的流程要求，不属于本人偏好。','合作方银桥小组'],
+  // 同名不同指：石桥项目 vs 石桥试验项目 覆盖 0.406／0.619 已过线，靠范围判据挡下。
+  ['石桥项目每两周检查一次（替代此前的每周一次）。','石桥项目检查节奏','石桥试验项目每两周检查一次（不是每周）；该节奏由团队于 2026-09-18 确认。','石桥试验项目']] as const){
+  const kept=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({recent:null,proposals:[proposal(input,standing,'standing',standingScope)]})};yield {type:'finish',reason:'stop'}},'整理本库已确认的写作与项目要求。')
+  const containerSource=await kept.service.sourceForPrompt('a.md','task')
+  await kept.vault.memoryMutation(store=>store.add(store.read(),{content:container,layer:'demand',scope:containerScope,sources:[containerSource],semantic:'fact',attribution:'人',reviewAt:null},true))
+  await kept.engine.handoff(kept.material);await kept.engine.idle()
+  const rows=kept.service.snapshot().record.entries
+  expect(rows).toHaveLength(2)
+  expect(rows.find(e=>e.semantic==='standing')).toMatchObject({content:standing,status:'active'})
+  expect(rows.find(e=>e.semantic==='fact')).toMatchObject({content:container,status:'active'})
+  expect(kept.service.snapshot().record.jobs[0]?.results?.some(r=>r.code==='MEMORY_SEMANTIC_DUPLICATE')).toBe(false)
+ }
 })
 it('does not fail a committed batch because an unused displayed candidate expires after the request',async()=>{
  let calls=0

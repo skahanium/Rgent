@@ -32,6 +32,12 @@ it('explains output token, byte/proposal and queue limits separately from storag
  for(const [code,reason] of [['MEMORY_OUTPUT_TOKEN_LIMIT','输出'],['MEMORY_OUTPUT_LIMIT','输出'],['MEMORY_QUEUE_FULL','队列']]){const text=memoryErrorText(code);expect(text).toContain(reason);expect(text).not.toMatch(/遗忘空间|修订计数|普通修改已暂停/);expect(text).toMatch(/重试|再试/)}expect(memoryErrorText('MEMORY_FILE_LIMIT')).toContain('遗忘空间')
 })
 
+it('explains a semantic duplicate standing proposal without claiming the fact container was lost',()=>{
+ expect(MEMORY_ERROR_CODES).toContain('MEMORY_SEMANTIC_DUPLICATE')
+ expect(memoryErrorText('MEMORY_SEMANTIC_DUPLICATE')).toContain('事实条目')
+ expect(memoryErrorText('MEMORY_SEMANTIC_DUPLICATE')).toContain('未另行保存')
+})
+
 it('does not claim that every result was lost or invent the automatic retry count',()=>{
  for(const code of ['MEMORY_SERVICE_FAILED','MEMORY_OUTPUT_EMPTY','MEMORY_OUTPUT_TRUNCATED','MEMORY_OUTPUT_TOKEN_LIMIT','MEMORY_OUTPUT_LIMIT','MEMORY_DEADLINE']){
   expect(memoryErrorText(code)).not.toMatch(/本次未写入|没有写入新内容|未提交新记忆|未提交本次结果|没有自动重试/)
