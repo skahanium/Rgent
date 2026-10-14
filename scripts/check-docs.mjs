@@ -1,17 +1,37 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * 四条机械规则（每条只判可判定的形态，不猜散文）：
+ * 1. 链接与锚点：相对链接存在、同文件锚点、跨文件锚点；
+ * 2. 阶段一致性：`AGENTS.md` 与 `docs/build.md` 的「当前阶段」同名、有同名节、在依赖顺序里，
+ *    对象矩阵恰有一行「当前」且与当前阶段一致、矩阵状态只用既有词汇；
+ * 3. 交付证据形态：本轮交付对照表的提交引用与四项证据状态、v2 交付证据须带日期或受验提交；
+ * 4. 本轮新增：**提交号存在性**与**包表状态格**——
+ *    - 提交号：正文里按本仓库惯例写成裸短号的十六进制号必须真的存在（`git cat-file -e <sha>^{commit}`）。
+ *      判据只收「提交引用形态」，排除明确不是提交号的哈希（见下面规则 4a 的注释）；浅克隆无法
+ *      区分「没取回」与「不存在」，此时只提示、不判错。
+ *    - 包表状态格：`docs/build.md` 里表头含「包」的表，末列（门／验收／证据列）若以加粗词开头，
+ *      该词必须落在既有词汇内。
+ */
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const files = ['AGENTS.md', 'README.md', 'CONTRIBUTING.md', ...[
   'README.md', 'architecture.md', 'build.md', 'build-history.md', 'decisions.md', 'frontend.md', 'handbook.md',
   'opensource.md', 'topics.md', 'vision.md', 'memory.md'
 ].map((name) => `docs/${name}`)]
 const errors = []
+const notices = []
 
 /** 只消费独占行的围栏；行内代码中的三个反引号不是围栏起点。兼容 CRLF。 */
 function stripFencedCode(source) {
   return source.replace(/^ {0,3}```[^\r\n]*\r?\n[\s\S]*?^ {0,3}```[ \t]*\r?$/gm, '')
+}
+
+/** 同上，但保留行号：围栏内的字符换成空格，报告的行号才对得上原文。 */
+function blankFencedCode(source) {
+  return source.replace(/^ {0,3}```[^\r\n]*\r?\n[\s\S]*?^ {0,3}```[ \t]*\r?$/gm, (block) => block.replace(/[^\r\n]/g, ' '))
 }
 
 /** GitHub 风格的标题锚点：小写、去标点、空白转连字符。中文保留原字。 */
@@ -140,9 +160,95 @@ if (currentV2) for (const row of currentV2.split(/\r?\n/).filter(line=>/^\| [0-5
   if (/通过/.test(evidence) && !/`[a-f\d]{7,40}`|待提交/.test(evidence)) errors.push('docs/build.md: v2 代码通过证据必须标记受验提交或待提交')
 }
 
+// 规则 4a：提交号存在性。只有「提交引用形态」才核，判据如下（每一条都有既有文档为证，改动前先看标定）：
+//   · 裸十六进制 7–40 位，两侧不与字母数字相邻（不切长标识符，`baseline83c700b` 不是提交号）；
+//   · 排除：纯数字、链接目标（URL／路径）里的片段、明确截断的前缀（代码跨度内含 `…`／`...`）、
+//     连字符连接的十六进制组（UUID 片段）、紧跟 `@版本`（记忆条目版本引用）、
+//     紧邻对象种类标签（`tree`／`树`／`条目`／`事实`／`entry`／`uuid`）的哈希；
+//   · 9 位以上只核显式提交声明形态（`**`sha`**`）与紧跟在「受验／执行提交／提交」之后的号——
+//     长号在正文里绝大多数是冻结、评分与产物哈希（sha256 前缀），不是提交。
+// 浅克隆只能看见一部分历史，报错会把「没取回」说成「不存在」，故那时只提示。
+const KIND_LABELS = ['条目', '事实', 'entry', 'uuid', 'UUID']
+const COMMIT_WORDS = ['受验', '执行提交', '提交']
+const gitAvailable = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: root, encoding: 'utf8' }).status === 0
+const shallowClone = gitAvailable
+  && spawnSync('git', ['rev-parse', '--is-shallow-repository'], { cwd: root, encoding: 'utf8' }).stdout.trim() === 'true'
+const commitExists = (() => {
+  const cache = new Map()
+  return (sha) => {
+    if (!cache.has(sha)) {
+      cache.set(sha, spawnSync('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd: root }).status === 0)
+    }
+    return cache.get(sha)
+  }
+})()
+let checkedCommits = 0
+const missingCommits = []
+if (gitAvailable) {
+  for (const file of files) {
+    const lines = blankFencedCode(readFileSync(path.join(root, file), 'utf8')).split(/\r?\n/)
+    lines.forEach((raw, index) => {
+      // 链接目标先抹掉：URL 与绝对路径里的十六进制片段不是提交号引用。
+      const line = raw.replace(/!?\[[^\]\n]*\]\(([^)\n]+)\)/g, (match, target) => match.replace(target, ' '.repeat(target.length)))
+      const spans = [...line.matchAll(/`([^`\n]*)`/g)].map((match) => ({ text: match[1], start: match.index, end: match.index + match[0].length }))
+      for (const match of line.matchAll(/(?<![0-9A-Za-z])([0-9a-f]{7,40})(?![0-9A-Za-z])/g)) {
+        const sha = match[1]
+        if (/^\d+$/.test(sha)) continue
+        const before = line.slice(0, match.index)
+        const after = line.slice(match.index + sha.length)
+        if (!/`[^`]*$/.test(before) || !/^[^`]*`/.test(after)) continue
+        const span = spans.find((item) => item.start < match.index && item.end > match.index + sha.length)
+        if (!span || /…|\.\.\./.test(span.text)) continue
+        if (/[0-9a-f]-[0-9a-f]/.test(line.slice(Math.max(0, match.index - 2), match.index + sha.length + 2))) continue
+        if (/^@\d/.test(after)) continue
+        const spanContext = line.slice(Math.max(0, span.start - 8), span.start)
+        if (/(tree|树)/.test(spanContext)) continue
+        if (KIND_LABELS.some((label) => spanContext.includes(label))) continue
+        const declared = line.includes(`**\`${sha}\`**`) || COMMIT_WORDS.some((word) => before.slice(-12).includes(word))
+        if (sha.length > 8 && !declared) continue
+        checkedCommits += 1
+        if (!commitExists(sha)) {
+          missingCommits.push(`${file}:${index + 1}: 提交号在仓库里不存在：\`${sha}\``)
+        }
+      }
+    })
+  }
+  if (shallowClone) {
+    if (missingCommits.length > 0) {
+      notices.push(`浅克隆里 ${missingCommits.length} 个提交号无法确认（缺完整历史），本次按提示处理：${missingCommits[0]}`)
+    }
+  } else {
+    errors.push(...missingCommits)
+  }
+} else {
+  notices.push('未找到 git 工作树，提交号存在性检查跳过（需要在完整克隆里跑才有效）')
+}
+
+// 规则 4b：包表状态格。表头含「包」的表（`| 包 |`／`| # | 包 |`…），末列若以加粗词开头，该词必须是既有状态词。
+const PACKAGE_STATES = new Set(['已交', '未开', '进行中', '待核'])
+let checkedStatusCells = 0
+{
+  const lines = blankFencedCode(build).split(/\r?\n/)
+  let header = null
+  for (const [index, line] of lines.entries()) {
+    if (!line.startsWith('|')) { header = null; continue }
+    if (/^\|[\s:|-]+\|$/.test(line)) continue
+    const cells = line.split('|').slice(1, -1).map((cell) => cell.trim())
+    if (header === null) { header = cells; continue }
+    if (!header.includes('包')) continue
+    const state = /^\*\*([^*]+)\*\*/.exec(cells.at(-1) ?? '')?.[1]
+    if (state === undefined) continue
+    checkedStatusCells += 1
+    if (!PACKAGE_STATES.has(state)) {
+      errors.push(`docs/build.md:${index + 1}: 包表状态格「**${state}**」不在既有词汇内（${[...PACKAGE_STATES].map((s) => `**${s}**`).join('／')}）`)
+    }
+  }
+}
+
 if (errors.length > 0) {
   for (const error of errors) process.stderr.write(`${error}\n`)
   process.exitCode = 1
 } else {
-  process.stdout.write(`文档检查通过：${files.length} 个文件，当前阶段「${buildStage}」。\n`)
+  for (const notice of notices) process.stderr.write(`${notice}\n`)
+  process.stdout.write(`文档检查通过：${files.length} 个文件，当前阶段「${buildStage}」；四条机械规则：链接与锚点／阶段一致性／交付证据形态／提交号存在性（核 ${checkedCommits} 个）＋包表状态格（核 ${checkedStatusCells} 个）。\n`)
 }
