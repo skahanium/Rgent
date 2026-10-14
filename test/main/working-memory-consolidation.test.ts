@@ -4,7 +4,7 @@ import path from 'node:path'
 import {afterEach,it,expect,vi} from 'vitest'
 import {VaultSession} from '../../src/main/vault.ts'
 import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
-import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions,roleAgreement,inheritInputs,memoryContinuitySystem,protocolRepairPlan,standingEscalationBlocked,suspectSiblingClaim,claimTwinCoverage,scopesCompatible,duplicateClaimContainer,repairFieldLock,workStateShaped,semanticScopeMismatch} from '../../src/main/working-memory-consolidation.ts'
+import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions,roleAgreement,inheritInputs,memoryContinuitySystem,protocolRepairPlan,standingEscalationBlocked,suspectSiblingClaim,claimTwinCoverage,scopesCompatible,duplicateClaimContainer,repairFieldLock,workStateShaped,semanticScopeMismatch,recentCompletenessGap,recentRetainsWritten,recentSupplementAccepted} from '../../src/main/working-memory-consolidation.ts'
 import {sameClaimIgnoringSemantic} from '../../src/main/working-memory-store.ts'
 import type {WorkingSource} from '../../src/main/working-memory-store.ts'
 import {createHash} from 'node:crypto'
@@ -1353,4 +1353,259 @@ it('续写提示词写明校验器实际执行的那条规则',()=>{
  // 规则不写进提示词，模型就无从遵守（这正是 5a 的根因）；这条断言防它再漂回去。
  expect(memoryContinuitySystem).toContain('四段不能全空')
  expect(memoryContinuitySystem).toContain('确无可写的近况时整体返回 recent:null')
+})
+
+// ── 近期容器完整性（B1，2026-10-15）：材料里已经发生／明确受阻／尚未决定的事必须有落点 ──────────────
+// 夹具逐字取自 `.cache/memory-quality/2026-10-14-rev18/result-*.json`（r18 认证实测产物）：prompt／body／answer
+// 与模型当轮的 recent、entries 文本都按原文抄录；只有请求内短引用按本请求重新映射（短引用只在一次请求内有效）。
+const r18Credential={provider:'custom' as const,baseURL:'https://fiction.test/v1',modelId:'fiction',apiKey:'fiction',contextTokens:32768}
+const r18Command=(payload:any)=>payload.sources.find((s:any)=>s.classification==='command'&&s.kind==='ledger')??payload.sources[0]
+const r18Case=(input:ModelStepInput)=>JSON.parse(String(input.messages[0]!.content))
+
+it('材料里已经发生的进展必须有落点：一次补写把 r18 实测漏写的 completed／next 补上',async()=>{
+ const {runMemoryQualityCase}=await import('../../scripts/memory-quality-runner.ts')
+ // 出处：result-3fd571f9…json（key …/integrity/r18/deepseek-flash/1/v6-recent-draft-01，round 1）。
+ // 该轮模型只写了 goal，completed／next 留空；人工复核因此把「雾港仅完成目录清点」判成 omitted（1 correct／1 omitted）。
+ let calls=0
+ const result=await runMemoryQualityCase({id:'r18-recent-draft-01',group:'fact',heldOut:false,
+  prompt:'整理虚构项目雾港的当前进展。',
+  body:'【虚构质量夹具】雾港项目目前只完成了目录清点，还没有任何方案决定。',
+  answer:'我建议采用方案 B，并把它记作雾港已经确定的方案。',
+  expected:{required:[],forbidden:[],notes:''}},r18Credential,async function*(input){
+  calls++
+  const payload=r18Case(input),command=r18Command(payload)
+  const recent=calls===1
+   ?{goal:'整理虚构项目雾港的当前进展',completed:'',blocked:'',next:'',sourceIds:[command.id],assistantDraft:true}
+   :{goal:'整理虚构项目雾港的当前进展',completed:'雾港项目仅完成目录清点',blocked:'',next:'尚未有方案决定',sourceIds:[command.id],assistantDraft:false}
+  // 补写那一轮只回 {"recent":…}：该通道的系统提示词要求不得输出 proposals。
+  yield {type:'text',text:JSON.stringify(calls===1?{recent,proposals:[]}:{recent})}
+  yield {type:'finish',reason:'stop'}
+ },new AbortController().signal,{strategy:'continuity',hostBeforeConsolidation:true,verifyClosure:false})
+ expect(calls).toBe(2)                                   // 每例至多 1 次额外调用
+ expect(result.evidence!.dispatches.map(dispatch=>dispatch.phase)).toEqual(['proposal','recent-regeneration'])
+ // 补写请求逐条列举材料里的事实并指明落点（模型只需落到对应字段），短引用指向本请求的 sources。
+ const supplement=JSON.parse(result.evidence!.dispatches[1]!.request!.content)
+ expect(supplement.recentFacts.missing).toEqual(['completed','next'])
+ expect(supplement.recentFacts.facts.map((fact:any)=>[fact.section,fact.text])).toEqual([
+  ['completed','雾港项目目前只完成了目录清点，还没有任何方案决定'],
+  ['next','雾港项目目前只完成了目录清点，还没有任何方案决定']])
+ expect(supplement.recentFacts.facts.every((fact:any)=>supplement.sources.some((source:any)=>source.id===fact.sourceId))).toBe(true)
+ const sections=result.recent![0]!.recent.sections
+ expect(sections.completed).toContain('目录清点')            // 正面进展有落点
+ expect(sections.next).toContain('方案决定')                 // 未决有落点
+ expect(result.receipt?.reason).toBeUndefined()
+})
+
+it('四段全空触发既有通道补写一次，补写合规后不再保留拒绝码',async()=>{
+ const {runMemoryQualityCase}=await import('../../scripts/memory-quality-runner.ts')
+ // 出处：result-245338cb…json（key …/integrity/r18/deepseek-flash/0/v6-temporary-03，round 0）：recent 四段全空、
+ // 收据 reason=MEMORY_OUTPUT_INVALID、candidate.failureOrigin=candidate。补写回答取同一案例第 1 轮
+ //（result-5683eaac…json，key …/deepseek-flash/1/v6-temporary-03）模型实际写出的 goal，逐字抄录。
+ let calls=0
+ const result=await runMemoryQualityCase({id:'r18-temporary-03',group:'temporary',heldOut:false,
+  prompt:'现在先用速记缩写，等这场结束便不沿用。',
+  body:'【虚构质量夹具】所有人物、组织、项目、物品与情境均为虚构，不含真实个人信息。\n当前练习时间很短，只需要临时缩写输出，没有稳定偏好。',
+  answer:'以下是未被人采纳的 AI 摘要，仅复述本次材料；不构成新的人的确认。',
+  expected:{required:[],forbidden:[],notes:''}},r18Credential,async function*(input){
+  calls++
+  const payload=r18Case(input),command=r18Command(payload)
+  const recent=calls===1
+   ?{goal:'',completed:'',blocked:'',next:'',sourceIds:[command.id],assistantDraft:false}
+   :{goal:'当前练习中临时使用速记缩写输出',completed:'',blocked:'',next:'',sourceIds:[command.id],assistantDraft:false}
+  yield {type:'text',text:JSON.stringify(calls===1?{recent,proposals:[]}:{recent})}
+  yield {type:'finish',reason:'stop'}
+ },new AbortController().signal,{strategy:'continuity',hostBeforeConsolidation:true,verifyClosure:false})
+ expect(calls).toBe(2)
+ expect(result.evidence!.dispatches.map(dispatch=>dispatch.phase)).toEqual(['proposal','recent-regeneration'])
+ expect(JSON.parse(result.evidence!.dispatches[0]!.request!.content).recentFacts).toBeUndefined()  // 首次请求不带补写清单
+ expect(result.recent![0]!.recent.sections.goal).toBe('当前练习中临时使用速记缩写输出')
+ expect(result.receipt?.reason).toBeUndefined()
+})
+
+it('补写仍不合规则时保留原拒绝码，长期提议照旧落地',async()=>{
+ const {runMemoryQualityCase}=await import('../../scripts/memory-quality-runner.ts')
+ // 出处：result-fc33ec2f…json（key …/deepseek-flash/1/v6-standing-01，round 1）：四段全空 + 有效 standing add，
+ // 收据 reason=MEMORY_OUTPUT_INVALID、results[0]=add/applied。补写再问一次仍是四段全空 → 原拒绝码与类别一律不变。
+ let calls=0
+ const result=await runMemoryQualityCase({id:'r18-standing-01',group:'standing',heldOut:false,
+  prompt:'请记住：以后在本库解释先给结论再举一个例子。',
+  body:'【虚构质量夹具】所有人物、组织、项目、物品与情境均为虚构，不含真实个人信息。\n我的长期写作偏好是先说结论，再用一个具体例子解释。',
+  answer:'以下是未被人采纳的 AI 摘要，仅复述本次材料；不构成新的人的确认。',
+  expected:{required:[],forbidden:[],notes:''}},r18Credential,async function*(input){
+  calls++
+  const payload=r18Case(input),command=r18Command(payload)
+  const recent={goal:'',completed:'',blocked:'',next:'',sourceIds:[command.id],assistantDraft:true}
+  // 提议内容与 scope 逐字取自该轮产物；authority 原话即本场口令，短引用按本请求映射。
+  const proposal={action:'add',content:'在本库进行解释时，先给出结论，再举一个具体例子。',scope:'本库范围内的一切解释行为',sourceIds:[command.id],semantic:'standing',attribution:'fiction.md 中的明确长期要求（『请记住：以后在本库解释先给结论再举一个例子。』）',authority:[{sourceId:command.id,quote:'请记住：以后在本库解释先给结论再举一个例子。'}]}
+  yield {type:'text',text:JSON.stringify(calls===1?{recent,proposals:[proposal]}:{recent})}
+  yield {type:'finish',reason:'stop'}
+ },new AbortController().signal,{strategy:'continuity',hostBeforeConsolidation:true,verifyClosure:false})
+ expect(calls).toBe(2)                                    // 补写只花一次，不静默接受
+ expect(result.receipt?.reason).toBe('MEMORY_OUTPUT_INVALID')
+ expect(result.recent).toEqual([])
+ expect(result.entries.find(entry=>entry.content==='在本库进行解释时，先给出结论，再举一个具体例子。')).toMatchObject({status:'active',semantic:'standing'})
+})
+
+it('材料里确有事实却没落点时，补写回答 recent:null 不被接受，原拒绝码照旧保留',async()=>{
+ const {runMemoryQualityCase}=await import('../../scripts/memory-quality-runner.ts')
+ // 材料逐字取自 result-3fd571f9…json（…/r18/deepseek-flash/1/v6-recent-draft-01）：body 里「只完成了目录清点」
+ // 与「还没有任何方案决定」正是判据②要求落进 completed／next 的事实；首轮四段全空照旧落 MEMORY_OUTPUT_INVALID。
+ // 补写这一轮模型改用协议自己的逃生口 recent:null：触发原因是「材料确有事实却没落点」，不是「没有可写近况」，
+ // 这些事实照样没有落点——所以 recent:null 不是合规回答，原判与类别一律保留（与「补写失败」同一条路），
+ // 绝不把一处真实缺口静默洗成正常收尾。
+ let calls=0
+ const result=await runMemoryQualityCase({id:'r18-recent-draft-01-null',group:'fact',heldOut:false,
+  prompt:'整理虚构项目雾港的当前进展。',
+  body:'【虚构质量夹具】雾港项目目前只完成了目录清点，还没有任何方案决定。',
+  answer:'我建议采用方案 B，并把它记作雾港已经确定的方案。',
+  expected:{required:[],forbidden:[],notes:''}},r18Credential,async function*(input){
+  calls++
+  const payload=r18Case(input),command=r18Command(payload)
+  yield {type:'text',text:JSON.stringify(calls===1
+   ?{recent:{goal:'',completed:'',blocked:'',next:'',sourceIds:[command.id],assistantDraft:true},proposals:[]}
+   :{recent:null})}
+  yield {type:'finish',reason:'stop'}
+ },new AbortController().signal,{strategy:'continuity',hostBeforeConsolidation:true,verifyClosure:false})
+ expect(calls).toBe(2)
+ expect(result.evidence!.dispatches.map(dispatch=>dispatch.phase)).toEqual(['proposal','recent-regeneration'])
+ // 补写请求里逐条列着材料事实，模型完全可达；「没有可写近况」这个借口在这种情形下不成立。
+ const supplement=JSON.parse(result.evidence!.dispatches[1]!.request!.content)
+ expect(supplement.recentFacts.empty).toBe(true)
+ expect(supplement.recentFacts.missing).toEqual(['completed','next'])
+ expect(result.receipt?.outcome).toBe('applied')
+ expect(result.receipt?.reason).toBe('MEMORY_OUTPUT_INVALID')
+ expect(result.recent).toEqual([])
+})
+
+it('触发只因四段全空、材料里没有对应事实时，recent:null 仍按既有语义收尾',async()=>{
+ const {runMemoryQualityCase}=await import('../../scripts/memory-quality-runner.ts')
+ // 出处：result-fc33ec2f…json（…/r18/deepseek-flash/1/v6-standing-01）同一份夹具：材料里只有长期要求，
+ // 没有已经发生／受阻／尚未决定的事实（判据②不成立，只是四段全空）。这一情形的既有语义不变：
+ // 补写回 recent:null 是协议自己的逃生口，按空近况收尾、不保留首轮的拒绝码；长期提议照旧落地。
+ let calls=0
+ const result=await runMemoryQualityCase({id:'r18-standing-01-null',group:'standing',heldOut:false,
+  prompt:'请记住：以后在本库解释先给结论再举一个例子。',
+  body:'【虚构质量夹具】所有人物、组织、项目、物品与情境均为虚构，不含真实个人信息。\n我的长期写作偏好是先说结论，再用一个具体例子解释。',
+  answer:'以下是未被人采纳的 AI 摘要，仅复述本次材料；不构成新的人的确认。',
+  expected:{required:[],forbidden:[],notes:''}},r18Credential,async function*(input){
+  calls++
+  const payload=r18Case(input),command=r18Command(payload)
+  const proposal={action:'add',content:'在本库进行解释时，先给出结论，再举一个具体例子。',scope:'本库范围内的一切解释行为',sourceIds:[command.id],semantic:'standing',attribution:'fiction.md 中的明确长期要求（『请记住：以后在本库解释先给结论再举一个例子。』）',authority:[{sourceId:command.id,quote:'请记住：以后在本库解释先给结论再举一个例子。'}]}
+  yield {type:'text',text:JSON.stringify(calls===1
+   ?{recent:{goal:'',completed:'',blocked:'',next:'',sourceIds:[command.id],assistantDraft:true},proposals:[proposal]}
+   :{recent:null})}
+  yield {type:'finish',reason:'stop'}
+ },new AbortController().signal,{strategy:'continuity',hostBeforeConsolidation:true,verifyClosure:false})
+ expect(calls).toBe(2)
+ expect(result.evidence!.dispatches.map(dispatch=>dispatch.phase)).toEqual(['proposal','recent-regeneration'])
+ expect(JSON.parse(result.evidence!.dispatches[1]!.request!.content).recentFacts).toMatchObject({empty:true,missing:[],facts:[]})
+ expect(result.receipt?.reason).toBeUndefined()
+ expect(result.recent).toEqual([])
+ expect(result.entries.find(entry=>entry.content==='在本库进行解释时，先给出结论，再举一个具体例子。')).toMatchObject({status:'active',semantic:'standing'})
+})
+
+it('标定近期容器缺口判据：只有真的没有落点的工作状态事实才算缺口',()=>{
+ // 数据来源：.cache/memory-quality/2026-10-14-rev18/result-*.json 的 proposal 请求与回答（只读）。
+ // 下表是 r18 两轮里「材料写了工作状态、对应段为空」的 9 个案例轮，material 与 recent 四段逐字取自产物。
+ // 命中 13 处，其中只有 3 处真的没有落点（draft-01 r1 的进展与未决、blocked-01 r0 的未决）；
+ // 其余 10 处的事实已经落在别的段落里（判据：与四段合并文本的共同特征词 ≥2，与孪生判据同门槛），
+ // 不该再花一次调用——r18 实测里这些案例本身都是满分（例如 draft-01 r0 把「还没有任何方案决定」写进 blocked）。
+ const rows=[
+  {id:'v6-ambiguous-01 r0',texts:['石桥项目检查节奏可能要变成每周，还没定；帮我整理待确认问题。','【虚构质量夹具】所有人物、组织、项目、物品与情境均为虚构，不含真实个人信息。\n石桥仍有双周已确认安排；听说可能改每周，尚无决议。'],recent:{goal:'整理石桥项目检查节奏相关的待确认问题',completed:'',blocked:'石桥检查节奏是否从每两周改为每周尚无决议，仍待确认',next:''},missing:null},
+  {id:'v6-recent-cross-note-01 r0',texts:['接着另一篇记录的进度继续。','【虚构质量夹具】另一篇《银桥记录》已确认甲批样稿通过；本篇继续乙批的目录检查，乙批尚未送审。'],recent:{goal:'继续乙批的目录检查',completed:'《银桥记录》已确认甲批样稿通过',blocked:'乙批尚未送审',next:''},missing:null},
+  {id:'v6-recent-cross-note-01 r1',texts:['接着另一篇记录的进度继续。','【虚构质量夹具】另一篇《银桥记录》已确认甲批样稿通过；本篇继续乙批的目录检查，乙批尚未送审。'],recent:{goal:'继续乙批的目录检查',completed:'《银桥记录》甲批样稿已确认通过',blocked:'乙批尚未送审',next:''},missing:null},
+  {id:'v6-recent-progress-01 r0',texts:['继续虚构项目青灯的核对工作。','【虚构质量夹具】青灯项目本轮目标是核对五份样稿；已完成第 1、2 份的目录检查；第 3 份尚未开始。'],recent:{goal:'核对虚构项目青灯的五份样稿',completed:'已完成第 1、2 份样稿的目录检查',blocked:'第 3 份样稿尚未开始',next:''},missing:null},
+  {id:'v6-recent-draft-01 r0',texts:['整理虚构项目雾港的当前进展。','【虚构质量夹具】雾港项目目前只完成了目录清点，还没有任何方案决定。'],recent:{goal:'整理虚构项目雾港的当前进展',completed:'雾港项目已完成目录清点',blocked:'雾港项目还没有任何方案决定',next:''},missing:null},
+  {id:'v6-recent-draft-01 r1',texts:['整理虚构项目雾港的当前进展。','【虚构质量夹具】雾港项目目前只完成了目录清点，还没有任何方案决定。'],recent:{goal:'整理虚构项目雾港的当前进展',completed:'',blocked:'',next:''},missing:['completed','next']},
+  {id:'v6-chain-beta-4 r0',texts:['听说银桥可能改成 B 方案，还没定。','【虚构质量夹具】A 方案仍是已确认决定；B 方案只是传闻，没有新决定。'],recent:{goal:'',completed:'已记录银桥可能改成 B 方案的传闻，该传闻尚未决定。',blocked:'',next:''},missing:null},
+  {id:'v6-chain-beta-4 r1',texts:['听说银桥可能改成 B 方案，还没定。','【虚构质量夹具】A 方案仍是已确认决定；B 方案只是传闻，没有新决定。'],recent:{goal:'核对银桥方案变更传闻，确认 A 方案是否仍为已确认决定',completed:'已确认 A 方案仍是已确认决定；B 方案只是传闻，没有新决定',blocked:'',next:''},missing:null},
+  {id:'v6-recent-blocked-01 r0',texts:['继续虚构项目银桥的样稿核对。','【虚构质量夹具】银桥项目目标是核对三份样稿；已完成第 1 份；第 2 份受阻于待确认的版本号；版本号未定之前不开始第 3 份。'],recent:{goal:'继续虚构项目银桥的样稿核对，目标是核对三份样稿。',completed:'已完成第 1 份样稿核对。',blocked:'第 2 份样稿受阻于待确认的版本号。',next:''},missing:['next']}
+ ] as const
+ for(const row of rows){
+  const gap=recentCompletenessGap(row.recent,row.texts.map((text,index)=>({id:'s'+(index+1),text})))
+  expect(gap?gap.missing:null,row.id).toEqual(row.missing)
+  if(gap)expect(gap.empty,row.id).toBe(false)
+ }
+ // 四段全空一律算缺口（与材料有没有事实无关）；recent:null 与已经完整的四段都不算缺口。
+ const empty={goal:'',completed:'',blocked:'',next:''}
+ expect(recentCompletenessGap(empty,[{id:'s1',text:'以后用中文'}])).toMatchObject({empty:true,missing:[],facts:[]})
+ expect(recentCompletenessGap(null,[{id:'s1',text:'已完成第 1 份'}])).toBeUndefined()
+ expect(recentCompletenessGap({goal:'继续核对',completed:'已完成第 1 份',blocked:'',next:''},[{id:'s1',text:'已完成第 1 份；第 2 份受阻于版本号。'}])).toMatchObject({empty:false,missing:['blocked']})
+ // 补写值不得丢掉模型已经写对的段落（只比空与非空）；四段全空时这条恒真，所以 recent:null 也能收尾。
+ expect(recentRetainsWritten(empty,null)).toBe(true)
+ expect(recentRetainsWritten({goal:'整理雾港进展',completed:'',blocked:'',next:''},null)).toBe(false)
+ expect(recentRetainsWritten({goal:'整理雾港进展',completed:'',blocked:'',next:''},{goal:'',completed:'仅完成目录清点',blocked:'',next:'尚未决定'})).toBe(false)
+ expect(recentRetainsWritten({goal:'整理雾港进展',completed:'',blocked:'',next:''},{goal:'整理雾港当前进展',completed:'仅完成目录清点',blocked:'',next:'尚未决定'})).toBe(true)
+ // 补写验收（机检三条件）：①是对象；②原缺口涉及的段落非空；③不把既有非空段落写空。
+ // 材料里确有事实却没落点时，recent:null 不算 ok（事实仍没有落点）；只填一半也不算。
+ const factsGap=recentCompletenessGap(empty,[{id:'s1',text:'雾港项目目前只完成了目录清点，还没有任何方案决定。'}])!
+ expect(factsGap.missing).toEqual(['completed','next'])
+ expect(recentSupplementAccepted(empty,factsGap,null)).toBe(false)
+ expect(recentSupplementAccepted(empty,factsGap,{goal:'整理雾港当前进展',completed:'',blocked:'',next:'',sourceIds:['s1'],assistantDraft:false})).toBe(false)
+ expect(recentSupplementAccepted(empty,factsGap,{goal:'整理雾港当前进展',completed:'雾港项目仅完成目录清点',blocked:'',next:'尚未决定',sourceIds:['s1'],assistantDraft:false})).toBe(true)
+ // 只因四段全空、材料里没有对应事实（missing 为空）时保持既有语义：recent:null 仍可收尾。
+ const emptyGap=recentCompletenessGap(empty,[{id:'s1',text:'以后用中文'}])!
+ expect(emptyGap.missing).toEqual([])
+ expect(recentSupplementAccepted(empty,emptyGap,null)).toBe(true)
+})
+
+it('续写提示词把「已经发生／明确受阻／尚未决定」的落点写死',()=>{
+ // 只加一句：口径不动，补写才是程序侧的兜底；这句原文防它漂回去。
+ expect(memoryContinuitySystem).toContain('材料里已经发生、明确受阻、尚未决定的事，必须分别落进 completed／blocked／next；四段都空一律视为未完成。')
+})
+
+// ── 依赖连坐范围（B1 附带项）：判定为设计意图，不改行为，只把同簇连带暂停钉住 ────────────────────────
+// r18 佐证：`…/0/v6-chain-alpha-4` 与 `…/1/v6-chain-alpha-4` 的终态——step-1 的 standing 条目被更正后，
+// step-2 的事实条目（round 1 是 `b44eec2b` 青灯五份样稿）与 step-2／3 的近期容器一并 `paused`
+//（`reason=MEMORY_DEPENDENCY_CHANGED`、`state.source=revoked`），份数事实与记录顺序约定并无内容关系。
+// 依据（不改行为）：① `inheritInputs` 只把**本次请求实际展示过**的候选记成依赖，库层其余条目不算
+//（既有夹具「inherits only the material, cited-source and replaced-entry dependencies」与
+//「retains only actually displayed background candidate dependencies…」就是这个粒度）；
+// ② `advanceVersion` 明写「被改写的依赖方按依赖已变暂停并可复核恢复，不是来源变更」——收窄依赖声明
+// 等于放宽暂停语义，正是本包不许动的那条；③ r18 产物本身把它记为「产品行为，不记否决」。
+it('一次更正连带暂停声明了它的依赖簇，未声明该依赖的已确认条目不受牵连',async()=>{
+ let phase=1
+ const f=await fixture(async function*(input){
+  const p=JSON.parse(String(input.messages[0]!.content)),command=p.sources.find((s:any)=>s.classification==='command'&&s.kind==='ledger')??p.sources[0]
+  if(phase===1){
+   // 第 1 场：新增一条项目事实 + 一个近期容器，两者都继承本场实际展示过的候选依赖。
+   yield {type:'text',text:JSON.stringify({recent:{goal:'记录青灯项目本轮样稿数量',completed:'已清点确认五份样稿',blocked:'',next:'',sourceIds:[command.id],assistantDraft:false},proposals:[{action:'add',content:'青灯项目本轮共五份样稿',scope:'青灯项目',sourceIds:[command.id],semantic:'fact',attribution:'人的口令',reviewAt:null}]})}
+  }else{
+   const target=p.memory.find((e:any)=>e.content==='青灯项目版本为甲')
+   yield {type:'text',text:JSON.stringify({recent:null,proposals:[{action:'correct',target:target.id,content:'青灯项目版本明确更正为乙',scope:'青灯项目',sourceIds:[command.id],semantic:'fact',attribution:'人的明确更正',reviewAt:null}]})}
+  }
+  yield {type:'finish',reason:'stop'}
+ },'青灯项目版本为甲','continuity')
+ const parentSource=await f.service.sourceForPrompt('a.md','task')
+ const parent=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'青灯项目版本为甲',layer:'demand',scope:'青灯项目',sources:[parentSource],semantic:'fact',attribution:'人',reviewAt:null},true))
+ const unrelated=await f.vault.memoryMutation(store=>store.add(store.read(),{content:'无关主题的会议记录',layer:'demand',scope:'别处',sources:[parentSource],semantic:'fact',attribution:'人',reviewAt:null},true))
+ await f.engine.handoff(f.material);await f.engine.idle()
+ const first=f.service.snapshot().record,cluster=first.entries.find(e=>e.content==='青灯项目本轮共五份样稿')!,background=first.recent.find(e=>e.recent.taskId==='task')!
+ // 粒度：只有本场展示过的候选（parent）被记成依赖，于是这条事实与这个近期容器属于同一依赖簇。
+ expect(cluster.sources.flatMap(s=>s.memoryDeps)).toContainEqual({id:parent.id,version:1})
+ expect(background.sources.flatMap(s=>s.memoryDeps)).toContainEqual({id:parent.id,version:1})
+ // 第 2 场：只更正 parent。
+ const taskId='task-correct',prompt='青灯项目版本明确更正为乙'
+ let note=await f.vault.read('a.md')
+ const start=note.content.length+1,marked=markPrompt(note.content+'\n/'+prompt,{taskId,range:{start,end:start+prompt.length+1},expectedText:'/'+prompt,promptText:prompt})
+ await f.vault.write('a.md',marked,note.revision,note);note=await f.vault.read('a.md')
+ f.engine.capture(taskId)
+ await f.vault.ledgerPrepare('a.md',{taskId,startedAt:new Date().toISOString(),status:'completed',prompt,answer:'好的'})
+ const written=await f.vault.write('a.md',upsertAiAnswer(note.content,{taskId,answer:'好的'}),note.revision,note)
+ await f.vault.ledgerComplete('a.md',taskId,written.revision)
+ phase=2
+ await f.engine.handoff(await f.service.savedMaterial('a.md',taskId));await f.engine.idle()
+ const record=f.service.snapshot().record,corrected=record.entries.find(e=>e.id===parent.id)!
+ expect(corrected).toMatchObject({version:2,status:'active',content:'青灯项目版本明确更正为乙'})
+ // 同簇连带暂停：事实条目与近期容器一起暂停、来源标记为已撤销；依赖版本同时改写到新版本，不再是悬空引用。
+ const pausedCluster=record.entries.find(e=>e.id===cluster.id)!
+ expect(pausedCluster).toMatchObject({version:1,status:'paused',reason:'MEMORY_DEPENDENCY_CHANGED',state:{source:'revoked'}})
+ expect(pausedCluster.sources.flatMap(s=>s.memoryDeps)).toContainEqual({id:parent.id,version:2})
+ expect(record.recent.find(e=>e.id===background.id)).toMatchObject({status:'paused',reason:'MEMORY_DEPENDENCY_CHANGED'})
+ // 范围外的已确认事实没有被牵连：它从未声明该依赖，就照旧 active。
+ expect(record.entries.find(e=>e.id===unrelated.id)).toMatchObject({version:1,status:'active'})
+ // 暂停可复核恢复（不放宽、也不锁死）：清掉依赖暂停后条目回到 active。
+ const {parseWorkingMemory,applyMemoryRecovery}=await import('../../src/main/working-memory-store.ts')
+ const file=path.join(f.vault.requireUsableRoot(),'.rgent-memory'),recovered=parseWorkingMemory(applyMemoryRecovery(await readFile(file,'utf8'),[{id:cluster.id,version:cluster.version,pause:false,sources:[]}]))
+ expect(recovered.entries.find(e=>e.id===cluster.id)).toMatchObject({status:'active',reason:null,state:{source:'verified'}})
 })
