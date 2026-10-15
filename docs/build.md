@@ -386,7 +386,7 @@ flowchart TD
 
 2026-10-03 包 5 最终收口（受验提交 `d0e6796`）：串行文档、完整测试、构建、功能窗口通过；完整 **1010 通过／2 跳过**，功能 **306／0**，固定同内容视觉 **110／0**。两项跳过仍为 Windows 路径／数据流用例。1000 条固定记忆、100 个词面查询达到首八条覆盖率至少 85%、无关返回不高于 5% 的基准；这是词面检索证据，不证明困难语义查询或模型学习质量。受控回环服务证实“保存 → 整理 → 下一场使用 → 遗忘 → 派生历史不再流出”，不冒充真实供应商质量。
 
-最终及失败日志、15 张实际截图保存于[本轮证据目录](/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/rgent-v2-2026-10-03)。[完整窗口日志](/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/rgent-v2-2026-10-03/rgent-v2-package5-close-ui.log)、[视觉日志](/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/rgent-v2-2026-10-03/rgent-v2-package5-close-visual.log)。记忆设置及展开来源的日夜 1200×800、800×560、1600×900 十二张样张已本机逐张查看，分页／账本和遗忘反馈另留三张。用户视觉确认仍未取得。
+最终及失败日志、15 张实际截图保存于`本轮证据目录`（本机路径：`/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/rgent-v2-2026-10-03`）。`完整窗口日志`（本机路径：`/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/rgent-v2-2026-10-03/rgent-v2-package5-close-ui.log`）、`视觉日志`（本机路径：`/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/rgent-v2-2026-10-03/rgent-v2-package5-close-visual.log`）。记忆设置及展开来源的日夜 1200×800、800×560、1600×900 十二张样张已本机逐张查看，分页／账本和遗忘反馈另留三张。用户视觉确认仍未取得。
 
 本轮工程债务清理与对照自查完成；Windows 维护竞态、对应双平台 CI、macOS／Windows 原生输入法人工操作、每个真实记忆模型 120 个虚构案例 × 三次的学习质量门继续待核。未推送、不触发 CI，不将合成输入或受控响应替代这些证据，不宣称整个阶段验收完成。
 
@@ -397,7 +397,7 @@ flowchart TD
 - 施工图与工程篇区分 2026-10-02 旧授权、各包当时结果和 v2 最新本机交付，保留原数字、失败及平台待核项。
 - 修复后定向 5 文件／58 项通过；串行文档、完整类型及测试 **81 文件／1014 通过／2 平台跳过**、构建通过，构建后功能窗口 **305／0**。本次未设置截图目录；与上次 306 项相比，只少截图分支中的“800×560 设置面板完整留在窗口内”，没有删改断言。本轮未改窗口布局，既有 `d0e6796` 同内容视觉 110／0 的适用提交保持不变，不冒充本次新视觉采证。
 
-追加红例、定向、完整、构建和窗口日志保存在同一[证据目录](/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/rgent-v2-2026-10-03)，文件前缀 `rgent-v2-extra-review-`。真实模型、Windows／CI、原生输入法与用户视觉确认仍待核；本次只提交本地。
+追加红例、定向、完整、构建和窗口日志保存在同一`证据目录`（本机路径：`/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/rgent-v2-2026-10-03`），文件前缀 `rgent-v2-extra-review-`。真实模型、Windows／CI、原生输入法与用户视觉确认仍待核；本次只提交本地。
 
 阶段按包推进，不借改名销账。架构仅登记已接线强制点，topics／frontend 登记规划和必要界面协议；正文原文、撤销、身份锁、IME、历史来源与任务材料均纳入回归。收口串行 docs:check、test、build、ui:check；真实模型与人工证据未取得明示待核。单篇拷出不带历史、推理短期化及设备摘要含改写内容的代价按合同登记。
 
@@ -410,7 +410,7 @@ flowchart TD
 - 最终定向 **5 文件／60 项通过**，类型检查、文档检查、构建通过，构建后真实窗口 **327 项／0 失败**，整轮无未捕获异常。窗口覆盖日夜 1200×800、800×560、1600×900，空状态、多条虚构记忆、长名称与范围、模型设置、来源展开、维护确认、滚动、键盘和中性焦点。本轮严格限定上述呈现与文案范围，按获准门禁未额外运行全量单元测试。
 - 失败证据分别保留：首轮 **304／5** 的首因是新增夹具误用提交接口，导致后续设置未关闭的连锁失败；修正接口但保留原断言。后续 **327／1** 先纠正草稿反馈节点选择器，继而真实复现模型选项刷新丢失选择，定向反例复现后修复。中途 **326／0**、**327／0** 仅证明各自当时实现；最终证据独立对应 `9a7b043`，没有放宽断言或选取重跑绿灯。
 
-最终与红例／中途日志、同内容日夜样张保存在[本轮证据目录](/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/memory-page-2026-10-04)。[最终窗口日志](/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/memory-page-2026-10-04/rgent-memory-page-window.log)、[定向日志](/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/memory-page-2026-10-04/rgent-memory-page-final-target.log)、[日间列表](/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/memory-page-2026-10-04/memory-list-day-1200.png)、[夜间列表](/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/memory-page-2026-10-04/memory-list-night-1200.png)。本机逐图核对了空状态、列表、模型及维护样张；自动截图不代表用户确认。
+最终与红例／中途日志、同内容日夜样张保存在`本轮证据目录`（本机路径：`/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/memory-page-2026-10-04`）。`最终窗口日志`（本机路径：`/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/memory-page-2026-10-04/rgent-memory-page-window.log`）、`定向日志`（本机路径：`/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/memory-page-2026-10-04/rgent-memory-page-final-target.log`）、`日间列表`（本机路径：`/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/memory-page-2026-10-04/memory-list-day-1200.png`）、`夜间列表`（本机路径：`/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/memory-page-2026-10-04/memory-list-night-1200.png`）。本机逐图核对了空状态、列表、模型及维护样张；自动截图不代表用户确认。
 
 仅本地提交，未推送、不触发 CI。本轮 Windows 与用户视觉确认仍待核；此前原生输入法人工操作、真实模型学习质量、双平台维护与 CI 的缺口继续保留，不因本页窗口通过而销账，不宣称整个记忆阶段验收完成。
 
@@ -537,7 +537,7 @@ flowchart TD
 
 - **分包可构建：** `5468a1b` 对应暂存源码导出副本的类型检查、6 文件 109 条定向用例及构建通过；`a3d9514` 对应副本的类型检查、4 文件 45 条定向用例及构建通过。副本是临时源码目录，不含 `.git`，没有创建分支或 worktree。文档检查器 15 条覆盖当前阶段／矩阵、交接引用与证据字段。
 - **完整产品门禁：** `6958a71` 的产品源码经过串行 `pnpm docs:check`、`pnpm test`、`pnpm build`、构建后 `pnpm ui:check`：67 文件、834 通过／2 平台条件跳过，功能窗口 280 项／0 失败。记录分别为 `/tmp/rgent-alignment-test-verified.log`、`/tmp/rgent-alignment-build-verified.log`、`/tmp/rgent-alignment-ui-verified.log`。本机受控模型响应不代称厂商现场通过。
-- **样张与字号：** 窗口脚本 `51ac399` 随后补小字号工作区与默认模型区域的采证；产品源码没有再改。`RGENT_UI_VISUAL_ONLY=1 pnpm ui:check` 最终 110 项／0 失败，包含九种字号预览组合、保存后大／小字号、取消恢复、日夜主题及 1200×800、800×560、1840×1000。日志 `/tmp/rgent-alignment-visual-final.log`；[日间助手默认区域](/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/rgent-alignment/reference-day-settings-assistant-default.png)、[夜间界面文字样张](/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/rgent-alignment/reference-night-settings-text-small.png)。自动采证及本机查看不等于用户视觉确认。
+- **样张与字号：** 窗口脚本 `51ac399` 随后补小字号工作区与默认模型区域的采证；产品源码没有再改。`RGENT_UI_VISUAL_ONLY=1 pnpm ui:check` 最终 110 项／0 失败，包含九种字号预览组合、保存后大／小字号、取消恢复、日夜主题及 1200×800、800×560、1840×1000。日志 `/tmp/rgent-alignment-visual-final.log`；`日间助手默认区域`（本机路径：`/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/rgent-alignment/reference-day-settings-assistant-default.png`）、`夜间界面文字样张`（本机路径：`/Users/skahanium/.codex/visualizations/2026/09/25/01a0d62c-72ef-7e91-8196-679d57407688/rgent-alignment/reference-night-settings-text-small.png`）。自动采证及本机查看不等于用户视觉确认。
 - **自查修正：** 模型配置在异步来源复核后再次核验，避免沿旧预览消费新接收方；新建及迟到回执核对库会话；助手多行输入保留原稿，迟到保存结果不能覆盖保存后新输入；附件 live 核验只检查获准对象的祖先及同级归属，不在每个增量递归扫描整库。原生核验前后检查不是外部文件系统的原子隔离证明。
 - **本轮反例：** 首次完整测试的授权调用次数断言及原样说明计数字段断言已按实际语义修正，保留 `/tmp/rgent-alignment-test.log`、`/tmp/rgent-alignment-test-green.log`。首次功能窗口 275 项／4 失败的独立首因是授权浮层忽略 `keyCode 229`，随后取消与运行／全文断言发生连锁失败；单独反例 `/tmp/rgent-ime-confirm-red.log` 复现误发送，修复后独立组合事件用例及完整门禁通过，原 `/tmp/rgent-alignment-ui.log` 保留。
 - **旧失败未销账：** 旧 `/tmp/rgent-compact-chrome.log` 的首个底栏候选失败，在 `83c700b` 的一次受控切片中未重现（原断言不变，只加配置、焦点、浮层与异常观测，163 项／0 失败；`/tmp/rgent-baseline83c700b-observed.log`）。这仅证明该切片本次通过，不能证明旧整轮通过或认定宿主负载是根因；旧失败原因仍待核。
