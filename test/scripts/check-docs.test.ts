@@ -290,7 +290,7 @@ describe('commit references and package status cells', () => {
   it('rejects a package table status outside the four existing words', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const row = /\| 1 \| 技能库存储与字段校验[^\n]*?\*\*已交\*\*/
+    const row = /\| C1 \| 原生候选证明[^\n]*?\*\*已交\*\*/
     expect(source).toMatch(row)
     writeFileSync(build, source.replace(row, (matched) => matched.replace('**已交**', '**冻结**')))
     const result = run()
@@ -299,10 +299,37 @@ describe('commit references and package status cells', () => {
     expect(result.stderr).toContain('**冻结**')
   })
 
+  it('rejects a current-round package row whose status cell is missing', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    // 本轮包表的数据行「末列必须写状态」：以前「若以加粗词开头才校验」，所以漏写反而合法，
+    // B1／B2／B3／C2／C3／C4 六个格子就是这么漏掉的。这条测试锁住「缺失即报错」。
+    const row = /\| C2 \| 库层删除与恢复核验[^\n]*?\*\*已交\*\*/
+    expect(source).toMatch(row)
+    writeFileSync(build, source.replace(row, (matched) => matched.replace('**已交**', '')))
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('本轮包表')
+    expect(result.stderr).toContain('本行缺失')
+  })
+
+  it('does not require status cells in historical package tables', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    // 债务移交那张表的末列是「触发条件」（如「用户愿意花几分钟时」），从来不用四个状态词；
+    // 它不在「本轮」小节里，判据不该误伤——历史表的读法与当前包表不同。
+    const row = /\| 3 \| 用户视觉确认（记忆页在新成绩下的实际显示）[^\n]*/
+    expect(source).toMatch(row)
+    expect(source.match(row)![0].split('|').at(-2)!.trim()).not.toMatch(/^\*\*(已交|未开|进行中|待核)\*\*/)
+    const result = run()
+    expect(result.stderr).toBe('')
+    expect(result.status).toBe(0)
+  })
+
   it('accepts the four existing package states', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const row = /\| 1 \| 技能库存储与字段校验[^\n]*?\*\*已交\*\*/
+    const row = /\| C1 \| 原生候选证明[^\n]*?\*\*已交\*\*/
     expect(source).toMatch(row)
     writeFileSync(build, source.replace(row, (matched) => matched.replace('**已交**', '**进行中**')))
     const result = run()

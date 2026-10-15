@@ -13,8 +13,12 @@ import { fileURLToPath } from 'node:url'
  *    - 提交号：正文里按本仓库惯例写成裸短号的十六进制号必须真的存在（`git cat-file -e <sha>^{commit}`）。
  *      判据只收「提交引用形态」，排除明确不是提交号的哈希（见下面规则 4a 的注释）；浅克隆无法
  *      区分「没取回」与「不存在」，此时只提示、不判错。
- *    - 包表状态格：`docs/build.md` 里表头含「包」的表，末列（门／验收／证据列）若以加粗词开头，
- *      该词必须落在既有词汇内。
+ *    - 包表状态格：只核**本轮包表**——标题含「本轮」（或标题去括号后等于当前阶段名）的小节里、
+ *      表头含「包」的表的**数据行**（表头行与分隔行不算）。末列（门／验收／证据列）**必须**以
+ *      四个状态词之一加粗开头（`**已交**`／`**未开**`／`**进行中**`／`**待核**`）；**缺失即报错**。
+ *      以前写成「若以加粗词开头才校验」，于是**只有写了状态格才被检查**，漏写反而合法——本轮的
+ *      包表就是这么漏掉 B1／B2／B3／C2／C3／C4 六个状态格的。历史表（`## 2026-*`、更早的施工图
+ *      小节）不按本轮词汇要求，不在判据内。
  */
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const files = ['AGENTS.md', 'README.md', 'CONTRIBUTING.md', ...[
@@ -224,22 +228,39 @@ if (gitAvailable) {
   notices.push('未找到 git 工作树，提交号存在性检查跳过（需要在完整克隆里跑才有效）')
 }
 
-// 规则 4b：包表状态格。表头含「包」的表（`| 包 |`／`| # | 包 |`…），末列若以加粗词开头，该词必须是既有状态词。
+// 规则 4b：本轮包表状态格。只核**本轮包表**：标题含「本轮」（或标题去括号后等于当前阶段名）的小节里，
+// 表头含「包」的表（`| 包 |`／`| # | 包 |`…）的**数据行**；末列必须以四个状态词之一加粗开头，
+// **缺失即报错**。历史表（`## 2026-*`、更早小节）不按本轮词汇要求——它们本来就不写状态词。
 const PACKAGE_STATES = new Set(['已交', '未开', '进行中', '待核'])
+const CURRENT_SECTION = /本轮/
+/** 标题去掉尾部括号（全角／半角）后的主名，用来认「当前阶段」那一节。 */
+const headingBase = (text) => text.replace(/[（(][^（()）]*[)）]\s*$/u, '').trim()
 let checkedStatusCells = 0
 {
   const lines = blankFencedCode(build).split(/\r?\n/)
+  const stageBase = buildStage?.replace(/[。.!！\s]+$/u, '') ?? null
+  let scoped = false
   let header = null
   for (const [index, line] of lines.entries()) {
+    const heading = /^#{2,6}\s+(.+?)\s*$/.exec(line)
+    if (heading) {
+      const text = heading[1]
+      // 本轮的节怎么认：标题里带「本轮」，或标题去括号后就是当前阶段名（`## 人删除与废纸篓安全门（本轮）`）。
+      scoped = CURRENT_SECTION.test(text) || (stageBase !== null && headingBase(text) === stageBase)
+      header = null
+      continue
+    }
     if (!line.startsWith('|')) { header = null; continue }
     if (/^\|[\s:|-]+\|$/.test(line)) continue
     const cells = line.split('|').slice(1, -1).map((cell) => cell.trim())
     if (header === null) { header = cells; continue }
-    if (!header.includes('包')) continue
-    const state = /^\*\*([^*]+)\*\*/.exec(cells.at(-1) ?? '')?.[1]
-    if (state === undefined) continue
+    if (!scoped || !header.includes('包')) continue
     checkedStatusCells += 1
-    if (!PACKAGE_STATES.has(state)) {
+    const last = cells.at(-1) ?? ''
+    const state = /^\*\*([^*]+)\*\*/.exec(last)?.[1]
+    if (state === undefined) {
+      errors.push(`docs/build.md:${index + 1}: 本轮包表（表头含「包」）的数据行末列必须以状态词开头（${[...PACKAGE_STATES].map((s) => `**${s}**`).join('／')}），本行缺失`)
+    } else if (!PACKAGE_STATES.has(state)) {
       errors.push(`docs/build.md:${index + 1}: 包表状态格「**${state}**」不在既有词汇内（${[...PACKAGE_STATES].map((s) => `**${s}**`).join('／')}）`)
     }
   }
@@ -250,5 +271,5 @@ if (errors.length > 0) {
   process.exitCode = 1
 } else {
   for (const notice of notices) process.stderr.write(`${notice}\n`)
-  process.stdout.write(`文档检查通过：${files.length} 个文件，当前阶段「${buildStage}」；四条机械规则：链接与锚点／阶段一致性／交付证据形态／提交号存在性（核 ${checkedCommits} 个）＋包表状态格（核 ${checkedStatusCells} 个）。\n`)
+  process.stdout.write(`文档检查通过：${files.length} 个文件，当前阶段「${buildStage}」；四条机械规则：链接与锚点／阶段一致性／交付证据形态／提交号存在性（核 ${checkedCommits} 个）＋本轮包表状态格（核 ${checkedStatusCells} 个：缺失或超出四个词即报错）。\n`)
 }
