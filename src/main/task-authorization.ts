@@ -30,6 +30,8 @@ export interface TaskGrant {
   assertLive(action: AuthorizationAction, path?: string, signal?: AbortSignal): Promise<void>
   validateSources(signal?: AbortSignal): Promise<void>
   assertWriteTarget(path: string): void
+  /** 发起篇的现行核验基准：开场冻结，仅 acknowledgeOrigin 推进。 */
+  readonly originProof: Readonly<AuthorizedSource>
   acknowledgeOrigin(snapshot: NoteSnapshot): void
   revoke(): void
 }
@@ -172,7 +174,7 @@ class LiveGrant implements TaskGrant {
   readonly memorySnapshotSignature?:string
   private live=true
   private readonly owner:string
-  private originProof:AuthorizedSource
+  originProof:AuthorizedSource
   constructor(private readonly deps:AuthorizationDependencies,prepared:Prepared){
     this.memorySnapshotSignature=prepared.memory?.snapshotSignature
     this.owner=prepared.owner;this.id=prepared.view.id;this.root=prepared.root;this.sessionId=prepared.view.sessionId;this.origin=prepared.view.origin

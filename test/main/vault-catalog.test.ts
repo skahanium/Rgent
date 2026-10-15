@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { VaultCatalog } from '../../src/main/vault-catalog.ts'
 
 const roots: string[] = []
+const nativePath = (input: string) => fs.realpathSync.native(input)
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rgent-catalog-'))
   roots.push(root)
@@ -37,7 +38,7 @@ describe('device vault catalog', () => {
   it('inspects only directory metadata and preserves an empty root', () => {
     const { vault, catalog } = fixture()
     const target = catalog.inspect(vault)
-    expect(target).toMatchObject({ path: fs.realpathSync(vault), label: 'vault', id: null })
+    expect(target).toMatchObject({ path: nativePath(vault), label: 'vault', id: null })
     expect(target.rootIdentity).toMatch(/^\d+:\d+$/)
     expect(fs.readdirSync(vault)).toEqual([])
     expect(() => catalog.inspect(path.join(vault, 'absent'))).toThrow()
@@ -74,7 +75,7 @@ describe('device vault catalog', () => {
     catalog.register(catalog.inspect(child))
     expect(() => catalog.register(catalog.inspect(vault))).toThrow('VAULT_NESTED')
     const alias = path.join(root, 'child-alias'); fs.symlinkSync(child, alias, 'dir')
-    expect(catalog.register(catalog.inspect(alias)).path).toBe(fs.realpathSync(child))
+    expect(catalog.register(catalog.inspect(alias)).path).toBe(nativePath(child))
     const sibling = path.join(vault, 'sibling'); fs.mkdirSync(sibling)
     expect(catalog.register(catalog.inspect(sibling)).id).toBeTruthy()
   })
@@ -105,7 +106,7 @@ describe('device vault catalog', () => {
     const file = path.join(data, 'vault-catalog.json'); fs.writeFileSync(file, '{broken')
     expect(catalog.view().diagnostic).toBeTruthy()
     const target = catalog.inspect(vault)
-    expect(target.path).toBe(fs.realpathSync(vault))
+    expect(target.path).toBe(nativePath(vault))
     expect(() => catalog.register(target)).toThrow('VAULT_CATALOG_INVALID')
     expect(fs.readFileSync(file, 'utf8')).toBe('{broken')
   })
@@ -157,7 +158,7 @@ describe('device vault catalog', () => {
     const target = catalog.inspect(moved)
     expect(() => catalog.register(target)).toThrow('VAULT_RELOCATE_REQUIRED')
     expect(catalog.relocate(entry.id, target, catalog.view().revision)).toMatchObject({ lastVaultId: null })
-    expect(catalog.view().entries[0]).toMatchObject({ id: entry.id, path: fs.realpathSync(moved), lastUsed: null })
+    expect(catalog.view().entries[0]).toMatchObject({ id: entry.id, path: nativePath(moved), lastUsed: null })
   })
   it('removes only the device directory entry and clears last-use selection', () => {
     const { vault, catalog } = fixture()

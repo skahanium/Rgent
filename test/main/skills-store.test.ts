@@ -45,7 +45,7 @@ describe('skills store', () => {
     const store = createSkillsStore(root)
     store.write(config([record()], { [VAULT_A]: { enabled: ['skill-1'] } }), null)
     const target = path.join(root, 'skills.json')
-    expect(statSync(target).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') expect(statSync(target).mode & 0o777).toBe(0o600)
     const fresh = createSkillsStore(root)
     expect(fresh.get().skills[0]!.name).toBe('答案批改')
     expect(fresh.get().vaults[VAULT_A]!.enabled).toEqual(['skill-1'])

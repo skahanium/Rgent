@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
+import { TaskAuthorizationRegistry, type TaskGrant } from '../../src/main/task-authorization.ts'
 import { createScopedAgentTools } from '../../src/main/scoped-agent-tools.ts'
 import { appendLedgerChapter } from '../../src/main/host-source.ts'
 import { bodyFingerprint } from '../../src/main/ledger-provenance.ts'
@@ -18,6 +18,15 @@ async function fixture(content='# B\n\nneedle 正文\n') {
   return {records,reads,grant,deps,tools:createScopedAgentTools(grant,'task',deps),deny:(path:string)=>{denied=path},hook:(fn:(path:string)=>Promise<void>)=>{hook=fn}}
 }
 const signal=()=>new AbortController().signal
+/** 只让 snapshot 这一支说话：validateSources 已经按 originProof 核过，绕开它才能证明工具层不再整段跳过发起篇。 */
+function snapshotOnly(grant: TaskGrant): TaskGrant {
+  return new Proxy(grant, {
+    get(target, prop, receiver) {
+      if (prop === 'validateSources' || prop === 'assertLive') return async () => {}
+      return Reflect.get(target, prop, receiver)
+    }
+  })
+}
 
 describe('task-scoped read/search tools',()=>{
  it('searches only the fixed scope and never reads or returns outside material',async()=>{
@@ -82,6 +91,26 @@ it('hides a reference note’s unadopted body derived from a source outside this
 it('rejects a source replaced after material was read but before the tool returns',async()=>{
  const f=await fixture();let reads=0;f.hook(async path=>{if(path==='b.md' && ++reads===3)f.records.get(path)!.objectVersion='replacement'})
  await expect(f.tools.execute('search_library',{query:'needle'},signal())).rejects.toThrow('SOURCE_REPLACED');expect(f.tools.sentSources()).toEqual([])
+})
+it('rejects an origin swapped for another object even when the bytes match',async()=>{
+ const f=await fixture();const originId=f.grant.sources.find(s=>s.relPath==='a.md')!.sourceId
+ f.records.get('a.md')!.objectVersion='swapped-same-bytes'
+ const tools=createScopedAgentTools(snapshotOnly(f.grant),'task',f.deps)
+ await expect(tools.execute('read_library',{sourceId:originId},signal())).rejects.toThrow('SOURCE_REPLACED')
+})
+it('still reads the origin after append acknowledges the new identity',async()=>{
+ const f=await fixture();const originId=f.grant.sources.find(s=>s.relPath==='a.md')!.sourceId
+ const updated={content:'/问\n\n补一段依据。\n',revision:'ra2',sessionId:'s',objectVersion:'oa2'}
+ f.records.set('a.md',updated);f.grant.acknowledgeOrigin(updated)
+ const tools=createScopedAgentTools(snapshotOnly(f.grant),'task',f.deps)
+ const read:any=await tools.execute('read_library',{sourceId:originId},signal())
+ expect(JSON.stringify(read)).toContain('补一段依据')
+})
+it('rejects an unacknowledged origin rewrite instead of skipping identity',async()=>{
+ const f=await fixture();const originId=f.grant.sources.find(s=>s.relPath==='a.md')!.sourceId
+ f.records.set('a.md',{content:'/问\n\n人改了发起篇。\n',revision:'ra2',sessionId:'s',objectVersion:'oa'})
+ const tools=createScopedAgentTools(snapshotOnly(f.grant),'task',f.deps)
+ await expect(tools.execute('read_library',{sourceId:originId},signal())).rejects.toThrow('SOURCE_CHANGED')
 })
 it('preserves source range offsets and does not expose identity markers in reading pages',async()=>{
  const content='<!-- rgent:ai:v1 task-id="previous" -->\n\nanswer\n\n正文\r\n'

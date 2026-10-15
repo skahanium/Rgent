@@ -96,7 +96,7 @@ it('forgets 1000 longest legal identities serially beyond the old control wall',
  const {root,store}=fixture(),record=entryRecord(1000,true);writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record));expect(Buffer.byteLength(encodeWorkingMemory(record))).toBeLessThan(2*1024*1024)
  const started=performance.now();for(const e of record.entries)store.forget(store.read(),e.id,e.version)
  const final=store.read();expect(final.record.entries).toEqual([]);expect(final.record.forgotten).toHaveLength(1000);expect(Buffer.byteLength(final.raw!)).toBeLessThanOrEqual(2*1024*1024);console.info('Memory capacity cost',JSON.stringify({kind:'serial-1000',initialBytes:Buffer.byteLength(encodeWorkingMemory(record)),finalBytes:Buffer.byteLength(final.raw!),ms:Number((performance.now()-started).toFixed(2))}))
-},120000)
+}, process.platform === 'win32' ? 240_000 : 120_000)
 it('forget closes pending target chains as well as recursive evidence dependencies',()=>{
  const {root,store}=fixture(),record=entryRecord(4);record.entries[1]!.pendingTarget={id:record.entries[0]!.id,version:1};record.entries[2]!.pendingTarget={id:record.entries[1]!.id,version:1};record.entries[3]!.sources[0]!.memoryDeps=[{id:record.entries[2]!.id,version:1}];writeFileSync(path.join(root,'.rgent-memory'),encodeWorkingMemory(record))
  store.forget(store.read(),record.entries[0]!.id,1);expect(store.read().record.entries).toEqual([])

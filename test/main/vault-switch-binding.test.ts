@@ -3,7 +3,7 @@ import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 vi.mock('electron',()=>({dialog:{showOpenDialog:vi.fn()}}))
-vi.mock('../../src/main/watch.ts',async original=>({...await original<object>(),watchVault:(root:string)=>{if(root.endsWith('/B'))throw Error('WATCH_INITIALIZATION_FAILED');return ()=>{}}}))
+vi.mock('../../src/main/watch.ts',async original=>({...await original<object>(),watchVault:(root:string)=>{if(path.basename(root)==='B')throw Error('WATCH_INITIALIZATION_FAILED');return ()=>{}}}))
 import {VaultSession} from '../../src/main/vault.ts'
 import {vaultRootIdentity} from '../../src/main/watch.ts'
 it('watcher initialization failure returns the committed new binding with a persistent diagnosis',async()=>{

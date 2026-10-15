@@ -31,6 +31,7 @@ vi.mock('../../src/main/agent-host.ts',()=>({AgentHost:class{
 let base='',catalog:VaultCatalog,a:string,b:string,c:string
 const callerFrame={routingId:1}
 const invoke=(channel:string,...args:unknown[])=>state.handles.get(channel)!({sender:state.window.webContents,senderFrame:callerFrame},...args)
+const nativePath=(input:string)=>fs.realpathSync.native(input)
 beforeEach(async()=>{
  vi.resetModules();state.heldObjects=[];state.pending=[];state.acknowledged=[];state.trusted=true;state.memoryOwnerCheck=undefined;state.handles.clear();state.events.clear();state.appEvents.clear();state.window=null;state.launch=Promise.resolve();state.active=false;state.settled=0;state.stopped=0;state.watchFailure='';state.memoryResult=null;state.rechecks=[];state.tasks=[];state.cancelled=[];state.retried=[];state.open.mockReset();state.save.mockReset();state.confirm.mockReset();state.confirm.mockResolvedValue({response:1})
  base=fs.mkdtempSync(path.join(os.tmpdir(),'rgent-switch-main-'));state.data=path.join(base,'data');fs.mkdirSync(state.data)
@@ -56,7 +57,7 @@ it('exposes a damaged device catalogue while remaining in the chooser',async()=>
  expect(fs.readFileSync(path.join(state.data,'vault-catalog.json'),'utf8')).toBe('damaged')
 })
 it('restores the actual target and its watcher initialization diagnosis at startup',async()=>{
- state.watchFailure=fs.realpathSync(a);await restart()
+ state.watchFailure=nativePath(a);await restart()
  expect(await invoke(IPC.vaultGet)).toMatchObject({status:'ready',rootName:'A',vaultId:catalog.inspect(a).id,diagnostic:expect.any(String)})
 })
 it('waits for an existing launch before asking whether its active task may stop',async()=>{
@@ -96,7 +97,7 @@ it('rejects a nested create before touching the old vault directory',async()=>{
  await expect(invoke(IPC.vaultPick,true)).rejects.toThrow('VAULT_NESTED');expect(fs.existsSync(child)).toBe(false);expect((await invoke(IPC.vaultGet)).rootName).toBe('A')
 })
 it('reports the actual new target after watcher initialization failure',async()=>{
- state.watchFailure=fs.realpathSync(b);const entry=catalog.update(catalog.inspect(b).id!,{label:'新库'},catalog.view().revision).entries.find(e=>e.path===fs.realpathSync(b))!
+ state.watchFailure=nativePath(b);const entry=catalog.update(catalog.inspect(b).id!,{label:'新库'},catalog.view().revision).entries.find(e=>e.path===nativePath(b))!
  const result=await invoke(IPC.vaultOpen,entry.id).catch(()=>invoke(IPC.vaultGet))
  expect(result).toMatchObject({status:'ready',rootName:'新库',vaultId:entry.id,diagnostic:expect.any(String)})
 })
@@ -127,7 +128,7 @@ it.each(['inspect','abandon'] as const)('late note %s does not stop a same-name 
  let release!:()=>void,entered!:()=>void;const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r)
  const spy=vi.spyOn(VaultSession.prototype,'noteStatus').mockImplementation(async()=>{entered();await gate;return {status:'missing',sessionId:session,relPath:'same.md',objectVersion:'old'}})
  const old=invoke(operation==='inspect'?IPC.noteInspect:IPC.noteAbandon,{session,args:[{sessionId:session,relPath:'same.md',objectVersion:'old'}]}).then(()=>null,(e:Error)=>e.message)
- await started;await invoke(IPC.vaultOpen,catalog.inspect(b).id!);state.tasks=[{id:'B-task',root:fs.realpathSync(b),relPath:'same.md'}];release()
+ await started;await invoke(IPC.vaultOpen,catalog.inspect(b).id!);state.tasks=[{id:'B-task',root:nativePath(b),relPath:'same.md'}];release()
  try{expect(await old).toBe('VAULT_CHANGED');expect(state.cancelled).toEqual([])}finally{spy.mockRestore()}
 })
 it('late note save receipt does not request retryPending for B',async()=>{
@@ -159,7 +160,7 @@ it('a new-root watcher notification cannot re-read B for an old image controller
  vi.spyOn(VaultSession.prototype,'openVerified').mockImplementation(async function(this:import('../../src/main/vault.ts').VaultSession,...args){const result=await open.apply(this,args);(this as any).emit(IPC.treeChanged);return result})
  const old=invoke(IPC.remoteImageGet,{session,args:[{url:'https://image.test/x.png',context:{sessionId:session,noteRelPath:'same.md',objectVersion:'o',revision:'r'},mode:'default'}]}).then(()=>null,(e:Error)=>e.message)
  await started;await invoke(IPC.vaultOpen,catalog.inspect(b).id!);release()
- try{expect(await old).toBe('VAULT_CHANGED');expect(roots).toEqual([fs.realpathSync(a)])}finally{vi.restoreAllMocks()}
+ try{expect(await old).toBe('VAULT_CHANGED');expect(roots).toEqual([nativePath(a)])}finally{vi.restoreAllMocks()}
 })
 
 it('passes a captured production frame check to the existing memory IPC handler',async()=>{
@@ -170,7 +171,7 @@ it('passes a captured production frame check to the existing memory IPC handler'
 })
 
 it.each(['same-inode','replaced'] as const)('ordinary open preserves all registration bytes for %s identity changes',async kind=>{
- const file=path.join(state.data,'vault-catalog.json'),data=JSON.parse(fs.readFileSync(file,'utf8')),entry=data.entries.find((e:any)=>e.path===fs.realpathSync(a))
+ const file=path.join(state.data,'vault-catalog.json'),data=JSON.parse(fs.readFileSync(file,'utf8')),entry=data.entries.find((e:any)=>e.path===nativePath(a))
  if(kind==='same-inode')entry.rootIdentity='999999:'+entry.rootIdentity.split(':')[1]
  else{fs.renameSync(a,a+'-old');fs.mkdirSync(a)}
  if(kind==='same-inode')fs.writeFileSync(file,JSON.stringify(data))
@@ -179,7 +180,7 @@ it.each(['same-inode','replaced'] as const)('ordinary open preserves all registr
  expect(fs.readFileSync(file,'utf8')).toBe(before)
 })
 it('keeps explicit recovery retry after catalogue commit and failed attach, without ordinary pending retry',async()=>{
- const entry=catalog.view().entries.find(e=>e.path===fs.realpathSync(a))!,oldSession=(await invoke(IPC.vaultGet)).sessionId
+ const entry=catalog.view().entries.find(e=>e.path===nativePath(a))!,oldSession=(await invoke(IPC.vaultGet)).sessionId
  fs.renameSync(a,a+'-old');fs.mkdirSync(a)
  const {VaultSession}=await import('../../src/main/vault.ts'),open=vi.spyOn(VaultSession.prototype,'openVerified').mockRejectedValueOnce(Error('controlled attach failure'))
  const preview=await invoke(IPC.vaultCatalogChange,{id:entry.id,revision:catalog.view().revision,action:'root-preview'})
@@ -195,15 +196,15 @@ it('keeps explicit recovery retry after catalogue commit and failed attach, with
 })
 
 it('returns an explicit root preview instead of associating a different object through legacy relocate',async()=>{
- const entry=catalog.view().entries.find(e=>e.path===fs.realpathSync(b))!,before=fs.readFileSync(path.join(state.data,'vault-catalog.json'),'utf8')
+ const entry=catalog.view().entries.find(e=>e.path===nativePath(b))!,before=fs.readFileSync(path.join(state.data,'vault-catalog.json'),'utf8')
  const newRoot=path.join(base,'replacement');fs.mkdirSync(newRoot);state.open.mockResolvedValue({canceled:false,filePaths:[newRoot]})
  const result=await invoke(IPC.vaultCatalogChange,{id:entry.id,revision:catalog.view().revision,action:'relocate'})
- expect(result.rootPreview).toMatchObject({entryId:entry.id,path:fs.realpathSync(newRoot)})
+ expect(result.rootPreview).toMatchObject({entryId:entry.id,path:nativePath(newRoot)})
  expect(fs.readFileSync(path.join(state.data,'vault-catalog.json'),'utf8')).toBe(before)
 })
 
 it('rejects root association if its original frame is replaced during preparation waits',async()=>{
- const entry=catalog.view().entries.find(e=>e.path===fs.realpathSync(a))!
+ const entry=catalog.view().entries.find(e=>e.path===nativePath(a))!
  fs.renameSync(a,a+'-old');fs.mkdirSync(a)
  const preview=await invoke(IPC.vaultCatalogChange,{id:entry.id,revision:catalog.view().revision,action:'root-preview'}),before=fs.readFileSync(path.join(state.data,'vault-catalog.json'),'utf8')
  let release!:()=>void;state.launch=new Promise<void>(r=>release=r)
@@ -213,7 +214,7 @@ it('rejects root association if its original frame is replaced during preparatio
 })
 
 it('body-only copy leaves old pending visible until explicit old-source abandon and never acknowledges it as copied',async()=>{
- const entry=catalog.view().entries.find(e=>e.path===fs.realpathSync(a))!
+ const entry=catalog.view().entries.find(e=>e.path===nativePath(a))!
  fs.writeFileSync(path.join(a,'held.md'),'old verified body')
  const oldSession=(await invoke(IPC.vaultGet)).sessionId,source=await invoke(IPC.noteRead,{session:oldSession,args:['held.md']})
  state.heldObjects=[{relPath:'held.md',objectVersion:source.objectVersion}];state.pending=[{taskId:'old-pending',answer:'retained answer'}]

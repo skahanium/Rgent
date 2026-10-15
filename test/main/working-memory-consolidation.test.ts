@@ -535,7 +535,7 @@ it('corrects a Host-loaded parent using proven legacy recent ancestry while leav
    expect(result.entries.find(e=>e.id===recentId)?.status).toBe('paused')
   }
  }
-},20000)
+}, process.platform === 'win32' ? 60_000 : 20_000)
 
 it('keeps the applied batch and publishes failure when post-commit promotion fails',async()=>{
  const f=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({proposals:[suggestion(input)],recent:null})};yield {type:'finish',reason:'stop'}},'以后用中文','continuity')
@@ -605,7 +605,7 @@ it('runs total 25 actual Host sessions across two stable libraries with five cor
   expect({sessions,corrections,forgets,tightenings,restarts,nextSends}).toEqual({sessions:25,corrections:5,forgets:3,tightenings:2,restarts:1,nextSends:23});expect(derivedRevocations).toBeGreaterThanOrEqual(3)
   expect(new VaultCatalog(base).view().entries.map(e=>e.id)).toEqual(registered.map(e=>e.id));console.info('Memory continuous controlled',JSON.stringify({sessions,corrections,forgets,tightenings,restarts,nextSends,derivedRevocations,partial,paidCalls:0}))
  }finally{engine?.close();await engine?.idle();vault.dispose();await rm(base,{recursive:true,force:true})}
-},30000)
+}, process.platform === 'win32' ? 120_000 : 30_000)
 
 it('rechecks the exact saved material after a safe-empty M4 terminal',async()=>{
  let completed=false

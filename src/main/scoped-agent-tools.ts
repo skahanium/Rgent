@@ -157,10 +157,9 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
     const after = await awaiting(deps.tier(grant.root, path), signal)
     if (tier !== approved.tier || after !== approved.tier) throw Error('SOURCE_PERMISSION_CHANGED')
     if (current.sessionId !== grant.sessionId) throw Error('VAULT_CHANGED')
-    if (path !== grant.origin) {
-      if (current.objectVersion !== approved.objectVersion && !deps.acceptsObject(path, approved.objectVersion, current.objectVersion)) throw Error('SOURCE_REPLACED')
-      if (current.revision !== approved.revision || hash(current.content) !== approved.fingerprint) throw Error('SOURCE_CHANGED')
-    }
+    const proof = path === grant.origin ? grant.originProof : approved
+    if (current.objectVersion !== proof.objectVersion && !deps.acceptsObject(path, proof.objectVersion, current.objectVersion)) throw Error('SOURCE_REPLACED')
+    if (current.revision !== proof.revision || hash(current.content) !== proof.fingerprint) throw Error('SOURCE_CHANGED')
     return current
   }
   async function dependencyValid(dependency: LedgerSource, signal: AbortSignal): Promise<boolean> {

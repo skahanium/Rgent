@@ -1,6 +1,9 @@
+import { createHash } from 'node:crypto'
 import {hostLedgerFixture} from './host-ledger-fixture.ts'
 import {ledgerChapters,ledgerTaskFields} from '../../src/main/host-context.ts'
 import {mkdtempSync,rmSync} from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import {SummaryCache,summaryHash,SUMMARY_SECTIONS} from '../../src/main/summary-cache.ts'
 import { describe, expect, it, vi } from 'vitest'
 import {createScopedAgentTools} from '../../src/main/scoped-agent-tools.ts'
@@ -406,7 +409,6 @@ describe('assistant habits in a run', () => {
 })
 
 import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
-import { createHash } from 'node:crypto'
 it.each(['valid','revision','object','session'] as const)('continues only a verified migration receipt: %s',async changed=>{
  const hash=(text:string)=>createHash('sha256').update(text).digest('hex')
  let content='/问\n<!-- rgent:ledger:v1 -->\n旧历史',objectVersion='old',revision=hash(content)
@@ -477,7 +479,8 @@ function memoryToolHarness(options:{calls?:{id:string;name:string;input:unknown}
  const credential={provider:'custom' as const,baseURL:'https://model.example/v1',modelId:'m',contextTokens:32000,apiKey:'fixture'}
  const source={id:'s',version:1,relPath:'outside.md',objectVersion:'outside',revision:'a'.repeat(64),permissionTier:'reference' as const,kind:'body' as const,taskId:null,taskMaterialHash:null,classification:'human' as const,start:0,end:2,text:'依据',hash:'b'.repeat(64),basisHash:'c'.repeat(64),sourceDeps:[],memoryDeps:[]}
  const memory={context:()=>({sessionId:'s',vaultKey:'v'}),config:()=>({enabled,revision:enabled?0:1}),entries:async(ids?:readonly string[])=>{const result=options.empty?[]:[{id:'m',version:entriesVersion,content:'火星计划约定',layer:'demand' as const,scope:'仅项目甲',attribution:'人的约定',status:paused?'paused' as const:'active' as const,reason:null,updatedAt:'2026-10-05',updateBasis:{kind:'manual' as const,id:'manual',version:1},sources:[source]}];if(ids){proofReads++;if(proofReads===1)await options.proof?.()}return result}}
- const grant={id:'g',root:'/v',sessionId:'s',origin:'a.md',sources:[{sourceId:'origin',relPath:'a.md',title:'a',sessionId:'s',objectVersion:'o',revision:'1',fingerprint:'f',tier:'reference' as const},...(options.library?[{sourceId:'external',relPath:'b.md',title:'b',sessionId:'s',objectVersion:'b',revision:'b',fingerprint:'b',tier:'reference' as const}]:[])],credential,limits:{seconds:30,steps:options.steps??12,tools:options.tools??20},assertActive(){},async assertLive(){},async validateSources(){},assertWriteTarget(){},acknowledgeOrigin(){},revoke(){}}
+ const originProof={sourceId:'origin',relPath:'a.md',title:'a',sessionId:'s',objectVersion:'o',revision:'1',fingerprint:createHash('sha256').update(content).digest('hex'),tier:'reference' as const}
+ const grant={id:'g',root:'/v',sessionId:'s',origin:'a.md',originProof,sources:[originProof,...(options.library?[{sourceId:'external',relPath:'b.md',title:'b',sessionId:'s',objectVersion:'b',revision:'b',fingerprint:'b',tier:'reference' as const}]:[])],credential,limits:{seconds:30,steps:options.steps??12,tools:options.tools??20},assertActive(){},async assertLive(){},async validateSources(){},assertWriteTarget(){},acknowledgeOrigin(){},revoke(){}}
  const read=async(path:string)=>path==='b.md'?{content:'外篇普通正文',revision:'b',sessionId:'s',objectVersion:'b'}:{content,revision:String(revision),sessionId:'s',objectVersion:'o'}
  const host=new AgentHost({ledger:history.ledger,...(options.library?{createReadOnlyTools:(grant:import('../../src/main/task-authorization.ts').TaskGrant,id:string)=>createScopedAgentTools(grant,id,{read,tier:async()=> 'reference',acceptsObject:()=>false})}:{}),root:()=>'/v',session:()=> 's',read,write:async(_path,next,expected)=>{if(expected!==String(revision))throw Error('CONFLICT');content=next;return String(++revision)},tier:async()=> 'reference',credential:()=>credential,limits:()=>grant.limits,authorize:async()=>grant,memory,stream:async function*(){throw Error('OLD_STREAM')},streamStep:async function*(input){requests.push(structuredClone(input));dispatches++;if(dispatches===1){for(const c of options.calls??[{id:'one',name:'search_memory',input:{query:'火星'}}])yield {type:'tool-call',...c};yield {type:'finish',reason:'tool-calls'}}else {options.change?.();yield {type:'text',text:'已答'};yield {type:'finish',reason:'stop'}}},emit:()=>{}})
  if(options.verified!==false)host.supportsMemorySearch=()=>true
@@ -547,7 +550,7 @@ it('library plus memory outgoing retains only the authorized library metadata an
 })
 
 it('reuses a valid partial cache in the production chapters path without another summary call',async()=>{
- const directory=mkdtempSync('/tmp/rgent-C-cache-'),cache=new SummaryCache(directory),key=summaryHash('note'),prompts:string[]=[]
+ const directory=mkdtempSync(path.join(os.tmpdir(),'rgent-C-cache-')),cache=new SummaryCache(directory),key=summaryHash('note'),prompts:string[]=[]
  try{
  const app=harness(async function*(_signal,prompt){prompts.push(prompt);yield '已答'},undefined,undefined,{summaries:{cache,key:async()=>key}})
  for(const id of ['cached','uncovered'])app.history.seed('a.md',{taskId:id,startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'旧',answer:'旧记录。'.repeat(300),provenance:{version:1,model:{provider:'custom',modelId:id,endpointHost:'localhost'},scope:['a.md'],sources:[],tools:[]}})
@@ -595,7 +598,7 @@ it('omits a ledger answer derived from forgotten raw material even when original
  expect(prompts.at(-1)).not.toContain('FORGOTTEN_DERIVED_SNAPSHOT');expect(prompts.at(-1)).toContain('原始历史仍可核对');expect(app.history.records().find(c=>c.taskId==='derived')!.answer).toBe('FORGOTTEN_DERIVED_SNAPSHOT')
 })
 it('checks forgetting before derived sends without creating any memory-use permit',async()=>{
- const directory=mkdtempSync('/tmp/rgent-C-no-permit-'),cache=new SummaryCache(directory),key=summaryHash('note'),prompts:string[]=[]
+ const directory=mkdtempSync(path.join(os.tmpdir(),'rgent-C-no-permit-')),cache=new SummaryCache(directory),key=summaryHash('note'),prompts:string[]=[]
  try{
  const extra={summaries:{cache,key:async()=>key},summaryAllowed:async()=>false} as Partial<import('../../src/main/agent-host.ts').HostDependencies>
  const app=harness(async function*(_signal,prompt){prompts.push(prompt);yield '新回答'},undefined,undefined,extra)
@@ -641,9 +644,9 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
   const requests: Parameters<NonNullable<import('../../src/main/agent-host.ts').HostDependencies['streamStep']>>[0][] = []
   const credential = { provider: 'custom' as const, baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 32000, apiKey: 'fixture' }
   const extras = options.originOnly ? [] : (options.extras ?? [{ relPath: 'b.md', tier: 'reference' as const }])
-  const source = (relPath: string, tier: 'reference' | 'follow' = 'reference') => ({ sourceId: relPath === 'a.md' ? 'origin' : relPath, relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: 'f',
+  const source = (relPath: string, tier: 'reference' | 'follow' = 'reference') => ({ sourceId: relPath === 'a.md' ? 'origin' : relPath, relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: relPath === 'a.md' ? createHash('sha256').update(content).digest('hex') : 'f',
     tier, kind: 'body' as const, taskId: null, taskMaterialHash: null, classification: 'human' as const, start: 0, end: 2, hash: 'a'.repeat(64), basisHash: 'b'.repeat(64), sourceDeps: [], memoryDeps: [] })
-  const grant = { id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', sources: [source('a.md'), ...extras.map(item => source(item.relPath, item.tier))], credential, limits: { seconds: 30, steps: 4, tools: 4 },
+  const grant = { id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', originProof: source('a.md'), sources: [source('a.md'), ...extras.map(item => source(item.relPath, item.tier))], credential, limits: { seconds: 30, steps: 4, tools: 4 },
     assertActive() {}, validateSources: async () => {}, acknowledgeOrigin() {}, revoke() {},
     assertWriteTarget(path: string) { if (path !== 'a.md') throw Error('OUTSIDE_TASK_SCOPE') },
     assertLive: async () => {} }

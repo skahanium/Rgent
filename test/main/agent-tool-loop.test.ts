@@ -371,8 +371,8 @@ it('retains the once handoff stamp if a later save notification throws and the t
  expect(callbacks).toEqual([task.id])
 })
 it('reserves encoded audit space before repeated summary sends and omits old history when it runs out',async()=>{
- const {mkdtempSync,rmSync}=await import('node:fs'),{SummaryCache,summaryHash,SUMMARY_SECTIONS}=await import('../../src/main/summary-cache.ts')
- const directory=mkdtempSync('/tmp/rgent-C-audit-'),cache=new SummaryCache(directory),key=summaryHash('note')
+ const {mkdtempSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path'),{SummaryCache,summaryHash,SUMMARY_SECTIONS}=await import('../../src/main/summary-cache.ts')
+ const directory=mkdtempSync(join(tmpdir(),'rgent-C-audit-')),cache=new SummaryCache(directory),key=summaryHash('note')
  try{
  const app=appFor([[call('one'),finish()],[call('two'),finish()],[{type:'text',text:'有效回答'},finish('stop')]])
  app.deps.summaries={cache,key:async()=>key}
@@ -393,8 +393,8 @@ it('reserves encoded audit space before repeated summary sends and omits old his
  }finally{rmSync(directory,{recursive:true,force:true})}
 })
 it('records every actual repeated summary dispatch rather than only its final use',async()=>{
- const {mkdtempSync,rmSync}=await import('node:fs'),{SummaryCache,summaryHash,SUMMARY_SECTIONS}=await import('../../src/main/summary-cache.ts')
- const directory=mkdtempSync('/tmp/rgent-C-repeat-'),cache=new SummaryCache(directory),key=summaryHash('note')
+ const {mkdtempSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path'),{SummaryCache,summaryHash,SUMMARY_SECTIONS}=await import('../../src/main/summary-cache.ts')
+ const directory=mkdtempSync(join(tmpdir(),'rgent-C-repeat-')),cache=new SummaryCache(directory),key=summaryHash('note')
  try{
  const app=appFor([[call('one'),finish()],[{type:'text',text:'回答'},finish('stop')]])
  app.deps.summaries={cache,key:async()=>key};app.history.seed('a.md',{taskId:'old',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'旧',answer:'历史。'.repeat(2000)})
@@ -405,8 +405,8 @@ it('records every actual repeated summary dispatch rather than only its final us
 })
 
 it('keeps an earlier summary audit but stops forwarding its derived snapshot after permission shrinks',async()=>{
- const {mkdtempSync,rmSync}=await import('node:fs'),{SummaryCache,summaryHash,SUMMARY_SECTIONS}=await import('../../src/main/summary-cache.ts')
- const directory=mkdtempSync('/tmp/rgent-C-scope-'),cache=new SummaryCache(directory),key=summaryHash('note')
+ const {mkdtempSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path'),{SummaryCache,summaryHash,SUMMARY_SECTIONS}=await import('../../src/main/summary-cache.ts')
+ const directory=mkdtempSync(join(tmpdir(),'rgent-C-scope-')),cache=new SummaryCache(directory),key=summaryHash('note')
  try{
  const app=appFor([[call('one'),finish()],[{type:'text',text:'后续回答'},finish('stop')]])
  app.deps.summaries={cache,key:async()=>key};app.history.seed('a.md',{taskId:'old',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'旧',answer:'历史。'.repeat(2000)})

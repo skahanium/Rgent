@@ -238,16 +238,16 @@ flowchart TD
 | B1 | 记忆近期容器完整性 | 既有 `recent-regeneration`／`protocol-repair` 通道 | **已交**：r18 真实夹具（进展无落点、四段全空被拒）修复后产出完整近期容器；仍保留拒绝码；**每例至多 1 次额外调用** |
 | B2 | 债务清零（6 项） | 见各条 | **已交**：每项一条红绿测试或明确记录为接受 |
 | B3 | 文档收口 | `docs:check` | **已交**：历史入 build-history；提交号存在性、包表状态格（**本轮包表末列必须开头即写状态，缺失即报错**）、锚点与阶段一致性四条机械规则 |
-| C1 | 原生候选证明 | 同一探针加分支（不另造判定） | **已交**（结论：不通过，门保持关闭）：`file-manager` 与已失败候选逐场景一致；判定逻辑未放宽（负面对照＝换成永久删除即失败）；证据在 `artifacts/trash/`；Windows 待 CI 且仅新增按构造不可过的可选分支 |
+| C1 | 原生候选证明 | 同一探针加分支（不另造判定） | **已交**（结论：不通过，门保持关闭）：`file-manager` 与已失败候选逐场景一致；判定逻辑未放宽（负面对照＝换成永久删除即失败）；本机证据在 `artifacts/trash/`。推送后 CI [run 38694186521](https://github.com/skahanium/Rgent/actions/runs/38694186521) 两平台 `evidence-collected`（macOS `workspace`＋`file-manager` 14 场、Windows `file-operation` 14 场）；判据② macOS `same-name` 第 2 项 `namePreserved=false`，门继续关 |
 | C2 | 库层删除与恢复核验 | `structureGate`、生命周期记录、`verifySource` | **已交**：身份不符／竞态／内部路径／换库／附件跟随／恢复三分支各有先红后绿；**安全半边已随 `b9fde20` 交付**（只对无删除入口时保护人的那半边负责）：外部消失**有记录**、消失对象**不被重建**（同路径新建拒 `PATH_RESERVED`）、来源**标失效但不自动遗忘**、**单篇**恢复核验（原全库核验是全有全无）＋恢复降级如实上报 |
 | C3 | 界面 | 树右键菜单、确认卡、设置页 | **已交**（仅**恢复核验界面**那半）：核验入口、逐分支文案与“通过才可核验”已随 C2 交付（`test/renderer/recovery-ui.test.ts`），且窗口断言里**不出现任何删除入口**；树右键菜单、删除确认卡、设置页那三件**等门开**才做，本轮不做 |
-| C4 | 窗口证据 | 恢复界面的**窗口专项（待写）**＋完整窗口回归 | **未开**：窗口专项尚未写（`RGENT_UI_TRASH_ONLY` 这类开关**不存在**，不要照抄旧稿）。`probe:check` 是**付费**协议剥离对照探针（`scripts/check-probe.mjs:2`），与本轮“零付费调用”信封冲突，**本轮不跑**，也不再列为 C4 依赖 |
+| C4 | 窗口证据 | 恢复界面的窗口专项＋完整窗口回归 | **已交**：开关是 `RGENT_UI_RECOVERY_ONLY=1`（`scripts/verify-ui.mjs` 的 `verifyExternalRecovery`，独占、不进默认完整窗口）。专项 **11 条失败 0**（识别／`PATH_RESERVED`／核验通过／内容已变／附件缺失／门关无删除入口，加初始化与受控主机两道收口）；完整窗口回归 **379／0**。`probe:check` 是付费协议剥离对照探针，本轮不跑 |
 
 **认证批次规则**：B 与 C 都在认证前落地 → 合并成一次复认证；C 被证伪（只交付安全半边）→ 只认证 B 的改动；C 晚于认证落地 → 另跑一次，并记为"因产品改动而复认证"。
 
 ### 本轮实测的范围与边界（2026-10-15）
 
-**证据的所在地与覆盖范围**：本轮 14 场（7 场景 × 2 候选：`workspace` 与 `file-manager`）是**本机 macOS 证据**，产物在 `artifacts/trash/`；**`artifacts/` 被 `.gitignore` 整目录忽略（`git ls-files artifacts/` 为空）**，所以仓库内无法复核原始件，只留结论与本节的复现做法。`file-manager`（`NSFileManager.trashItemAtURL:resultingItemURL:error:`）分支是 `b4bfa4f` 当天才加的、**尚未推送 → CI 从未跑过它**：**CI 要等推送后才会跑两候选**（推送前 CI 只有 `workspace` 的七场）。9 月 30 日那节的“七场”是当时的记录，已恢复原文、不回填。
+**证据的所在地与覆盖范围**：本轮 14 场（7 场景 × 2 候选：`workspace` 与 `file-manager`）先是**本机 macOS 证据**，产物在 `artifacts/trash/`；**`artifacts/` 被 `.gitignore` 整目录忽略（`git ls-files artifacts/` 为空）**，所以仓库内无法复核原始件，只留结论与本节的复现做法。推送后 CI [run 38694186521](https://github.com/skahanium/Rgent/actions/runs/38694186521)（提交 `7ae86aae…`）已跑两候选：macOS `workspace`＋`file-manager` 各 7 场、Windows `file-operation` 14 场，作业均为 `evidence-collected`／`productionGateOpen=false`。macOS `same-name` 第 2 项两候选 `namePreserved=false`（落点加时间戳后缀）。9 月 30 日那节的“七场”是当时的记录，已恢复原文、不回填。
 
 **负面对照可复现**：探针的判定逻辑没有放宽，凭据是“把候选换成永久删除即失败”。复现做法：在**临时副本**上把候选实现换成永久删除（`unlink`／`Remove-Item`），夹具与场景不变，期望的失败三件套是 `experimentComplete=false`、`fixtureReclaimed=false`、进程退出码 1——即“删掉了、但没有可核验的废纸篓收据”，判定必须在此情形下失败。原始件 `artifacts/trash/run/report.json` 与对照表在本机，不入库。
 
@@ -256,10 +256,7 @@ flowchart TD
 **两项已披露残余**（据实写，不沿用与代码不符的旧说法）：
 
 1. **权限档只能与“消失当时记录”的档比较**：库层没有档位历史快照，所以核验只能对消失那一刻记下的档，不能证明“系统放回后权限档与更早的某次状态一致”。
-2. **发起篇身份这一处，两条路径做的事不一样**（先读代码再写）：
-   - `src/main/task-authorization.ts` 的 `validateSources` 对发起篇用 `originProof` 比，比的是**该场的身份＋修订＋指纹**——对象身份（`objectVersion`，不符时还要过 `acceptsObject` 的迁移判定）、`revision` 与 `digest(content)` 都核；`originProof` 初始是发起篇来源的冻结副本，`acknowledgeOrigin` 只把它换成“**刚被核验过的那次写入**”的快照，所以身份也是比过的，只是基准是最近一次已核验写入。
-   - `src/main/scoped-agent-tools.ts` 的 `snapshot` 对 `grant.origin` 那一支**整个 if 块跳过**：对象身份、修订、内容指纹**一律不比**（`if (path !== grant.origin) { … }` 外面只留库会话一致性）。所以“同字节换一个对象”的恢复在这一支不会被发现。
-   - 旧说法“只比 revision＋内容指纹、不比对象身份”**对两处都对不上**：发起篇在 `task-authorization` 那一侧是**比了身份**的（比 `scoped-agent-tools` 那一侧多），而在 `scoped-agent-tools` 那一侧是**连修订和指纹也没比**。两处不一致的差比原来写的大。
+2. **发起篇身份缺口已收口**：`TaskGrant.originProof` 现对授权层与工具层共用。`snapshot(origin)` 按与 `validateSources` 相同的三条核——`objectVersion`（含 `acceptsObject`）／`revision`／内容指纹；基准只由 `acknowledgeOrigin` 推进。同字节换对象拒 `SOURCE_REPLACED`，本场 `append` 后仍可读。权限档那条残余仍在。
 
 ## 库内 AI 工具
 
@@ -339,7 +336,7 @@ flowchart TD
 
 | # | 债务 | 现状（2026-10-13） | 触发条件 | 不可代证 |
 |---|------|--------------------|----------|----------|
-| 1 | Windows 平台证据（构建窗口＋双平台 CI 腿；技能专项一并算这一笔） | **未开**。CI 机制已就绪（`os: [macos-latest, windows-latest]`，跑 build／原生装载／`pnpm test`／`pnpm ui:check`）。本轮把 Windows 口径与四处平台分支审计写清（见下节），但**取到证据需要推送**——未获用户指令不推 | 用户下令推送并触发 CI | CI 绿灯、macOS 结果、CDP 截图都不能代证；Windows 绿灯**不覆盖**下节列出的 POSIX 专属夹具与两处 Windows 跳过点 |
+| 1 | Windows 平台证据（构建窗口＋双平台 CI 腿；技能专项一并算这一笔） | **未开**。2026-10-15 已推送并触发 CI。[run 38762840064](https://github.com/skahanium/Rgent/actions/runs/38762840064)（PR #11 合并）`verify (macos-latest)` 绿、`verify (windows-latest)` 红：夹具写死 `/tmp`、`realpathSync` 对不上 `.native`、Unix `0o600`、路径分隔符与慢测超时；本轮已修夹具，远端未再推仍红。废纸篓独立 job 在 [run 38694186521](https://github.com/skahanium/Rgent/actions/runs/38694186521) 两平台 `evidence-collected`，**不**等于门开。POSIX 专属夹具与两处 Windows 跳过点仍未验 | 再推一次并等 Windows 代码腿绿 | CI 绿灯、macOS 结果、CDP 截图都不能代证；Windows 绿灯**不覆盖**下节列出的 POSIX 专属夹具与两处 Windows 跳过点 |
 | 2 | 原生输入法人工操作（macOS 拼音候选窗、Windows 原生输入法） | **未开**。两张逐步清单已备（见下节），等人操作 | 用户手上有窗口时随时 | 最终汉字粘贴、CDP 组合事件不能代证 |
 | 2b | 测试稳定性观察：`ledger-forget` 参数在 2026-10-12 一次全量门里失败过一次 | **仍未复现，但边界量清了**：隔离重跑 **50／50 通过**（各约 1.0s）、加载重跑 **30 次里 27 过／3 失败**；3 次失败经原文查明**不是断言失败**，而是 `Cannot find module 'build/Release/rgent_fs.node'`——`pnpm test`／`pnpm build` 都会重建该原生模块，与并行的测试抢文件（详见下节与守则新规）。**原断言失败本身在两轮共 80 次里 0 次出现** | 再复现即按真实缺陷查；已加"禁止并发重建与测试"的守则 | 一次通过不代表已修；`--repeat` 结果不能代称全量门 |
 | 2c | 窗口门三处各失败一次（2026-10-13 记录） | **已定位并修掉其中构造性竞态**：「成功重试后焦点转到浮层关闭按钮」原本紧跟异步焦点**直接断言、毫无等待**（同类的还有 4 处：失败重试焦点、取消遗忘回焦、取消选库回焦、切库冲突回焦），现全部改为等待。修完重跑：恢复专项 **12＋8 次零失败**、完整窗口 **379／0（两次）** | — | 本次未复现原失败；这是"构造上就该等"的修正，按修正记录，不按"已复现并修好"记录 |
