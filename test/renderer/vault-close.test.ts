@@ -18,7 +18,7 @@ beforeEach(()=>{
  api=new Proxy({vaultGet:async()=>({status:'ready',sessionId:'old',rootName:'old'}),vaultWorkspaceGet:async()=>null,vaultWorkspaceSave:vi.fn(async()=>true),treeList:async()=>[],backlinks:async()=>[],permissionsGet:async()=>({status:'ready',entries:[]}),lifecycleStatus:async()=>({status:'ready',sessionId:'old'}),modelConfigGet:async()=>({ok:false}),memoryGet:async()=>({ok:false}),flushDone:vi.fn(),lifecycleFlushDone:vi.fn(),vaultTransitionDone:vi.fn(async()=>true),onMenu:(channel:string,fn:Function)=>{handlers[channel]=fn}}, {get:(target,key:string)=>key in target?(target as any)[key]:key.startsWith('on')?(fn:Function)=>{handlers[key]=fn;return()=>{}}:fallback})
  window.rgent=api;root=document.createElement('main');document.body.append(root)
 })
-afterEach(()=>{document.body.replaceChildren();vi.unstubAllGlobals()})
+afterEach(()=>{document.body.replaceChildren();vi.unstubAllGlobals();vi.useRealTimers()})
 it('real shell refuses native close and switch flush when workspace persistence returns false or throws',async()=>{
  await start(root)
  for(const write of [async()=>false,async()=>{throw Error('disk')}]){
@@ -303,13 +303,27 @@ it('unmigrated legacy history is diagnosed without claiming no history or silent
  expect(editorHarness.text).toBe('original body')
 })
 
+it('root-recovery-protect clears the window save debounce so a slow restore cannot noteWrite',async()=>{
+ api.vaultWorkspaceGet=async()=>({version:1,tabs:[{relPath:'one.md'}],active:'one.md',sidebarHidden:true,treeScroll:0,resourceScroll:0})
+ api.noteRead=async()=>({content:'original',revision:'r',objectVersion:'one.md',sessionId:'old'})
+ api.noteWrite=vi.fn(async()=>({ok:true,revision:'saved',objectVersion:'one.md',sessionId:'old'}))
+ await start(root)
+ const cleared=vi.spyOn(window,'clearTimeout')
+ editorHarness.text='draft';editorHarness.change!('draft')
+ handlers.onVaultTransition(true,'old',{busy:true,session:'old',phase:'preparing',operationId:'root'})
+ handlers.onLifecycleFlushRequest('protect',[],'root-recovery-protect',{sessionId:'old',operationId:'root'})
+ await vi.waitFor(()=>expect(api.lifecycleFlushDone).toHaveBeenCalledWith('protect',true,[{relPath:'one.md',objectVersion:'one.md'}]))
+ expect(cleared).toHaveBeenCalled()
+ expect(api.noteWrite).not.toHaveBeenCalled()
+})
+
 it('real shell holds two old-session drafts across explicit root attach and ignores new-root same-path and late Host events',async()=>{
  api.vaultWorkspaceGet=async()=>({version:1,tabs:[{relPath:'one.md'},{relPath:'two.md'}],active:'one.md',sidebarHidden:false,treeScroll:0,resourceScroll:0})
  api.noteRead=vi.fn(async(relPath:string)=>({content:'original '+relPath,revision:'r',objectVersion:relPath,sessionId:'old'}))
  api.noteWrite=vi.fn(async()=>({ok:false,error:'VAULT_CHANGED'}))
  await start(root)
  editorHarness.text='draft one';editorHarness.change!('draft one')
- const second=[...root.querySelectorAll<HTMLElement>('.tab')].find(n=>n.textContent?.includes('two'))!;second.click()
+ root.querySelector<HTMLElement>('.tab[data-rel="two.md"]')!.click()
  editorHarness.text='draft two';editorHarness.change!('draft two')
  handlers.onVaultTransition(true,'old',{busy:true,session:'old',phase:'preparing',operationId:'root'})
  handlers.onLifecycleFlushRequest('protect',[],'root-recovery-protect',{sessionId:'old',operationId:'root'})
