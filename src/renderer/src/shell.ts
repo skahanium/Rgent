@@ -833,7 +833,7 @@ export async function start(root: HTMLElement): Promise<void> {
       sidebarHidden:treePanel.classList.contains('is-collapsed'),...fileBrowser.workspaceScroll()}
   }
   async function saveWorkspace(): Promise<boolean> {
-    if (restoringWorkspace || tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession) || vaultSession && restoredSession !== vaultSession) return false
+    if (!root.isConnected || restoringWorkspace || tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession) || vaultSession && restoredSession !== vaultSession) return false
     if (!vaultSession) return true
     const session = vaultSession
     return saveWorkspacePosition(()=>window.rgent.vaultWorkspaceSave(session,workspaceSnapshot()),()=>{if(session===vaultSession){hostNotice='工作区位置未保存，已留在当前库。请检查本机存储后重试保存或切换。';updateStatus()}})
@@ -841,7 +841,7 @@ export async function start(root: HTMLElement): Promise<void> {
   function scheduleWorkspace(): void {
     if (restoringWorkspace || tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession) || !vaultSession || restoredSession !== vaultSession) return
     if (workspaceTimer !== null) window.clearTimeout(workspaceTimer)
-    workspaceTimer = window.setTimeout(()=>{workspaceTimer=null;void saveWorkspace()},400)
+    workspaceTimer = window.setTimeout(()=>{workspaceTimer=null;if(root.isConnected)void saveWorkspace()},400)
   }
   async function restoreWorkspace(session: string, serial: number): Promise<boolean> {
     const currentRestore = () => vaultSession === session && stateSerial === serial
@@ -1665,12 +1665,12 @@ export async function start(root: HTMLElement): Promise<void> {
     if(bodyWritesPaused()||recoveryDraftGate.held(vaultSession)||restoringWorkspace)return
     if (saveTimer != null) window.clearTimeout(saveTimer)
     saveTimer = window.setTimeout(() => {
-      void flushSave()
+      if (root.isConnected) void flushSave()
     }, SAVE_MS)
   }
 
   function flushSave(recoveryOperation?:string): Promise<boolean> {
-    if(!recoveryDraftGate.maySave(vaultSession,recoveryOperation)||restoringWorkspace)return Promise.resolve(false)
+    if(!root.isConnected||!recoveryDraftGate.maySave(vaultSession,recoveryOperation)||restoringWorkspace)return Promise.resolve(false)
     if (saveInFlight) {
       return saveInFlight.then((ok) => ok && tabs.some((tab) => tab.dirty) ? flushSave(recoveryOperation) : ok)
     }

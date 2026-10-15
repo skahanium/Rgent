@@ -18,7 +18,7 @@ beforeEach(()=>{
  api=new Proxy({vaultGet:async()=>({status:'ready',sessionId:'old',rootName:'old'}),vaultWorkspaceGet:async()=>null,vaultWorkspaceSave:vi.fn(async()=>true),treeList:async()=>[],backlinks:async()=>[],permissionsGet:async()=>({status:'ready',entries:[]}),lifecycleStatus:async()=>({status:'ready',sessionId:'old'}),modelConfigGet:async()=>({ok:false}),memoryGet:async()=>({ok:false}),flushDone:vi.fn(),lifecycleFlushDone:vi.fn(),vaultTransitionDone:vi.fn(async()=>true),onMenu:(channel:string,fn:Function)=>{handlers[channel]=fn}}, {get:(target,key:string)=>key in target?(target as any)[key]:key.startsWith('on')?(fn:Function)=>{handlers[key]=fn;return()=>{}}:fallback})
  window.rgent=api;root=document.createElement('main');document.body.append(root)
 })
-afterEach(()=>{document.body.replaceChildren();vi.unstubAllGlobals();vi.useRealTimers()})
+afterEach(()=>{document.body.replaceChildren();vi.unstubAllGlobals();vi.useRealTimers();vi.clearAllTimers()})
 it('real shell refuses native close and switch flush when workspace persistence returns false or throws',async()=>{
  await start(root)
  for(const write of [async()=>false,async()=>{throw Error('disk')}]){
