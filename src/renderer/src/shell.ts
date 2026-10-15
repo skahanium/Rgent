@@ -56,8 +56,12 @@ const LIFECYCLE_ERRORS: Record<string, string> = {
   PATH_RESERVED: '这个路径的原笔记曾在库外消失，核验恢复前这个名字被保留、不能复用。原对象还在系统废纸篓时，请原样放回后在设置「笔记库」重扫核验；原对象已不在废纸篓时核验不可能通过，这个名称只能靠整库恢复或人工处理。'
 }
 export const lifecycleErrorText = (error: unknown): string => {
-  const message = error instanceof Error ? error.message : String(error)
-  return LIFECYCLE_ERRORS[message] ?? message
+  const raw = error instanceof Error ? error.message : String(error)
+  // 主进程的拒绝经 Electron `invoke` 回来会包一层「Error invoking remote method 'x': Error: CODE」，
+  // 直接查表会落空，把中文说明漏成原始串（实测：同路径新建被拒时人只看到 PATH_RESERVED）。
+  const marker = raw.lastIndexOf('Error: ')
+  const code = raw.startsWith('Error invoking remote method') && marker >= 0 ? raw.slice(marker + 'Error: '.length).trim() : raw
+  return LIFECYCLE_ERRORS[code] ?? raw
 }
 const ROOT_UNAVAILABLE_NOTICE = '笔记库暂时无法读取，窗口稿和账本已保留。恢复原库后重新核验；换库前须处理或明确舍弃。'
 

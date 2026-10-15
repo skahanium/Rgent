@@ -101,13 +101,15 @@ export function mountVaultManager(context: {
     for(const row of externalView.rows){
       const item=element('li','',`${row.relPath} · ${verdictLabels[row.verdict]}：${row.message}`)
       item.dataset.recoveryVerdict=row.verdict
-      if(row.canRestore){const confirm=button('核验并恢复',()=>{void run('正在核验恢复…',async()=>{
+      if(row.canRestore){const confirm=button('核验并恢复',()=>{let notice:string|null=null;void run('正在核验恢复…',async()=>{
         const result=await handlers.externalRecovery!.confirm(row.relPath)
         if(!alive())return
         if(!result.ok)throw Error(result.error)
         await rescanRows()
-        status.textContent=result.message
-      })});confirm.dataset.recoveryConfirm=row.relPath;item.append(confirm)}
+        notice=result.message
+        // `run` 收尾会把没有返回值的操作状态清空；核验结论要在它之后再落到状态行，
+        // 否则「核验通过…来源恢复可用」当场被抹掉（窗口专项实测）。
+      }).then(()=>{if(alive()&&notice)status.textContent=notice})});confirm.dataset.recoveryConfirm=row.relPath;item.append(confirm)}
       externalRows.append(item)
     }
     externalActions.append(rescan)

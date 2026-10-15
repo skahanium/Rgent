@@ -79,19 +79,10 @@ function makePage(send, close) {
   let id = 0
   const pending = new Map()
   const errors = []
-  send.onMessage = (raw) => {
-    const message = JSON.parse(raw)
-    if (message.method === 'Runtime.exceptionThrown') {
-      errors.push(message.params.exceptionDetails.exception?.description ?? JSON.stringify(message.params.exceptionDetails))
-    }
-    const settle = pending.get(message.id)
-    if (settle) {
-      pending.delete(message.id)
-      settle(message)
-    }
-  }
-  return {
+  // 专项可挂自己的 CDP 事件钩子（例如截获原生对话框）。默认 null，既有用例的观测与行为不变。
+  const page = {
     errors,
+    onEvent: null,
     close,
     call: (method, params) =>
       new Promise((resolve, reject) => {
@@ -124,6 +115,19 @@ function makePage(send, close) {
       await sleep(260)
     }
   }
+  send.onMessage = (raw) => {
+    const message = JSON.parse(raw)
+    if (message.method === 'Runtime.exceptionThrown') {
+      errors.push(message.params.exceptionDetails.exception?.description ?? JSON.stringify(message.params.exceptionDetails))
+    }
+    const settle = pending.get(message.id)
+    if (settle) {
+      pending.delete(message.id)
+      settle(message)
+    }
+    page.onEvent?.(message)
+  }
+  return page
 }
 
 /** Real rectangles and pointer/keyboard input exercise the sidebar's layout contract. */
@@ -715,6 +719,296 @@ async function verifyWriteTools(page, vault, shot, requests) {
   await page.eval(`document.querySelector('.ledger-close')?.click()`)
 }
 
+/** 外部消失与恢复核验专项（RGENT_UI_RECOVERY_ONLY=1）：在专用临时库里真删真放回，逐条走
+ *  「识别与如实呈现／原路径不可重建／核验通过／内容已变／附件缺失／门关」六条判据。
+ *  模型只用来做登记场与恢复后复跑，全部走受控主机，零真实调用。 */
+async function verifyExternalRecovery(page, vault, staging, shot, requests, shotDir) {
+  const modifier = process.platform === 'darwin' ? 4 : 2
+  const at = (name) => path.join(vault, name)
+  const parked = (name) => path.join(staging, name)
+  const sha256 = (name) => createHash('sha256').update(readFileSync(at(name))).digest('hex')
+  const inodeOf = (file) => statSync(file, { bigint: true }).ino.toString()
+  const editorText = () => page.eval(`document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null`)
+  const readFails = (name) => page.eval(`window.rgent.noteRead(${JSON.stringify(name)}).then(() => false, () => true)`)
+  mkdirSync(staging, { recursive: true })
+  for (const [name, body] of Object.entries({
+    '恢复甲.md': '# 恢复甲\n\n受控原正文，用来核对内容哈希。\n',
+    '恢复乙.md': '# 恢复乙\n\n受控原正文，用来核对内容哈希。\n',
+    '恢复丙.md': '# 恢复丙\n\n受控原正文，附件夹与它同住。\n'
+  })) writeFileSync(at(name), body)
+  mkdirSync(at('恢复丙'))
+  writeFileSync(path.join(at('恢复丙'), '附件.txt'), '受控附件内容。\n')
+  const evidence = { dialogs: [], menus: {}, scans: [] }
+  // 原生 alert 是「同名新建被拒」在界面上的唯一落点：只截获并立刻确认它，判据读的是
+  // 应用自己交给人的那句话，不替换、不改写文案。
+  await page.call('Page.enable', {})
+  page.onEvent = (message) => {
+    if (message.method !== 'Page.javascriptDialogOpening') return
+    evidence.dialogs.push(message.params.message)
+    void page.call('Page.handleJavaScriptDialog', { accept: true })
+  }
+  const ownerFor = (name) => {
+    let entries = []
+    try { entries = readdirSync(path.join(vault, '.rgent', 'ledgers')) } catch { return null }
+    for (const id of entries) {
+      try {
+        const raw = JSON.parse(readFileSync(path.join(vault, '.rgent', 'ledgers', id, 'owner.json'), 'utf8'))
+        if (raw.relPath === name) return raw
+      } catch { /* 不是夹具的登记目录 */ }
+    }
+    return null
+  }
+  const recoveryPanel = () => page.eval(`(() => {
+    const section = [...document.querySelectorAll('.settings-main section')].find(node => node.querySelector('h3')?.textContent === '外部消失与恢复核验')
+    if (!section) return null
+    return {
+      message: section.querySelector('.vault-settings-hint')?.textContent ?? '',
+      actions: [...section.querySelectorAll('li button')].map(node => node.textContent),
+      rows: [...section.querySelectorAll('li')].map(node => ({ text: node.textContent, verdict: node.dataset.recoveryVerdict ?? null, confirm: node.querySelector('[data-recovery-confirm]')?.dataset.recoveryConfirm ?? null }))
+    }
+  })()`)
+  const rowFor = async (relPath) => {
+    const panel = await recoveryPanel()
+    const row = panel?.rows.find((item) => item.text.startsWith(relPath)) ?? null
+    evidence.scans.push({ relPath, verdict: row?.verdict ?? null, confirm: row?.confirm ?? null, text: row?.text ?? null })
+    return { panel, row }
+  }
+  const leaveSettings = async () => {
+    await page.key('Escape', 'Escape', 0, 27)
+    return waitFor(page, `!document.querySelector('.settings-nav')`)
+  }
+  /** 打开「笔记库」页并点「重扫并核验恢复」；收尾看真实事务的 `aria-busy`，不靠睡眠猜。 */
+  const rescan = async () => {
+    if (!await page.eval(`!!document.querySelector('.settings-main .vault-settings')`)) {
+      await page.eval(`document.querySelector('.settings-open').click()`)
+      if (!await waitFor(page, `!!document.querySelector('.settings-nav')`)) return '设置面板没打开'
+      await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(node => node.textContent === '笔记库').click()`)
+      if (!await waitFor(page, `!!document.querySelector('.settings-main .vault-settings')`)) return '「笔记库」页没打开'
+    }
+    if (!await waitFor(page, `!!document.querySelector('[data-recovery-scan]:not(:disabled)')`, 20000)) {
+      return '「重扫并核验恢复」按钮不可用：' + await page.eval(`JSON.stringify({ scan: !!document.querySelector('[data-recovery-scan]'), disabled: document.querySelector('[data-recovery-scan]')?.disabled ?? null, busy: document.querySelector('.settings-main .vault-settings')?.getAttribute('aria-busy') ?? null, text: document.querySelector('.settings-main .vault-settings')?.innerText?.slice(0, 200) })`)
+    }
+    await page.eval(`document.querySelector('[data-recovery-scan]').click()`)
+    if (!await waitFor(page, `document.querySelector('.settings-main .vault-settings')?.getAttribute('aria-busy') === 'false'`, 30000)) return '重扫没有收尾'
+    return true
+  }
+  /** 登记场：真开一场（受控主机），让账本记住这篇的对象身份、正文哈希与附件证据。 */
+  const register = async (name, prompt, expectManifest = false) => {
+    await selectBrowserFolder(page, '')
+    if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(node => node.dataset.path === ${JSON.stringify(name)})`)) return `目录里没有 ${name}`
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find(node => node.dataset.path === ${JSON.stringify(name)}).click()`)
+    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(name)}`)) return `tab 没打开 ${name}`
+    // 口令段落要用编辑器事务写进去：库里的原文以换行结尾时，`Input.insertText` 会把结尾那个
+    // 换行替换掉（CDP/DOM 选区映射），口令就不再是空段落开头的口令。事务走的是同一条编辑路径，
+    // 回车仍然是真实按键。
+    await page.eval(`(() => {
+      const view = document.querySelector('.cm-content').cmTile.root.view
+      const at = view.state.doc.length, insert = '\\n/' + ${JSON.stringify(prompt)}
+      view.dispatch({ changes: { from: at, insert }, selection: { anchor: at + insert.length }, userEvent: 'input.type' })
+      view.focus()
+      return true
+    })()`)
+    await sleep(300)
+    await page.key('Enter', 'Enter', 0, 13)
+    if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 60000)) {
+      return `授权弹窗没出现（${name}）` + await page.eval(`JSON.stringify({ editor: document.querySelector('.cm-content')?.innerText?.slice(0, 80), popover: !!document.querySelector('.overlay-authorization'), send: document.querySelector('.authorization-send')?.disabled ?? null, status: document.querySelector('.status')?.textContent?.slice(0, 160) })`)
+    }
+    if (expectManifest) {
+      const manifest = await page.eval(`[...document.querySelectorAll('.authorization-manifest li')].map(node => node.textContent)`)
+      if (manifest.length !== 1 || manifest[0] !== name) return `授权清单不是仅有发起篇：${JSON.stringify(manifest)}`
+    }
+    await page.key('Enter', 'Enter', 0, 13)
+    if (!await waitFor(page, `!document.querySelector('.status-task')`, 60000)) return `任务没有收尾（${name}）`
+    if (!await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content.includes('受控回答第一句。'))()`, 30000)) return `回答没有落盘（${name}）`
+    return true
+  }
+
+  // 受控供应商经 IPC 配好，渲染层的模型快照要开一次设置页才刷新。
+  await page.eval(`document.querySelector('.settings-open').click()`)
+  await waitFor(page, `!!document.querySelector('.settings-nav')`)
+  await leaveSettings()
+  await page.eval(`(() => { const toggle = document.querySelector('.tree-toggle'); if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click(); return true })()`)
+  const fixtureReady = await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter(node => /^恢复[甲乙丙]\\.md$/.test(node.dataset.path ?? '')).length === 3`)
+  const registrations = []
+  for (const [name, prompt] of [['恢复甲.md', '恢复登记甲'], ['恢复乙.md', '恢复登记乙'], ['恢复丙.md', '恢复登记丙']]) registrations.push(await register(name, prompt))
+  const owners = ['恢复甲.md', '恢复乙.md', '恢复丙.md'].map(ownerFor)
+  check('恢复核验夹具已登记：账本有主人、附件证据入库、正文哈希与磁盘一致',
+    fixtureReady && registrations.every((item) => item === true) &&
+      owners.every((entry) => !!entry?.recoveryEvidence && entry.bodyRevision === sha256(entry.relPath)) &&
+      JSON.stringify(owners[0]?.recoveryEvidence?.attachments ?? null) === '[]' &&
+      JSON.stringify(owners[2]?.recoveryEvidence?.attachments?.map((part) => part.relPath) ?? null) === JSON.stringify(['恢复丙', '恢复丙/附件.txt']),
+    JSON.stringify({ fixtureReady, registrations, owners: owners.map((entry) => entry ? { relPath: entry.relPath, attachments: entry.recoveryEvidence?.attachments?.map((part) => part.relPath) ?? null, hashMatches: entry.bodyRevision === sha256(entry.relPath) } : null) }))
+
+  // 一、外部消失：甲在 tab 里开着，文件被移出库外（Finder 删除的等价动作）。
+  await selectBrowserFolder(page, '')
+  await page.eval(`[...document.querySelectorAll('.tree-note')].find(node => node.dataset.path === '恢复甲.md').click()`)
+  if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '恢复甲.md'`)) throw Error('甲没有成为当前 tab')
+  const beforeDelete = await page.eval(`(async () => (await window.rgent.noteRead('恢复甲.md')).content)()`)
+  renameSync(at('恢复甲.md'), parked('恢复甲.md'))
+  const tabWentUnavailable = await waitFor(page, `document.querySelector('.note-unavailable:not([hidden]) span')?.textContent === '文件已消失，窗口稿已保留；原路径不会重建。'`, 30000)
+  await shot(page, 'recovery-tab-unavailable-1200')
+  // 不自动保存也不重建：在不可用的 tab 里打字并按保存键，磁盘上都不许复活旧名字。
+  await page.eval(`document.querySelector('.cm-content').cmTile.root.view.focus()`)
+  await page.call('Input.insertText', { text: '消失后的窗口稿不该落盘。' })
+  await page.key('s', 'KeyS', modifier, 83)
+  await sleep(1500)
+  const notRecreated = !existsSync(at('恢复甲.md'))
+  const treeHasNoGhost = await page.eval(`![...document.querySelectorAll('.tree-note')].some(node => node.dataset.path === '恢复甲.md')`)
+  for (let attempt = 0; attempt < 3 && await editorText() !== beforeDelete; attempt += 1) await page.key('z', 'KeyZ', modifier, 90)
+  const draftRestored = await editorText() === beforeDelete
+  const scanned = await rescan()
+  if (scanned !== true) throw Error('设置「笔记库」页没能重扫核验：' + scanned)
+  const missingRow = await rowFor('恢复甲.md')
+  check('外部消失被识别并如实呈现：设置页如实报「仍在库外」、tab 不可用且不重建、不自动保存',
+    tabWentUnavailable && notRecreated && treeHasNoGhost && draftRestored &&
+      missingRow.row?.verdict === 'still-missing' && missingRow.row.confirm === null &&
+      missingRow.row.text.includes('仍在库外') && missingRow.row.text.includes('文件仍不在原路径') && !missingRow.row.text.includes('已恢复'),
+    JSON.stringify({ tabWentUnavailable, notRecreated, treeHasNoGhost, draftRestored, row: missingRow.row, message: missingRow.panel?.message }))
+  await shot(page, 'recovery-missing-settings-1200')
+
+  // 二、原路径不可重建：同名新建被拒，界面给的是可读、且不指向不可能完成核验的那句话。
+  await leaveSettings()
+  await selectBrowserFolder(page, '')
+  const filesBefore = readdirSync(vault).filter((name) => name.endsWith('.md')).sort()
+  await page.eval(`document.querySelector('.tab-new').click()`)
+  if (!await waitFor(page, `!!document.querySelector('dialog[open] input')`)) throw Error('新建笔记的人确认框没有出现')
+  await page.eval(`(() => { const dialog = document.querySelector('dialog[open]'); const input = dialog.querySelector('input'); input.value = '恢复甲'; input.dispatchEvent(new Event('input', { bubbles: true })); dialog.querySelector('button[value=ok]').click() })()`)
+  for (let attempt = 0; attempt < 40 && !evidence.dialogs.length; attempt += 1) await sleep(250)
+  const refusal = evidence.dialogs[0] ?? ''
+  const filesAfter = readdirSync(vault).filter((name) => name.endsWith('.md')).sort()
+  check('原路径不可重建：同名新建被拒 PATH_RESERVED，界面文案不指向不可能完成的核验',
+    evidence.dialogs.length === 1 &&
+      refusal.includes('不能复用') && refusal.includes('核验不可能通过') && refusal.includes('整库恢复或人工处理') && !refusal.includes('PATH_RESERVED') &&
+      !existsSync(at('恢复甲.md')) && JSON.stringify(filesAfter) === JSON.stringify(filesBefore),
+    JSON.stringify({ dialogs: evidence.dialogs, filesBefore, filesAfter }))
+  await shot(page, 'recovery-path-reserved-1200')
+
+  // 三、按原身份放回（同 inode）：核验未过之前它仍不是可用的原对象。
+  const inodeRestored = inodeOf(parked('恢复甲.md'))
+  renameSync(parked('恢复甲.md'), at('恢复甲.md'))
+  if (inodeOf(at('恢复甲.md')) !== inodeRestored) throw Error('夹具放回后 inode 变了，构造不出同身份恢复')
+  const pendingMarked = await waitFor(page, `document.querySelector('.tree-note[data-path="恢复甲.md"]')?.dataset.recoveryPending === 'true' && document.querySelector('.tree-note[data-path="恢复甲.md"] .tree-recovery')?.textContent === '待核验'`, 30000)
+  await shot(page, 'recovery-pending-tree-1200')
+  const stillUnavailable = await page.eval(`document.querySelector('.note-unavailable:not([hidden]) span')?.textContent === '暂时无法核验文件；自动保存和生成已暂停。'`)
+  const suspendedRead = await readFails('恢复甲.md')
+  const scanned2 = await rescan()
+  if (scanned2 !== true) throw Error('设置「笔记库」页没能重扫核验：' + scanned2)
+  const restorableRow = await rowFor('恢复甲.md')
+  check('对象回到原路径但核验未过：树上标「待核验」，行说可以核验恢复，对象与来源仍失效',
+    pendingMarked && stillUnavailable && suspendedRead &&
+      restorableRow.row?.verdict === 'restored' && restorableRow.row.confirm === '恢复甲.md' && restorableRow.row.text.includes('可以核验恢复'),
+    JSON.stringify({ pendingMarked, stillUnavailable, suspendedRead, row: restorableRow.row }))
+  await shot(page, 'recovery-pending-row-1200')
+
+  // 四、核验通过：点「核验并恢复」，记录清除、树标记消失、tab 与来源恢复可用。
+  await page.eval(`document.querySelector('[data-recovery-confirm="恢复甲.md"]').click()`)
+  await waitFor(page, `document.querySelector('.settings-main .vault-settings')?.getAttribute('aria-busy') === 'false'`, 30000)
+  const clearedRows = await waitFor(page, `(() => { const section = [...document.querySelectorAll('.settings-main section')].find(node => node.querySelector('h3')?.textContent === '外部消失与恢复核验'); return !!section && section.querySelectorAll('li').length === 0 })()`, 20000)
+  const confirmMessage = await page.eval(`document.querySelector('.settings-main .vault-settings-status')?.textContent ?? ''`)
+  const treeMarkerGone = await waitFor(page, `!document.querySelector('.tree-note[data-path="恢复甲.md"] .tree-recovery')`, 20000)
+  await leaveSettings()
+  const tabUsable = await waitFor(page, `document.querySelector('.note-unavailable')?.hidden === true && document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() === ${JSON.stringify(beforeDelete)}`, 20000)
+  const readWorks = await page.eval(`window.rgent.noteRead('恢复甲.md').then(note => note.content === ${JSON.stringify(beforeDelete)}, () => false)`)
+  // 来源恢复可用：再开一场，授权清单里必须正好是这一篇（读不出来时这一场根本起不来）。
+  const rerun = await register('恢复甲.md', '恢复复跑', true)
+  const answeredTwice = await page.eval(`(async () => ((await window.rgent.noteRead('恢复甲.md')).content.split('受控回答第一句。').length - 1) >= 2)()`)
+  check('核验通过分支：记录清除、树标记消失、tab 与来源恢复可用',
+    clearedRows && confirmMessage.includes('核验通过') && confirmMessage.includes('来源恢复可用') && treeMarkerGone && tabUsable && readWorks && rerun === true && answeredTwice,
+    JSON.stringify({ clearedRows, confirmMessage, treeMarkerGone, tabUsable, readWorks, rerun, answeredTwice }))
+  await shot(page, 'recovery-restored-1200')
+
+  // 五、内容已变：同 inode、同路径放回，但内容不同——不许冒充通过。
+  await selectBrowserFolder(page, '')
+  await page.eval(`[...document.querySelectorAll('.tree-note')].find(node => node.dataset.path === '恢复乙.md').click()`)
+  if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '恢复乙.md'`)) throw Error('乙没有成为当前 tab')
+  const inodeChanged = inodeOf(at('恢复乙.md'))
+  renameSync(at('恢复乙.md'), parked('恢复乙.md'))
+  if (!await waitFor(page, `!!document.querySelector('.note-unavailable:not([hidden])')`, 30000)) throw Error('乙消失后 tab 没有进入不可用')
+  writeFileSync(parked('恢复乙.md'), '# 恢复乙\n\n这段正文在库外被改过，哈希与登记不一致。\n')
+  const inodeKept = inodeOf(parked('恢复乙.md')) === inodeChanged
+  renameSync(parked('恢复乙.md'), at('恢复乙.md'))
+  const scanned3 = await rescan()
+  if (scanned3 !== true) throw Error('设置「笔记库」页没能重扫核验：' + scanned3)
+  const changedRow = await rowFor('恢复乙.md')
+  const changedMarked = await waitFor(page, `document.querySelector('.tree-note[data-path="恢复乙.md"]')?.dataset.recoveryPending === 'true'`, 30000)
+  const changedSuspended = await readFails('恢复乙.md')
+  const changedTabUnavailable = await page.eval(`document.querySelector('.note-unavailable')?.hidden === false`)
+  check('内容已变分支：核验不过、行保持失效并如实上报，不冒充通过',
+    inodeKept && changedRow.row?.verdict === 'content-changed' && changedRow.row.confirm === null &&
+      changedRow.row.text.includes('内容与登记记录不一致') && changedRow.row.text.includes('不自动遗忘') &&
+      changedMarked && changedSuspended && changedTabUnavailable,
+    JSON.stringify({ inodeKept, row: changedRow.row, changedMarked, changedSuspended, changedTabUnavailable }))
+  await shot(page, 'recovery-content-changed-1200')
+
+  // 六、附件缺失：只放回笔记、附件夹不在——降级上报，既不是通过也不是普通失败。
+  const inodeAttachments = inodeOf(at('恢复丙.md'))
+  renameSync(at('恢复丙.md'), parked('恢复丙.md'))
+  renameSync(at('恢复丙'), parked('恢复丙'))
+  // 消失要真的被程序看见（这里由设置页的重扫登记），否则夹具从没离开过，分支根本不存在。
+  const scanned4 = await rescan()
+  if (scanned4 !== true) throw Error('设置「笔记库」页没能重扫核验：' + scanned4)
+  const stillMissingRow = await rowFor('恢复丙.md')
+  renameSync(parked('恢复丙.md'), at('恢复丙.md'))
+  if (inodeOf(at('恢复丙.md')) !== inodeAttachments) throw Error('丙放回后 inode 变了，构造不出同身份恢复')
+  const scanned5 = await rescan()
+  if (scanned5 !== true) throw Error('设置「笔记库」页没能重扫核验：' + scanned5)
+  const attachmentRow = await rowFor('恢复丙.md')
+  const attachmentsMarked = await waitFor(page, `document.querySelector('.tree-note[data-path="恢复丙.md"]')?.dataset.recoveryPending === 'true'`, 30000)
+  const attachmentsSuspended = await readFails('恢复丙.md')
+  check('附件缺失分支：只放回笔记而附件夹不在时降级上报，不冒充通过',
+    stillMissingRow.row?.verdict === 'still-missing' &&
+      attachmentRow.row?.verdict === 'attachments-missing' && attachmentRow.row.confirm === null &&
+      attachmentRow.row.text.includes('附件夹缺失（降级）') && attachmentRow.row.text.includes('降级状态') && attachmentRow.row.text.includes('不冒充核验通过') &&
+      attachmentsMarked && attachmentsSuspended,
+    JSON.stringify({ disappearedRow: stillMissingRow.row, row: attachmentRow.row, attachmentsMarked, attachmentsSuspended }))
+  await shot(page, 'recovery-attachments-missing-1200')
+
+  // 七、门关：整个「笔记库」页与目录树里不许有任何删除入口、按钮或菜单项。
+  const menuLabels = async (selector) => {
+    // 只派发 contextmenu；不按 Esc（那会连设置浮层一起关掉）。下一次开菜单会先收掉上一个。
+    await page.eval(`(() => { const row = document.querySelector(${JSON.stringify(selector)}); const rect = row.getBoundingClientRect(); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.left + 20, clientY: rect.top + 12 })) })()`)
+    if (!await waitFor(page, `!!document.querySelector('.tier-menu')`)) return null
+    const labels = await page.eval(`[...document.querySelectorAll('.tier-menu button')].map(node => node.textContent)`)
+    evidence.menus[selector] = labels
+    return labels
+  }
+  const noteMenu = await menuLabels('.tree-note[data-path="恢复甲.md"]')
+  const dirMenu = await menuLabels('.tree-dir[data-path="资料"]')
+  const gate = await page.eval(`(() => {
+    const forbidden = /删除|废纸篓|回收站|清空|永久移除/
+    const interactive = 'button, [role="menuitem"], [role="button"], a[href], input[type="button"], input[type="submit"], summary'
+    const hits = []
+    const scopes = [['设置面板', document.querySelector('.overlay-settings')], ['目录树', document.querySelector('#tree-panel')], ['顶栏', document.querySelector('.top')], ['目录菜单', document.querySelector('.tier-menu')]]
+    for (const [scope, node] of scopes) {
+      if (!node) { if (scope !== '目录菜单') hits.push(scope + '：整块缺失'); continue }
+      for (const label of [...node.querySelectorAll(interactive)].map(item => (item.getAttribute('aria-label') || item.textContent || '').trim()).filter(Boolean)) if (forbidden.test(label)) hits.push(scope + '：' + label)
+    }
+    const panel = document.querySelector('.settings-main .vault-settings')
+    // 「从列表移除」的说明里那句「不会删除」是解释文字，不是入口；剔掉它以后整页不许再出现「删除」。
+    const pageText = (panel?.textContent ?? '').split('不会删除').join('')
+    const section = [...document.querySelectorAll('.settings-main section')].find(node => node.querySelector('h3')?.textContent === '外部消失与恢复核验')
+    return {
+      hits,
+      pageDeleteHits: pageText.match(/删除/g) ?? [],
+      recoveryActions: [...(section?.querySelectorAll('button') ?? [])].map(node => node.textContent),
+      recoveryVerdicts: [...(section?.querySelectorAll('li') ?? [])].map(node => node.dataset.recoveryVerdict),
+      noteRowButtons: document.querySelectorAll('.tree-note[data-path="恢复甲.md"] button').length,
+      dirRowButtons: document.querySelectorAll('.tree-dir[data-path="资料"] button').length
+    }
+  })()`)
+  check('门关：笔记库页与树里没有任何删除入口、按钮或菜单项',
+    JSON.stringify(noteMenu) === JSON.stringify(['改名', '移动']) &&
+      JSON.stringify(dirMenu) === JSON.stringify(['在此新建笔记', '新建文件夹', '改名', '移动', '可参考', '必须遵循', '禁止触碰']) &&
+      gate.hits.length === 0 && gate.pageDeleteHits.length === 0 &&
+      JSON.stringify(gate.recoveryActions) === JSON.stringify(['重扫并核验恢复']) &&
+      JSON.stringify(gate.recoveryVerdicts) === JSON.stringify(['content-changed', 'attachments-missing']) &&
+      gate.noteRowButtons === 0 && gate.dirRowButtons === 2,
+    JSON.stringify({ noteMenu, dirMenu, ...gate }))
+  await shot(page, 'recovery-gate-closed-1200')
+  check('恢复专项的模型调用都走受控主机', requests.length >= 4 && requests.every((request) => request.model === 'test'), String(requests.length) + '／' + JSON.stringify([...new Set(requests.map((request) => request.model))]))
+  if (shotDir) writeFileSync(path.join(shotDir, 'recovery-evidence.json'), JSON.stringify(evidence, null, 2))
+}
+
 async function availablePort() {
   const server = createServer()
   await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve))
@@ -760,6 +1054,7 @@ const multiVaultOnly = process.env.RGENT_UI_MULTI_VAULT_ONLY === '1'
 const memoryOnly = process.env.RGENT_UI_MEMORY_ONLY === '1'
 const skillsOnly = process.env.RGENT_UI_SKILLS_ONLY === '1'
 const writeOnly = process.env.RGENT_UI_WRITE_ONLY === '1'
+const recoveryOnly = process.env.RGENT_UI_RECOVERY_ONLY === '1'
 // 付费专项：只由显式环境变量触发，普通测试／构建／CI 永不调用模型。
 const skillsLive = process.env.RGENT_UI_SKILLS_LIVE
 const v4Only = process.env.RGENT_UI_V4_ONLY === '1'
@@ -2721,12 +3016,13 @@ async function verifyModelFeedback(page, nativePage, shot) {
   await openModel()
 }
 
-function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequests=[]) {
+function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequests=[],allRequests=null) {
   const server = createHttpServer((request, response) => {
       let body = ''
       request.on('data', (chunk) => { body += String(chunk) })
       request.on('end', () => {
         const decoded = JSON.parse(body)
+        allRequests?.push(decoded)
         if (decoded.model === 'memory-ui-fixture') {
           memoryRequests.push(decoded)
           const material = JSON.parse(decoded.messages.find(m=>m.role==='user').content)
@@ -3183,6 +3479,19 @@ async function main() {
       try{await verifyWriteTools(page,vault,shot,writeRequests)}catch(error){stageFailed('写工具专项',error)}
       check('写工具专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
       check('写工具专项全程只走受控主机',writeRequests.length>=4,String(writeRequests.length))
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode=failures===0?0:1
+      return
+    }
+    if(recoveryOnly){
+      const recoveryRequests=[]
+      hostServer=createControlledHostServer([],[],[],recoveryRequests)
+      await new Promise(resolve=>hostServer.listen(0,'127.0.0.1',resolve))
+      const configured=await configureControlledHost(page,`http://127.0.0.1:${hostServer.address().port}/v1`)
+      check('恢复专项初始化受控供应商与设备默认模型',configured===true)
+      if(!configured)throw Error('恢复专项受控模型初始化失败')
+      try{await verifyExternalRecovery(page,vault,path.join(workdir,'recovery-stage'),shot,recoveryRequests,shotDir)}catch(error){stageFailed('外部消失与恢复核验专项',error)}
+      check('恢复专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
       process.exitCode=failures===0?0:1
       return
