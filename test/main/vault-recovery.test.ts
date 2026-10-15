@@ -194,6 +194,65 @@ it('keeps the disappearance record across an unrelated structural operation', as
   } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
 })
 
+it('keeps an in-place but unverified object unavailable to reads, not only to status', async () => {
+  const f = await fixture()
+  try {
+    const service = new WorkingMemoryService(f.vault, () => null)
+    const source = await service.sourceForPrompt('a.md', 'task')
+    await moveOut(f.root, f.stash, 'a.md')
+    expect((await f.vault.noteStatus('a.md', f.binding)).status).toBe('missing')
+    await rm(path.join(f.root, 'a'), { recursive: true })
+    await moveBack(f.root, f.stash, 'a.md')
+    // 同 inode 原位放回（verdict 的首个判据是对象身份，走到 attachments-missing 就证明身份没换），
+    // 但附件夹仍缺、核验未过：读必须与 noteStatus 同判，不能靠身份相同短路。
+    const scan = await f.vault.recoveryScan()
+    expect(scan.rows[0]!.verdict).toBe('attachments-missing')
+    expect(scan.rows[0]!.canRestore).toBe(false)
+    expect((await f.vault.noteStatus('a.md', f.binding)).status).toBe('unreadable')
+    await expect(f.vault.read('a.md')).rejects.toThrow('NOTE_UNREADABLE')
+    await expect(f.vault.readOpened('a.md')).rejects.toThrow('NOTE_UNREADABLE')
+    expect(await service.verifySource(source)).toBe(false)
+    expect((await journal(f.root)).missing).toHaveLength(1)
+  } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
+})
+
+it('keeps the disappearance record when another note publishes a ledger chapter', async () => {
+  const f = await fixture()
+  try {
+    // 另一篇笔记先登记身份；账本发布写的是同一本 `.rgent-lifecycle`，与被消失的对象无关。
+    await writeFile(path.join(f.root, 'b.md'), '另一篇正文')
+    await f.vault.ledgerMigrateBatch(null)
+    await moveOut(f.root, f.stash, 'a.md')
+    expect((await f.vault.noteStatus('a.md', f.binding)).status).toBe('missing')
+    await moveBack(f.root, f.stash, 'a.md')
+    // 账本发布路径：新任务 prepare 走 publish() → recoverLedgerPublication，一路整篇重写
+    // `.rgent-lifecycle`（写入计划、每条回执、active:null 三次）。它不认识的键（missing）必须原样留下。
+    await f.vault.ledgerPrepare('b.md', { taskId: 'task-b', startedAt: new Date().toISOString(), status: 'completed', prompt: '另一问', answer: '另一答' })
+    expect((await f.vault.ledgerRecord('b.md', 'task-b')).taskId).toBe('task-b')
+    const after = await journal(f.root)
+    expect(after.active).toBeNull()
+    expect(after.missing).toHaveLength(1)
+    expect((after.missing![0] as Record<string, unknown>).objectVersion).toBe(f.binding.objectVersion)
+    expect((await f.vault.recoveryScan()).rows.map(row => row.relPath)).toEqual(['a.md'])
+    await expect(f.vault.create('a')).rejects.toThrow('PATH_RESERVED')
+  } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
+})
+
+it('refuses a new folder that would occupy the attachment identity of a disappeared note', async () => {
+  const f = await fixture()
+  try {
+    await writeFile(path.join(f.root, 'b.md'), '另一篇正文')
+    await f.vault.ledgerMigrateBatch(null)
+    const note = await f.vault.read('b.md')
+    await moveOut(f.root, f.stash, 'b.md')
+    expect((await f.vault.noteStatus('b.md', note)).status).toBe('missing')
+    expect((await journal(f.root)).missing).toHaveLength(1)
+    // 同名附件夹也是被保留的身份：新建文件夹会占住它，恢复从此卡在 attachments-changed/missing。
+    await expect(f.vault.createFolder('b')).rejects.toThrow('PATH_RESERVED')
+    expect(await readdir(f.root)).not.toContain('b')
+  } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
+})
+
 it('shows no deletion entry anywhere while the trash gate stays shut', async () => {
   // 设备级模型密钥的删除不属于笔记库删除入口；这里禁的是库内对象与废纸篓的任何入口。
   const channels = Object.entries(IPC).filter(([key, value]) => /trash/i.test(`${key} ${value}`) || /^(note|folder|tree|vault|lifecycle|ledger):.*(delete|remove|trash)/i.test(String(value)))

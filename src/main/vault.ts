@@ -12,7 +12,7 @@ import { createFolder, createNote, createNoteWithBody, listVaultTree, parseStore
 import { VaultMutationQueue } from './vault-mutation-queue.ts'
 import { VaultLifecycle, type MissingObject, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite } from './vault-lifecycle.ts'
 import { isOwnEcho, type RecentWrite } from './echo.ts'
-import { hasHiddenSegment, isNotePath, resolveInVault, sanitizeNoteName } from './paths.ts'
+import { hasHiddenSegment, isNotePath, resolveInVault, sanitizeFolderName, sanitizeNoteName } from './paths.ts'
 import { effectivePermissionEntries, loadPermissions, loadPermissionSnapshot, modelTierFor, setPermission as savePermission, tierFor } from './permissions.ts'
 import type { TaskGrant } from './task-authorization.ts'
 import { closeSecureFs, secureFsFor } from './secure-fs.ts'
@@ -443,6 +443,14 @@ export class VaultSession {
     const root = this.root!
     try {
       this.requireUsableRoot()
+      // F6：`missing` 判据先于任何身份比较生效。外部消失记录在且核验未过时，文件即使回到原位
+      //（同 inode、附件夹仍缺）也不再是可用的原对象；读与 noteStatus 同判：在是 unreadable，不在是 missing。
+      // 身份相同的短路（如 validateSources）因此不再能绕过记录。
+      if (this.missingRecord(relPath)) {
+        let present = false
+        try { present = !!secureFsFor(root).resolve(relPath) } catch { /* 路径不在就是缺失 */ }
+        throw new Error(present ? 'NOTE_UNREADABLE' : 'NOTE_MISSING')
+      }
       const snapshot = { ...await readNoteSnapshot(root, relPath), sessionId: token }
       this.assertSession(token)
       this.requireUsableRoot()
@@ -511,6 +519,16 @@ export class VaultSession {
   private refuseReservedPath(name: string, parent: string): void {
     const fileName = sanitizeNoteName(name)
     if (this.missingRecord(parent ? `${parent}/${fileName}` : fileName)) throw new Error('PATH_RESERVED')
+  }
+
+  /** 同名附件夹也是被保留的身份：`<stem>/` 属于 `<stem>.md`。新建它会占住附件证据，
+   *  恢复从此卡在 `attachments-changed`／`attachments-missing`——而清除点 `clearMissing` 只在
+   *  `recoveryRow` 判为 `restored`（原 inode 仍在、附件证据逐字节一致）时才放行。所以原对象被
+   *  清空废纸篓后，这个名字就是永久死路：核验永远不可能通过，只能整库恢复或人工处理。
+   *  这条边界如实上报，不新增「强制完成／清空」入口。 */
+  private refuseReservedFolder(name: string, parent: string): void {
+    const folderName = sanitizeFolderName(name)
+    if (this.missingRecord(parent ? `${parent}/${folderName}.md` : `${folderName}.md`)) throw new Error('PATH_RESERVED')
   }
 
   /** 只读重扫：清点外部消失的记录，给出核验判据的分支结论。 */
@@ -941,6 +959,9 @@ export class VaultSession {
     const token = this.captureSession(); const root = this.requireUsableRoot()
     const relPath = await this.mutations.run(async () => {
       this.assertSession(token); this.requireUsableRoot()
+      // 目录也占路径：`b` 是 `b.md` 的附件身份，`b.md` 本身则是它的原路径，两者都拒。
+      this.refuseReservedPath(name, parent)
+      this.refuseReservedFolder(name, parent)
       return createFolder(root, name, parent)
     })
     this.assertSession(token); this.requireUsableRoot()

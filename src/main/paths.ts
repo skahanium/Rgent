@@ -61,3 +61,9 @@ export function sanitizeNoteName(name: string): string {
   const file = safe.length === 0 ? '未命名' : safe
   return `${file}.md`
 }
+
+/** 文件夹名用同一套非法字符规则，但不加、也不剥 `.md`：`<stem>/` 是 `<stem>.md` 的附件身份。 */
+export function sanitizeFolderName(name: string): string {
+  const safe = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/^\.+/u, '_')
+  return safe.length === 0 ? '未命名文件夹' : safe
+}

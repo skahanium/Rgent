@@ -53,9 +53,9 @@ const LIFECYCLE_ERRORS: Record<string, string> = {
   PREVIOUS_TASK_UNSAVED: '运行任务的内容尚未保存，请先处理再修改文件位置。',
   LIFECYCLE_RECOVERY_REQUIRED: '文件操作中断且无法自动核对。恢复记录仍在库中；AI 访问已暂停，请人工检查。',
   STRUCTURE_BUSY: '另一个文件位置操作正在进行，请稍后重试。',
-  PATH_RESERVED: '这个路径的原笔记曾在库外消失。请先在设置「笔记库」核验恢复，再决定是否复用该名称。'
+  PATH_RESERVED: '这个路径的原笔记曾在库外消失，核验恢复前这个名字被保留、不能复用。原对象还在系统废纸篓时，请原样放回后在设置「笔记库」重扫核验；原对象已不在废纸篓时核验不可能通过，这个名称只能靠整库恢复或人工处理。'
 }
-const lifecycleErrorText = (error: unknown): string => {
+export const lifecycleErrorText = (error: unknown): string => {
   const message = error instanceof Error ? error.message : String(error)
   return LIFECYCLE_ERRORS[message] ?? message
 }

@@ -16,6 +16,19 @@ const id=(s:unknown):s is string=>typeof s==='string'&&/^[A-Za-z0-9_-]{1,128}$/.
 const rel=(s:unknown):s is string=>typeof s==='string'&&s.length<=4096&&/\.md$/i.test(s)&&!s.split('/').some(x=>!x||x==='.'||x==='..'||x.startsWith('.'))&&!/[:\\\x00-\x1f]/.test(s)
 const obj=(s:unknown):s is Record<string,unknown>=>!!s&&typeof s==='object'&&!Array.isArray(s)
 const exact=(s:Record<string,unknown>,keys:string[])=>Object.keys(s).sort().join()===keys.sort().join()
+/** `.rgent-lifecycle` 有两个写入者：生命周期 journal（vault-lifecycle）与账本发布（本模块）。
+ *  谁都不能整篇覆盖别人的键——写入前按当前字节读回，保留本模块不认识的顶层键（至少 `missing`
+ *  外部消失记录），只替换 `active`。整篇写 `{version:1,active}` 会把别人的记录一起抹掉。 */
+function lifecycleRaw(expected:string|null,active:unknown):string{
+ let current:Record<string,unknown>={}
+ if(expected!==null){
+  let parsed:unknown
+  try{parsed=JSON.parse(expected)}catch{throw Error('LIFECYCLE_RECOVERY_REQUIRED')}
+  if(!obj(parsed))throw Error('LIFECYCLE_RECOVERY_REQUIRED')
+  current=parsed
+ }
+ return JSON.stringify({...current,version:1,active})
+}
 export type LedgerOwner={noteId:string;relPath:string;objectVersion:string;bodyRevision:string;anchors:string[];anchorsTruncated?:true;sequenceCeiling:number;recoveryEvidence?:{rootIdentity:string;attachments:{relPath:string;kind:'file'|'dir';hash?:string}[]}}
 type Registry={version:1;owners:LedgerOwner[];sequence:number}
 type MaterialUnit={id:string;noteId:string;start:number;end:number;sequence:number;hash?:string}
@@ -75,7 +88,7 @@ export class LedgerStore{
   const plan:LedgerPublication={kind:'ledger-publication',rootIdentity:this.rootIdentity?.()??this.fs.rootIdentity,sessionId:this.sessionId(),relPath:owner.relPath,objectVersion:note.objectVersion,bodyRevision:digest(note.bytes.toString()),permissionRaw:permission?.raw??null,permissionId:permission?.id??null,ownerPath,
     writes:[{path:ownerPath,before:beforeOwner?.raw??null,beforeId:beforeOwner?.id??null,after:JSON.stringify(owner)},{path:fixed,before:beforeRegistry?.raw??null,beforeId:beforeRegistry?.id??null,after:JSON.stringify(registry)}]}
   if(!validLedgerPublication(plan))throw Error('LEDGER_REGISTRY_INVALID')
-  this.replace('.rgent-lifecycle',JSON.stringify({version:1,active:plan}))
+  this.replace('.rgent-lifecycle',lifecycleRaw(journal?.raw??null,plan))
   recoverLedgerPublication(this.fs,plan,()=>this.check())
   this.read(fixed);this.read(ownerPath)
  }
@@ -493,7 +506,7 @@ export function recoverLedgerPublication(fs:SecureVaultFs,plan:LedgerPublication
   if(current!==write.after)fs.replace(write.path,write.before,write.after,write.beforeId??undefined)
   check();const saved=fs.readSnapshot(write.path);if(saved.bytes.toString()!==write.after)throw Error('STALE_RECOVERY')
   write.receipt=saved.objectVersion
-  const next=JSON.stringify({version:1,active:plan});fs.replace('.rgent-lifecycle',journal.bytes.toString(),next,journal.objectVersion);journal=fs.readSnapshot('.rgent-lifecycle')
+  const next=lifecycleRaw(journal.bytes.toString(),plan);fs.replace('.rgent-lifecycle',journal.bytes.toString(),next,journal.objectVersion);journal=fs.readSnapshot('.rgent-lifecycle')
  }
- inspectLedgerPublication(fs,plan,check);fs.replace('.rgent-lifecycle',journal.bytes.toString(),JSON.stringify({version:1,active:null}),journal.objectVersion)
+ inspectLedgerPublication(fs,plan,check);fs.replace('.rgent-lifecycle',journal.bytes.toString(),lifecycleRaw(journal.bytes.toString(),null),journal.objectVersion)
 }

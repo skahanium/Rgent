@@ -6,6 +6,7 @@ import {
   isHiddenName,
   isNotePath,
   resolveInVault,
+  sanitizeFolderName,
   sanitizeNoteName
 } from './paths.ts'
 
@@ -232,7 +233,7 @@ export async function createNoteWithBody(root: string, name: string, parent = ''
 
 export async function createFolder(root: string, name: string, parent = ''): Promise<string> {
   verifiedParent(root, parent)
-  const folderName = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/^\.+/u, '_') || '未命名文件夹'
+  const folderName = sanitizeFolderName(name)
   const relPath = parent ? `${parent}/${folderName}` : folderName
   mustResolve(root, relPath)
   try {
