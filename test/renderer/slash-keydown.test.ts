@@ -68,4 +68,23 @@ describe('slash keydown starts a command only from an empty paragraph', () => {
     host.view.dispatch({ selection: { anchor: host.view.state.doc.length } })
     expect(pendingSlash(host.getText(), host.selectionRange().head, host.slashCommandStart())).toBeNull()
   })
+
+  it('submits a loaded empty-paragraph /prompt without typing it this session', () => {
+    const host = editor()
+    host.setText('正文\n\n/问')
+    host.view.dispatch({ selection: { anchor: host.view.state.doc.length } })
+    expect(host.slashCommandStart()).toBe(host.getText().lastIndexOf('/'))
+    expect(pendingSlash(host.getText(), host.selectionRange().head, host.slashCommandStart())?.prompt).toBe('问')
+  })
+
+  it('keeps a loaded mixed-newline command after an edit elsewhere', () => {
+    const host = editor()
+    const body = '\ufeff# 原文坐标\r\n\r\n原文字节。\n\n/快速完成\r\n'
+    host.setText(body)
+    const editAt = host.view.state.doc.toString().indexOf('原文字节。') + '原文字节。'.length
+    host.view.dispatch({ changes: { from: editAt, insert: '改' }, selection: { anchor: editAt + 1 }, userEvent: 'input.type' })
+    const at = host.view.state.doc.toString().indexOf('/快速完成') + '/快速完成'.length
+    host.view.dispatch({ selection: { anchor: at } })
+    expect(pendingSlash(host.getText(), host.selectionRange().head, host.slashCommandStart())?.prompt).toBe('快速完成')
+  })
 })

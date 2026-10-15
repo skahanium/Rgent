@@ -32,7 +32,7 @@ import { attachRevealSource } from './widgets/reveal.ts'
 import { renderSafeHtmlFragment } from './safe-html.ts'
 import { renderReadOnlyNode } from './read-only.ts'
 import { joinVaultRel } from '../../../shared/vault-rel.ts'
-import { canStartSlash } from '../slash.ts'
+import { canStartSlash, slashCommandStarts, slashParagraphOrigin } from '../slash.ts'
 import type { Root } from 'mdast'
 import type { PresentationBlock, PresentationSyntax } from '../../../markdown/presentation.ts'
 
@@ -432,7 +432,7 @@ const theme = EditorView.theme({
   }
 })
 
-const markSlashStart = StateEffect.define<number | null>()
+const markSlashStart = StateEffect.define<number>()
 
 function slashStartFromInsert(tr: Transaction): number | null {
   if (!tr.docChanged) return null
@@ -452,24 +452,37 @@ function slashStartFromInsert(tr: Transaction): number | null {
   return started
 }
 
-const slashStartField = StateField.define<number | null>({
-  create: () => null,
+function seedSlashStarts(raw: string): number[] {
+  const projection = new SourceProjection(raw)
+  return slashCommandStarts(projection.raw).map((at) => projection.toView(at))
+}
+
+const slashStartField = StateField.define<readonly number[]>({
+  create: () => [],
   update: (value, tr) => {
     const marked = tr.effects.find((effect) => effect.is(markSlashStart))
-    if (marked) return marked.value
-    if (tr.effects.some((effect) => effect.is(setRawSource))) return null
-    const started = slashStartFromInsert(tr)
-    if (started != null) return started
-    if (value == null || !tr.docChanged) return value
-    const mapped = tr.changes.mapPos(value, 1)
-    return tr.state.doc.sliceString(mapped, mapped + 1) === '/' ? mapped : null
+    const explicit = tr.effects.find((effect) => effect.is(setRawSource))
+    const next = new Set(explicit ? seedSlashStarts(explicit.value) : value)
+    if (explicit == null) {
+      if (tr.docChanged) {
+        next.clear()
+        for (const at of value) {
+          const mapped = tr.changes.mapPos(at, 1)
+          if (tr.state.doc.sliceString(mapped, mapped + 1) === '/') next.add(mapped)
+        }
+      }
+      const started = slashStartFromInsert(tr)
+      if (started != null) next.add(started)
+    }
+    if (marked) next.add(marked.value)
+    return [...next]
   }
 })
 
 export type EditorHost = {
   view: EditorView
   getText: () => string
-  /** 空段段首按 `/` 留下的命令起点（原文偏移）；未发起则为 null。 */
+  /** 空段段首按 `/` 留下的命令起点（原文偏移）；打开已有空段口令也算；未发起则为 null。 */
   slashCommandStart: () => number | null
   setText: (text: string, host?: NoteHost, selection?: { anchor: number; head: number }) => void
   /** Apply a saved Host change without replacing this tab's history or scroll position. */
@@ -622,8 +635,10 @@ export function mountEditor(
     view,
     getText: () => sourceOf(view.state).raw,
     slashCommandStart: () => {
-      const at = view.state.field(slashStartField)
-      return at == null ? null : sourceOf(view.state).toRaw(at)
+      const projection = sourceOf(view.state)
+      const origin = slashParagraphOrigin(projection.raw, projection.toRaw(view.state.selection.main.head))
+      if (origin == null) return null
+      return view.state.field(slashStartField).some((at) => projection.toRaw(at) === origin) ? origin : null
     },
     setText: (text, host, selection) => {
       documentGeneration += 1
