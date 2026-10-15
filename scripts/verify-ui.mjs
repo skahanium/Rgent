@@ -1336,6 +1336,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       return JSON.stringify({ contentWidth: Math.round(content.width), sideGap: Math.round(content.left - stage.left), align: paragraph && getComputedStyle(paragraph).textAlign })
     })()`))
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+    await setTreeExpanded(page, true)
     return { ok: state.contentWidth >= 730 && state.contentWidth <= 800 && state.sideGap >= 32 && state.align === 'justify', detail: JSON.stringify(state) }
   })
   await probe('导航和反链的密度接近参考图', async () => {
