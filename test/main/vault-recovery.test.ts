@@ -7,6 +7,7 @@ import { VaultSession } from '../../src/main/vault.ts'
 import { WorkingMemoryService } from '../../src/main/working-memory-service.ts'
 import { serializeStoredVault } from '../../src/main/notes-fs.ts'
 import { markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
+import { vaultRootIdentity } from '../../src/main/watch.ts'
 import { IPC } from '../../src/shared/ipc.ts'
 vi.mock('electron', () => ({ dialog: { showOpenDialog: vi.fn() } }))
 vi.mock('../../src/main/watch.ts', async importOriginal => ({ ...await importOriginal<typeof import('../../src/main/watch.ts')>(), watchVault: () => () => {} }))
@@ -250,6 +251,31 @@ it('refuses a new folder that would occupy the attachment identity of a disappea
     // 同名附件夹也是被保留的身份：新建文件夹会占住它，恢复从此卡在 attachments-changed/missing。
     await expect(f.vault.createFolder('b')).rejects.toThrow('PATH_RESERVED')
     expect(await readdir(f.root)).not.toContain('b')
+  } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
+})
+
+it('keeps PATH_RESERVED after the missing-record limit swallows a later disappearance', async () => {
+  const f = await fixture()
+  try {
+    const filled = Array.from({ length: 64 }, (_, i) => ({
+      relPath: `filler-${String(i).padStart(2, '0')}.md`,
+      noteId: `note-${String(i).padStart(2, '0')}`,
+      objectVersion: `obj-${String(i).padStart(2, '0')}`,
+      bodyRevision: hash(`filler-${i}`),
+      attachments: [] as const,
+      rootIdentity: vaultRootIdentity(f.root),
+      permissionTier: 'reference' as const,
+      detectedAt: '2026-10-15T00:00:00.000Z'
+    }))
+    await writeFile(path.join(f.root, '.rgent-lifecycle'), JSON.stringify({ version: 1, active: null, missing: filled }))
+    await moveOut(f.root, f.stash, 'a.md')
+    expect((await f.vault.noteStatus('a.md', f.binding)).status).toBe('missing')
+    expect((await journal(f.root)).missing).toHaveLength(64)
+    await expect(f.vault.create('a')).rejects.toThrow('PATH_RESERVED')
+    await expect(f.vault.createWithContent('a', '', '新正文')).rejects.toThrow('PATH_RESERVED')
+    await expect(f.vault.write('a.md', '草稿', hash(f.content), f.binding)).rejects.toThrow()
+    expect(await readdir(f.root)).toEqual(expect.arrayContaining(['a']))
+    expect((await readdir(f.root)).filter(name => name === 'a.md')).toEqual([])
   } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
 })
 

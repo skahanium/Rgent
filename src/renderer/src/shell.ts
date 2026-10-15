@@ -833,7 +833,7 @@ export async function start(root: HTMLElement): Promise<void> {
       sidebarHidden:treePanel.classList.contains('is-collapsed'),...fileBrowser.workspaceScroll()}
   }
   async function saveWorkspace(): Promise<boolean> {
-    if (restoringWorkspace || tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession) || vaultSession && restoredSession !== vaultSession) return false
+    if (!root.isConnected || restoringWorkspace || tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession) || vaultSession && restoredSession !== vaultSession) return false
     if (!vaultSession) return true
     const session = vaultSession
     return saveWorkspacePosition(()=>window.rgent.vaultWorkspaceSave(session,workspaceSnapshot()),()=>{if(session===vaultSession){hostNotice='工作区位置未保存，已留在当前库。请检查本机存储后重试保存或切换。';updateStatus()}})
@@ -841,7 +841,7 @@ export async function start(root: HTMLElement): Promise<void> {
   function scheduleWorkspace(): void {
     if (restoringWorkspace || tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession) || !vaultSession || restoredSession !== vaultSession) return
     if (workspaceTimer !== null) window.clearTimeout(workspaceTimer)
-    workspaceTimer = window.setTimeout(()=>{workspaceTimer=null;void saveWorkspace()},400)
+    workspaceTimer = window.setTimeout(()=>{workspaceTimer=null;if(root.isConnected)void saveWorkspace()},400)
   }
   async function restoreWorkspace(session: string, serial: number): Promise<boolean> {
     const currentRestore = () => vaultSession === session && stateSerial === serial
@@ -1291,7 +1291,7 @@ export async function start(root: HTMLElement): Promise<void> {
     }
   }
 
-  function activate(relPath: string): void {
+  function activate(relPath: string, focusEditor = true): void {
     const tab = tabs.find((item) => item.relPath === relPath)
     if (!tab) return
     if (active && active !== relPath) {
@@ -1304,7 +1304,7 @@ export async function start(root: HTMLElement): Promise<void> {
     requestAnimationFrame(() => { if (session === vaultSession && active === relPath && tab.scrollTop !== undefined) editor.view.scrollDOM.scrollTop = tab.scrollTop })
     scheduleWorkspace()
     syncActiveLocks()
-    editor.focus()
+    if (focusEditor) editor.focus()
     closeLedger()
     renderTabs(true)
     paintTree()
@@ -1366,7 +1366,7 @@ export async function start(root: HTMLElement): Promise<void> {
         const at = tabs.findIndex((item) => item.relPath === tab.relPath)
         const next = tabs[(at + step + tabs.length) % tabs.length]
         if (!next) return
-        activate(next.relPath)
+        activate(next.relPath, false)
         tabsEl.querySelector<HTMLButtonElement>(`.tab[data-rel="${CSS.escape(next.relPath)}"]`)?.focus()
       })
       const close = document.createElement('button')
@@ -1665,12 +1665,12 @@ export async function start(root: HTMLElement): Promise<void> {
     if(bodyWritesPaused()||recoveryDraftGate.held(vaultSession)||restoringWorkspace)return
     if (saveTimer != null) window.clearTimeout(saveTimer)
     saveTimer = window.setTimeout(() => {
-      void flushSave()
+      if (root.isConnected) void flushSave()
     }, SAVE_MS)
   }
 
   function flushSave(recoveryOperation?:string): Promise<boolean> {
-    if(!recoveryDraftGate.maySave(vaultSession,recoveryOperation)||restoringWorkspace)return Promise.resolve(false)
+    if(!root.isConnected||!recoveryDraftGate.maySave(vaultSession,recoveryOperation)||restoringWorkspace)return Promise.resolve(false)
     if (saveInFlight) {
       return saveInFlight.then((ok) => ok && tabs.some((tab) => tab.dirty) ? flushSave(recoveryOperation) : ok)
     }
