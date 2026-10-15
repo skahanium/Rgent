@@ -722,7 +722,7 @@ async function verifyWriteTools(page, vault, shot, requests) {
   await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
   await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`)
   check('账本面板如实写「未执行（超限）」并带工具名', await ledgerPanel('写作超限.md', `text.includes('append_to_note') && text.includes('refused:OVER_LIMIT_BYTES') && text.includes('未执行（OVER_LIMIT_BYTES）')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,260)??'(无账本面板)'`))
-  check('建的账本留痕看得见', await ledgerPanel('写作建一.md', `text.includes('create_note') && text.includes('ok (1)')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
+  check('建的账本留痕看得见', await ledgerPanel('写作建一.md', `text.includes('create_note') && /ok:[^\\s]+·/.test(text)`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
   check('补的账本留痕看得见', await ledgerPanel('写作补.md', `text.includes('append_to_note') && text.includes('ok (1)')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
   await shot(page, 'write-ledger-1200')
   await page.eval(`document.querySelector('.ledger-close')?.click()`)

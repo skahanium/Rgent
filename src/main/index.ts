@@ -1369,10 +1369,11 @@ if (ownsInstance) app.whenReady().then(() => {
       if(memoryAuthorizationState(request.sessionId).signature!==state.signature)throw Error('STALE_PREVIEW')
       return {signature:state.signature+':'+memorySnapshotSignature(entries),snapshotSignature:memorySnapshotSignature(entries),search,disclosure:state.disclosure}
     },
-    configuration:(extraReferences, modelRecordId,memorySearch)=>{
+    configuration:(_extraReferences, modelRecordId,_memorySearch)=>{
       if(!modelConfig)throw Error(modelConfigError??'MODEL_CONFIG_UNAVAILABLE')
       const config=modelConfig.getPublic()
-      return {credential:modelConfig.credential(modelRecordId),limits:extraReferences||memorySearch ? config.limits.local : config.limits.none}
+      // 仅发起篇也要宣告补／建，额度用本地档；读搜结构仍按来源另有篇才宣告。
+      return {credential:modelConfig.credential(modelRecordId),limits:config.limits.local}
     }
   })
   reasoningStore=new ReasoningStore(path.join(app.getPath('userData'),'reasoning-v2'))

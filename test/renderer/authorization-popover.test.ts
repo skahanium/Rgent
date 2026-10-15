@@ -140,3 +140,75 @@ it('says no skills when the session has none', async () => {
   const dialog=document.querySelector<HTMLDialogElement>('.overlay-authorization')!
   await vi.waitFor(()=>expect(dialog.querySelector('.authorization-skills')?.textContent).toBe('本场无技能。'))
 })
+
+it('lets follow notes be referenced and says they cannot be renamed or moved', async () => {
+  const popup = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'a.md',
+    entries: [
+      { name: 'b.md', relPath: 'b.md', kind: 'note' },
+      { name: 'follow.md', relPath: 'follow.md', kind: 'note', tier: 'follow' }
+    ],
+    preview: async () => ({ ok: true as const, preview }),
+    send: async () => ({ ok: true as const, id: 'task' })
+  })
+  const inputs = [...popup.root.querySelectorAll<HTMLInputElement>('.authorization-choices input')]
+  expect(inputs.map(input => input.value)).toEqual(['b.md', 'follow.md'])
+  expect(inputs.every(input => !input.disabled)).toBe(true)
+  expect(popup.root.textContent).toContain('必须遵循：可参考，不能改名／挪')
+  popup.close()
+})
+
+it('origin-only preview lists append and create, not read search or struct', async () => {
+  const popup = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'a.md',
+    entries: [],
+    preview: async () => ({ ok: true as const, preview }),
+    send: async () => ({ ok: true as const, id: 'task' })
+  })
+  await vi.waitFor(() => expect(popup.root.querySelector('.authorization-status')!.textContent).toContain('补发起篇'))
+  const status = popup.root.querySelector('.authorization-status')!.textContent!
+  expect(status).toContain('建笔记')
+  expect(status).not.toContain('读库')
+  expect(status).not.toContain('改名')
+  popup.close()
+})
+
+it('extra reference preview lists read search and struct; follow-only extras omit struct', async () => {
+  const withReference = {
+    ...preview,
+    sources: [
+      ...preview.sources,
+      { sourceId: 'b', relPath: 'b.md', title: 'b', revision: 'r', objectVersion: 'o', sessionId: 's', fingerprint: 'y', tier: 'reference' as const }
+    ]
+  }
+  const withFollow = {
+    ...preview,
+    sources: [
+      ...preview.sources,
+      { sourceId: 'f', relPath: 'follow.md', title: 'f', revision: 'r', objectVersion: 'o', sessionId: 's', fingerprint: 'z', tier: 'follow' as const }
+    ]
+  }
+  const first = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'a.md',
+    entries: [],
+    preview: async () => ({ ok: true as const, preview: withReference }),
+    send: async () => ({ ok: true as const, id: 'task' })
+  })
+  await vi.waitFor(() => expect(first.root.querySelector('.authorization-status')!.textContent).toContain('读库'))
+  expect(first.root.querySelector('.authorization-status')!.textContent).toContain('改名')
+  first.close()
+  const second = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'a.md',
+    entries: [],
+    preview: async () => ({ ok: true as const, preview: withFollow }),
+    send: async () => ({ ok: true as const, id: 'task' })
+  })
+  await vi.waitFor(() => expect(second.root.querySelector('.authorization-status')!.textContent).toContain('读库'))
+  expect(second.root.querySelector('.authorization-status')!.textContent).toContain('搜库')
+  expect(second.root.querySelector('.authorization-status')!.textContent).not.toContain('改名')
+  second.close()
+})

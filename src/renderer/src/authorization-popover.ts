@@ -12,6 +12,15 @@ export type AuthorizationPopoverOptions = {
   onClose?:()=>void
   returnFocus?:()=>HTMLElement|null
 }
+/** 预览文案与宿主宣告同源：补／建始终在；读搜要另有篇；结构只要可参考外篇。 */
+function sessionToolLabels(origin:string, sources:readonly {relPath:string;tier:string}[]):string[] {
+  const labels=['补发起篇','建笔记']
+  const extras=sources.filter(source=>source.relPath!==origin)
+  if(extras.length)labels.push('读库','搜库')
+  if(extras.some(source=>source.tier!=='follow'))labels.push('改名','挪')
+  return labels
+}
+
 /** Command-local confirmation; scope changes never reuse the previous displayed grant. */
 export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Overlay {
   const selected=new Set<string>();let prepared:AgentAuthorizationPreview|null=null;let generation=0;let submitting=false
@@ -34,7 +43,7 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
       if(entry.attachmentOf !== undefined || entry.kind==='file' || entry.relPath===options.origin)continue
       const label=document.createElement('label');label.style.paddingInlineStart=`${depth*12}px`
       const input=document.createElement('input');input.type='checkbox';input.value=entry.relPath;input.disabled=entry.tier==='forbidden'
-      const text=document.createElement('span');text.textContent=entry.relPath+(entry.kind==='dir'?'（确认时固定目录成员）':entry.tier==='follow'?'（只读）':'')
+      const text=document.createElement('span');text.textContent=entry.relPath+(entry.kind==='dir'?'（确认时固定目录成员）':entry.tier==='follow'?'（必须遵循：可参考，不能改名／挪）':'')
       label.append(input,icon(entry.kind==='dir'?'folder':'note'),text);choices.append(label)
       input.addEventListener('change',()=>{if(input.checked)selected.add(entry.relPath);else selected.delete(entry.relPath);void refresh()})
       if(entry.children)renderEntries(entry.children,depth+1)
@@ -70,7 +79,7 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
       const title=document.createElement('p');title.textContent='本场固定对象：';manifest.append(title)
       const paths=document.createElement('ul');for(const source of prepared.sources){const item=document.createElement('li');item.textContent=source.relPath;paths.append(item)}manifest.append(paths)
       recipient.textContent=`模型：${prepared.recipient.modelId} · 接口主机：${prepared.recipient.host}`
-      status.textContent=`已核对 ${prepared.sources.length} 篇笔记；其他篇账本、附件不在本场范围。`
+      status.textContent=`已核对 ${prepared.sources.length} 篇笔记；本场工具：${sessionToolLabels(options.origin, prepared.sources).join('、')}。其他篇账本、附件不在本场范围。`
       send.disabled=false
       if(document.activeElement===panel.root)send.focus({preventScroll:true})
     }catch{if(current===generation && panel.isOpen())status.textContent='准备失败，请取消后重试。'}

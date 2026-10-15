@@ -14,7 +14,7 @@ export const READ_ONLY_TOOL_SCHEMAS = {
   search_library: { description: '仅搜索本场获准笔记标题和正文，返回来源及命中片段；结果有分页和省略说明。', inputSchema: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 512 }, cursor: { type: 'string', maxLength: 256 } }, required: ['query'], additionalProperties: false } }
 } as const
 
-/** 写类工具：本轮只有"补任务发起篇"。可用与否由宿主决定（默认无工具档不出现）。 */
+/** 写类工具：补／建在仅发起篇也宣告；读搜与结构仍要范围内另有对象。 */
 export const WRITE_TOOL_SCHEMAS = {
   append_to_note: {
     description: '只往本场发起篇正文末尾追加一个新块，用来补充依据或结论。不能改人写文本、不能动账本，也不能写别的笔记；超限会被拒。',
@@ -68,7 +68,7 @@ export const WRITE_TOOL_SCHEMAS = {
 export type StructuralOutcome = { ok: true; target: string; moved: number; linkChanges: number; permissionChanges: number } | { ok: false; reason: string }
 export type ScopedWriteTool = {
   append(text: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }>
-  create?(name: string, body: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }>
+  create?(name: string, body: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number; relPath: string; objectVersion?: string } | { ok: false; reason: string }>
   /** 结构操作（改名／挪）：要人确认与库层迁移两条都在才出现。 */
   rename?(relPath: string, newName: string, signal: AbortSignal): Promise<StructuralOutcome>
   move?(relPath: string, targetFolder: string, signal: AbortSignal): Promise<StructuralOutcome>
@@ -370,8 +370,8 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
           await check(signal)
           const created = await deps.write!.create!(request.name!, request.body!, signal)
           if (!created.ok) { outcome = `refused:${created.reason}`; throw Error(created.reason) }
-          outcome = 'ok'
-          return { revision: created.revision, bytes: created.bytes }
+          outcome = `ok:${created.relPath}${created.objectVersion ? `·${created.objectVersion}` : ''}`
+          return { revision: created.revision, bytes: created.bytes, relPath: created.relPath, objectVersion: created.objectVersion }
         }
         if (name === 'append_to_note') {
           const appended = args(input, ['text'], [])
