@@ -21,8 +21,31 @@ export function submittedSlash(source: string, start: number, end: number): Slas
   return { range: { start, end }, prompt: text.slice(1) }
 }
 
-/** A pending command occupies one top-level paragraph ending at the caret. */
-export function slashAtCaret(source: string, caret: number): SlashSubmission | null {
+/** Enter submits only if this paragraph was started by pressing `/` on an empty paragraph. */
+export function pendingSlash(source: string, caret: number, commandStart: number | null): SlashSubmission | null {
+  if (commandStart == null) return null
+  const submission = slashAtCaret(source, caret)
+  return submission?.range.start === commandStart ? submission : null
+}
+
+/** Raw offsets of leftover empty-paragraph commands already in the source. */
+export function slashCommandStarts(source: string): number[] {
+  const starts: number[] = []
+  const seen = new Set<number>()
+  const consider = (caret: number) => {
+    const submission = slashAtCaret(source, caret)
+    if (submission && !seen.has(submission.range.start)) {
+      seen.add(submission.range.start)
+      starts.push(submission.range.start)
+    }
+  }
+  for (const newline of source.matchAll(/\r\n|\r|\n/g)) consider(newline.index)
+  consider(source.length)
+  return starts
+}
+
+/** Paragraph-start offset of a `/` line ending at the caret, even before it has a prompt. */
+export function slashParagraphOrigin(source: string, caret: number): number | null {
   if (!Number.isInteger(caret) || caret < 0 || caret > source.length) return null
   const before = source.slice(0, caret)
   let start = source.startsWith('\ufeff') ? 1 : 0, lineStart = start
@@ -34,5 +57,11 @@ export function slashAtCaret(source: string, caret: number): SlashSubmission | n
   if (!source.startsWith('/', start)) return null
   const after = source.slice(caret)
   if (after && !/^[\r\n]/.test(after)) return null
-  return submittedSlash(source, start, caret)
+  return start
+}
+
+/** A pending command occupies one top-level paragraph ending at the caret. */
+export function slashAtCaret(source: string, caret: number): SlashSubmission | null {
+  const start = slashParagraphOrigin(source, caret)
+  return start == null ? null : submittedSlash(source, start, caret)
 }

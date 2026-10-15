@@ -17,7 +17,7 @@ import {
   type EditChange
 } from '@markdown'
 import { defaultKeymap, history, historyKeymap, isolateHistory } from '@codemirror/commands'
-import { Compartment, EditorState, Facet, StateField, Transaction, type Range } from '@codemirror/state'
+import { Compartment, EditorState, Facet, StateEffect, StateField, Transaction, type Range } from '@codemirror/state'
 import {
   Decoration,
   type DecorationSet,
@@ -32,6 +32,7 @@ import { attachRevealSource } from './widgets/reveal.ts'
 import { renderSafeHtmlFragment } from './safe-html.ts'
 import { renderReadOnlyNode } from './read-only.ts'
 import { joinVaultRel } from '../../../shared/vault-rel.ts'
+import { canStartSlash, slashCommandStarts, slashParagraphOrigin } from '../slash.ts'
 import type { Root } from 'mdast'
 import type { PresentationBlock, PresentationSyntax } from '../../../markdown/presentation.ts'
 
@@ -431,9 +432,58 @@ const theme = EditorView.theme({
   }
 })
 
+const markSlashStart = StateEffect.define<number>()
+
+function slashStartFromInsert(tr: Transaction): number | null {
+  if (!tr.docChanged) return null
+  const projection = sourceOf(tr.startState)
+  let started: number | null = null
+  tr.changes.iterChanges((from, to, fromB, _toB, inserted) => {
+    if (started != null || from !== to) return
+    const text = inserted.toString()
+    const at = text.search(/(?<=^|[\r\n])\//)
+    if (at < 0) return
+    const before = text.slice(0, at)
+    const rawFrom = projection.toRaw(from)
+    const simulated = before.length === 0 ? projection.raw : projection.raw.slice(0, rawFrom) + projection.inserted(before, from)
+    if (!canStartSlash(simulated, before.length === 0 ? rawFrom : simulated.length)) return
+    started = fromB + at
+  })
+  return started
+}
+
+function seedSlashStarts(raw: string): number[] {
+  const projection = new SourceProjection(raw)
+  return slashCommandStarts(projection.raw).map((at) => projection.toView(at))
+}
+
+const slashStartField = StateField.define<readonly number[]>({
+  create: () => [],
+  update: (value, tr) => {
+    const marked = tr.effects.find((effect) => effect.is(markSlashStart))
+    const explicit = tr.effects.find((effect) => effect.is(setRawSource))
+    const next = new Set(explicit ? seedSlashStarts(explicit.value) : value)
+    if (explicit == null) {
+      if (tr.docChanged) {
+        next.clear()
+        for (const at of value) {
+          const mapped = tr.changes.mapPos(at, 1)
+          if (tr.state.doc.sliceString(mapped, mapped + 1) === '/') next.add(mapped)
+        }
+      }
+      const started = slashStartFromInsert(tr)
+      if (started != null) next.add(started)
+    }
+    if (marked) next.add(marked.value)
+    return [...next]
+  }
+})
+
 export type EditorHost = {
   view: EditorView
   getText: () => string
+  /** 空段段首按 `/` 留下的命令起点（原文偏移）；打开已有空段口令也算；未发起则为 null。 */
+  slashCommandStart: () => number | null
   setText: (text: string, host?: NoteHost, selection?: { anchor: number; head: number }) => void
   /** Apply a saved Host change without replacing this tab's history or scroll position. */
   applyExternalText: (text: string) => void
@@ -507,7 +557,25 @@ export function mountEditor(
       hostCompartment.of(noteHostFacet.of(emptyNoteHost)),
       markdownField,
       identityLock,
+      slashStartField,
       EditorView.domEventHandlers({
+        keydown: (event, view) => {
+          if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229) return false
+          if (view.state.readOnly) return false
+          const selection = view.state.selection.main
+          const projection = sourceOf(view.state)
+          const start = selection.empty && canStartSlash(projection.raw, projection.toRaw(selection.head))
+          view.dispatch({
+            changes: { from: selection.from, to: selection.to, insert: '/' },
+            selection: { anchor: selection.from + 1 },
+            userEvent: 'input.type'
+          })
+          if (start) {
+            const at = view.state.selection.main.head - 1
+            if (view.state.doc.sliceString(at, at + 1) === '/') view.dispatch({ effects: markSlashStart.of(at) })
+          }
+          return true
+        },
         compositionstart: (_event, view) => {
           compositionBoundary = null
           const selection = view.state.selection.main
@@ -566,6 +634,12 @@ export function mountEditor(
   return {
     view,
     getText: () => sourceOf(view.state).raw,
+    slashCommandStart: () => {
+      const projection = sourceOf(view.state)
+      const origin = slashParagraphOrigin(projection.raw, projection.toRaw(view.state.selection.main.head))
+      if (origin == null) return null
+      return view.state.field(slashStartField).some((at) => projection.toRaw(at) === origin) ? origin : null
+    },
     setText: (text, host, selection) => {
       documentGeneration += 1
       compositionBoundary = null

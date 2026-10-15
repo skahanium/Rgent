@@ -415,6 +415,8 @@ describe('vault paths', () => {
   it('encodes vault media urls without letting other schemes through', () => {
     expect(parseVaultMediaUrl(vaultMediaUrl('工作/pic.png'))).toBe('工作/pic.png')
     expect(parseVaultMediaUrl('https://example.com/x.png')).toBeNull()
+    expect(parseVaultMediaUrl('rgent-vault://evil/?p=pic.png')).toBeNull()
+    expect(parseVaultMediaUrl('rgent-vault://media/extra/?p=pic.png')).toBeNull()
   })
 
   it('refuses to serve hidden media over the vault protocol', async () => {

@@ -217,6 +217,7 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
     save.textContent = '保存配置'
     save.addEventListener('click', () => {
       const newKey = key.value.trim()
+      key.value = ''
       void mutate(() => handlers.saveProvider({
         provider,
         baseURL: base.value.trim(),

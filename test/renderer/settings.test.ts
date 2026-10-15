@@ -268,6 +268,20 @@ describe('settings interface page', () => {
     panel.close()
   })
 
+  it('clears the password field as soon as save is clicked', async () => {
+    let finish!: (value: { ok: true; config: ReturnType<typeof modelConfig> }) => void
+    const handlers = modelHandlers()
+    handlers.saveProvider = vi.fn().mockReturnValue(new Promise((resolve) => { finish = resolve }))
+    const panel = await openProvider(handlers, 'minimax')
+    const secret = document.querySelector<HTMLInputElement>('input[type="password"]')!
+    secret.value = 'live-secret'
+    buttonByText('保存配置')!.click()
+    expect(secret.value).toBe('')
+    expect(handlers.saveProvider).toHaveBeenCalledWith(expect.objectContaining({ newKey: 'live-secret' }))
+    finish({ ok: true, config: modelConfig() })
+    panel.close()
+  })
+
   it('asks for a real model id and capacity when a provider has no preset model', async () => {
     const handlers = modelHandlers(modelConfig({
       providers: modelConfig().providers.map((item) => item.provider === 'custom' ? { ...item, configured: false, baseURL: '', hasKey: false, modelCount: 0 } : item)

@@ -7,13 +7,19 @@ import type { VaultSession } from './vault.ts'
 export function attachVaultProtocol(getVault: () => VaultSession | null): void {
   protocol.handle(VAULT_MEDIA_SCHEME, (request) => {
     const rel = parseVaultMediaUrl(request.url)
-    if (!rel) return new Response('', { status: 400 })
+    // Chromium leaves destination empty for this custom-scheme <img> request.
+    if (!rel || (request.destination && request.destination !== 'image')) return new Response('', { status: 403 })
     let root: string
     try { const current = getVault()!; const session = new URL(request.url).searchParams.get('s'); if (!session || session !== current.sessionId()) return new Response('', { status: 410 }); root = current.requireUsableRoot() } catch { return new Response('', { status: 404 }) }
     const resolved = readVaultMedia(root, rel)
     if ('error' in resolved) return new Response('', { status: resolved.error })
     return new Response(new Uint8Array(resolved.bytes), {
-      headers: { 'content-type': contentType(rel) }
+      headers: {
+        'content-type': contentType(rel),
+        'x-content-type-options': 'nosniff',
+        'cache-control': 'no-store',
+        'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'"
+      }
     })
   })
 }

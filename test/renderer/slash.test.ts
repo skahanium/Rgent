@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canStartSlash, slashAtCaret, submittedSlash } from '../../src/renderer/src/slash.ts'
+import { canStartSlash, pendingSlash, slashAtCaret, slashCommandStarts, submittedSlash } from '../../src/renderer/src/slash.ts'
 
 describe('inline slash command', () => {
   it('finds a pending slash paragraph after text and Shift+Enter without treating headings as commands', () => {
@@ -46,4 +46,21 @@ it('finds a command after a mixed-style blank line and rejects a CR-only blank c
 it('starts and submits the first paragraph after a document BOM', () => {
   expect(canStartSlash('\ufeff', 1)).toBe(true)
   expect(slashAtCaret('\ufeff/问\r\n', 3)).toEqual({ range: { start: 1, end: 3 }, prompt: '问' })
+})
+
+it('does not submit a slash paragraph that was not started as a command', () => {
+  const source = '/已有段落'
+  const caret = source.length
+  expect(slashAtCaret(source, caret)?.prompt).toBe('已有段落')
+  expect(pendingSlash(source, caret, null)).toBeNull()
+  expect(pendingSlash(source, caret, 0)).toEqual({ range: { start: 0, end: caret }, prompt: '已有段落' })
+  expect(pendingSlash(source, caret, 1)).toBeNull()
+})
+
+it('lists leftover empty-paragraph commands, including mixed endings after a BOM', () => {
+  expect(slashCommandStarts('正文\n\n/问')).toEqual(['正文\n\n'.length])
+  const source = '\ufeff# 原文坐标\r\n\r\n原文字节。\n\n/快速完成\r\n'
+  expect(slashCommandStarts(source)).toEqual([source.indexOf('/快速完成')])
+  expect(slashCommandStarts('已有段落')).toEqual([])
+  expect(slashCommandStarts('正文\n/不是空段')).toEqual([])
 })
