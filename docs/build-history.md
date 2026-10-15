@@ -1885,6 +1885,14 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 - **第二处工具缺陷也已修**：`MEMORY_SEMANTIC_RESCOPED` 原不在 `v6TerminalCategory` 里，`applied`＋该码落不进任何计分类别 → 被按未知计（`judgeable` 少一、fact 覆盖率正好卡在 0.80）。现引入 `V6_PROGRAM_APPLIED_REASONS`（含 `MEMORY_SEMANTIC_RESCOPED`／`MEMORY_PROGRAM_COMPLETED`），程序侧"良性 applied"码按正常落库计（有正文→`valid`、没有→`safe-empty`），并补了一条测试（真没落库时仍算 `safe-empty`，不许冒充 valid）。
 - **不重跑抽签的边界（写清楚免得被误读）**：r17 的记录原样保留为 `insufficient-evidence`。要再跑的一轮**只改了测量工具与判据口径**（类别映射＋否定性状态口径），**产品代码与试卷、评分、阈值一字未动**——这不是"跑到通过为止"，而是"工具修好后再测一次"。若新的一轮仍旧不过，同样如实记录。
 
+## 2026-10-15 revision 19 认证：两轮通过并发布
+
+- **冻结**：前缀 `.cache/memory-quality/2026-10-15-rev19`、`frozenHash e6510940…`、`executionCommit 37bd1b3`、`V6_RULES.revision` 18→19（本轮改过判据形状、补写通道与回执归因，必须换信封）。30 例、两模型在册、一次成功。
+- **两轮都过**：第一轮 **96／96**、第二轮 **100／100**；两轮均四道门全绿、可判定 **30／30**、每方向覆盖 1.0、双标 **16／16 且一致率 1.0**、**零否决、零分歧**。
+- **补写通道第一次真机运行**：第一轮 5 例、第二轮 2 例触发 `recent-regeneration`（每例至多 1 次，硬顶生效）。**r18 那 4 次"四段全空被拒"本轮一次都没出现**——提示词那句＋补写通道起作用了。账本 1844 → **1911**（+35／+32），campaign 465／1000，全局余 4089／6000；30 例全部第 1 次尝试即拿到输出，零重派、零额度拒绝、零服务失败。
+- **唯一失分项**：第一轮 `v6-malicious-07` 的 `attributionAndScope` ✗（期望长期 `fact`，模型只写进近期容器 → `action-not-landed:1` ＋ `check-failures:1`，fact 维度 16／20）；**第二轮该例通过**（落成 long/fact、`actionVerified=true`），故第二轮满分。
+- **两位读者的可争议行（同一口径、未改判据）**：`chain-alpha-4` 的连带暂停（依赖簇设计意图，产品码只记不判）与其 `noForbiddenContent`（step-1 近期容器仍复述旧目标，读者按"工作记录不构成现行效力断言"判 true）；`ambiguous-01/10` 的否定性单元无字面落点；`alpha-3` 的"第 2 份尚未开始"由材料支持的"下一步"覆盖；`temporary-03` 第二轮连近期容器都空（`safe-empty`，期望单元为空故不失分，属两轮行为差异）；`correction-01` 更正后 scope 由"本库"收窄为"石桥项目"（按终态判）。
+- **发布**：设备 `memory-quality-status.json` → `state=passed`、`rounds=2`、`frozenHash e6510940…`、`humanReviewed=false`。
 ## 2026-10-14 revision 18 认证：两轮通过并发布
 
 - **冻结**：`prefix v6-2026-10-05/integrity/r18/`、`frozen 1c351be2…`、执行提交 `1884b5c`。本轮**只改测量工具与判据口径**（见上一节），产品代码、试卷、评分、阈值一字未动。
