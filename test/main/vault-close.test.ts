@@ -40,7 +40,7 @@ it('actual main native close hook defers repeated close until a trusted restorat
  expect(state.win.isDestroyed()).toBe(false);expect(state.win.webContents.send.mock.calls.filter((v:any[])=>v[0]===IPC.flushRequest)).toHaveLength(0)
  expect(await invoke(IPC.vaultTransition,{id:result.restoreId,sessionId:'wrong',outcome:'ready'})).toBe(false)
  expect(await invoke(IPC.vaultTransition,{id:result.restoreId,sessionId:result.sessionId,outcome:'ready'})).toBe(true)
- expect(state.win.webContents.send.mock.calls.filter((v:any[])=>v[0]===IPC.flushRequest)).toHaveLength(1)
+ await vi.waitFor(()=>expect(state.win.webContents.send.mock.calls.filter((v:any[])=>v[0]===IPC.flushRequest)).toHaveLength(1))
  state.listeners.get(IPC.flushDone)!(event(),{ok:true});expect(state.win.isDestroyed()).toBe(true)
 })
 it('actual main preparation close cancels switching without starting a concurrent flush',async()=>{
@@ -53,7 +53,7 @@ it('actual main preparation close cancels switching without starting a concurren
  state.listeners.get(IPC.lifecycleFlushDone)!(event(),{id:pending![0],ok:true});const result=await work
  expect(concurrent).toBe(0);expect(result).toBeInstanceOf(Error);expect(result.message).toContain('VAULT_SWITCH_CANCELLED')
  expect((await invoke(IPC.vaultGet)).sessionId).toBe(old.sessionId)
- expect(state.win.webContents.send.mock.calls.filter((v:any[])=>v[0]===IPC.flushRequest)).toHaveLength(1)
+ await vi.waitFor(()=>expect(state.win.webContents.send.mock.calls.filter((v:any[])=>v[0]===IPC.flushRequest)).toHaveLength(1))
  state.listeners.get(IPC.flushDone)!(event(),{ok:true})
 })
 it('actual main restoration timeout offers retry, cancels close and rejects the retired receipt',async()=>{
@@ -65,7 +65,7 @@ it('actual main restoration timeout offers retry, cancels close and rejects the 
  expect(await invoke(IPC.vaultTransition,{id:result.restoreId,sessionId:result.sessionId,outcome:'ready'})).toBe(false)
  expect(await invoke(IPC.vaultTransition,{id:retry.restoreId,sessionId:result.sessionId,outcome:'diagnosed'})).toBe(true)
  expect(state.win.webContents.send.mock.calls.filter((v:any[])=>v[0]===IPC.flushRequest)).toHaveLength(0)
- state.win.close();expect(state.win.webContents.send.mock.calls.filter((v:any[])=>v[0]===IPC.flushRequest)).toHaveLength(1)
+ state.win.close();await vi.waitFor(()=>expect(state.win.webContents.send.mock.calls.filter((v:any[])=>v[0]===IPC.flushRequest)).toHaveLength(1))
  state.listeners.get(IPC.flushDone)!(event(),{ok:true})
 })
 it('restoration receipt remains bound to the original frame object even if routing id is reused',async()=>{

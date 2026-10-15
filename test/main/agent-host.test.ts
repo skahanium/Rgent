@@ -423,6 +423,38 @@ it.each(['valid','revision','object','session'] as const)('continues only a veri
  else{await expect(host.start({...request,previewId:preview.id})).rejects.toThrow();expect(writes).toBe(0);expect(streams).toBe(0)}
 })
 
+it('cancelAll covers only running tasks and leaves a still-launching start intact', async () => {
+  let content = '前言\n\n/写个回答\n\n后文\n', revision = 1, reading = 0
+  let releaseRead!: () => void
+  const held = new Promise<void>(resolve => { releaseRead = resolve })
+  const host = new AgentHost({
+    root: () => '/vault',
+    read: async () => {
+      reading += 1
+      if (reading === 1) await held
+      return { content, revision: String(revision) }
+    },
+    write: async (_path, next) => { content = next; revision += 1; return String(revision) },
+    tier: async () => 'reference',
+    credential: () => ({ provider: 'custom', baseURL: 'http://127.0.0.1:1234/v1', modelId: 'test', contextTokens: 10000, apiKey: 'secret' }),
+    limits: () => ({ seconds: 30, steps: 4, tools: 0 }),
+    stream: async function* (_input, signal) { await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true })) },
+    emit: () => {},
+    ledger: hostLedgerFixture().ledger
+  })
+  const start = content.indexOf('/')
+  const launching = host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+  await vi.waitFor(() => expect(reading).toBe(1))
+  await host.cancelAll('close')
+  expect(host.active()).toEqual([])
+  releaseRead()
+  const task = await launching
+  expect(host.active().map(item => item.id)).toEqual([task.id])
+  await host.cancelAll('close')
+  await task.done
+  expect(host.active()).toEqual([])
+})
+
 it('waits for launching to settle, rejects the now-active task, and never queues a new launch during recovery', async () => {
   const app = harness(async function* (signal) { await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true })) })
   const source = app.source(), start = source.indexOf('/'), input = { relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' }

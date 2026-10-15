@@ -219,6 +219,36 @@ describe('VaultSession isolation', () => {
     } finally { session.dispose() }
   })
 
+  it('does not restore a superseded identity when a stale read finishes after write', async () => {
+    const { session, attach, first } = await setup()
+    try {
+      await attach(first)
+      const initial = await session.read('原篇.md')
+      let release!: () => void
+      let holding = false
+      const actual = notesFs.readNoteSnapshot
+      vi.spyOn(notesFs, 'readNoteSnapshot').mockImplementation(async (root, relPath) => {
+        const snapshot = await actual(root, relPath)
+        if (relPath === '原篇.md' && !holding) {
+          holding = true
+          await new Promise<void>(resolve => { release = resolve })
+        }
+        return snapshot
+      })
+      const stale = session.read('原篇.md')
+      await vi.waitFor(() => expect(holding).toBe(true))
+      const saved = await session.write('原篇.md', 'new body', initial.revision, initial)
+      release()
+      await stale
+      await rename(path.join(first, '原篇.md'), path.join(first, 'held.md'))
+      await writeFile(path.join(first, '原篇.md'), 'replaced')
+      const replaced = await session.read('原篇.md')
+      expect(replaced.content).toBe('replaced')
+      expect(session.acceptsObject('原篇.md', initial.objectVersion, saved.objectVersion)).toBe(true)
+      expect(session.latestFor('原篇.md', initial.objectVersion)?.content).toBe('new body')
+    } finally { session.dispose() }
+  })
+
   it('reports missing watched notes without recreating their files', async () => {
     const { session, emit, attach, first } = await setup()
     try {

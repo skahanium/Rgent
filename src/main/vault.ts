@@ -60,6 +60,8 @@ export class VaultSession {
   discardRootSource(sessionId:string,relPath:string,objectVersion:string):void{if(!this.protectedRootSource(sessionId,relPath,objectVersion))throw Error('STALE_PREVIEW');for(const [key,p]of this.protectedSources)if(p.snapshot.sessionId===sessionId&&p.relPath===relPath)this.protectedSources.delete(key)}
   private readonly successors = new Map<string, Map<string, string>>()
   private readonly latestObjects = new Map<string, string>()
+  /** Journal 超限或登记失败后，已观察到的消失路径仍占位，避免 PATH_RESERVED 被空 catch 吞掉。 */
+  private readonly reservedMissing = new Set<string>()
   private readonly copyPreviews = new Map<string, {
     view: SaveCopyPreviewView; request: SaveCopyPreviewRequest; content: string;
     bodyHash: string; basisHash: string; pendingHash: string; parentIdentity: string
@@ -485,6 +487,7 @@ export class VaultSession {
   /** 未核验的外部消失记录。记录本身读不了就失败关闭；库根不可用不是记录问题，
    *  交给既有的 NOTE_UNREADABLE 路径，也不在这里预先打开库根句柄。 */
   private missingRecord(relPath: string): boolean {
+    if (this.reservedMissing.has(relPath)) return true
     try { return this.lifecycle?.hasMissing(relPath) ?? false }
     catch { return this.hasUsableRoot() }
   }
@@ -493,9 +496,10 @@ export class VaultSession {
    *  消失时的权限档），写进同一本 `.rgent-lifecycle`，不新增存储格式。
    *  本轮没有程序删除，所以任何路径消失都是外部消失。 */
   private async recordExternalDisappearance(relPath: string): Promise<void> {
+    let observed = false
     try {
       const root = this.root, ledger = this.ledgerStore
-      if (!root || !ledger || !isNotePath(relPath) || this.lifecycle?.hasMissing(relPath)) return
+      if (!root || !ledger || !isNotePath(relPath) || this.lifecycle?.hasMissing(relPath) || this.reservedMissing.has(relPath)) return
       try { secureFsFor(root).resolve(relPath); return }
       catch (error) { if (!(error instanceof Error && error.message === 'ENOENT')) return }
       let owners: ReturnType<LedgerStore['recoveryOwners']>['owners']
@@ -503,6 +507,7 @@ export class VaultSession {
       try { owners = ledger.recoveryOwners().owners } catch { return }
       const owner = owners.find((item) => item.relPath === relPath)
       if (!owner) return
+      observed = true
       const snapshot = await loadPermissionSnapshot(root)
       const effective = snapshot.state.status === 'ready' ? effectivePermissionEntries(root, snapshot.state.entries) : null
       // 权限名单读不了就按最严档记录：核验时不会冒充通过。
@@ -512,7 +517,11 @@ export class VaultSession {
         bodyRevision: owner.bodyRevision, attachments: owner.recoveryEvidence?.attachments ?? [],
         rootIdentity: this.rootIdentity ?? vaultRootIdentity(root), permissionTier, detectedAt: new Date().toISOString()
       })
-    } catch { /* 登记失败不改变既有的失败关闭：读写仍按 NOTE_MISSING 处理。 */ }
+    } catch {
+      // 超限或 journal 被占用：已观察到的登记对象仍占路径，不能当成无记录。
+      // 读写仍按 NOTE_MISSING 失败关闭；不新增强制清空入口。
+      if (observed) this.reservedMissing.add(relPath)
+    }
   }
 
   /** 消失的对象在被核验恢复前占着自己的路径：同路径新建会顶替它的身份，一律拒绝。 */
@@ -557,6 +566,7 @@ export class VaultSession {
       if (row.verdict !== 'restored') return { verdict: row.verdict, restored: false, message: row.message }
       this.assertSession(token)
       if (!this.lifecycle!.clearMissing(relPath)) throw new Error('STALE_PREVIEW')
+      this.reservedMissing.delete(relPath)
       // 身份连续且登记一致：重新读取以恢复运行时绑定与来源可用。
       await this.read(relPath)
       this.assertSession(token)
@@ -804,12 +814,18 @@ export class VaultSession {
     if (bytes > 64 * 1024 * 1024) throw new Error('OBJECT_BINDING_LIMIT')
   }
 
-  private remember(relPath: string, snapshot: NoteSnapshot): void {
+  private remember(relPath: string, snapshot: NoteSnapshot): boolean {
+    const latest = this.latestObjects.get(relPath)
+    // 已有后继身份时拒绝把 latestObjects / verified 指回旧对象。
+    if (latest && latest !== snapshot.objectVersion && this.acceptsObject(relPath, snapshot.objectVersion, latest)) {
+      return false
+    }
     this.requireSnapshotCapacity(relPath, snapshot.objectVersion, snapshot.content)
     const versions = this.verified.get(relPath) ?? new Map<string, NoteSnapshot>()
     versions.set(snapshot.objectVersion, { ...snapshot })
     this.verified.set(relPath, versions)
     this.latestObjects.set(relPath, snapshot.objectVersion)
+    return true
   }
 
   async previewSaveCopy(request: SaveCopyPreviewRequest, chapters: readonly LedgerChapterWrite[] = []): Promise<SaveCopyPreviewView> {
@@ -1096,6 +1112,7 @@ export class VaultSession {
     this.verified.clear();this.protectedSources.clear()
     this.successors.clear()
     this.latestObjects.clear()
+    this.reservedMissing.clear()
     this.copyPreviews.clear();this.ledgerRecoveryPreviews.clear()
     if (this.root) closeSecureFs(this.root)
     this.root = null
@@ -1119,6 +1136,7 @@ export class VaultSession {
     this.verified.clear()
     this.successors.clear()
     this.latestObjects.clear()
+    this.reservedMissing.clear()
     this.copyPreviews.clear();this.ledgerRecoveryPreviews.clear()
     if (this.root) closeSecureFs(this.root)
     this.root = path.resolve(root)
@@ -1219,7 +1237,7 @@ export class VaultSession {
       const snapshot = { ...await readNoteSnapshot(root, relPath), sessionId: token! }
       if (this.token !== token) return
       this.requireUsableRoot()
-      this.remember(relPath, snapshot)
+      if (!this.remember(relPath, snapshot)) return
       if (previous && !this.acceptsObject(relPath, previous, snapshot.objectVersion)) {
         this.emit('note:external-change', { relPath, sessionId: token!, state: 'replaced', objectVersion: previous })
         return
