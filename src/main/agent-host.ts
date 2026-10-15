@@ -362,22 +362,24 @@ export class AgentHost {
       if (memory) this.memoryUses.set(key, {permit: memory, credential})
       const materials = new TaskMaterialTracker()
       const savedMaterial = {tracker:materials,context:memory?.context ?? null}
-      const libraryToolsEnabled = Boolean(grant && grant.sources.length > 1)
-      // 写类工具只在"有工具档"的场里出现：默认无工具档不给模型任何工具，写也不例外。
-      const write = grant && libraryToolsEnabled ? this.writeCapability(grant, root, input.relPath, id) : undefined
+      const originPath = grant?.origin
+      const libraryReadEnabled = Boolean(grant && originPath && grant.sources.some(source => source.relPath !== originPath))
+      const structuralTargets = Boolean(grant && originPath && grant.sources.some(source => source.relPath !== originPath && source.tier !== 'follow'))
+      // 补／建跟读搜拆开：仅发起篇也必须能补、能建；读库／搜库仍要范围内另有篇。
+      const write = grant ? this.writeCapability(grant, root, input.relPath, id) : undefined
       const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials, write)
       // 宣告与白名单必须同源：工具集没有写入能力就不宣告，宣告了就必须在白名单里。
       const writeEnabled = Boolean(write && scoped?.writes)
       const createEnabled = Boolean(write?.create && scoped?.creates)
-      const structuralEnabled = Boolean(write?.rename && write?.move && scoped?.renames)
+      const structuralEnabled = Boolean(structuralTargets && write?.rename && write?.move && scoped?.renames)
       const memorySearchEnabled=input.memorySearchAuthorized===true&&!!grant&&!!memory?.searchable&&!!this.deps.streamStep&&this.supportsMemorySearch(credential)
-      const toolsEnabled=libraryToolsEnabled||memorySearchEnabled
+      const toolsEnabled=libraryReadEnabled||writeEnabled||createEnabled||structuralEnabled||memorySearchEnabled
       // 只有当这套工具**确实**带写入能力时才把写工具宣告给模型，避免宣告了却执行不了。
-      const toolSchemas={...(libraryToolsEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(structuralEnabled?{rename_note:WRITE_TOOL_SCHEMAS.rename_note,move_note:WRITE_TOOL_SCHEMAS.move_note}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
+      const toolSchemas={...(libraryReadEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(structuralEnabled?{rename_note:WRITE_TOOL_SCHEMAS.rename_note,move_note:WRITE_TOOL_SCHEMAS.move_note}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
       let memorySearchCalls=0,memorySearchFailures=0
       const memoryToolOutcomes:{name:string;outcome:string}[]=[]
       let successfulLibraryTool=false
-      if (libraryToolsEnabled && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
+      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled) && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
       if (scoped) this.scoped.set(key, scoped)
       const marked = markPrompt(original.content, { ...input, taskId: id })
       const submitted = promptBlock(marked, id)
@@ -490,7 +492,7 @@ export class AgentHost {
           policy = scoped ? await wait(scoped.contextPolicy(source, signal,historicalChapters)) : await wait(historicalContextPolicy(source, async () => false, undefined, historicalChapters, dep => memory?.validateDependency(dep) ?? Promise.resolve(false)))
           const currentPrompt = promptBlock(source, id)
           if (currentPrompt.text !== submitted.text) throw Error('任务口令已被外部修改')
-          const metadata = libraryToolsEnabled ? `\n本场工具来源清单（正文须经工具读取，附件和账本不可读）：${JSON.stringify(grant!.sources.map(s => ({ sourceId: s.sourceId, title: s.title, relPath: s.relPath })))}` : ''
+          const metadata = libraryReadEnabled ? `\n本场工具来源清单（正文须经工具读取，附件和账本不可读）：${JSON.stringify(grant!.sources.map(s => ({ sourceId: s.sourceId, title: s.title, relPath: s.relPath })))}` : ''
           const planBudget = budget - conservativeTokens(metadata) - (toolsEnabled ? conservativeTokens(JSON.stringify(toolSchemas)) : 0) - conservativeTokens(JSON.stringify(messages)) - 128 - serializationPenalty
           const plan = buildHostContext({ source, chapters:historicalChapters, prompt: input.promptText, placement: currentPrompt.position, inputBudgetTokens: planBudget, countTokens: conservativeTokens, summary, memory: memory?.recall, ...policy })
           if (plan.status === 'too-large') throw Error(plan.reason)
@@ -589,7 +591,7 @@ export class AgentHost {
           const results: ToolContent = []
           for (const call of calls) {
             await guard()
-            const registered = libraryToolsEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||structuralEnabled&&(call.name==='rename_note'||call.name==='move_note')||call.name==='search_memory'&&memorySearchEnabled
+            const registered = libraryReadEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||structuralEnabled&&(call.name==='rename_note'||call.name==='move_note')||call.name==='search_memory'&&memorySearchEnabled
             const duplicate = usedIds.has(call.id)
             usedIds.add(call.id)
             // Duplicate IDs cannot enter provider messages. A fresh internal refusal ID preserves their order.
@@ -708,7 +710,7 @@ export class AgentHost {
       write: async (path, content, revision) => ({ revision: await this.writeBound(root, path, content, revision) }),
       composeAppend: (previous, text) => appendAiBlock(previous, { taskId, text }),
       ...(this.deps.relocationPreview && this.deps.relocationCommit && grant.sources.length ? { structural: {
-        authorized: (path: string) => grant.sources.some(source => source.relPath === path),
+        authorized: (path: string) => grant.sources.some(source => source.relPath === path && source.tier !== 'follow'),
         origin: () => relPath,
         otherTaskRunning: () => this.active().some(task => task.id !== taskId),
         // 把本场任务 id 交给迁移路径：它不能把自己停掉。
@@ -737,8 +739,8 @@ export class AgentHost {
       : undefined
     const structural = this.deps.relocationPreview && this.deps.relocationCommit
       ? {
-        // 授权范围＝本场来源清单（含发起篇）；发起篇自身的结构操作由门按 ORIGIN_LOCKED 拒。
-        authorized: (path: string) => grant.sources.some(source => source.relPath === path),
+        // 结构对象只能是可参考：必须遵循可被参考，但不能改名／挪。发起篇由门按 ORIGIN_LOCKED 拒。
+        authorized: (path: string) => grant.sources.some(source => source.relPath === path && source.tier !== 'follow'),
         origin: () => relPath,
         otherTaskRunning: () => this.active().some(task => task.id !== taskId),
         // 把本场任务 id 交给迁移路径：它不能把自己停掉。

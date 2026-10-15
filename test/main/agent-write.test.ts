@@ -141,7 +141,7 @@ describe('write gate · 建', () => {
     expect(preview.ok && preview.relPath).toBe('工作/新笔记.md')
     expect(app.created).toHaveLength(0)
     const committed = await app.gate.commitCreate({ previewId: (preview as { previewId: string }).previewId, body: '正文' })
-    expect(committed.ok).toBe(true)
+    expect(committed).toMatchObject({ ok: true, relPath: '工作/新笔记.md', objectVersion: 'co1' })
     expect(app.created).toEqual([{ relPath: '工作/新笔记.md', content: '正文' }])
   })
 
@@ -323,5 +323,26 @@ describe('write gate · 改名与挪', () => {
       await app.gate.commitStruct({ previewId: (preview as { previewId: string }).previewId })
     }
     expect(await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '再来' })).toEqual({ ok: false, reason: 'OVER_LIMIT_STRUCTURAL' })
+  })
+
+  it('必须遵循不能当结构对象：rename 报 OUTSIDE_TASK_SCOPE', async () => {
+    const follow = '资料/必须遵循.md'
+    const app = structHarness({
+      authorized: relPath => relPath === STRUCT_SOURCE || relPath === ORIGIN
+    })
+    expect(await app.gate.previewStruct({ kind: 'rename', relPath: follow, newName: '改名' })).toEqual({ ok: false, reason: 'OUTSIDE_TASK_SCOPE' })
+    expect(app.previews).toHaveLength(0)
+    expect(app.commits).toHaveLength(0)
+  })
+
+  it('提交结构操作时与建一样再核 assertLive', async () => {
+    let live = true
+    const app = structHarness({}, { assertLive: async () => { if (!live) throw Error('AUTHORIZATION_REVOKED') } })
+    const preview = await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '新名' })
+    expect(preview.ok).toBe(true)
+    live = false
+    expect(await app.gate.commitStruct({ previewId: (preview as { previewId: string }).previewId })).toEqual({ ok: false, reason: 'AUTHORIZATION_REVOKED' })
+    expect(app.commits).toHaveLength(0)
+    expect(app.gate.state().structural).toBe(0)
   })
 })

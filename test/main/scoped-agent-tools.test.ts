@@ -195,6 +195,23 @@ describe('append_to_note（补任务发起篇）', () => {
   })
 })
 
+describe('create_note（建）', () => {
+  it('成功回执记路径与对象版本', async () => {
+    const f = await fixture()
+    const tools = createScopedAgentTools(f.grant, 'task', {
+      ...f.deps,
+      write: {
+        append: async () => ({ ok: true as const, revision: 'r2', bytes: 1 }),
+        create: async () => ({ ok: true as const, revision: 'c1', bytes: 4, relPath: '工作/新笔记.md', objectVersion: 'co1' })
+      }
+    })
+    expect(await tools.execute('create_note', { name: '新笔记', body: '正文' }, signal())).toEqual({
+      revision: 'c1', bytes: 4, relPath: '工作/新笔记.md', objectVersion: 'co1'
+    })
+    expect(tools.summary()).toEqual([{ name: 'create_note', outcome: 'ok:工作/新笔记.md·co1 (1)' }])
+  })
+})
+
 describe('rename_note ／ move_note（结构操作）', () => {
   const structural = (over: Partial<{ rename: unknown; move: unknown }> = {}) => ({
     rename: async (relPath: string, newName: string) => ({ ok: true as const, target: `${relPath.slice(0, relPath.lastIndexOf('/') + 1)}${newName}.md`, moved: 1, linkChanges: 0, permissionChanges: 0 }),

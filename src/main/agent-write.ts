@@ -12,7 +12,7 @@ export const WRITE_LIMITS = {
   appendsPerNote: 2,
   bytesPerAppend: 8 * 1024,
   bytesPerSession: 32 * 1024,
-  /** 结构操作额度本轮只立着，下一轮改名／挪才用得上。 */
+  /** 结构操作额度：改名／挪每场最多三次。 */
   structuralPerSession: 3
 } as const
 
@@ -77,7 +77,7 @@ export type StructuralPreview = {
   permissionChanges: { from: string; to: string; tier: string }[]
 }
 export type StructuralDeps = {
-  /** 本场授权范围内的笔记（含发起篇）。 */
+  /** 可当结构对象的笔记：授权范围内且档位为可参考。必须遵循不算。 */
   authorized: (relPath: string) => boolean
   /** 发起篇：本场不对它做结构操作。 */
   origin: () => string
@@ -272,6 +272,7 @@ export function createWriteGate(deps: WriteGateDeps) {
       if (await deps.attachmentFolder?.(dirOf(target.relPath))) return failure('ATTACHMENT_SUBTREE')
       if (await deps.exists?.(target.relPath)) return failure('TARGET_EXISTS')
       try {
+        await deps.assertLive()
         const preview = await deps0.preview({ kind: 'note', source: request.relPath, target: target.relPath })
         // 引用修复只允许落在授权范围内：范围外要改正文，整件事交给人做。
         if (preview.linkChanges.some(change => !deps0!.authorized(change.relPath))) return failure('LINK_REPAIR_OUT_OF_SCOPE')
@@ -293,6 +294,7 @@ export function createWriteGate(deps: WriteGateDeps) {
       if (structural >= WRITE_LIMITS.structuralPerSession) return failure('OVER_LIMIT_STRUCTURAL')
       if (!deps0.authorized(pending.source)) return failure('OUTSIDE_TASK_SCOPE')
       try {
+        await deps.assertLive()
         const result = await deps0.commit(pending.libId, true)
         structural += 1
         return { ok: true, target: pending.target, moved: result.moved }

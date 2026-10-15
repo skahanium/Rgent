@@ -602,23 +602,24 @@ it.each(['missing-connection','extra-field','material-envelope'] as const)('save
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
 
-function writeToolHarness(options: { text?: string; calls?: { id: string; name: string; input: unknown }[]; confirm?: (request: import('../../src/main/agent-host.ts').AgentWriteConfirm) => Promise<boolean>; noCreate?: boolean; relocation?: boolean } = {}) {
+function writeToolHarness(options: { text?: string; calls?: { id: string; name: string; input: unknown }[]; confirm?: (request: import('../../src/main/agent-host.ts').AgentWriteConfirm) => Promise<boolean>; noCreate?: boolean; relocation?: boolean; originOnly?: boolean; extras?: { relPath: string; tier: 'reference' | 'follow' }[] } = {}) {
   let content = '人写的段落。\n\n/问\n'
   let revision = 1
   const history = hostLedgerFixture()
   const requests: Parameters<NonNullable<import('../../src/main/agent-host.ts').HostDependencies['streamStep']>>[0][] = []
   const credential = { provider: 'custom' as const, baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 32000, apiKey: 'fixture' }
-  const source = (relPath: string) => ({ sourceId: relPath === 'a.md' ? 'origin' : 'extra', relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: 'f',
-    tier: 'reference' as const, kind: 'body' as const, taskId: null, taskMaterialHash: null, classification: 'human' as const, start: 0, end: 2, hash: 'a'.repeat(64), basisHash: 'b'.repeat(64), sourceDeps: [], memoryDeps: [] })
-  const grant = { id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', sources: [source('a.md'), source('b.md')], credential, limits: { seconds: 30, steps: 4, tools: 4 },
+  const extras = options.originOnly ? [] : (options.extras ?? [{ relPath: 'b.md', tier: 'reference' as const }])
+  const source = (relPath: string, tier: 'reference' | 'follow' = 'reference') => ({ sourceId: relPath === 'a.md' ? 'origin' : relPath, relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: 'f',
+    tier, kind: 'body' as const, taskId: null, taskMaterialHash: null, classification: 'human' as const, start: 0, end: 2, hash: 'a'.repeat(64), basisHash: 'b'.repeat(64), sourceDeps: [], memoryDeps: [] })
+  const grant = { id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', sources: [source('a.md'), ...extras.map(item => source(item.relPath, item.tier))], credential, limits: { seconds: 30, steps: 4, tools: 4 },
     assertActive() {}, validateSources: async () => {}, acknowledgeOrigin() {}, revoke() {},
     assertWriteTarget(path: string) { if (path !== 'a.md') throw Error('OUTSIDE_TASK_SCOPE') },
     assertLive: async () => {} }
   const created: { relPath: string; body: string }[] = []
   const moved: { id: string; repairLinks: boolean }[] = []
   const read = async (path: string) => {
-    if (path === 'b.md') return { content: '外篇正文', revision: 'b', sessionId: 's', objectVersion: 'o' }
     if (path === 'a.md') return { content, revision: String(revision), sessionId: 's', objectVersion: 'o' }
+    if (extras.some(item => item.relPath === path) || path === 'b.md' || path === 'c.md') return { content: '外篇正文', revision: 'b', sessionId: 's', objectVersion: 'o' }
     // 真库把"查无此篇"归一化成 NOTE_MISSING，夹具照它写，否则重名判定测不准。
     throw Error('NOTE_MISSING')
   }
@@ -628,9 +629,10 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
     content = next; revision += 1
     return String(revision)
   }
-  const host = new AgentHost({ ledger: history.ledger, root: () => '/vault', read, write, tier: async () => 'reference', credential: () => credential, limits: () => grant.limits,
+  const extraTier = (path: string): 'reference' | 'follow' => extras.find(item => item.relPath === path)?.tier ?? 'reference'
+  const host = new AgentHost({ ledger: history.ledger, root: () => '/vault', read, write, tier: async (_root, path) => extraTier(path), credential: () => credential, limits: () => grant.limits,
     authorize: async () => grant, session: () => 's', stream: async function* () {},
-    createReadOnlyTools: (granted, id, _memory, _materials, writeTool) => createScopedAgentTools(granted, id, { read, tier: async () => 'reference', acceptsObject: () => false, write: writeTool }),
+    createReadOnlyTools: (granted, id, _memory, _materials, writeTool) => createScopedAgentTools(granted, id, { read, tier: async (_root, path) => extraTier(path), acceptsObject: () => false, write: writeTool }),
     ...(options.confirm ? { confirmWrite: options.confirm } : {}),
     ...(options.relocation ? {
       relocationPreview: async (request: { kind: 'note'; source: string; target: string }) => ({ id: 'lib-1', source: request.source, target: request.target, moves: [{ from: request.source, to: request.target }], linkChanges: [], permissionChanges: [] }),
@@ -690,7 +692,7 @@ it('人同意后新建笔记：落点在发起篇所在目录，并记进账本�
   expect(await task.done).toEqual({ status: 'completed' })
   expect(asked).toEqual(['新笔记.md'])
   expect(app.created).toEqual([{ relPath: '新笔记.md', body: '新笔记正文。' }])
-  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'create_note')?.outcome).toContain('ok (1)')
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'create_note')?.outcome).toContain('ok:新笔记.md·co1 (1)')
   expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('建笔记')
 })
 
@@ -753,6 +755,47 @@ it('没有库层迁移时不宣告结构工具，硬叫也只吃未注册', asyn
   expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('rename_note')
   expect(app.history.records().at(-1)?.provenance?.tools?.some(item => item.name === 'rename_note')).toBe(false)
   expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('未执行')
+})
+
+it('仅发起篇也宣告补与建，不宣告读库搜库与结构工具', async () => {
+  const app = writeToolHarness({ originOnly: true, relocation: true, confirm: async () => true })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  const names = Object.keys(app.requests[0]!.tools ?? {})
+  expect(names).toEqual(expect.arrayContaining(['append_to_note', 'create_note']))
+  expect(names).not.toContain('read_library')
+  expect(names).not.toContain('search_library')
+  expect(names).not.toContain('rename_note')
+  expect(names).not.toContain('move_note')
+})
+
+it('额外参考才宣告读库搜库；必须遵循可参考但不能当改名目标', async () => {
+  const app = writeToolHarness({
+    extras: [{ relPath: 'b.md', tier: 'reference' }, { relPath: 'c.md', tier: 'follow' }],
+    relocation: true,
+    calls: [{ id: 'c1', name: 'rename_note', input: { relPath: 'c.md', newName: '改掉遵循' } }],
+    confirm: async () => true
+  })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  const names = Object.keys(app.requests[0]!.tools ?? {})
+  expect(names).toEqual(expect.arrayContaining(['read_library', 'search_library', 'append_to_note', 'create_note', 'rename_note', 'move_note']))
+  expect(app.moved).toEqual([])
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'rename_note')?.outcome).toContain('refused:OUTSIDE_TASK_SCOPE')
+})
+
+it('只有必须遵循外篇时宣告读搜，不宣告改名挪', async () => {
+  const app = writeToolHarness({
+    extras: [{ relPath: 'c.md', tier: 'follow' }],
+    relocation: true,
+    confirm: async () => true
+  })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  const names = Object.keys(app.requests[0]!.tools ?? {})
+  expect(names).toEqual(expect.arrayContaining(['read_library', 'search_library', 'append_to_note', 'create_note']))
+  expect(names).not.toContain('rename_note')
+  expect(names).not.toContain('move_note')
 })
 
 describe('skills in the request', () => {

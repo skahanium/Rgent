@@ -722,7 +722,7 @@ async function verifyWriteTools(page, vault, shot, requests) {
   await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
   await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`)
   check('账本面板如实写「未执行（超限）」并带工具名', await ledgerPanel('写作超限.md', `text.includes('append_to_note') && text.includes('refused:OVER_LIMIT_BYTES') && text.includes('未执行（OVER_LIMIT_BYTES）')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,260)??'(无账本面板)'`))
-  check('建的账本留痕看得见', await ledgerPanel('写作建一.md', `text.includes('create_note') && text.includes('ok (1)')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
+  check('建的账本留痕看得见', await ledgerPanel('写作建一.md', `text.includes('create_note') && /ok:[^\\s]+·/.test(text)`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
   check('补的账本留痕看得见', await ledgerPanel('写作补.md', `text.includes('append_to_note') && text.includes('ok (1)')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
   await shot(page, 'write-ledger-1200')
   await page.eval(`document.querySelector('.ledger-close')?.click()`)
@@ -1336,6 +1336,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       return JSON.stringify({ contentWidth: Math.round(content.width), sideGap: Math.round(content.left - stage.left), align: paragraph && getComputedStyle(paragraph).textAlign })
     })()`))
     await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+    await setTreeExpanded(page, true)
     return { ok: state.contentWidth >= 730 && state.contentWidth <= 800 && state.sideGap >= 32 && state.align === 'justify', detail: JSON.stringify(state) }
   })
   await probe('导航和反链的密度接近参考图', async () => {

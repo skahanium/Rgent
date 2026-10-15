@@ -301,6 +301,21 @@ it('rejects origin receipts after revocation and exposes a synchronous live chec
  grant.revoke();expect(()=>grant.acknowledgeOrigin(app.records.get('a.md')!)).toThrow('AUTHORIZATION_REVOKED');expect(()=>grant.assertActive()).toThrow('AUTHORIZATION_REVOKED')
 })
 
+it('origin-only slash uses local limits so append and create have a tool budget', async () => {
+  const app = setup()
+  const local = { seconds: 300, steps: 12, tools: 24 }
+  const registry = new TaskAuthorizationRegistry({
+    ...app.deps,
+    configuration: () => ({ ...app.deps.configuration(), limits: local })
+  })
+  const request = { ...app.request, references: [] }
+  const preview = await registry.preview('owner', request)
+  const grant = await registry.consume('owner', { ...request, previewId: preview.id })
+  expect(grant.sources).toHaveLength(1)
+  expect(grant.limits).toEqual(local)
+  expect(grant.limits.tools).toBeGreaterThan(0)
+})
+
 it('freezes a note-only memory tool budget before preview and rechecks memory signature on consume',async()=>{
  const app=setup();let signature='first';let search=true
  const registry=new TaskAuthorizationRegistry({...app.deps,memoryAuthorization:async()=>({signature,search,disclosure:{use:true,consolidate:false,recipient:null,limits:{seconds:120,calls:2,tools:0}}}),configuration:(library,_model,memory)=>({...app.deps.configuration(),limits:{seconds:30,steps:memory||library?8:4,tools:memory||library?12:0}})})
