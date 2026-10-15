@@ -3,10 +3,10 @@ import {beforeEach,afterEach,it,expect,vi} from 'vitest'
 import {start} from '../../src/renderer/src/shell.ts'
 import {renderReadOnlyMarkdown} from '../../src/renderer/src/view/read-only.ts'
 import {VaultSwitch} from '../../src/main/vault-switch.ts'
-const editorHarness=vi.hoisted(()=>({text:'',change:null as ((text:string)=>void)|null}))
+const editorHarness=vi.hoisted(()=>({text:'',change:null as ((text:string)=>void)|null,focus:vi.fn()}))
 vi.mock('../../src/renderer/src/view/editor.ts',()=>({mountEditor:(_root:HTMLElement,change:(text:string)=>void)=>{editorHarness.change=change;
  const dom=document.createElement('div'),scrollDOM=document.createElement('div');let text=''
- return {view:{dom,contentDOM:dom,scrollDOM,compositionStarted:false},getText:()=>editorHarness.text,setText:(v:string)=>{text=v;editorHarness.text=v},setReadOnly:()=>{},setTheme:()=>{},setActiveTaskIds:()=>{},setNoteHost:()=>{},onStateChange:()=>{},focus:()=>{},selectionRange:()=>({anchor:0,head:0}),selectionInfo:()=>({line:1,column:1}),headings:()=>[],viewport:()=>({from:0,to:0}),caret:()=>0,markers:()=>[]}
+ return {view:{dom,contentDOM:dom,scrollDOM,compositionStarted:false},getText:()=>editorHarness.text,setText:(v:string)=>{text=v;editorHarness.text=v},setReadOnly:()=>{},setTheme:()=>{},setActiveTaskIds:()=>{},setNoteHost:()=>{},onStateChange:()=>{},focus:editorHarness.focus,selectionRange:()=>({anchor:0,head:0}),selectionInfo:()=>({line:1,column:1}),headings:()=>[],viewport:()=>({from:0,to:0}),caret:()=>0,markers:()=>[]}
 }}))
 vi.mock('../../src/renderer/src/view/read-only.ts',()=>({renderReadOnlyMarkdown:vi.fn(),disposeReadOnlyImages:()=>{}}))
 let handlers:Record<string,Function>,api:any,root:HTMLElement
@@ -368,4 +368,20 @@ it('real shell holds two old-session drafts across explicit root attach and igno
  await vi.waitFor(()=>expect(root.querySelectorAll('.tab')).toHaveLength(3))
  expect(root.querySelector<HTMLElement>('.workspace-recovery')!.hidden).toBe(true)
 
+})
+
+it('arrow keys keep tablist focus on the selected tab instead of the editor',async()=>{
+ api.vaultWorkspaceGet=async()=>({version:1,tabs:[{relPath:'one.md'},{relPath:'two.md'}],active:'one.md',sidebarHidden:false,treeScroll:0,resourceScroll:0})
+ api.noteRead=vi.fn(async(relPath:string)=>({content:'body '+relPath,revision:'r',objectVersion:relPath,sessionId:'old'}))
+ await start(root)
+ const selected=root.querySelector<HTMLButtonElement>('.tab[aria-selected="true"]')!
+ selected.focus()
+ editorHarness.focus.mockClear()
+ selected.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}))
+ const next=root.querySelector<HTMLButtonElement>('.tab[aria-selected="true"]')!
+ expect(next.dataset.rel).toBe('two.md')
+ expect(document.activeElement).toBe(next)
+ expect(editorHarness.focus).not.toHaveBeenCalled()
+ root.querySelector<HTMLElement>('.tab[data-rel="one.md"]')!.click()
+ expect(editorHarness.focus).toHaveBeenCalled()
 })

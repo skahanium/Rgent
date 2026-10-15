@@ -1291,7 +1291,7 @@ export async function start(root: HTMLElement): Promise<void> {
     }
   }
 
-  function activate(relPath: string): void {
+  function activate(relPath: string, focusEditor = true): void {
     const tab = tabs.find((item) => item.relPath === relPath)
     if (!tab) return
     if (active && active !== relPath) {
@@ -1304,7 +1304,7 @@ export async function start(root: HTMLElement): Promise<void> {
     requestAnimationFrame(() => { if (session === vaultSession && active === relPath && tab.scrollTop !== undefined) editor.view.scrollDOM.scrollTop = tab.scrollTop })
     scheduleWorkspace()
     syncActiveLocks()
-    editor.focus()
+    if (focusEditor) editor.focus()
     closeLedger()
     renderTabs(true)
     paintTree()
@@ -1366,7 +1366,7 @@ export async function start(root: HTMLElement): Promise<void> {
         const at = tabs.findIndex((item) => item.relPath === tab.relPath)
         const next = tabs[(at + step + tabs.length) % tabs.length]
         if (!next) return
-        activate(next.relPath)
+        activate(next.relPath, false)
         tabsEl.querySelector<HTMLButtonElement>(`.tab[data-rel="${CSS.escape(next.relPath)}"]`)?.focus()
       })
       const close = document.createElement('button')
