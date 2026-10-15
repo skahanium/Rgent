@@ -715,11 +715,11 @@ Host 接管单步模型事件、工具名与参数校验、顺序执行、模型
 
 本机验收（9 月 30 日晚）：`pnpm docs:check`、文档检查器 10 项、`pnpm test`（61 文件，711 通过／2 平台条件跳过）、`pnpm build`、构建后 `pnpm ui:check`（144 项）连续两次零失败。该脚本在构建后的**第一次**运行出现过假失败（长文响应、点击类、授权准备），紧接着连续三次运行均 144 项零失败；基线与本分支都出现过。机制未证明（首次加载新产物或机器负载均可能），阶段隔离后至少不再吞掉总账；结论以连续通过的那几次和双平台 CI 为准。
 
-分支 `fix/tool-stage-hardening` 的 PR [CI 36727088963](https://github.com/skahanium/Rgent/actions/runs/36727088963)（提交 `4ec51e3`）已核：macOS 61 文件、690 通过／2 条件跳过，功能窗口 144 项与固定样张 28 项零失败；Windows 首次尝试在 `test/main/path-race.test.ts` 两个原生换链用例上各 5 秒超时（该文件当次 27.4s，上一轮 Windows 腿同一文件为 2.3s），重跑该腿通过（2.5s、61 文件、688 通过／4 条件跳过），`CI gate` 最终 success。首次失败如实保留，未改动那两个用例。同分支 push 命中「同一提交已有开放 PR」的去重路径：只跑分类与汇总，`docs`／`verify`／`trash` 全 skipped 且 `CI gate` success——该路径首次现场运行，此前只记录为未运行场景。
+分支 `fix/tool-stage-hardening` 的 PR [CI 36727088963](https://github.com/skahanium/Rgent/actions/runs/36727088963)（提交 `7c2c93b`）已核：macOS 61 文件、690 通过／2 条件跳过，功能窗口 144 项与固定样张 28 项零失败；Windows 首次尝试在 `test/main/path-race.test.ts` 两个原生换链用例上各 5 秒超时（该文件当次 27.4s，上一轮 Windows 腿同一文件为 2.3s），重跑该腿通过（2.5s、61 文件、688 通过／4 条件跳过），`CI gate` 最终 success。首次失败如实保留，未改动那两个用例。同分支 push 命中「同一提交已有开放 PR」的去重路径：只跑分类与汇总，`docs`／`verify`／`trash` 全 skipped 且 `CI gate` success——该路径首次现场运行，此前只记录为未运行场景。
 
-自查补漏后的提交 `7b5cf3e` 的 PR [CI 36731908663](https://github.com/skahanium/Rgent/actions/runs/36731908663)：`docs`、macOS 与 Windows 两腿、`CI gate` 全 success，废纸篓按分类 skipped。其后的 `01247f0` 一轮 Windows 腿在**功能窗口 144 项零失败**之后，因验收脚本删临时目录报 EPERM 把 `VISUAL_ONLY` 的 32 项全绿改判成失败——已改为重试后仅告警，见上表。
+自查补漏后的提交 `0390a9f` 的 PR [CI 36731908663](https://github.com/skahanium/Rgent/actions/runs/36731908663)：`docs`、macOS 与 Windows 两腿、`CI gate` 全 success，废纸篓按分类 skipped。其后的 `01247f0…` 一轮 Windows 腿在**功能窗口 144 项零失败**之后，因验收脚本删临时目录报 EPERM 把 `VISUAL_ONLY` 的 32 项全绿改判成失败——已改为重试后仅告警，见上表。
 
-最终提交 `c2fa091` 的 PR [CI 36734156052](https://github.com/skahanium/Rgent/actions/runs/36734156052) 已核：`docs`、macOS（711 通过／2 条件跳过、功能窗口 144 项、固定样张 28 项零失败）、Windows（709 通过／4 条件跳过、功能窗口 144 项、固定样张 32 项零失败）、`CI gate` 全 success，废纸篓按分类 skipped。中间提交 `a4774e8` 的运行被同分支新推送按并发规则取消（`verify` 两腿 cancelled、`CI gate` failure）：汇总门没有把取消当通过，这条 fail-closed 行为也因此现场验到；该次不作为验收证据。
+最终提交 `2bc900d` 的 PR [CI 36734156052](https://github.com/skahanium/Rgent/actions/runs/36734156052) 已核：`docs`、macOS（711 通过／2 条件跳过、功能窗口 144 项、固定样张 28 项零失败）、Windows（709 通过／4 条件跳过、功能窗口 144 项、固定样张 32 项零失败）、`CI gate` 全 success，废纸篓按分类 skipped。中间提交 `c7d00a5` 的运行被同分支新推送按并发规则取消（`verify` 两腿 cancelled、`CI gate` failure）：汇总门没有把取消当通过，这条 fail-closed 行为也因此现场验到；该次不作为验收证据。
 
 ### 真实厂商现场调用（9 月 30 日）
 
@@ -749,7 +749,7 @@ Host 接管单步模型事件、工具名与参数校验、顺序执行、模型
 
 已知未测：授权范围上限（256 篇）下，每次工具调用与模型步都要重核全部来源，尚无延迟预算或实测；提升上限前先测。
 
-本节 14 个提交经 PR [#6](https://github.com/skahanium/Rgent/pull/6) 合入 `branch-v0.1.0`。合并用的是 rebase 方式，主线提交号被重写、内容逐字节相同（tree 同为 `d2c769c`）；上文按 PR head 侧的提交号引用，映射如下：`4ec51e3→7c2c93b`、`a4774e8→c7d00a5`、`7b5cf3e→0390a9f`、`c2fa091→2bc900d`，主线 tip 为 `ef06d6f`。CI run 链接按 run id 打开，不受重写影响；这些 PR head 侧提交在 PR [#6](https://github.com/skahanium/Rgent/pull/6) 的提交列表里仍可查看（本次合并后已删除该临时分支）。
+本节 14 个提交经 PR [#6](https://github.com/skahanium/Rgent/pull/6) 合入 `branch-v0.1.0`。合并用的是 rebase 方式，主线提交号被重写、内容逐字节相同（tree 同为 `d2c769c`）；上文改为主线号，删除分支上的旧号对照：4ec51e3→`7c2c93b`、a4774e8→`c7d00a5`、7b5cf3e→`0390a9f`、c2fa091→`2bc900d`，主线 tip 为 `ef06d6f`。CI run 链接按 run id 打开，不受重写影响；这些 PR head 侧提交在 PR [#6](https://github.com/skahanium/Rgent/pull/6) 的提交列表里仍可查看（本次合并后已删除该临时分支）。
 
 合入后的 `branch-v0.1.0` 自身证据：push [CI 36740163198](https://github.com/skahanium/Rgent/actions/runs/36740163198)（提交 `ef06d6f`）已核，macOS 711 通过／2 条件跳过＋功能窗口 144 项＋固定样张 28 项，Windows 709 通过／4 条件跳过＋功能窗口 144 项＋固定样张 32 项，`docs` 与 `CI gate` 均 success，废纸篓按分类 skipped。
 
