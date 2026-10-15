@@ -56,7 +56,7 @@
 - **推送权限在用户手里**。技术上不设「必须走 PR」，也不需要 `enforce_admins` 这类收紧——`CI gate` 对每次推送给出结论，保护只挡住 force push 与删除。但提交只到本地为止，推送要等用户明确指令（见上）。
 - **`master` 只在里程碑同步到 `branch-v0.1.0`**，一律纯快进。日常提交留在工作分支，master 落后是预期状态，不跟着每次提交走。里程碑指：换阶段（[施工图](build.md) 的「当前阶段」变更）、一次独立验收收口、或用户明确要求三者之一。
 
-GitHub 的手动入口要求默认分支已有 `workflow_dispatch`。默认分支 `master` 已快进到与 `branch-v0.1.0` 同一提交（纯快进，未改历史），手动入口随之可用并已现场运行：`full` 见 [CI 36742424920](https://github.com/skahanium/Rgent/actions/runs/36742424920)（文档、两平台代码与功能窗口、两平台废纸篓探针采证、`CI gate` 全 success）；`standard`／`trash` 仍按需使用。新 PR 的默认对比基准因此变为 `master`，以 `branch-v0.1.0` 为工作分支时记得显式指定 base。
+GitHub 的手动入口要求默认分支已有 `workflow_dispatch`。历史上曾把 `master` 纯快进到当时的 `branch-v0.1.0` 以开通手动入口（`full` 见 [CI 36742424920](https://github.com/skahanium/Rgent/actions/runs/36742424920)）；那是一次里程碑同步，**不是现在时**。日常 `master` 落后工作分支是预期状态，见上条。以 `branch-v0.1.0` 为工作分支开 PR 时记得显式指定 base；`standard`／`trash` 仍按需使用。
 
 ## 禁止
 

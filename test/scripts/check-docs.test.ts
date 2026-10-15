@@ -299,6 +299,30 @@ describe('commit references and package status cells', () => {
     expect(result.stderr).toContain('**冻结**')
   })
 
+  it('rejects a write-tools package row whose status cell is missing', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    const row = /\| 1 \| 写入门（受信写服务）[^\n]*?\*\*已交\*\*/
+    expect(source).toMatch(row)
+    writeFileSync(build, source.replace(row, (matched) => matched.replace('**已交**', '')))
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('本轮包表')
+    expect(result.stderr).toContain('本行缺失')
+  })
+
+  it('rejects a struct-tools package row whose status cell is missing', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    const row = /\| 1 \| 写入门结构性动作[^\n]*?\*\*已交\*\*/
+    expect(source).toMatch(row)
+    writeFileSync(build, source.replace(row, (matched) => matched.replace('**已交**', '')))
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('本轮包表')
+    expect(result.stderr).toContain('本行缺失')
+  })
+
   it('rejects a current-round package row whose status cell is missing', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
