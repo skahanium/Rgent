@@ -155,6 +155,11 @@ function locatedPrompt(source: string, taskId: string): { blockEnd: number; firs
 
 /** Replace only AI blocks tagged with this task ID in freshly read source. */
 function renderedAnswer(taskId: string, input: string, newline: string): string {
+  return renderedAiBlocks(taskId, input, newline)
+}
+
+/** 每个顶层块一枚标记；模型注释先逃逸。补路径带 part=append，避免被最终回答替换。 */
+function renderedAiBlocks(taskId: string, input: string, newline: string, attrs: Record<string, string> = {}): string {
   let answer = escapedModelText(input.replace(/\r\n|\r/g, '\n'))
   let parsed = compileFragment(answer)
   if (parsed.stale) throw new Error('无法解析模型回答')
@@ -174,7 +179,7 @@ function renderedAnswer(taskId: string, input: string, newline: string): string 
     }
   }
   const rendered = parsed.index.blocks.map((block) =>
-    `${markerLine('ai', { 'task-id': taskId })}${newline}${answer.slice(block.range.start, block.range.end).replace(/\r\n|\r/g, '\n').replace(/\n/g, newline)}`
+    `${markerLine('ai', { 'task-id': taskId, ...attrs })}${newline}${answer.slice(block.range.start, block.range.end).replace(/\r\n|\r/g, '\n').replace(/\n/g, newline)}`
   ).join(newline + newline)
   // CommonMark 的 HTML 块以空行结束，不以闭合标签结束：紧贴其后的账本锚点或人写段落
   // 都会并进同一个块（`</table>` 结尾也一样）。这里补出分隔空行，让边界重新成立。
@@ -182,17 +187,16 @@ function renderedAnswer(taskId: string, input: string, newline: string): string 
   return parsed.index.blocks.at(-1)?.type === 'html' ? rendered + newline + newline : rendered
 }
 
-/** 追加一个新的 AI 块：只往正文末尾加，不改已有块、不动人写文本，也不碰账本分区。
- *  写入门会独立核「新内容 = 原文 + 一个 AI 块」，这里只负责产出守约的内容。 */
+/** 追加 AI 块：只往正文末尾加，不改已有块、不动人写文本，也不碰账本分区。
+ *  写入门会独立核「新内容 = 原文 + 与块数对得上的 AI 标记」，这里只负责产出守约的内容。 */
 export function appendAiBlock(source: string, write: { taskId: string; text: string }): string {
   const taskId = taskKey(write.taskId)
   const newline = lineEnding(source)
   // part=append 让最终回答保存不会把追加块当成「本次回答」而替换掉它。
-  // 先把模型文本的换行归一成 \n，再按本篇换行输出：否则 CRLF 笔记里模型自带的 \r\n 会变成 \r\r\n。
-  const block = `${markerLine('ai', { 'task-id': taskId, part: 'append' })}${newline}${write.text.replace(/\r\n|\r/g, '\n').replace(/\n/g, newline)}`
+  const rendered = renderedAiBlocks(taskId, write.text, newline, { part: 'append' })
   const body = source.replace(/[\s\n]*$/u, '')
   const separator = body.length === 0 ? '' : newline + newline
-  return `${body}${separator}${block}${newline}${newline}`
+  return `${body}${separator}${rendered}${newline}${newline}`
 }
 
 export function upsertAiAnswer(source: string, write: AnswerWrite): string {

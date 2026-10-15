@@ -1,6 +1,7 @@
 import { EditorView, WidgetType } from '@codemirror/view'
 import type { WikiLinkRef } from '@markdown'
 import type { NoteHost } from '../host.ts'
+import { sourceOf } from '../source.ts'
 
 export class WikilinkWidget extends WidgetType {
   constructor(
@@ -31,7 +32,7 @@ export class WikilinkWidget extends WidgetType {
       event.preventDefault()
       event.stopPropagation()
       if (event instanceof MouseEvent && !event.metaKey && !event.ctrlKey) {
-        view.dispatch({ selection: { anchor: this.link.range.start } })
+        view.dispatch({ selection: { anchor: sourceOf(view.state).toView(this.link.range.start) } })
         view.focus()
         return
       }

@@ -28,6 +28,7 @@ import {
 import { SourceProjection, normalizeSource, sourceOf, rawSourceField, rawSourceHistory, setRawSource } from './source.ts'
 import { emptyNoteHost, type NoteHost } from './host.ts'
 import { decorationForWidget } from './widgets/decorate.ts'
+import { attachRevealSource } from './widgets/reveal.ts'
 import { renderSafeHtmlFragment } from './safe-html.ts'
 import { renderReadOnlyNode } from './read-only.ts'
 import { joinVaultRel } from '../../../shared/vault-rel.ts'
@@ -64,17 +65,8 @@ class PresentationBlockWidget extends WidgetType {
   }
 
   toDOM(view: EditorView): HTMLElement {
-    const reveal = (element: HTMLElement): HTMLElement => {
-      // CM6 把整块替换后，落在 widget 上的鼠标坐标可能映射到块尾的下一行。
-      // 明确把光标放回当前源码范围，保证点摘要/代码/HTML 都能进入编辑。
-      element.addEventListener('mousedown', (event) => {
-        event.preventDefault()
-        event.stopPropagation()
-        view.dispatch({ selection: { anchor: sourceOf(view.state).toView(Math.min(this.block.range.start + 1, this.block.range.end)) } })
-        view.focus()
-      })
-      return element
-    }
+    const reveal = (element: HTMLElement): HTMLElement =>
+      attachRevealSource(element, view, this.block.range.start, this.block.range.end)
     if (this.block.kind === 'rule') {
       const rule = document.createElement('hr')
       rule.className = 'md-rule'
@@ -370,7 +362,8 @@ export const identityLock = EditorState.transactionFilter.of((tr) => {
   if (!tr.docChanged) return tr
   if (tr.isUserEvent('rgent')) return tr
   const result = tr.startState.field(markdownField).result
-  if (result.stale) return []
+  // 解析失败时画布已是原文：放行人手改写，才能自救。空索引拦不住身份，也不用上一代装成解析成功。
+  if (result.stale) return tr
   const index = result.index
   const projection = sourceOf(tr.startState)
   const changes = changesOf(tr).map((change) => ({ ...change, from: projection.toRaw(change.from), to: projection.toRaw(change.to) }))

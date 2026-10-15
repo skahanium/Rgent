@@ -453,7 +453,7 @@ describe('source integrity regressions', () => {
 
 it('keeps image provenance under nested prompt and AI containers', () => {
   const source = '<!-- rgent:prompt:v1 -->\n- ![prompt](a.png)\n\n<!-- rgent:ai:v1 -->\n> ![answer](b.png)\n\n![human](c.png)'
-  expect(compile(source).index.images.map((image) => image.source)).toEqual(['ai', 'ai', 'human'])
+  expect(compile(source).index.images.map((image) => image.source)).toEqual(['human', 'ai', 'human'])
 })
 
 

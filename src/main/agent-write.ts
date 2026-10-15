@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { compile } from '../markdown/index.ts'
 import { partitionSource } from '../markdown/partition.ts'
 import { hasHiddenSegment, isNotePath, sanitizeNoteName } from './paths.ts'
 
@@ -125,7 +126,7 @@ export function createWriteGate(deps: WriteGateDeps) {
 
   const join = (dir: string, name: string): string => (dir ? `${dir}/${name}` : name)
 
-  /** 追加必须等于「原文 ＋ 一个 AI 块」：原文段不动、尾段有 AI 块、含账本标记一律拒。
+  /** 追加必须等于「原文 ＋ 与块数对得上的 AI 块」：原文段不动、每个新顶层块都有身份、含账本标记一律拒。
    *  这是"只追加新块"的机器判据，不靠组合器自觉。 */
   function assertAppendInvariant(previous: string, next: string): boolean {
     const head = previous.replace(/\s+$/u, '')
@@ -134,7 +135,14 @@ export function createWriteGate(deps: WriteGateDeps) {
     const tail = next.slice(head.length)
     if (!AI_MARKER.test(tail)) return false
     if (LEDGER_MARKER.test(tail)) return false
-    return partitionSource(next).ledger === null
+    if (partitionSource(next).ledger !== null) return false
+    const compiled = compile(next)
+    if (compiled.stale) return false
+    const addedBlocks = compiled.index.blocks.filter((block) => block.range.start >= head.length)
+    const addedMarkers = compiled.index.markers.filter((marker) => marker.identity === 'ai' && marker.range.start >= head.length)
+    return addedBlocks.length > 0
+      && addedBlocks.length === addedMarkers.length
+      && addedBlocks.every((block) => block.identity === 'ai')
   }
 
   /** 改名：名字必须对消毒是恒等操作（只补 .md），落点固定在原目录。 */

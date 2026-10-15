@@ -1,6 +1,7 @@
 import { WidgetType, type EditorView } from '@codemirror/view'
 import type { MermaidRef } from '@markdown'
 import DOMPurify from 'dompurify'
+import { attachRevealSource } from './reveal.ts'
 
 let mermaidLoader: Promise<{ default: MermaidApi }> | null = null
 let seq = 0
@@ -33,7 +34,7 @@ export class MermaidWidget extends WidgetType {
     el.textContent = this.mermaid.value
     const token = ++seq
     void paint(el, this.mermaid.value, token, this.dark, () => this.dead, () => view?.requestMeasure())
-    return el
+    return attachRevealSource(el, view, this.mermaid.range.start, this.mermaid.range.end)
   }
 
   destroy(_dom: HTMLElement): void {

@@ -252,7 +252,7 @@ it('projects each line of CR-only quotes into the matching editor line', () => {
 })
 
 
-it('shows a parse error for current raw source, clears old indexes and blocks writes until recovery', () => {
+it('shows a parse error for current raw source, clears old indexes and still allows source edits', () => {
   const parent = document.createElement('div')
   const host = mountEditor(parent, () => {})
   mounted.push(host)
@@ -272,7 +272,8 @@ it('shows a parse error for current raw source, clears old indexes and blocks wr
     expect(alert.hidden).toBe(false)
     expect(alert.textContent).toContain('故障注入')
     host.view.dispatch({ changes: { from: 1, to: 2, insert: '改' }, userEvent: 'input.type' })
-    expect(host.getText()).toBe(raw)
+    expect(host.getText()).not.toBe(raw)
+    expect(host.getText()).toContain('改')
   } finally { stage.transform = transform }
   host.applyExternalText(raw + '\n恢复')
   expect(parent.querySelector<HTMLElement>('.md-parse-error')!.hidden).toBe(true)

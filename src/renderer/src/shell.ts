@@ -187,6 +187,10 @@ export async function start(root: HTMLElement): Promise<void> {
   new ResizeObserver(() => revealActiveTab()).observe(tabsEl)
   let tree: TreeEntry[] = []
   let saveTimer: number | null = null
+  const clearDebounceTimers = (): void => {
+    if (saveTimer != null) { window.clearTimeout(saveTimer); saveTimer = null }
+    if (workspaceTimer != null) { window.clearTimeout(workspaceTimer); workspaceTimer = null }
+  }
   // 冲突串行化：一次只问一个，后来的排队——旧实现用全局标志直接丢掉，
   // 第二条冲突的通知就永远没人处理了。
   let conflictChain: Promise<void> = Promise.resolve()
@@ -476,7 +480,7 @@ export async function start(root: HTMLElement): Promise<void> {
   window.rgent.onLifecycleFlushRequest((id, cleanUnavailablePaths, phase, context) => {
     if (phase?.startsWith('recovery-')||phase==='root-recovery-protect') {
       if (!context) { window.rgent.lifecycleFlushDone(id,false); return }
-      if(phase==='root-recovery-protect'){const tab=current();if(tab){tab.content=editor.getText();tab.selection=editor.selectionRange();tab.scrollTop=editor.view.scrollDOM.scrollTop}if(saveTimer!==null){clearTimeout(saveTimer);saveTimer=null}if(workspaceTimer!==null){clearTimeout(workspaceTimer);workspaceTimer=null}}
+      if(phase==='root-recovery-protect'){const tab=current();if(tab){tab.content=editor.getText();tab.selection=editor.selectionRange();tab.scrollTop=editor.view.scrollDOM.scrollTop}clearDebounceTimers()}
       const deps = {session:()=>vaultSession,composing:()=>restoringWorkspace||editor.view.compositionStarted,
         changed:syncRecoveryInput,settled:()=>Promise.resolve(saveInFlight),save:()=>flushSave(context.operationId),dirty:()=>tabs.some(tab=>tab.dirty||!!tab.availability)}
       void (async()=>{
@@ -699,7 +703,7 @@ export async function start(root: HTMLElement): Promise<void> {
     restoreQuerySession=expectedSession;restoreQueryOperationId=transitionId
     currentRestoreId=restoreId??null;restoreQueryPending=true;restoringWorkspace=true
     vaultEpoch++
-    if(workspaceTimer!==null){clearTimeout(workspaceTimer);workspaceTimer=null}
+    clearDebounceTimers()
     syncInteractionGate()
     const current=()=>root.isConnected&&restoreQueryPending&&query===restoreQuerySerial&&serial===stateSerial&&
       vaultSession===sourceSession&&currentRestoreId===(restoreId??null)
@@ -733,7 +737,7 @@ export async function start(root: HTMLElement): Promise<void> {
     restoringWorkspace = true
     // Consume the release only after this restore owns the interaction gate.
     if (releasedSession !== undefined && state.sessionId === releasedSession) { releasedSession=undefined;transitionBusy=false }
-    if (workspaceTimer !== null) { clearTimeout(workspaceTimer);workspaceTimer=null }
+    clearDebounceTimers()
     syncInteractionGate()
     vaultEpoch += 1
     workspaceRecovery.hidden=true
@@ -819,7 +823,7 @@ export async function start(root: HTMLElement): Promise<void> {
   function bodyWritesPaused(): boolean { return recoveryState?.status==='invalid'||recoveryState?.operation?.kind==='ledger-repair' }
   function syncRecoveryInput(): void {
     editor.setReadOnly(bodyWritesPaused()||recoveryDraftGate.held(vaultSession))
-    if(bodyWritesPaused()&&saveTimer!=null){window.clearTimeout(saveTimer);saveTimer=null}
+    if(bodyWritesPaused())clearDebounceTimers()
   }
 
   function workspaceSnapshot(): VaultWorkspace {
@@ -836,7 +840,7 @@ export async function start(root: HTMLElement): Promise<void> {
   }
   function scheduleWorkspace(): void {
     if (restoringWorkspace || tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession) || !vaultSession || restoredSession !== vaultSession) return
-    if (workspaceTimer !== null) clearTimeout(workspaceTimer)
+    if (workspaceTimer !== null) window.clearTimeout(workspaceTimer)
     workspaceTimer = window.setTimeout(()=>{workspaceTimer=null;void saveWorkspace()},400)
   }
   async function restoreWorkspace(session: string, serial: number): Promise<boolean> {
@@ -871,7 +875,7 @@ export async function start(root: HTMLElement): Promise<void> {
   window.addEventListener('pagehide',()=>{void saveWorkspace()})
 
   function resetSession(): void {
-    if (workspaceTimer !== null) { clearTimeout(workspaceTimer);workspaceTimer=null }
+    clearDebounceTimers()
     vaultEpoch += 1
     recoveryState = null
     syncRecoveryInput()
@@ -1658,7 +1662,7 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   function scheduleSave(): void {
-    if(bodyWritesPaused()||recoveryDraftGate.held(vaultSession))return
+    if(bodyWritesPaused()||recoveryDraftGate.held(vaultSession)||restoringWorkspace)return
     if (saveTimer != null) window.clearTimeout(saveTimer)
     saveTimer = window.setTimeout(() => {
       void flushSave()
@@ -1666,7 +1670,7 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   function flushSave(recoveryOperation?:string): Promise<boolean> {
-    if(!recoveryDraftGate.maySave(vaultSession,recoveryOperation))return Promise.resolve(false)
+    if(!recoveryDraftGate.maySave(vaultSession,recoveryOperation)||restoringWorkspace)return Promise.resolve(false)
     if (saveInFlight) {
       return saveInFlight.then((ok) => ok && tabs.some((tab) => tab.dirty) ? flushSave(recoveryOperation) : ok)
     }
@@ -1682,7 +1686,7 @@ export async function start(root: HTMLElement): Promise<void> {
       window.clearTimeout(saveTimer)
       saveTimer = null
     }
-    if(!recoveryDraftGate.maySave(vaultSession,recoveryOperation))return false
+    if(!recoveryDraftGate.maySave(vaultSession,recoveryOperation)||restoringWorkspace)return false
     if(bodyWritesPaused())return !tabs.some(tab=>tab.dirty)&&!hasUnavailableDraft(tabs,cleanUnavailablePaths)
     let ok = !hasUnavailableDraft(tabs, cleanUnavailablePaths)
     let wrote = false
@@ -1691,7 +1695,7 @@ export async function start(root: HTMLElement): Promise<void> {
       if (writes.length === 0) break
       for (const write of writes) {
         const tab = tabs.find((item) => item.relPath === write.relPath)
-        if (!tab || tab.availability) continue
+        if (!tab || tab.availability || tab.sessionId !== vaultSession) continue
         wrote = true
         if (!(await writeTab(tab, write.body,0,recoveryOperation))) ok = false
       }
@@ -1704,7 +1708,7 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   async function writeTab(tab: Tab, body = tab.relPath === active ? editor.getText() : tab.content, attempt = 0,recoveryOperation?:string): Promise<boolean> {
-    if (!recoveryDraftGate.maySave(vaultSession,recoveryOperation) || bodyWritesPaused() || tab.availability || !tab.sessionId || !tab.objectVersion || tab.sessionId !== vaultSession) return false
+    if (!recoveryDraftGate.maySave(vaultSession,recoveryOperation) || restoringWorkspace || bodyWritesPaused() || tab.availability || !tab.sessionId || !tab.objectVersion || tab.sessionId !== vaultSession) return false
     const epoch = vaultEpoch
     const result = await window.rgent.noteWrite({
       sessionId: tab.sessionId, objectVersion: tab.objectVersion,
