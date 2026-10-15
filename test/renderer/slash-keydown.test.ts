@@ -34,6 +34,30 @@ describe('slash keydown starts a command only from an empty paragraph', () => {
     expect(pendingSlash(host.getText(), host.selectionRange().head, host.slashCommandStart())?.prompt).toBe('问')
   })
 
+  it('starts a command when /prompt is inserted at an empty paragraph', () => {
+    const host = editor()
+    host.setText('')
+    host.view.dispatch({
+      changes: { from: 0, insert: '/请写两句话' },
+      selection: { anchor: '/请写两句话'.length },
+      userEvent: 'input.type'
+    })
+    expect(host.getText()).toBe('/请写两句话')
+    expect(pendingSlash(host.getText(), host.selectionRange().head, host.slashCommandStart())?.prompt).toBe('请写两句话')
+  })
+
+  it('starts a command when a blank line and /prompt are inserted together', () => {
+    const host = editor()
+    host.setText('正文\n')
+    host.view.dispatch({
+      changes: { from: host.view.state.doc.length, insert: '\n/问' },
+      selection: { anchor: host.view.state.doc.length + 3 },
+      userEvent: 'input.type'
+    })
+    expect(host.getText()).toBe('正文\n\n/问')
+    expect(pendingSlash(host.getText(), host.selectionRange().head, host.slashCommandStart())?.prompt).toBe('问')
+  })
+
   it('inserts / at the start of an existing paragraph without submitting on Enter', () => {
     const host = editor()
     host.setText('已有段落')

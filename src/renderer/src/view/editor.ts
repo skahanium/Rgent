@@ -433,12 +433,33 @@ const theme = EditorView.theme({
 })
 
 const markSlashStart = StateEffect.define<number | null>()
+
+function slashStartFromInsert(tr: Transaction): number | null {
+  if (!tr.docChanged) return null
+  const projection = sourceOf(tr.startState)
+  let started: number | null = null
+  tr.changes.iterChanges((from, to, fromB, _toB, inserted) => {
+    if (started != null || from !== to) return
+    const text = inserted.toString()
+    const at = text.search(/(?<=^|[\r\n])\//)
+    if (at < 0) return
+    const before = text.slice(0, at)
+    const rawFrom = projection.toRaw(from)
+    const simulated = before.length === 0 ? projection.raw : projection.raw.slice(0, rawFrom) + projection.inserted(before, from)
+    if (!canStartSlash(simulated, before.length === 0 ? rawFrom : simulated.length)) return
+    started = fromB + at
+  })
+  return started
+}
+
 const slashStartField = StateField.define<number | null>({
   create: () => null,
   update: (value, tr) => {
     const marked = tr.effects.find((effect) => effect.is(markSlashStart))
     if (marked) return marked.value
     if (tr.effects.some((effect) => effect.is(setRawSource))) return null
+    const started = slashStartFromInsert(tr)
+    if (started != null) return started
     if (value == null || !tr.docChanged) return value
     const mapped = tr.changes.mapPos(value, 1)
     return tr.state.doc.sliceString(mapped, mapped + 1) === '/' ? mapped : null
