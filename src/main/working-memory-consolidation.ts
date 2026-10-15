@@ -259,19 +259,39 @@ export function workStateShaped(content:string):boolean{
  return WORK_STATE_SHAPE.test(content)
 }
 /** 库级范围标记：范围写的是整个库或通用适用面，说明这条不是某个具体对象的事实。
- *  `当前库` 与 `本库` 同义（窗口夹具与提示词都用过这个写法）：漏掉它会让「范围＝当前库」的长期约定
- *  被判成"范围指向某个具体对象"而改判成 demand，条目本身没错却被换了容器。 */
-const LIBRARY_SCOPE_MARKER=/(?:当前库|本库|全库|全局|通用|所有|全部)/u
+ *  这里用**结构性判据**——范围里出现「库」字——而不是逐字列同义词。依据是本机已有产物的只读取证
+ *  （2026-10-15，零模型调用；.cache 与 artifacts 下 8539 份 JSON 全扫）：
+ *   · 终态条目面：`.cache/memory-quality` 的 `2026-10-1*` 与 `2026-10-04` 两批 run 目录、841 份 result 产物、
+ *     1967 条 result.entries、228 种 scope；含「库」的 91 种／330 条**全部**是库级范围
+ *     （本库／本库项目记录／本库中文回答与引用格式／本库（fiction.md）的解释与回复…），零反例——
+ *     不存在"含库字却是具体对象"的写法。
+ *   · 判据的直接输入面：同一批产物 responses[].body 里模型原始提议 505 条、249 种 scope；含「库」的
+ *     102 种／184 条同样零反例。两面去重后共 103 种含「库」写法、514 条（条目面 330 ＋ 提议面 184），
+ *     全部是库级——语料里不存在"含库字却是具体对象"的 scope。
+ *   · 旧枚举为什么不够：这些写法里没有一种写成「当前库」，而 2026-10-15 窗口夹具写的正是「当前库」
+ *     （scripts/verify-ui.mjs：proposal.scope='当前库'，窗口检查要求该条目 layer='core'）——
+ *     枚举漏掉它，一条人的长期约定被改判成 fact、layer 由 core 滑成 demand，窗口门红了一天（见 6ad6286）。
+ *     结构性判据把「当前库／全库／整个库／库级」这类写法一次盖住，不必再猜下一个同义词。
+ *  「全局／通用／所有／全部」沿用既有口径保留：语料里 23 条「所有」、5 条「全部」**全部**落在含「库」的范围里，
+ *  没有一条独立出现；「全局」「通用」零出现。它们只把"不改判"的一侧放宽（漏改只是分类不准，误改会把人的
+ *  长期约定降级），不据此扩集——要扩集先给新证据并重跑标定测试。 */
+const LIBRARY_SCOPE_MARKER=/(?:库|全局|通用|所有|全部)/u
 /** 人的做法标记：范围落在人本身或内容用第一人称／习惯／偏好时，那是人的长期做法，不能降级成项目事实。 */
 const SELF_STANDING_MARKER=/(?:我|本人|自己|习惯|偏好|一直|始终)/u
-/** 容器范围改判：范围非空、不含库级标记，内容也没有第一人称／人的做法标记时，这条 standing 的范围
- *  指向某个具体对象（项目、材料、本场），应当按项目事实保存。只认这两类反向标记，其余一律"拿不准不动"——
- *  改判是换容器，误改会把人的长期约定降级；漏改只是留下一条分类不准的条目，代价小得多。
+/** 容器范围改判：范围非空、不含库级标记（结构性判据见 LIBRARY_SCOPE_MARKER）、内容也没有第一人称／
+ *  人的做法标记时，这条 standing 的范围指向某个具体对象（项目、材料、本场），应当按项目事实保存。
+ *  只认这两类反向标记，其余一律"拿不准不动"——改判是换容器，误改会把人的长期约定降级；漏改只是留下
+ *  一条分类不准的条目，代价小得多。
+ *  已知残留面（本轮不扩集，交给下一轮取证）：范围是通用面却没写「库」字的写法仍靠内容侧标记兜底——
+ *  语料里 10 种／11 条（写作偏好／中文回答与引用／任务说明与步骤列示的长期格式偏好…），其中 5 条 standing
+ *  正是因为内容写了「本库」才没被改判；范围与内容都没点名这个库时，这类长期约定仍会被误改成 fact。
  *  标定：r16 两轮终态 21 条 standing 里 18 条范围含库级标记（不动）、3 条范围是具体对象（改判），
- *  逐字文本与数字钉在标定测试里；改判据必须重跑那组断言。 */
+ *  逐字文本与数字钉在标定测试里；语料全量 scope 标定见紧接着的那条测试；改判据必须重跑这两组断言。 */
 export function semanticScopeMismatch(input:{scope:string;content:string}):boolean{
  // 内容自己带库级标记（如「本库以后先给结论」）时也不改：范围写成具体对象、约定却关于整个库时，
- // 真实容器应是 standing。实测 0 例，但与提示词那句「看范围」同向收紧——宁可漏改。
+ // 真实容器应是 standing。语料里"范围没有库级标记、内容有"共 5 条，全是通用面范围（中文回答与引用、
+ // 任务说明与步骤列示的长期格式偏好…）；"范围是具体对象、内容写库级"0 例。与提示词那句「看范围」同向
+ // 收紧——宁可漏改。
  return input.scope.trim().length>0&&!LIBRARY_SCOPE_MARKER.test(input.scope)&&!LIBRARY_SCOPE_MARKER.test(input.content)&&!SELF_STANDING_MARKER.test(input.content)
 }
 const CLAIM_STOP=new Set('本库,项目,本轮,虚构,样稿,工作,核对,记录,要求,版本,长期,以后,先,再,给,列,写,的,是,这,要,一份,五份,三份'.split(','))
@@ -820,6 +840,15 @@ export class WorkingMemoryConsolidation{
    }
    // 旧评测空提议仍核本次输入；生产 M4 提交前只核本批实际派生来源，不因无关已展示候选到期毁整批。
    await this.recheck(job,!continuity&&!groups.length&&!recent?sources:[],[])
+   /** 回执归因：拒绝码优先、applied 注记码垫底。
+    *  改判这类「程序等价改写」是 applied 注记（V6_PROGRAM_APPLIED_REASONS），它**最先**入 dropped；
+    *  同一条响应里后到的拒绝也排在它后面，所以按 dropped[0] 取码会让 applied 注记盖住拒绝码——
+    *  2026-10-15 实测：改判＋近期补写失败时，补写该保留的 MEMORY_OUTPUT_INVALID 从回执里消失，
+    *  而终态类别与界面归因都读 reason。现在取 dropped 里**第一条非 applied** 的记录；
+    *  一条非 applied 都没有时才回落到第一条 applied 注记的码（纯改判照旧得 MEMORY_SEMANTIC_RESCOPED）。
+    *  `unchanged`（例如 MEMORY_SIBLING_REMAINS：嫌疑条目仍 active、需人查看）也算非 applied——
+    *  它是待复核的真实结局，同样不该被 applied 注记盖住。 */
+   const rejection=proposed.dropped.find(result=>result.outcome!=='applied')
    const result=await job.service.vault.memoryMutation(async store=>{
     this.assert(job)
     // 排队期间来源、权限与所用版本仍可能变化；在同一提交队列重新核实际派生输入。
@@ -828,7 +857,7 @@ export class WorkingMemoryConsolidation{
     const current=store.read(),materialState=(r:typeof basis.record)=>JSON.stringify([r.identity,r.watermark,r.forgotten])
     if(materialState(current.record)!==materialState(basis.record))throw Error('MEMORY_CONFLICT')
     for(const used of entries)if(![...current.record.entries,...current.record.recent].some(e=>e.id===used.id&&e.version===used.version))throw Error('MEMORY_CONFLICT')
-    return store.apply(current,groups,{taskId:job.material.taskId,materialVersion:job.material.materialVersion,outcome:'applied',entryIds:[],...(dependencyRejected?{reason:'MEMORY_DEPENDENCY_CHANGED'}:repairFailure?{reason:repairFailure}:referenceRejected?{reason:'MEMORY_OUTPUT_REFERENCE_INVALID'}:proposed.dropped.length?{reason:proposed.dropped[0]!.code??'MEMORY_OUTPUT_INVALID'}:continuity&&recentValue!==null&&!recent?{reason:'MEMORY_OUTPUT_INVALID'}:{})},recent,proposed.dropped,dependencyEntries)
+    return store.apply(current,groups,{taskId:job.material.taskId,materialVersion:job.material.materialVersion,outcome:'applied',entryIds:[],...(dependencyRejected?{reason:'MEMORY_DEPENDENCY_CHANGED'}:repairFailure?{reason:repairFailure}:referenceRejected?{reason:'MEMORY_OUTPUT_REFERENCE_INVALID'}:rejection?{reason:rejection.code??'MEMORY_OUTPUT_INVALID'}:continuity&&recentValue!==null&&!recent?{reason:'MEMORY_OUTPUT_INVALID'}:proposed.dropped.length?{reason:proposed.dropped[0]!.code??'MEMORY_OUTPUT_INVALID'}:{})},recent,proposed.dropped,dependencyEntries)
    })
    if(result.entryIds.length){const changed=[...result.snapshot.record.entries,...result.snapshot.record.recent].filter(e=>result.entryIds.includes(e.id));const before=[...basis.record.entries,...basis.record.recent].filter(e=>result.entryIds.includes(e.id));this.undoBatches.set(job.material.taskId,{service:job.service,sessionId:job.context.sessionId,version:job.material.materialVersion,before:structuredClone(before),after:changed.map(e=>({id:e.id,version:e.version}))});while(this.undoBatches.size>8)this.undoBatches.delete(this.undoBatches.keys().next().value!)}
    if(result.rejected)this.notify(job)

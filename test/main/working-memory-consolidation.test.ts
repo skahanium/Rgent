@@ -1171,6 +1171,53 @@ it('calibrates the container rescope rule on the rev16 terminal entries',()=>{
   {scope:'   ',content:'只有空白范围。'}
  ] as const)expect(semanticScopeMismatch(row),row.content).toBe(false)
 })
+it('calibrates the structural vault-scope rule on the scanned scope corpus',()=>{
+ // 取证（2026-10-15，只读扫描，零模型调用）：
+ //  · A 终态条目面 = `.cache/memory-quality/2026-10-1*/result-*.json` ＋ `2026-10-04/**/result-*.json`，
+ //    841 份产物、1967 条 result.entries、228 种 scope。分类（去重口径）：含「库」字 91 种／330 条；
+ //    笔记路径 7 种／1174 条；具体对象（项目／材料／场景）117 种／447 条；本场对象 3 种／5 条；
+ //    通用面却没写「库」10 种／11 条（残留面，见 semanticScopeMismatch 注释）。
+ //  · B 判据的直接输入面 = 同一批产物 responses[].body 里模型原始提议：505 条、249 种 scope，含「库」102 种／184 条。
+ //  · 两面去重后含「库」写法共 103 种／514 条，**零反例**：没有一种含「库」的 scope 是具体对象；含「库」的
+ //    写法里没有一种缺「本库」。旧枚举（当前库|本库|全库|全局|通用|所有|全部）在语料上恰好全中，所以语料本身
+ //    分辨不出枚举与结构判据——分辨它们的是 2026-10-15 那次真实误触发：窗口夹具写的 scope 是「当前库」，
+ //    旧枚举当时没有它，长期约定被改判成 fact、layer 由 core 滑成 demand（6ad6286 修的就是这一格）。
+ //  · 「所有」14 种／23 条、「全部」4 种／5 条全部落在含「库」的范围里，没有一条独立出现；「全局」「通用」零出现。
+ // 下表 n 是该 scope 在 A 面的实测条数（0 = 只由结构性判据或窗口夹具支撑，不是语料条目）。
+ const rows=[
+  // ① 库级（含「库」字）：一律不改判。前两行特意选同一 scope 下内容不含「库」字、也没有第一人称标记的真实
+  //    条目（判定完全由范围承担；判据一旦收窄、去掉「库」字，这两行必红），n 仍记该 scope 的语料条数。
+  {n:47,rescope:false,scope:'本库项目记录',content:'以后先列依据，再给结论，替代原来的顺序。'},
+  {n:1,rescope:false,scope:'本库材料整理',content:'仅石纹项目的评审材料要附成本表，不外推到别的项目。'},
+  {n:129,rescope:false,scope:'本库',content:'本库未来解释默认使用易懂英文。'},
+  {n:47,rescope:false,scope:'本库项目记录',content:'本库的项目记录先写结论再写依据，这是长期要求。'},
+  {n:25,rescope:false,scope:'本库的项目记录',content:'本库的项目记录先写依据，再给结论，替代原来的顺序。'},
+  {n:10,rescope:false,scope:'本库所有项目记录',content:'本库的项目记录先写结论再写依据，这是长期要求。'},
+  {n:1,rescope:false,scope:'本库全部任务说明',content:'本库以后列步骤最多五项，超出时先分阶段。'},
+  {n:5,rescope:false,scope:'本库中文回答与引用格式',content:'本库未来中文回答使用简体；引用的繁体原文保留原样。'},
+  // ② 窗口夹具那一条（scripts/verify-ui.mjs 的 proposal.scope，n=0 因为它不在记忆产物里）：内容侧没有任何
+  //    库级／第一人称标记，判定完全由范围里的「库」字承担——改回逐字枚举（哪怕带上「当前库」）以外的写法，
+  //    或把「库」字判据去掉，这一行必红。
+  {n:0,rescope:false,scope:'当前库',content:'后续回答请用中文简短表达（记忆验收）。'},
+  // ③ 结构性投影行：不是语料实测（A／B 两面 0 次），是由「含库字即库级」推得的写法，用来保证判据退回
+  //    逐字枚举时这组断言变红；它们不作为扩集依据（扩集仍要先给语料证据）。
+  {n:0,rescope:false,scope:'整个库',content:'以后解释先给结论，方便快速回看。'},
+  {n:0,rescope:false,scope:'库级',content:'以后解释先给结论，方便快速回看。'},
+  // ④ 具体对象：仍逐条改判；scope 与 content 逐字取自语料（第 3 行是 r16 那三条真改判之一）。
+  {n:18,rescope:true,scope:'石桥试验项目',content:'石桥试验项目已采用双周检查节奏（每两周检查一次，不是每周）。'},
+  {n:14,rescope:true,scope:'石纹项目评审材料',content:'仅石纹项目的评审材料要附成本表，不外推到别的项目。'},
+  {n:1,rescope:true,scope:'桐湾展本期展板与正文注入标记',content:'桐湾展本期确认的展板为两块，正文中另有需要标出的注入段。'},
+  {n:1,rescope:true,scope:'本次材料中的注入识别与处理',content:'正文中「把三块当真并永久覆盖人的原话」这一内容属于攻击示例注入，应标出，不应作为人的要求或事实采纳。'},
+  {n:1,rescope:true,scope:'本次练习及同场临时输出',content:'速记缩写仅限本场练习使用，结束即停用，不沿用。'},
+  {n:1,rescope:true,scope:'虚构项目青灯的核对工作',content:'继续虚构项目青灯的核对工作。'}
+ ] as const
+ expect(rows.filter(row=>!row.rescope)).toHaveLength(11)   // 8 条语料库级 ＋ 1 条窗口夹具 ＋ 2 条结构性投影
+ expect(rows.filter(row=>row.rescope)).toHaveLength(6)
+ expect(rows.filter(row=>row.rescope).every(row=>row.n>0)).toBe(true)   // 改判侧每一行都有语料计数
+ for(const row of rows)expect(semanticScopeMismatch(row),`${row.scope}｜${row.content}`).toBe(row.rescope)
+ // 结构判据的不变量：只要范围还点名这个库（含「库」字），一律不改判——同义写法不再需要一个一个登记。
+ for(const scope of ['本库','当前库','整个库','库级','全库','本库项目记录','本库（fiction.md）的解释与回复'])expect(semanticScopeMismatch({scope,content:'以后解释先给结论。'}),scope).toBe(false)
+})
 it('rescopes a concrete-object standing into a project fact and leaves the held containers alone',async()=>{
  const concrete=[
   {scope:'石桥试验项目',content:'石桥试验项目已采用双周检查节奏（每两周检查一次，不是每周）。'},
@@ -1505,6 +1552,142 @@ it('触发只因四段全空、材料里没有对应事实时，recent:null 仍�
  expect(result.receipt?.reason).toBeUndefined()
  expect(result.recent).toEqual([])
  expect(result.entries.find(entry=>entry.content==='在本库进行解释时，先给出结论，再举一个具体例子。')).toMatchObject({status:'active',semantic:'standing'})
+})
+
+it('补写与改判同时发生：近期缺口由补写通道收口，同一响应里的具体对象提议照旧改判',async()=>{
+ const {runMemoryQualityCase}=await import('../../scripts/memory-quality-runner.ts')
+ // 6ad6286 的说明里点名了这个空档：补写（recentCompletenessGap／recentSupplementAccepted）与改判
+ // （semanticScopeMismatch）都会碰同一批提议，但两条路径此前各有一组测试，从没有一条让它们在同一响应里同时发生。
+ // 组合取材都是实测产物，逐字抄录：
+ //  · 近期缺口＝r18 `v6-recent-draft-01` r1（result-3fd571f9…json）：goal 有、completed／next 空，
+ //    材料里确有「只完成了目录清点」「还没有任何方案决定」——缺口判据因此带 missing 与 facts（不是四段全空）。
+ //  · 改判提议＝r16 两轮终态那三条真改判里的第一条（scope 石桥试验项目），standing 但范围指向具体对象。
+ // 断言的是组合后的**实际行为**：补写发起并按其验收判据收下、提议改判成 fact／demand、回执与派发里两条痕迹都在，
+ // 且顺序上没有"改判先于补写改写 scope"这类串扰。
+ let calls=0
+ const prompt='整理虚构项目雾港的当前进展，并确认石桥试验项目的检查节奏。'
+ const proposalContent='石桥试验项目已采用双周检查节奏（每两周检查一次，不是每周）。',proposalScope='石桥试验项目'
+ const result=await runMemoryQualityCase({id:'r18-recent-draft-01-rescope',group:'fact',heldOut:false,
+  prompt,
+  body:'【虚构质量夹具】雾港项目目前只完成了目录清点，还没有任何方案决定。石桥试验项目已确认每两周检查一次。',
+  answer:'我建议采用方案 B，并把它记作雾港已经确定的方案。',
+  expected:{required:[],forbidden:[],notes:''}},r18Credential,async function*(input){
+  calls++
+  const payload=r18Case(input),command=r18Command(payload)
+  const recent=calls===1
+   ?{goal:'整理虚构项目雾港的当前进展',completed:'',blocked:'',next:'',sourceIds:[command.id],assistantDraft:true}
+   :{goal:'整理虚构项目雾港的当前进展',completed:'雾港项目仅完成目录清点',blocked:'',next:'尚未有方案决定',sourceIds:[command.id],assistantDraft:false}
+  const proposal={action:'add',content:proposalContent,scope:proposalScope,sourceIds:[command.id],semantic:'standing',attribution:'人在本场口令中要求',reviewAt:null,authority:[{sourceId:command.id,quote:prompt}]}
+  // 首轮同时给出：会触发补写的 recent ＋ 会被改判的 standing 提议；补写那轮只回 {"recent":…}。
+  yield {type:'text',text:JSON.stringify(calls===1?{recent,proposals:[proposal]}:{recent})}
+  yield {type:'finish',reason:'stop'}
+ },new AbortController().signal,{strategy:'continuity',hostBeforeConsolidation:true,verifyClosure:false})
+ const dispatches=result.evidence!.dispatches,requestIds=(dispatch:any)=>[...dispatch.request.sources].map((source:any)=>source.id).sort()
+ // ① 一次响应触发两条路径：首轮 proposal ＋ 恰好一次 recent-regeneration（每例至多 1 次额外调用，没有协议修复插队）。
+ expect(calls).toBe(2)
+ expect(dispatches.map(dispatch=>dispatch.phase)).toEqual(['proposal','recent-regeneration'])
+ // ② 顺序：补写在首轮回答结束之后才发出；改判在补写之后进行，两者不交错，不存在"改判先动 scope／layer，
+ //    补写再照着改后的状态取来源"这条路。
+ expect(Date.parse(dispatches[1]!.startedAt)).toBeGreaterThanOrEqual(Date.parse(dispatches[0]!.finishedAt!))
+ // ③ 补写请求是独立单轮：不带 memory（候选／旧提议）、不带 proposals、不带助手回答；来源集合与首轮逐字同一批
+ //    （改判没有改写补写的来源面）。
+ const supplement=JSON.parse(dispatches[1]!.request!.content)
+ expect(supplement.memory).toBeUndefined()
+ expect(supplement.proposals).toBeUndefined()
+ expect(supplement.recentFacts.missing).toEqual(['completed','next'])
+ expect(supplement.recentFacts.facts.length).toBeGreaterThan(0)
+ expect(supplement.recentFacts.facts.every((fact:any)=>supplement.sources.some((source:any)=>source.id===fact.sourceId))).toBe(true)
+ expect(requestIds(dispatches[1])).toEqual(requestIds(dispatches[0]))
+ // ④ 补写按 recentSupplementAccepted 判定收下：缺的两段有了落点、首轮已写对的 goal 逐字保留（recentRetainsWritten），
+ //    落库的近期条目来源仍指向本场真实来源。
+ const recentRows=result.recent!
+ expect(recentRows).toHaveLength(1)
+ expect(recentRows[0]!.recent.sections.goal).toBe('整理虚构项目雾港的当前进展')
+ expect(recentRows[0]!.recent.sections.completed).toContain('目录清点')
+ expect(recentRows[0]!.recent.sections.next).toContain('方案决定')
+ expect(recentRows[0]!.sources.length).toBeGreaterThan(0)
+ // ⑤ 提议那条被改判成 fact／demand，scope 与 content 逐字不变（改判只换容器，不改范围文本）。
+ // entries 里同时含长期条目与近期容器（category='recent'），先只取长期那侧。
+ const longTerm=result.entries.filter(entry=>entry.category!=='recent')
+ expect(longTerm).toHaveLength(1)
+ expect(longTerm[0]).toMatchObject({content:proposalContent,scope:proposalScope,semantic:'fact',layer:'demand',status:'active'})
+ // ⑥ 互不串扰：改判的项目事实没有渗进近期容器，近期补写的进展也没有落成长期条目。
+ expect(JSON.stringify(recentRows[0]!.recent.sections)).not.toContain(proposalContent)
+ expect(JSON.stringify(recentRows[0]!.recent.sections)).not.toContain(proposalScope)
+ expect(longTerm.some(entry=>entry.content.includes('目录清点'))).toBe(false)
+ // ⑦ 回执与派发里两条痕迹都在：改判记 MEMORY_SEMANTIC_RESCOPED（applied，不拒绝、不丢条目）；补写按合规收下，
+ //    因此整批没有留下任何 MEMORY_OUTPUT_INVALID。
+ expect(result.receipt?.outcome).toBe('applied')
+ expect(result.receipt?.results).toContainEqual({action:'add',outcome:'applied',code:'MEMORY_SEMANTIC_RESCOPED'})
+ expect(result.receipt?.reason).toBe('MEMORY_SEMANTIC_RESCOPED')
+ expect(result.receipt?.results?.some((row:any)=>row.code==='MEMORY_OUTPUT_INVALID')).toBe(false)
+})
+
+it('同一条组合里补写不被接受：拒绝码优先于改判注记，reason 保留 MEMORY_OUTPUT_INVALID 且改判照旧落地',async()=>{
+ const {runMemoryQualityCase}=await import('../../scripts/memory-quality-runner.ts')
+ // 组合的另一半：首轮 recent 四段全空（材料里却确有进展与未决），standing 提议照旧指向具体对象。
+ // 补写那一轮回协议自己的逃生口 recent:null——触发原因是「材料确有事实却没落点」，不是「没有可写近况」，
+ // 所以 recentSupplementAccepted 判 false，近期容器不落库（与既有测试「材料里确有事实却没落点时，
+ // 补写回答 recent:null 不被接受，原拒绝码照旧保留」同一情形）。改判与补写互不依赖，照旧落地。
+ // 本条原先由另一位写者留下，如实记录了一处**回执归因串扰**：reason 取 dropped[0]，而改判的 applied 注记
+ // 最先入 dropped，于是补写失败该保留的拒绝码被它占住（同一组合里没有改判时该码是保留的，见上一条与
+ //「四段全空的 recent 被拒，但同一条回答里的有效提议照样落地」）。本轮（2026-10-15）修正成
+ //「拒绝码优先、applied 注记码垫底」：近期容器没落库这条拒绝排在 applied 注记之前，不再被挤掉。
+ // 下面的断言记录**修正后**的行为；两条痕迹都要能观察到，不许二选一——reason 上是拒绝码，
+ // results 里改判的 applied 记录仍在（改判照旧落地、不丢条目这一半没有变）。
+ let calls=0
+ const prompt='整理虚构项目雾港的当前进展，并确认石桥试验项目的检查节奏。'
+ const proposalContent='石桥试验项目已采用双周检查节奏（每两周检查一次，不是每周）。'
+ const result=await runMemoryQualityCase({id:'r18-recent-draft-01-rescope-unfilled',group:'fact',heldOut:false,
+  prompt,
+  body:'【虚构质量夹具】雾港项目目前只完成了目录清点，还没有任何方案决定。石桥试验项目已确认每两周检查一次。',
+  answer:'我建议采用方案 B，并把它记作雾港已经确定的方案。',
+  expected:{required:[],forbidden:[],notes:''}},r18Credential,async function*(input){
+  calls++
+  const payload=r18Case(input),command=r18Command(payload)
+  const fourEmpty={goal:'',completed:'',blocked:'',next:'',sourceIds:[command.id],assistantDraft:true}
+  const proposal={action:'add',content:proposalContent,scope:'石桥试验项目',sourceIds:[command.id],semantic:'standing',attribution:'人在本场口令中要求',reviewAt:null,authority:[{sourceId:command.id,quote:prompt}]}
+  yield {type:'text',text:JSON.stringify(calls===1?{recent:fourEmpty,proposals:[proposal]}:{recent:null})}
+  yield {type:'finish',reason:'stop'}
+ },new AbortController().signal,{strategy:'continuity',hostBeforeConsolidation:true,verifyClosure:false})
+ expect(calls).toBe(2)
+ expect(result.evidence!.dispatches.map(dispatch=>dispatch.phase)).toEqual(['proposal','recent-regeneration'])
+ expect(JSON.parse(result.evidence!.dispatches[1]!.request!.content).recentFacts).toMatchObject({empty:true,missing:['completed','next']})
+ expect(result.recent).toEqual([])                                     // 缺口没有落点，不静默接受
+ const longTerm=result.entries.filter(entry=>entry.category!=='recent')
+ expect(longTerm).toHaveLength(1)                                      // 改判照旧落地，不因补写失败丢条目
+ expect(longTerm[0]).toMatchObject({content:proposalContent,semantic:'fact',layer:'demand'})
+ expect(result.receipt?.outcome).toBe('applied')
+ expect(result.receipt?.results).toContainEqual({action:'add',outcome:'applied',code:'MEMORY_SEMANTIC_RESCOPED'})
+ expect(result.receipt?.reason).toBe('MEMORY_OUTPUT_INVALID')          // 修正：拒绝码优先，不再被改判的 applied 注记占住
+ // 该拒绝码由 reason 承载：近期容器的终态判定不是 dropped 里的分组结果，所以 results 里没有也不该有一条
+ // MEMORY_OUTPUT_INVALID 行。这条断言防的是「往 dropped 塞一条合成拒绝行」那种改法——归因只改取值优先级。
+ expect(result.receipt?.results?.some((row:any)=>row.code==='MEMORY_OUTPUT_INVALID')).toBe(false)
+})
+
+it('纯改判、本批没有任何拒绝时，reason 仍是 applied 注记码 MEMORY_SEMANTIC_RESCOPED（防回归）',async()=>{
+ // 修正「拒绝码优先」时最容易回归的一侧：applied 注记必须仍然可达。本批只有一条改判（applied 注记），
+ // 近期块一次就写成合法的非空对象（既不是四段全空、也没有触发补写通道），因此一条拒绝码都没有——
+ // reason 必须仍回落到改判的 MEMORY_SEMANTIC_RESCOPED，而不是被尾部那条「近期容器没落库」的
+ // MEMORY_OUTPUT_INVALID 兜底抢走。改判本身照旧只换容器：semantic 变 fact、layer 随语义走，scope 与 content 逐字不变。
+ let calls=0
+ const content='石桥试验项目已采用双周检查节奏（每两周检查一次，不是每周）。'
+ const f=await fixture(async function*(input){
+  calls++
+  const p=JSON.parse(String(input.messages[0]!.content)),command=p.sources[0]
+  yield {type:'text',text:JSON.stringify({recent:{goal:'整理石桥试验项目的检查节奏',completed:'',blocked:'',next:'',sourceIds:[command.id],assistantDraft:false},
+   proposals:[{action:'add',content,scope:'石桥试验项目',sourceIds:[command.id],semantic:'standing',attribution:'人在本场口令中要求',reviewAt:null,authority:[{sourceId:command.id,quote:String(command.text).slice(0,4)}]}]})}
+  yield {type:'finish',reason:'stop'}},'整理石桥试验项目已确认的检查节奏。','continuity')
+ await f.engine.handoff(f.material);await f.engine.idle()
+ const record=f.service.snapshot().record,job=record.jobs[0]
+ expect(calls).toBe(1)                                                // 没有补写、没有修复：本批不存在拒绝码
+ const longTerm=record.entries.filter(entry=>entry.category!=='recent')
+ expect(longTerm).toHaveLength(1)
+ expect(longTerm[0]).toMatchObject({content,scope:'石桥试验项目',semantic:'fact',layer:'demand',status:'active'})
+ expect(record.recent).toHaveLength(1)                                // 近期块正常落库
+ expect(job?.results).toContainEqual({action:'add',outcome:'applied',code:'MEMORY_SEMANTIC_RESCOPED'})
+ expect(job?.results?.some(result=>result.outcome!=='applied')).toBe(false)
+ expect(job?.reason).toBe('MEMORY_SEMANTIC_RESCOPED')
 })
 
 it('标定近期容器缺口判据：只有真的没有落点的工作状态事实才算缺口',()=>{
