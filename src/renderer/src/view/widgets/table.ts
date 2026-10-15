@@ -1,7 +1,8 @@
-import { WidgetType } from '@codemirror/view'
+import { WidgetType, type EditorView } from '@codemirror/view'
 import type { TableRef } from '@markdown'
 import type { NoteHost } from '../host.ts'
 import { renderReadOnlyNode, disposeReadOnlyImages } from '../read-only.ts'
+import { attachRevealSource } from './reveal.ts'
 
 export class TableWidget extends WidgetType {
   constructor(readonly table: TableRef, readonly host?: NoteHost) {
@@ -18,12 +19,12 @@ export class TableWidget extends WidgetType {
       && JSON.stringify(this.table.rows) === JSON.stringify(other.table.rows)
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view?: EditorView): HTMLElement {
     if (this.table.node) {
       const table = renderReadOnlyNode(this.table.node, this.table.source ?? '', this.host) as HTMLElement
       table.classList.add('md-table')
       table.setAttribute('aria-label', '表格')
-      return table
+      return attachRevealSource(table, view, this.table.range.start, this.table.range.end)
     }
     const table = document.createElement('table')
     table.className = 'md-table'
@@ -48,7 +49,7 @@ export class TableWidget extends WidgetType {
       tbody.append(tr)
     }
     table.append(tbody)
-    return table
+    return attachRevealSource(table, view, this.table.range.start, this.table.range.end)
   }
 
   destroy(dom: HTMLElement): void { disposeReadOnlyImages(dom) }

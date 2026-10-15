@@ -264,6 +264,31 @@ it('CRLF 笔记追加 AI 块不会把换行写坏', () => {
 
 it('LF 笔记追加仍用 LF，且归一不会吞掉空行', () => {
   const next = appendAiBlock('第一段\n\n/问\n', { taskId: 'task', text: '甲\r\n\r\n乙' })
-  expect(next).toContain('甲\n\n乙')
+  expect(next).toContain('甲\n')
+  expect(next).toContain('\n乙\n')
   expect(next).not.toContain('\r')
+  expect(compile(next).index.blocks.filter((block) => block.identity === 'ai')).toHaveLength(2)
+  expect(compile(next).index.markers.filter((marker) => marker.identity === 'ai')).toHaveLength(2)
+})
+
+it('CRLF 笔记追加多块时每块一枚 part=append 标记', () => {
+  const next = appendAiBlock('第一段\r\n\r\n/问\r\n', { taskId: 'task', text: '甲\r\n\r\n乙' })
+  const compiled = compile(next)
+  expect(compiled.index.blocks.filter((block) => block.identity === 'ai')).toHaveLength(2)
+  expect(compiled.index.markers.filter((marker) => marker.identity === 'ai')).toHaveLength(2)
+  expect(next.match(/part="append"/g)).toHaveLength(2)
+  expect(next).toContain('甲\r\n')
+  expect(next).toContain('乙\r\n')
+  expect(next).not.toContain('\r\r')
+})
+
+it('追加逃逸模型注入的身份注释，不让后段变成人写', () => {
+  const next = appendAiBlock('正文\n', { taskId: 'task', text: '段\n\n<!-- rgent:ai:v1 -->\n坏标记' })
+  expect(next).toContain('&lt;!-- rgent:ai:v1 --&gt;')
+  expect(next).not.toMatch(/<!-- rgent:ai:v1 -->\n坏标记/)
+  const compiled = compile(next)
+  expect(compiled.index.blocks.filter((block) => block.identity === 'ai').length).toBe(
+    compiled.index.markers.filter((marker) => marker.identity === 'ai').length
+  )
+  expect(compiled.index.blocks.every((block) => block.identity === 'ai' || compiled.source.slice(block.range.start, block.range.end) === '正文')).toBe(true)
 })

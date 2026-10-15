@@ -1,5 +1,6 @@
 import { WidgetType, type EditorView } from '@codemirror/view'
 import type { ImageRef } from '@markdown'
+import { attachRevealSource } from './reveal.ts'
 import type { RemoteImageGetRequest, RemoteImageGetResult } from '../../../../shared/ipc.ts'
 import { joinVaultRel, vaultMediaUrl } from '../../../../shared/vault-rel.ts'
 import type { NoteHost } from '../host.ts'
@@ -48,16 +49,16 @@ export class ImageWidget extends WidgetType {
 
   toDOM(view?: EditorView): HTMLElement {
     if (/^https?:\/\//i.test(this.image.url)) {
-      return createImageElement(this.image.alt, this.image.url, this.standalone,
+      return attachRevealSource(createImageElement(this.image.alt, this.image.url, this.standalone,
         this.host.remoteImageGet, () => view?.requestMeasure(), { source: this.image.source, getContext: () => this.host.imageContext?.(this.image.range, 'body') ?? {
           noteRelPath: this.host.noteRelPath, region: 'body', start: this.image.range.start, end: this.image.range.end
-        } })
+        } }), view, this.image.range.start, this.image.range.end)
     }
     const rel = this.resolved()
     if (!rel || !this.host.vaultHas(rel)) {
-      return placeholder(this.image.alt, this.standalone)
+      return attachRevealSource(placeholder(this.image.alt, this.standalone), view, this.image.range.start, this.image.range.end)
     }
-    return createVaultImageElement(this.image.alt, rel, this.standalone, this.image.source, () => view?.requestMeasure(), this.host.sessionId)
+    return attachRevealSource(createVaultImageElement(this.image.alt, rel, this.standalone, this.image.source, () => view?.requestMeasure(), this.host.sessionId), view, this.image.range.start, this.image.range.end)
   }
 
   destroy(dom: HTMLElement): void {

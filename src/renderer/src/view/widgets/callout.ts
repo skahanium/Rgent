@@ -1,7 +1,8 @@
-import { WidgetType } from '@codemirror/view'
+import { WidgetType, type EditorView } from '@codemirror/view'
 import type { CalloutRef } from '@markdown'
 import type { NoteHost } from '../host.ts'
 import { renderReadOnlyNode, disposeReadOnlyImages } from '../read-only.ts'
+import { attachRevealSource } from './reveal.ts'
 
 export class CalloutWidget extends WidgetType {
   constructor(readonly callout: CalloutRef, readonly host?: NoteHost) {
@@ -19,11 +20,11 @@ export class CalloutWidget extends WidgetType {
       && this.callout.body === other.callout.body
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view?: EditorView): HTMLElement {
     if (this.callout.node) {
       const el = renderReadOnlyNode(this.callout.node, this.callout.source ?? '', this.host) as HTMLElement
       el.setAttribute('role', 'note')
-      return el
+      return attachRevealSource(el, view, this.callout.range.start, this.callout.range.end)
     }
     const el = document.createElement('aside')
     el.className = `md-callout md-callout-${this.callout.kind}`
@@ -38,7 +39,7 @@ export class CalloutWidget extends WidgetType {
       body.textContent = this.callout.body
       el.append(body)
     }
-    return el
+    return attachRevealSource(el, view, this.callout.range.start, this.callout.range.end)
   }
 
   destroy(dom: HTMLElement): void { disposeReadOnlyImages(dom) }

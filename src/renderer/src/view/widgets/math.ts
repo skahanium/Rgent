@@ -1,5 +1,6 @@
 import { WidgetType, type EditorView } from '@codemirror/view'
 import type { MathRef } from '@markdown'
+import { attachRevealSource } from './reveal.ts'
 
 export class MathWidget extends WidgetType {
   private dead = false
@@ -17,7 +18,7 @@ export class MathWidget extends WidgetType {
     el.className = this.math.block ? 'md-math md-math-block' : 'md-math'
     el.textContent = this.math.value
     void paint(el, this.math.value, this.math.block, () => this.dead, () => view?.requestMeasure())
-    return el
+    return attachRevealSource(el, view, this.math.range.start, this.math.range.end)
   }
 
   destroy(_dom: HTMLElement): void {

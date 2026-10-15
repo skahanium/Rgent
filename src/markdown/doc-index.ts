@@ -112,7 +112,7 @@ export function buildIndex(tree: Root, source: string, stages: StageFlags, bodyO
       url: node.url,
       alt: node.alt ?? '',
       base: 'note',
-      source: identityOf(topLevel) ? 'ai' : 'human',
+      source: identityOf(topLevel)?.identity === 'ai' ? 'ai' : 'human',
       standalone: startsLine(source, range) || (parent?.type === 'paragraph' && parent.children.length === 1)
     }
     index.images.push(image)

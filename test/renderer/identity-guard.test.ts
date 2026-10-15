@@ -1,5 +1,19 @@
 import { EditorState, Transaction } from '@codemirror/state'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+vi.mock('@markdown', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@markdown')>()
+  return {
+    ...actual,
+    compile: (source: string, options?: import('@markdown').CompileOptions) => {
+      if (source.includes('__FORCE_STALE__')) {
+        return actual.recoverCompile(source, actual.DEFAULT_STAGES, 'forced-stale')
+      }
+      return actual.compile(source, options)
+    }
+  }
+})
+
 import { markdownField, identityLock } from '../../src/renderer/src/view/editor.ts'
 
 /**
@@ -113,6 +127,36 @@ describe('identity guard, state level', () => {
     const remaining = after.field(markdownField).result.index
     expect(remaining.markers).toEqual([])
     expect(remaining.blocks.every((block) => block.identity === undefined)).toBe(true)
+  })
+})
+
+describe('stale compile lets the person edit source', () => {
+  const staleDoc = '人写的一段。\n__FORCE_STALE__\n还能改。\n'
+
+  function staleState(): EditorState {
+    return EditorState.create({ doc: staleDoc, extensions: [markdownField, identityLock] })
+  }
+
+  it('keeps recoverCompile empty and marks the field stale', () => {
+    const before = staleState()
+    const result = before.field(markdownField).result
+    expect(result.stale).toBe(true)
+    expect(result.index.blocks).toEqual([])
+    expect(result.index.markers).toEqual([])
+    expect(result.error).toBe('forced-stale')
+  })
+
+  it('allows insert and delete in the visible source', () => {
+    const before = staleState()
+    const inserted = type(before, 0, '改')
+    expect(inserted.doc.toString()).toBe(`改${staleDoc}`)
+    const at = inserted.doc.toString().indexOf('还能改')
+    const deleted = inserted.update({
+      changes: { from: at, to: at + 3, insert: '' },
+      userEvent: 'delete.forward'
+    }).state
+    expect(deleted.doc.toString()).toContain('。')
+    expect(deleted.doc.toString()).not.toContain('还能改')
   })
 })
 

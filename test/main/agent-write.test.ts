@@ -112,6 +112,26 @@ describe('write gate · 补任务发起篇', () => {
     expect(result.ok).toBe(false)
     expect(app.written).toHaveLength(0)
   })
+
+  it('组合器只给整段打一枚标记、后段变成人写时判违约', async () => {
+    const app = harness({
+      composeAppend: (previous, text) => `${previous.trimEnd()}\n\n<!-- rgent:ai:v1 -->\n${text}\n`
+    })
+    const result = await app.gate.append({ text: '甲\n\n乙', expectedRevision: 'r1' })
+    expect(result).toEqual({ ok: false, reason: 'INVARIANT_VIOLATION' })
+    expect(app.written).toHaveLength(0)
+  })
+
+  it('按块打标的追加通过不变量', async () => {
+    const { appendAiBlock } = await import('../../src/main/host-source.ts')
+    const app = harness({
+      composeAppend: (previous, text) => appendAiBlock(previous, { taskId: 'gate-task', text })
+    })
+    const result = await app.gate.append({ text: '甲\n\n乙', expectedRevision: 'r1' })
+    expect(result.ok).toBe(true)
+    const ai = (await import('../../src/markdown/index.ts')).compile(app.written[0]!.content)
+    expect(ai.index.blocks.filter((block) => block.identity === 'ai')).toHaveLength(2)
+  })
 })
 
 describe('write gate · 建', () => {
