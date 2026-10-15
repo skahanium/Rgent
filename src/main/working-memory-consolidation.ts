@@ -258,8 +258,10 @@ const WORK_STATE_SHAPE=/(?:已完成|未完成|尚未|未开始|不开始|待确
 export function workStateShaped(content:string):boolean{
  return WORK_STATE_SHAPE.test(content)
 }
-/** 库级范围标记：范围写的是整个库或通用适用面，说明这条不是某个具体对象的事实。 */
-const LIBRARY_SCOPE_MARKER=/(?:本库|全库|全局|通用|所有|全部)/u
+/** 库级范围标记：范围写的是整个库或通用适用面，说明这条不是某个具体对象的事实。
+ *  `当前库` 与 `本库` 同义（窗口夹具与提示词都用过这个写法）：漏掉它会让「范围＝当前库」的长期约定
+ *  被判成"范围指向某个具体对象"而改判成 demand，条目本身没错却被换了容器。 */
+const LIBRARY_SCOPE_MARKER=/(?:当前库|本库|全库|全局|通用|所有|全部)/u
 /** 人的做法标记：范围落在人本身或内容用第一人称／习惯／偏好时，那是人的长期做法，不能降级成项目事实。 */
 const SELF_STANDING_MARKER=/(?:我|本人|自己|习惯|偏好|一直|始终)/u
 /** 容器范围改判：范围非空、不含库级标记，内容也没有第一人称／人的做法标记时，这条 standing 的范围

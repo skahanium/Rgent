@@ -1164,6 +1164,9 @@ it('calibrates the container rescope rule on the rev16 terminal entries',()=>{
   {scope:'石桥试验项目',content:'本库以后解释先给结论，方便快速回看。'},
   {scope:'银桥项目',content:'本人习惯先看预算再看美术。'},
   {scope:'石纹项目',content:'这是我们自己的偏好做法。'},
+  // 范围写「当前库」也是库级范围（与本库同义），窗口夹具用的就是这个写法：漏掉它会把一条人的长期约定
+  // 改判成 demand，窗口检查「条目落成 core」随之确定性变红（2026-10-15 实测：条目 layer=demand）。
+  {scope:'当前库',content:'后续回答请用中文简短表达（记忆验收）。'},
   {scope:'',content:'内容不变但没有范围。'},
   {scope:'   ',content:'只有空白范围。'}
  ] as const)expect(semanticScopeMismatch(row),row.content).toBe(false)
