@@ -75,6 +75,15 @@ async function selectBrowserFolder(page, folder) {
   return waitFor(page, `document.querySelector('.resource-path')?.textContent === ${JSON.stringify(folder || '笔记库')}`)
 }
 
+/** Reload restores the saved expanded state; a blind toggle would collapse the visual vault. */
+async function setTreeExpanded(page, open) {
+  await page.eval(`(() => {
+    const button = document.querySelector('.tree-toggle')
+    if (button && (button.getAttribute('aria-expanded') === 'true') !== ${open}) button.click()
+  })()`)
+  return waitFor(page, `document.querySelector('.tree-toggle')?.getAttribute('aria-expanded') === ${JSON.stringify(String(open))}`)
+}
+
 function makePage(send, close) {
   let id = 0
   const pending = new Map()
@@ -1231,6 +1240,7 @@ async function verifySidebarScrolling(page) {
 }
 
 async function captureSidebar(page, shot, mode, size) {
+  await setTreeExpanded(page, true)
   await selectBrowserFolder(page, '研究记录')
   check(`${mode}/${size}两区位于侧栏内且高度可用`, await page.eval(`(() => {
     const panel = document.querySelector('.tree-panel').getBoundingClientRect()
@@ -1263,7 +1273,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
   const ready = await waitFor(page, `document.querySelectorAll('.tree-dir').length >= 2`)
   check('固定演示库含文件夹和多种文件类型', ready)
   if (!ready) return
-  await page.eval(`document.querySelector('.tree-toggle')?.click()`)
+  await setTreeExpanded(page, true)
   await selectBrowserFolder(page, '素材')
   const types = await page.eval(`document.querySelectorAll('.resource-scroll .tree-file').length === 3`)
   await selectBrowserFolder(page, '研究记录')
@@ -1271,8 +1281,8 @@ async function captureVisualBaseline(page, shot, nativeShot) {
   check('演示库按目录显示三篇笔记及多种文件类型', rows && types)
   check('上方只含普通目录且附件默认不出现', await page.eval(`!document.querySelector('.folder-scroll .tree-note, .folder-scroll .tree-file') && ![...document.querySelectorAll('.tree-select')].some(node => node.dataset.path === '研究记录/自然生长') && !document.querySelector('.attachment-folder')`) === true)
   await page.call('Page.reload', {})
-  check('重新加载恢复按库保存的目录与展开状态', await waitFor(page, `document.querySelector('.resource-path')?.textContent === '研究记录' && document.querySelector('.tree-select[aria-current=location]')?.dataset.path === '研究记录'`))
-  await page.eval(`document.querySelector('.tree-toggle')?.click()`)
+  check('重新加载恢复按库保存的目录与展开状态', await waitFor(page, `document.querySelector('.resource-path')?.textContent === '研究记录' && document.querySelector('.tree-select[aria-current=location]')?.dataset.path === '研究记录' && document.querySelector('.tree-toggle')?.getAttribute('aria-expanded') === 'true'`))
+  await setTreeExpanded(page, true)
   const opened = await page.eval(`(async () => {
     for (const title of ['自然生长', '知识的落点', '设计片段']) {
       const row = [...document.querySelectorAll('.tree-note')].find((item) => item.innerText.includes(title))
@@ -1364,12 +1374,20 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       })()`))
       return { ok: geometry.top >= 24 && geometry.top <= 55 && geometry.width >= 980 && geometry.width <= 1050 && geometry.height >= 680 && geometry.height < 800 && geometry.titleTop >= 35 && geometry.titleTop <= 70 && geometry.titleLeft >= 240, detail: JSON.stringify(geometry) }
     })
-    check('设置遮罩柔焦且导航仅列出六页与同系图标', await page.eval(`(() => {
-      const dialog = document.querySelector('.overlay-settings')
-      const blur = getComputedStyle(dialog, '::backdrop').backdropFilter
-      const labels = [...dialog.querySelectorAll('.settings-nav button')].map((button) => button.textContent)
-      return blur.includes('blur(') && JSON.stringify(labels) === JSON.stringify(['笔记库','界面','助手','记忆','模型','运行']) && dialog.querySelectorAll('.settings-nav .icon').length === 6
-    })()`) === true)
+    await probe('设置遮罩柔焦且导航仅列出六页与同系图标', async () => {
+      await waitFor(page, `(() => { const dialog = document.querySelector('.overlay-settings[open]'); if (!dialog) return false; const style = getComputedStyle(dialog, '::backdrop'); const blur = style.backdropFilter || style.webkitBackdropFilter; return typeof blur === 'string' && blur.includes('blur(') })()`)
+      const state = JSON.parse(await page.eval(`(() => {
+        const dialog = document.querySelector('.overlay-settings')
+        const style = getComputedStyle(dialog, '::backdrop')
+        const blur = style.backdropFilter || style.webkitBackdropFilter
+        const labels = [...dialog.querySelectorAll('.settings-nav button')].map((button) => button.textContent)
+        return JSON.stringify({ blur, labels, icons: dialog.querySelectorAll('.settings-nav .icon').length })
+      })()`))
+      return {
+        ok: typeof state.blur === 'string' && state.blur.includes('blur(') && JSON.stringify(state.labels) === JSON.stringify(['笔记库','界面','助手','记忆','模型','运行']) && state.icons === 6,
+        detail: JSON.stringify(state)
+      }
+    })
     check('阅读排版有真实中英样张和五项可调控件', await waitFor(page, `document.querySelector('.settings-reading-sample')?.textContent.includes('English') && [...document.querySelectorAll('.settings-reading-controls [data-setting]')].filter(node => !node.dataset.setting.startsWith('chrome-')).length === 5`))
     await shot(page, `reference-${mode}-settings`)
     await page.call('Emulation.clearDeviceMetricsOverride', {})
