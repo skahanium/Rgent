@@ -27,7 +27,7 @@ import { mergeHostBody } from './host-merge.ts'
 import { openAuthorizationPopover } from './authorization-popover.ts'
 import { installWriteConfirm } from './write-confirm.ts'
 import { hostErrorText } from './host-errors.ts'
-import { slashAtCaret } from './slash.ts'
+import { pendingSlash } from './slash.ts'
 import { createFileBrowser, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
 import { createSidebarSizer } from './sidebar.ts'
 import type { Theme } from './theme.ts'
@@ -407,7 +407,7 @@ export async function start(root: HTMLElement): Promise<void> {
     if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229 || editor.view.compositionStarted) return
     const selection = editor.selectionRange()
     if (selection.anchor !== selection.head) return
-    const submission = slashAtCaret(editor.getText(), selection.head)
+    const submission = pendingSlash(editor.getText(), selection.head, editor.slashCommandStart())
     if (!submission || conflictDecisionOpen || document.querySelector('dialog[open]')) return
     event.preventDefault()
     void submitSlash(submission)

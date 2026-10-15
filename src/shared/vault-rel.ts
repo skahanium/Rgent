@@ -65,7 +65,7 @@ export function vaultMediaUrl(relPath: string, sessionId?: string): string {
 export function parseVaultMediaUrl(url: string): string | null {
   try {
     const parsed = new URL(url)
-    if (parsed.protocol !== `${VAULT_MEDIA_SCHEME}:`) return null
+    if (parsed.protocol !== `${VAULT_MEDIA_SCHEME}:` || parsed.hostname !== 'media' || parsed.pathname !== '/') return null
     const rel = parsed.searchParams.get('p')
     return rel && rel.length > 0 ? rel : null
   } catch {

@@ -17,7 +17,7 @@ import {
   type EditChange
 } from '@markdown'
 import { defaultKeymap, history, historyKeymap, isolateHistory } from '@codemirror/commands'
-import { Compartment, EditorState, Facet, StateField, Transaction, type Range } from '@codemirror/state'
+import { Compartment, EditorState, Facet, StateEffect, StateField, Transaction, type Range } from '@codemirror/state'
 import {
   Decoration,
   type DecorationSet,
@@ -32,6 +32,7 @@ import { attachRevealSource } from './widgets/reveal.ts'
 import { renderSafeHtmlFragment } from './safe-html.ts'
 import { renderReadOnlyNode } from './read-only.ts'
 import { joinVaultRel } from '../../../shared/vault-rel.ts'
+import { canStartSlash } from '../slash.ts'
 import type { Root } from 'mdast'
 import type { PresentationBlock, PresentationSyntax } from '../../../markdown/presentation.ts'
 
@@ -431,9 +432,24 @@ const theme = EditorView.theme({
   }
 })
 
+const markSlashStart = StateEffect.define<number | null>()
+const slashStartField = StateField.define<number | null>({
+  create: () => null,
+  update: (value, tr) => {
+    const marked = tr.effects.find((effect) => effect.is(markSlashStart))
+    if (marked) return marked.value
+    if (tr.effects.some((effect) => effect.is(setRawSource))) return null
+    if (value == null || !tr.docChanged) return value
+    const mapped = tr.changes.mapPos(value, 1)
+    return tr.state.doc.sliceString(mapped, mapped + 1) === '/' ? mapped : null
+  }
+})
+
 export type EditorHost = {
   view: EditorView
   getText: () => string
+  /** 空段段首按 `/` 留下的命令起点（原文偏移）；未发起则为 null。 */
+  slashCommandStart: () => number | null
   setText: (text: string, host?: NoteHost, selection?: { anchor: number; head: number }) => void
   /** Apply a saved Host change without replacing this tab's history or scroll position. */
   applyExternalText: (text: string) => void
@@ -507,7 +523,25 @@ export function mountEditor(
       hostCompartment.of(noteHostFacet.of(emptyNoteHost)),
       markdownField,
       identityLock,
+      slashStartField,
       EditorView.domEventHandlers({
+        keydown: (event, view) => {
+          if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229) return false
+          if (view.state.readOnly) return false
+          const selection = view.state.selection.main
+          const projection = sourceOf(view.state)
+          const start = selection.empty && canStartSlash(projection.raw, projection.toRaw(selection.head))
+          view.dispatch({
+            changes: { from: selection.from, to: selection.to, insert: '/' },
+            selection: { anchor: selection.from + 1 },
+            userEvent: 'input.type'
+          })
+          if (start) {
+            const at = view.state.selection.main.head - 1
+            if (view.state.doc.sliceString(at, at + 1) === '/') view.dispatch({ effects: markSlashStart.of(at) })
+          }
+          return true
+        },
         compositionstart: (_event, view) => {
           compositionBoundary = null
           const selection = view.state.selection.main
@@ -566,6 +600,10 @@ export function mountEditor(
   return {
     view,
     getText: () => sourceOf(view.state).raw,
+    slashCommandStart: () => {
+      const at = view.state.field(slashStartField)
+      return at == null ? null : sourceOf(view.state).toRaw(at)
+    },
     setText: (text, host, selection) => {
       documentGeneration += 1
       compositionBoundary = null

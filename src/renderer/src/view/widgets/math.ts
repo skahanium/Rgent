@@ -43,7 +43,7 @@ async function paint(
       import('katex/dist/katex.min.css')
     ])
     if (isDead() || !el.isConnected) return
-    katex.render(value, el, { displayMode, throwOnError: false })
+    katex.render(value, el, { displayMode, throwOnError: false, trust: false })
     measure()
   } catch {
     if (isDead()) return

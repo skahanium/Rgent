@@ -21,6 +21,13 @@ export function submittedSlash(source: string, start: number, end: number): Slas
   return { range: { start, end }, prompt: text.slice(1) }
 }
 
+/** Enter submits only if this paragraph was started by pressing `/` on an empty paragraph. */
+export function pendingSlash(source: string, caret: number, commandStart: number | null): SlashSubmission | null {
+  if (commandStart == null) return null
+  const submission = slashAtCaret(source, caret)
+  return submission?.range.start === commandStart ? submission : null
+}
+
 /** A pending command occupies one top-level paragraph ending at the caret. */
 export function slashAtCaret(source: string, caret: number): SlashSubmission | null {
   if (!Number.isInteger(caret) || caret < 0 || caret > source.length) return null
