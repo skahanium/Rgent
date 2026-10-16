@@ -71,7 +71,7 @@ GitHub 的手动入口要求默认分支已有 `workflow_dispatch`。历史上�
 
 ## 仓库骨架
 
-产品骨架是 Electron + TypeScript，以根目录 `package.json` 为准。不要把已删除的 Python 探路件写回来，也不要按其写法扩散。产品性格以围栏篇为准。当前做什么以 [施工图](build.md) 为准。
+产品骨架是 Electron + TypeScript，以根目录 `package.json` 为准。不要把已删除的 Python 探路件写回来，也不要按其写法扩散。产品性格以围栏篇为准。当前做什么以 [施工图](build.md) 为准。文本一律 LF（根目录 `.gitattributes` 的 `eol=lf`）：Windows 默认 autocrlf 会把 `#!/usr/bin/env node` 变成 CRLF，Vite 转译不再把它当 hashbang，vitest 加载即 `SyntaxError`。
 
 ## 文档与代码同步
 

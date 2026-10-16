@@ -1,0 +1,11 @@
+# 文本一律 LF。Windows 默认 autocrlf 会把 `#!/usr/bin/env node` 变成 CRLF，
+# Vite 转译不再把它当 hashbang，shebang 留在模块中间，vitest 加载即语法错误。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.wasm binary
+*.node binary
