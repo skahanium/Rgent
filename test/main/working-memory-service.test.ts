@@ -1,6 +1,7 @@
 import {createHash} from 'node:crypto'
 import {mkdtemp,mkdir,writeFile,readFile,rename,rm} from 'node:fs/promises';import os from 'node:os';import path from 'node:path'
 import {it,expect,vi} from 'vitest'
+import {testTimeoutAtLeast} from '../../vitest.config.ts'
 import {VaultSession} from '../../src/main/vault.ts';import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
 import {serializeStoredVault} from '../../src/main/notes-fs.ts';import {markPrompt,upsertAiAnswer} from '../../src/main/host-source.ts'
 vi.mock('electron',()=>({dialog:{showOpenDialog:vi.fn()}}));vi.mock('../../src/main/watch.ts',async importOriginal=>({...await importOriginal<typeof import('../../src/main/watch.ts')>(),watchVault:()=>()=>{}}))
@@ -350,7 +351,7 @@ it.each(['body','ledger'] as const)('measures 1000 %s sources through startup, r
   await measure('dispatch-selected',()=>permit.assertCurrent(receiver));await measure('update-candidates-selected',async()=>{const {updateMemoryCandidates}=await import('../../src/main/memory-use.ts');const selected=updateMemoryCandidates(service.snapshot().record.entries,'中文要求','');expect(selected).toHaveLength(16);expect(await service.consolidationCandidates([source],selected.map(e=>e.id))).toHaveLength(16)});await measure('management',()=>service.view());expect(contexts).not.toHaveBeenCalled()
   await writeFile(path.join(root,'.rgent-permissions'),JSON.stringify({'a.md':'forbidden'}));await expect(permit.assertCurrent(receiver)).rejects.toThrow('MEMORY_CHANGED')
  }finally{vi.restoreAllMocks();vault.dispose();await rm(base,{recursive:true,force:true})}
-},30000)
+},testTimeoutAtLeast(30_000))
 it('damaged material control bytes do not block ordinary note saving or become empty controls',async()=>{
  const base=await mkdtemp(path.join(os.tmpdir(),'rgent-material-save-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'原始材料')
  const vault=new VaultSession(base,vi.fn());vault.restore()

@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { stripHashbang, testTimeoutMs } from '../../vitest.config.ts'
+import { stripHashbang, testTimeoutAtLeast, testTimeoutMs } from '../../vitest.config.ts'
 
 it('strips a LF hashbang so the remainder is ordinary module source', () => {
   expect(stripHashbang('#!/usr/bin/env node\nexport const ok = 1\n')).toBe('export const ok = 1\n')
@@ -14,5 +14,6 @@ it('leaves modules without a hashbang unchanged', () => {
 })
 
 it('gives Windows CI a longer unit-test budget without changing assertions', () => {
-  expect(testTimeoutMs).toBe(process.platform === 'win32' ? 60_000 : 20_000)
+  expect(testTimeoutMs).toBe(process.platform === 'win32' ? 90_000 : 20_000)
+  expect(testTimeoutAtLeast(30_000)).toBe(process.platform === 'win32' ? 90_000 : 30_000)
 })

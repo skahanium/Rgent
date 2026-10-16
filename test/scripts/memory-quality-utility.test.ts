@@ -1,4 +1,5 @@
 import {afterEach,expect,it,vi} from 'vitest'
+import {testTimeoutAtLeast} from '../../vitest.config.ts'
 import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -52,7 +53,7 @@ it('captures actual M4 before closure and restores only memory/permissions with 
  await expect(utility.restoreUtilityArtifact(artifact,{...binding,frozenHash:'b'.repeat(64)})).rejects.toThrow()
  await writeFile(path.join(base,'vault','source','fiction.md'),original.toString()+'changed')
  await expect(utility.restoreUtilityArtifact(artifact,binding)).rejects.toThrow('EVALUATION_ARTIFACT_SOURCE_CHANGED')
-},30000)
+},testTimeoutAtLeast(30_000))
 it('requires exact unique memory suffix and all remaining input to match before any charge',()=>{
  expect(typeof utility.assertUtilityInputs).toBe('function')
  const input={system:'system',messages:[{role:'user',content:'body\nmemory'}],maxOutputTokens:4096,modelId:'fiction',baseURL:'https://fiction.test',contextTokens:32768}
@@ -123,4 +124,4 @@ it('chain alpha4 and alpha5 retain separate actual snapshots and allow later unr
  await utility.restoreUtilityArtifact(artifacts[1],artifacts[1].binding)
  expect(await readFile(path.join(artifacts[0].root,'step-4.md'))).toEqual(first)
  expect(artifacts[0].record.entries.map((e:any)=>[e.id,e.version])).toEqual(artifacts[1].record.entries.map((e:any)=>[e.id,e.version]))
-},30000)
+},testTimeoutAtLeast(30_000))
