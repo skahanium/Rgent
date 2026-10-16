@@ -2,6 +2,7 @@ import {expect,it,vi,afterEach} from 'vitest'
 import {mkdtempSync,readFileSync,writeFileSync,unlinkSync,rmSync} from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import {testTimeoutMs} from '../../vitest.config.ts'
 import * as utility from '../../scripts/memory-quality-utility.ts'
 import {runMemoryQualityCase} from '../../scripts/memory-quality-runner.ts'
 import {fingerprint,collaborationResumeCycle} from '../../scripts/memory-quality-support.ts'
@@ -9,7 +10,7 @@ import {V6_QUALITY_CASES} from '../fixtures/v6-memory-quality.ts'
 vi.mock('electron',()=>({dialog:{showOpenDialog:vi.fn()}}))
 const dirs:string[]=[];afterEach(()=>{for(const dir of dirs.splice(0))rmSync(dir,{recursive:true,force:true})})
 // 断言不变，只放宽时限：Windows CI 并行下 terminalFixture 单例实测会超过默认 20 秒。
-const persistTimeout=process.platform==='win32'?60_000:20_000
+const persistTimeout=testTimeoutMs
 async function terminalFixture(service?:{failures:number;stop?:boolean;failedScore?:boolean}){
  const root=mkdtempSync(path.join(os.tmpdir(),'rgent-utility-persist-'));dirs.push(root)
  const frozenHash='a'.repeat(64),pairKey='v6-2026-10-05/collaboration/r11/answers/deepseek-flash/fact',sourceKey='v6-2026-10-05/collaboration/r11/consolidation/deepseek-flash/0/v6-fact-01',binding={frozenHash,key:sourceKey,model:'deepseek-flash',round:0,caseId:'v6-fact-01'},credential={provider:'custom' as const,baseURL:'https://fiction.test/v1',modelId:'fiction',apiKey:'fiction-key',contextTokens:32768}

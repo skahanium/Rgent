@@ -1,4 +1,5 @@
 import {describe,expect,it,vi} from 'vitest'
+import {testTimeoutMs} from '../../vitest.config.ts'
 import {mkdtempSync,readFileSync,realpathSync,rmSync,writeFileSync} from 'node:fs'
 import {spawnSync} from 'node:child_process'
 import os from 'node:os'
@@ -254,7 +255,7 @@ describe('v6 付费记录字段', () => {
   expect(result.candidate.failureOrigin).toBeNull()
   expect(result.candidate.secondary).toEqual([])
   expect(result.receipt?.outcome).toBe('applied')
- },20000)
+ },testTimeoutMs)
  it('链式受阻时留证，取得终态但输出不可解析时记候选阶段失败', async() => {
   const spec={id:'v6-wiring-blocked',group:'fact' as const,heldOut:false,prompt:'总结虚构项目木舟的当前状态。',body:'【虚构质量夹具】木舟项目本周只完成了场地确认，下一步安排尚未讨论。',answer:'未采纳的助手草稿。',expected:{required:[],forbidden:[],notes:'',action:'unchanged' as const}}
   const result=await runMemoryQualityCase(spec,credential,async function*(input){
@@ -270,7 +271,7 @@ describe('v6 付费记录字段', () => {
   expect(result.actionVerified).toBe(true)
   expect(result.candidate.failureOrigin).toBe('candidate')
   expect(result.candidate.secondary).toEqual([])
- },20000)
+ },testTimeoutMs)
  it('合法空提议算取得完整结构化输出，近期块落地算动作完成', async() => {
   const spec={id:'v6-wiring-recent',group:'fact' as const,heldOut:false,prompt:'继续虚构项目青灯的核对工作。',body:'【虚构质量夹具】青灯项目本轮目标是核对五份样稿；已完成第 1、2 份的目录检查；第 3 份尚未开始。',answer:'未采纳的助手草稿。',expected:{required:[],forbidden:[],notes:'',action:'add' as const}}
   const result=await runMemoryQualityCase(spec,credential,async function*(input){
@@ -289,7 +290,7 @@ describe('v6 付费记录字段', () => {
   expect(provenance?.version).toBe(2)
   expect(provenance?.version===2?provenance.memoryDeps.map(d=>({id:d.id,version:d.version})):null).toContainEqual({id:result.recent![0]!.id,version:result.recent![0]!.version})
   expect(result.candidate.failureOrigin).toBeNull()
- },20000)
+ },testTimeoutMs)
 })
 
 it('完整性 campaign 跨修订按真实模型累计，两模型限额互不占用',()=>{
@@ -343,7 +344,7 @@ it('真实前置Host链用观测taskId解析后续目标并留证后置发送版
   expect(result.dependencies).toEqual(expect.arrayContaining(result.actionEvidence.finalTargets!.map(t=>expect.objectContaining(t))))
   expect(result.followup!.inputBudgetTokens).toBeGreaterThan(0)
  }finally{rmSync(base,{recursive:true,force:true})}
-},20000)
+},testTimeoutMs)
 
 
 it('actual Electron runner options keep v5 historical non-chain saving and all new v6 Host saving explicit',async()=>{

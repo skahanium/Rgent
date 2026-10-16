@@ -2,6 +2,7 @@ import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {afterEach,it,expect,vi} from 'vitest'
+import {testTimeoutMs} from '../../vitest.config.ts'
 import {VaultSession} from '../../src/main/vault.ts'
 import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
 import {WorkingMemoryConsolidation,parseMemorySuggestions,parseContinuitySuggestions,roleAgreement,inheritInputs,memoryContinuitySystem,protocolRepairPlan,standingEscalationBlocked,suspectSiblingClaim,claimTwinCoverage,scopesCompatible,duplicateClaimContainer,repairFieldLock,workStateShaped,semanticScopeMismatch,recentCompletenessGap,recentRetainsWritten,recentSupplementAccepted} from '../../src/main/working-memory-consolidation.ts'
@@ -374,7 +375,7 @@ it('corrects an actually Host-sent old version without self dependency and retai
   await service.forget({sessionId:service.context().sessionId,revision:basis.revision,objectVersion:basis.objectVersion,id:upstream.id,version:upstream.version})
   expect(service.snapshot().record.entries).toEqual([])
  }finally{vault.dispose()}
-},20000)
+},testTimeoutMs)
 
 const roleSource=(id:string,text:string,classification:'command'|'human'):WorkingSource=>({id,version:1,relPath:'a.md',objectVersion:'object',revision:'a'.repeat(64),permissionTier:'reference',kind:classification==='command'?'ledger':'body',taskId:'task',taskMaterialHash:'b'.repeat(64),classification,start:0,end:text.length,text,hash:createHash('sha256').update(text).digest('hex'),basisHash:'d'.repeat(64),sourceDeps:[],memoryDeps:[],materialId:'task/fragment',sequence:1})
 it('keeps a verbatim authority quote and demotes extra citations into the supporting role',()=>{
@@ -535,7 +536,7 @@ it('corrects a Host-loaded parent using proven legacy recent ancestry while leav
    expect(result.entries.find(e=>e.id===recentId)?.status).toBe('paused')
   }
  }
-}, process.platform === 'win32' ? 60_000 : 20_000)
+}, testTimeoutMs)
 
 it('keeps the applied batch and publishes failure when post-commit promotion fails',async()=>{
  const f=await fixture(async function*(input){yield {type:'text',text:JSON.stringify({proposals:[suggestion(input)],recent:null})};yield {type:'finish',reason:'stop'}},'以后用中文','continuity')

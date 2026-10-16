@@ -9,6 +9,7 @@ import {VaultSession} from '../../src/main/vault.ts'
 import {WorkingMemoryService} from '../../src/main/working-memory-service.ts'
 import {serializeStoredVault} from '../../src/main/notes-fs.ts'
 import {expect,it,vi} from 'vitest'
+import {testTimeoutMs} from '../../vitest.config.ts'
 import * as runner from '../../scripts/memory-quality-runner.ts'
 import * as support from '../../scripts/memory-quality-support.ts'
 import {recordedQualityReview,qualitySummary} from '../../scripts/memory-quality-support.ts'
@@ -35,7 +36,7 @@ it('uses saved body and ledger evidence, then the production context and revocat
  expect(String(requests[0]!.messages[0]!.content)).toContain('项目已经确认蓝鹭术语')
  expect(String(requests[0]!.messages[0]!.content)).not.toContain('神秘人物')
  expect(JSON.stringify(result)).not.toContain('private-secret')
-})
+},testTimeoutMs)
 it('an operator abort cancels pending consolidation and preserves its interrupted result',async()=>{
  const controller=new AbortController()
  const result=await runner.runMemoryQualityCase(sample,credential,async function*(input){controller.abort();throw Error('stopped');yield {type:'text',text:''}},controller.signal)
@@ -54,7 +55,7 @@ it('records a corrected version in a genuine next-task ledger and cannot relearn
  expect(result.followup?.sent[0]?.prompt).toContain('石桥项目每两周检查一次。')
  expect(result.forget).toMatchObject({revoked:true,relearningBlocked:true,replay:{attempted:true,calls:1,remaining:[],receipt:{outcome:'rejected',reason:'MEMORY_MATERIAL_FORGOTTEN'}}})
  expect(paidCalls).toBe(1)
-})
+},testTimeoutMs)
 
 it('scores a genuine terminal format failure as assessed zero while leaving failed negatives pending',async()=>{
  const responses:{body:string;input:ModelStepInput;reason:null;finishReason:string}[]=[]

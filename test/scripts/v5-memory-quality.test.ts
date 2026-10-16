@@ -1,4 +1,5 @@
 import {it,expect} from 'vitest'
+import {testTimeoutMs} from '../../vitest.config.ts'
 import * as support from '../../scripts/memory-quality-support.ts'
 import {V5_QUALITY_CASES,V5_SCREEN_IDS} from '../fixtures/v5-memory-quality.ts'
 it('freezes balanced thirty attempts and gates unreviewed or failed dispatches',()=>{
@@ -38,7 +39,7 @@ it('persists actual first-step output into the next controlled production Host r
  }
  expect(JSON.stringify(results[1].followup.sent)).toContain('第1份目录检查完成（受控实写标识）')
  }finally{await rm(base,{recursive:true,force:true})}
-},20000)
+},testTimeoutMs)
 it('stops a model after hard violations or insufficient service evidence',()=>{
  expect(()=>support.v5DispatchGate([{caseId:'v5-attribution-01',round:0,category:'valid',review:{longRetained:0,recentCorrect:0,semanticChecks:{...goodChecks},evidenceComplete:true,hardViolations:['wrong-attribution']}}],'v5-recent-1',0,true)).toThrow('EVALUATION_MODEL_STOPPED')
  expect(()=>support.v5DispatchGate([{caseId:'v5-standing-01',round:0,category:'service',review:{longRetained:0,recentCorrect:0,semanticChecks:{...goodChecks},evidenceComplete:false,hardViolations:[]}}],'v5-recent-1',0,true)).toThrow('EVALUATION_INSUFFICIENT_EVIDENCE')
@@ -99,7 +100,7 @@ it('runs every chain foreground before paid consolidation and hands off its actu
   if(step>1){expect(hostInputs.at(-1)).toContain(`第${step-1}份目录完成（前步真实输出）`);expect(result.material.memoryDeps.length).toBeGreaterThan(0)}
  }
  }finally{hostStart.mockRestore();await rm(base,{recursive:true,force:true})}
-},20000)
+},testTimeoutMs)
 it('includes explicit correction and Chinese-seed English repetition with genuinely saved initial facts',async()=>{
  const correction=V5_QUALITY_CASES.find(c=>c.id==='v5-correction-01')!,duplicate=V5_QUALITY_CASES.find(c=>c.id==='v5-duplicate-06')!
  expect(correction.expected.action).toBe('correct');expect(duplicate.expected.action).toBe('unchanged')
@@ -112,7 +113,7 @@ it('includes explicit correction and Chinese-seed English repetition with genuin
  expect(support.v5ControlledStatus(c,result)).toBe('passed');expect(result.before[0].content).toBe(c.seed!.content);expect(result.completed).toBe(true);expect(result.initialState.seeded).toBe(true);expect(result.entries.filter((e:any)=>e.category==='long'&&e.status==='active')).toHaveLength(1)
  if(c===correction)expect(result.entries[0].content).toBe('石桥项目每两周检查一次。');else expect(result.entries[0].content).toBe(c.seed!.content)
  }
-},20000)
+},testTimeoutMs)
 it('classifies empty, truncated, service, reference and cancellation receipts separately',()=>{
  for(const [reason,category] of [['MEMORY_OUTPUT_EMPTY','empty'],['MEMORY_OUTPUT_TRUNCATED','length'],['MEMORY_SERVICE_FAILED','service'],['MEMORY_SOURCE_CHANGED','reference'],['MEMORY_OUTPUT_REFERENCE_INVALID','reference'],['MEMORY_CANCELLED','cancel'],['MEMORY_OUTPUT_INVALID','format']] as const)
   expect(support.v5TerminalCategory({result:{receipt:{outcome:'rejected',reason}}})).toBe(category)
@@ -152,7 +153,7 @@ it('does not treat the unchanged applied receipt as a rejected relearning attemp
  expect(result.controlled?.closure?.replay.freshTerminal).toBe(true)
  expect(result.controlled?.closure?.replay.validProposalSources).toBe(true)
  expect(result.controlled?.closure?.passed).toBe(true)
-},20000)
+},testTimeoutMs)
 it('recomputes replay evidence and rejects stale no-op receipts even with asserted flags',()=>{
  const old={taskId:'task',materialVersion:'material',outcome:'applied',entryIds:[]},probe={receipt:old,previousReceipt:old,material:{taskId:'task',materialVersion:'material'},beforeRevision:'before',afterRevision:'after',freshTerminal:true,explicitBlock:true,proposalRejected:true,calls:0,validProposalSources:false}
  expect(support.v5ReplayEvidence(probe)).toBe(false)
