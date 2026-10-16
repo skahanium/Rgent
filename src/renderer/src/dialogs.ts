@@ -13,7 +13,9 @@ export function openLifecycleStatus(initial: LifecycleStatus,
   retry: (request: LifecycleRetryRequest) => Promise<{ status: LifecycleStatus; message?: string }>,
   fallbackFocus?: () => HTMLElement | null): Overlay {
   const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  let busy = false
   const overlay = openOverlay({ label: '文件操作恢复状态', initialFocus: () => close,
+    canDismiss: () => !busy,
     returnFocus: () => trigger?.isConnected && !trigger.closest('[hidden]') ? trigger : fallbackFocus?.() ?? null })
   overlay.root.classList.add('lifecycle-dialog', 'lifecycle-recovery')
   const heading = document.createElement('h2'); heading.textContent = '文件操作恢复状态'
@@ -46,8 +48,12 @@ export function openLifecycleStatus(initial: LifecycleStatus,
     }
   }
   again.addEventListener('click', () => {
-    if (!current.revision || again.disabled) return
+    if (!current.revision || again.disabled || busy) return
     const wasFocused = document.activeElement === again
+    busy = true
+    // Disabling the focused retry control moves focus to body. Chromium then
+    // may fire a CloseWatcher and dismiss the modal (Windows Electron).
+    if (wasFocused) close.focus()
     again.disabled = true
     notice.textContent = '正在核验并保存…'
     void retry({ sessionId: current.sessionId, revision: current.revision }).then((result) => {
@@ -56,10 +62,9 @@ export function openLifecycleStatus(initial: LifecycleStatus,
       notice.textContent = result.message ?? (result.status.status === 'ready' ? '文件操作已完成。' : '恢复记录仍保留。')
     }).catch(() => { if (overlay.isOpen()) notice.textContent = '无法完成重试。恢复记录仍保留，请重新查看状态。' })
       .finally(() => {
+        busy = false
         again.disabled = false
-        if (overlay.isOpen() && wasFocused && (document.activeElement === document.body || document.activeElement === overlay.root)) {
-          (again.isConnected ? again : close).focus()
-        }
+        if (overlay.isOpen() && wasFocused) (again.isConnected ? again : close).focus()
       })
   })
   render(initial)

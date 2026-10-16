@@ -38,6 +38,21 @@ describe('lifecycle recovery dialog', () => {
     overlay.close()
     expect(document.activeElement).toBe(trigger)
   })
+  it('keeps keyboard focus inside the dialog while retry is in flight', async () => {
+    let release!: (value: { status: LifecycleStatus }) => void
+    const overlay = openLifecycleStatus(pending, () => new Promise((resolve) => { release = resolve }))
+    await Promise.resolve()
+    const again = overlay.root.querySelector<HTMLButtonElement>('.lifecycle-retry')!
+    again.focus(); again.click()
+    expect(overlay.isOpen()).toBe(true)
+    expect(again.disabled).toBe(true)
+    expect(document.activeElement?.textContent).toBe('关闭')
+    release({ status: { ...pending, status: 'ready', items: [] } })
+    await vi.waitFor(() => expect(overlay.root.querySelector('.lifecycle-retry')).toBeNull())
+    expect(overlay.isOpen()).toBe(true)
+    expect(document.activeElement?.textContent).toBe('关闭')
+    overlay.close()
+  })
   it('keeps keyboard focus inside after success and uses a visible return target', async () => {
     const trigger = document.createElement('button'); document.body.append(trigger); trigger.focus()
     const fallback = document.createElement('button'); document.body.append(fallback)

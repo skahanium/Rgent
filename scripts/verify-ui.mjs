@@ -1131,7 +1131,9 @@ async function verifyComposition(page, vault, shot) {
     check(`${name} 输入保留完整原文字节`, readFileSync(path.join(vault, name), 'utf8') === expectedRaw)
     await page.key('z', 'KeyZ', process.platform === 'darwin' ? 4 : 2, 90)
     check(`${name} 一次撤销恢复输入前全文`, (await text()).text === source.replace(/\r\n?|\n/g, '\n'))
-    await page.key('z', 'KeyZ', (process.platform === 'darwin' ? 4 : 2) | 8, 90)
+    // CodeMirror historyKeymap: Mod-Shift-z on macOS, Mod-y on Windows/Linux.
+    if (process.platform === 'darwin') await page.key('z', 'KeyZ', 4 | 8, 90)
+    else await page.key('y', 'KeyY', 2, 89)
     check(`${name} 重做恢复完整选词`, (await text()).text === expectedRaw.replace(/\r\n?|\n/g, '\n'))
     for (const syllable of ['n', 'ni', '']) await page.call('Input.imeSetComposition', { text: syllable, selectionStart: syllable.length, selectionEnd: syllable.length })
     await sleep(150)
@@ -4491,12 +4493,19 @@ async function main() {
         readFileSync(path.join(vault, '.rgent-lifecycle'), 'utf8') === journal && existsSync(path.join(vault, '生命周期', '复原', '附件.png')))
       check('失败重试后键盘焦点仍在恢复浮层', await waitFor(page, `document.querySelector('.lifecycle-recovery')?.contains(document.activeElement)`))
       rmSync(path.join(vault, '生命周期', '复原', '外部新增.txt'))
-      await page.eval(`document.querySelector('.lifecycle-retry').click()`)
-      check('安全重试续跑附件且正文与权限保持不变', await waitFor(page, `document.querySelector('.lifecycle-recovery [role=status]')?.textContent === '文件操作已完成。'`) &&
+      await page.eval(`document.querySelector('.lifecycle-retry').focus(); document.querySelector('.lifecycle-retry').click()`)
+      const recoveredUi = await waitFor(page, `document.querySelector('.lifecycle-recovery [role=status]')?.textContent.includes('文件操作已完成')`, process.platform === 'win32' ? 30000 : 12000)
+      const recoveredFiles = recoveredUi &&
         readFileSync(path.join(vault, '生命周期', '已恢复.md'), 'utf8') === '不应泄露到状态接口的正文\r\n' &&
         existsSync(path.join(vault, '生命周期', '已恢复', '附件.png')) &&
         JSON.parse(readFileSync(path.join(vault, '.rgent-lifecycle'), 'utf8')).active === null &&
-        (!policy || readFileSync(path.join(vault, '.rgent-permissions'), 'utf8') === policy))
+        (!policy || readFileSync(path.join(vault, '.rgent-permissions'), 'utf8') === policy)
+      check('安全重试续跑附件且正文与权限保持不变', recoveredFiles, recoveredFiles ? '' : await page.eval(`JSON.stringify({
+        status: document.querySelector('.lifecycle-recovery [role=status]')?.textContent ?? null,
+        overlay: !!document.querySelector('.lifecycle-recovery'),
+        active: document.activeElement && (document.activeElement.textContent || document.activeElement.className),
+        tab: document.querySelector('.tab[aria-selected=true]')?.dataset.rel ?? null
+      })`))
       const unrelatedSaved = await waitFor(page, `(async () => {
         const source = (await window.rgent.noteRead('生命周期/无关生成.md')).content
         const note=await window.rgent.noteRead('生命周期/无关生成.md')
@@ -4509,7 +4518,14 @@ async function main() {
       const recoveredUnrelatedSource = await page.eval(`(async ()=>(await window.rgent.noteRead('生命周期/无关生成.md')).content)()`)
 
       // 焦点是异步落位的：这里必须等，不能紧跟异步操作直接断言——否则机器一忙就会偶发失败（构造性竞态）。
-      check('成功重试后焦点转到浮层关闭按钮', await waitFor(page, `document.querySelector('.lifecycle-recovery')?.contains(document.activeElement) && document.activeElement.textContent === '关闭'`))
+      const closeFocused = await waitFor(page,
+        `document.querySelector('.lifecycle-recovery')?.contains(document.activeElement) && document.activeElement.textContent === '关闭'`,
+        process.platform === 'win32' ? 30000 : 12000)
+      check('成功重试后焦点转到浮层关闭按钮', closeFocused, closeFocused ? '' : await page.eval(`JSON.stringify({
+        overlay: !!document.querySelector('.lifecycle-recovery'),
+        active: document.activeElement && (document.activeElement.textContent || document.activeElement.className),
+        status: document.querySelector('.lifecycle-recovery [role=status]')?.textContent ?? null
+      })`))
       await page.key('Escape', 'Escape', 0, 27)
       check('重试后 tab、文件树与状态一起更新', await waitFor(page, `document.querySelector('.lifecycle-warning').hidden && document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '生命周期/已恢复.md'`))
       check('状态入口隐藏后关闭浮层回到可见工作区控件', await waitFor(page, `document.activeElement?.classList.contains('tree-toggle')`))
