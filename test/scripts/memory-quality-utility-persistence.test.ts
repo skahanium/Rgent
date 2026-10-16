@@ -8,6 +8,8 @@ import {fingerprint,collaborationResumeCycle} from '../../scripts/memory-quality
 import {V6_QUALITY_CASES} from '../fixtures/v6-memory-quality.ts'
 vi.mock('electron',()=>({dialog:{showOpenDialog:vi.fn()}}))
 const dirs:string[]=[];afterEach(()=>{for(const dir of dirs.splice(0))rmSync(dir,{recursive:true,force:true})})
+// 断言不变，只放宽时限：Windows CI 并行下 terminalFixture 单例实测会超过默认 20 秒。
+const persistTimeout=process.platform==='win32'?60_000:20_000
 async function terminalFixture(service?:{failures:number;stop?:boolean;failedScore?:boolean}){
  const root=mkdtempSync(path.join(os.tmpdir(),'rgent-utility-persist-'));dirs.push(root)
  const frozenHash='a'.repeat(64),pairKey='v6-2026-10-05/collaboration/r11/answers/deepseek-flash/fact',sourceKey='v6-2026-10-05/collaboration/r11/consolidation/deepseek-flash/0/v6-fact-01',binding={frozenHash,key:sourceKey,model:'deepseek-flash',round:0,caseId:'v6-fact-01'},credential={provider:'custom' as const,baseURL:'https://fiction.test/v1',modelId:'fiction',apiKey:'fiction-key',contextTokens:32768}
@@ -37,7 +39,7 @@ it('recovers two durable terminals without a pair and a pair without a blind pac
  const finalPair=JSON.parse(pair.toString());finalPair.conditions.on.body='corrupted';writeFileSync(input.file('utility-result'),JSON.stringify(finalPair))
  expect(()=>utility.recoverUtilityReport(input)).toThrow('EVALUATION_UTILITY_EVIDENCE_MISMATCH')
  expect(JSON.parse(readFileSync(input.file('utility-result'),'utf8')).conditions.on.body).toBe('corrupted')
-})
+},persistTimeout)
 it('summary and recovery share strict raw ownership, frozen/source/after/charge and paired-condition validation',async()=>{
  expect(typeof utility.readUtilityEvidence).toBe('function')
  const input=await terminalFixture(),on=readFileSync(input.raw('on')),off=readFileSync(input.raw('off'))
@@ -49,18 +51,18 @@ it('summary and recovery share strict raw ownership, frozen/source/after/charge 
  unlinkSync(input.file('utility-result'));unlinkSync(input.file('utility-blind'));unlinkSync(input.raw('on'))
  expect(utility.readUtilityEvidence(input).conditions.on.status).toBe('charged-without-terminal')
  expect(()=>utility.recoverUtilityReport(input)).toThrow('EVALUATION_CHARGED_UNFINISHED')
-})
+},persistTimeout)
 
 it('recovers charged production limit terminals as failed measurements without redispatch',async()=>{
  const input=await terminalFixture(),before=JSON.stringify(input.dispatches)
  // The ledger schema also permits limit; project that terminal without inventing a new paid attempt.
  for(const c of ['on','off']){const row=JSON.parse(readFileSync(input.raw(c),'utf8'));row.result.status='limit';row.result.finishReason='length';writeFileSync(input.raw(c),JSON.stringify(row))}
  const recovered=utility.recoverUtilityReport(input);expect(recovered.result.conditions.on.status).toBe('limit');expect(recovered.result.validTerminal).toBe(0);expect(JSON.stringify(input.dispatches)).toBe(before)
-})
+},persistTimeout)
 
 it('explicit stop and three consolidation service failures block utility before any answer charge',async()=>{
  for(const service of [{failures:0,stop:true},{failures:3}]){const input=await terminalFixture(service);expect(input.error).toMatchObject({message:service.stop?'EVALUATION_MODEL_STOPPED':'EVALUATION_MODEL_PAUSED'});expect(input.dispatches.filter(d=>d.key.includes('/answers/'))).toHaveLength(0)}
-})
+},persistTimeout)
 it('a third mixed-phase failure stops the next condition; two bound resumes retain the mixed charged history',async()=>{
  const input=await terminalFixture({failures:2});expect(input.error).toMatchObject({message:'EVALUATION_MODEL_PAUSED'});expect(input.dispatches.filter(d=>d.key.includes('/answers/'))).toHaveLength(1)
  const before=JSON.stringify(input.dispatches),cycles:any[]=[],binding={frozenHash:input.frozenHash,prefix:input.serviceInput().prefix,model:'deepseek-flash'}
@@ -71,10 +73,10 @@ it('a third mixed-phase failure stops the next condition; two bound resumes reta
   for(let n=0;n<3;n++){const key=binding.prefix+'consolidation/'+binding.model+'/0/'+V6_QUALITY_CASES[cycle*3+n+3]!.id;input.dispatches.push({key,at:new Date(cycle+1).toISOString()});writeFileSync(path.join(input.root,'result-'+fingerprint(key)+'.json'),JSON.stringify({key,frozenHash:input.frozenHash,status:'completed',responses:[{reason:'EVALUATION_REQUEST_FAILED'}]}))}
  }
  expect(utility.collaborationServiceState(input.serviceInput()).decision).toBe('exhausted');expect(()=>utility.assertCollaborationServiceDispatch(input.serviceInput())).toThrow('EVALUATION_RECOVERY_EXHAUSTED');expect(JSON.stringify(input.dispatches.slice(0,3))).toBe(before)
-})
+},persistTimeout)
 it('ordinary failed first-round scores do not stop trusted utility observations',async()=>{
  const input=await terminalFixture({failures:0,failedScore:true});expect(input.error).toBeUndefined();expect(input.dispatches).toHaveLength(2);expect(utility.collaborationServiceState(input.serviceInput()).decision).toBe('continue')
-})
+},persistTimeout)
 it('service windows use each actual consolidation response and the program-held in-flight receipt',()=>{
  const root=mkdtempSync(path.join(os.tmpdir(),'rgent-service-window-'));dirs.push(root)
  const frozenHash='service-freeze',prefix='v6-2026-10-05/collaboration/r11/',model='deepseek-flash',keys=V6_QUALITY_CASES.slice(0,3).map(c=>prefix+'consolidation/'+model+'/0/'+c.id),dispatches=keys.map(key=>({key}))
