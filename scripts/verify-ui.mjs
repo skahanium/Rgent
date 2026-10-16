@@ -4164,8 +4164,17 @@ async function main() {
     await probe('输入引起的 tab 重绘保留手动滚动位置', async () => (await page.eval(`Math.abs(document.querySelector('.tabs').scrollLeft - 60) < 1 && document.querySelector('.tab[aria-selected="true"]').querySelector('.tab-dirty') !== null`)) === true)
     await page.eval(`document.querySelector('.tab[aria-selected="true"]').focus()`)
     await page.key('ArrowRight', 'ArrowRight', 0, 39)
+    // 焦点与滚动都是异步落位的：不能紧跟按键直接断言，否则机器一忙就会偶发失败。
+    const keyboardMoved = await waitFor(page, `(() => {
+      const strip = document.querySelector('.tabs')
+      const selected = document.querySelector('.tab[aria-selected="true"]')
+      if (!selected || document.activeElement !== selected) return false
+      const bounds = strip.getBoundingClientRect()
+      const active = selected.closest('.tab-wrap').getBoundingClientRect()
+      return active.left >= bounds.left - 1 && active.right <= bounds.right + 1
+    })()`)
     const keyboardTabs = await page.eval(tabGeometry)
-    check('方向键切到栏外 tab 后，焦点与当前项一起进入可视区', keyboardTabs.activeVisible && (await page.eval(`document.activeElement.matches('.tab[aria-selected="true"]')`)) === true, JSON.stringify(keyboardTabs))
+    check('方向键切到栏外 tab 后，焦点与当前项一起进入可视区', keyboardMoved && keyboardTabs.activeVisible, JSON.stringify(keyboardTabs))
     await page.call('Emulation.clearDeviceMetricsOverride', {})
 
     } catch (error) { stageFailed('长文响应', error) }

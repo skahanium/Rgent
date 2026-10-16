@@ -150,7 +150,7 @@ describe('device vault catalog', () => {
     expect(() => catalog.register(catalog.inspect(extra))).toThrow('VAULT_CATALOG_LIMIT')
     expect(catalog.register(catalog.inspect(vault)).id).toBe(first.id)
     expect(catalog.view().entries).toHaveLength(128)
-  }, 15_000)
+  }, process.platform === 'win32' ? 60_000 : 15_000) // 断言不变；Windows 上 128 次 mkdir+inspect 会超过原 15 秒
   it('requires explicit relocation for a moved root and resets last-use binding', () => {
     const { root, vault, catalog } = fixture()
     const entry = catalog.committed(catalog.inspect(vault))
