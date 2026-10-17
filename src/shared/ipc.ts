@@ -25,6 +25,8 @@ export const IPC = {
   folderCreate: 'folder:create',
   relocationPreview: 'note:relocation-preview',
   relocationCommit: 'note:relocation-commit',
+  noteTrashPreview: 'note:trash-preview',
+  noteTrashCommit: 'note:trash-commit',
   noteRelocated: 'note:relocated',
   lifecycleFlushRequest: 'lifecycle:flush-request',
   lifecycleFlushDone: 'lifecycle:flush-done',
@@ -273,6 +275,20 @@ export type RelocationPreviewView = {
 }
 export type RelocationPreviewResult = { ok: true; preview: RelocationPreviewView } | { ok: false; error: string }
 export type RelocationCommitResult = { ok: true; moved: { from: string; to: string }[]; unrepaired: string[] } | { ok: false; error: string }
+export type TrashPreviewRequest = { relPath: string }
+export type TrashCommitRequest = { id: string; allow: boolean }
+export type TrashPreviewView = {
+  id: string
+  sessionId: string
+  relPath: string
+  title: string
+  hasAttachments: boolean
+}
+export type TrashPreviewResult = { ok: true; preview: TrashPreviewView } | { ok: false; error: string }
+export type TrashCommitResult =
+  | { ok: true; cancelled: true }
+  | { ok: true; cancelled: false; relPath: string; landing: string; attachmentLanding: string | null; orphan: boolean }
+  | { ok: false; error: string }
 export type RelocationEvent = { moved: { from: string; to: string }[]; sessionId?: string }
 export type LifecycleReason = 'journal-invalid' | 'journal-unreadable' | 'object-changed' | 'policy-changed' | 'recovery-required'
 export type LifecycleStatus = {

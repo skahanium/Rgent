@@ -43,5 +43,7 @@ void Create(VaultHandle* root, const std::string& relative_file);
 void CreateVaultDirectory(VaultHandle* root, const std::string& relative_dir);
 void Move(VaultHandle* root, const std::string& source, const std::string& target,
           const std::string& expected_id);
+/** 送入系统废纸篓。macOS 核 expected_id 后调用 trashItem，返回落点路径（可空）。Windows 报 PLATFORM_UNPROVEN。 */
+std::string Trash(VaultHandle* root, const std::string& rel_path, const std::string& expected_id);
 
 } // namespace rgent

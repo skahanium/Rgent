@@ -1,7 +1,8 @@
 import { LedgerStore } from '../../src/main/ledger-store.ts'
 import { VaultLifecycle } from '../../src/main/vault-lifecycle.ts'
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { closeSecureFs, secureFsFor } from '../../src/main/secure-fs.ts'
@@ -63,6 +64,48 @@ describe('secure vault structure', () => {
     expect(await readFile(path.join(root, '归档', '资料', '一.md'), 'utf8')).toBe('one')
     await mkdir(path.join(root, '资料'))
     expect(() => fs.move('归档/资料', '资料', id)).toThrow('EEXIST')
+  })
+
+  it('trashes a file only when the expected identity still matches', async () => {
+    const root = await vault()
+    await writeFile(path.join(root, '稿.md'), '原文')
+    const fs = secureFsFor(root)
+    const id = fs.resolve('稿.md').at(-1)!.id
+    if (process.platform !== 'darwin') {
+      expect(() => fs.trash('稿.md', id)).toThrow('PLATFORM_UNPROVEN')
+      expect(await readFile(path.join(root, '稿.md'), 'utf8')).toBe('原文')
+      return
+    }
+    expect(() => fs.trash('稿.md', 'stale')).toThrow('PATH_CHANGED')
+    expect(await readFile(path.join(root, '稿.md'), 'utf8')).toBe('原文')
+    await rename(path.join(root, '稿.md'), path.join(root, '停.md'))
+    await writeFile(path.join(root, '稿.md'), '顶替')
+    expect(() => fs.trash('稿.md', id)).toThrow('PATH_CHANGED')
+    expect(await readFile(path.join(root, '稿.md'), 'utf8')).toBe('顶替')
+    expect(await readFile(path.join(root, '停.md'), 'utf8')).toBe('原文')
+    const current = fs.resolve('稿.md').at(-1)!.id
+    const landing = fs.trash('稿.md', current)
+    expect(existsSync(path.join(root, '稿.md'))).toBe(false)
+    expect(landing.length).toBeGreaterThan(0)
+    expect(await readFile(landing, 'utf8')).toBe('顶替')
+    await rm(landing, { recursive: true, force: true })
+  })
+
+  it('trashes a directory', async () => {
+    const root = await vault()
+    await mkdir(path.join(root, '附件'))
+    await writeFile(path.join(root, '附件', '图.txt'), 'bit')
+    const fs = secureFsFor(root)
+    const id = fs.resolve('附件').at(-1)!.id
+    if (process.platform !== 'darwin') {
+      expect(() => fs.trash('附件', id)).toThrow('PLATFORM_UNPROVEN')
+      expect(await readFile(path.join(root, '附件', '图.txt'), 'utf8')).toBe('bit')
+      return
+    }
+    const landing = fs.trash('附件', id)
+    expect(existsSync(path.join(root, '附件'))).toBe(false)
+    expect(await readFile(path.join(landing, '图.txt'), 'utf8')).toBe('bit')
+    await rm(landing, { recursive: true, force: true })
   })
 })
 

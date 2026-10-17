@@ -20,12 +20,12 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
-import { asString, parseEntryCreateRequest, parseFlushDone, parseLifecycleRetryRequest, parseNoteName, parseNoteWriteRequest, parseRelocationCommitRequest, parseRelocationPreviewRequest, parseSetPermissionRequest } from '../shared/ipc-guard.ts'
+import { asString, parseEntryCreateRequest, parseFlushDone, parseLifecycleRetryRequest, parseNoteName, parseNoteWriteRequest, parseRelocationCommitRequest, parseRelocationPreviewRequest, parseSetPermissionRequest, parseTrashCommitRequest, parseTrashPreviewRequest } from '../shared/ipc-guard.ts'
 import { IPC, type VaultState } from '../shared/ipc.ts'
 import type { ChromeTextSetResult } from '../shared/ipc.ts'
 import { loadChromeTextPreference, saveChromeTextPreference } from './theme-preference.ts'
 import { isChromeTextPreference } from '../shared/reading-preference.ts'
-import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, RelocationPreviewRequest, RelocationPreviewView, ModelAddRequest, ModelConfigResult, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult } from '../shared/ipc.ts'
+import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, RelocationPreviewRequest, RelocationPreviewView, ModelAddRequest, ModelConfigResult, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult, TrashCommitResult, TrashPreviewResult, TrashPreviewView } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { loadAssistantHabits, saveAssistantHabits } from './assistant-preference.ts'
@@ -134,7 +134,8 @@ const structureGate = new VaultStructureGate()
 const lifecycleErrorCodes = new Set(['BAD_PATH', 'BAD_REQUEST', 'NO_VAULT', 'VAULT_CHANGED', 'STALE_PREVIEW',
   'STALE_RECOVERY', 'EEXIST', 'ENOENT', 'PATH_CHANGED', 'UNSAFE_PATH', 'PERMISSION_DOWNGRADE',
   'PERMISSION_COLLISION', 'PERMISSIONS_INVALID', 'UNSAVED_DRAFT', 'PREVIOUS_TASK_UNSAVED',
-  'LIFECYCLE_RECOVERY_REQUIRED', 'STRUCTURE_BUSY', 'OTHER_TASK_RUNNING', 'ATTACHMENT_COLLISION', 'LINK_SCAN_FAILED'])
+  'LIFECYCLE_RECOVERY_REQUIRED', 'STRUCTURE_BUSY', 'OTHER_TASK_RUNNING', 'ATTACHMENT_COLLISION', 'LINK_SCAN_FAILED',
+  'PLATFORM_UNPROVEN', 'PATH_RESERVED', 'TRASH_INCOMPLETE'])
 
 function visibleVaultState(): VaultState {
   const state = startupVaultState && !vault?.root ? {...startupVaultState} : vault?.currentState() ?? {status:'needs-pick' as const,reason:'first-run' as const}
@@ -247,6 +248,68 @@ async function relocationCommitShared(id: string, repairLinks: boolean, owner?: 
     const outcome = await currentVault.commitRelocation(id, repairLinks, token)
     currentVault.assertSession(token)
     return { moved: outcome.moved.map(({ from, to }) => ({ from, to })), unrepaired: outcome.unrepaired }
+  } finally { structureGate.finish() }
+}
+
+async function trashPreviewShared(relPath: string): Promise<TrashPreviewView> {
+  const currentVault = vault
+  if (!currentVault) throw new Error('NO_VAULT')
+  const token = currentVault.captureSession()
+  const root = currentVault.root!
+  if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
+  await agentHost?.whenLaunchesSettled()
+  currentVault.assertSession(token)
+  const stem = relPath.replace(/\.md$/i, '')
+  const affected = agentHost?.active().filter((task) => task.root === root &&
+    (task.relPath === relPath || task.relPath.startsWith(`${stem}/`))) ?? []
+  for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
+  if (agentHost?.hasPending(root)) throw new Error('PREVIOUS_TASK_UNSAVED')
+  if (!mainWindow || !(await flushBeforeStructure(mainWindow))) throw new Error('UNSAVED_DRAFT')
+  currentVault.assertSession(token)
+  const preview = await currentVault.previewTrash(relPath, token)
+  currentVault.assertSession(token)
+  return {
+    id: preview.id, sessionId: preview.sessionId, relPath: preview.relPath,
+    title: preview.title, hasAttachments: preview.hasAttachments
+  }
+}
+
+async function trashCommitShared(id: string, allow: boolean): Promise<Exclude<TrashCommitResult, { ok: false }>> {
+  const currentVault = vault
+  const win = mainWindow
+  if (!currentVault || !win || !currentVault.root) throw new Error('BAD_REQUEST')
+  const token = currentVault.captureSession()
+  const preview = currentVault.trashPreviewById(id)
+  if (!preview) throw new Error('STALE_PREVIEW')
+  if (!allow) {
+    await currentVault.commitTrash(id, false, token)
+    return { ok: true, cancelled: true }
+  }
+  const root = currentVault.root
+  if (structureGate.isBusy()) throw new Error('STRUCTURE_BUSY')
+  structureGate.begin({
+    root,
+    exact: [preview.relPath],
+    prefixes: [preview.relPath.replace(/\.md$/i, '')]
+  })
+  try {
+    await agentHost?.whenLaunchesSettled()
+    currentVault.assertSession(token)
+    const stem = preview.relPath.replace(/\.md$/i, '')
+    const affected = agentHost?.active().filter((task) => task.root === root &&
+      (task.relPath === preview.relPath || task.relPath.startsWith(`${stem}/`))) ?? []
+    for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
+    if (agentHost?.hasPending(root)) throw new Error('PREVIOUS_TASK_UNSAVED')
+    if (!(await flushBeforeStructure(win))) throw new Error('UNSAVED_DRAFT')
+    currentVault.assertSession(token)
+    structureGate.seal()
+    const outcome = await currentVault.commitTrash(id, true, token)
+    currentVault.assertSession(token)
+    if (outcome.cancelled) return { ok: true, cancelled: true }
+    return {
+      ok: true, cancelled: false, relPath: outcome.relPath!, landing: outcome.landing ?? '',
+      attachmentLanding: outcome.attachmentLanding ?? null, orphan: outcome.orphan === true
+    }
   } finally { structureGate.finish() }
 }
 
@@ -491,7 +554,7 @@ function registerIpc(): void {
       if (!trusted(event)) throw new Error('BAD_SENDER')
       const current = vault,session = current?.sessionId() ?? null
       const actual = isVaultChannel(channel) ? boundArguments(args, session) : args
-      if (vaultSwitch?.busy && [IPC.agentStart, IPC.agentAuthorizationPreview, IPC.noteCreate, IPC.folderCreate, IPC.relocationPreview, IPC.relocationCommit, IPC.lifecycleRetry, IPC.recoveryScan, IPC.recoveryConfirm, IPC.noteSaveCopyPreview, IPC.noteSaveCopyCommit, IPC.permissionsSet, IPC.memoryConfigSave, IPC.memoryPreviewCommit, IPC.memoryItemEdit, IPC.memoryItemDisable, IPC.memoryItemForget, IPC.memoryJobRetryPreview, IPC.skillsSave, IPC.skillsSetEnabled, IPC.agentWriteConfirm, IPC.ledgerMaintenance, IPC.ledgerMigrate, IPC.ledgerRepair].includes(channel as never)) throw Error('VAULT_SWITCH_BUSY')
+      if (vaultSwitch?.busy && [IPC.agentStart, IPC.agentAuthorizationPreview, IPC.noteCreate, IPC.folderCreate, IPC.relocationPreview, IPC.relocationCommit, IPC.noteTrashPreview, IPC.noteTrashCommit, IPC.lifecycleRetry, IPC.recoveryScan, IPC.recoveryConfirm, IPC.noteSaveCopyPreview, IPC.noteSaveCopyCommit, IPC.permissionsSet, IPC.memoryConfigSave, IPC.memoryPreviewCommit, IPC.memoryItemEdit, IPC.memoryItemDisable, IPC.memoryItemForget, IPC.memoryJobRetryPreview, IPC.skillsSave, IPC.skillsSetEnabled, IPC.agentWriteConfirm, IPC.ledgerMaintenance, IPC.ledgerMigrate, IPC.ledgerRepair].includes(channel as never)) throw Error('VAULT_SWITCH_BUSY')
       const result = isVaultChannel(channel) && current ? await current.runBound(session, () => listener(event, ...actual)) : await listener(event, ...actual)
       if (isVaultChannel(channel) && session !== (vault?.sessionId() ?? null)) throw Error('VAULT_CHANGED')
       return result
@@ -1164,6 +1227,18 @@ function registerIpc(): void {
       const outcome = await relocationCommitShared(request.id, request.repairLinks)
       return { ok: true, moved: outcome.moved, unrepaired: outcome.unrepaired }
     } catch (error) { return { ok: false, error: lifecycleError(error, 'COMMIT_FAILED') } }
+  })
+  registerTrustedHandle(IPC.noteTrashPreview, async (event, value: unknown): Promise<TrashPreviewResult> => {
+    const request = parseTrashPreviewRequest(value)
+    if (!trusted(event) || !request || !vault) return { ok: false, error: 'BAD_PATH' }
+    try { return { ok: true, preview: await trashPreviewShared(request.relPath) } }
+    catch (error) { return { ok: false, error: lifecycleError(error, 'PREVIEW_FAILED') } }
+  })
+  registerTrustedHandle(IPC.noteTrashCommit, async (event, value: unknown): Promise<TrashCommitResult> => {
+    const request = parseTrashCommitRequest(value)
+    if (!trusted(event) || !request || !vault) return { ok: false, error: 'BAD_REQUEST' }
+    try { return await trashCommitShared(request.id, request.allow) }
+    catch (error) { return { ok: false, error: lifecycleError(error, 'COMMIT_FAILED') } }
   })
   registerTrustedHandle(IPC.lifecycleStatus, async (event) => {
     if (!trusted(event) || !vault) throw new Error('NO_VAULT')

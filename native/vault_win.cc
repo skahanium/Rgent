@@ -605,6 +605,10 @@ void Move(VaultHandle* root, const std::string& source, const std::string& targe
   if (Resolve(root, target).back().id != expected_id) Fail("PATH_CHANGED");
 }
 
+std::string Trash(VaultHandle*, const std::string&, const std::string&) {
+  Fail("PLATFORM_UNPROVEN");
+}
+
 } // namespace rgent
 
 #endif // _WIN32

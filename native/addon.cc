@@ -231,6 +231,16 @@ napi_value Move(napi_env env, napi_callback_info info) {
   });
 }
 
+napi_value Trash(napi_env env, napi_callback_info info) {
+  return Invoke(env, [&] {
+    size_t argc = 3;
+    napi_value args[3];
+    Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr));
+    if (argc != 3) throw std::runtime_error("BAD_ARGS");
+    return Text(env, rgent::Trash(Root(env, args[0]), String(env, args[1]), String(env, args[2])));
+  });
+}
+
 napi_value Init(napi_env env, napi_value exports) {
   const napi_property_descriptor properties[] = {
     {"openRoot", nullptr, OpenRoot, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -242,7 +252,8 @@ napi_value Init(napi_env env, napi_value exports) {
     {"replace", nullptr, Replace, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"create", nullptr, Create, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"createDirectory", nullptr, CreateDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
-    {"move", nullptr, Move, nullptr, nullptr, nullptr, napi_default, nullptr}
+    {"move", nullptr, Move, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"trash", nullptr, Trash, nullptr, nullptr, nullptr, napi_default, nullptr}
   };
   Check(env, napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties));
   return exports;

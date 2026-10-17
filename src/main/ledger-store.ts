@@ -321,6 +321,24 @@ export class LedgerStore{
   const record:LedgerRecord={version:1,noteId:owner.noteId,taskId:chapter.taskId,revision:1,state:'pending-body',bodyStatus:'unable-to-verify',chapter:visible,sequence:registry.sequence}
   const raw=JSON.stringify(record);if(Buffer.byteLength(raw)>2*1024*1024)throw Error('LEDGER_RECORD_LIMIT');this.replace(this.path(owner,chapter.taskId),raw);return record
  }
+ /** 人确认删除后记一笔：笔记已进废纸篓，不能再读正文，所以不走 owner()/publish()。 */
+ recordHumanTrash(relPath:string,landing:string,attachmentLanding:string|null,orphan:boolean):void{
+  if(!rel(relPath))throw Error('BAD_PATH')
+  const registry=this.registry(),owner=registry.owners.find(o=>o.relPath===relPath)
+  if(!owner)return
+  const taskId='humantrash'
+  const answer=orphan
+   ?`${landing?`笔记落点：${landing}`:'笔记已移入系统废纸篓'}；同名附件夹未能送入废纸篓`
+   :attachmentLanding
+    ?`笔记落点：${landing||'（无收据）'}；附件夹落点：${attachmentLanding}`
+    :`笔记落点：${landing||'（无收据）'}`
+  const chapter={taskId,startedAt:new Date().toISOString(),status:'completed' as const,prompt:'移入系统废纸篓',answer}
+  if(!validChapter(chapter))throw Error('LEDGER_RECORD_INVALID')
+  const previous=this.record(owner,taskId)
+  const record:LedgerRecord={version:1,noteId:owner.noteId,taskId,revision:previous?nextRecordRevision(previous.revision):1,state:'saved',bodyStatus:'unable-to-verify',chapter,sequence:0}
+  const raw=JSON.stringify(record);if(Buffer.byteLength(raw)>2*1024*1024)throw Error('LEDGER_RECORD_LIMIT')
+  this.replace(this.path(owner,taskId),raw)
+ }
  complete(relPath:string,taskId:string,bodyRevision:string):LedgerRecord{
   const owner=this.owner(relPath),note=this.fs.readSnapshot(relPath),record=this.record(owner,taskId);if(!record||!record.chapter)throw Error('LEDGER_RECORD_INVALID');if(digest(note.bytes.toString())!==bodyRevision)throw Error('LEDGER_BODY_CHANGED')
   const body=note.bytes.toString(),blocks=compile(body).index.markers.filter(b=>b.identity==='ai'&&parseMarker(body.slice(b.range.start,b.range.end))?.attrs['task-id']===taskId)

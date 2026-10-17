@@ -17,6 +17,7 @@ type NativeBinding = {
   create(root: unknown, relPath: string): void
   createDirectory(root: unknown, relPath: string): void
   move(root: unknown, source: string, target: string, expectedId: string): void
+  trash(root: unknown, relPath: string, expectedId: string): string
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -69,6 +70,10 @@ export class SecureVaultFs {
 
   move(source: string, target: string, expectedId: string): void {
     binding.move(this.handle, source, target, expectedId)
+  }
+
+  trash(relPath: string, expectedId: string): string {
+    return binding.trash(this.handle, relPath, expectedId)
   }
 
   close(): void {

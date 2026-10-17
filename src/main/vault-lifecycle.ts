@@ -2,7 +2,8 @@ import { validOwner, validLedgerPublication, inspectLedgerPublication, recoverLe
 import { applyMemoryRecovery, type MemoryRecoveryPatch } from './working-memory-store.ts'
 import { vaultRootIdentity } from './watch.ts'
 import { createHash, randomUUID } from 'node:crypto'
-import { collectNotePaths } from '../shared/vault-rel.ts'
+import { collectNotePaths, noteTitle } from '../shared/vault-rel.ts'
+import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 import { compile } from '../markdown/index.ts'
 import { listVaultTree, readNoteSnapshot, revisionOf } from './notes-fs.ts'
 import { effectivePermissionEntries, loadPermissionSnapshot, tierFor } from './permissions.ts'
@@ -14,6 +15,16 @@ import type { LifecycleStatus } from '../shared/ipc.ts'
 const JOURNAL = '.rgent-lifecycle'
 const PERMISSIONS = '.rgent-permissions'
 
+export type TrashPreview = {
+  id: string
+  sessionId: string
+  relPath: string
+  title: string
+  objectVersion: string
+  hasAttachments: boolean
+  attachmentPath: string | null
+  attachmentId: string | null
+}
 export type RelocationRequest = { kind: 'note' | 'folder'; source: string; target: string }
 export type RelocationMove = { from: string; to: string; id: string }
 export type LinkChange = { relPath: string; newPath: string; expectedRevision: string; expectedObjectVersion: string; changes: { start: number; end: number; before: string; after: string }[] }
@@ -91,6 +102,7 @@ export class VaultLifecycle {
   /** Disk journal fields are recovery hints, not native-success identity evidence. */
   private readonly controlledRepairs = new Map<string, RepairReceipt>()
   private readonly previews = new Map<string, { view: RelocationPreview; fingerprints: Fingerprint[]; permissionBefore: string | null; permissionAfter: string | null }>()
+  private readonly trashPreviews = new Map<string, TrashPreview>()
 
   constructor(private readonly root: string, private readonly queue = new VaultMutationQueue(),
     private readonly sessionId: string = randomUUID(), private readonly assertCurrent: () => void = () => {},
@@ -150,6 +162,42 @@ export class VaultLifecycle {
   }
 
   peek(id: string): RelocationPreview | null { return this.previews.get(id)?.view ?? null }
+
+  peekTrash(id: string): TrashPreview | null {
+    const view = this.trashPreviews.get(id)
+    return view ? structuredClone(view) : null
+  }
+
+  discardTrash(id: string): void { this.trashPreviews.delete(id) }
+
+  /** 人删除预览：只接受一篇笔记。同名附件夹记为同一事务第二步。Windows 报 PLATFORM_UNPROVEN。 */
+  previewTrash(relPath: string): TrashPreview {
+    this.assertCurrent()
+    if (!HUMAN_TRASH_ON_THIS_PLATFORM) throw new Error('PLATFORM_UNPROVEN')
+    if (this.loadJournal().active) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+    if (!validPath(relPath) || !isNotePath(relPath) || !resolveInVault(this.root, relPath)) throw new Error('BAD_PATH')
+    const fs = secureFsFor(this.root)
+    const source = fs.resolve(relPath)
+    if (source.at(-1)?.kind !== 'file') throw new Error('BAD_PATH')
+    let attachmentPath: string | null = null
+    let attachmentId: string | null = null
+    const companion = relPath.slice(0, -3)
+    try {
+      const resolved = fs.resolve(companion)
+      if (resolved.at(-1)?.kind !== 'dir') throw new Error('ATTACHMENT_COLLISION')
+      attachmentPath = companion
+      attachmentId = resolved.at(-1)!.id
+    } catch (error) {
+      if (!(error instanceof Error && error.message === 'ENOENT')) throw error
+    }
+    const view: TrashPreview = {
+      id: randomUUID(), sessionId: this.sessionId, relPath, title: noteTitle(relPath),
+      objectVersion: source.at(-1)!.id, hasAttachments: attachmentPath !== null, attachmentPath, attachmentId
+    }
+    this.trashPreviews.clear()
+    this.trashPreviews.set(view.id, view)
+    return structuredClone(view)
+  }
 
   /** 未核验的外部消失记录；只读，不改变 `active` 的中断语义。 */
   missingObjects(): MissingObject[] {

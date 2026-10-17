@@ -10,7 +10,8 @@ import { dialog, type BrowserWindow } from 'electron'
 import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, RecoveryRow, RecoveryScanView, RecoveryVerdict, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest } from '../shared/ipc.ts'
 import { createFolder, createNote, createNoteWithBody, listVaultTree, parseStoredVault, readNoteSnapshot, requireOrdinaryNotes as verifyOrdinaryNotes, revisionOf, serializeStoredVault, writeNote } from './notes-fs.ts'
 import { VaultMutationQueue } from './vault-mutation-queue.ts'
-import { VaultLifecycle, type MissingObject, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite } from './vault-lifecycle.ts'
+import { VaultLifecycle, type MissingObject, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite, type TrashPreview } from './vault-lifecycle.ts'
+import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 import { isOwnEcho, type RecentWrite } from './echo.ts'
 import { hasHiddenSegment, isNotePath, resolveInVault, sanitizeFolderName, sanitizeNoteName } from './paths.ts'
 import { effectivePermissionEntries, loadPermissions, loadPermissionSnapshot, modelTierFor, setPermission as savePermission, tierFor } from './permissions.ts'
@@ -494,7 +495,8 @@ export class VaultSession {
 
   /** 外部消失登记一条生命周期记录。字段全部取自既有登记（身份、内容哈希、附件证据、
    *  消失时的权限档），写进同一本 `.rgent-lifecycle`，不新增存储格式。
-   *  本轮没有程序删除，所以任何路径消失都是外部消失。 */
+   *  人确认的 macOS 删除也走同一本记录（PATH_RESERVED／来源失效／不自动遗忘）；
+   *  监视器看到的路径消失仍按外部消失登记。 */
   private async recordExternalDisappearance(relPath: string): Promise<void> {
     let observed = false
     try {
@@ -1025,6 +1027,100 @@ export class VaultSession {
   }
 
   relocationPreviewById(id: string): RelocationPreview | null { this.assertCall(); return this.lifecycle?.peek(id) ?? null }
+
+  async previewTrash(relPath: string, token = this.captureSession()): Promise<TrashPreview> {
+    this.assertSession(token)
+    const lifecycle = this.lifecycle
+    await this.lifecycleReady
+    this.assertSession(token)
+    if (this.lifecycleError) throw this.lifecycleError
+    if (!lifecycle) throw new Error('NO_VAULT')
+    this.requireStableStructure()
+    const preview = lifecycle.previewTrash(relPath)
+    this.assertSession(token)
+    return preview
+  }
+
+  trashPreviewById(id: string): TrashPreview | null { this.assertCall(); return this.lifecycle?.peekTrash(id) ?? null }
+
+  async commitTrash(id: string, allow: boolean, token = this.captureSession()): Promise<{
+    cancelled: boolean; relPath?: string; landing?: string; attachmentLanding?: string | null; orphan?: boolean
+  }> {
+    this.assertSession(token)
+    const lifecycle = this.lifecycle
+    await this.lifecycleReady
+    this.assertSession(token)
+    if (this.lifecycleError) throw this.lifecycleError
+    if (!lifecycle) throw new Error('NO_VAULT')
+    const preview = lifecycle.peekTrash(id)
+    if (!preview || preview.sessionId !== token) throw new Error('STALE_PREVIEW')
+    if (!allow) {
+      lifecycle.discardTrash(id)
+      return { cancelled: true }
+    }
+    if (!HUMAN_TRASH_ON_THIS_PLATFORM) {
+      lifecycle.discardTrash(id)
+      throw new Error('PLATFORM_UNPROVEN')
+    }
+    return this.mutations.run(async () => {
+      this.assertSession(token)
+      this.requireStableStructure()
+      const root = this.root!
+      const fs = secureFsFor(root)
+      let current: ReturnType<typeof fs.resolve>[number] | undefined
+      try { current = fs.resolve(preview.relPath).at(-1) }
+      catch (error) {
+        lifecycle.discardTrash(id)
+        if (error instanceof Error && error.message === 'ENOENT') throw new Error('PATH_CHANGED')
+        throw error
+      }
+      if (!current || current.kind !== 'file' || current.id !== preview.objectVersion) {
+        lifecycle.discardTrash(id)
+        throw new Error('PATH_CHANGED')
+      }
+      const body = fs.readSnapshot(preview.relPath)
+      const bodyRevision = createHash('sha256').update(body.bytes).digest('hex')
+      let noteId: string = randomUUID()
+      try {
+        const owner = this.ledgerStore?.recoveryOwners().owners.find((item) => item.relPath === preview.relPath)
+        if (owner) noteId = owner.noteId
+      } catch { /* 未登记笔记仍写消失记录 */ }
+      let attachments: MissingObject['attachments'] = []
+      try { attachments = this.ledgerStore?.attachmentEvidence(preview.relPath) ?? [] }
+      catch { attachments = [] }
+      const snapshot = await loadPermissionSnapshot(root)
+      const effective = snapshot.state.status === 'ready' ? effectivePermissionEntries(root, snapshot.state.entries) : null
+      const permissionTier: PermissionTier = effective ? tierFor(preview.relPath, effective) : 'forbidden'
+      const landing = fs.trash(preview.relPath, preview.objectVersion)
+      lifecycle.discardTrash(id)
+      try {
+        lifecycle.recordMissing({
+          relPath: preview.relPath, noteId, objectVersion: preview.objectVersion, bodyRevision, attachments,
+          rootIdentity: this.rootIdentity ?? vaultRootIdentity(root), permissionTier, detectedAt: new Date().toISOString()
+        })
+      } catch {
+        this.reservedMissing.add(preview.relPath)
+      }
+      let attachmentLanding: string | null = null
+      let orphan = false
+      if (preview.attachmentPath && preview.attachmentId) {
+        try {
+          const attach = fs.resolve(preview.attachmentPath).at(-1)
+          if (!attach || attach.kind !== 'dir' || attach.id !== preview.attachmentId) throw new Error('PATH_CHANGED')
+          attachmentLanding = fs.trash(preview.attachmentPath, preview.attachmentId)
+        } catch (error) {
+          if (!(error instanceof Error && error.message === 'ENOENT')) orphan = true
+        }
+      }
+      try { this.ledgerStore?.recordHumanTrash(preview.relPath, landing, attachmentLanding, orphan) }
+      catch { /* 账本留痕失败不回滚已进废纸篓的对象 */ }
+      this.verified.delete(preview.relPath)
+      this.latestObjects.delete(preview.relPath)
+      this.index.markDirty()
+      this.emit('tree:changed')
+      return { cancelled: false, relPath: preview.relPath, landing, attachmentLanding, orphan }
+    })
+  }
 
   async commitRelocation(id: string, repairLinks: boolean, token = this.captureSession()): Promise<{ moved: RelocationMove[]; unrepaired: string[] }> {
     this.assertSession(token)

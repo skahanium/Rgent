@@ -47,6 +47,10 @@ import {
   type RelocationPreviewResult,
   type RelocationCommitRequest,
   type RelocationCommitResult,
+  type TrashPreviewRequest,
+  type TrashPreviewResult,
+  type TrashCommitRequest,
+  type TrashCommitResult,
   type RelocationEvent,
   type LifecycleStatus,
   type LifecycleRetryRequest,
@@ -54,6 +58,7 @@ import {
   type SaveCopyPreviewRequest, type SaveCopyCommitRequest, type SaveCopyPreviewResult, type SaveCopyCommitResult,
   type LifecycleRetryResult
 } from '../shared/ipc.ts'
+import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 
 let mountedSession: string | null = null
 async function invoke(channel: string, ...args: unknown[]): Promise<any> {
@@ -129,6 +134,12 @@ const api = {
     invoke(IPC.relocationPreview, request),
   relocationCommit: (request: RelocationCommitRequest): Promise<RelocationCommitResult> =>
     invoke(IPC.relocationCommit, request),
+  noteTrashPreview: (request: TrashPreviewRequest): Promise<TrashPreviewResult> =>
+    invoke(IPC.noteTrashPreview, request),
+  noteTrashCommit: (request: TrashCommitRequest): Promise<TrashCommitResult> =>
+    invoke(IPC.noteTrashCommit, request),
+  /** 沙箱渲染进程读不到 process.platform；入口是否出现由 preload 在本机判定。 */
+  humanTrashOnThisPlatform: HUMAN_TRASH_ON_THIS_PLATFORM,
   lifecycleStatus: (): Promise<LifecycleStatus> => invoke(IPC.lifecycleStatus),
   lifecycleRetry: (request: LifecycleRetryRequest): Promise<LifecycleRetryResult> =>
     invoke(IPC.lifecycleRetry, request),

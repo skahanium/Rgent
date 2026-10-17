@@ -729,7 +729,7 @@ async function verifyWriteTools(page, vault, shot, requests) {
 }
 
 /** 外部消失与恢复核验专项（RGENT_UI_RECOVERY_ONLY=1）：在专用临时库里真删真放回，逐条走
- *  「识别与如实呈现／原路径不可重建／核验通过／内容已变／附件缺失／门关」六条判据。
+ *  「识别与如实呈现／原路径不可重建／核验通过／内容已变／附件缺失／设置页无删除入口」六条判据。
  *  模型只用来做登记场与恢复后复跑，全部走受控主机，零真实调用。 */
 async function verifyExternalRecovery(page, vault, staging, shot, requests, shotDir) {
   const modifier = process.platform === 'darwin' ? 4 : 2
@@ -1005,17 +1005,88 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
       dirRowButtons: document.querySelectorAll('.tree-dir[data-path="资料"] button').length
     }
   })()`)
-  check('门关：笔记库页与树里没有任何删除入口、按钮或菜单项',
-    JSON.stringify(noteMenu) === JSON.stringify(['改名', '移动']) &&
+  const expectedNoteMenu = process.platform === 'darwin' ? ['改名', '移动', '删除'] : ['改名', '移动']
+  check('恢复专项：macOS 笔记可删、文件夹与设置页没有删除入口',
+    JSON.stringify(noteMenu) === JSON.stringify(expectedNoteMenu) &&
       JSON.stringify(dirMenu) === JSON.stringify(['在此新建笔记', '新建文件夹', '改名', '移动', '可参考', '必须遵循', '禁止触碰']) &&
+      !dirMenu.includes('删除') &&
       gate.hits.length === 0 && gate.pageDeleteHits.length === 0 &&
       JSON.stringify(gate.recoveryActions) === JSON.stringify(['重扫并核验恢复']) &&
       JSON.stringify(gate.recoveryVerdicts) === JSON.stringify(['content-changed', 'attachments-missing']) &&
       gate.noteRowButtons === 0 && gate.dirRowButtons === 2,
-    JSON.stringify({ noteMenu, dirMenu, ...gate }))
+    JSON.stringify({ noteMenu, dirMenu, expectedNoteMenu, ...gate }))
   await shot(page, 'recovery-gate-closed-1200')
   check('恢复专项的模型调用都走受控主机', requests.length >= 4 && requests.every((request) => request.model === 'test'), String(requests.length) + '／' + JSON.stringify([...new Set(requests.map((request) => request.model))]))
   if (shotDir) writeFileSync(path.join(shotDir, 'recovery-evidence.json'), JSON.stringify(evidence, null, 2))
+}
+
+function reclaimTrashSamples() {
+  const trash = path.join(homedir(), '.Trash')
+  let n = 0
+  for (const name of ['rg-trash-sample.md', 'rg-trash-sample', 'rg-trash-keep.md']) {
+    try {
+      rmSync(path.join(trash, name), { recursive: true, force: true })
+      n += 1
+    } catch { /* 列举废纸篓会 EPERM；已知路径仍可能被系统改名 */ }
+  }
+  const script = 'tell application "Finder"\ntry\ndelete (every item of trash whose name contains "rg-trash-sample" or name contains "rg-trash-keep")\nend try\nend tell'
+  const result = spawnSync('osascript', ['-e', script], { encoding: 'utf8', timeout: 10000 })
+  if (result.status === 0) n += 1
+  return n
+}
+
+/** macOS 人删除专项：右键 → 确认 → 进废纸篓；不删则不动。Windows 只断言没有删除项。 */
+async function verifyHumanTrash(page, vault, shot) {
+  process.stdout.write('\n人删除\n')
+  const darwin = process.platform === 'darwin'
+  check('窗口起来并展开目录', await waitFor(page, `!!document.querySelector('.tree-toggle') && document.querySelectorAll('.tree-row').length>0`) && await setTreeExpanded(page, true))
+  await selectBrowserFolder(page, '')
+  const openMenu = async (selector) => {
+    await page.eval(`(() => { const row = document.querySelector(${JSON.stringify(selector)}); const rect = row.getBoundingClientRect(); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.left + 20, clientY: rect.top + 12 })) })()`)
+    return waitFor(page, `!!document.querySelector('.tier-menu')`)
+  }
+  const labels = async () => page.eval(`[...document.querySelectorAll('.tier-menu button')].map(node => node.textContent)`)
+  await waitFor(page, `document.querySelectorAll('.tree-note').length>0`)
+  const noteSelector = '.tree-note[data-path="研究记录.md"]'
+  check('打开一篇笔记的右键菜单', await openMenu(noteSelector))
+  const noteMenu = await labels()
+  check(darwin ? 'macOS 笔记菜单有删除' : 'Windows 笔记菜单没有删除',
+    darwin ? noteMenu.includes('删除') : !noteMenu.includes('删除'),
+    JSON.stringify(noteMenu))
+  check('打开一个文件夹的右键菜单', await openMenu('.tree-dir[data-path="资料"]'))
+  const dirMenu = await labels()
+  check('文件夹菜单没有删除', !dirMenu.includes('删除'), JSON.stringify(dirMenu))
+  if (!darwin) {
+    await shot(page, 'trash-windows-no-entry-1200')
+    return
+  }
+  const token = `rg-trash-${Date.now()}`
+  writeFileSync(path.join(vault, 'rg-trash-keep.md'), `# 不删\n\n${token}-keep\n`)
+  writeFileSync(path.join(vault, 'rg-trash-sample.md'), `# 样张\n\n${token}\n`)
+  mkdirSync(path.join(vault, 'rg-trash-sample'))
+  writeFileSync(path.join(vault, 'rg-trash-sample', '附图.txt'), `${token}-附图`)
+  try {
+    check('样张出现在树里', await waitFor(page, `!!document.querySelector('.tree-note[data-path="rg-trash-sample.md"]') && !!document.querySelector('.tree-note[data-path="rg-trash-keep.md"]')`))
+    await openMenu('.tree-note[data-path="rg-trash-keep.md"]')
+    await page.eval(`[...document.querySelectorAll('.tier-menu button')].find(n => n.textContent === '删除')?.click()`)
+    check('确认卡写出路径', await waitFor(page, `!!document.querySelector('.overlay-write-confirm') && document.querySelector('.overlay-write-confirm').textContent.includes('rg-trash-keep.md')`))
+    await shot(page, 'trash-confirm-1200')
+    await page.eval(`document.querySelector('.write-confirm-cancel')?.click()`)
+    check('点「不删」后文件仍在', await waitFor(page, `!document.querySelector('.overlay-write-confirm')`) && existsSync(path.join(vault, 'rg-trash-keep.md')))
+    await page.eval(`document.querySelector('.tree-note[data-path="rg-trash-sample.md"]')?.click()`)
+    check('样张标签已打开', await waitFor(page, `document.querySelector('.tab[data-rel="rg-trash-sample.md"]')`))
+    await openMenu('.tree-note[data-path="rg-trash-sample.md"]')
+    await page.eval(`[...document.querySelectorAll('.tier-menu button')].find(n => n.textContent === '删除')?.click()`)
+    check('带附件夹的确认卡说明会一起送', await waitFor(page, `document.querySelector('.overlay-write-confirm')?.textContent.includes('同名附件夹')`))
+    await page.eval(`document.querySelector('.write-confirm-accept')?.click()`)
+    check('确认后笔记从库里消失', await waitFor(page, `!document.querySelector('.tree-note[data-path="rg-trash-sample.md"]')`, 15000) &&
+      !existsSync(path.join(vault, 'rg-trash-sample.md')) && !existsSync(path.join(vault, 'rg-trash-sample')))
+    check('被删笔记的标签已关掉', await page.eval(`![...document.querySelectorAll('.tab')].some(t => t.dataset.rel === 'rg-trash-sample.md')`))
+    await shot(page, 'trash-after-1200')
+  } finally {
+    const cleaned = reclaimTrashSamples()
+    if (!cleaned) process.stdout.write('  ! 未能从废纸篓清掉样张，请在访达废纸篓里找 rg-trash-sample\n')
+  }
 }
 
 async function availablePort() {
@@ -1064,6 +1135,7 @@ const memoryOnly = process.env.RGENT_UI_MEMORY_ONLY === '1'
 const skillsOnly = process.env.RGENT_UI_SKILLS_ONLY === '1'
 const writeOnly = process.env.RGENT_UI_WRITE_ONLY === '1'
 const recoveryOnly = process.env.RGENT_UI_RECOVERY_ONLY === '1'
+const trashOnly = process.env.RGENT_UI_TRASH_ONLY === '1'
 // 付费专项：只由显式环境变量触发，普通测试／构建／CI 永不调用模型。
 const skillsLive = process.env.RGENT_UI_SKILLS_LIVE
 const v4Only = process.env.RGENT_UI_V4_ONLY === '1'
@@ -3504,6 +3576,13 @@ async function main() {
       process.exitCode=failures===0?0:1
       return
     }
+    if(trashOnly){
+      try{await verifyHumanTrash(page,vault,shot)}catch(error){stageFailed('人删除专项',error)}
+      check('人删除专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode=failures===0?0:1
+      return
+    }
     if(recoveryOnly){
       const recoveryRequests=[]
       hostServer=createControlledHostServer([],[],[],recoveryRequests)
@@ -4431,7 +4510,14 @@ async function main() {
     const staleResult = stale.ok ? await page.eval(`window.rgent.relocationCommit({ id: '${stale.preview.id}', repairLinks: false })`) : stale
     check('预览后的外部修改使移动失败且保留原文', staleResult.ok === false && !existsSync(path.join(vault, '生命周期', '拒绝.md')) &&
       readFileSync(path.join(vault, '生命周期', '过期.md'), 'utf8') === '外部第二版')
-    check('废纸篓验证门未通过前没有删除入口', (await page.eval(`!([...document.querySelectorAll('.tier-menu button')].some((n) => n.textContent.includes('删除')))`)) === true)
+    await page.eval(`(() => { const node = [...document.querySelectorAll('.resource-scroll .tree-note')].find((n) => n.querySelector('.tree-label')?.textContent === '新'); node?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 220 })) })()`)
+    const noteMenuAfter = await page.eval(`[...document.querySelectorAll('.tier-menu button')].map((n) => n.textContent)`)
+    check(process.platform === 'darwin' ? 'macOS 笔记右键有删除' : 'Windows 笔记右键没有删除',
+      process.platform === 'darwin' ? noteMenuAfter.includes('删除') : !noteMenuAfter.includes('删除'),
+      JSON.stringify(noteMenuAfter))
+    await page.eval(`(() => { const node = document.querySelector('.tree-dir[data-path="生命周期"]'); const rect = node?.getBoundingClientRect(); node?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: (rect?.left??100)+20, clientY: (rect?.top??220)+12 })) })()`)
+    const dirMenuAfter = await page.eval(`[...document.querySelectorAll('.tier-menu button')].map((n) => n.textContent)`)
+    check('文件夹右键没有删除', !dirMenuAfter.includes('删除'), JSON.stringify(dirMenuAfter))
 
     } catch (error) { stageFailed('笔记库文件生命周期', error) }
     process.stdout.write('\n文件操作恢复状态\n')

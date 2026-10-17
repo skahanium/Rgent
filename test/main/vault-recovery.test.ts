@@ -279,14 +279,14 @@ it('keeps PATH_RESERVED after the missing-record limit swallows a later disappea
   } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
 })
 
-it('shows no deletion entry anywhere while the trash gate stays shut', async () => {
-  // 设备级模型密钥的删除不属于笔记库删除入口；这里禁的是库内对象与废纸篓的任何入口。
-  const channels = Object.entries(IPC).filter(([key, value]) => /trash/i.test(`${key} ${value}`) || /^(note|folder|tree|vault|lifecycle|ledger):.*(delete|remove|trash)/i.test(String(value)))
-  expect(channels).toEqual([])
+it('does not name TRASH_GATE_OPEN and does not give the model a delete channel', async () => {
   const files = await readdir(path.join(process.cwd(), 'src'), { recursive: true, withFileTypes: true })
   for (const file of files) {
     if (!file.isFile()) continue
     const text = await readFile(path.join(file.parentPath, file.name), 'utf8')
     expect(text).not.toContain('TRASH_GATE_OPEN')
   }
+  expect(IPC.noteTrashPreview).toBe('note:trash-preview')
+  expect(IPC.noteTrashCommit).toBe('note:trash-commit')
+  expect(Object.values(IPC).some((value) => /agent:.*trash|tool:.*delete/i.test(String(value)))).toBe(false)
 })

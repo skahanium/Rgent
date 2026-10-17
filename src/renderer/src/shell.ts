@@ -29,6 +29,7 @@ import { installWriteConfirm } from './write-confirm.ts'
 import { hostErrorText } from './host-errors.ts'
 import { pendingSlash } from './slash.ts'
 import { createFileBrowser, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
+import { confirmTrash } from './trash-confirm.ts'
 import { createSidebarSizer } from './sidebar.ts'
 import type { Theme } from './theme.ts'
 
@@ -53,7 +54,9 @@ const LIFECYCLE_ERRORS: Record<string, string> = {
   PREVIOUS_TASK_UNSAVED: '运行任务的内容尚未保存，请先处理再修改文件位置。',
   LIFECYCLE_RECOVERY_REQUIRED: '文件操作中断且无法自动核对。恢复记录仍在库中；AI 访问已暂停，请人工检查。',
   STRUCTURE_BUSY: '另一个文件位置操作正在进行，请稍后重试。',
-  PATH_RESERVED: '这个路径的原笔记曾在库外消失，核验恢复前这个名字被保留、不能复用。原对象还在系统废纸篓时，请原样放回后在设置「笔记库」重扫核验；原对象已不在废纸篓时核验不可能通过，这个名称只能靠整库恢复或人工处理。'
+  PATH_RESERVED: '这个路径的原笔记曾在库外消失，核验恢复前这个名字被保留、不能复用。原对象还在系统废纸篓时，请原样放回后在设置「笔记库」重扫核验；原对象已不在废纸篓时核验不可能通过，这个名称只能靠整库恢复或人工处理。',
+  PLATFORM_UNPROVEN: '这台电脑上的系统废纸篓还没有可证明的删除实现，没有执行删除。',
+  PATH_CHANGED: '文件在确认前被换掉了，没有删除。请重新查看后再试。'
 }
 export const lifecycleErrorText = (error: unknown): string => {
   const raw = error instanceof Error ? error.message : String(error)
@@ -158,7 +161,8 @@ export async function start(root: HTMLElement): Promise<void> {
   const fileBrowser = createFileBrowser(treeScroll, {
     onOpenNote: (path) => { void openNote(path) },
     onSetTier: (path, tier) => { void changePermission(path, tier) },
-    onAction: (entry, action) => { void handleTreeAction(entry, action) }
+    onAction: (entry, action) => { void handleTreeAction(entry, action) },
+    canTrash: window.rgent.humanTrashOnThisPlatform
   })
   const sidebarSizer = createSidebarSizer({
     body: bodyEl, panel: treePanel, handle: sidebarHandle, toggle: treeToggle, backlinks: backlinksEl,
@@ -1185,6 +1189,25 @@ export async function start(root: HTMLElement): Promise<void> {
         if (epoch !== vaultEpoch || sessionId !== vaultSession) return
         await refreshTree()
         if (action === 'new-note') await openNote(created)
+        return
+      }
+      if (action === 'trash') {
+        if (entry.kind !== 'note' || !window.rgent.humanTrashOnThisPlatform) return
+        if (!(await flushSave())) { window.alert('有草稿尚未保存，请先处理保存冲突。'); return }
+        const prepared = await window.rgent.noteTrashPreview({ relPath: entry.relPath })
+        if (epoch !== vaultEpoch) return
+        if (!prepared.ok) throw new Error(prepared.error)
+        if (vaultSession && prepared.preview.sessionId !== vaultSession) return
+        const allow = await confirmTrash(prepared.preview)
+        if (epoch !== vaultEpoch) return
+        const result = await window.rgent.noteTrashCommit({ id: prepared.preview.id, allow })
+        if (epoch !== vaultEpoch) return
+        if (!result.ok) throw new Error(result.error)
+        if (result.cancelled) return
+        await closeTab(entry.relPath, { save: false })
+        await refreshTree()
+        hostNotice = result.orphan ? '笔记已移入系统废纸篓；同名附件夹没能一起送入，可稍后重试。' : '已移入系统废纸篓'
+        updateStatus()
         return
       }
       if (!(await flushSave())) { window.alert('有草稿尚未保存，请先处理保存冲突。'); return }

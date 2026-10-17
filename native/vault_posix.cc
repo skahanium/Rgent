@@ -6,6 +6,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/param.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #ifdef __APPLE__
@@ -420,6 +421,44 @@ void Move(VaultHandle* root, const std::string& source, const std::string& targe
 #endif
   (void)fsync(source_parent.value);
   (void)fsync(target_parent.value);
+}
+
+#ifdef __APPLE__
+std::string TrashItemAtAbsolutePath(const std::string& absolute_path);
+#endif
+
+std::string Trash(VaultHandle* root, const std::string& rel_path, const std::string& expected_id) {
+#ifndef __APPLE__
+  (void)root;
+  (void)rel_path;
+  (void)expected_id;
+  Fail("PLATFORM_UNPROVEN");
+#else
+  const auto before = Resolve(root, rel_path);
+  if (before.back().id != expected_id) Fail("PATH_CHANGED");
+  const auto parts = Parts(rel_path);
+  Fd parent = Dir(root, parts, parts.size() - 1);
+  const bool is_dir = before.back().kind == "dir";
+  Fd object(openat(parent.value, parts.back().c_str(),
+                   O_RDONLY | (is_dir ? O_DIRECTORY : O_NONBLOCK) | O_NOFOLLOW_ANY |
+                   kResolveBeneath | O_CLOEXEC));
+  CheckOpen(object.value);
+  struct stat info;
+  if (fstat(object.value, &info) != 0) Fail("IO_ERROR");
+  if (Id(info) != expected_id) Fail("PATH_CHANGED");
+  char path[MAXPATHLEN];
+  if (fcntl(object.value, F_GETPATH, path) != 0) Fail("IO_ERROR");
+  if (Resolve(root, rel_path).back().id != expected_id) Fail("PATH_CHANGED");
+  object = Fd();
+  const std::string landing = TrashItemAtAbsolutePath(path);
+  try {
+    const auto after = Resolve(root, rel_path);
+    if (after.back().id == expected_id) Fail("TRASH_INCOMPLETE");
+  } catch (const std::runtime_error& error) {
+    if (std::string(error.what()) != "ENOENT") throw;
+  }
+  return landing;
+#endif
 }
 
 } // namespace rgent

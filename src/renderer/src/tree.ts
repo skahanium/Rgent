@@ -3,7 +3,7 @@ import { icon, iconForFile } from './icons.ts'
 import { noteTitle } from '../../shared/vault-rel.ts'
 
 export { collectNotePaths, collectRelPaths } from '../../shared/vault-rel.ts'
-export type TreeAction = 'new-note' | 'new-folder' | 'rename' | 'move'
+export type TreeAction = 'new-note' | 'new-folder' | 'rename' | 'move' | 'trash'
 
 type BrowserPreference = {
   version: 1; selected: string; resource: string; expanded: string[]; ratio: number; attachments: boolean; width?: number
@@ -12,6 +12,8 @@ type BrowserOptions = {
   onOpenNote: (path: string) => void
   onSetTier?: (path: string, tier: PermissionTier) => void
   onAction?: (entry: TreeEntry, action: TreeAction) => void
+  /** 只在 macOS 人删除开放时为 true。文件夹永远没有删除。 */
+  canTrash?: boolean
 }
 export type FileBrowser = {
   readonly selectedFolder: string
@@ -123,7 +125,7 @@ export function createFileBrowser(host: HTMLElement, options: BrowserOptions): F
     row.addEventListener('contextmenu', event => {
       if (!listingReady) return
       event.preventDefault(); event.stopPropagation()
-      showTreeMenu(event.clientX, event.clientY, entry, options.onSetTier, allowStructure ? options.onAction : undefined)
+      showTreeMenu(event.clientX, event.clientY, entry, options.onSetTier, allowStructure ? options.onAction : undefined, options.canTrash === true)
     })
   }
   function folderNode(entry: TreeEntry): HTMLElement {
@@ -326,7 +328,8 @@ let dismissTreeMenu: (() => void) | null = null
 function showTreeMenu(
   x: number, y: number, entry: TreeEntry,
   onSetTier?: (relPath: string, tier: PermissionTier) => void,
-  onAction?: (entry: TreeEntry, action: TreeAction) => void
+  onAction?: (entry: TreeEntry, action: TreeAction) => void,
+  canTrash = false
 ): void {
   dismissTreeMenu?.()
   const menu = document.createElement('div')
@@ -348,7 +351,9 @@ function showTreeMenu(
       ? [['new-note', '在此新建笔记'], ['new-folder', '新建文件夹']] as const
       : entry.kind === 'dir'
       ? [['new-note', '在此新建笔记'], ['new-folder', '新建文件夹'], ['rename', '改名'], ['move', '移动']] as const
-      : [['rename', '改名'], ['move', '移动']] as const
+      : canTrash
+        ? [['rename', '改名'], ['move', '移动'], ['trash', '删除']] as const
+        : [['rename', '改名'], ['move', '移动']] as const
     for (const [action, label] of actions) add(label, () => onAction(entry, action))
   }
   if (entry.kind === 'dir' && entry.relPath && onSetTier) {
