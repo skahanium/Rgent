@@ -68,7 +68,7 @@ for (const [sha, refs] of commits) {
     // 反引号里的 7–40 位十六进制不一定是提交（可能是 tree／blob 片段）；对象存在就不算缺证据。
     if (!objectExists(sha)) findings.push(`文档引用的提交不存在：\`${sha}\`（${where}）`)
   } else if (!isAncestor(sha)) {
-    findings.push(`文档标记已交但未推送：\`${sha}\` 不在 ${base} 历史里（${where}）`)
+    findings.push(`文档引用的提交未推送：\`${sha}\` 不在 ${base} 历史里（${where}）`)
   }
 }
 
