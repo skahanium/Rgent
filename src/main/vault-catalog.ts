@@ -15,7 +15,12 @@ function object(value: unknown): value is Record<string, unknown> { return !!val
 function text(value: unknown, max: number): value is string { return typeof value === 'string' && value.length > 0 && value.length <= max && !CONTROL.test(value) }
 function label(value: unknown): value is string { return text(value, 80) && value.trim().length > 0 }
 function rootPath(value: unknown): value is string { return text(value, 4096) && path.isAbsolute(value) && path.resolve(value) === value }
-function identity(value: unknown): value is string { return typeof value === 'string' && /^\d+:\d+$/.test(value) && value.length <= 128 }
+/** 对象身份：POSIX 是 `十进制设备号:十进制 inode`，Windows 是 `16 位十六进制卷号:32 位十六进制文件 ID`。
+ *  两种格式都要认，否则同一库重挂载的提示在 Windows 上永远不成立。 */
+function identity(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 128) return false
+  return /^\d+:\d+$/.test(value) || /^[0-9a-f]{16}:[0-9a-f]{32}$/.test(value)
+}
 /** 同 inode 可提示卷重新挂载的可能性，不能证明物理连续性或授权认领。 */
 export function sameRootInode(a: string, b: string): boolean {
   return identity(a) && identity(b) && a.slice(a.indexOf(':') + 1) === b.slice(b.indexOf(':') + 1)

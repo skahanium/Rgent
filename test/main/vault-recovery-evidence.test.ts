@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
+import { sameRootInode } from '../../src/main/vault-catalog.ts'
 import { copyFile, mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
-import { statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -145,8 +145,15 @@ describe('recovery evidence and identity', () => {
     try {
       const content = '重挂载前后内容相同\n'
       await writeFile(path.join(f.root, relPath), content)
-      const info = statSync(path.join(f.root, relPath), { bigint: true })
-      const remounted = `${BigInt(info.dev) + 1n}:${info.ino}`
+      // 身份必须取自产品的对象身份（POSIX 十进制、Windows 十六进制），不能用 Node 的 dev/ino 硬造。
+      const opened = await f.vault.readOpened(relPath)
+      const identity = opened.objectVersion
+      const cut = identity.indexOf(':')
+      const device = identity.slice(0, cut), inode = identity.slice(cut + 1)
+      const bumped = /^\d+$/.test(device)
+        ? String(Number(device) + 1)
+        : (device[0] === 'f' ? 'e' : 'f') + device.slice(1)
+      const remounted = `${bumped}:${inode}`
       await writeFile(path.join(f.root, '.rgent-lifecycle'), JSON.stringify({
         version: 1, active: null,
         missing: [{
@@ -154,6 +161,10 @@ describe('recovery evidence and identity', () => {
           rootIdentity: vaultRootIdentity(f.root), permissionTier: 'reference', detectedAt: '2026-10-18T00:00:00.000Z', cause: 'external'
         }]
       }))
+      // 同一 inode、不同设备号在两种平台格式下都要被认成同一对象（Windows 是十六进制身份）。
+      expect(sameRootInode(identity, remounted)).toBe(true)
+      expect(sameRootInode('0123456789abcdef:' + 'a'.repeat(32), 'fedcba9876543210:' + 'a'.repeat(32))).toBe(true)
+      expect(sameRootInode('16777232:1', '16777232:2')).toBe(false)
       const scan = await f.vault.recoveryScan()
       expect(scan.rows[0]!.verdict).not.toBe('object-replaced')
       expect(scan.rows[0]).toMatchObject({ verdict: 'restored', canRestore: true })
@@ -279,11 +290,11 @@ describe('recovery evidence and identity', () => {
     try {
       const content = '旧 journal 的正文\n'
       await writeFile(path.join(f.root, relPath), content)
-      const info = statSync(path.join(f.root, relPath), { bigint: true })
+      const identity = (await f.vault.readOpened(relPath)).objectVersion
       await writeFile(path.join(f.root, '.rgent-lifecycle'), JSON.stringify({
         version: 1, active: null,
         missing: [{
-          relPath, noteId: 'old-note', objectVersion: `${info.dev}:${info.ino}`, bodyRevision: hash(content), attachments: [],
+          relPath, noteId: 'old-note', objectVersion: identity, bodyRevision: hash(content), attachments: [],
           rootIdentity: vaultRootIdentity(f.root), permissionTier: 'reference', detectedAt: '2026-10-17T00:00:00.000Z'
         }]
       }))
