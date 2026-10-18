@@ -637,7 +637,7 @@ it.each(['missing-connection','extra-field','material-envelope'] as const)('save
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
 
-function writeToolHarness(options: { text?: string; calls?: { id: string; name: string; input: unknown }[]; confirm?: (request: import('../../src/main/agent-host.ts').AgentWriteConfirm) => Promise<boolean>; noCreate?: boolean; relocation?: boolean; originOnly?: boolean; extras?: { relPath: string; tier: 'reference' | 'follow' }[] } = {}) {
+function writeToolHarness(options: { text?: string; calls?: { id: string; name: string; input: unknown }[]; confirm?: (request: import('../../src/main/agent-host.ts').AgentWriteConfirm) => Promise<boolean>; noCreate?: boolean; relocation?: boolean; trash?: boolean; originOnly?: boolean; extras?: { relPath: string; tier: 'reference' | 'follow' }[]; sourcesVanishAfterTrash?: boolean; recheckAfterTrash?: boolean } = {}) {
   let content = '人写的段落。\n\n/问\n'
   let revision = 1
   const history = hostLedgerFixture()
@@ -647,11 +647,12 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
   const source = (relPath: string, tier: 'reference' | 'follow' = 'reference') => ({ sourceId: relPath === 'a.md' ? 'origin' : relPath, relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: relPath === 'a.md' ? createHash('sha256').update(content).digest('hex') : 'f',
     tier, kind: 'body' as const, taskId: null, taskMaterialHash: null, classification: 'human' as const, start: 0, end: 2, hash: 'a'.repeat(64), basisHash: 'b'.repeat(64), sourceDeps: [], memoryDeps: [] })
   const grant = { id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', originProof: source('a.md'), sources: [source('a.md'), ...extras.map(item => source(item.relPath, item.tier))], credential, limits: { seconds: 30, steps: 4, tools: 4 },
-    assertActive() {}, validateSources: async () => {}, acknowledgeOrigin() {}, revoke() {},
+    assertActive() {}, validateSources: async () => { if (options.sourcesVanishAfterTrash && trashed.length) throw Error('ENOENT') }, acknowledgeOrigin() {}, revoke() {},
     assertWriteTarget(path: string) { if (path !== 'a.md') throw Error('OUTSIDE_TASK_SCOPE') },
-    assertLive: async () => {} }
+    assertLive: async () => { if (options.sourcesVanishAfterTrash && trashed.length) throw Error('ENOENT') } }
   const created: { relPath: string; body: string }[] = []
   const moved: { id: string; repairLinks: boolean }[] = []
+  const trashed: { id: string; attribution?: { taskId: string; prompt: string } }[] = []
   const read = async (path: string) => {
     if (path === 'a.md') return { content, revision: String(revision), sessionId: 's', objectVersion: 'o' }
     if (extras.some(item => item.relPath === path) || path === 'b.md' || path === 'c.md') return { content: '外篇正文', revision: 'b', sessionId: 's', objectVersion: 'o' }
@@ -665,13 +666,24 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
     return String(revision)
   }
   const extraTier = (path: string): 'reference' | 'follow' => extras.find(item => item.relPath === path)?.tier ?? 'reference'
-  const host = new AgentHost({ ledger: history.ledger, root: () => '/vault', read, write, tier: async (_root, path) => extraTier(path), credential: () => credential, limits: () => grant.limits,
+  let host!: AgentHost
+  host = new AgentHost({ ledger: history.ledger, root: () => '/vault', read, write, tier: async (_root, path) => extraTier(path), credential: () => credential, limits: () => grant.limits,
     authorize: async () => grant, session: () => 's', stream: async function* () {},
     createReadOnlyTools: (granted, id, _memory, _materials, writeTool) => createScopedAgentTools(granted, id, { read, tier: async (_root, path) => extraTier(path), acceptsObject: () => false, write: writeTool }),
     ...(options.confirm ? { confirmWrite: options.confirm } : {}),
     ...(options.relocation ? {
       relocationPreview: async (request: { kind: 'note'; source: string; target: string }) => ({ id: 'lib-1', source: request.source, target: request.target, moves: [{ from: request.source, to: request.target }], linkChanges: [], permissionChanges: [] }),
       relocationCommit: async (id: string, repairLinks: boolean) => { moved.push({ id, repairLinks }); return { moved: [{ from: 'b.md', to: '归档笔记.md' }] } }
+    } : {}),
+    ...(options.trash ? {
+      trashPreview: async (relPath: string) => ({ id: 'trash-1', sessionId: 's', relPath, title: relPath, objectVersion: 'o', hasAttachments: false, attachmentPath: null, attachmentId: null }),
+      trashCommit: async (id: string, allow: boolean, attribution?: { taskId: string; prompt: string }) => {
+        if (allow) {
+          trashed.push({ id, attribution })
+          if (options.recheckAfterTrash) await host.recheckSources('/vault', 's')
+        }
+        return { cancelled: !allow, relPath: 'b.md', orphan: false }
+      }
     } : {}),
     ...(options.noCreate ? {} : {
       createNote: async (relPath: string, body: string) => { created.push({ relPath, body }); return { relPath, revision: 'c1', objectVersion: 'co1' } },
@@ -687,7 +699,7 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
     },
     emit: () => {} })
   const run = () => host.start({ relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: '1', range: { start: content.indexOf('/问'), end: content.indexOf('/问') + 2 }, expectedText: '/问', promptText: '问' })
-  return { host, history, requests, run, content: () => content, created, moved }
+  return { host, history, requests, run, content: () => content, created, moved, trashed }
 }
 
 /** 包 2：补任务发起篇——模型请求经真门、真组合器落到正文并进账本。 */
@@ -802,6 +814,75 @@ it('仅发起篇也宣告补与建，不宣告读库搜库与结构工具', asyn
   expect(names).not.toContain('search_library')
   expect(names).not.toContain('rename_note')
   expect(names).not.toContain('move_note')
+  expect(names).not.toContain('delete_note')
+})
+
+it('模型请求删除：人同意才送篓，随后本场收尾并留痕', async () => {
+  const asked: import('../../src/main/agent-host.ts').AgentWriteConfirm[] = []
+  const app = writeToolHarness({
+    calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }],
+    trash: true,
+    confirm: async request => { asked.push(request); return true }
+  })
+  const task = await app.run()
+  if (process.platform !== 'darwin') {
+    expect(await task.done).toEqual({ status: 'completed' })
+    expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('delete_note')
+    expect(app.trashed).toEqual([])
+    return
+  }
+  expect(await task.done).toEqual({ status: 'cancelled', reason: 'vault-change' })
+  expect(asked[0]).toMatchObject({ kind: 'delete', relPath: 'b.md', hasAttachments: false })
+  expect(app.trashed).toEqual([{ id: 'trash-1', attribution: { taskId: task.id, prompt: 'AI 提议移入系统废纸篓（人已确认）' } }])
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'delete_note')?.outcome).toBe('ok:b.md (1)')
+  expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('删笔记')
+})
+
+it('送篓后旧来源再核只会假失败：本场仍按 vault-change 收尾，不记 ENOENT', async () => {
+  const app = writeToolHarness({
+    calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }],
+    trash: true,
+    sourcesVanishAfterTrash: true,
+    recheckAfterTrash: true,
+    confirm: async () => true
+  })
+  const task = await app.run()
+  if (process.platform !== 'darwin') {
+    expect(await task.done).toEqual({ status: 'completed' })
+    return
+  }
+  expect(await task.done).toEqual({ status: 'cancelled', reason: 'vault-change' })
+  expect(app.trashed).toHaveLength(1)
+  expect(app.history.records().at(-1)?.reason).toBe('vault-change')
+  expect(app.history.records().at(-1)?.trace?.join('\n')).not.toContain('ENOENT')
+})
+
+it('模型请求删除：人拒绝就什么都不动，本场照常收尾', async () => {
+  const app = writeToolHarness({
+    calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }],
+    trash: true,
+    confirm: async () => false
+  })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  expect(app.trashed).toEqual([])
+  if (process.platform !== 'darwin') {
+    expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('delete_note')
+    return
+  }
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'delete_note')?.outcome).toContain('refused:DECLINED')
+})
+
+it('没有送篓能力时不宣告 delete_note', async () => {
+  const app = writeToolHarness({
+    calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }],
+    confirm: async () => true
+  })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('delete_note')
+  expect(app.trashed).toEqual([])
+  expect(app.history.records().at(-1)?.provenance?.tools?.some(item => item.name === 'delete_note')).toBe(false)
 })
 
 it('额外参考才宣告读库搜库；必须遵循可参考但不能当改名目标', async () => {

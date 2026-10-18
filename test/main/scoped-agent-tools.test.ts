@@ -287,3 +287,41 @@ describe('rename_note ／ move_note（结构操作）', () => {
     expect(await tools.execute('move_note', { relPath: '资料/参考.md', targetFolder: '' }, signal())).toEqual({ target: '参考.md', moved: 2 })
   })
 })
+
+describe('delete_note', () => {
+  it('没有删除能力时按未知工具拒', async () => {
+    const f = await fixture()
+    await expect(f.tools.execute('delete_note', { relPath: 'b.md' }, signal())).rejects.toThrow('UNKNOWN_TOOL')
+  })
+
+  it('有删除能力时执行并记路径，孤儿单独标明', async () => {
+    const f = await fixture()
+    const tools = createScopedAgentTools(f.grant, 'task', {
+      ...f.deps,
+      write: {
+        append: async () => ({ ok: true as const, revision: 'r', bytes: 1 }),
+        delete: async (relPath: string) => ({ ok: true as const, relPath, orphan: relPath === 'b.md' })
+      }
+    })
+    expect(await tools.execute('delete_note', { relPath: 'b.md' }, signal())).toEqual({ relPath: 'b.md', orphan: true })
+    expect(tools.summary()).toEqual([{ name: 'delete_note', outcome: 'ok:b.md·孤儿 (1)' }])
+    expect(await tools.execute('delete_note', { relPath: 'a.md' }, signal())).toEqual({ relPath: 'a.md', orphan: false })
+    expect(tools.summary()).toEqual([
+      { name: 'delete_note', outcome: 'ok:b.md·孤儿 (1)' },
+      { name: 'delete_note', outcome: 'ok:a.md (1)' }
+    ])
+  })
+
+  it('门拒绝时原因原样报给模型', async () => {
+    const f = await fixture()
+    const tools = createScopedAgentTools(f.grant, 'task', {
+      ...f.deps,
+      write: {
+        append: async () => ({ ok: true as const, revision: 'r', bytes: 1 }),
+        delete: async () => ({ ok: false as const, reason: 'ORIGIN_LOCKED' })
+      }
+    })
+    await expect(tools.execute('delete_note', { relPath: 'a.md' }, signal())).rejects.toThrow('ORIGIN_LOCKED')
+    expect(tools.summary()).toEqual([{ name: 'delete_note', outcome: 'refused:ORIGIN_LOCKED (1)' }])
+  })
+})

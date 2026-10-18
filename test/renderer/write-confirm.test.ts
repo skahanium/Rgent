@@ -87,3 +87,18 @@ it('挪动的卡片按钮说的是移动', () => {
   expect(app.dialog()!.querySelector('.write-confirm-accept')!.textContent).toBe('移动')
   expect(app.dialog()!.textContent).toContain('将移动：参考篇.md → 归档/参考篇.md')
 })
+
+it('删除卡片写明送篓且不代改引用', () => {
+  const app = mount()
+  app.send({ requestId: 'r11', kind: 'delete', relPath: '资料/参考篇.md', hasAttachments: true })
+  const dialog = app.dialog()!
+  expect(dialog.textContent).toContain('把这篇笔记移入系统废纸篓吗？')
+  expect(dialog.textContent).toContain('将删除：资料/参考篇.md')
+  expect(dialog.textContent).toContain('链接会失效')
+  expect(dialog.querySelector('.write-confirm-accept')!.textContent).toBe('移入废纸篓')
+  expect(dialog.querySelector('.write-confirm-cancel')!.textContent).toBe('不删')
+  expect(dialog.getAttribute('aria-label')).toBe('移入系统废纸篓')
+  expect(document.activeElement?.className).toContain('write-confirm-cancel')
+  dialog.querySelector<HTMLButtonElement>('.write-confirm-accept')!.click()
+  expect(app.decide).toHaveBeenCalledWith({ requestId: 'r11', approved: true })
+})

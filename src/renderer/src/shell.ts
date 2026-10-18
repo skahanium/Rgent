@@ -542,9 +542,19 @@ export async function start(root: HTMLElement): Promise<void> {
     }).catch(() => { /* 读写失败时保留窗口稿，后续保存仍会复核修订值。 */ })
   })
   // 「建」的人确认：主进程发起请求，这里只摆一张卡并回一个是否同意。
+  let pendingDeletePath: string | null = null
   installWriteConfirm({
-    onRequest: handler => window.rgent.onAgentWriteRequest(handler),
-    decide: decision => window.rgent.agentWriteConfirm(decision)
+    onRequest: handler => window.rgent.onAgentWriteRequest(preview => {
+      pendingDeletePath = preview.kind === 'delete' ? preview.relPath : null
+      handler(preview)
+    }),
+    decide: async decision => {
+      const path = pendingDeletePath
+      const result = await window.rgent.agentWriteConfirm(decision)
+      if (decision.approved && path && await waitNoteGone(path)) await closeTab(path, { save: false })
+      pendingDeletePath = null
+      return result
+    }
   })
 
   window.rgent.onMemoryChanged(session => {
@@ -1204,7 +1214,7 @@ export async function start(root: HTMLElement): Promise<void> {
         if (epoch !== vaultEpoch) return
         if (!result.ok) throw new Error(result.error)
         if (result.cancelled) return
-        await closeTab(entry.relPath, { save: false })
+        if (await waitNoteGone(entry.relPath)) await closeTab(entry.relPath, { save: false })
         await refreshTree()
         hostNotice = result.orphan ? '笔记已移入系统废纸篓；同名附件夹没能一起送入，可稍后重试。' : '已移入系统废纸篓'
         updateStatus()
@@ -1663,6 +1673,16 @@ export async function start(root: HTMLElement): Promise<void> {
     ledgerEl.hidden = true
     renderTabs()
     if (restoreFocus) ledgerOpenButton.focus()
+  }
+
+  async function waitNoteGone(relPath: string): Promise<boolean> {
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      try { await window.rgent.noteRead(relPath) }
+      catch { return true }
+      await new Promise(resolve => setTimeout(resolve, 40))
+    }
+    return false
   }
 
   async function closeTab(relPath: string, opts: { save?: boolean } = {}): Promise<void> {

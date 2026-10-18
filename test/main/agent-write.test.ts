@@ -346,3 +346,127 @@ describe('write gate · 改名与挪', () => {
     expect(app.gate.state().structural).toBe(0)
   })
 })
+
+function deleteHarness(over: Partial<NonNullable<WriteGateDeps['trash']>> = {}, depsOver: Partial<WriteGateDeps> = {}) {
+  const previews: string[] = []
+  const commits: string[] = []
+  const trash = {
+    authorized: (relPath: string) => relPath === STRUCT_SOURCE || relPath === ORIGIN,
+    origin: () => ORIGIN,
+    otherTaskRunning: () => false,
+    preview: async (relPath: string) => {
+      previews.push(relPath)
+      return { id: 'trash-1', relPath, hasAttachments: false }
+    },
+    commit: async (id: string) => { commits.push(id); return { relPath: STRUCT_SOURCE, orphan: false } },
+    ...over
+  }
+  const base: WriteGateDeps = {
+    origin: () => ORIGIN, session: () => 's1',
+    assertWriteTarget: () => {}, assertLive: async () => {},
+    read: async () => ({ content: MARKED, revision: 'r1', objectVersion: 'o1', sessionId: 's1' }),
+    write: async () => ({ revision: 'r2' }),
+    composeAppend: (previous, text) => `${previous}\n<!-- rgent:ai:v1 -->\n${text}\n`,
+    trash
+  }
+  return { gate: createWriteGate({ ...base, ...depsOver, trash: { ...trash, ...depsOver.trash } }), previews, commits }
+}
+
+describe('write gate · 删除', () => {
+  it('授权范围内删除：预览后人同意才提交，结构额度只吃一次', async () => {
+    const app = deleteHarness()
+    const preview = await app.gate.previewDelete({ relPath: STRUCT_SOURCE })
+    expect(preview).toMatchObject({ ok: true, relPath: STRUCT_SOURCE, hasAttachments: false })
+    expect(app.previews).toEqual([STRUCT_SOURCE])
+    expect(app.commits).toHaveLength(0)
+    expect(await app.gate.commitDelete({ previewId: (preview as { previewId: string }).previewId })).toEqual({ ok: true, relPath: STRUCT_SOURCE, orphan: false })
+    expect(app.commits).toEqual(['trash-1'])
+    expect(app.gate.state().structural).toBe(1)
+  })
+
+  it('发起篇自己不能删', async () => {
+    const app = deleteHarness()
+    expect(await app.gate.previewDelete({ relPath: ORIGIN })).toEqual({ ok: false, reason: 'ORIGIN_LOCKED' })
+    expect(app.previews).toHaveLength(0)
+  })
+
+  it('授权范围外与必须遵循一律拒', async () => {
+    const app = deleteHarness()
+    expect(await app.gate.previewDelete({ relPath: '别处/别人的.md' })).toEqual({ ok: false, reason: 'OUTSIDE_TASK_SCOPE' })
+    expect(await app.gate.previewDelete({ relPath: '资料/必须遵循.md' })).toEqual({ ok: false, reason: 'OUTSIDE_TASK_SCOPE' })
+    expect(app.previews).toHaveLength(0)
+  })
+
+  it('另有任务在跑时不删', async () => {
+    const app = deleteHarness({ otherTaskRunning: () => true })
+    expect(await app.gate.previewDelete({ relPath: STRUCT_SOURCE })).toEqual({ ok: false, reason: 'OTHER_TASK_RUNNING' })
+    expect(app.previews).toHaveLength(0)
+  })
+
+  it('库层平台未证明与身份对不上原样透出', async () => {
+    const unproven = deleteHarness({ preview: async () => { throw Error('PLATFORM_UNPROVEN') } })
+    expect(await unproven.gate.previewDelete({ relPath: STRUCT_SOURCE })).toEqual({ ok: false, reason: 'PLATFORM_UNPROVEN' })
+    const swapped = deleteHarness({ commit: async () => { throw Error('PATH_CHANGED') } })
+    const preview = await swapped.gate.previewDelete({ relPath: STRUCT_SOURCE })
+    expect(await swapped.gate.commitDelete({ previewId: (preview as { previewId: string }).previewId })).toEqual({ ok: false, reason: 'PATH_CHANGED' })
+    expect(swapped.gate.state().structural).toBe(0)
+  })
+
+  it('令牌一次性：重放与丢弃后提交都被拒', async () => {
+    const app = deleteHarness()
+    const preview = await app.gate.previewDelete({ relPath: STRUCT_SOURCE })
+    const id = (preview as { previewId: string }).previewId
+    expect((await app.gate.commitDelete({ previewId: id })).ok).toBe(true)
+    expect(await app.gate.commitDelete({ previewId: id })).toEqual({ ok: false, reason: 'STALE_PREVIEW' })
+    const second = await app.gate.previewDelete({ relPath: STRUCT_SOURCE })
+    app.gate.discardDelete((second as { previewId: string }).previewId)
+    expect(await app.gate.commitDelete({ previewId: (second as { previewId: string }).previewId })).toEqual({ ok: false, reason: 'STALE_PREVIEW' })
+    expect(app.gate.state().structural).toBe(1)
+  })
+
+  it('删除与改名共用结构额度', async () => {
+    const commits: string[] = []
+    const gate = createWriteGate({
+      origin: () => ORIGIN, session: () => 's1',
+      assertWriteTarget: () => {}, assertLive: async () => {},
+      read: async () => ({ content: MARKED, revision: 'r1', sessionId: 's1' }),
+      write: async () => ({ revision: 'r2' }),
+      composeAppend: (previous, text) => `${previous}\n<!-- rgent:ai:v1 -->\n${text}\n`,
+      structural: {
+        authorized: relPath => relPath === STRUCT_SOURCE || relPath === ORIGIN,
+        origin: () => ORIGIN,
+        otherTaskRunning: () => false,
+        preview: async request => ({ id: `rel-${request.target}`, source: request.source, target: request.target, moves: [], linkChanges: [], permissionChanges: [] }),
+        commit: async id => { commits.push(id); return { moved: [] } }
+      },
+      trash: {
+        authorized: relPath => relPath === STRUCT_SOURCE || relPath === ORIGIN,
+        origin: () => ORIGIN,
+        otherTaskRunning: () => false,
+        preview: async relPath => ({ id: `trash-${relPath}`, relPath, hasAttachments: false }),
+        commit: async id => { commits.push(id); return { relPath: STRUCT_SOURCE, orphan: false } }
+      }
+    })
+    for (let at = 0; at < 2; at += 1) {
+      const preview = await gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: `第${at}名` })
+      expect(preview.ok).toBe(true)
+      await gate.commitStruct({ previewId: (preview as { previewId: string }).previewId })
+    }
+    const last = await gate.previewDelete({ relPath: STRUCT_SOURCE })
+    expect(last.ok).toBe(true)
+    await gate.commitDelete({ previewId: (last as { previewId: string }).previewId })
+    expect(await gate.previewDelete({ relPath: STRUCT_SOURCE })).toEqual({ ok: false, reason: 'OVER_LIMIT_STRUCTURAL' })
+    expect(gate.state().structural).toBe(3)
+  })
+
+  it('没有送篓能力就不让预览', async () => {
+    const gate = createWriteGate({
+      origin: () => ORIGIN, session: () => 's1',
+      assertWriteTarget: () => {}, assertLive: async () => {},
+      read: async () => ({ content: MARKED, revision: 'r1', sessionId: 's1' }),
+      write: async () => ({ revision: 'r2' }),
+      composeAppend: (previous, text) => `${previous}\n<!-- rgent:ai:v1 -->\n${text}\n`
+    })
+    expect(await gate.previewDelete({ relPath: STRUCT_SOURCE })).toEqual({ ok: false, reason: 'NOT_ALLOWED' })
+  })
+})

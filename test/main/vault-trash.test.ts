@@ -7,6 +7,7 @@ import { VaultSession } from '../../src/main/vault.ts'
 import { serializeStoredVault } from '../../src/main/notes-fs.ts'
 import { markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
 import { WRITE_TOOL_SCHEMAS } from '../../src/main/scoped-agent-tools.ts'
+import { IPC } from '../../src/shared/ipc.ts'
 import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../../src/shared/human-trash.ts'
 vi.mock('electron', () => ({ dialog: { showOpenDialog: vi.fn() } }))
 vi.mock('../../src/main/watch.ts', async importOriginal => ({ ...await importOriginal<typeof import('../../src/main/watch.ts')>(), watchVault: () => () => {} }))
@@ -41,9 +42,12 @@ describe('human trash', () => {
     for (const base of bases.splice(0)) await rm(base, { recursive: true, force: true }).catch(() => {})
   })
 
-  it('does not register a delete tool for the model', () => {
-    expect(Object.keys(WRITE_TOOL_SCHEMAS)).not.toContain('delete_note')
-    expect(JSON.stringify(WRITE_TOOL_SCHEMAS)).not.toMatch(/delete|trash/i)
+  it('registers delete_note for the model but not an agent trash channel', () => {
+    expect(Object.keys(WRITE_TOOL_SCHEMAS)).toContain('delete_note')
+    expect(WRITE_TOOL_SCHEMAS.delete_note.inputSchema.required).toEqual(['relPath'])
+    expect(IPC.noteTrashPreview).toBe('note:trash-preview')
+    expect(IPC.noteTrashCommit).toBe('note:trash-commit')
+    expect(Object.values(IPC).some((value) => /agent:.*trash|tool:.*delete/i.test(String(value)))).toBe(false)
   })
 
   it('refuses preview on Windows and does not touch the note', async () => {
@@ -135,6 +139,34 @@ describe('human trash', () => {
     } finally {
       f.vault.dispose()
       await reclaim(landing)
+    }
+  })
+
+  it('AI 确认删除把账本记在本场 taskId 下，不占用 humantrash', async () => {
+    if (!HUMAN_TRASH_ON_THIS_PLATFORM) return
+    const f = await fixture()
+    bases.push(f.base)
+    let landing: string | undefined
+    let attachmentLanding: string | null | undefined
+    try {
+      const session = f.vault.sessionId()
+      expect(session).toBeTruthy()
+      const preview = await f.vault.previewTrash('a.md')
+      const result = await f.vault.commitTrash(preview.id, true, session!, { taskId: 'agent-task-1', prompt: 'AI 提议移入系统废纸篓（人已确认）' })
+      landing = result.landing
+      attachmentLanding = result.attachmentLanding
+      const ledgers = path.join(f.root, '.rgent', 'ledgers')
+      const owners = (await readdir(ledgers)).filter(name => name !== '.DS_Store')
+      const files = await readdir(path.join(ledgers, owners[0]!))
+      expect(files).toContain('agent-task-1.json')
+      expect(files).not.toContain('humantrash.json')
+      const record = JSON.parse(await readFile(path.join(ledgers, owners[0]!, 'agent-task-1.json'), 'utf8')) as { chapter: { prompt: string; answer: string } }
+      expect(record.chapter.prompt).toBe('AI 提议移入系统废纸篓（人已确认）')
+      expect(record.chapter.answer).toContain(landing)
+    } finally {
+      f.vault.dispose()
+      await reclaim(landing)
+      await reclaim(attachmentLanding)
     }
   })
 })

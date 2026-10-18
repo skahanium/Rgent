@@ -620,11 +620,13 @@ async function verifyScopedHost(page, vault, shot, requests) {
 /** 包 4 窗口收口：写类工具在真窗口里的四条路——建·同意、建·不建、补·安静、补·超限。
  *  模型是受控主机脚本，真实供应商一律未配置（零真实调用）。 */
 async function verifyWriteTools(page, vault, shot, requests) {
-  const fixtures = ['写作建一.md', '写作建二.md', '写作补.md', '写作超限.md', '写作改名.md', '写作越权.md', '写作挪.md', '写作挪参考.md']
+  const fixtures = ['写作建一.md', '写作建二.md', '写作补.md', '写作超限.md', '写作改名.md', '写作越权.md', '写作挪.md', '写作挪参考.md', '写作删.md', '写作不删.md']
   for (const name of fixtures) writeFileSync(path.join(vault, name), '')
   writeFileSync(path.join(vault, '写作参考.md'), '# 参考\n\n受控参考正文。\n')
+  writeFileSync(path.join(vault, '写作删参考.md'), '# 删除参考\n\n这篇会被送进废纸篓。\n')
+  writeFileSync(path.join(vault, '写作不删参考.md'), '# 不删参考\n\n这篇应该留下。\n')
   mkdirSync(path.join(vault, '归档'), { recursive: true })
-  check('写工具夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter(n=>/写作/.test(n.innerText)).length===9`))
+  check('写工具夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter(n=>/写作/.test(n.innerText)).length===13`))
   // 受控供应商是通过 IPC 配的，渲染层的模型快照要打开一次设置页才会刷新；
   // 不刷新的话按 Enter 只会得到「请选择可用模型」，任务根本不会开始。
   await page.eval(`document.querySelector('.settings-open').click()`)
@@ -716,6 +718,21 @@ async function verifyWriteTools(page, vault, shot, requests) {
   check('挪动卡片摆出旧路径 → 新路径', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将移动：写作挪参考.md → 归档/写作挪参考.md')})()`))
   check('点「移动」后文件真的挪进目标目录', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `!document.querySelector('.status-task')`, 30000) && existsSync(path.join(vault, '归档', '写作挪参考.md')) && !existsSync(path.join(vault, '写作挪参考.md')))
 
+  if (process.platform === 'darwin') {
+    check('先打开要删的参考篇', await page.eval(`(() => { const n=[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path==='写作删参考.md'); if (!n) return false; n.click(); return true })()`) && await waitFor(page, `!!document.querySelector('.tab[data-rel="写作删参考.md"]')`))
+    check('打开删除发起篇并授权参考篇', await start('写作删.md', '删样张', '写作删参考.md'))
+    check('删除卡片写明送篓且不代改引用', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将删除：写作删参考.md') && text.includes('链接会失效') && text.includes('移入废纸篓')})()`))
+    await shot(page, 'write-delete-1200')
+    check('点「移入废纸篓」后面从库里消失且标签关掉', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `!document.querySelector('.status-task')`, 30000) && !existsSync(path.join(vault, '写作删参考.md')) && await page.eval(`![...document.querySelectorAll('.tab')].some(t => t.dataset.rel === '写作删参考.md')`))
+    check('删除账本留痕看得见', await ledgerPanel('写作删.md', `text.includes('delete_note') && text.includes('ok:写作删参考.md') && text.includes('vault-change') && !text.includes('ENOENT')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,240)??'(无)'`))
+
+    check('打开不删发起篇', await start('写作不删.md', '不删样张', '写作不删参考.md'))
+    check('不删卡片出现', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将删除：写作不删参考.md')})()`))
+    check('点「不删」后面还在', (await clickSelector('.write-confirm-cancel')) && (await settle()) && existsSync(path.join(vault, '写作不删参考.md')))
+  } else {
+    check('Windows 写工具专项不走送篓路', existsSync(path.join(vault, '写作删参考.md')) && existsSync(path.join(vault, '写作不删参考.md')))
+  }
+
   // 账本：面板上看"未执行（超限）"的如实记录，数据上看三场各自的工具留痕。
   await page.eval(`document.querySelector('.ledger-open')?.click()`)
   await waitFor(page, `!!document.querySelector('.ledger-body details')`)
@@ -726,6 +743,13 @@ async function verifyWriteTools(page, vault, shot, requests) {
   check('补的账本留痕看得见', await ledgerPanel('写作补.md', `text.includes('append_to_note') && text.includes('ok (1)')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
   await shot(page, 'write-ledger-1200')
   await page.eval(`document.querySelector('.ledger-close')?.click()`)
+  if (process.platform === 'darwin') {
+    const trash = path.join(homedir(), '.Trash')
+    for (const name of ['写作删参考.md', '写作删参考']) {
+      try { rmSync(path.join(trash, name), { recursive: true, force: true }) } catch { /* 废纸篓列举会 EPERM */ }
+    }
+    spawnSync('osascript', ['-e', 'tell application "Finder"\ntry\ndelete (every item of trash whose name contains "写作删参考")\nend try\nend tell'], { encoding: 'utf8', timeout: 10000 })
+  }
 }
 
 /** 外部消失与恢复核验专项（RGENT_UI_RECOVERY_ONLY=1）：在专用临时库里真删真放回，逐条走
@@ -3139,7 +3163,7 @@ function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequest
         }
         // 只按写工具专项自己的口令识别：工具链场景现在也带写工具，按工具名匹配会把它整个劫持走。
         const writeBody = JSON.stringify(decoded.messages)
-        const writePrompts = ['建样张一', '建样张二', '补样张', '超限样张', '改名样张', '挪样张', '越权样张']
+        const writePrompts = ['建样张一', '建样张二', '补样张', '超限样张', '改名样张', '挪样张', '越权样张', '删样张', '不删样张']
         if (writePrompts.some(prompt => writeBody.includes(prompt))) {
           writeRequests.push(decoded)
           const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'write-ui', object: 'chat.completion.chunk', created: 1, model: decoded.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
@@ -3155,6 +3179,10 @@ function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequest
                 ? { name: 'rename_note', input: { relPath: '写作参考.md', newName: '写作参考改' } }
                 : prompts.includes('挪样张')
                   ? { name: 'move_note', input: { relPath: '写作挪参考.md', targetFolder: '归档' } }
+                : prompts.includes('不删样张')
+                  ? { name: 'delete_note', input: { relPath: '写作不删参考.md' } }
+                : prompts.includes('删样张')
+                  ? { name: 'delete_note', input: { relPath: '写作删参考.md' } }
                   : prompts.includes('建样张二')
                 ? { name: 'create_note', input: { name: '写工具二', body: '第二篇受控正文。' } }
                 : prompts.includes('建样张一')

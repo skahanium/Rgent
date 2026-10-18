@@ -1043,7 +1043,7 @@ export class VaultSession {
 
   trashPreviewById(id: string): TrashPreview | null { this.assertCall(); return this.lifecycle?.peekTrash(id) ?? null }
 
-  async commitTrash(id: string, allow: boolean, token = this.captureSession()): Promise<{
+  async commitTrash(id: string, allow: boolean, token = this.captureSession(), attribution?: { taskId: string; prompt: string }): Promise<{
     cancelled: boolean; relPath?: string; landing?: string; attachmentLanding?: string | null; orphan?: boolean
   }> {
     this.assertSession(token)
@@ -1112,7 +1112,7 @@ export class VaultSession {
           if (!(error instanceof Error && error.message === 'ENOENT')) orphan = true
         }
       }
-      try { this.ledgerStore?.recordHumanTrash(preview.relPath, landing, attachmentLanding, orphan) }
+      try { this.ledgerStore?.recordHumanTrash(preview.relPath, landing, attachmentLanding, orphan, attribution) }
       catch { /* 账本留痕失败不回滚已进废纸篓的对象 */ }
       this.verified.delete(preview.relPath)
       this.latestObjects.delete(preview.relPath)

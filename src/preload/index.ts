@@ -90,6 +90,8 @@ const api = {
       if (!preview || typeof preview !== 'object' || typeof preview.requestId !== 'string') return
       const valid = preview.kind === 'create'
         ? typeof preview.relPath === 'string' && typeof preview.body === 'string'
+        : preview.kind === 'delete'
+          ? typeof preview.relPath === 'string' && typeof preview.hasAttachments === 'boolean'
         : (preview.kind === 'rename' || preview.kind === 'move') && typeof preview.source === 'string' && typeof preview.target === 'string'
       if (valid) fn(preview)
     }

@@ -12,9 +12,10 @@ import { encodeLedgerProvenance, historicalContextPolicy } from './ledger-proven
 import type {FrozenSkills} from './skills.ts'
 import { READ_ONLY_TOOL_SCHEMAS, WRITE_TOOL_SCHEMAS, type ScopedWriteTool } from './scoped-agent-tools.ts'
 import { createWriteGate } from './agent-write.ts'
+import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 
-/** 人确认的两种载荷：建与结构操作。 */
-export type AgentWriteConfirm = ({ kind: 'create'; relPath: string; body: string } | { kind: 'rename' | 'move'; source: string; target: string; moves: number; linkChanges: number; permissionChanges: number }) & { signal: AbortSignal }
+/** 人确认的载荷：建、改名／挪、删除。 */
+export type AgentWriteConfirm = ({ kind: 'create'; relPath: string; body: string } | { kind: 'rename' | 'move'; source: string; target: string; moves: number; linkChanges: number; permissionChanges: number } | { kind: 'delete'; relPath: string; hasAttachments: boolean }) & { signal: AbortSignal }
 import { MODEL_STREAM_BOUNDS, type ModelStepEvent, type ToolSchema } from './model-stream.ts'
 import { randomUUID } from 'node:crypto'
 import { AgentTasks, type TaskResult, type StopReason } from './agent-tasks.ts'
@@ -62,7 +63,7 @@ export type HostStart = Partial<ObjectBinding> & {
 
 export /** 过程只记「调了什么、结果如何」，不铺工具返回的正文。 */
 function toolTraceLine(call: { name: string; input: unknown }, failure?: string): string {
-  const label = call.name === 'read_library' ? '读库' : call.name === 'search_library' ? '搜库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name==='search_memory'?'检索记忆':call.name
+  const label = call.name === 'read_library' ? '读库' : call.name === 'search_library' ? '搜库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name === 'delete_note' ? '删笔记' : call.name==='search_memory'?'检索记忆':call.name
   const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
   const query = typeof input.query === 'string' ? input.query.replace(/\s+/g, ' ').slice(0, 80) : ''
   const what = (label === '搜库'||label==='检索记忆') && query ? `${label}「${query}」` : label
@@ -106,11 +107,14 @@ export type HostDependencies = {
   memory?: MemoryUsePort
   createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker, write?: ScopedWriteTool) => ScopedAgentTools
   /** 「建」需要人在预览里点一下同意；没有这个入口就不宣告该工具。 */
-  /** 人确认：建是「落点＋正文」，改名／挪是「旧路径 → 新路径＋影响面」。 */
+  /** 人确认：建是「落点＋正文」，改名／挪是「旧路径 → 新路径＋影响面」，删是「路径＋是否带附件夹」。 */
   confirmWrite?: (request: AgentWriteConfirm) => Promise<boolean>
   /** 结构操作的库层预览／提交：由主进程用库自己的迁移实现（含引用修复与权限不放宽）。 */
   relocationPreview?: (request: { kind: 'note'; source: string; target: string }, ownerTaskId?: string) => Promise<import('./agent-write.ts').StructuralPreview>
   relocationCommit?: (previewId: string, repairLinks: boolean, ownerTaskId?: string) => Promise<{ moved: { from: string; to: string }[] }>
+  /** 删除走人删除同一条送篓路。 */
+  trashPreview?: (relPath: string, ownerTaskId?: string) => Promise<{ id: string; relPath: string; hasAttachments: boolean }>
+  trashCommit?: (previewId: string, allow: boolean, attribution?: { taskId: string; prompt: string }, ownerTaskId?: string) => Promise<{ cancelled: boolean; relPath?: string; orphan?: boolean }>
   /** 「建」真正落盘：由主进程用库服务实现（含对象身份）。 */
   createNote?: (relPath: string, body: string) => Promise<{ relPath: string; revision: string; objectVersion?: string }>
   /** 目标目录是否落在某篇笔记的同名附件夹子树里。 */
@@ -276,6 +280,8 @@ export class AgentHost {
       const signal = this.signals.get(key)
       if (!signal || signal.aborted || this.finalizing.has(key) || sessionId && this.grants.get(key)?.sessionId !== sessionId) return
       if (this.rechecking.has(key)) return this.rechecking.get(key)
+      // 本场刚改名／挪／删：旧路径已失效，再核只会假失败；工具环会按 vault-change 收尾。
+      if (this.structuralMoves.has(task.id)) return
       const checking = (async () => {
         try {
           await awaiting(this.checkpoints.get(key) ?? Promise.resolve(), signal)
@@ -284,6 +290,7 @@ export class AgentHost {
           const sessionUnchanged = !sessionId || this.deps.session === undefined || this.deps.session() === sessionId
           if (this.deps.root() === null && sessionUnchanged) throw Error('VAULT_CHANGED')
           if (this.deps.root() !== root || (sessionId && grant?.sessionId !== sessionId) || !this.active().some(t => t.id === task.id)) return
+          if (this.structuralMoves.has(task.id)) return
           await awaiting(grant?.validateSources(signal) ?? Promise.resolve(), signal)
           await awaiting(this.scoped.get(key)?.assertCurrent(signal) ?? Promise.resolve(), signal)
           const memory = this.memoryUses.get(key)
@@ -291,6 +298,7 @@ export class AgentHost {
           await awaiting(this.requirePermission(root, task.relPath), signal)
           await awaiting(this.readBound(root, task.relPath), signal)
         } catch (error) {
+          if (this.structuralMoves.has(task.id)) return
           const sessionUnchanged = !sessionId || this.deps.session === undefined || this.deps.session() === sessionId
           if ((this.deps.root() === root || (this.deps.root() === null && sessionUnchanged)) && this.active().some(t => t.id === task.id)) {
             void this.tasks.fail(task.id, error instanceof Error ? error.message : 'SOURCE_CHANGED').catch(() => {})
@@ -372,14 +380,15 @@ export class AgentHost {
       const writeEnabled = Boolean(write && scoped?.writes)
       const createEnabled = Boolean(write?.create && scoped?.creates)
       const structuralEnabled = Boolean(structuralTargets && write?.rename && write?.move && scoped?.renames)
+      const deleteEnabled = Boolean(structuralTargets && write?.delete && scoped?.deletes)
       const memorySearchEnabled=input.memorySearchAuthorized===true&&!!grant&&!!memory?.searchable&&!!this.deps.streamStep&&this.supportsMemorySearch(credential)
-      const toolsEnabled=libraryReadEnabled||writeEnabled||createEnabled||structuralEnabled||memorySearchEnabled
+      const toolsEnabled=libraryReadEnabled||writeEnabled||createEnabled||structuralEnabled||deleteEnabled||memorySearchEnabled
       // 只有当这套工具**确实**带写入能力时才把写工具宣告给模型，避免宣告了却执行不了。
-      const toolSchemas={...(libraryReadEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(structuralEnabled?{rename_note:WRITE_TOOL_SCHEMAS.rename_note,move_note:WRITE_TOOL_SCHEMAS.move_note}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
+      const toolSchemas={...(libraryReadEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(structuralEnabled?{rename_note:WRITE_TOOL_SCHEMAS.rename_note,move_note:WRITE_TOOL_SCHEMAS.move_note}:{}),...(deleteEnabled?{delete_note:WRITE_TOOL_SCHEMAS.delete_note}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
       let memorySearchCalls=0,memorySearchFailures=0
       const memoryToolOutcomes:{name:string;outcome:string}[]=[]
       let successfulLibraryTool=false
-      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled) && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
+      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled || deleteEnabled) && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
       if (scoped) this.scoped.set(key, scoped)
       const marked = markPrompt(original.content, { ...input, taskId: id })
       const submitted = promptBlock(marked, id)
@@ -590,8 +599,9 @@ export class AgentHost {
           if (!calls.length) { if (successfulLibraryTool&&finishReason==='stop')this.verifiedToolReceivers.add(memoryHash(JSON.stringify(credential)));if (answer) await wait(checkpoint()); return }
           const results: ToolContent = []
           for (const call of calls) {
+            if (this.structuralMoves.has(id)) break
             await guard()
-            const registered = libraryReadEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||structuralEnabled&&(call.name==='rename_note'||call.name==='move_note')||call.name==='search_memory'&&memorySearchEnabled
+            const registered = libraryReadEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||structuralEnabled&&(call.name==='rename_note'||call.name==='move_note')||deleteEnabled&&call.name==='delete_note'||call.name==='search_memory'&&memorySearchEnabled
             const duplicate = usedIds.has(call.id)
             usedIds.add(call.id)
             // Duplicate IDs cannot enter provider messages. A fresh internal refusal ID preserves their order.
@@ -599,8 +609,9 @@ export class AgentHost {
             let failure = duplicate ? 'DUPLICATE_TOOL_CALL' : !registered ? 'TOOL_NOT_ALLOWED' : call.invalid ? 'INVALID_TOOL_ARGUMENTS' : undefined
             let reportedByTool = false
             let value: unknown
+            if (this.structuralMoves.has(id)) break
             if (!failure) {
-              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
+              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name === 'delete_note' ? '删笔记' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
               try {
                 if(call.name==='search_memory'){
                   const args=call.input as Record<string,unknown>
@@ -617,7 +628,7 @@ export class AgentHost {
                 if (!['MEMORY_SEARCH_LIMIT','UNKNOWN_TOOL', 'INVALID_TOOL_ARGUMENTS', 'OUTSIDE_TASK_SCOPE', 'INVALID_TOOL_CURSOR', 'SOURCE_METADATA_TOO_LARGE',
                   // 写门的可预期拒绝：如实报给模型并继续，不把整场弄失败；库/授权类故障仍然致命。
                   'OVER_LIMIT_BYTES','OVER_LIMIT_APPENDS','OVER_LIMIT_NOTES','OVER_LIMIT_SESSION','NOT_ALLOWED',
-                  'BAD_NAME','TARGET_EXISTS','ATTACHMENT_SUBTREE','HIDDEN_PATH','CONFLICT','INVARIANT_VIOLATION','DECLINED','ORIGIN_LOCKED','OTHER_TASK_RUNNING','OVER_LIMIT_STRUCTURAL','LINK_REPAIR_OUT_OF_SCOPE','PERMISSION_DOWNGRADE','STALE_PREVIEW','STRUCTURE_BUSY','UNSAVED_DRAFT','PREVIOUS_TASK_UNSAVED'].includes(reason)) throw error
+                  'BAD_NAME','TARGET_EXISTS','ATTACHMENT_SUBTREE','HIDDEN_PATH','CONFLICT','INVARIANT_VIOLATION','DECLINED','ORIGIN_LOCKED','OTHER_TASK_RUNNING','OVER_LIMIT_STRUCTURAL','LINK_REPAIR_OUT_OF_SCOPE','PERMISSION_DOWNGRADE','STALE_PREVIEW','STRUCTURE_BUSY','UNSAVED_DRAFT','PREVIOUS_TASK_UNSAVED','PLATFORM_UNPROVEN','PATH_CHANGED'].includes(reason)) throw error
                 failure = reason
                 reportedByTool = call.name!=='search_memory'
               }
@@ -628,7 +639,8 @@ export class AgentHost {
             }
             noteTrace(toolTraceLine(call, failure))
             if(!failure&&call.name==='search_memory'){const items=(value as {items:{id:string;version:number;content:string}[]}).items;const detail=`${items.map(e=>e.id+'@'+e.version).join('、')||'无匹配'}；摘要 ${items.map(e=>e.content.replace(/[\x00-\x1f]/g,' ').replace(/\s+/g,' ').slice(0,48)).join('；').slice(0,320)}`.slice(0,900);memoryToolOutcomes.push({name:'search_memory',outcome:`已执行：${detail}`});noteTrace(`记忆结果：${detail}`)}
-            await guard()
+            // 结构操作成功后旧来源已失效，再走 guard 只会把整场记成 ENOENT。
+            if (!this.structuralMoves.has(id)) await guard()
             // Refusals never echo unvalidated foreign arguments or remote error text.
             parts.push({ type: 'tool-call', toolCallId: callId, toolName: call.name, input: failure ? {} : call.input })
             outputBytes+=byteCount(JSON.stringify(failure?{error:failure}:value)??'')
@@ -638,7 +650,10 @@ export class AgentHost {
           messages.push({ role: 'assistant', content: parts }, { role: 'tool', content: results })
           if (conservativeTokens(JSON.stringify(messages)) > budget) throw Error('MODEL_CONTEXT_LIMIT')
           // 本场来源刚被搬走：账本与已写内容保留，但继续读旧路径只会假失败，按「库在任务底下变了」收尾。
-          if (this.structuralMoves.delete(id)) this.cancel(id, 'vault-change')
+          if (this.structuralMoves.delete(id)) {
+            this.cancel(id, 'vault-change')
+            return
+          }
           if (answer) await wait(checkpoint())
         }
       }, async (status, reason) => {
@@ -719,6 +734,17 @@ export class AgentHost {
       } } : {}),
       ...(this.deps.createNote ? { create: (relPath: string, body: string) => this.deps.createNote!(relPath, body) } : {}),
       ...(this.deps.attachmentFolder ? { attachmentFolder: (relPath: string) => this.deps.attachmentFolder!(relPath) } : {}),
+      ...(HUMAN_TRASH_ON_THIS_PLATFORM && this.deps.trashPreview && this.deps.trashCommit ? { trash: {
+        authorized: (path: string) => grant.sources.some(source => source.relPath === path && source.tier !== 'follow'),
+        origin: () => relPath,
+        otherTaskRunning: () => this.active().some(task => task.id !== taskId),
+        preview: (path: string) => this.deps.trashPreview!(path, taskId),
+        commit: async (previewId: string) => {
+          const result = await this.deps.trashCommit!(previewId, true, { taskId, prompt: 'AI 提议移入系统废纸篓（人已确认）' }, taskId)
+          if (result.cancelled || !result.relPath) throw Error('DECLINED')
+          return { relPath: result.relPath, orphan: result.orphan === true }
+        }
+      } } : {}),
       // 「建」的重名判定：读得到就是已存在；只把"查无此篇"当作不存在，其他错误照旧抛出。
       exists: async (relPath: string) => {
         try { await this.deps.read(relPath); return true }
@@ -758,19 +784,38 @@ export class AgentHost {
       let approved = false
       try { approved = await this.deps.confirmWrite!({ kind: preview.kind, source: preview.source, target: preview.target, moves: preview.moves, linkChanges: preview.linkChanges, permissionChanges: preview.permissionChanges, signal }) } catch { approved = false }
       if (!approved) { gate.discardStruct(preview.previewId); return { ok: false as const, reason: signal.aborted ? 'TASK_CANCELLED' : 'DECLINED' } }
-      const committed = await gate.commitStruct({ previewId: preview.previewId })
-      if (!committed.ok) return committed
       this.structuralMoves.add(taskId)
+      let committed
+      try { committed = await gate.commitStruct({ previewId: preview.previewId }) }
+      catch (error) { this.structuralMoves.delete(taskId); throw error }
+      if (!committed.ok) { this.structuralMoves.delete(taskId); return committed }
       // 工具层只需要「成了没、落到哪、动了几项、影响面多大」，不把库层的 move 清单透给模型。
       return { ok: true as const, target: committed.target, moved: committed.moved.length, linkChanges: preview.linkChanges, permissionChanges: preview.permissionChanges }
     }
+    const remove = HUMAN_TRASH_ON_THIS_PLATFORM && this.deps.confirmWrite && this.deps.trashPreview && this.deps.trashCommit
+      ? async (source: string, signal: AbortSignal) => {
+        const preview = await gate.previewDelete({ relPath: source })
+        if (!preview.ok) return preview
+        if (signal.aborted) { gate.discardDelete(preview.previewId); return { ok: false as const, reason: 'TASK_CANCELLED' } }
+        let approved = false
+        try { approved = await this.deps.confirmWrite!({ kind: 'delete', relPath: preview.relPath, hasAttachments: preview.hasAttachments, signal }) } catch { approved = false }
+        if (!approved) { gate.discardDelete(preview.previewId); return { ok: false as const, reason: signal.aborted ? 'TASK_CANCELLED' : 'DECLINED' } }
+        this.structuralMoves.add(taskId)
+        let committed
+        try { committed = await gate.commitDelete({ previewId: preview.previewId }) }
+        catch (error) { this.structuralMoves.delete(taskId); throw error }
+        if (!committed.ok) { this.structuralMoves.delete(taskId); return committed }
+        return { ok: true as const, relPath: committed.relPath, orphan: committed.orphan }
+      }
+      : undefined
     return {
       append: (text: string) => gate.append({ text }),
       ...(create ? { create } : {}),
       ...(structural ? {
         rename: (source: string, newName: string, signal: AbortSignal) => move('rename', source, newName, signal),
         move: (source: string, targetFolder: string, signal: AbortSignal) => move('move', source, targetFolder, signal)
-      } : {})
+      } : {}),
+      ...(remove ? { delete: remove } : {})
     }
   }
 

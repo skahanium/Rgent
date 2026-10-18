@@ -251,7 +251,7 @@ async function relocationCommitShared(id: string, repairLinks: boolean, owner?: 
   } finally { structureGate.finish() }
 }
 
-async function trashPreviewShared(relPath: string): Promise<TrashPreviewView> {
+async function trashPreviewShared(relPath: string, owner?: string): Promise<TrashPreviewView> {
   const currentVault = vault
   if (!currentVault) throw new Error('NO_VAULT')
   const token = currentVault.captureSession()
@@ -260,7 +260,7 @@ async function trashPreviewShared(relPath: string): Promise<TrashPreviewView> {
   await agentHost?.whenLaunchesSettled()
   currentVault.assertSession(token)
   const stem = relPath.replace(/\.md$/i, '')
-  const affected = agentHost?.active().filter((task) => task.root === root &&
+  const affected = agentHost?.active().filter((task) => task.id !== owner && task.root === root &&
     (task.relPath === relPath || task.relPath.startsWith(`${stem}/`))) ?? []
   for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
   if (agentHost?.hasPending(root)) throw new Error('PREVIOUS_TASK_UNSAVED')
@@ -274,7 +274,7 @@ async function trashPreviewShared(relPath: string): Promise<TrashPreviewView> {
   }
 }
 
-async function trashCommitShared(id: string, allow: boolean): Promise<Exclude<TrashCommitResult, { ok: false }>> {
+async function trashCommitShared(id: string, allow: boolean, owner?: string, attribution?: { taskId: string; prompt: string }): Promise<Exclude<TrashCommitResult, { ok: false }>> {
   const currentVault = vault
   const win = mainWindow
   if (!currentVault || !win || !currentVault.root) throw new Error('BAD_REQUEST')
@@ -296,14 +296,14 @@ async function trashCommitShared(id: string, allow: boolean): Promise<Exclude<Tr
     await agentHost?.whenLaunchesSettled()
     currentVault.assertSession(token)
     const stem = preview.relPath.replace(/\.md$/i, '')
-    const affected = agentHost?.active().filter((task) => task.root === root &&
+    const affected = agentHost?.active().filter((task) => task.id !== owner && task.root === root &&
       (task.relPath === preview.relPath || task.relPath.startsWith(`${stem}/`))) ?? []
     for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
     if (agentHost?.hasPending(root)) throw new Error('PREVIOUS_TASK_UNSAVED')
     if (!(await flushBeforeStructure(win))) throw new Error('UNSAVED_DRAFT')
     currentVault.assertSession(token)
     structureGate.seal()
-    const outcome = await currentVault.commitTrash(id, true, token)
+    const outcome = await currentVault.commitTrash(id, true, token, attribution)
     currentVault.assertSession(token)
     if (outcome.cancelled) return { ok: true, cancelled: true }
     return {
@@ -1507,12 +1507,23 @@ if (ownsInstance) app.whenReady().then(() => {
         // 建与结构操作各有自己的载荷；界面照 kind 渲染。
         send(IPC.agentWriteRequest, request.kind === 'create'
           ? { requestId, kind: 'create' as const, relPath: request.relPath, body: request.body }
+          : request.kind === 'delete'
+            ? { requestId, kind: 'delete' as const, relPath: request.relPath, hasAttachments: request.hasAttachments }
           : { requestId, kind: request.kind, source: request.source, target: request.target, moves: request.moves, linkChanges: request.linkChanges, permissionChanges: request.permissionChanges })
       })
     },
     // AI 的结构操作走同一条共用迁移路径（含引用修复与权限不放宽），不另造实现。
     relocationPreview: (request, owner) => relocationPreviewShared({ kind: request.kind, source: request.source, target: request.target }, owner),
     relocationCommit: (previewId, repairLinks, owner) => relocationCommitShared(previewId, repairLinks, owner),
+    trashPreview: async (relPath, owner) => {
+      const preview = await trashPreviewShared(relPath, owner)
+      return { id: preview.id, relPath: preview.relPath, hasAttachments: preview.hasAttachments }
+    },
+    trashCommit: async (previewId, allow, attribution, owner) => {
+      const result = await trashCommitShared(previewId, allow, owner, attribution)
+      if (result.cancelled) return { cancelled: true }
+      return { cancelled: false, relPath: result.relPath, orphan: result.orphan }
+    },
     // 「建」一次落盘：正文与文件原子出现，不先建空笔记再写（写失败会留下没法清理的半成品）。
     createNote: async (relPath, body) => {
       if (!vault) throw Error('NO_VAULT')

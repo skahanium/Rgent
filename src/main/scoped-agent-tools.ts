@@ -60,18 +60,32 @@ export const WRITE_TOOL_SCHEMAS = {
       required: ['name', 'body'],
       additionalProperties: false
     }
+  },
+  delete_note: {
+    description: '把本场授权范围内的一篇笔记移入系统废纸篓（不含正在写入的发起篇）。会先给人看预览，人点了同意才真的删；其他笔记里的链接不会代为改掉。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        relPath: { type: 'string', minLength: 1, maxLength: 256, description: '要删除的笔记路径（本场来源清单里的 relPath）。' }
+      },
+      required: ['relPath'],
+      additionalProperties: false
+    }
   }
 } as const
 
 /** 宿主提供的写入能力：门在宿主侧构造，这里只调用并记账。
  *  create 只在宿主既有人确认、又能真的落盘时才出现。 */
 export type StructuralOutcome = { ok: true; target: string; moved: number; linkChanges: number; permissionChanges: number } | { ok: false; reason: string }
+export type DeleteOutcome = { ok: true; relPath: string; orphan: boolean } | { ok: false; reason: string }
 export type ScopedWriteTool = {
   append(text: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }>
   create?(name: string, body: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number; relPath: string; objectVersion?: string } | { ok: false; reason: string }>
   /** 结构操作（改名／挪）：要人确认与库层迁移两条都在才出现。 */
   rename?(relPath: string, newName: string, signal: AbortSignal): Promise<StructuralOutcome>
   move?(relPath: string, targetFolder: string, signal: AbortSignal): Promise<StructuralOutcome>
+  /** 删除：要人确认与库层送篓两条都在才出现。 */
+  delete?(relPath: string, signal: AbortSignal): Promise<DeleteOutcome>
 }
 
 export interface ScopedAgentTools {
@@ -81,6 +95,8 @@ export interface ScopedAgentTools {
   creates?: boolean
   /** 是否带结构操作（改名／挪）。 */
   renames?: boolean
+  /** 是否带删除（需要人确认与送篓）。 */
+  deletes?: boolean
   contextPolicy(source: string, signal: AbortSignal, chapters?: ContextChapter[]): Promise<{ allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[] }>
   execute(name: string, input: unknown, signal: AbortSignal): Promise<unknown>
   assertCurrent(signal: AbortSignal): Promise<void>
@@ -339,18 +355,27 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
     writes: !!deps.write,
     creates: !!deps.write?.create,
     renames: !!(deps.write?.rename && deps.write?.move),
+    deletes: !!deps.write?.delete,
     async contextPolicy(source, signal, chapters) {
       active(signal); originParsed = compile(source); originPolicy = await policy(source, signal, originParsed,chapters); active(signal)
       return { allowedLedgerChapterIds: [...originPolicy.allowedLedgerChapterIds], excludedAiTaskIds: [...originPolicy.excludedAiTaskIds] }
     },
     async execute(name, input, signal) {
       const writeEnabled = !!deps.write
-      const known = name === 'read_library' || name === 'search_library' || (writeEnabled && name === 'append_to_note') || (!!deps.write?.create && name === 'create_note') || (!!deps.write?.rename && (name === 'rename_note' || name === 'move_note'))
+      const known = name === 'read_library' || name === 'search_library' || (writeEnabled && name === 'append_to_note') || (!!deps.write?.create && name === 'create_note') || (!!deps.write?.rename && (name === 'rename_note' || name === 'move_note')) || (!!deps.write?.delete && name === 'delete_note')
       const label = known ? name : 'unknown'
       let outcome = 'refused'
       try {
         active(signal)
         if (!known) throw Error('UNKNOWN_TOOL')
+        if (name === 'delete_note') {
+          const request = args(input, ['relPath'], [])
+          await check(signal)
+          const result = await deps.write!.delete!(request.relPath!, signal)
+          if (!result.ok) { outcome = `refused:${result.reason}`; throw Error(result.reason) }
+          outcome = result.orphan ? `ok:${result.relPath}·孤儿` : `ok:${result.relPath}`
+          return { relPath: result.relPath, orphan: result.orphan }
+        }
         if (name === 'rename_note' || name === 'move_note') {
           const request = name === 'rename_note'
             ? args(input, ['relPath', 'newName'], [])

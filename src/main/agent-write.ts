@@ -12,7 +12,7 @@ export const WRITE_LIMITS = {
   appendsPerNote: 2,
   bytesPerAppend: 8 * 1024,
   bytesPerSession: 32 * 1024,
-  /** 结构操作额度：改名／挪每场最多三次。 */
+  /** 结构操作额度：改名／挪／删每场最多三次。 */
   structuralPerSession: 3
 } as const
 
@@ -62,6 +62,8 @@ export type WriteGateDeps = {
   attachmentFolder?: (relPath: string) => Promise<string | null> | string | null
   /** 结构操作（改名／挪）：只有宿主把库层迁移接上时才可用。 */
   structural?: StructuralDeps
+  /** 删除：只有宿主把送篓路接上时才可用。不走迁移，不修引用。 */
+  trash?: TrashDeps
   /** 包 2 提供真正的 AI 块写入器；门只校验它是否守约。 */
   composeAppend: (previous: string, text: string) => string
   now?: () => number
@@ -92,6 +94,16 @@ export type StructuralPreviewResult = {
 } | WriteFailure
 export type StructuralCommitResult = { ok: true; target: string; moved: { from: string; to: string }[] } | WriteFailure
 
+export type TrashDeps = {
+  authorized: (relPath: string) => boolean
+  origin: () => string
+  otherTaskRunning: () => boolean
+  preview: (relPath: string) => Promise<{ id: string; relPath: string; hasAttachments: boolean }>
+  commit: (previewId: string) => Promise<{ relPath: string; orphan: boolean }>
+}
+export type TrashPreviewResult = { ok: true; previewId: string; relPath: string; hasAttachments: boolean } | WriteFailure
+export type TrashCommitResult = { ok: true; relPath: string; orphan: boolean } | WriteFailure
+
 export type AppendResult = { ok: true; relPath: string; revision: string; bytes: number } | WriteFailure
 export type PreviewCreateResult = { ok: true; previewId: string; relPath: string } | WriteFailure
 export type CommitCreateResult = { ok: true; relPath: string; revision: string; objectVersion?: string; bytes: number } | WriteFailure
@@ -113,6 +125,7 @@ export function createWriteGate(deps: WriteGateDeps) {
   const appends = new Map<string, number>()
   const previews = new Map<string, { relPath: string; name: string; expiresAt: number }>()
   const structPreviews = new Map<string, { kind: 'rename' | 'move'; source: string; target: string; libId: string; expiresAt: number }>()
+  const trashPreviews = new Map<string, { relPath: string; libId: string; expiresAt: number }>()
   let notes = 0
   let bytes = 0
   let structural = 0
@@ -306,6 +319,49 @@ export function createWriteGate(deps: WriteGateDeps) {
     /** 人没点同意：丢弃令牌，什么都不做。 */
     discardStruct(previewId: string): void {
       structPreviews.delete(previewId)
+    },
+
+    /** 删除第一步：范围、非发起篇、额度与一次性令牌。磁盘预览走库层送篓，不修引用。 */
+    async previewDelete(request: { relPath: string }): Promise<TrashPreviewResult> {
+      const deps0 = deps.trash
+      if (!deps0) return failure('NOT_ALLOWED')
+      if (structural >= WRITE_LIMITS.structuralPerSession) return failure('OVER_LIMIT_STRUCTURAL')
+      if (request.relPath === deps0.origin()) return failure('ORIGIN_LOCKED')
+      if (!deps0.authorized(request.relPath)) return failure('OUTSIDE_TASK_SCOPE')
+      if (deps0.otherTaskRunning()) return failure('OTHER_TASK_RUNNING')
+      if (!isNotePath(request.relPath)) return failure('BAD_NAME')
+      try {
+        await deps.assertLive()
+        const preview = await deps0.preview(request.relPath)
+        const previewId = randomUUID()
+        trashPreviews.set(previewId, { relPath: request.relPath, libId: preview.id, expiresAt: now() + PREVIEW_TTL_MS })
+        return { ok: true, previewId, relPath: request.relPath, hasAttachments: preview.hasAttachments }
+      } catch (error) {
+        return failure(reasonOf(error))
+      }
+    },
+
+    /** 删除第二步：消费令牌，交库层送篓，成功才吃额度。 */
+    async commitDelete(request: { previewId: string }): Promise<TrashCommitResult> {
+      const deps0 = deps.trash
+      const pending = trashPreviews.get(request.previewId)
+      if (!deps0 || !pending) return failure('STALE_PREVIEW')
+      trashPreviews.delete(request.previewId)
+      if (pending.expiresAt <= now()) return failure('STALE_PREVIEW')
+      if (structural >= WRITE_LIMITS.structuralPerSession) return failure('OVER_LIMIT_STRUCTURAL')
+      if (!deps0.authorized(pending.relPath)) return failure('OUTSIDE_TASK_SCOPE')
+      try {
+        await deps.assertLive()
+        const result = await deps0.commit(pending.libId)
+        structural += 1
+        return { ok: true, relPath: result.relPath, orphan: result.orphan }
+      } catch (error) {
+        return failure(reasonOf(error))
+      }
+    },
+
+    discardDelete(previewId: string): void {
+      trashPreviews.delete(previewId)
     },
 
   }

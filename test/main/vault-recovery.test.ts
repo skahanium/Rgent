@@ -279,7 +279,7 @@ it('keeps PATH_RESERVED after the missing-record limit swallows a later disappea
   } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
 })
 
-it('does not name TRASH_GATE_OPEN and does not give the model a delete channel', async () => {
+it('does not name TRASH_GATE_OPEN and does not give the model a trash IPC', async () => {
   const files = await readdir(path.join(process.cwd(), 'src'), { recursive: true, withFileTypes: true })
   for (const file of files) {
     if (!file.isFile()) continue
