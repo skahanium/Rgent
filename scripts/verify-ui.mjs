@@ -968,7 +968,7 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
   const changedTabUnavailable = await page.eval(`document.querySelector('.note-unavailable')?.hidden === false`)
   check('内容已变分支：核验不过、行保持失效并如实上报，不冒充通过',
     inodeKept && changedRow.row?.verdict === 'content-changed' && changedRow.row.confirm === null &&
-      changedRow.row.text.includes('内容与登记记录不一致') && changedRow.row.text.includes('不自动遗忘') &&
+      changedRow.row.text.includes('内容已变') && changedRow.row.text.includes('不一致') && changedRow.row.text.includes('不自动遗忘') &&
       changedMarked && changedSuspended && changedTabUnavailable,
     JSON.stringify({ inodeKept, row: changedRow.row, changedMarked, changedSuspended, changedTabUnavailable }))
   await shot(page, 'recovery-content-changed-1200')
@@ -1048,10 +1048,10 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
   const abandonStatusBefore = await statusOf()
   const abandonBefore = { row: (await rowFor('恢复乙.md')).row, file: existsSync(at('恢复乙.md')), blocked: await readFails('恢复乙.md') }
   await page.eval(`${abandonToggle}?.click()`)
-  const abandonConfirmShown = await waitFor(page, `(() => { const text=document.querySelector('.vault-settings-confirmation')?.textContent||''; return !!document.querySelector('[data-recovery-abandon-confirm="true"]') && text.includes('只清除 Rgent 库内的恢复记录') && text.includes('不会动系统废纸篓里的文件') })()`, 20000)
+  const abandonConfirmShown = await waitFor(page, `(() => { const row=document.querySelector('[data-recovery-abandon="恢复乙.md"]')?.closest('li'); const panel=row?.querySelector('.vault-settings-confirmation'); const text=panel?.textContent||''; return !!panel && !!row.querySelector('[data-recovery-abandon-confirm="true"]') && text.includes('只清除 Rgent 库内的恢复记录') && text.includes('不会动系统废纸篓里的文件') })()`, 20000)
   const abandonAfterOpen = { file: existsSync(at('恢复乙.md')), blocked: await readFails('恢复乙.md'), row: (await rowFor('恢复乙.md')).row }
-  await page.eval(`[...document.querySelectorAll('.vault-settings-confirmation button')].find(node => node.textContent === '取消')?.click()`)
-  const abandonConfirmClosed = await waitFor(page, `!document.querySelector('.vault-settings-confirmation')`)
+  await page.eval(`(() => { const row=document.querySelector('[data-recovery-abandon="恢复乙.md"]')?.closest('li'); const panel=row?.querySelector('.vault-settings-confirmation'); [...(panel?.querySelectorAll('button') ?? [])].find(node => node.textContent === '取消')?.click() })()`)
+  const abandonConfirmClosed = await waitFor(page, `!document.querySelector('[data-recovery-abandon="恢复乙.md"]')?.closest('li')?.querySelector('.vault-settings-confirmation')`)
   const abandonAfterCancel = {
     file: existsSync(at('恢复乙.md')),
     blocked: await readFails('恢复乙.md'),

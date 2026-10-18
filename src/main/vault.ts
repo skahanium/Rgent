@@ -596,7 +596,11 @@ export class VaultSession {
       // 身份连续且登记一致：重新读取以恢复运行时绑定与来源可用。
       await this.read(relPath)
       this.assertSession(token)
-      return { verdict: row.verdict, restored: true, message: `核验通过：${row.message}` }
+      // 成功文案由行文案去掉"可以核验恢复"再拼成：保留行里关于 AI 可用性／权限档的如实说明，
+      // 同时给出恢复成功的结论，避免出现「核验通过…可以核验恢复」这种自相矛盾的话。
+      const base = row.message.replace('，可以核验恢复', '')
+      const restoredMessage = `核验通过：${base}；该对象与相关来源恢复可用。`
+      return { verdict: row.verdict, restored: true, message: restoredMessage }
     })
   }
 
