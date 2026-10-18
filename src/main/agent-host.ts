@@ -18,13 +18,13 @@ import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 export type AgentWriteConfirm = ({ kind: 'create'; relPath: string; body: string } | { kind: 'rename' | 'move'; source: string; target: string; moves: number; linkChanges: number; permissionChanges: number } | { kind: 'delete'; relPath: string; hasAttachments: boolean }) & { signal: AbortSignal }
 import { MODEL_STREAM_BOUNDS, type ModelStepEvent, type ToolSchema } from './model-stream.ts'
 import { randomUUID } from 'node:crypto'
-import { AgentTasks, type TaskResult, type StopReason } from './agent-tasks.ts'
+import { AgentTasks, type TaskResult, type StopReason, type ActiveTask } from './agent-tasks.ts'
 import { buildHostContext, type ContextChapter, type ContextSummary } from './host-context.ts'
 import { appendAiBlock, markPrompt, upsertAiAnswer, type LedgerChapterWrite, type SentSummary } from './host-source.ts'
 import { assistantSystemBlock, assistantSummary, type AssistantHabits } from '../shared/assistant.ts'
 import type { ModelCredential, RunLimits } from './model-config.ts'
 import type { SourceRange } from '../markdown/types.ts'
-import type { ObjectBinding } from '../shared/ipc.ts'
+import type { ObjectBinding, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
 import type { TaskGrant } from './task-authorization.ts'
 import { compile, parseMarker } from '../markdown/index.ts'
 
@@ -114,7 +114,7 @@ export type HostDependencies = {
   relocationCommit?: (previewId: string, repairLinks: boolean, ownerTaskId?: string) => Promise<{ moved: { from: string; to: string }[] }>
   /** 删除走人删除同一条送篓路。 */
   trashPreview?: (relPath: string, ownerTaskId?: string) => Promise<{ id: string; relPath: string; hasAttachments: boolean }>
-  trashCommit?: (previewId: string, allow: boolean, attribution?: { taskId: string; prompt: string }, ownerTaskId?: string) => Promise<{ cancelled: boolean; relPath?: string; orphan?: boolean }>
+  trashCommit?: (previewId: string, allow: boolean, attribution?: { taskId: string; prompt: string }, ownerTaskId?: string) => Promise<{ cancelled: boolean; relPath?: string; orphan?: boolean; orphanReason?: TrashOrphanReason; degraded?: TrashDegradedReason[]; landingVerified?: TrashLandingVerdict }>
   /** 「建」真正落盘：由主进程用库服务实现（含对象身份）。 */
   createNote?: (relPath: string, body: string) => Promise<{ relPath: string; revision: string; objectVersion?: string }>
   /** 目标目录是否落在某篇笔记的同名附件夹子树里。 */
@@ -139,6 +139,11 @@ const SYSTEM_RULES = [
   '无法从原文核对的历史细节不得断言为事实。直接说明上下文省略的范围。',
   '不要生成 rgent 机器标记或账本锚点。'
 ].join('\n')
+
+/** 系统送篓之后才可能报的错：对象可能已经离开原路径，工具报错不等于没发生副作用。
+ *  这些原因必须保留 `structuralMoves`，否则工具环接下来按旧来源复核会假失败成 ENOENT，
+ *  把「删了但落点/原路径有冲突」误记成来源消失。 */
+const TRASH_SIDE_EFFECT_REASONS = new Set(['TRASH_CONFLICT', 'LANDING_MISMATCH', 'TRASH_INCOMPLETE'])
 
 /** Owns one model run from permission check to final same-note ledger entry. */
 export class AgentHost {
@@ -272,6 +277,14 @@ export class AgentHost {
     const task = this.active().find(task => task.id === id)
     if (!task) return []
     return this.grants.get(`${task.root}\0${task.relPath}`)?.sources.map(source => source.relPath) ?? [task.relPath]
+  }
+  /** 一次文件操作会碰到的任务：任务授权范围内的来源路径与给定路径或它的子树相交。
+   *  `paths` 同时按「本身」和「父目录前缀」解释，和人删除／迁移的 exact/prefixes 语义一致：
+   *  任务只是在读／引用目标笔记时也会被找到，不只按任务自己的 relPath 判断。
+   *  `excludeId` 留给发起这次操作的 AI 自己，否则它会把自己停掉。 */
+  affectedBy(root: string, paths: readonly string[], excludeId?: string): ActiveTask[] {
+    return this.active().filter(task => task.id !== excludeId && task.root === root &&
+      this.scopePaths(task.id).some(path => paths.some(target => path === target || path.startsWith(`${target}/`))))
   }
   /** Watcher notifications are only signals: revalidate live sources, after our own save receipt. */
   async recheckSources(root: string, sessionId?: string): Promise<void> {
@@ -628,7 +641,7 @@ export class AgentHost {
                 if (!['MEMORY_SEARCH_LIMIT','UNKNOWN_TOOL', 'INVALID_TOOL_ARGUMENTS', 'OUTSIDE_TASK_SCOPE', 'INVALID_TOOL_CURSOR', 'SOURCE_METADATA_TOO_LARGE',
                   // 写门的可预期拒绝：如实报给模型并继续，不把整场弄失败；库/授权类故障仍然致命。
                   'OVER_LIMIT_BYTES','OVER_LIMIT_APPENDS','OVER_LIMIT_NOTES','OVER_LIMIT_SESSION','NOT_ALLOWED',
-                  'BAD_NAME','TARGET_EXISTS','ATTACHMENT_SUBTREE','HIDDEN_PATH','CONFLICT','INVARIANT_VIOLATION','DECLINED','ORIGIN_LOCKED','OTHER_TASK_RUNNING','OVER_LIMIT_STRUCTURAL','LINK_REPAIR_OUT_OF_SCOPE','PERMISSION_DOWNGRADE','STALE_PREVIEW','STRUCTURE_BUSY','UNSAVED_DRAFT','PREVIOUS_TASK_UNSAVED','PLATFORM_UNPROVEN','PATH_CHANGED'].includes(reason)) throw error
+                  'BAD_NAME','TARGET_EXISTS','ATTACHMENT_SUBTREE','ATTACHMENT_COLLISION','HIDDEN_PATH','CONFLICT','INVARIANT_VIOLATION','DECLINED','ORIGIN_LOCKED','OTHER_TASK_RUNNING','OVER_LIMIT_STRUCTURAL','LINK_REPAIR_OUT_OF_SCOPE','PERMISSION_DOWNGRADE','STALE_PREVIEW','STRUCTURE_BUSY','UNSAVED_DRAFT','PREVIOUS_TASK_UNSAVED','PLATFORM_UNPROVEN','PATH_CHANGED','TRASH_CONFLICT','LANDING_MISMATCH','TRASH_INCOMPLETE'].includes(reason)) throw error
                 failure = reason
                 reportedByTool = call.name!=='search_memory'
               }
@@ -803,9 +816,24 @@ export class AgentHost {
         this.structuralMoves.add(taskId)
         let committed
         try { committed = await gate.commitDelete({ previewId: preview.previewId }) }
-        catch (error) { this.structuralMoves.delete(taskId); throw error }
-        if (!committed.ok) { this.structuralMoves.delete(taskId); return committed }
-        return { ok: true as const, relPath: committed.relPath, orphan: committed.orphan }
+        catch (error) {
+          // 送篓后的系统错误（落点不符、原路径冲突等）意味着对象可能已经离开原路径。
+          // 保留 structuralMoves，工具环随后按 vault-change 收尾；若在这里清掉，紧接着的
+          // guard 会拿旧来源复核，把真正的原因淹没成 ENOENT。
+          if (!(error instanceof Error && TRASH_SIDE_EFFECT_REASONS.has(error.message))) this.structuralMoves.delete(taskId)
+          throw error
+        }
+        if (!committed.ok) {
+          // 库层把送篓后的错误包成结果返回，和上面的 catch 是同一个语义：副作用已发生时不清理。
+          if (!TRASH_SIDE_EFFECT_REASONS.has(committed.reason)) this.structuralMoves.delete(taskId)
+          return committed
+        }
+        return {
+          ok: true as const, relPath: committed.relPath, orphan: committed.orphan,
+          ...(committed.orphanReason ? { orphanReason: committed.orphanReason } : {}),
+          ...(committed.degraded ? { degraded: committed.degraded } : {}),
+          ...(committed.landingVerified ? { landingVerified: committed.landingVerified } : {})
+        }
       }
       : undefined
     return {

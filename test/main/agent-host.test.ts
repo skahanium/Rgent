@@ -7,6 +7,7 @@ import path from 'node:path'
 import {SummaryCache,summaryHash,SUMMARY_SECTIONS} from '../../src/main/summary-cache.ts'
 import { describe, expect, it, vi } from 'vitest'
 import {createScopedAgentTools} from '../../src/main/scoped-agent-tools.ts'
+import type { TaskGrant } from '../../src/main/task-authorization.ts'
 import { AgentHost } from '../../src/main/agent-host.ts'
 import { assertLedgerPreserved, partitionSource } from '../../src/markdown/partition.ts'
 import { appendLedgerChapter, markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
@@ -637,7 +638,7 @@ it.each(['missing-connection','extra-field','material-envelope'] as const)('save
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
 
-function writeToolHarness(options: { text?: string; calls?: { id: string; name: string; input: unknown }[]; confirm?: (request: import('../../src/main/agent-host.ts').AgentWriteConfirm) => Promise<boolean>; noCreate?: boolean; relocation?: boolean; trash?: boolean; originOnly?: boolean; extras?: { relPath: string; tier: 'reference' | 'follow' }[]; sourcesVanishAfterTrash?: boolean; recheckAfterTrash?: boolean } = {}) {
+function writeToolHarness(options: { text?: string; calls?: { id: string; name: string; input: unknown }[]; confirm?: (request: import('../../src/main/agent-host.ts').AgentWriteConfirm) => Promise<boolean>; noCreate?: boolean; relocation?: boolean; trash?: boolean; originOnly?: boolean; extras?: { relPath: string; tier: 'reference' | 'follow' }[]; sourcesVanishAfterTrash?: boolean; recheckAfterTrash?: boolean; trashError?: string } = {}) {
   let content = '人写的段落。\n\n/问\n'
   let revision = 1
   const history = hostLedgerFixture()
@@ -680,6 +681,7 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
       trashCommit: async (id: string, allow: boolean, attribution?: { taskId: string; prompt: string }) => {
         if (allow) {
           trashed.push({ id, attribution })
+          if (options.trashError) throw Error(options.trashError)
           if (options.recheckAfterTrash) await host.recheckSources('/vault', 's')
         }
         return { cancelled: !allow, relPath: 'b.md', orphan: false }
@@ -883,6 +885,131 @@ it('没有送篓能力时不宣告 delete_note', async () => {
   expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('delete_note')
   expect(app.trashed).toEqual([])
   expect(app.history.records().at(-1)?.provenance?.tools?.some(item => item.name === 'delete_note')).toBe(false)
+})
+
+it('送篓后报 TRASH_CONFLICT：错误如实进账本，但 structuralMoves 不清，整场仍按 vault-change 收尾而不记 ENOENT', async () => {
+  const app = writeToolHarness({
+    calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }],
+    trash: true,
+    sourcesVanishAfterTrash: true,
+    trashError: 'TRASH_CONFLICT',
+    confirm: async () => true
+  })
+  const task = await app.run()
+  if (process.platform !== 'darwin') {
+    // Windows 不宣告 delete_note，这条分支只钉住平台门。
+    expect(await task.done).toEqual({ status: 'completed' })
+    expect(app.trashed).toEqual([])
+    return
+  }
+  // 送篓已经发生（夹具里 trashed 有记录）→ 之后的 guard 若按旧来源核会假失败成 ENOENT；
+  // 正确收尾是带着 structuralMoves 走 vault-change，账本上如实留下这次拒绝。
+  expect(await task.done).toEqual({ status: 'cancelled', reason: 'vault-change' })
+  expect(app.trashed).toHaveLength(1)
+  expect(app.history.records().at(-1)?.reason).toBe('vault-change')
+  const trace = app.history.records().at(-1)?.trace?.join('\n') ?? ''
+  expect(trace).toContain('未执行（TRASH_CONFLICT）')
+  expect(trace).not.toContain('ENOENT')
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'delete_note')?.outcome).toContain('refused:TRASH_CONFLICT')
+})
+
+it('delete_note 的工具返回与账本 outcome 都带出孤儿与降级字段', async () => {
+  const source = (relPath: string) => ({ sourceId: `id-${relPath}`, relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: 'f', tier: 'reference' as const })
+  const origin = source('a.md')
+  const grant: TaskGrant = {
+    id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', originProof: origin, sources: [origin],
+    credential: { provider: 'custom', baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 32000, apiKey: 'fixture' },
+    limits: { seconds: 30, steps: 4, tools: 4 },
+    assertActive() {}, validateSources: async () => {}, assertWriteTarget() {}, assertLive: async () => {}, acknowledgeOrigin() {}, revoke() {}
+  }
+  const tools = createScopedAgentTools(grant, 't1', {
+    read: async () => ({ content: '正文', revision: '1', sessionId: 's', objectVersion: 'o' }),
+    tier: async () => 'reference',
+    acceptsObject: () => false,
+    write: {
+      append: async () => ({ ok: true, revision: '1', bytes: 1 }),
+      delete: async () => ({ ok: true, relPath: 'b.md', orphan: true, orphanReason: 'attachment-failed', degraded: ['record-failed', 'ledger-failed'], landingVerified: 'unverified' })
+    }
+  })
+  const result = await tools.execute('delete_note', { relPath: 'b.md' }, new AbortController().signal)
+  expect(result).toEqual({ relPath: 'b.md', orphan: true, orphanReason: 'attachment-failed', degraded: ['record-failed', 'ledger-failed'], landingVerified: 'unverified' })
+  expect(tools.summary()).toContainEqual({ name: 'delete_note', outcome: 'ok:b.md·孤儿:attachment-failed·降级:record-failed,ledger-failed (1)' })
+})
+
+/** 三场同时在跑：发起甲这一场在授权范围内“读”了目标.md；发起乙的标签页在笔记.md 的附件夹子树里。 */
+function affectedHarness() {
+  const contents = new Map<string, string>()
+  const body = () => '前言\n\n/问\n\n后文\n'
+  const contentOf = (relPath: string): string => {
+    if (!contents.has(relPath)) contents.set(relPath, body())
+    return contents.get(relPath)!
+  }
+  const credential = { provider: 'custom' as const, baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 32000, apiKey: 'fixture' }
+  const limits = { seconds: 30, steps: 4, tools: 0 }
+  const source = (relPath: string) => ({ sourceId: `id-${relPath}`, relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: 'f', tier: 'reference' as const })
+  const host = new AgentHost({
+    ledger: hostLedgerFixture().ledger,
+    root: () => '/vault',
+    session: () => 's',
+    read: async (relPath) => ({ content: contentOf(relPath), revision: '1', sessionId: 's', objectVersion: 'o' }),
+    write: async (relPath, next) => { contents.set(relPath, next); return '2' },
+    tier: async () => 'reference',
+    credential: () => credential,
+    limits: () => limits,
+    createReadOnlyTools: (granted, id) => createScopedAgentTools(granted, id, {
+      read: async (relPath) => ({ content: contentOf(relPath), revision: '1', sessionId: 's', objectVersion: 'o' }),
+      tier: async () => 'reference',
+      acceptsObject: () => false
+    }),
+    stream: async function* (_input, signal) { await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true })) },
+    streamStep: async function* (_input, signal) { await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true })) },
+    authorize: async (input) => {
+      const origin = source(input.relPath)
+      const grant: TaskGrant = {
+        id: `grant-${input.relPath}`, root: '/vault', sessionId: 's', origin: input.relPath, originProof: origin,
+        // 只有发起甲这一场的 scopePaths 含目标.md：它的任务 relPath 与目标无关，旧写法找不到它。
+        sources: input.relPath === '发起甲.md' ? [origin, source('目标.md')] : [origin],
+        credential, limits,
+        assertActive() {}, validateSources: async () => {}, assertWriteTarget() {}, assertLive: async () => {}, acknowledgeOrigin() {}, revoke() {}
+      }
+      return grant
+    },
+    emit: () => {}
+  })
+  const start = (relPath: string) => {
+    const content = contentOf(relPath)
+    const at = content.indexOf('/问')
+    return host.start({ relPath, sessionId: 's', objectVersion: 'o', range: { start: at, end: at + 2 }, expectedText: '/问', promptText: '问' })
+  }
+  return { host, start }
+}
+
+it('affectedBy 按任务授权范围命中目标与附件夹子树，并排除发起者自己', async () => {
+  const app = affectedHarness()
+  const first = await app.start('发起甲.md')
+  const inside = await app.start('笔记/附件页.md')
+  const unrelated = await app.start('别处/无关.md')
+  expect(app.host.active()).toHaveLength(3)
+  // 目标本身：任务 relPath 是发起甲.md，但授权范围里有目标.md，必须被找出来。
+  expect(app.host.affectedBy('/vault', ['目标.md', '目标']).map(task => task.id)).toEqual([first.id])
+  // 附件夹子树：目标笔记的附件夹前缀（笔记/）覆盖夹里的标签页。
+  expect(app.host.affectedBy('/vault', ['笔记.md', '笔记']).map(task => task.id)).toEqual([inside.id])
+  // 发起这次操作的那一场不能把自己停掉。
+  expect(app.host.affectedBy('/vault', ['目标.md', '目标'], first.id)).toEqual([])
+  // 不相干的场不受影响。
+  expect(app.host.affectedBy('/vault', ['目标.md', '目标']).some(task => task.id === unrelated.id)).toBe(false)
+  app.host.cancelAll('user')
+  await Promise.all([first.done, inside.done, unrelated.done])
+})
+
+it('affectedBy 的父目录前缀不误伤同名前缀的另一个名字', async () => {
+  const app = affectedHarness()
+  const inside = await app.start('笔记/附件页.md')
+  const sibling = await app.start('笔记本.md')
+  expect(app.host.affectedBy('/vault', ['笔记.md', '笔记']).map(task => task.id)).toEqual([inside.id])
+  expect(app.host.affectedBy('/vault', ['笔记.md', '笔记']).some(task => task.id === sibling.id)).toBe(false)
+  app.host.cancelAll('user')
+  await Promise.all([inside.done, sibling.done])
 })
 
 it('额外参考才宣告读库搜库；必须遵循可参考但不能当改名目标', async () => {

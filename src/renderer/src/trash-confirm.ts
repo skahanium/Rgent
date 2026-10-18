@@ -12,8 +12,8 @@ export function confirmTrash(preview: TrashPreviewView): Promise<boolean> {
     })
     overlay.root.classList.add('overlay-write-confirm')
     const note = preview.hasAttachments
-      ? '这篇笔记和同名附件夹会一起进系统废纸篓。不同意就什么都不动。'
-      : '这篇笔记会进系统废纸篓。没有同名附件夹。不同意就什么都不动。'
+      ? '这篇笔记和同名附件夹会一起进系统废纸篓。其他笔记里的链接会失效，不会代为改字。不同意就什么都不动。'
+      : '这篇笔记会进系统废纸篓。没有同名附件夹。其他笔记里的链接会失效，不会代为改字。不同意就什么都不动。'
     overlay.root.innerHTML = `<h2>把这篇笔记移入系统废纸篓吗？</h2><p class="write-confirm-path"></p><p class="write-confirm-note settings-hint"></p><footer><button type="button" class="write-confirm-cancel">不删</button><button type="button" class="write-confirm-accept">移入废纸篓</button></footer>`
     overlay.root.querySelector('.write-confirm-path')!.textContent = preview.relPath
     overlay.root.querySelector('.write-confirm-note')!.textContent = note

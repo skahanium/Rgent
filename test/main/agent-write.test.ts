@@ -403,6 +403,18 @@ describe('write gate · 删除', () => {
     expect(app.previews).toHaveLength(0)
   })
 
+  it('预览放行后、确认前新起了任务：提交时再查一次，拒绝且不送篓', async () => {
+    let running = false
+    const app = deleteHarness({ otherTaskRunning: () => running })
+    const preview = await app.gate.previewDelete({ relPath: STRUCT_SOURCE })
+    expect(preview.ok).toBe(true)
+    // 预览时还没有别的任务；人在看卡片的这段时间里另一场开始了。
+    running = true
+    expect(await app.gate.commitDelete({ previewId: (preview as { previewId: string }).previewId })).toEqual({ ok: false, reason: 'OTHER_TASK_RUNNING' })
+    expect(app.commits).toHaveLength(0)
+    expect(app.gate.state().structural).toBe(0)
+  })
+
   it('库层平台未证明与身份对不上原样透出', async () => {
     const unproven = deleteHarness({ preview: async () => { throw Error('PLATFORM_UNPROVEN') } })
     expect(await unproven.gate.previewDelete({ relPath: STRUCT_SOURCE })).toEqual({ ok: false, reason: 'PLATFORM_UNPROVEN' })

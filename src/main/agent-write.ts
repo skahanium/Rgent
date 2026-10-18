@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { compile } from '../markdown/index.ts'
 import { partitionSource } from '../markdown/partition.ts'
 import { hasHiddenSegment, isNotePath, sanitizeNoteName } from './paths.ts'
+import type { TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
 
 /** 写入门：模型侧写类工具的唯一入口。合同见 decisions.md「写类 AI 工具局部授权」。
  *  三条硬规矩：正文写入只发生在发起篇、只追加新块；建落点固定在发起篇所在目录；
@@ -99,10 +100,18 @@ export type TrashDeps = {
   origin: () => string
   otherTaskRunning: () => boolean
   preview: (relPath: string) => Promise<{ id: string; relPath: string; hasAttachments: boolean }>
-  commit: (previewId: string) => Promise<{ relPath: string; orphan: boolean }>
+  commit: (previewId: string) => Promise<{ relPath: string; orphan: boolean; orphanReason?: TrashOrphanReason; degraded?: TrashDegradedReason[]; landingVerified?: TrashLandingVerdict }>
 }
 export type TrashPreviewResult = { ok: true; previewId: string; relPath: string; hasAttachments: boolean } | WriteFailure
-export type TrashCommitResult = { ok: true; relPath: string; orphan: boolean } | WriteFailure
+/** 删除已发生时，库层对落点、孤儿附件夹与记录降级的如实结果一并带回；缺字段只表示调用方没给。 */
+export type TrashCommitResult = {
+  ok: true
+  relPath: string
+  orphan: boolean
+  orphanReason?: TrashOrphanReason
+  degraded?: TrashDegradedReason[]
+  landingVerified?: TrashLandingVerdict
+} | WriteFailure
 
 export type AppendResult = { ok: true; relPath: string; revision: string; bytes: number } | WriteFailure
 export type PreviewCreateResult = { ok: true; previewId: string; relPath: string } | WriteFailure
@@ -350,11 +359,18 @@ export function createWriteGate(deps: WriteGateDeps) {
       if (pending.expiresAt <= now()) return failure('STALE_PREVIEW')
       if (structural >= WRITE_LIMITS.structuralPerSession) return failure('OVER_LIMIT_STRUCTURAL')
       if (!deps0.authorized(pending.relPath)) return failure('OUTSIDE_TASK_SCOPE')
+      // 预览放行后、人点确认前可能又起了别的任务；提交前再查一次，别在别人的任务底下删。
+      if (deps0.otherTaskRunning()) return failure('OTHER_TASK_RUNNING')
       try {
         await deps.assertLive()
         const result = await deps0.commit(pending.libId)
         structural += 1
-        return { ok: true, relPath: result.relPath, orphan: result.orphan }
+        return {
+          ok: true, relPath: result.relPath, orphan: result.orphan,
+          ...(result.orphanReason ? { orphanReason: result.orphanReason } : {}),
+          ...(result.degraded ? { degraded: result.degraded } : {}),
+          ...(result.landingVerified ? { landingVerified: result.landingVerified } : {})
+        }
       } catch (error) {
         return failure(reasonOf(error))
       }

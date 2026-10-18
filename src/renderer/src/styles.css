@@ -1930,6 +1930,7 @@ a[href]:focus-visible,
 .vault-settings-confirmation p { margin: 0 0 10px; font-size: .78rem; line-height: 1.6; overflow-wrap: anywhere; }
 .vault-settings-confirmation button { margin-right: 8px; margin-top: 4px; }
 .vault-settings-confirmation [data-vault-action='confirm-remove'] { color: var(--status-error); }
+.vault-settings-danger { color: var(--status-error); border-color: var(--border-strong); }
 .vault-settings-status { min-height: 1.6em; margin: 0; color: var(--text-muted); font-size: .8rem; line-height: 1.6; overflow-wrap: anywhere; }
 .vault-settings [hidden] { display: none; }
 .vault-settings-list:empty { display: none; }

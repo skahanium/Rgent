@@ -1035,11 +1035,38 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
       JSON.stringify(dirMenu) === JSON.stringify(['在此新建笔记', '新建文件夹', '改名', '移动', '可参考', '必须遵循', '禁止触碰']) &&
       !dirMenu.includes('删除') &&
       gate.hits.length === 0 && gate.pageDeleteHits.length === 0 &&
-      JSON.stringify(gate.recoveryActions) === JSON.stringify(['重扫并核验恢复']) &&
+      gate.recoveryActions.includes('重扫并核验恢复') &&
+      gate.recoveryActions.filter(action => action === '放弃恢复').length === gate.recoveryVerdicts.length &&
       JSON.stringify(gate.recoveryVerdicts) === JSON.stringify(['content-changed', 'attachments-missing']) &&
       gate.noteRowButtons === 0 && gate.dirRowButtons === 2,
     JSON.stringify({ noteMenu, dirMenu, expectedNoteMenu, ...gate }))
   await shot(page, 'recovery-gate-closed-1200')
+  // 八、放弃恢复：入口与二次确认都在行内；点开先出确认块，取消则零动作（记录、路径与磁盘对象都不许变）。
+  const abandonToggle = `document.querySelector('[data-recovery-abandon="恢复乙.md"]')`
+  const abandonPresent = await waitFor(page, `!!${abandonToggle}`, 20000)
+  const statusOf = () => page.eval(`document.querySelector('.settings-main .vault-settings-status')?.textContent ?? ''`)
+  const abandonStatusBefore = await statusOf()
+  const abandonBefore = { row: (await rowFor('恢复乙.md')).row, file: existsSync(at('恢复乙.md')), blocked: await readFails('恢复乙.md') }
+  await page.eval(`${abandonToggle}?.click()`)
+  const abandonConfirmShown = await waitFor(page, `(() => { const text=document.querySelector('.vault-settings-confirmation')?.textContent||''; return !!document.querySelector('[data-recovery-abandon-confirm="true"]') && text.includes('只清除 Rgent 库内的恢复记录') && text.includes('不会动系统废纸篓里的文件') })()`, 20000)
+  const abandonAfterOpen = { file: existsSync(at('恢复乙.md')), blocked: await readFails('恢复乙.md'), row: (await rowFor('恢复乙.md')).row }
+  await page.eval(`[...document.querySelectorAll('.vault-settings-confirmation button')].find(node => node.textContent === '取消')?.click()`)
+  const abandonConfirmClosed = await waitFor(page, `!document.querySelector('.vault-settings-confirmation')`)
+  const abandonAfterCancel = {
+    file: existsSync(at('恢复乙.md')),
+    blocked: await readFails('恢复乙.md'),
+    row: (await rowFor('恢复乙.md')).row,
+    status: await statusOf()
+  }
+  check('放弃恢复：行内入口存在，点开先出二次确认；取消后零动作',
+    abandonPresent && abandonConfirmShown && abandonConfirmClosed &&
+      abandonBefore.row?.verdict === 'content-changed' && abandonBefore.file && abandonBefore.blocked &&
+      abandonAfterOpen.file && abandonAfterOpen.blocked && abandonAfterOpen.row?.verdict === 'content-changed' &&
+      abandonAfterCancel.file && abandonAfterCancel.blocked && abandonAfterCancel.row?.verdict === 'content-changed' &&
+      abandonAfterCancel.status === abandonStatusBefore && !abandonAfterCancel.status.includes('已放弃恢复'),
+    JSON.stringify({ abandonPresent, abandonConfirmShown, abandonConfirmClosed, abandonStatusBefore, abandonBefore, abandonAfterOpen, abandonAfterCancel }))
+  await shot(page, 'recovery-abandon-confirm-1200')
+
   check('恢复专项的模型调用都走受控主机', requests.length >= 4 && requests.every((request) => request.model === 'test'), String(requests.length) + '／' + JSON.stringify([...new Set(requests.map((request) => request.model))]))
   if (shotDir) writeFileSync(path.join(shotDir, 'recovery-evidence.json'), JSON.stringify(evidence, null, 2))
 }
@@ -1094,6 +1121,7 @@ async function verifyHumanTrash(page, vault, shot) {
     await openMenu('.tree-note[data-path="rg-trash-keep.md"]')
     await page.eval(`[...document.querySelectorAll('.tier-menu button')].find(n => n.textContent === '删除')?.click()`)
     check('确认卡写出路径', await waitFor(page, `!!document.querySelector('.overlay-write-confirm') && document.querySelector('.overlay-write-confirm').textContent.includes('rg-trash-keep.md')`))
+    check('确认卡写明链接会失效、不会代为改字', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm')?.textContent||'';return text.includes('链接会失效') && text.includes('不会代为改字')})()`))
     await shot(page, 'trash-confirm-1200')
     await page.eval(`document.querySelector('.write-confirm-cancel')?.click()`)
     check('点「不删」后文件仍在', await waitFor(page, `!document.querySelector('.overlay-write-confirm')`) && existsSync(path.join(vault, 'rg-trash-keep.md')))

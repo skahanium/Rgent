@@ -3,7 +3,7 @@ import type { TaskMaterialTracker, MaterialDependencies } from './host-material.
 import { createHash, randomUUID } from 'node:crypto'
 import { compile } from '../markdown/index.ts'
 import type { CompileResult } from '../markdown/types.ts'
-import type { NoteSnapshot } from '../shared/ipc.ts'
+import type { NoteSnapshot, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
 import type { TaskGrant } from './task-authorization.ts'
 import { blankMarkers, folderOf, searchDocuments, searchSnippetRange } from './vault-index.ts'
 import { bodyFingerprint, historicalContextPolicy, ledgerProvenance, chapterProvenance, type LedgerSource, type LedgerMemoryDependency } from './ledger-provenance.ts'
@@ -77,7 +77,14 @@ export const WRITE_TOOL_SCHEMAS = {
 /** 宿主提供的写入能力：门在宿主侧构造，这里只调用并记账。
  *  create 只在宿主既有人确认、又能真的落盘时才出现。 */
 export type StructuralOutcome = { ok: true; target: string; moved: number; linkChanges: number; permissionChanges: number } | { ok: false; reason: string }
-export type DeleteOutcome = { ok: true; relPath: string; orphan: boolean } | { ok: false; reason: string }
+export type DeleteOutcome = {
+  ok: true
+  relPath: string
+  orphan: boolean
+  orphanReason?: TrashOrphanReason
+  degraded?: TrashDegradedReason[]
+  landingVerified?: TrashLandingVerdict
+} | { ok: false; reason: string }
 export type ScopedWriteTool = {
   append(text: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }>
   create?(name: string, body: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number; relPath: string; objectVersion?: string } | { ok: false; reason: string }>
@@ -373,8 +380,17 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
           await check(signal)
           const result = await deps.write!.delete!(request.relPath!, signal)
           if (!result.ok) { outcome = `refused:${result.reason}`; throw Error(result.reason) }
-          outcome = result.orphan ? `ok:${result.relPath}·孤儿` : `ok:${result.relPath}`
-          return { relPath: result.relPath, orphan: result.orphan }
+          // 账本要能审：孤儿附件夹的原因与「删了但没记全」的降级都写进 outcome，人能直接看见。
+          const marks: string[] = []
+          if (result.orphan) marks.push(result.orphanReason ? `·孤儿:${result.orphanReason}` : '·孤儿')
+          if (result.degraded?.length) marks.push(`·降级:${result.degraded.join(',')}`)
+          outcome = `ok:${result.relPath}${marks.join('')}`
+          return {
+            relPath: result.relPath, orphan: result.orphan,
+            ...(result.orphanReason ? { orphanReason: result.orphanReason } : {}),
+            ...(result.degraded ? { degraded: result.degraded } : {}),
+            ...(result.landingVerified ? { landingVerified: result.landingVerified } : {})
+          }
         }
         if (name === 'rename_note' || name === 'move_note') {
           const request = name === 'rename_note'

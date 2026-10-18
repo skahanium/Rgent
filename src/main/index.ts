@@ -260,8 +260,8 @@ async function trashPreviewShared(relPath: string, owner?: string): Promise<Tras
   await agentHost?.whenLaunchesSettled()
   currentVault.assertSession(token)
   const stem = relPath.replace(/\.md$/i, '')
-  const affected = agentHost?.active().filter((task) => task.id !== owner && task.root === root &&
-    (task.relPath === relPath || task.relPath.startsWith(`${stem}/`))) ?? []
+  // 按任务授权范围停任务：只在读／引用这篇笔记的场也要先停，不能只看任务自己的 relPath。
+  const affected = agentHost?.affectedBy(root, [relPath, stem], owner) ?? []
   for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
   if (agentHost?.hasPending(root)) throw new Error('PREVIOUS_TASK_UNSAVED')
   if (!mainWindow || !(await flushBeforeStructure(mainWindow))) throw new Error('UNSAVED_DRAFT')
@@ -296,8 +296,11 @@ async function trashCommitShared(id: string, allow: boolean, owner?: string, att
     await agentHost?.whenLaunchesSettled()
     currentVault.assertSession(token)
     const stem = preview.relPath.replace(/\.md$/i, '')
-    const affected = agentHost?.active().filter((task) => task.id !== owner && task.root === root &&
-      (task.relPath === preview.relPath || task.relPath.startsWith(`${stem}/`))) ?? []
+    // 预览之后、确认之前可能又起了任务：提交前按同一份授权范围再查一次。
+    const affected = agentHost?.affectedBy(root, [preview.relPath, stem], owner) ?? []
+    const affectedIds = new Set(affected.map((task) => task.id))
+    const unrelated = agentHost?.active().filter((task) => task.id !== owner && task.root === root && !affectedIds.has(task.id)) ?? []
+    if (unrelated.length) throw new Error('OTHER_TASK_RUNNING')
     for (const task of affected) { await agentHost?.cancel(task.id, 'user'); currentVault.assertSession(token) }
     if (agentHost?.hasPending(root)) throw new Error('PREVIOUS_TASK_UNSAVED')
     if (!(await flushBeforeStructure(win))) throw new Error('UNSAVED_DRAFT')
@@ -1544,7 +1547,12 @@ if (ownsInstance) app.whenReady().then(() => {
     trashCommit: async (previewId, allow, attribution, owner) => {
       const result = await trashCommitShared(previewId, allow, owner, attribution)
       if (result.cancelled) return { cancelled: true }
-      return { cancelled: false, relPath: result.relPath, orphan: result.orphan }
+      // 送篓之后的落点核验、孤儿附件夹与记录降级都要透到工具结果与账本，不能只留一句「已删除」。
+      return {
+        cancelled: false, relPath: result.relPath, orphan: result.orphan,
+        ...(result.orphanReason ? { orphanReason: result.orphanReason } : {}),
+        degraded: result.degraded, landingVerified: result.landingVerified
+      }
     },
     // 「建」一次落盘：正文与文件原子出现，不先建空笔记再写（写失败会留下没法清理的半成品）。
     createNote: async (relPath, body) => {

@@ -566,7 +566,7 @@ export async function start(root: HTMLElement): Promise<void> {
     decide: async decision => {
       const path = pendingDeletePath
       const result = await window.rgent.agentWriteConfirm(decision)
-      if (decision.approved && path && await waitNoteGone(path)) await closeTab(path, { save: false })
+      if (decision.approved && path) await closeTrashedTabs(path, { includeAttachment: false })
       pendingDeletePath = null
       return result
     }
@@ -1234,7 +1234,7 @@ export async function start(root: HTMLElement): Promise<void> {
           return
         }
         if (result.cancelled) return
-        if (await waitNoteGone(entry.relPath)) await closeTab(entry.relPath, { save: false })
+        await closeTrashedTabs(entry.relPath, { includeAttachment: !result.orphan })
         await refreshTree()
         const notices = ['笔记已移入系统废纸篓']
         if (result.orphan) notices.push(result.orphanReason === 'attachment-missing'
@@ -1710,6 +1710,18 @@ export async function start(root: HTMLElement): Promise<void> {
       await new Promise(resolve => setTimeout(resolve, 40))
     }
     return false
+  }
+
+  /** 删除成功后关掉目标笔记的标签页；附件夹**确实送进废纸篓**时再关整棵子树的标签页。
+   *  附件夹没送进去（孤儿）时子树还在库里，夹里的草稿不该因为一次没完成的第二步被无谓关掉；
+   *  那些标签会在文件被外部移走时按既有「文件已消失」路径变成不可保存，稿子仍留着。 */
+  async function closeTrashedTabs(relPath: string, opts: { includeAttachment: boolean }): Promise<void> {
+    const stem = relPath.replace(/\.md$/i, '')
+    const doomed = tabs
+      .filter(tab => tab.relPath === relPath || (opts.includeAttachment && tab.relPath.startsWith(`${stem}/`)))
+      .map(tab => tab.relPath)
+    if (!(await waitNoteGone(relPath))) return
+    for (const path of doomed) await closeTab(path, { save: false })
   }
 
   async function closeTab(relPath: string, opts: { save?: boolean } = {}): Promise<void> {

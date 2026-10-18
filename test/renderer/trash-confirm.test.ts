@@ -15,6 +15,7 @@ it('摆出路径和附件说明，点「移入废纸篓」才同意', async () =
   const dialog = document.querySelector('.overlay-write-confirm')!
   expect(dialog.textContent).toContain('甲.md')
   expect(dialog.textContent).toContain('同名附件夹')
+  expect(dialog.textContent).toContain('链接会失效，不会代为改字')
   expect(document.activeElement?.className).toContain('write-confirm-cancel')
   dialog.querySelector<HTMLButtonElement>('.write-confirm-accept')!.click()
   await expect(decided).resolves.toBe(true)
@@ -24,6 +25,7 @@ it('点「不删」或关掉浮层都是零动作', async () => {
   const decided = confirmTrash({ ...preview, hasAttachments: false })
   const dialog = document.querySelector('.overlay-write-confirm')!
   expect(dialog.textContent).toContain('没有同名附件夹')
+  expect(dialog.textContent).toContain('链接会失效，不会代为改字')
   dialog.querySelector<HTMLButtonElement>('.write-confirm-cancel')!.click()
   await expect(decided).resolves.toBe(false)
 })
