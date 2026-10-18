@@ -803,7 +803,7 @@ Host 接管单步模型事件、工具名与参数校验、顺序执行、模型
 
 已知未测：授权范围上限（256 篇）下，每次工具调用与模型步都要重核全部来源，尚无延迟预算或实测；提升上限前先测。
 
-本节 14 个提交经 PR [#6](https://github.com/skahanium/Rgent/pull/6) 合入 `branch-v0.1.0`。合并用的是 rebase 方式，主线提交号被重写、内容逐字节相同（tree 同为 `d2c769c`）；上文改为主线号，删除分支上的旧号对照：`4ec51e3`→`7c2c93b`、`a4774e8`→`c7d00a5`、`7b5cf3e`→`0390a9f`、`c2fa091`→`2bc900d`，主线 tip 为 `ef06d6f`；旧号只存在于 PR head 侧（普通 clone 可能取不到，`docs:check` 在浅克隆里按提示处理）。CI run 链接按 run id 打开，不受重写影响；这些 PR head 侧提交在 PR [#6](https://github.com/skahanium/Rgent/pull/6) 的提交列表里仍可查看（本次合并后已删除该临时分支）。
+本节 14 个提交经 PR [#6](https://github.com/skahanium/Rgent/pull/6) 合入 `branch-v0.1.0`。合并用的是 rebase 方式，主线提交号被重写、内容逐字节相同（tree 同为 `d2c769c`）；上文改为主线号，删除分支上的旧号对照：4ec51e3→7c2c93b、a4774e8→c7d00a5、7b5cf3e→0390a9f、c2fa091→2bc900d（旧号只在 PR head 侧，普通 clone 不可见，故不按可核提交号登记），主线 tip 为 `ef06d6f`；旧号只存在于 PR head 侧（普通 clone 可能取不到，`docs:check` 在浅克隆里按提示处理）。CI run 链接按 run id 打开，不受重写影响；这些 PR head 侧提交在 PR [#6](https://github.com/skahanium/Rgent/pull/6) 的提交列表里仍可查看（本次合并后已删除该临时分支）。
 
 合入后的 `branch-v0.1.0` 自身证据：push [CI 36740163198](https://github.com/skahanium/Rgent/actions/runs/36740163198)（提交 `ef06d6f`）已核，macOS 711 通过／2 条件跳过＋功能窗口 144 项＋固定样张 28 项，Windows 709 通过／4 条件跳过＋功能窗口 144 项＋固定样张 32 项，`docs` 与 `CI gate` 均 success，废纸篓按分类 skipped。
 
