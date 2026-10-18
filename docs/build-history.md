@@ -1960,6 +1960,7 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 | 记录／账本写失败被吞 | 回执给 `degraded`（`record-limit`／`record-failed`／`ledger-failed`）并如实提示 | `d9c8dec` |
 | 停任务只按 `task.relPath`、AI 提交不复查 | 抽出 `AgentHost.affectedBy` 按 `scopePaths` 交集停任务（预览与提交各查一次）；`commitDelete` 提交前复查 `OTHER_TASK_RUNNING`；「已发生副作用」错误不清 `structuralMoves`，仍按 `vault-change` 收尾 | `a6f8281` |
 | 附件夹里 Markdown 标签不关、人删卡无链接提示 | 仅在附件夹**确实送篓**时关闭子树标签；两张确认卡都写「链接会失效、不会代为改字」 | `a6f8281` |
+| CI 驱动的自查：Windows 身份格式与测试假设 | `identity()` 同时接受 POSIX 十进制与 Windows 十六进制身份，卷重挂载容错在 Windows 上生效；两条恢复测试改用产品身份，不再用 Node `dev/ino` 硬造 | `574d859` |
 | 证据链：两笔未推送零 CI、4 条 run 死链、施工历史缺三节 | 状态词扩五个并给 `已交` 加证据规则；本地 `pnpm delivery:check`；死链改摘要；补三节施工历史；受验提交与 AGENTS 同步 | `b218264`／`701fe39`／`8d491bf` |
 
 **已知边界（不粉饰）**
@@ -1977,7 +1978,9 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 
 **门（2026-10-18 本机跑）**：单元 **132 文件 2157 通过／2 跳过**；文档 14 篇（五状态词、`已交` 须提交号或 run、`delivery:check` 如实报未推送）；构建通过；完整窗口 **380／0**；人删除专项 **14／0**；写工具专项 **41／0**；恢复专项 **12／0**。
 
-**受验提交**：`8d491bf`／`a6f8281`／`88ac57f`／`d9c8dec`／`701fe39`／`b218264`（**本机、未推送、零 CI**）。
+**受验提交**：`574d859`／`9303aab`／`ad3b60b`／`8d491bf`／`a6f8281`／`88ac57f`／`d9c8dec`／`701fe39`／`b218264`（**已推送**）。
+
+**推送与 CI（2026-10-18）**：推送 `9303aab` 后首跑 [run 39092308310](https://github.com/skahanium/Rgent/actions/runs/39092308310) 在 **Windows 腿**红：两条恢复测试用 Node 的 `dev:ino` 硬造对象身份，而 Windows 原生身份是"十六进制卷号:十六进制文件 ID"，`identity()` 只认十进制——不仅测试错，**卷重挂载容错在 Windows 上本来就不生效**。修法：`identity()` 同时接受两种平台格式、测试改用产品报告的身份；提交 `574d859`。推送后第二跑 [run 39092990110](https://github.com/skahanium/Rgent/actions/runs/39092990110)：Windows 绿、macOS 腿在**与本轮改动无关的"生命周期重试"窗口检查**上红一次（本地完整窗口 4 次 380／0、首轮 CI 也绿），复跑失败 job 即全绿；**未改任何断言**，按抖动记录。最终：macOS／Windows／docs／CI gate 全 success，trash job 按 scope 跳过（探针专项未在本轮 scope 内）。
 
 **未做**：推送与 CI 证据（等所有者指令）、记忆复认证（记忆提示词与仪器代码未动，设备成绩仍按规则显示适用范围已变）。
 
