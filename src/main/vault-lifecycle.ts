@@ -70,7 +70,8 @@ export type MissingObject = {
   bodyRevision: string
   attachments: MissingAttachment[]
   rootIdentity: string
-  permissionTier: import('../shared/ipc.ts').PermissionTier
+  /** `unknown` 只用于删除时权限名单不可读；恢复核验不会把它当成任何一档。 */
+  permissionTier: import('../shared/ipc.ts').PermissionTier | 'unknown'
   detectedAt: string
 }
 type Journal = { version: 1; active: PendingMove | PendingLedgerRepair | LedgerPublication | null; missing?: MissingObject[] }
@@ -184,11 +185,15 @@ export class VaultLifecycle {
     const companion = relPath.slice(0, -3)
     try {
       const resolved = fs.resolve(companion)
-      if (resolved.at(-1)?.kind !== 'dir') throw new Error('ATTACHMENT_COLLISION')
-      attachmentPath = companion
-      attachmentId = resolved.at(-1)!.id
+      // 同名位置不是目录（普通文件／链接）时按「无附件夹」处理：它不是这次要送篓的附件夹，
+      // 不该挡住笔记本身的删除，也不再报 ATTACHMENT_COLLISION。
+      if (resolved.at(-1)?.kind === 'dir') {
+        attachmentPath = companion
+        attachmentId = resolved.at(-1)!.id
+      }
     } catch (error) {
-      if (!(error instanceof Error && error.message === 'ENOENT')) throw error
+      // 笔记与它同一父目录已由上面核验；这里只剩同名对象本身不可解析（不存在／不是普通对象）。
+      if (!(error instanceof Error && (error.message === 'ENOENT' || error.message === 'UNSAFE_PATH'))) throw error
     }
     const view: TrashPreview = {
       id: randomUUID(), sessionId: this.sessionId, relPath, title: noteTitle(relPath),
@@ -840,7 +845,7 @@ function validMissing(value: unknown): value is MissingObject {
     typeof item.bodyRevision === 'string' && /^[a-f0-9]{64}$/.test(item.bodyRevision) &&
     typeof item.rootIdentity === 'string' && /^\d+:\d+$/.test(item.rootIdentity) &&
     typeof item.detectedAt === 'string' && Number.isFinite(Date.parse(item.detectedAt)) &&
-    (item.permissionTier === 'reference' || item.permissionTier === 'follow' || item.permissionTier === 'forbidden') &&
+    (item.permissionTier === 'reference' || item.permissionTier === 'follow' || item.permissionTier === 'forbidden' || item.permissionTier === 'unknown') &&
     Array.isArray(item.attachments) && item.attachments.length <= 4096 &&
     item.attachments.every((part) => !!part && typeof part === 'object' &&
       typeof part.relPath === 'string' && !part.relPath.split('/').some((name) => !name || name === '.' || name === '..') &&

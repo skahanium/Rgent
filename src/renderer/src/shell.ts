@@ -56,7 +56,11 @@ const LIFECYCLE_ERRORS: Record<string, string> = {
   STRUCTURE_BUSY: '另一个文件位置操作正在进行，请稍后重试。',
   PATH_RESERVED: '这个路径的原笔记曾在库外消失，核验恢复前这个名字被保留、不能复用。原对象还在系统废纸篓时，请原样放回后在设置「笔记库」重扫核验；原对象已不在废纸篓时核验不可能通过，这个名称只能靠整库恢复或人工处理。',
   PLATFORM_UNPROVEN: '这台电脑上的系统废纸篓还没有可证明的删除实现，没有执行删除。',
-  PATH_CHANGED: '文件在确认前被换掉了，没有删除。请重新查看后再试。'
+  PATH_CHANGED: '文件在确认前被换掉了，没有删除。请重新查看后再试。',
+  TRASH_CONFLICT: '删除后原路径又出现了另一个对象，这次不能当成功。请到系统废纸篓核对本次落点；新出现的对象要你自己确认，别把它当成刚删的笔记。',
+  LANDING_MISMATCH: '系统废纸篓里的落点不是这次确认的笔记，可能删错了对象。请立刻到系统废纸篓核对本次新增的那一项；在核对清楚前不要再动这个路径。',
+  TRASH_INCOMPLETE: '系统报告原路径仍被占用，删除没有完成。请检查该文件后再试。',
+  ATTACHMENT_COLLISION: '同名位置是一个普通文件，不是附件夹，不能和笔记一起移动；请先处理那个文件。'
 }
 export const lifecycleErrorText = (error: unknown): string => {
   const raw = error instanceof Error ? error.message : String(error)
@@ -1212,11 +1216,23 @@ export async function start(root: HTMLElement): Promise<void> {
         if (epoch !== vaultEpoch) return
         const result = await window.rgent.noteTrashCommit({ id: prepared.preview.id, allow })
         if (epoch !== vaultEpoch) return
-        if (!result.ok) throw new Error(result.error)
+        if (!result.ok) {
+          // 落点核验不符或原路径冲突时，错误里带着系统实际落点：直接摆出来，人才能去废纸篓找回。
+          const text = lifecycleErrorText(result.error)
+          window.alert(result.landing ? `${text}\n本次落点：${result.landing}` : text)
+          return
+        }
         if (result.cancelled) return
         if (await waitNoteGone(entry.relPath)) await closeTab(entry.relPath, { save: false })
         await refreshTree()
-        hostNotice = result.orphan ? '笔记已移入系统废纸篓；同名附件夹没能一起送入，可稍后重试。' : '已移入系统废纸篓'
+        const notices = ['笔记已移入系统废纸篓']
+        if (result.orphan) notices.push(result.orphanReason === 'attachment-missing'
+          ? '同名附件夹在确认前已不在原路径，没有一起送入；笔记本身已移入系统废纸篓。'
+          : '同名附件夹没能一起送入；它仍在库里时可恢复笔记后一并处理，或去 Finder 处理。')
+        if (result.landingVerified === 'unverified') notices.push('系统没有给出可核对的落点：删除已按记录处理，但落点身份未核验。')
+        if (result.degraded.includes('record-limit') || result.degraded.includes('record-failed')) notices.push('消失记录未能写入磁盘：笔记已进废纸篓，但重启后路径占位与来源失效可能不再保留。')
+        if (result.degraded.includes('ledger-failed')) notices.push('账本留痕未能写入，删除本身已完成。')
+        hostNotice = notices.join(' ')
         updateStatus()
         return
       }

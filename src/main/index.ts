@@ -135,7 +135,7 @@ const lifecycleErrorCodes = new Set(['BAD_PATH', 'BAD_REQUEST', 'NO_VAULT', 'VAU
   'STALE_RECOVERY', 'EEXIST', 'ENOENT', 'PATH_CHANGED', 'UNSAFE_PATH', 'PERMISSION_DOWNGRADE',
   'PERMISSION_COLLISION', 'PERMISSIONS_INVALID', 'UNSAVED_DRAFT', 'PREVIOUS_TASK_UNSAVED',
   'LIFECYCLE_RECOVERY_REQUIRED', 'STRUCTURE_BUSY', 'OTHER_TASK_RUNNING', 'ATTACHMENT_COLLISION', 'LINK_SCAN_FAILED',
-  'PLATFORM_UNPROVEN', 'PATH_RESERVED', 'TRASH_INCOMPLETE'])
+  'PLATFORM_UNPROVEN', 'PATH_RESERVED', 'TRASH_INCOMPLETE', 'TRASH_CONFLICT', 'LANDING_MISMATCH'])
 
 function visibleVaultState(): VaultState {
   const state = startupVaultState && !vault?.root ? {...startupVaultState} : vault?.currentState() ?? {status:'needs-pick' as const,reason:'first-run' as const}
@@ -307,8 +307,10 @@ async function trashCommitShared(id: string, allow: boolean, owner?: string, att
     currentVault.assertSession(token)
     if (outcome.cancelled) return { ok: true, cancelled: true }
     return {
-      ok: true, cancelled: false, relPath: outcome.relPath!, landing: outcome.landing ?? '',
-      attachmentLanding: outcome.attachmentLanding ?? null, orphan: outcome.orphan === true
+      ok: true, cancelled: false, relPath: outcome.relPath, landing: outcome.landing,
+      landingVerified: outcome.landingVerified, attachmentLanding: outcome.attachmentLanding,
+      orphan: outcome.orphan, ...(outcome.orphanReason ? { orphanReason: outcome.orphanReason } : {}),
+      degraded: outcome.degraded
     }
   } finally { structureGate.finish() }
 }
@@ -1238,7 +1240,14 @@ function registerIpc(): void {
     const request = parseTrashCommitRequest(value)
     if (!trusted(event) || !request || !vault) return { ok: false, error: 'BAD_REQUEST' }
     try { return await trashCommitShared(request.id, request.allow) }
-    catch (error) { return { ok: false, error: lifecycleError(error, 'COMMIT_FAILED') } }
+    catch (error) {
+      // 落点核验失败时把系统实际落点一并交回；其它错误不编造落点。
+      const landing = error instanceof Error ? (error as Error & { landing?: unknown }).landing : undefined
+      return {
+        ok: false, error: lifecycleError(error, 'COMMIT_FAILED'),
+        ...(typeof landing === 'string' && landing ? { landing } : {})
+      }
+    }
   })
   registerTrustedHandle(IPC.lifecycleStatus, async (event) => {
     if (!trusted(event) || !vault) throw new Error('NO_VAULT')

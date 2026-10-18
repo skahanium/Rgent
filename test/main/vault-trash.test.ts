@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { VaultSession } from '../../src/main/vault.ts'
+import { VaultLifecycle } from '../../src/main/vault-lifecycle.ts'
 import { serializeStoredVault } from '../../src/main/notes-fs.ts'
 import { markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
 import { WRITE_TOOL_SCHEMAS } from '../../src/main/scoped-agent-tools.ts'
@@ -137,6 +138,80 @@ describe('human trash', () => {
       expect(await readFile(path.join(f.root, 'a'), 'utf8')).toBe('不是附件夹')
       await expect(f.vault.create('a')).rejects.toThrow('PATH_RESERVED')
     } finally {
+      f.vault.dispose()
+      await reclaim(landing)
+    }
+  })
+
+  it('reports the attachment folder as missing when it vanishes after preview', async () => {
+    if (!HUMAN_TRASH_ON_THIS_PLATFORM) return
+    const f = await fixture()
+    bases.push(f.base)
+    let landing: string | undefined
+    try {
+      const preview = await f.vault.previewTrash('a.md')
+      expect(preview.hasAttachments).toBe(true)
+      await rm(path.join(f.root, 'a'), { recursive: true, force: true })
+      const result = await f.vault.commitTrash(preview.id, true)
+      landing = result.landing
+      expect(result.cancelled).toBe(false)
+      expect(result.landingVerified).toBe('verified')
+      expect(result.orphan).toBe(true)
+      expect(result.orphanReason).toBe('attachment-missing')
+      expect(result.attachmentLanding).toBeNull()
+      expect(existsSync(path.join(f.root, 'a.md'))).toBe(false)
+      expect(existsSync(path.join(f.root, 'a'))).toBe(false)
+      expect(await readFile(landing!, 'utf8')).toContain('以后用中文')
+    } finally {
+      f.vault.dispose()
+      await reclaim(landing)
+    }
+  })
+
+  it('treats a plain file beside the note as no companion folder and still trashes the note', async () => {
+    if (!HUMAN_TRASH_ON_THIS_PLATFORM) return
+    const f = await fixture()
+    bases.push(f.base)
+    let landing: string | undefined
+    try {
+      await rm(path.join(f.root, 'a'), { recursive: true, force: true })
+      await writeFile(path.join(f.root, 'a'), '不是附件夹')
+      const preview = await f.vault.previewTrash('a.md')
+      expect(preview.hasAttachments).toBe(false)
+      const result = await f.vault.commitTrash(preview.id, true)
+      landing = result.landing
+      expect(result.cancelled).toBe(false)
+      expect(result.orphan).toBe(false)
+      expect(result.orphanReason).toBeUndefined()
+      expect(result.attachmentLanding).toBeNull()
+      expect(existsSync(path.join(f.root, 'a.md'))).toBe(false)
+      expect(await readFile(path.join(f.root, 'a'), 'utf8')).toBe('不是附件夹')
+      await expect(f.vault.create('a')).rejects.toThrow('PATH_RESERVED')
+    } finally {
+      f.vault.dispose()
+      await reclaim(landing)
+    }
+  })
+
+  it('reports record-limit degradation when the missing record cannot be written (injected, not a real limit)', async () => {
+    if (!HUMAN_TRASH_ON_THIS_PLATFORM) return
+    const f = await fixture()
+    bases.push(f.base)
+    let landing: string | undefined
+    // 注入：库层 recordMissing 直接抛 MISSING_RECORD_LIMIT，避免真的写满 64 条记录。
+    const spy = vi.spyOn(VaultLifecycle.prototype, 'recordMissing').mockImplementation(() => { throw new Error('MISSING_RECORD_LIMIT') })
+    try {
+      const preview = await f.vault.previewTrash('a.md')
+      const result = await f.vault.commitTrash(preview.id, true)
+      landing = result.landing
+      expect(result.cancelled).toBe(false)
+      expect(result.orphan).toBe(false)
+      expect(result.degraded).toContain('record-limit')
+      // 记录写失败也不能把路径放开：内存占位仍在，重启前的同一进程内新建仍被拒。
+      await expect(f.vault.create('a')).rejects.toThrow('PATH_RESERVED')
+      expect(existsSync(path.join(f.root, 'a.md'))).toBe(false)
+    } finally {
+      spy.mockRestore()
       f.vault.dispose()
       await reclaim(landing)
     }

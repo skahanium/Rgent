@@ -286,10 +286,27 @@ export type TrashPreviewView = {
   hasAttachments: boolean
 }
 export type TrashPreviewResult = { ok: true; preview: TrashPreviewView } | { ok: false; error: string }
+/** 落点核验：`unverified` 只表示系统没给可核对的收据，不是删除失败。 */
+export type TrashLandingVerdict = 'verified' | 'unverified'
+/** 附件夹第二步失败的两类：预览后已不在（missing）／其它失败（failed）。 */
+export type TrashOrphanReason = 'attachment-missing' | 'attachment-failed'
+/** 删除已发生但记录没写全时如实带出，不把降级说成完整成功。 */
+export type TrashDegradedReason = 'record-limit' | 'record-failed' | 'ledger-failed'
 export type TrashCommitResult =
   | { ok: true; cancelled: true }
-  | { ok: true; cancelled: false; relPath: string; landing: string; attachmentLanding: string | null; orphan: boolean }
-  | { ok: false; error: string }
+  | {
+    ok: true
+    cancelled: false
+    relPath: string
+    landing: string
+    landingVerified: TrashLandingVerdict
+    attachmentLanding: string | null
+    orphan: boolean
+    orphanReason?: TrashOrphanReason
+    degraded: TrashDegradedReason[]
+  }
+  /** 落点核验失败时带出系统实际给出的落点（可能不是原对象），供人找回或核对。 */
+  | { ok: false; error: string; landing?: string }
 export type RelocationEvent = { moved: { from: string; to: string }[]; sessionId?: string }
 export type LifecycleReason = 'journal-invalid' | 'journal-unreadable' | 'object-changed' | 'policy-changed' | 'recovery-required'
 export type LifecycleStatus = {

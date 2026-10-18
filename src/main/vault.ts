@@ -2,12 +2,12 @@ import { WorkingMemoryService } from './working-memory-service.ts'
 import { bodyFingerprint } from './ledger-provenance.ts'
 import { collectNotePaths } from '../shared/vault-rel.ts'
 import {WorkingMemoryStore,applyMemoryRecovery,type MemoryRecoveryPatch,type WorkingBindingPatch,type WorkingSource,type WorkingSnapshot} from './working-memory-store.ts'
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { dialog, type BrowserWindow } from 'electron'
-import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, RecoveryRow, RecoveryScanView, RecoveryVerdict, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest } from '../shared/ipc.ts'
+import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, RecoveryRow, RecoveryScanView, RecoveryVerdict, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
 import { createFolder, createNote, createNoteWithBody, listVaultTree, parseStoredVault, readNoteSnapshot, requireOrdinaryNotes as verifyOrdinaryNotes, revisionOf, serializeStoredVault, writeNote } from './notes-fs.ts'
 import { VaultMutationQueue } from './vault-mutation-queue.ts'
 import { VaultLifecycle, type MissingObject, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite, type TrashPreview } from './vault-lifecycle.ts'
@@ -17,6 +17,7 @@ import { hasHiddenSegment, isNotePath, resolveInVault, sanitizeFolderName, sanit
 import { effectivePermissionEntries, loadPermissions, loadPermissionSnapshot, modelTierFor, setPermission as savePermission, tierFor } from './permissions.ts'
 import type { TaskGrant } from './task-authorization.ts'
 import { closeSecureFs, secureFsFor } from './secure-fs.ts'
+import { postTrashOutcome, verifyLanding } from './trash-result.ts'
 import { VaultIndex } from './vault-index.ts'
 import { vaultRootIdentity, watchVault } from './watch.ts'
 import { assertLedgerPreserved, composeSource, partitionSource } from '../markdown/partition.ts'
@@ -25,6 +26,26 @@ import { LedgerStore } from './ledger-store.ts'
 import type { LedgerChapterWrite } from './host-source.ts'
 import { retireMemoryFile,memoryRetirementTarget } from './memory-retirement.ts'
 import type { MemoryContext } from '../shared/memory.ts'
+
+/** 落点核验用 `lstatSync`（不跟随链接）。拿不到落点属性就没有可核对的收据，按删错上报。 */
+function landingStat(target: string): { dev: number; ino: number } {
+  try {
+    const info = lstatSync(target)
+    return { dev: Number(info.dev), ino: Number(info.ino) }
+  } catch { throw new Error('LANDING_MISMATCH') }
+}
+
+/** 删除成功后的如实回执：落点核验与降级都随结果带出，不吞成一句「成功」。 */
+type TrashCommitOutcome = {
+  cancelled: false
+  relPath: string
+  landing: string
+  landingVerified: TrashLandingVerdict
+  attachmentLanding: string | null
+  orphan: boolean
+  orphanReason?: TrashOrphanReason
+  degraded: TrashDegradedReason[]
+}
 
 export class VaultSession {
   private readonly calls = new AsyncLocalStorage<{sessionId:string|null}>()
@@ -625,6 +646,8 @@ export class VaultSession {
     if (snapshot.state.status !== 'ready') return row('permission-denied', '权限名单无法核验，暂不恢复。')
     const tier = tierFor(record.relPath, effectivePermissionEntries(root, snapshot.state.entries))
     if (tier === 'forbidden') return row('permission-denied', '当前权限档禁止 AI 使用该笔记。')
+    // 删除时权限名单不可读只记 unknown：原档未知，就不能按任何一档宣告恢复。
+    if (record.permissionTier === 'unknown') return row('permission-changed', '删除时权限名单无法核验，原权限档未知，不能按原档宣告恢复。')
     const labels: Record<PermissionTier, string> = { reference: '参考', follow: '跟随', forbidden: '禁止' }
     if (tier !== record.permissionTier) return row('permission-changed', `权限档在对象不在时从「${labels[record.permissionTier]}」变成「${labels[tier]}」，按原档恢复的判据不成立。`)
     const ownership = ledger.inspectOwner(record.relPath)
@@ -1043,9 +1066,9 @@ export class VaultSession {
 
   trashPreviewById(id: string): TrashPreview | null { this.assertCall(); return this.lifecycle?.peekTrash(id) ?? null }
 
-  async commitTrash(id: string, allow: boolean, token = this.captureSession(), attribution?: { taskId: string; prompt: string }): Promise<{
-    cancelled: boolean; relPath?: string; landing?: string; attachmentLanding?: string | null; orphan?: boolean
-  }> {
+  async commitTrash(id: string, allow: false, token?: string, attribution?: { taskId: string; prompt: string }): Promise<{ cancelled: true }>
+  async commitTrash(id: string, allow: true, token?: string, attribution?: { taskId: string; prompt: string }): Promise<TrashCommitOutcome>
+  async commitTrash(id: string, allow: boolean, token = this.captureSession(), attribution?: { taskId: string; prompt: string }): Promise<{ cancelled: true } | TrashCommitOutcome> {
     this.assertSession(token)
     const lifecycle = this.lifecycle
     await this.lifecycleReady
@@ -1090,36 +1113,75 @@ export class VaultSession {
       catch { attachments = [] }
       const snapshot = await loadPermissionSnapshot(root)
       const effective = snapshot.state.status === 'ready' ? effectivePermissionEntries(root, snapshot.state.entries) : null
-      const permissionTier: PermissionTier = effective ? tierFor(preview.relPath, effective) : 'forbidden'
+      // 权限名单读不了时原本写 forbidden；这会谎称「当时是禁止档」并把恢复卡死，改记 unknown。
+      const permissionTier: MissingObject['permissionTier'] = effective ? tierFor(preview.relPath, effective) : 'unknown'
       const landing = fs.trash(preview.relPath, preview.objectVersion)
       lifecycle.discardTrash(id)
+      // 系统调用之后分开核验两件事：原路径是否空出来、落点是否还是刚才确认的对象。
+      // 冲突先记下不立刻抛：落点核验更关键（删错对象要压过冲突上报），记录也照写。
+      let conflict: Error | null = null
+      try { postTrashOutcome(() => fs.resolve(preview.relPath).at(-1) ?? null) }
+      catch (error) {
+        if (error instanceof Error && error.message === 'TRASH_CONFLICT') conflict = error
+        else throw error
+      }
+      let landingVerified: TrashLandingVerdict
+      try { landingVerified = verifyLanding(landing, preview.objectVersion, landingStat) }
+      catch (error) {
+        // 删错对象时不能写「这篇笔记已进废纸篓」的记录：先丢掉运行时绑定再响亮停下。
+        // 把系统实际给出的落点挂到错误上：人要知道东西去了哪儿（它可能不是原对象）。
+        this.forgetTrashedPath(preview.relPath)
+        if (error instanceof Error && landing) (error as Error & { landing?: string }).landing = landing
+        throw error
+      }
+      const degraded: TrashDegradedReason[] = []
       try {
         lifecycle.recordMissing({
           relPath: preview.relPath, noteId, objectVersion: preview.objectVersion, bodyRevision, attachments,
           rootIdentity: this.rootIdentity ?? vaultRootIdentity(root), permissionTier, detectedAt: new Date().toISOString()
         })
-      } catch {
+      } catch (error) {
+        // 超限或 journal 被占用：内存占位保留（重启前仍占路径），并把降级如实带出去。
         this.reservedMissing.add(preview.relPath)
+        degraded.push(error instanceof Error && error.message === 'MISSING_RECORD_LIMIT' ? 'record-limit' : 'record-failed')
       }
       let attachmentLanding: string | null = null
       let orphan = false
+      let orphanReason: TrashOrphanReason | undefined
       if (preview.attachmentPath && preview.attachmentId) {
+        const attachmentPath = preview.attachmentPath
         try {
-          const attach = fs.resolve(preview.attachmentPath).at(-1)
+          const attach = fs.resolve(attachmentPath).at(-1)
           if (!attach || attach.kind !== 'dir' || attach.id !== preview.attachmentId) throw new Error('PATH_CHANGED')
-          attachmentLanding = fs.trash(preview.attachmentPath, preview.attachmentId)
+          attachmentLanding = fs.trash(attachmentPath, preview.attachmentId)
+          postTrashOutcome(() => fs.resolve(attachmentPath).at(-1) ?? null)
+          verifyLanding(attachmentLanding, preview.attachmentId, landingStat)
         } catch (error) {
-          if (!(error instanceof Error && error.message === 'ENOENT')) orphan = true
+          // 第二步不再把 ENOENT 吞成普通成功：预览承诺过一起送篓，夹子不在了也要如实报。
+          orphan = true
+          orphanReason = error instanceof Error && error.message === 'ENOENT' ? 'attachment-missing' : 'attachment-failed'
         }
       }
       try { this.ledgerStore?.recordHumanTrash(preview.relPath, landing, attachmentLanding, orphan, attribution) }
-      catch { /* 账本留痕失败不回滚已进废纸篓的对象 */ }
-      this.verified.delete(preview.relPath)
-      this.latestObjects.delete(preview.relPath)
-      this.index.markDirty()
-      this.emit('tree:changed')
-      return { cancelled: false, relPath: preview.relPath, landing, attachmentLanding, orphan }
+      catch { degraded.push('ledger-failed') }
+      this.forgetTrashedPath(preview.relPath)
+      if (conflict) {
+        if (landing) (conflict as Error & { landing?: string }).landing = landing
+        throw conflict
+      }
+      return {
+        cancelled: false, relPath: preview.relPath, landing, landingVerified, attachmentLanding, orphan,
+        ...(orphanReason ? { orphanReason } : {}), degraded
+      }
     })
+  }
+
+  /** 送篓之后这个路径的运行时绑定不能再当原对象：树要重扫，已验证快照也要丢。 */
+  private forgetTrashedPath(relPath: string): void {
+    this.verified.delete(relPath)
+    this.latestObjects.delete(relPath)
+    this.index.markDirty()
+    this.emit('tree:changed')
   }
 
   async commitRelocation(id: string, repairLinks: boolean, token = this.captureSession()): Promise<{ moved: RelocationMove[]; unrepaired: string[] }> {

@@ -1,7 +1,7 @@
 import { LedgerStore } from '../../src/main/ledger-store.ts'
 import { VaultLifecycle } from '../../src/main/vault-lifecycle.ts'
 import { afterEach, describe, expect, it } from 'vitest'
-import { existsSync } from 'node:fs'
+import { existsSync, lstatSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -88,6 +88,21 @@ describe('secure vault structure', () => {
     expect(existsSync(path.join(root, '稿.md'))).toBe(false)
     expect(landing.length).toBeGreaterThan(0)
     expect(await readFile(landing, 'utf8')).toBe('顶替')
+    await rm(landing, { recursive: true, force: true })
+  })
+
+  it('returns a landing whose dev:ino still identifies the trashed object', async () => {
+    const root = await vault()
+    await writeFile(path.join(root, '落点.md'), '正文')
+    const fs = secureFsFor(root)
+    const id = fs.resolve('落点.md').at(-1)!.id
+    if (process.platform !== 'darwin') {
+      expect(() => fs.trash('落点.md', id)).toThrow('PLATFORM_UNPROVEN')
+      return
+    }
+    const landing = fs.trash('落点.md', id)
+    const info = lstatSync(landing)
+    expect(`${info.dev}:${info.ino}`).toBe(id)
     await rm(landing, { recursive: true, force: true })
   })
 
