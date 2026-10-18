@@ -15,9 +15,11 @@ import { fileURLToPath } from 'node:url'
  *      区分「没取回」与「不存在」，此时只提示、不判错。
  *    - 包表状态格：核**当下有效包表**——标题含「本轮」「写类」或「结构工具」（或标题去括号后
  *      等于当前阶段名）的小节里、表头含「包」的表的**数据行**（表头行与分隔行不算）。末列
- *      （门／验收／证据列）**必须**以四个状态词之一加粗开头（`**已交**`／`**未开**`／
- *      `**进行中**`／`**待核**`）；**缺失即报错**。以前写成「若以加粗词开头才校验」，于是
- *      **只有写了状态格才被检查**，漏写反而合法；写类包 0 与结构包表重复行也曾因此漏检。
+ *      （门／验收／证据列）**必须**以五个状态词之一加粗开头（`**已交**`／`**本机已交**`／
+ *      `**未开**`／`**进行中**`／`**待核**`）；**缺失即报错**。以前写成「若以加粗词开头才校验」，
+ *      于是**只有写了状态格才被检查**，漏写反而合法；写类包 0 与结构包表重复行也曾因此漏检。
+ *    - 交付证据：同一批数据行里，`**已交**` 的末列**必须**含反引号提交号（7–40 位十六进制）
+ *      或 `actions/runs/<id>` 链接之一；`**本机已交**` 是「本机已交、待推送」，不要求远端证据。
  *      历史表（`## 2026-*`、更早的施工图小节）不按本轮词汇要求，不在判据内。
  */
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -230,8 +232,12 @@ if (gitAvailable) {
 
 // 规则 4b：当下有效包表状态格。核标题含「本轮」「写类」或「结构工具」（或标题去括号后等于
 // 当前阶段名）的小节里，表头含「包」的表（`| 包 |`／`| # | 包 |`…）的**数据行**；末列必须以
-// 四个状态词之一加粗开头，**缺失即报错**。历史表（`## 2026-*`、更早小节）不按本轮词汇要求。
-const PACKAGE_STATES = new Set(['已交', '未开', '进行中', '待核'])
+// 五个状态词之一加粗开头，**缺失即报错**。历史表（`## 2026-*`、更早小节）不按本轮词汇要求。
+// 规则 4c：同一批数据行里，`**已交**` 的末列必须含反引号提交号或 `actions/runs/<id>` 链接；
+// `**本机已交**` 明说还没推送，不要求远端证据。
+const PACKAGE_STATES = new Set(['已交', '本机已交', '未开', '进行中', '待核'])
+const EVIDENCE_PATTERN = /`[a-f\d]{7,40}`|actions\/runs\/\d+/
+const STATE_WORDS = [...PACKAGE_STATES].map((s) => `**${s}**`).join('／')
 const CURRENT_SECTION = /本轮|写类|结构工具/
 /** 标题去掉尾部括号（全角／半角）后的主名，用来认「当前阶段」那一节。 */
 const headingBase = (text) => text.replace(/[（(][^（()）]*[)）]\s*$/u, '').trim()
@@ -259,9 +265,11 @@ let checkedStatusCells = 0
     const last = cells.at(-1) ?? ''
     const state = /^\*\*([^*]+)\*\*/.exec(last)?.[1]
     if (state === undefined) {
-      errors.push(`docs/build.md:${index + 1}: 本轮包表（表头含「包」）的数据行末列必须以状态词开头（${[...PACKAGE_STATES].map((s) => `**${s}**`).join('／')}），本行缺失`)
+      errors.push(`docs/build.md:${index + 1}: 本轮包表（表头含「包」）的数据行末列必须以状态词开头（${STATE_WORDS}），本行缺失`)
     } else if (!PACKAGE_STATES.has(state)) {
-      errors.push(`docs/build.md:${index + 1}: 包表状态格「**${state}**」不在既有词汇内（${[...PACKAGE_STATES].map((s) => `**${s}**`).join('／')}）`)
+      errors.push(`docs/build.md:${index + 1}: 包表状态格「**${state}**」不在既有词汇内（${STATE_WORDS}）`)
+    } else if (state === '已交' && !EVIDENCE_PATTERN.test(last)) {
+      errors.push(`docs/build.md:${index + 1}: 「已交」行末列缺少证据：须含反引号提交号或 actions/runs/<id> 链接（「本机已交」不要求）`)
     }
   }
 }
@@ -271,5 +279,5 @@ if (errors.length > 0) {
   process.exitCode = 1
 } else {
   for (const notice of notices) process.stderr.write(`${notice}\n`)
-  process.stdout.write(`文档检查通过：${files.length} 个文件，当前阶段「${buildStage}」；四条机械规则：链接与锚点／阶段一致性／交付证据形态／提交号存在性（核 ${checkedCommits} 个）＋本轮包表状态格（核 ${checkedStatusCells} 个：缺失或超出四个词即报错）。\n`)
+  process.stdout.write(`文档检查通过：${files.length} 个文件，当前阶段「${buildStage}」；四条机械规则：链接与锚点／阶段一致性／交付证据形态／提交号存在性（核 ${checkedCommits} 个）＋本轮包表状态格（核 ${checkedStatusCells} 个：缺失、超出五个词或「已交」缺提交号／run 链接即报错）。\n`)
 }

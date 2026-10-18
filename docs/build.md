@@ -84,7 +84,7 @@ flowchart TD
 | 第三方执行隔离 | 统一资源代理、任务撤销／预算、平台机制与签名方案 | 可验证的最小文件／网络／进程权限和资源上限 | 未开：机制依据及两平台构建后恶意组件实测；失效不得普通启动补位。候选 API、限额和适配未锁，详见 [门二](topics.md#两道开放门与定向验收)。 |
 | 远端 MCP 与联网 | 统一授权、受控出口、联网总闸与连接凭据 | 经逐项审定的只读外部能力与低信任结果 | **当前阶段、实现未开**：先远端 HTTPS 查询／资料获取，不下载服务器或挂库；逐项核发送确认、目标认证、数据／凭据隔离、取消和部分失败，两平台本地出口均须证明。等本机授权后再接线。内置搜索／抓页独立验收，不声称约束远端内部。 |
 | 本机可执行 MCP | 统一授权、第三方执行隔离、候选程序审定 | 有最小资源权限的本机能力 | 未开：逐候选核双平台文件／网络／凭据／进程／资源边界；失效不普通启动补位，不开放任意命令。 |
-| 废纸篓删除与恢复核验 | 文件操作基础、送篓前对象身份核对（macOS）；Windows 另须原生证明 | 人的逐次删除、系统废纸篓、放回后核验；随后才供删除工具使用 | **macOS 人删除已开**（2026-10-17）：送篓前核 `expected_id`，对不上就拒；同名进篓改名按此接受；恢复核验入口仍在设置「笔记库」。**AI 删除在 macOS 已交**（同一条送篓路、预览＋一次点击）。**Windows 入口未开**（`PLATFORM_UNPROVEN`）。探针结论（2026-10-15）仍成立：单凭路径的 `trashItem`／`recycleURLs` 绑不住 inode，篓内同名会改名；产品用身份 CAS 补上「换掉就拒」，不假装探针已过。契约见[人删除与废纸篓安全门](decisions.md#2026-10-15-人删除与废纸篓安全门)与[AI 删除授权](decisions.md#2026-10-17-ai-删除落地授权macos)。`src/` 里没有 `TRASH_GATE_OPEN`。Windows 项见[Windows 上暂测不了的项](#windows-上暂测不了的项2026-10-17)。 |
+| 废纸篓删除与恢复核验 | 文件操作基础、送篓前对象身份核对（macOS）；Windows 另须原生证明 | 人的逐次删除、系统废纸篓、放回后核验；随后才供删除工具使用 | **macOS 人删除已开**（2026-10-17；`1330329`，本机、待推送）：送篓前核 `expected_id`，对不上就拒；同名进篓改名按此接受；恢复核验入口仍在设置「笔记库」。**AI 删除在 macOS 本机已交**（`2b4a85b`，待推送；同一条送篓路、预览＋一次点击）。**Windows 入口未开**（`PLATFORM_UNPROVEN`）。探针结论（2026-10-15）仍成立：单凭路径的 `trashItem`／`recycleURLs` 绑不住 inode，篓内同名会改名；**产品缩小窗口并核验落点、失败如实报告；窗口未消除（合同 2026-10-18 披露）**。契约见[人删除与废纸篓安全门](decisions.md#2026-10-15-人删除与废纸篓安全门)、[AI 删除授权](decisions.md#2026-10-17-ai-删除落地授权macos)与[删除链路加固](decisions.md#2026-10-18-删除链路加固)。`src/` 里没有 `TRASH_GATE_OPEN`。Windows 项见[Windows 上暂测不了的项](#windows-上暂测不了的项2026-10-17)。 |
 | 专项模型分工 | 对应摘要、视觉理解或联网搜索能力已开放 | 仅对应能力的模型选择和可信用量数据 | 未开：逐项验证协议及来源统计，不预设小／大／视觉模型控件。 |
 | 最终视觉与压测校准 | 各已开页面和长文固定样例 | 统一外观、可访问性与性能证据 | 未开：最终统一外观、长文延迟与压测证据。当前界面的用户确认已在「界面改造」登记，不等于本阶段的校准。 |
 
@@ -143,7 +143,7 @@ flowchart TD
 |------|----------|----------|--------------------|
 | 壳与信任 | `src/main/index.ts`、`src/preload`、`src/shared/ipc.ts`、`src/shared/flush.ts` | **已交** | `test/shared/flush.test.ts`；preload 为 `index.cjs`。 |
 | 库与文件 | `src/main/vault.ts`、`secure-fs.ts`、`notes-fs.ts`、`vault-lifecycle.ts`、`native/**` | **已交** | 保存、新建／改名／移动／引用修复／中断恢复及消失另存基础已验；macOS 人删除见下格。残余竞态保留。 |
-| 废纸篓删除与恢复核验 | `native/vault_trash_mac.mm`、`VaultSession.previewTrash`／`commitTrash`、树右键 | **已交** | **macOS 人删除已开**（身份 CAS ＋系统废纸篓＋确认卡）；恢复核验界面已交。**AI 删除在 macOS 已交**（复用同一条送篓路）。Windows 入口未开；整夹／永久删除仍硬停。探针 `test/native/trash_*` 仍非产品接口。 |
+| 废纸篓删除与恢复核验 | `native/vault_trash_mac.mm`、`VaultSession.previewTrash`／`commitTrash`、树右键 | **已交** | **macOS 人删除已开**（`1330329`，本机、待推送；送篓前核身份＋系统废纸篓＋确认卡）；恢复核验界面已交（`b9fde20`、`57f9b7a`）。**AI 删除在 macOS 本机已交**（`2b4a85b`，待推送；复用同一条送篓路）。**最后核验到 `trashItemAtURL` 之间的窗口未消除**（合同 2026-10-18 披露）。Windows 入口未开；整夹／永久删除仍硬停。探针 `test/native/trash_*` 仍非产品接口。 |
 | 正文与画布 | `src/markdown/**`、`src/renderer/src/view/**` | **已交** | 一条管线 + viewport widget；`test/markdown/pipeline.test.ts`。 |
 | 账本缝 | `src/markdown/partition.ts`、主进程独立账本服务、`src/renderer/src/tabs.ts` | **已交** | 画布与保存只走正文；独立账本由 `LedgerStore` 写入，旧尾部由 `partitionSource`／`composeSource` 保真迁移，不作为生产追加路径。 |
 | 检索 | `src/main/vault-index.ts`、`src/renderer/src/search.ts`、`backlinks.ts` | **已交** | 人搜惰性全量 + 子串保持；模型读库／搜库已使用固定授权集合，不使用人的全库搜索后过滤。 |
@@ -235,19 +235,19 @@ flowchart TD
 | 包 | 内容 | 依赖 | 验收 |
 | --- | --- | --- | --- |
 | A | 证据与围栏（零产品改动） | 既有探针与矩阵判据 | **已交**：合同与包表落地（`83d5370`）；探针 API／失败模式读清；三项假设核对（消失另存位置、技能快照发送点、依赖连坐粒度） |
-| B1 | 记忆近期容器完整性 | 既有 `recent-regeneration`／`protocol-repair` 通道 | **已交**：r18 真实夹具（进展无落点、四段全空被拒）修复后产出完整近期容器；仍保留拒绝码；**每例至多 1 次额外调用** |
-| B2 | 债务清零（6 项） | 见各条 | **已交**：每项一条红绿测试或明确记录为接受 |
-| B3 | 文档收口 | `docs:check` | **已交**：历史入 build-history；提交号存在性、包表状态格（**本轮包表末列必须开头即写状态，缺失即报错**）、锚点与阶段一致性四条机械规则 |
-| C1 | 原生候选证明 | 同一探针加分支（不另造判定） | **已交**（结论：不通过，门保持关闭）：`file-manager` 与已失败候选逐场景一致；判定逻辑未放宽（负面对照＝换成永久删除即失败）；本机证据在 `artifacts/trash/`。推送后 CI [run 38694186521](https://github.com/skahanium/Rgent/actions/runs/38694186521) 两平台 `evidence-collected`（macOS `workspace`＋`file-manager` 14 场、Windows `file-operation` 14 场）；判据② macOS `same-name` 第 2 项 `namePreserved=false`，门继续关 |
+| B1 | 记忆近期容器完整性 | 既有 `recent-regeneration`／`protocol-repair` 通道 | **已交**（`059e6c9`）：r18 真实夹具（进展无落点、四段全空被拒）修复后产出完整近期容器；仍保留拒绝码；**每例至多 1 次额外调用** |
+| B2 | 债务清零（6 项） | 见各条 | **已交**（`b9fde20`）：每项一条红绿测试或明确记录为接受 |
+| B3 | 文档收口 | `docs:check` | **已交**（`6bc17ae`）：历史入 build-history；提交号存在性、包表状态格（**本轮包表末列必须开头即写状态，缺失即报错**）、锚点与阶段一致性四条机械规则 |
+| C1 | 原生候选证明 | 同一探针加分支（不另造判定） | **已交**（`b4bfa4f`；结论：不通过，门保持关闭）：`file-manager` 与已失败候选逐场景一致；判定逻辑未放宽（负面对照＝换成永久删除即失败）；本机证据在 `artifacts/trash/`。推送后 CI（原 run 已删除；结论与复现做法见本节）两平台 `evidence-collected`（macOS `workspace`＋`file-manager` 14 场、Windows `file-operation` 14 场，`productionGateOpen=false`）；判据② macOS `same-name` 第 2 项 `namePreserved=false`，门继续关 |
 | C2 | 库层删除与恢复核验 | `structureGate`、生命周期记录、`verifySource` | **已交**：身份不符／竞态／内部路径／换库／附件跟随／恢复三分支各有先红后绿；**安全半边已随 `b9fde20` 交付**（只对无删除入口时保护人的那半边负责）：外部消失**有记录**、消失对象**不被重建**（同路径新建拒 `PATH_RESERVED`）、来源**标失效但不自动遗忘**、**单篇**恢复核验（原全库核验是全有全无）＋恢复降级如实上报 |
-| C3 | 界面 | 树右键菜单、确认卡、设置页 | **已交**（仅**恢复核验界面**那半）：核验入口、逐分支文案与“通过才可核验”已随 C2 交付（`test/renderer/recovery-ui.test.ts`），且窗口断言里**不出现任何删除入口**；树右键菜单、删除确认卡、设置页那三件**等门开**才做，本轮不做 |
-| C4 | 窗口证据 | 恢复界面的窗口专项＋完整窗口回归 | **已交**：开关是 `RGENT_UI_RECOVERY_ONLY=1`（`scripts/verify-ui.mjs` 的 `verifyExternalRecovery`，独占、不进默认完整窗口）。专项 **11 条失败 0**（识别／`PATH_RESERVED`／核验通过／内容已变／附件缺失／门关无删除入口，加初始化与受控主机两道收口）；完整窗口回归 **379／0**。`probe:check` 是付费协议剥离对照探针，本轮不跑 |
+| C3 | 界面 | 树右键菜单、确认卡、设置页 | **已交**（`b9fde20`；仅**恢复核验界面**那半）：核验入口、逐分支文案与“通过才可核验”已随 C2 交付（`test/renderer/recovery-ui.test.ts`），且窗口断言里**不出现任何删除入口**；树右键菜单、删除确认卡、设置页那三件**等门开**才做，本轮不做 |
+| C4 | 窗口证据 | 恢复界面的窗口专项＋完整窗口回归 | **已交**（`57f9b7a`）：开关是 `RGENT_UI_RECOVERY_ONLY=1`（`scripts/verify-ui.mjs` 的 `verifyExternalRecovery`，独占、不进默认完整窗口）。专项 **11 条失败 0**（识别／`PATH_RESERVED`／核验通过／内容已变／附件缺失／门关无删除入口，加初始化与受控主机两道收口）；完整窗口回归 **379／0**。`probe:check` 是付费协议剥离对照探针，本轮不跑 |
 
 **认证批次规则**：B 与 C 都在认证前落地 → 合并成一次复认证；C 被证伪（只交付安全半边）→ 只认证 B 的改动；C 晚于认证落地 → 另跑一次，并记为"因产品改动而复认证"。
 
 ### 本轮实测的范围与边界（2026-10-15）
 
-**证据的所在地与覆盖范围**：本轮 14 场（7 场景 × 2 候选：`workspace` 与 `file-manager`）先是**本机 macOS 证据**，产物在 `artifacts/trash/`；**`artifacts/` 被 `.gitignore` 整目录忽略（`git ls-files artifacts/` 为空）**，所以仓库内无法复核原始件，只留结论与本节的复现做法。推送后 CI [run 38694186521](https://github.com/skahanium/Rgent/actions/runs/38694186521)（提交 `7ae86aae…`）已跑两候选：macOS `workspace`＋`file-manager` 各 7 场、Windows `file-operation` 14 场，作业均为 `evidence-collected`／`productionGateOpen=false`。macOS `same-name` 第 2 项两候选 `namePreserved=false`（落点加时间戳后缀）。9 月 30 日那节的“七场”是当时的记录，已恢复原文、不回填。
+**证据的所在地与覆盖范围**：本轮 14 场（7 场景 × 2 候选：`workspace` 与 `file-manager`）先是**本机 macOS 证据**，产物在 `artifacts/trash/`；**`artifacts/` 被 `.gitignore` 整目录忽略（`git ls-files artifacts/` 为空）**，所以仓库内无法复核原始件，只留结论与本节的复现做法。推送后 CI（原 run 已删除；提交 `7ae86aae…`）已跑两候选：macOS `workspace`＋`file-manager` 各 7 场、Windows `file-operation` 14 场，作业均为 `evidence-collected`／`productionGateOpen=false`。**已删除 run 的摘要**：时间 2026-10-15 推送后当天；job 名 `evidence-collected`；结论 `productionGateOpen=false`（门不动）；场景数 macOS 两候选各 7 场（合计 14 场）＋Windows `file-operation` 14 场；复现做法见下两段。macOS `same-name` 第 2 项两候选 `namePreserved=false`（落点加时间戳后缀）。9 月 30 日那节的“七场”是当时的记录，已恢复原文、不回填。
 
 **负面对照可复现**：探针的判定逻辑没有放宽，凭据是“把候选换成永久删除即失败”。复现做法：在**临时副本**上把候选实现换成永久删除（`unlink`／`Remove-Item`），夹具与场景不变，期望的失败三件套是 `experimentComplete=false`、`fixtureReclaimed=false`、进程退出码 1——即“删掉了、但没有可核验的废纸篓收据”，判定必须在此情形下失败。原始件 `artifacts/trash/run/report.json` 与对照表在本机，不入库。
 
@@ -264,11 +264,13 @@ flowchart TD
 
 | 包 | 内容 | 依赖 | 验收 |
 | --- | --- | --- | --- |
-| 0 | 围栏与债务 | 既有安全半边 | **已交**：macOS 可开入口；Windows 测不了的项记入[债务](#windows-上暂测不了的项2026-10-17) |
-| 1 | 原生送篓 | `expected_id` 与 `NSFileManager trashItemAtURL:resultingItemURL:` | **已交**：macOS 返回落点；身份不符拒 `PATH_CHANGED`；Windows 报 `PLATFORM_UNPROVEN` |
-| 2 | 库层 preview／commit | 一次性令牌、先笔记后附件夹、消失记录、账本 | **已交**：取消零动作；第二步失败留孤儿附件夹；同路径新建仍 `PATH_RESERVED` |
-| 3 | 人用入口 | 树右键、确认卡、关标签、两个 IPC | **已交**：只在 macOS 且对象是笔记时出现「删除」；文件夹／Windows 无入口 |
-| 4 | 边界反例与窗口 | 单元＋`RGENT_UI_TRASH_ONLY`＋完整回归 | **已交**：单元 **129 文件 2105 通过／2 跳过**；`RGENT_UI_TRASH_ONLY=1` 专项 **13／0**（右键有删除／不删则不动／确认后进废纸篓且关标签／文件夹无入口）；完整窗口 **380／0**（87 秒）；文档 14 篇、构建通过。Windows 入口仍关，未在本机跑 Windows 腿 |
+| 0 | 围栏与债务 | 既有安全半边 | **本机已交**：macOS 可开入口；Windows 测不了的项记入[债务](#windows-上暂测不了的项2026-10-17) |
+| 1 | 原生送篓 | `expected_id` 与 `NSFileManager trashItemAtURL:resultingItemURL:` | **本机已交**：macOS 返回落点；身份不符拒 `PATH_CHANGED`；Windows 报 `PLATFORM_UNPROVEN` |
+| 2 | 库层 preview／commit | 一次性令牌、先笔记后附件夹、消失记录、账本 | **本机已交**：取消零动作；第二步失败留孤儿附件夹；同路径新建仍 `PATH_RESERVED` |
+| 3 | 人用入口 | 树右键、确认卡、关标签、两个 IPC | **本机已交**：只在 macOS 且对象是笔记时出现「删除」；文件夹／Windows 无入口 |
+| 4 | 边界反例与窗口 | 单元＋`RGENT_UI_TRASH_ONLY`＋完整回归 | **本机已交**：单元 **129 文件 2105 通过／2 跳过**；`RGENT_UI_TRASH_ONLY=1` 专项 **13／0**（右键有删除／不删则不动／确认后进废纸篓且关标签／文件夹无入口）；完整窗口 **380／0**（87 秒）；文档 14 篇、构建通过。Windows 入口仍关，未在本机跑 Windows 腿 |
+
+**受验提交**：`1330329`（本机提交，未推送；本轮零 CI）。门数字见包 4。
 
 ## AI 删除（macOS，本轮）
 
@@ -276,11 +278,25 @@ flowchart TD
 
 | # | 包 | 内容 | 验收 |
 |---|----|------|------|
-| 0 | 合同与债务 | 可删对象、送篓复用、确认粒度、结构额度、账本与失败语义；Windows 同一道原生门 | **已交** |
-| 1 | 写入门 | `previewDelete`／`commitDelete`：范围＋非发起篇＋额度＋一次性令牌；不走迁移修引用 | **已交** |
-| 2 | 工具与宿主 | `delete_note`＋确认入口＋`previewTrash`／`commitTrash`；成功 `vault-change` | **已交** |
-| 3 | 确认卡与账本 | `kind: 'delete'` 联合；人删／AI 删账本可区分；同意后关标签 | **已交** |
-| 4 | 边界反例与窗口 | 单元反例＋`RGENT_UI_WRITE_ONLY` 两条删路＋完整回归 | **已交**：单元 **129 文件 2122 通过／2 跳过**；`RGENT_UI_WRITE_ONLY=1` 专项 **41／0**（删·同意／不删；账本 `delete_note ok:写作删参考.md`＋`vault-change`）；完整窗口 **380／0**（87 秒）；文档 14 篇、构建通过。Windows 不宣告 |
+| 0 | 合同与债务 | 可删对象、送篓复用、确认粒度、结构额度、账本与失败语义；Windows 同一道原生门 | **本机已交** |
+| 1 | 写入门 | `previewDelete`／`commitDelete`：范围＋非发起篇＋额度＋一次性令牌；不走迁移修引用 | **本机已交** |
+| 2 | 工具与宿主 | `delete_note`＋确认入口＋`previewTrash`／`commitTrash`；成功 `vault-change` | **本机已交** |
+| 3 | 确认卡与账本 | `kind: 'delete'` 联合；人删／AI 删账本可区分；同意后关标签 | **本机已交** |
+| 4 | 边界反例与窗口 | 单元反例＋`RGENT_UI_WRITE_ONLY` 两条删路＋完整回归 | **本机已交**：单元 **129 文件 2122 通过／2 跳过**；`RGENT_UI_WRITE_ONLY=1` 专项 **41／0**（删·同意／不删；账本 `delete_note ok:写作删参考.md`＋`vault-change`）；完整窗口 **380／0**（87 秒）；文档 14 篇、构建通过。Windows 不宣告 |
+
+**受验提交**：`2b4a85b`（本机提交，未推送；本轮零 CI）。门数字见包 4。
+
+## 删除链路加固（本轮）
+
+合同：[2026-10-18 删除链路加固](decisions.md#2026-10-18-删除链路加固)。本轮只补披露与加固，**不新开删除面**（macOS 单平台、一次一篇、逐次确认；Windows 与整夹／永久删除仍硬停）。评审报告在 `artifacts/review/2026-10-18-grok-batch.md`（本地产物、不入库）。包 1–4 按合同由代码写者落地，包 5 是本轮文档门与证据链；**下列状态是施工图状态，不是交付声明**。
+
+| 包 | 内容 | 依赖 | 验收 |
+| --- | --- | --- | --- |
+| 1 | 落点核验与披露 | 既有送篓收据 | **进行中**：收据返回后按 `expected_id` 核 `landing` 身份，不符报独立失败并交出落点路径；合同披露「窗口缩小、未消除」；补可注入窗口的红绿测试 |
+| 2 | 恢复证据源 | `missing` 删除时证据 | **进行中**：恢复以删除时抓取的 identity／`bodyRevision`／`attachments`／`permissionTier` 为准；未登记笔记同样可恢复（只有生命周期记录、没有账本） |
+| 3 | 恢复出口与降级 | 生命周期记录、账本 | **进行中**：`permissionTier='unknown'`；卷重挂载（设备号变、inode 不变、内容／附件一致）视为同一对象；逐条「放弃恢复」；删除成功但记录／账本未落盘时 `degraded`；孤儿附件夹文案不再承诺重试 |
+| 4 | 任务范围与语义 | `scopePaths`、`OTHER_TASK_RUNNING` | **进行中**：停任务按任务授权范围（不是仅目标路径）；AI 确认提交时复查 `OTHER_TASK_RUNNING`；同名 companion 是普通文件时视为无附件夹、不阻塞删除 |
+| 5 | 文档门与证据链 | `docs:check`、`delivery:check`、施工历史 | **进行中**：状态词扩为五个（`已交｜本机已交｜未开｜进行中｜待核`）；`已交` 行须带提交号或 run 链接；本机专用 `pnpm delivery:check`；两笔未推送提交标「本机已交」；施工历史补三小节；死链改述 |
 
 ## Windows 上暂测不了的项（2026-10-17）
 
@@ -321,11 +337,11 @@ flowchart TD
 
 | # | 包 | 内容 | 验收 |
 |---|----|------|------|
-| 0 | 合同与包表 | 登记可动对象、落点规则、保护不放宽、引用修复边界、确认粒度、限额与失败语义；收窄硬停 | **已交**：用户批准；`docs:check` 通过 |
-| 1 | 写入门结构性动作 | `rename`／`move` 的预览与提交：范围＋非发起篇＋目标校验＋权限不放宽＋引用修复边界＋一次性令牌＋结构额度 | **已交**：`previewStruct`／`commitStruct`／`discardStruct`；**权限判据不复刻**——库层 `previewRelocation` 自己按 `tierFor` 前后比对并抛 `PERMISSION_DOWNGRADE`，门只透出。`test/main/agent-write.test.ts` **11 条**结构反例（越权／发起篇／另有任务／隐藏段／附件夹／重名／非法名／库层降级／范围外引用／令牌重放／额度耗尽） |
-| 2 | 工具与宿主接线 | 工具 `rename_note`／`move_note`＋宿主能力（复用库迁移与既有确认入口）＋账本记新身份 | **已交**：工具层 `test/main/scoped-agent-tools.test.ts` **5 条**；宿主 `test/main/agent-host.test.ts` **3 条**端到端（同意→库层提交被调用＋账本记 `ok:<新路径>·引用N·权限M (1)`；拒绝→零迁移＋`refused:DECLINED`；无迁移能力→不宣告）。**本场来源被搬走后本场按 `vault-change` 收尾**（已写内容与账本保留），不继续读旧路径造假失败 |
-| 3 | 确认卡与主进程 | 确认载荷扩成「旧路径 → 新路径 ＋ 引用 N 处 ＋ 权限 M 处」；主进程抽出人与 AI 共用的迁移路径 | **已交**：确认载荷联合（建／改名／挪）；`relocationPreviewShared`／`relocationCommitShared` 由 IPC 与 AI 共用，两处错误码一致；**请求者自己不进"停任务"名单**（否则工具调用被半路掐断，实测抓到）；界面卡 `test/renderer/write-confirm.test.ts` **2 条**（旧→新＋影响面＋按钮分别是「改名」「移动」） |
-| 4 | 边界反例与窗口收口 | 越权／发起篇／重名／隐藏段／附件夹／权限放宽／范围外引用／额度耗尽＋`RGENT_UI_WRITE_ONLY` 扩项＋样张＋文档同步 | **已交**：`RGENT_UI_WRITE_ONLY=1` 专项 **33 条失败 0**（新增三场景：发起篇被拒 `ORIGIN_LOCKED` 且**不出卡片**、改名卡片 → 点「改名」→ 文件真的换名、挪动卡片 → 点「移动」→ 文件真的进 `归档/`）；样张 `write-rename-1200.png`／`write-structural-origin-refused-1200.png`；完整窗口 **379／0（89 秒）**——人与 AI 共用迁移路径的重构无回归 |
+| 0 | 合同与包表 | 登记可动对象、落点规则、保护不放宽、引用修复边界、确认粒度、限额与失败语义；收窄硬停 | **已交**（`4c8cd56`）：用户批准；`docs:check` 通过 |
+| 1 | 写入门结构性动作 | `rename`／`move` 的预览与提交：范围＋非发起篇＋目标校验＋权限不放宽＋引用修复边界＋一次性令牌＋结构额度 | **已交**（`4c8cd56`）：`previewStruct`／`commitStruct`／`discardStruct`；**权限判据不复刻**——库层 `previewRelocation` 自己按 `tierFor` 前后比对并抛 `PERMISSION_DOWNGRADE`，门只透出。`test/main/agent-write.test.ts` **11 条**结构反例（越权／发起篇／另有任务／隐藏段／附件夹／重名／非法名／库层降级／范围外引用／令牌重放／额度耗尽） |
+| 2 | 工具与宿主接线 | 工具 `rename_note`／`move_note`＋宿主能力（复用库迁移与既有确认入口）＋账本记新身份 | **已交**（`4c8cd56`）：工具层 `test/main/scoped-agent-tools.test.ts` **5 条**；宿主 `test/main/agent-host.test.ts` **3 条**端到端（同意→库层提交被调用＋账本记 `ok:<新路径>·引用N·权限M (1)`；拒绝→零迁移＋`refused:DECLINED`；无迁移能力→不宣告）。**本场来源被搬走后本场按 `vault-change` 收尾**（已写内容与账本保留），不继续读旧路径造假失败 |
+| 3 | 确认卡与主进程 | 确认载荷扩成「旧路径 → 新路径 ＋ 引用 N 处 ＋ 权限 M 处」；主进程抽出人与 AI 共用的迁移路径 | **已交**（`4c8cd56`）：确认载荷联合（建／改名／挪）；`relocationPreviewShared`／`relocationCommitShared` 由 IPC 与 AI 共用，两处错误码一致；**请求者自己不进"停任务"名单**（否则工具调用被半路掐断，实测抓到）；界面卡 `test/renderer/write-confirm.test.ts` **2 条**（旧→新＋影响面＋按钮分别是「改名」「移动」） |
+| 4 | 边界反例与窗口收口 | 越权／发起篇／重名／隐藏段／附件夹／权限放宽／范围外引用／额度耗尽＋`RGENT_UI_WRITE_ONLY` 扩项＋样张＋文档同步 | **已交**（`4c8cd56`）：`RGENT_UI_WRITE_ONLY=1` 专项 **33 条失败 0**（新增三场景：发起篇被拒 `ORIGIN_LOCKED` 且**不出卡片**、改名卡片 → 点「改名」→ 文件真的换名、挪动卡片 → 点「移动」→ 文件真的进 `归档/`）；样张 `write-rename-1200.png`／`write-structural-origin-refused-1200.png`；完整窗口 **379／0（89 秒）**——人与 AI 共用迁移路径的重构无回归 |
 
 ## 写类 AI 工具（补发起篇 ＋ 建）
 
@@ -337,11 +353,11 @@ flowchart TD
 
 | # | 包 | 内容 | 验收 |
 |---|----|------|------|
-| 0 | 合同与包表 | 登记范围、确认粒度、限额、账本字段与失败语义；改硬停行与交接表 | **已交**：用户批准；`docs:check` 通过 |
-| 1 | 写入门（受信写服务） | `create`／`append` 两个动作统一走一个受信接口：范围＋权限档＋对象身份＋修订＋目标（存在性／隐藏段／附件子树／禁区）＋预览令牌消费＋账本记账；**先补失败反例再实现** | **已交**：`src/main/agent-write.ts`＋`test/main/agent-write.test.ts` **15 项**（先红后绿；两处按合同纠正了我自己的假设：名字消毒应为恒等、8 KiB 只管追加不管新建） |
-| 2 | 补任务发起篇 | 只能追加新块：人写文本逐字不变、账本分区不变、机器标记不变；`revision` 变化即冲突失败并保留 | **已交**：工具 `append_to_note`＋宿主侧写入门接线；追加块带 `part="append"`（否则最终回答保存会把它覆盖）；门拒绝纳入宿主的"可继续"清单；`test/main/scoped-agent-tools.test.ts` 4 项＋`test/main/agent-host.test.ts` 2 项端到端 |
-| 3 | 建 | 名称与路径校验（非法字符／重名／隐藏段／附件夹子树禁入）；预览＋一次点击后经 `noteCreate` 同路落盘；账本记新对象身份 | **已交**：工具 `create_note`＋宿主编排（人确认／真落盘／附件夹判定三者缺一就不宣告）＋两个 IPC（`agent:write-request`／`agent:write-confirm`）＋preload＋确认浮层 `src/renderer/src/write-confirm.ts`；`test/renderer/write-confirm.test.ts` 5 项＋宿主 3 项。**Esc／点外面／程序关闭一律按不建结清**（写测试时抓到我原实现的挂起缺陷） |
-| 4 | 边界反例与窗口收口 | 红绿反例（必须遵循／禁止触碰／越权／重名／并发编辑／取消换库／令牌重放／超限／账本改写）＋`ui:check` 新专项（受控假模型，零调用）＋样张＋文档同步 | **已交**：`RGENT_UI_WRITE_ONLY=1` 专项 **25 条失败 0**，四条路走完真窗口——建·同意（卡片摆落点与正文 → 点「建」→ 落盘到发起篇所在目录）、建·不建（不落盘）、补·安静（**不弹窗**，正文出现 `part="append"` 的新块且人写文本与已有块不动）、补·超限（12 KB 汉字撞 8 KiB 字节线被拒、正文完好）；账本面板三份证据：`create_note ok (1)`／`append_to_note ok (1)`／`append_to_note refused:OVER_LIMIT_BYTES (1)` 与「建笔记／补发起篇：已执行／未执行（超限）」。反例另见 `test/main/agent-write.test.ts` 15 项、`test/main/scoped-agent-tools.test.ts` 4 项、`test/main/agent-host.test.ts` 5 项、`test/renderer/write-confirm.test.ts` 5 项。**完整窗口 379 条失败 0**（写工具专项并入默认范围之外单跑）；样张 `artifacts/write-tools/`（确认卡、建后、账本三张）。**有工具档的场里模型同时看到读／搜／补／建四个工具**：补不额外授权、建才多一次点击。**仪器观察（已处置，2026-10-13）**：本轮完整窗口跑动中三处各失败一次；随后重跑 **20 次零复现**（恢复专项 12＋8）＋完整窗口 **379／0 两次**。其中「成功重试后焦点转到浮层关闭按钮」查明是**构造性竞态**——紧跟异步焦点直接断言、完全没有等待；同类的四处（失败重试焦点、取消遗忘回焦、取消选库回焦、切库冲突回焦）一并改为等待，改后 379／0。其余两处仍是"负载下偶发、未复现"，按有界观察记录 |
+| 0 | 合同与包表 | 登记范围、确认粒度、限额、账本字段与失败语义；改硬停行与交接表 | **已交**（`3894faa`）：用户批准；`docs:check` 通过 |
+| 1 | 写入门（受信写服务） | `create`／`append` 两个动作统一走一个受信接口：范围＋权限档＋对象身份＋修订＋目标（存在性／隐藏段／附件子树／禁区）＋预览令牌消费＋账本记账；**先补失败反例再实现** | **已交**（`3f6ab06`）：`src/main/agent-write.ts`＋`test/main/agent-write.test.ts` **15 项**（先红后绿；两处按合同纠正了我自己的假设：名字消毒应为恒等、8 KiB 只管追加不管新建） |
+| 2 | 补任务发起篇 | 只能追加新块：人写文本逐字不变、账本分区不变、机器标记不变；`revision` 变化即冲突失败并保留 | **已交**（`eae1c89`）：工具 `append_to_note`＋宿主侧写入门接线；追加块带 `part="append"`（否则最终回答保存会把它覆盖）；门拒绝纳入宿主的"可继续"清单；`test/main/scoped-agent-tools.test.ts` 4 项＋`test/main/agent-host.test.ts` 2 项端到端 |
+| 3 | 建 | 名称与路径校验（非法字符／重名／隐藏段／附件夹子树禁入）；预览＋一次点击后经 `noteCreate` 同路落盘；账本记新对象身份 | **已交**（`4449825`）：工具 `create_note`＋宿主编排（人确认／真落盘／附件夹判定三者缺一就不宣告）＋两个 IPC（`agent:write-request`／`agent:write-confirm`）＋preload＋确认浮层 `src/renderer/src/write-confirm.ts`；`test/renderer/write-confirm.test.ts` 5 项＋宿主 3 项。**Esc／点外面／程序关闭一律按不建结清**（写测试时抓到我原实现的挂起缺陷） |
+| 4 | 边界反例与窗口收口 | 红绿反例（必须遵循／禁止触碰／越权／重名／并发编辑／取消换库／令牌重放／超限／账本改写）＋`ui:check` 新专项（受控假模型，零调用）＋样张＋文档同步 | **已交**（`183996f`）：`RGENT_UI_WRITE_ONLY=1` 专项 **25 条失败 0**，四条路走完真窗口——建·同意（卡片摆落点与正文 → 点「建」→ 落盘到发起篇所在目录）、建·不建（不落盘）、补·安静（**不弹窗**，正文出现 `part="append"` 的新块且人写文本与已有块不动）、补·超限（12 KB 汉字撞 8 KiB 字节线被拒、正文完好）；账本面板三份证据：`create_note ok (1)`／`append_to_note ok (1)`／`append_to_note refused:OVER_LIMIT_BYTES (1)` 与「建笔记／补发起篇：已执行／未执行（超限）」。反例另见 `test/main/agent-write.test.ts` 15 项、`test/main/scoped-agent-tools.test.ts` 4 项、`test/main/agent-host.test.ts` 5 项、`test/renderer/write-confirm.test.ts` 5 项。**完整窗口 379 条失败 0**（写工具专项并入默认范围之外单跑）；样张 `artifacts/write-tools/`（确认卡、建后、账本三张）。**有工具档的场里模型同时看到读／搜／补／建四个工具**：补不额外授权、建才多一次点击。**仪器观察（已处置，2026-10-13）**：本轮完整窗口跑动中三处各失败一次；随后重跑 **20 次零复现**（恢复专项 12＋8）＋完整窗口 **379／0 两次**。其中「成功重试后焦点转到浮层关闭按钮」查明是**构造性竞态**——紧跟异步焦点直接断言、完全没有等待；同类的四处（失败重试焦点、取消遗忘回焦、取消选库回焦、切库冲突回焦）一并改为等待，改后 379／0。其余两处仍是"负载下偶发、未复现"，按有界观察记录 |
 
 ## 文档体系校正（2026-10-12，零代码改动）
 
@@ -377,7 +393,7 @@ flowchart TD
 
 | # | 债务 | 现状（2026-10-17） | 触发条件 | 不可代证 |
 |---|------|--------------------|----------|----------|
-| 1 | Windows 平台证据（构建窗口＋双平台 CI 腿；技能专项一并算这一笔） | **代码腿已绿**（2026-10-16）：`82d602c` 的 [run 38916112341](https://github.com/skahanium/Rgent/actions/runs/38916112341) 上 macOS 与 Windows 的 `pnpm test`、两端 `ui:check` 与 `CI gate` 均通过。此前 [run 38762840064](https://github.com/skahanium/Rgent/actions/runs/38762840064)（PR #11 合并）Windows 红在夹具，夹具已修。废纸篓独立 job 在 [run 38694186521](https://github.com/skahanium/Rgent/actions/runs/38694186521) 两平台 `evidence-collected`，**不**等于删除门开。POSIX 专属夹具与两处 Windows 跳过点仍未验 | — | Windows 绿灯**不覆盖**下节列出的 POSIX 专属夹具与两处 Windows 跳过点；废纸篓探针不代称删除入口 |
+| 1 | Windows 平台证据（构建窗口＋双平台 CI 腿；技能专项一并算这一笔） | **代码腿已绿**（2026-10-16）：`82d602c` 的 [run 38916112341](https://github.com/skahanium/Rgent/actions/runs/38916112341) 上 macOS 与 Windows 的 `pnpm test`、两端 `ui:check` 与 `CI gate` 均通过。此前 PR #11 合并的那次 run（原 run 已删除）Windows 红在夹具，夹具已修。废纸篓独立 job 的那次 run（原 run 已删除；结论与场景数见[本轮实测的范围与边界](#本轮实测的范围与边界2026-10-15)）两平台 `evidence-collected`，**不**等于删除门开。POSIX 专属夹具与两处 Windows 跳过点仍未验 | — | Windows 绿灯**不覆盖**下节列出的 POSIX 专属夹具与两处 Windows 跳过点；废纸篓探针不代称删除入口 |
 | 2 | 原生输入法人工操作（macOS 拼音候选窗、Windows 原生输入法） | **macOS 所有者 2026-10-17 自测接受**（原话：「中文输入我自己测了一下没什么问题」）。清单 ①–⑥ 未逐条填表，按所有者结论销「等人操作」。**Windows 原生输入法未另测**，不声称双平台人工都过 | Windows 上有窗口时按清单另测 | CDP 组合事件不能代证；未测平台不销 |
 | 2b | 测试稳定性观察：`ledger-forget` 参数在 2026-10-12 一次全量门里失败过一次 | **仍未复现，但边界量清了**：隔离重跑 **50／50 通过**（各约 1.0s）、加载重跑 **30 次里 27 过／3 失败**；3 次失败经原文查明**不是断言失败**，而是 `Cannot find module 'build/Release/rgent_fs.node'`——`pnpm test`／`pnpm build` 都会重建该原生模块，与并行的测试抢文件（详见下节与守则新规）。**原断言失败本身在两轮共 80 次里 0 次出现** | 再复现即按真实缺陷查；已加"禁止并发重建与测试"的守则 | 一次通过不代表已修；`--repeat` 结果不能代称全量门 |
 | 2c | 窗口门三处各失败一次（2026-10-13 记录） | **已定位并修掉其中构造性竞态**：「成功重试后焦点转到浮层关闭按钮」原本紧跟异步焦点**直接断言、毫无等待**（同类的还有 4 处：失败重试焦点、取消遗忘回焦、取消选库回焦、切库冲突回焦），现全部改为等待。修完重跑：恢复专项 **12＋8 次零失败**、完整窗口 **379／0（两次）** | — | 本次未复现原失败；这是"构造上就该等"的修正，按修正记录，不按"已复现并修好"记录 |
@@ -787,7 +803,7 @@ Host 接管单步模型事件、工具名与参数校验、顺序执行、模型
 
 已知未测：授权范围上限（256 篇）下，每次工具调用与模型步都要重核全部来源，尚无延迟预算或实测；提升上限前先测。
 
-本节 14 个提交经 PR [#6](https://github.com/skahanium/Rgent/pull/6) 合入 `branch-v0.1.0`。合并用的是 rebase 方式，主线提交号被重写、内容逐字节相同（tree 同为 `d2c769c`）；上文改为主线号，删除分支上的旧号对照：4ec51e3→`7c2c93b`、a4774e8→`c7d00a5`、7b5cf3e→`0390a9f`、c2fa091→`2bc900d`，主线 tip 为 `ef06d6f`。CI run 链接按 run id 打开，不受重写影响；这些 PR head 侧提交在 PR [#6](https://github.com/skahanium/Rgent/pull/6) 的提交列表里仍可查看（本次合并后已删除该临时分支）。
+本节 14 个提交经 PR [#6](https://github.com/skahanium/Rgent/pull/6) 合入 `branch-v0.1.0`。合并用的是 rebase 方式，主线提交号被重写、内容逐字节相同（tree 同为 `d2c769c`）；上文改为主线号，删除分支上的旧号对照：`4ec51e3`→`7c2c93b`、`a4774e8`→`c7d00a5`、`7b5cf3e`→`0390a9f`、`c2fa091`→`2bc900d`，主线 tip 为 `ef06d6f`；旧号只存在于 PR head 侧（普通 clone 可能取不到，`docs:check` 在浅克隆里按提示处理）。CI run 链接按 run id 打开，不受重写影响；这些 PR head 侧提交在 PR [#6](https://github.com/skahanium/Rgent/pull/6) 的提交列表里仍可查看（本次合并后已删除该临时分支）。
 
 合入后的 `branch-v0.1.0` 自身证据：push [CI 36740163198](https://github.com/skahanium/Rgent/actions/runs/36740163198)（提交 `ef06d6f`）已核，macOS 711 通过／2 条件跳过＋功能窗口 144 项＋固定样张 28 项，Windows 709 通过／4 条件跳过＋功能窗口 144 项＋固定样张 32 项，`docs` 与 `CI gate` 均 success，废纸篓按分类 skipped。
 
@@ -862,7 +878,7 @@ Windows 原生控制件人工操作、真实厂商密钥调用及废纸篓失败
 
 本轮本机 `pnpm docs:check`、`pnpm test`（54 文件、540 通过／2 条件跳过）、`pnpm build` 和构建后 `pnpm ui:check`（113 项）通过。窗口初次回归发现旧文件树刷新会关闭消失的干净 tab，已修为保留并复核；另修恢复期间仅允许日志范围内干净 tab 通过草稿排空，脏稿及无关缺失稿仍阻止提交。固定展示笔记及原生 macOS 日夜窗口截图检查另有 32 项通过；窗口控制区与设置已人工查看。新增来源查看导致行内图片占位换成两行的回归已收紧至 24px，完整地址仍可展开查看。代码提交 `9ce6ab1` 的 [CI 36676587998](https://github.com/skahanium/Rgent/actions/runs/36676587998) macOS、Windows 两腿 success，包含构建、原生装载／测试、完整功能窗口及固定展示窗口。此前 `7b8d28f` 两腿均只在图片提示高度的展示检查失败，已修后重验，不抹去首次失败证据。Windows 构建后窗口由实际 Electron／CDP 流程验证；原生控制件人工点击仍未核实。已人工对照最终两平台的保稿／另存预览／恢复窄窗截图，以及本机 macOS、CI Windows 日夜原生控制区截图。Windows runner 桌面为 `1024×768`，宽布局和控件行为另由 CDP 量测；截图不能代称原生控件人工点击。前端用户视觉确认保持冻结。
 
-明确保留的边界：原生最后身份复核到系统改名仍有外部并发窗口；另存的父目录核验不是原子预览对象 CAS，若发布后父身份变化则明确失败、保留已创建文件及原稿，不解除待保存内容。Host 的最后来源／权限复核至模型 socket 发出也不是 OS 原子授权；发现失效停止后续读写及请求，不能追回已合法发送的字节。定向反例与事后复核用于避免错误续接及静默报成功，不写成已证明所有竞态已阻断。
+明确保留的边界：原生最后身份复核到系统改名仍有外部并发窗口；**删除送篓的最后核验到 `trashItemAtURL` 之间同样有路径窗口**（缩小并核验落点，但未消除；见[删除链路加固](decisions.md#2026-10-18-删除链路加固)），不要读成删除窗口已消；另存的父目录核验不是原子预览对象 CAS，若发布后父身份变化则明确失败、保留已创建文件及原稿，不解除待保存内容。Host 的最后来源／权限复核至模型 socket 发出也不是 OS 原子授权；发现失效停止后续读写及请求，不能追回已合法发送的字节。定向反例与事后复核用于避免错误续接及静默报成功，不写成已证明所有竞态已阻断。
 
 另存保持原正文、最后核验的账本，并以原任务 ID 保存未落盘完整回答／状态／中止原因；不复制附件、不修相对引用、不重启任务。新建后的 readback 失败时保留原窗口稿和 Host 未保存状态。坏记录仍保留，不提供强制完成或删除回退。
 

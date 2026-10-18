@@ -41,8 +41,8 @@ export default defineConfig({
     environment: 'node',
     // 少数集成用例（1000 条召回秩评、五步链、真实账本边界）单跑 3–11 秒，
     // 在默认 100 路并行下会超过 vitest 默认 5 秒；断言不变，只放宽时限。
-    // Windows CI 再慢一截：真实库夹具会顶满 20 秒（run 38911900387）乃至写死的 30 秒
-    // （run 38914442628）。用例自己写的毫秒必须走 testTimeoutAtLeast，否则盖过全局。
+    // Windows CI 再慢一截：真实库夹具会顶满 20 秒乃至写死的 30 秒——依据 2026-10-16 的
+    // CI 慢测记录（run 已删除，保留结论）。用例自己写的毫秒必须走 testTimeoutAtLeast，否则盖过全局。
     testTimeout: testTimeoutMs
   }
 })

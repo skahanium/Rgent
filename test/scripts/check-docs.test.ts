@@ -287,7 +287,7 @@ describe('commit references and package status cells', () => {
     expect(result.stdout).toContain('提交号存在性')
   })
 
-  it('rejects a package table status outside the four existing words', () => {
+  it('rejects a package table status outside the five existing words', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
     const row = /\| C1 \| 原生候选证明[^\n]*?\*\*已交\*\*/
@@ -297,6 +297,45 @@ describe('commit references and package status cells', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('包表状态格')
     expect(result.stderr).toContain('**冻结**')
+  })
+
+  it('rejects a delivered package row without a commit or run link', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    const row = /\| A \| 证据与围栏[^\n]*/
+    expect(source).toMatch(row)
+    writeFileSync(build, source.replace(row, (matched) => matched.replace(/`[a-f\d]{7,40}`/g, '已核')))
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('「已交」行末列缺少证据')
+    expect(result.stderr).toContain('actions/runs/<id>')
+  })
+
+  it('accepts a locally delivered package row without remote evidence', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    const row = /\| B1 \| 记忆近期容器完整性[^\n]*/
+    expect(source).toMatch(row)
+    writeFileSync(build, source.replace(row, (matched) => matched
+      .replace(/\*\*已交\*\*（`[a-f\d]{7,40}`）/, '**本机已交**')
+      .replace(/`[a-f\d]{7,40}`/g, '')))
+    const result = run()
+    expect(result.stderr).toBe('')
+    expect(result.status).toBe(0)
+  })
+
+  it('accepts a delivered row whose evidence is a run link', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    const row = /\| B2 \| 债务清零[^\n]*/
+    expect(source).toMatch(row)
+    writeFileSync(build, source.replace(row, (matched) => matched.replace(
+      /（`[a-f\d]{7,40}`）/,
+      '（[run 123](https://github.com/skahanium/Rgent/actions/runs/123)）'
+    )))
+    const result = run()
+    expect(result.stderr).toBe('')
+    expect(result.status).toBe(0)
   })
 
   it('rejects a write-tools package row whose status cell is missing', () => {
@@ -340,7 +379,7 @@ describe('commit references and package status cells', () => {
   it('does not require status cells in historical package tables', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    // 债务移交那张表的末列是「触发条件」（如「用户愿意花几分钟时」），从来不用四个状态词；
+    // 债务移交那张表的末列是「触发条件」（如「用户愿意花几分钟时」），从来不用状态词；
     // 它不在「本轮」小节里，判据不该误伤——历史表的读法与当前包表不同。
     const row = /\| 3 \| 用户视觉确认（记忆页在新成绩下的实际显示）[^\n]*/
     expect(source).toMatch(row)
@@ -350,7 +389,7 @@ describe('commit references and package status cells', () => {
     expect(result.status).toBe(0)
   })
 
-  it('accepts the four existing package states', () => {
+  it('accepts the existing package states', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
     const row = /\| C1 \| 原生候选证明[^\n]*?\*\*已交\*\*/

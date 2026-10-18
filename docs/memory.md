@@ -54,6 +54,7 @@
 7. 未触达模型的请求可有限次重派（`V6_RULES.retryUnmeasuredMax`）；**服务层拒绝也要早停**——连续两次无输出就停下来问人，不继续派发。调用额度按授权写进 `V6_RULES.history`（`campaignLimit`／`perModelLimit`／`parentLimit`／`ledgerStop` 与 `ownerGrant`），额度拒绝必须在派发前响亮停下，不伪装成服务失败。
 
 - **最新一次成绩（revision 19，2026-10-15）**：`deepseek-flash` 两轮 **passed**（第一轮 **96／96**、第二轮 **100／100**），四道门全绿、可判定 30／30、双标 16／16 一致率 1.0、零否决零分歧；冻结 `e6510940…`、执行提交 `37bd1b3`、账本 1844→1911、campaign 465／1000；设备 `state=passed`／`rounds=2`／`humanReviewed=false`。完整账目与两轮明细见施工历史。
+- **适用范围（2026-10-18 补记）**：上述成绩对应冻结 `e6510940…`／提交 `37bd1b3`；2026-10-16／17 的产品改动后，现行构建按规则显示**适用范围已变**；记忆提示词与仪器代码未动，未重认证。
 
 记忆页显示的「现行通过」是 r18：第一轮 **100／100**（四维 20／20／30／30，`reasons` 为空——**零扣分**），第二轮 **98.67／98.67**（recent 28.67）；两轮均四道门全绿、可判定 **30／30**、每方向覆盖率 **1.0**、双标 **16／16 且一致率 1.0**、**零否决、零分歧**。冻结 `prefix v6-2026-10-05/integrity/r18/`、`frozen 1c351be2…`，执行提交 `1884b5c`；设备 `memory-quality-status.json` → `state=passed`、`rounds=2`、`frozenHash 1c351be2…`、`humanReviewed=false`。**仍未做**：把现行发布成绩标成 `humanReviewed:true`（须对现行 revision 另出复核包；r12 整卷不能贴过来）。Windows 代码腿已绿、当前画面所有者已接受，不再记在这里等人。
 
