@@ -1984,3 +1984,26 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 
 **未做**：推送与 CI 证据（等所有者指令）、记忆复认证（记忆提示词与仪器代码未动，设备成绩仍按规则显示适用范围已变）。
 
+## 2026-10-18 联网只读阶段 0：证据清账与预研（零产品代码）
+
+**开工授权**：所有者 2026-10-18 授权开启"联网只读"（先内置搜索／抓页，真实外发不设上限）；合同细目 C1–C16 待逐条审阅后另立。本轮只做清账、预研与围栏记录，**未写任何联网产品代码**。
+
+**CI 证据清账（2026-10-18 推送批次）**
+
+| run | 结论 | 逐 job |
+| --- | --- | --- |
+| [39092308310](https://github.com/skahanium/Rgent/actions/runs/39092308310) | failure（394s） | plan 12s ✓、docs 26s ✓、verify(macOS) 362s ✓、verify(Windows) 313s ✗、trash skipped、CI gate ✗ |
+| [39092990110](https://github.com/skahanium/Rgent/actions/runs/39092990110) | success（1167s） | plan 14s ✓、docs 12s ✓、verify(macOS) 372s ✓、verify(Windows) 675s ✓、trash skipped（scope）、CI gate 11s ✓ |
+| [39094206587](https://github.com/skahanium/Rgent/actions/runs/39094206587) | success（38s） | plan 9s、docs 13s、verify/trash skipped（纯文档）、CI gate 10s |
+
+首跑 Windows 红：两条恢复测试用 Node `dev:ino` 硬造对象身份，Windows 原生身份是十六进制卷号:文件 ID；`identity()` 只认十进制 → 不仅测试错，**卷重挂载容错在 Windows 上不生效**。修法：`identity()` 接受两种平台格式、测试改用产品身份（`574d859`）。第二跑 macOS 红一次在**与本轮改动无关**的"生命周期重试"窗口检查；本地完整窗口 4 次 380／0、首轮 CI 亦绿，复跑失败 job 即全绿，**未改任何断言**。
+
+**观察项（不当作缺陷，也不忽略）**：macOS 生命周期重试窗口检查的抖动目前只有 1 次观测；再出现时保留原始日志并单独立项，不在无证据时改断言或改产品。
+
+**预研结论（供围栏使用）**
+
+1. **已有硬化出口核心可直接复用**：`src/main/remote-image.ts`＋`remote-image-protocol.ts`＋`remote-image-transport.ts` 已具备：DNS 钉住（每请求按已核验地址、TLS 名不变）、重定向复核与重绑定拦截、HTTP 需显式激活、字节/时间/并发/重定向上限、取消与 continuation 绑定、无 cookies／auth／referrer、跨源重定向再次确认；并有 11 条专门测试（`test/main/remote-image.test.ts` 等）。联网阶段应把它当作**唯一出口核心**，不得另写 HTTP 客户端。
+2. **双平台出口证明有现成形态**：`test/main/model-stream.test.ts` 用本地回环 HTTP 服务、`pnpm test` 在 macOS 与 Windows 两条 CI 腿都会跑，可作为"两平台本地出口均须证明"的证据基座（真实外网不参与门）。
+3. **边界**：本阶段不新增进程/服务器/配置文件，出口只从主进程发起；凭据只走 `safeStorage`。
+
+**阶段 0 提交**：见受验提交清单（本文件下一次更新时补号）。
