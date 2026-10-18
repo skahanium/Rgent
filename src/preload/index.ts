@@ -147,6 +147,7 @@ const api = {
     invoke(IPC.lifecycleRetry, request),
   recoveryScan: (request: import('../shared/ipc.ts').RecoveryScanRequest): Promise<import('../shared/ipc.ts').RecoveryScanResult> => invoke(IPC.recoveryScan, request),
   recoveryConfirm: (request: import('../shared/ipc.ts').RecoveryConfirmRequest): Promise<import('../shared/ipc.ts').RecoveryConfirmResult> => invoke(IPC.recoveryConfirm, request),
+  recoveryAbandon: (request: import('../shared/ipc.ts').RecoveryAbandonRequest): Promise<import('../shared/ipc.ts').RecoveryAbandonResult> => invoke(IPC.recoveryAbandon, request),
   backlinks: (relPath: string): Promise<BacklinkGroup[]> => invoke(IPC.backlinks, relPath),
   search: (query: string): Promise<SearchHit[]> => invoke(IPC.search, query),
   themeGet: (): Promise<ThemeMode> => invoke(IPC.themeGet),

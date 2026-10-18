@@ -11,6 +11,7 @@ import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload
 import { createFolder, createNote, createNoteWithBody, listVaultTree, parseStoredVault, readNoteSnapshot, requireOrdinaryNotes as verifyOrdinaryNotes, revisionOf, serializeStoredVault, writeNote } from './notes-fs.ts'
 import { VaultMutationQueue } from './vault-mutation-queue.ts'
 import { VaultLifecycle, type MissingObject, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite, type TrashPreview } from './vault-lifecycle.ts'
+import { sameRootInode } from './vault-catalog.ts'
 import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 import { isOwnEcho, type RecentWrite } from './echo.ts'
 import { hasHiddenSegment, isNotePath, resolveInVault, sanitizeFolderName, sanitizeNoteName } from './paths.ts'
@@ -533,12 +534,13 @@ export class VaultSession {
       observed = true
       const snapshot = await loadPermissionSnapshot(root)
       const effective = snapshot.state.status === 'ready' ? effectivePermissionEntries(root, snapshot.state.entries) : null
-      // 权限名单读不了就按最严档记录：核验时不会冒充通过。
-      const permissionTier: PermissionTier = effective ? tierFor(owner.relPath, effective) : 'forbidden'
+      // 权限名单读不了就记 unknown（不冒充当时是禁止档）；核验按 unknown 跳过比较。
+      const permissionTier: MissingObject['permissionTier'] = effective ? tierFor(owner.relPath, effective) : 'unknown'
       this.lifecycle?.recordMissing({
         relPath: owner.relPath, noteId: owner.noteId, objectVersion: owner.objectVersion,
         bodyRevision: owner.bodyRevision, attachments: owner.recoveryEvidence?.attachments ?? [],
-        rootIdentity: this.rootIdentity ?? vaultRootIdentity(root), permissionTier, detectedAt: new Date().toISOString()
+        rootIdentity: this.rootIdentity ?? vaultRootIdentity(root), permissionTier, detectedAt: new Date().toISOString(),
+        cause: 'external'
       })
     } catch {
       // 超限或 journal 被占用：已观察到的登记对象仍占路径，不能当成无记录。
@@ -586,14 +588,48 @@ export class VaultSession {
       this.assertSession(token); this.requireStableStructure()
       const row = (await this.recoveryRows()).find((item) => item.relPath === relPath)
       if (!row) throw new Error('STALE_PREVIEW')
-      if (row.verdict !== 'restored') return { verdict: row.verdict, restored: false, message: row.message }
+      // `permission-changed` 也允许恢复（按现行档生效）；能否恢复只看 canRestore。
+      if (!row.canRestore) return { verdict: row.verdict, restored: false, message: row.message }
       this.assertSession(token)
       if (!this.lifecycle!.clearMissing(relPath)) throw new Error('STALE_PREVIEW')
       this.reservedMissing.delete(relPath)
       // 身份连续且登记一致：重新读取以恢复运行时绑定与来源可用。
       await this.read(relPath)
       this.assertSession(token)
-      return { verdict: 'restored' as const, restored: true, message: '核验通过：内容、附件与权限档都与记录一致；该对象与相关来源恢复可用。' }
+      return { verdict: row.verdict, restored: true, message: `核验通过：${row.message}` }
+    })
+  }
+
+  /** 人放弃恢复：只清 Rgent 库内的消失记录并释放路径，不碰系统废纸篓里的文件。
+   *  记录先清；账本留痕失败不回滚，返回 degraded 让界面如实提示。 */
+  async recoveryAbandon(relPath: string): Promise<{ verdict: 'abandoned'; cleared: true; degraded?: 'ledger-failed' }> {
+    const token = this.captureSession()
+    await this.lifecycleReady
+    this.assertSession(token)
+    if (!isNotePath(relPath)) throw new Error('BAD_PATH')
+    return this.mutations.run(async () => {
+      this.assertSession(token); this.requireStableStructure()
+      if (!this.lifecycle!.missingObjects().some((item) => item.relPath === relPath)) throw new Error('STALE_PREVIEW')
+      // 记录存在才可放弃。owner 用来决定是否要留账本痕迹；账本读不了也要清记录，但降级要上报。
+      let owner: ReturnType<LedgerStore['recoveryOwners']>['owners'][number] | null = null
+      let ledgerReadable = true
+      try { owner = this.ledgerStore?.recoveryOwners().owners.find((item) => item.relPath === relPath) ?? null }
+      catch (error) {
+        // 从来没有账本树的库不是「账本读坏了」：没有 owner，也就没有要补的留痕。
+        if (!(error instanceof Error && error.message === 'ENOENT')) ledgerReadable = false
+      }
+      this.assertSession(token)
+      if (!this.lifecycle!.clearMissing(relPath)) throw new Error('STALE_PREVIEW')
+      this.reservedMissing.delete(relPath)
+      this.verified.delete(relPath)
+      this.latestObjects.delete(relPath)
+      this.index.markDirty()
+      this.emit('tree:changed')
+      let degraded = false
+      if (owner) {
+        try { this.ledgerStore!.recordRecoveryAbandon(relPath) } catch { degraded = true }
+      } else if (!ledgerReadable) degraded = true
+      return { verdict: 'abandoned' as const, cleared: true as const, ...(degraded ? { degraded: 'ledger-failed' as const } : {}) }
     })
   }
 
@@ -601,7 +637,11 @@ export class VaultSession {
     const root = this.requireUsableRoot(), ledger = this.ledgerStore
     if (!ledger) return []
     let owners: ReturnType<LedgerStore['recoveryOwners']>['owners'] | null = null
-    try { owners = ledger.recoveryOwners().owners } catch { owners = null }
+    try { owners = ledger.recoveryOwners().owners }
+    catch (error) {
+      // 从未建过账本树的库与「账本读坏了」不是一回事：前者没有 owner，后者必须失败关闭。
+      owners = error instanceof Error && error.message === 'ENOENT' ? [] : null
+    }
     // 程序不在场时（关闭期间、换库期间）消失的登记对象也要被看见，不能只靠运行时监视。
     if (owners) for (const owner of owners) {
       if (this.missingRecord(owner.relPath)) continue
@@ -615,43 +655,66 @@ export class VaultSession {
     return rows
   }
 
-  /** 核验判据全部取自既有记录：内容哈希对 `owner.bodyRevision`、附件对既有证据、权限对三档名单。 */
+  /** 判据顺序：路径 → 身份（同 inode 且内容一致＝卷重挂载容错）→ 内容 → 附件（删除时记录，
+   *  不拿 owner 的旧证据）→ 权限（不可读单独上报；档变了仍可恢复，按现行档生效）→ owner 矛盾。
+   *  未登记笔记 owner 缺失时跳过 owner 判据，仍可恢复。 */
   private async recoveryRow(record: MissingObject, owners: ReturnType<LedgerStore['recoveryOwners']>['owners'] | null): Promise<RecoveryRow> {
-    const row = (verdict: RecoveryVerdict, message: string, canRestore = false): RecoveryRow => ({ relPath: record.relPath, verdict, message, canRestore })
+    const row = (verdict: RecoveryVerdict, message: string, canRestore = false): RecoveryRow => ({ relPath: record.relPath, verdict, message, canRestore, canAbandon: true })
     const root = this.requireUsableRoot(), fs = secureFsFor(root), ledger = this.ledgerStore!
     let current: string | null = null
     try { current = fs.resolve(record.relPath).at(-1)?.id ?? null }
     catch (error) { if (!(error instanceof Error && error.message === 'ENOENT')) current = null }
-    if (current === null) return row('still-missing', '文件仍不在原路径。若已从系统废纸篓放回，请重扫本页。')
-    if (current !== record.objectVersion) return row('object-replaced', '原路径现在放着另一个对象（同名替换篇）；同一库根内不继承身份，需要整库恢复才能重新关联。')
-    const owner = owners?.find((item) => item.relPath === record.relPath) ?? null
-    if (!owner || owner.objectVersion !== current) return row('ledger-unverified', '账本登记与当前对象不一致，不能宣告恢复。')
-    if (!owner.recoveryEvidence) return row('ledger-unverified', '该登记缺少库根与附件历史证据，只保留历史；来源继续暂停。')
+    if (current === null) return row('still-missing', record.cause === 'trash'
+      ? '文件仍不在原路径。若已从系统废纸篓放回，请重扫本页。'
+      : '文件仍不在原路径。若已放回原路径，请重扫本页。')
     let content: string
     try { content = fs.readSnapshot(record.relPath).bytes.toString('utf8') }
     catch { return row('ledger-unverified', '当前无法读取该对象。') }
-    if (revisionOf(content) !== owner.bodyRevision) return row('content-changed', '内容与登记记录不一致；对象与来源对 AI 保持失效，且不自动遗忘记忆。')
+    const revision = revisionOf(content)
+    // 设备号会随卷重挂载变化，inode 不会；同 inode 且内容仍与记录一致时按同一对象读。
+    const sameObject = current === record.objectVersion || (sameRootInode(record.objectVersion, current) && revision === record.bodyRevision)
+    if (!sameObject) return row('object-replaced', '原路径现在放着另一个对象；同一库根内不继承身份，不能按原记录恢复。')
+    if (revision !== record.bodyRevision) return row('content-changed', '内容与消失时的记录不一致；对象与来源对 AI 保持失效，且不自动遗忘记忆。')
     let attachments: MissingObject['attachments']
     try { attachments = ledger.attachmentEvidence(record.relPath) }
     catch { return row('ledger-unverified', '附件子树无法核验。') }
-    const recorded = owner.recoveryEvidence.attachments
-    if (JSON.stringify(attachments) !== JSON.stringify(recorded)) {
+    if (JSON.stringify(attachments) !== JSON.stringify(record.attachments)) {
       const stem = record.relPath.slice(0, -3)
-      const hadFolder = recorded.some((part) => part.relPath === stem && part.kind === 'dir')
+      const hadFolder = record.attachments.some((part) => part.relPath === stem && part.kind === 'dir')
       const hasFolder = attachments.some((part) => part.relPath === stem && part.kind === 'dir')
       if (hadFolder && !hasFolder) return row('attachments-missing', '同名附件夹没有一起放回；这是降级状态，不冒充核验通过。')
-      return row('attachments-changed', '附件子树与登记证据不一致；对象与来源对 AI 保持失效。')
+      return row('attachments-changed', '附件子树与消失时的记录不一致；对象与来源对 AI 保持失效。')
     }
     const snapshot = await loadPermissionSnapshot(root)
-    if (snapshot.state.status !== 'ready') return row('permission-denied', '权限名单无法核验，暂不恢复。')
+    if (snapshot.state.status !== 'ready') return row('permission-unreadable', '权限名单暂时无法核验，不能宣告恢复；请修好名单后稍后重扫。对象与来源继续失效。')
     const tier = tierFor(record.relPath, effectivePermissionEntries(root, snapshot.state.entries))
-    if (tier === 'forbidden') return row('permission-denied', '当前权限档禁止 AI 使用该笔记。')
-    // 删除时权限名单不可读只记 unknown：原档未知，就不能按任何一档宣告恢复。
-    if (record.permissionTier === 'unknown') return row('permission-changed', '删除时权限名单无法核验，原权限档未知，不能按原档宣告恢复。')
     const labels: Record<PermissionTier, string> = { reference: '参考', follow: '跟随', forbidden: '禁止' }
-    if (tier !== record.permissionTier) return row('permission-changed', `权限档在对象不在时从「${labels[record.permissionTier]}」变成「${labels[tier]}」，按原档恢复的判据不成立。`)
-    const ownership = ledger.inspectOwner(record.relPath)
-    if (!ownership || ownership.status !== 'verified') return row('ledger-unverified', '账本归属无法核验，不能宣告恢复。')
+    // 删除时名单读不了只记 unknown：原档未知，就不比较；恢复后按现行档生效。
+    // 档位变了仍可恢复，但先把 owner 矛盾判完再下结论，不能让权限分支绕过账本一致性。
+    let permissionChanged: string | null = null
+    if (record.permissionTier !== 'unknown' && tier !== record.permissionTier) {
+      const forbidden = tier === 'forbidden' ? '当前为「禁止」，恢复后 AI 仍不可使用该笔记。' : ''
+      permissionChanged = `权限档从「${labels[record.permissionTier]}」变成「${labels[tier]}」。恢复后按现行档生效，AI 是否可用以现行档为准。${forbidden}`
+    }
+    if (owners === null) return row('ledger-unverified', '账本登记暂时无法读取，不能宣告恢复。')
+    const owner = owners.find((item) => item.relPath === record.relPath) ?? null
+    if (owner) {
+      if (owner.objectVersion !== record.objectVersion || owner.bodyRevision !== record.bodyRevision) {
+        return row('ledger-unverified', '账本登记与消失时的记录互相矛盾，不能宣告恢复。')
+      }
+      // 卷重挂载时 owner 仍指旧设备号；身份已由 inode＋内容证明，不再用现行 id 反证。
+      if (current === record.objectVersion) {
+        const ownership = ledger.inspectOwner(record.relPath)
+        if (!ownership || ownership.status !== 'verified') return row('ledger-unverified', '账本归属无法核验，不能宣告恢复。')
+      }
+    } else {
+      // owner 缺失（未登记笔记）时跳过一致性判据；但账本若明确说「有登记却读不出来」仍失败关闭。
+      const ownership = ledger.inspectOwner(record.relPath)
+      if (!ownership || ownership.status === 'invalid' || ownership.status === 'verified') return row('ledger-unverified', '账本登记与当前对象不一致，不能宣告恢复。')
+    }
+    if (permissionChanged) return row('permission-changed', permissionChanged, true)
+    if (record.permissionTier === 'unknown') return row('restored', '内容与附件都与记录一致，可以核验恢复。消失时权限名单无法核验，原权限档未知；恢复后按现行档生效，AI 是否可用以现行档为准。', true)
+    if (tier === 'forbidden') return row('restored', '内容、附件与权限档都与记录一致，可以核验恢复。当前权限档为「禁止」，恢复后 AI 仍不可使用该笔记。', true)
     return row('restored', '内容、附件与权限档都与记录一致，可以核验恢复。', true)
   }
 
@@ -1138,7 +1201,8 @@ export class VaultSession {
       try {
         lifecycle.recordMissing({
           relPath: preview.relPath, noteId, objectVersion: preview.objectVersion, bodyRevision, attachments,
-          rootIdentity: this.rootIdentity ?? vaultRootIdentity(root), permissionTier, detectedAt: new Date().toISOString()
+          rootIdentity: this.rootIdentity ?? vaultRootIdentity(root), permissionTier, detectedAt: new Date().toISOString(),
+          cause: 'trash'
         })
       } catch (error) {
         // 超限或 journal 被占用：内存占位保留（重启前仍占路径），并把降级如实带出去。

@@ -11,10 +11,10 @@ beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute('open', '') } })
   Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute('open'); this.dispatchEvent(new Event('close')) } })
 })
-function start(scan: () => Promise<RecoveryScanResult>, confirm: (relPath: string) => Promise<import('../../src/shared/ipc.ts').RecoveryConfirmResult> = async () => ({ ok: true as const, verdict: 'restored' as const, restored: true, message: '核验通过：内容、附件与权限档都与记录一致；该对象与相关来源恢复可用。' })) {
+function start(scan: () => Promise<RecoveryScanResult>, confirm: (relPath: string) => Promise<import('../../src/shared/ipc.ts').RecoveryConfirmResult> = async () => ({ ok: true as const, verdict: 'restored' as const, restored: true, message: '核验通过：内容、附件与权限档都与记录一致；该对象与相关来源恢复可用。' }), abandon?: (relPath: string) => Promise<import('../../src/shared/ipc.ts').RecoveryAbandonResult>) {
   const handlers = {
     get: vi.fn(async () => catalog()), open: vi.fn(async () => {}), pick: vi.fn(async () => {}), change: vi.fn(async () => catalog()),
-    externalRecovery: { scan: vi.fn(scan), confirm: vi.fn(confirm) }
+    externalRecovery: { scan: vi.fn(scan), confirm: vi.fn(confirm), ...(abandon ? { abandon: vi.fn(abandon) } : {}) }
   }
   const root = document.createElement('dialog'); document.body.append(root); root.showModal()
   const page = mountVaultManager({ body: root, isCurrent: () => root.open }, handlers)
@@ -24,9 +24,9 @@ function start(scan: () => Promise<RecoveryScanResult>, confirm: (relPath: strin
 
 it('rescans external disappearances and offers the verification entry, reporting every branch honestly', async () => {
   const scan = vi.fn(async (): Promise<RecoveryScanResult> => ({ ok: true, value: { sessionId: 's1', rows: [
-    { relPath: 'a.md', verdict: 'restored', message: '内容、附件与权限档都与记录一致，可以核验恢复。', canRestore: true },
-    { relPath: 'b.md', verdict: 'content-changed', message: '内容与登记记录不一致；对象与来源对 AI 保持失效，且不自动遗忘记忆。', canRestore: false },
-    { relPath: 'c.md', verdict: 'attachments-missing', message: '同名附件夹没有一起放回；这是降级状态，不冒充核验通过。', canRestore: false }
+    { relPath: 'a.md', verdict: 'restored', message: '内容、附件与权限档都与记录一致，可以核验恢复。', canRestore: true, canAbandon: true },
+    { relPath: 'b.md', verdict: 'content-changed', message: '内容与登记记录不一致；对象与来源对 AI 保持失效，且不自动遗忘记忆。', canRestore: false, canAbandon: true },
+    { relPath: 'c.md', verdict: 'attachments-missing', message: '同名附件夹没有一起放回；这是降级状态，不冒充核验通过。', canRestore: false, canAbandon: true }
   ] } }))
   const { button, text } = start(scan)
   await flush()
@@ -46,7 +46,7 @@ it('rescans external disappearances and offers the verification entry, reporting
 it('confirms a passing verification, rescans afterwards and never shows a deletion entry', async () => {
   let pass = false
   const scan = vi.fn(async (): Promise<RecoveryScanResult> => ({ ok: true, value: { sessionId: 's1', rows: pass ? [] : [
-    { relPath: 'a.md', verdict: 'restored', message: '内容、附件与权限档都与记录一致，可以核验恢复。', canRestore: true }
+    { relPath: 'a.md', verdict: 'restored', message: '内容、附件与权限档都与记录一致，可以核验恢复。', canRestore: true, canAbandon: true }
   ] } }))
   const confirm = vi.fn(async (relPath: string) => { pass = true; return { ok: true as const, verdict: 'restored' as const, restored: true, message: `核验通过：${relPath}` } })
   const { button, text, root, handlers } = start(scan, confirm)
@@ -58,4 +58,27 @@ it('confirms a passing verification, rescans afterwards and never shows a deleti
   expect(text()).toContain('没有已登记对象在库外消失')
   expect(root.querySelector('[data-recovery-confirm]')).toBeNull()
   expect(text()).not.toMatch(/删除|废纸篓|移入回收站/)
+})
+
+it('asks for a second confirmation before abandoning recovery and cancels with zero action', async () => {
+  const scan = vi.fn(async (): Promise<RecoveryScanResult> => ({ ok: true, value: { sessionId: 's1', rows: [
+    { relPath: 'a.md', verdict: 'object-replaced', message: '原路径现在放着另一个对象（同名替换篇）。', canRestore: false, canAbandon: true }
+  ] } }))
+  const abandon = vi.fn(async () => ({ ok: true as const, verdict: 'abandoned' as const, cleared: true as const }))
+  const { button, text } = start(scan, undefined, abandon)
+  await flush()
+  button('重扫并核验恢复')!.click(); await flush()
+  expect(button('放弃恢复')).toBeTruthy()
+  // 展开二次确认前，页面默认可见文字里没有废纸篓／删除；确认内容只在人点开后才出现。
+  expect(text()).not.toMatch(/删除|废纸篓|移入回收站/)
+  button('放弃恢复')!.click(); await flush()
+  expect(abandon).not.toHaveBeenCalled()
+  expect(text()).toContain('不会动系统废纸篓里的文件')
+  button('取消')!.click(); await flush()
+  expect(abandon).not.toHaveBeenCalled()
+  expect(text()).not.toContain('不会动系统废纸篓里的文件')
+  button('放弃恢复')!.click(); await flush()
+  button('确认放弃恢复')!.click(); await flush()
+  expect(abandon).toHaveBeenCalledWith('a.md')
+  expect(scan).toHaveBeenCalledTimes(2)
 })

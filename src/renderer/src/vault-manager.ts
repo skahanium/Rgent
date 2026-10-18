@@ -1,13 +1,13 @@
 import { LEDGER_ERROR_MESSAGES, ledgerErrorText } from '../../shared/ledger-errors.ts'
 import type { LedgerRepairRequest, LedgerRepairResult, LedgerRecoveryView } from '../../shared/ledger.ts'
-import type { LifecycleStatus, RecoveryConfirmResult, RecoveryScanResult, RecoveryScanView, RecoveryVerdict } from '../../shared/ipc.ts'
+import type { LifecycleStatus, RecoveryAbandonResult, RecoveryConfirmResult, RecoveryScanResult, RecoveryScanView, RecoveryVerdict } from '../../shared/ipc.ts'
 import type { VaultCatalogEntry, VaultCatalogView, VaultRootPreview, VaultCatalogChangeRequest, VaultCatalogChangeResult } from '../../shared/vault-management'
 import { icon, type IconName } from './icons'
 
 type Catalog = VaultCatalogChangeResult & { activeId?: string | null; activeUnavailable?:boolean }
 export type VaultManagerHandlers = {
   recovery?: {state():Promise<LifecycleStatus>;repair(request:LedgerRepairRequest):Promise<LedgerRepairResult>}
-  externalRecovery?: {scan():Promise<RecoveryScanResult>;confirm(relPath:string):Promise<RecoveryConfirmResult>}
+  externalRecovery?: {scan():Promise<RecoveryScanResult>;confirm(relPath:string):Promise<RecoveryConfirmResult>;abandon?(relPath:string):Promise<RecoveryAbandonResult>}
   get(): Promise<Catalog>
   open(id: string): Promise<void>
   pick(create: boolean): Promise<void>
@@ -91,7 +91,31 @@ export function mountVaultManager(context: {
   const externalMessage=element('p','vault-settings-hint'),externalRows=element('ul',''),externalActions=element('div','vault-settings-shortcuts')
   external.append(element('h3','','外部消失与恢复核验'),externalMessage,externalRows,externalActions);root.append(external)
   let externalView:RecoveryScanView|null=null
-  const verdictLabels:Record<RecoveryVerdict,string>={restored:'可以核验恢复','still-missing':'仍在库外','object-replaced':'原路径换成了另一个对象','content-changed':'内容已变','attachments-missing':'附件夹缺失（降级）','attachments-changed':'附件子树已变','permission-denied':'权限档禁止','permission-changed':'权限档与记录不一致','ledger-unverified':'账本登记无法核验'}
+  const verdictLabels:Record<RecoveryVerdict,string>={restored:'可以核验恢复','still-missing':'仍在库外','object-replaced':'原路径换成了另一个对象','content-changed':'内容已变','attachments-missing':'附件夹缺失（降级）','attachments-changed':'附件子树已变','permission-denied':'权限档禁止','permission-changed':'权限档已变（仍可恢复）','permission-unreadable':'权限名单无法核验','ledger-unverified':'账本登记无法核验'}
+  /** 二次确认面板只在人点「放弃恢复」后才进 DOM：默认列表里不出现删除／废纸篓字样。 */
+  function confirmAbandon(item:HTMLElement,relPath:string){
+    if(item.querySelector('.vault-settings-confirmation'))return
+    const panel=element('div','vault-settings-confirmation')
+    panel.append(element('p','','只清除 Rgent 库内的恢复记录并释放路径，不会动系统废纸篓里的文件。若文件还在废纸篓，需要你自己处理。'))
+    const actions=element('div','vault-settings-shortcuts')
+    const cancel=button('取消',()=>panel.remove())
+    const confirm=button('确认放弃恢复',()=>{
+      panel.remove()
+      let notice=''
+      void run('正在放弃恢复…',async()=>{
+        const result=await handlers.externalRecovery!.abandon!(relPath)
+        if(!alive())return
+        if(!result.ok)throw Error(result.error)
+        notice=result.degraded==='ledger-failed'
+          ?'恢复记录已清除、路径已释放；但账本留痕失败，这次放弃没有完整审计记录。'
+          :'已放弃恢复：库内记录已清除，路径已释放；系统废纸篓里的文件未改动。'
+        await rescanRows()
+      }).then(()=>{if(alive()&&notice)status.textContent=notice})
+    })
+    confirm.dataset.recoveryAbandonConfirm='true'
+    confirm.classList.add('vault-settings-danger')
+    actions.append(cancel,confirm);panel.append(actions);item.append(panel)
+  }
   function showExternal(){
     externalRows.replaceChildren();externalActions.replaceChildren()
     if(!externalView)return
@@ -101,6 +125,7 @@ export function mountVaultManager(context: {
     for(const row of externalView.rows){
       const item=element('li','',`${row.relPath} · ${verdictLabels[row.verdict]}：${row.message}`)
       item.dataset.recoveryVerdict=row.verdict
+      if(row.canRestore&&row.verdict==='permission-changed')item.append(element('p','vault-settings-hint','恢复后按现行权限档生效；AI 是否可用以现行档为准。'))
       if(row.canRestore){const confirm=button('核验并恢复',()=>{let notice:string|null=null;void run('正在核验恢复…',async()=>{
         const result=await handlers.externalRecovery!.confirm(row.relPath)
         if(!alive())return
@@ -110,6 +135,7 @@ export function mountVaultManager(context: {
         // `run` 收尾会把没有返回值的操作状态清空；核验结论要在它之后再落到状态行，
         // 否则「核验通过…来源恢复可用」当场被抹掉（窗口专项实测）。
       }).then(()=>{if(alive()&&notice)status.textContent=notice})});confirm.dataset.recoveryConfirm=row.relPath;item.append(confirm)}
+      if(row.canAbandon&&handlers.externalRecovery?.abandon){const abandon=button('放弃恢复',()=>confirmAbandon(item,row.relPath));abandon.dataset.recoveryAbandon=row.relPath;abandon.classList.add('vault-settings-danger');item.append(abandon)}
       externalRows.append(item)
     }
     externalActions.append(rescan)

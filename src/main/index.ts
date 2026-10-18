@@ -556,7 +556,7 @@ function registerIpc(): void {
       if (!trusted(event)) throw new Error('BAD_SENDER')
       const current = vault,session = current?.sessionId() ?? null
       const actual = isVaultChannel(channel) ? boundArguments(args, session) : args
-      if (vaultSwitch?.busy && [IPC.agentStart, IPC.agentAuthorizationPreview, IPC.noteCreate, IPC.folderCreate, IPC.relocationPreview, IPC.relocationCommit, IPC.noteTrashPreview, IPC.noteTrashCommit, IPC.lifecycleRetry, IPC.recoveryScan, IPC.recoveryConfirm, IPC.noteSaveCopyPreview, IPC.noteSaveCopyCommit, IPC.permissionsSet, IPC.memoryConfigSave, IPC.memoryPreviewCommit, IPC.memoryItemEdit, IPC.memoryItemDisable, IPC.memoryItemForget, IPC.memoryJobRetryPreview, IPC.skillsSave, IPC.skillsSetEnabled, IPC.agentWriteConfirm, IPC.ledgerMaintenance, IPC.ledgerMigrate, IPC.ledgerRepair].includes(channel as never)) throw Error('VAULT_SWITCH_BUSY')
+      if (vaultSwitch?.busy && [IPC.agentStart, IPC.agentAuthorizationPreview, IPC.noteCreate, IPC.folderCreate, IPC.relocationPreview, IPC.relocationCommit, IPC.noteTrashPreview, IPC.noteTrashCommit, IPC.lifecycleRetry, IPC.recoveryScan, IPC.recoveryConfirm, IPC.recoveryAbandon, IPC.noteSaveCopyPreview, IPC.noteSaveCopyCommit, IPC.permissionsSet, IPC.memoryConfigSave, IPC.memoryPreviewCommit, IPC.memoryItemEdit, IPC.memoryItemDisable, IPC.memoryItemForget, IPC.memoryJobRetryPreview, IPC.skillsSave, IPC.skillsSetEnabled, IPC.agentWriteConfirm, IPC.ledgerMaintenance, IPC.ledgerMigrate, IPC.ledgerRepair].includes(channel as never)) throw Error('VAULT_SWITCH_BUSY')
       const result = isVaultChannel(channel) && current ? await current.runBound(session, () => listener(event, ...actual)) : await listener(event, ...actual)
       if (isVaultChannel(channel) && session !== (vault?.sessionId() ?? null)) throw Error('VAULT_CHANGED')
       return result
@@ -1055,6 +1055,19 @@ function registerIpc(): void {
       if(Object.keys(r).sort().join()!=='relPath,sessionId'||typeof r.sessionId!=='string'||typeof r.relPath!=='string'||r.relPath.length>4096)throw Error('BAD_REQUEST')
       if(!current)throw Error('NO_VAULT');current.assertSession(r.sessionId)
       return {ok:true,...await current.recoveryConfirm(r.relPath)}
+    }catch(error){const code=error instanceof Error?error.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED','STALE_PREVIEW','LIFECYCLE_RECOVERY_REQUIRED'].includes(code)?code:'RECOVERY_UNAVAILABLE'}}
+  })
+  // 放弃恢复：只清库内记录、释放路径；不提供删除或替代路径，也不动系统废纸篓。
+  registerTrustedHandle(IPC.recoveryAbandon,async(_event,value:unknown):Promise<import('../shared/ipc.ts').RecoveryAbandonResult>=>{
+    const current=vault
+    try{
+      if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
+      const r=value as Record<string,unknown>
+      if(Object.keys(r).sort().join()!=='relPath,sessionId'||typeof r.sessionId!=='string'||typeof r.relPath!=='string'||r.relPath.length>4096)throw Error('BAD_REQUEST')
+      if(!current)throw Error('NO_VAULT');current.assertSession(r.sessionId)
+      const result=await current.recoveryAbandon(r.relPath)
+      current.assertSession(r.sessionId)
+      return {ok:true,...result}
     }catch(error){const code=error instanceof Error?error.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED','STALE_PREVIEW','LIFECYCLE_RECOVERY_REQUIRED'].includes(code)?code:'RECOVERY_UNAVAILABLE'}}
   })
   registerTrustedHandle(IPC.ledgerReasoning,async(_event,value:unknown):Promise<import('../shared/ledger.ts').LedgerReasoningResult>=>{

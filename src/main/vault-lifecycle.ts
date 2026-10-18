@@ -60,9 +60,10 @@ export type MemoryRecoveryPlan={beforeHash:string;beforeId:string;afterHash:stri
 export type PendingLedgerRepair={kind:'ledger-repair';rootIdentity:string;sessionId:string;mode:'rebuild'|'restore';fingerprints:Fingerprint[];writes:RepairWrite[];permissionRaw:string|null;memory?:MemoryRecoveryPlan}
 /** 附件证据沿用登记记录（`LedgerOwner.recoveryEvidence`）的既有字段形状。 */
 export type MissingAttachment = { relPath: string; kind: 'file' | 'dir'; hash?: string }
-/** 外部消失（对象在库外被删或移走）的生命周期记录。字段取自既有登记：身份、内容哈希、
- *  附件证据与消失时的权限档。写在同一本 `.rgent-lifecycle` 的 version 1 信封里，不新增
- *  存储格式；不占用 `active`——`active` 仍是待恢复的中断，只由移动与账本恢复占用。 */
+/** 外部消失（对象在库外被删或移走）／应用删除的生命周期记录。字段取自既有登记：身份、
+ *  内容哈希、附件证据与消失时的权限档。写在同一本 `.rgent-lifecycle` 的 version 1 信封里，
+ *  不新增存储格式；不占用 `active`——`active` 仍是待恢复的中断，只由移动与账本恢复占用。
+ *  `cause` 是本轮新增字段；旧记录没有它时按 `external` 读。 */
 export type MissingObject = {
   relPath: string
   noteId: string
@@ -70,9 +71,10 @@ export type MissingObject = {
   bodyRevision: string
   attachments: MissingAttachment[]
   rootIdentity: string
-  /** `unknown` 只用于删除时权限名单不可读；恢复核验不会把它当成任何一档。 */
+  /** `unknown` 只用于消失／删除时权限名单不可读；恢复核验不会把它当成任何一档。 */
   permissionTier: import('../shared/ipc.ts').PermissionTier | 'unknown'
   detectedAt: string
+  cause: 'external' | 'trash'
 }
 type Journal = { version: 1; active: PendingMove | PendingLedgerRepair | LedgerPublication | null; missing?: MissingObject[] }
 const MISSING_LIMIT = 64
@@ -204,10 +206,11 @@ export class VaultLifecycle {
     return structuredClone(view)
   }
 
-  /** 未核验的外部消失记录；只读，不改变 `active` 的中断语义。 */
+  /** 未核验的外部消失记录；只读，不改变 `active` 的中断语义。
+   *  旧 journal 没有 `cause`：按外部消失读，不因为新增字段让整本记录失效。 */
   missingObjects(): MissingObject[] {
     this.assertCurrent()
-    return (this.loadJournal().missing ?? []).map((item) => structuredClone(item))
+    return (this.loadJournal().missing ?? []).map((item) => ({ ...structuredClone(item), cause: item.cause ?? 'external' }))
   }
 
   /** 有记录的对象在核验通过前不继承身份：来源核验、任务绑定与写回一律失败关闭。 */
@@ -838,13 +841,17 @@ function validPending(value: unknown): value is PendingMove {
 function validMissing(value: unknown): value is MissingObject {
   if (!value || typeof value !== 'object') return false
   const item = value as MissingObject
-  if (Object.keys(item).sort().join() !== ['attachments', 'bodyRevision', 'detectedAt', 'noteId', 'objectVersion', 'permissionTier', 'relPath', 'rootIdentity'].sort().join()) return false
+  const keys = ['attachments', 'bodyRevision', 'detectedAt', 'noteId', 'objectVersion', 'permissionTier', 'relPath', 'rootIdentity']
+  if ('cause' in item) keys.push('cause')
+  if (Object.keys(item).sort().join() !== keys.sort().join()) return false
   return validPath(item.relPath) && isNotePath(item.relPath) &&
     typeof item.noteId === 'string' && item.noteId.length > 0 && item.noteId.length < 128 &&
     typeof item.objectVersion === 'string' && item.objectVersion.length > 0 && item.objectVersion.length < 512 &&
     typeof item.bodyRevision === 'string' && /^[a-f0-9]{64}$/.test(item.bodyRevision) &&
     typeof item.rootIdentity === 'string' && /^\d+:\d+$/.test(item.rootIdentity) &&
     typeof item.detectedAt === 'string' && Number.isFinite(Date.parse(item.detectedAt)) &&
+    // 旧记录没有 cause；缺失时由 missingObjects() 归一成 external。
+    (item.cause === undefined || item.cause === 'external' || item.cause === 'trash') &&
     (item.permissionTier === 'reference' || item.permissionTier === 'follow' || item.permissionTier === 'forbidden' || item.permissionTier === 'unknown') &&
     Array.isArray(item.attachments) && item.attachments.length <= 4096 &&
     item.attachments.every((part) => !!part && typeof part === 'object' &&

@@ -340,6 +340,21 @@ export class LedgerStore{
   const raw=JSON.stringify(record);if(Buffer.byteLength(raw)>2*1024*1024)throw Error('LEDGER_RECORD_LIMIT')
   this.replace(this.path(owner,taskId),raw)
  }
+ /** 人放弃恢复：只清库内生命周期记录、释放路径；不碰系统废纸篓里的文件。
+  *  与 `recordHumanTrash` 不同，任务键用带时间戳的 `humanabandon-<ISO>`，不覆盖任何历史章节。 */
+ recordRecoveryAbandon(relPath:string):void{
+  if(!rel(relPath))throw Error('BAD_PATH')
+  const registry=this.registry(),owner=registry.owners.find(o=>o.relPath===relPath)
+  if(!owner)return
+  const startedAt=new Date().toISOString()
+  // 时间戳去掉冒号／连字符／点，再带一小段随机后缀：既是人能读的来源，也不会同名覆盖。
+  const taskId=`humanabandon-${startedAt.replace(/[-:.]/g,'')}-${randomUUID().slice(0,8)}`
+  const chapter={taskId,startedAt,status:'completed' as const,prompt:'人放弃恢复',answer:'人放弃恢复，路径释放；只清除 Rgent 库内的生命周期记录，未改动系统废纸篓里的文件。'}
+  if(!validChapter(chapter))throw Error('LEDGER_RECORD_INVALID')
+  const record:LedgerRecord={version:1,noteId:owner.noteId,taskId,revision:1,state:'saved',bodyStatus:'unable-to-verify',chapter,sequence:0}
+  const raw=JSON.stringify(record);if(Buffer.byteLength(raw)>2*1024*1024)throw Error('LEDGER_RECORD_LIMIT')
+  this.replace(this.path(owner,taskId),raw)
+ }
  complete(relPath:string,taskId:string,bodyRevision:string):LedgerRecord{
   const owner=this.owner(relPath),note=this.fs.readSnapshot(relPath),record=this.record(owner,taskId);if(!record||!record.chapter)throw Error('LEDGER_RECORD_INVALID');if(digest(note.bytes.toString())!==bodyRevision)throw Error('LEDGER_BODY_CHANGED')
   const body=note.bytes.toString(),blocks=compile(body).index.markers.filter(b=>b.identity==='ai'&&parseMarker(body.slice(b.range.start,b.range.end))?.attrs['task-id']===taskId)

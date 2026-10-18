@@ -240,6 +240,17 @@ export async function start(root: HTMLElement): Promise<void> {
           const result:import('../../shared/ipc.ts').RecoveryConfirmResult=vaultSession?await window.rgent.recoveryConfirm({sessionId:vaultSession,relPath}):{ok:false,error:'NO_VAULT'}
           if(result.ok&&result.restored){await refreshTree();await checkOpenNotes()}
           return result
+        },
+        // 放弃恢复只清库内记录并释放路径：该路径若还有标签页，按「文件已不在」处理，
+        // 不把释放后的路径重新当成原对象。
+        abandon:async relPath=>{
+          const result:import('../../shared/ipc.ts').RecoveryAbandonResult=vaultSession?await window.rgent.recoveryAbandon({sessionId:vaultSession,relPath}):{ok:false,error:'NO_VAULT'}
+          if(result.ok){
+            await refreshTree()
+            const tab=tabs.find(item=>item.relPath===relPath)
+            if(tab)markUnavailable(tab,'missing')
+          }
+          return result
         }
       },
       get: () => window.rgent.vaultCatalog(),

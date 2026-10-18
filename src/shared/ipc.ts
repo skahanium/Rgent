@@ -34,6 +34,7 @@ export const IPC = {
   lifecycleRetry: 'lifecycle:retry',
   recoveryScan: 'lifecycle:recovery-scan',
   recoveryConfirm: 'lifecycle:recovery-confirm',
+  recoveryAbandon: 'lifecycle:recovery-abandon',
   noteExternalChange: 'note:external-change',
   vaultLost: 'vault:lost',
   menuOpenVault: 'menu:open-vault',
@@ -348,13 +349,19 @@ export type NoteWriteResult = {
 /** 外部消失与恢复核验：只有全部分支判据通过才 `restored`；其余分支如实上报并保持失效。 */
 export type RecoveryVerdict =
   | 'restored' | 'still-missing' | 'object-replaced' | 'content-changed'
-  | 'attachments-missing' | 'attachments-changed' | 'permission-denied' | 'permission-changed' | 'ledger-unverified'
-export type RecoveryRow = { relPath: string; verdict: RecoveryVerdict; message: string; canRestore: boolean }
+  | 'attachments-missing' | 'attachments-changed' | 'permission-denied' | 'permission-changed'
+  | 'permission-unreadable' | 'ledger-unverified'
+export type RecoveryRow = { relPath: string; verdict: RecoveryVerdict; message: string; canRestore: boolean; canAbandon: boolean }
 export type RecoveryScanView = { sessionId: string; rows: RecoveryRow[] }
 export type RecoveryScanRequest = { sessionId: string }
 export type RecoveryScanResult = { ok: true; value: RecoveryScanView } | { ok: false; error: string }
 export type RecoveryConfirmRequest = { sessionId: string; relPath: string }
 export type RecoveryConfirmResult = { ok: true; verdict: RecoveryVerdict; restored: boolean; message: string } | { ok: false; error: string }
+/** 「放弃恢复」是确认结果，不是扫描行：`abandoned` 不进 `RecoveryVerdict`。 */
+export type RecoveryAbandonRequest = { sessionId: string; relPath: string }
+export type RecoveryAbandonResult =
+  | { ok: true; verdict: 'abandoned'; cleared: true; degraded?: 'ledger-failed' }
+  | { ok: false; error: string }
 
 export type FlushDonePayload = {
   ok: boolean
