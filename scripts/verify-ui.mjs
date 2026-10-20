@@ -752,6 +752,130 @@ async function verifyWriteTools(page, vault, shot, requests) {
   }
 }
 
+/** 联网只读专项（RGENT_UI_NETWORK_ONLY=1）：只证门控、拒绝与账本，零真实外网。
+ *  受控模型按「联网抓页专项」标记脚本化两次 fetch_url：第一次回环地址被出口核心拒，
+ *  第二次要等人在状态行点「停止联网」后才放行，回给模型 NETWORK_NOT_AUTHORIZED。 */
+function createNetworkOnlyHostServer(requests, gate) {
+  const server = createHttpServer((request, response) => {
+    let body = ''
+    request.on('data', chunk => { body += String(chunk) })
+    request.on('end', () => {
+      const decoded = JSON.parse(body)
+      const marker = JSON.stringify(decoded.messages ?? [])
+      const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'network-ui', object: 'chat.completion.chunk', created: 1, model: decoded.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      // 只按本专项的口令脚本化；后台整理等其它请求给普通回答，不劫持也不计入证据。
+      if (!marker.includes('联网抓页专项')) {
+        emit({ content: '受控回答。' })
+        emit({}, 'stop')
+        response.end('data: [DONE]\n\n')
+        return
+      }
+      requests.push(decoded)
+      const results = decoded.messages.filter(message => message.role === 'tool')
+      const fetchCall = (id) => ({ tool_calls: [{ index: 0, id, type: 'function', function: { name: 'fetch_url', arguments: JSON.stringify({ url: 'https://127.0.0.1/x' }) } }] })
+      if (!results.length) {
+        emit(fetchCall('network-fetch-1'))
+        emit({}, 'tool_calls')
+        response.end('data: [DONE]\n\n')
+        return
+      }
+      if (results.length === 1) {
+        // 第二次抓取不能自动发生：等界面上的「停止联网」落定后再回模型。
+        gate.reached = true
+        gate.abort = () => { if (!response.destroyed) response.destroy() }
+        gate.release = () => {
+          if (response.destroyed) return
+          emit(fetchCall('network-fetch-2'))
+          emit({}, 'tool_calls')
+          response.end('data: [DONE]\n\n')
+        }
+        return
+      }
+      // 留出窗口让人真的看见状态行按「第二次被拒」更新，再收尾。
+      const finalTimer = setTimeout(() => {
+        if (response.destroyed) return
+        emit({ content: '联网专项核验完成。' })
+        emit({}, 'stop')
+        response.end('data: [DONE]\n\n')
+      }, 3000)
+      response.on('close', () => clearTimeout(finalTimer))
+    })
+  })
+  return server
+}
+
+/** 联网只读专项：① 总开关默认关 ② 勾选默认不勾且写明抓网页 ③ 回环抓页被拒并进账本
+ *  ④ 停止联网后第二次抓取被拒 ⑤ 任务进行中状态行出现「联网：」提示。 */
+async function verifyNetworkOnly(page, vault, shot, requests, gate) {
+  process.stdout.write('\n联网只读专项\n')
+  await waitFor(page, `document.querySelector('#app')?.inert===false && !!document.querySelector('.settings-open')`)
+  const clickSelector = async (selector) => {
+    const point = await page.eval(`(() => { const el=document.querySelector(${JSON.stringify(selector)}); if(!el)return null; el.scrollIntoView({block:'nearest'}); const r=el.getBoundingClientRect(); return { x: r.left+r.width/2, y: r.top+r.height/2 } })()`)
+    if (!point) return false
+    await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    return true
+  }
+  const toolMessages = () => requests.flatMap(request => request.messages.filter(message => message.role === 'tool').map(message => String(message.content)))
+  // 夹具先落盘：设置页操作期间文件监听有时间把新笔记送进目录。
+  writeFileSync(path.join(vault, '联网抓页专项.md'), '')
+
+  // ① 设置「模型」页里的联网卡：默认关闭。
+  await page.eval(`document.querySelector('.settings-open')?.click()`)
+  check('设置页打开', await waitFor(page, `!!document.querySelector('.settings-nav')`))
+  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(button=>button.textContent==='模型')?.click()`)
+  check('联网只读总开关默认关闭', await waitFor(page, `(() => { const toggle=document.querySelector('[data-network="enabled"]'); return !!toggle && toggle.checked===false && !toggle.disabled && !!document.querySelector('.settings-network')?.textContent.includes('允许联网只读') })()`), await page.eval(`document.querySelector('.settings-network')?.textContent?.slice(0,180)??'(无联网卡)'`))
+  await shot(page, 'network-settings-1200')
+
+  // ② 打开总开关，发起一场并检查口令卡。
+  await page.eval(`(() => { const toggle=document.querySelector('[data-network="enabled"]'); toggle.checked=true; toggle.dispatchEvent(new Event('change')) })()`)
+  check('总开关经真实设置卡保存为开', await waitFor(page, `(() => { const toggle=document.querySelector('[data-network="enabled"]'); return toggle?.checked===true && !toggle.disabled })()`), await page.eval(`document.querySelector('[data-network="status"]')?.textContent??''`))
+  await page.key('Escape', 'Escape', 0, 27)
+  check('关闭设置后回到正文', await waitFor(page, `!document.querySelector('.overlay-settings')`))
+
+  await page.eval(`(() => { const toggle=document.querySelector('.tree-toggle'); if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click(); return true })()`)
+  check('联网专项夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(note=>note.dataset.path==='联网抓页专项.md')`))
+  await page.eval(`[...document.querySelectorAll('.tree-note')].find(note=>note.dataset.path==='联网抓页专项.md')?.click()`)
+  check('打开联网发起篇', await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel==='联网抓页专项.md'`))
+  check('打开笔记后底栏模型快照就绪', await waitFor(page, `document.querySelector('.status-model')?.value!==''`), await page.eval(`document.querySelector('.status-model')?.innerText??''`))
+  await page.eval(`document.querySelector('.cm-content')?.focus()`)
+  await page.call('Input.insertText', { text: '/联网抓页专项' })
+  await page.key('Enter', 'Enter', 0, 13)
+  check('口令卡出现联网勾选且默认不勾、写明抓网页', await waitFor(page, `(() => { const card=document.querySelector('.authorization-network'); const input=card?.querySelector('input[type="checkbox"]'); return !!input && input.checked===false && card.textContent.includes('抓网页') && !!document.querySelector('.authorization-send:not(:disabled)') })()`, 60000), await page.eval(`document.querySelector('.authorization-network')?.textContent??'(无联网勾选)'`))
+  check('勾选联网后口令卡重新核对并可发送', await clickSelector('.authorization-network input[type="checkbox"]') && await waitFor(page, `document.querySelector('.authorization-network input[type="checkbox"]')?.checked===true && !!document.querySelector('.authorization-send:not(:disabled)')`, 30000), await page.eval(`document.querySelector('.authorization-status')?.textContent??''`))
+  await shot(page, 'network-authorization-1200')
+  if (!await clickSelector('.authorization-send')) throw Error('找不到确认发送按钮')
+
+  // ⑤ 任务进行中抓一次 DOM：状态行必须出现「联网：」，而不是等任务结束后补记。
+  check('任务进行中状态行出现联网提示', await waitFor(page, `(() => { const hint=document.querySelector('.status-task-network'); return !!hint && hint.textContent.includes('联网：') && !!document.querySelector('.status-task') })()`, 30000), await page.eval(`document.querySelector('.status')?.textContent?.slice(0,220)??'(无状态行)'`))
+
+  // ③ 第一个 fetch_url 是回环地址：出口核心拒绝，模型收到 EGRESS_INVALID_URL，任务继续。
+  for (let index = 0; index < 200 && !gate.reached; index += 1) await sleep(100)
+  check('第一次抓页被拒后模型继续走下一步', gate.reached)
+  check('回给模型的是 EGRESS_INVALID_URL', toolMessages().some(text => text.includes('EGRESS_INVALID_URL')), JSON.stringify(toolMessages().slice(-2)))
+  check('状态行按真实拒绝事件显示主机与结果码', await waitFor(page, `(() => { const hint=document.querySelector('.status-task-network'); return !!hint && hint.textContent.includes('127.0.0.1') && hint.textContent.includes('未执行：EGRESS_INVALID_URL') })()`, 10000), await page.eval(`document.querySelector('.status-task-network')?.textContent??''`))
+
+  // ④ 第二次抓取前点「停止联网」，再放行；停止必须先于请求。
+  check('任务进行中可见「停止联网」', await waitFor(page, `!!document.querySelector('.status-task-network-stop:not(:disabled)')`, 10000))
+  if (!await clickSelector('.status-task-network-stop')) throw Error('找不到停止联网按钮')
+  check('停止联网后按钮消失且状态行仍有联网提示', await waitFor(page, `(() => { const hint=document.querySelector('.status-task-network'); return !!hint && hint.textContent.includes('联网：') && !document.querySelector('.status-task-network-stop') })()`, 15000), await page.eval(`document.querySelector('.status')?.textContent?.slice(0,220)??''`))
+  check('停止生效前第二次抓取尚未发出', !toolMessages().some(text => text.includes('NETWORK_NOT_AUTHORIZED')))
+  gate.release?.()
+  check('状态行按第二次拒绝事件显示尝试主机与结果码', await waitFor(page, `(() => { const hint=document.querySelector('.status-task-network'); return !!hint && hint.textContent.includes('127.0.0.1') && hint.textContent.includes('未执行：NETWORK_NOT_AUTHORIZED') })()`, 10000), await page.eval(`document.querySelector('.status-task-network')?.textContent??''`))
+
+  check('两次拒绝后任务仍正常完成', await waitFor(page, `(async()=>{ if((await window.rgent.agentTasks()).length) return false; return (await window.rgent.noteRead('联网抓页专项.md')).content.includes('联网专项核验完成。') })()`, 60000))
+  check('第二次抓取回给模型 NETWORK_NOT_AUTHORIZED', toolMessages().some(text => text.includes('NETWORK_NOT_AUTHORIZED')), JSON.stringify(toolMessages().slice(-2)))
+
+  // ③④ 账本：两条外发都看得见，且只有主机与结果码。
+  await page.eval(`document.querySelector('.ledger-open')?.click()`)
+  check('账本面板打开', await waitFor(page, `!!document.querySelector('.ledger-body details')`))
+  await page.eval(`document.querySelectorAll('.ledger-body details').forEach(details=>details.open=true)`)
+  check('账本出现本场外发与两条未执行原因', await waitFor(page, `(() => { const text=document.querySelector('.ledger-body')?.textContent||''; return text.includes('本场外发：') && text.includes('未执行：EGRESS_INVALID_URL') && text.includes('未执行：NETWORK_NOT_AUTHORIZED') && !text.includes('本场外发：无') })()`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,360)??''`))
+  check('外发证据不含抓取路径或正文', await page.eval(`(() => { const nodes=[...document.querySelectorAll('.ledger-network-evidence')]; const text=nodes.map(node=>node.textContent).join('|'); return nodes.length>0 && !text.includes('https://127.0.0.1') && !text.includes('/x') && !text.includes('外部正文') })()`))
+  await shot(page, 'network-ledger-1200')
+}
+
 /** 外部消失与恢复核验专项（RGENT_UI_RECOVERY_ONLY=1）：在专用临时库里真删真放回，逐条走
  *  「识别与如实呈现／原路径不可重建／核验通过／内容已变／附件缺失／设置页无删除入口」六条判据。
  *  模型只用来做登记场与恢复后复跑，全部走受控主机，零真实调用。 */
@@ -1188,6 +1312,7 @@ const skillsOnly = process.env.RGENT_UI_SKILLS_ONLY === '1'
 const writeOnly = process.env.RGENT_UI_WRITE_ONLY === '1'
 const recoveryOnly = process.env.RGENT_UI_RECOVERY_ONLY === '1'
 const trashOnly = process.env.RGENT_UI_TRASH_ONLY === '1'
+const networkOnly = process.env.RGENT_UI_NETWORK_ONLY === '1'
 // 付费专项：只由显式环境变量触发，普通测试／构建／CI 永不调用模型。
 const skillsLive = process.env.RGENT_UI_SKILLS_LIVE
 const v4Only = process.env.RGENT_UI_V4_ONLY === '1'
@@ -3628,6 +3753,20 @@ async function main() {
       try{await verifyWriteTools(page,vault,shot,writeRequests)}catch(error){stageFailed('写工具专项',error)}
       check('写工具专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
       check('写工具专项全程只走受控主机',writeRequests.length>=4,String(writeRequests.length))
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode=failures===0?0:1
+      return
+    }
+    if(networkOnly){
+      const networkRequests=[],networkGate={reached:false,release:null}
+      hostServer=createNetworkOnlyHostServer(networkRequests,networkGate)
+      await new Promise(resolve=>hostServer.listen(0,'127.0.0.1',resolve))
+      const configured=await configureControlledHost(page,`http://127.0.0.1:${hostServer.address().port}/v1`)
+      check('联网专项初始化受控供应商与设备默认模型',configured===true)
+      if(!configured)throw Error('联网专项受控模型初始化失败')
+      try{await verifyNetworkOnly(page,vault,shot,networkRequests,networkGate)}catch(error){stageFailed('联网只读专项',error)}finally{networkGate.abort?.()}
+      check('联网只读专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
+      check('联网只读专项全程只走受控主机',networkRequests.length>=3,String(networkRequests.length))
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
       process.exitCode=failures===0?0:1
       return

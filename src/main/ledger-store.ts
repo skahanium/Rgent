@@ -43,10 +43,11 @@ export function validSentSummary(value:unknown):value is import('./host-source.t
  return new Set(value.dependencies.map(d=>(d as {sourceId:string}).sourceId)).size===value.dependencies.length
 }
 /** 账本 `network[]` 的一条外发记录：≤50 条／场，字段类型固定，不含正文。
- *  抓页记 path；搜索 path 为空并另记截断 120 字的 query（只有 search 允许 query）。 */
+ *  抓页记 path；搜索 path 为空并另记截断 120 字的 query（只有 search 允许 query），
+ *  成功时另记结果条数 count（1–10，只有 search 允许）。 */
 function validNetworkEntry(v:unknown):boolean{
  if(!obj(v))return false
- if(Object.keys(v).some(k=>!['at','action','host','path','query','bytes','truncated','outcome'].includes(k)))return false
+ if(Object.keys(v).some(k=>!['at','action','host','path','query','count','bytes','truncated','outcome'].includes(k)))return false
  if(v.action!=='fetch'&&v.action!=='search')return false
  if(typeof v.at!=='string'||!Number.isFinite(Date.parse(v.at)))return false
  if(typeof v.host!=='string'||!v.host||v.host.length>255)return false
@@ -56,6 +57,7 @@ function validNetworkEntry(v:unknown):boolean{
   if(v.action!=='search')return false
   if(typeof v.query!=='string'||!v.query||v.query.length>120)return false
  }
+ if(v.count!==undefined&&(v.action!=='search'||!Number.isSafeInteger(v.count)||Number(v.count)<1||Number(v.count)>10))return false
  if(v.bytes!==undefined&&(!Number.isSafeInteger(v.bytes)||Number(v.bytes)<0))return false
  if(v.truncated!==undefined&&typeof v.truncated!=='boolean')return false
  return true

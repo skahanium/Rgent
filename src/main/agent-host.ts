@@ -127,6 +127,20 @@ function networkTarget(raw: unknown): { host: string; path: string } | null {
   } catch { return null }
 }
 
+/** 拒绝事件用：只取主机与去查询串的路径，不在这一步判协议——拒绝码自己说明原因。 */
+function networkEventTarget(raw: unknown): { host: string; path: string } | null {
+  try {
+    const url = new URL(String(raw))
+    if (!url.host || url.host.length > 255) return null
+    return { host: url.host, path: url.pathname.slice(0, 120) }
+  } catch { return null }
+}
+
+/** 只有这些码算「网络尝试被拒」；参数错与别的工具错误都不冒充外发。 */
+function networkRefusalCode(code: string): boolean {
+  return code === 'NETWORK_NOT_AUTHORIZED' || code.startsWith('EGRESS_') || code.startsWith('SEARCH_')
+}
+
 export type HostDependencies = {
   ledger: {
     prepare(relPath:string,chapter:LedgerChapterWrite,expectedVersion:number|undefined,binding:(ObjectBinding & {root:string;expectedRevision:string;grant?:TaskGrant})|undefined):Promise<{revision:number}>
@@ -544,7 +558,7 @@ export class AgentHost {
         this.networkAborts.set(id, networkAborts)
       }
       type NetworkRecordTarget = { action: 'fetch' | 'search'; host: string; path: string; query?: string }
-      const recordNetwork = (at: string, target: NetworkRecordTarget | null, outcome: string, extra: { bytes?: number; truncated?: boolean } = {}): void => {
+      const recordNetwork = (at: string, target: NetworkRecordTarget | null, outcome: string, extra: { bytes?: number; truncated?: boolean; count?: number } = {}): void => {
         if (!target?.host) return
         if (networkLog.length >= NETWORK_LEDGER_LIMIT) return
         networkLog.push({ at, action: target.action, host: target.host, path: target.path, ...(target.query ? { query: target.query } : {}), ...extra, outcome })
@@ -552,6 +566,31 @@ export class AgentHost {
       const fetchTarget = (target: { host: string; path: string } | null): NetworkRecordTarget | null => target ? { action: 'fetch', ...target } : null
       // 搜索查询进账本前截到 120 字，且只进这一场的账本章节。
       const searchTarget = (query: string, host = searchHost): NetworkRecordTarget => ({ action: 'search', host, path: '', ...(query ? { query: query.slice(0, 120) } : {}) })
+      type NetworkAttemptTarget = { kind: 'fetch' | 'search'; host: string; path: string }
+      /** 拒绝事件只报「试过哪里」：抓页取尝试 URL 的主机与 pathname，搜索取已配置主机。
+       *  `ledgerAligned` 时用与账本相同的 https 目标解析（NETWORK_NOT_AUTHORIZED），
+       *  保证事件与账本对同一次尝试给出同一个主机。 */
+      const networkAttemptTarget = (call: { name: string; input: unknown }, ledgerAligned = false): NetworkAttemptTarget => {
+        if (call.name !== 'fetch_url') return { kind: 'search', host: searchHost, path: '' }
+        const request = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
+        const target = ledgerAligned ? networkTarget(request.url) : networkEventTarget(request.url)
+        return { kind: 'fetch', host: target?.host ?? '', path: target?.path ?? '' }
+      }
+      /** 每次被拒的外发都交给状态行一条事件；不带查询串与正文。 */
+      const emitNetworkRefused = (at: string, target: NetworkAttemptTarget, code: string): void => {
+        this.deps.emit({
+          ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running',
+          network: {
+            taskId: id,
+            kind: target.kind,
+            host: target.host,
+            path: target.path,
+            outcome: 'refused',
+            code,
+            at
+          }
+        })
+      }
       const networkGrant = networkEnabled ? grant : undefined
       const searchTool = searchHost ? this.deps.network?.search : undefined
       const networkTool: ScopedNetworkTool | undefined = networkGrant && this.deps.network ? {
@@ -586,7 +625,7 @@ export class AgentHost {
             this.deps.emit({
               ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running',
               // 成功抓页带预览 id，界面才能在任务结束后按合同失效前取一次纯文本。
-              network: { taskId: id, ...(previewId ? { id: previewId } : {}), kind: 'fetch', host: result.host, path: finalTarget?.path ?? '', bytes: result.bytes, truncated: result.truncated, at }
+              network: { taskId: id, ...(previewId ? { id: previewId } : {}), kind: 'fetch', host: result.host, path: finalTarget?.path ?? '', bytes: result.bytes, truncated: result.truncated, outcome: 'ok', at }
             })
             return result
           } catch (error) {
@@ -616,10 +655,10 @@ export class AgentHost {
               const finalHost = result.host || searchHost
               const truncated = result.truncated === true
               // 搜索不存预览：没有可读的网页正文，P5 之前也不做结果浮层。
-              recordNetwork(at, searchTarget(query, finalHost), 'ok', truncated ? { truncated } : {})
+              recordNetwork(at, searchTarget(query, finalHost), 'ok', { ...(truncated ? { truncated } : {}), count: result.results.length })
               this.deps.emit({
                 ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running',
-                network: { taskId: id, kind: 'search', host: finalHost, path: '', provider: result.provider, ...(truncated ? { truncated } : {}), at }
+                network: { taskId: id, kind: 'search', host: finalHost, path: '', provider: result.provider, count: result.results.length, ...(truncated ? { truncated } : {}), outcome: 'ok', at }
               })
               return result
             } catch (error) {
@@ -886,11 +925,13 @@ export class AgentHost {
                 failure = 'EGRESS_CONTENT_ECHO'
                 reportedByTool = true
                 networkToolOutcomes.push({ name: call.name, outcome: 'refused:EGRESS_CONTENT_ECHO' })
-                recordNetwork(new Date().toISOString(),
+                const at = new Date().toISOString()
+                recordNetwork(at,
                   call.name === 'search_web'
                     ? searchTarget(typeof requested.query === 'string' ? requested.query : '')
                     : fetchTarget(networkTarget(requested.url)),
                   'refused:EGRESS_CONTENT_ECHO')
+                emitNetworkRefused(at, networkAttemptTarget(call), 'EGRESS_CONTENT_ECHO')
               }
             }
             if (!failure) {
@@ -918,6 +959,10 @@ export class AgentHost {
                   'SEARCH_NOT_CONFIGURED','SEARCH_UNAUTHORIZED','SEARCH_REFUSED','SEARCH_MALFORMED','SEARCH_EMPTY'].includes(reason)) throw error
                 failure = reason
                 reportedByTool = call.name!=='search_memory'
+                // 工具执行阶段的每次联网尝试恰好一条拒绝事件；参数错不是外发尝试，不发。
+                if ((call.name === 'fetch_url' || call.name === 'search_web') && networkRefusalCode(reason)) {
+                  emitNetworkRefused(new Date().toISOString(), networkAttemptTarget(call, reason === 'NETWORK_NOT_AUTHORIZED'), reason)
+                }
               }
             }
             if (failure && !reportedByTool) {

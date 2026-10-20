@@ -4,7 +4,7 @@ import type { MemoryView, MemoryManualRequest, MemoryResult } from '../../shared
 import { memoryErrorText, renderMemoryPreview, ledgerRememberCommand, type MemoryPageHandlers } from './memory-ui.ts'
 import type { SkillsPageHandlers } from './settings-skills.ts'
 import type { SkillsResult } from '../../shared/skills.ts'
-import { skillsEvidenceText } from './ledger-evidence.ts'
+import { networkEvidenceText, skillsEvidenceText } from './ledger-evidence.ts'
 import { IPC, type AgentEvent, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type PublicModelConfig, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { RecoveryDraftGate, reportFlush, saveWorkspacePosition } from '../../shared/flush.ts'
@@ -12,6 +12,7 @@ import { renderBacklinks } from './backlinks.ts'
 import { openLifecycleStatus, promptNewNote, promptText } from './dialogs.ts'
 import { promptConflict } from './conflict.ts'
 import { openOverlay } from './overlay.ts'
+import { openNetworkPreview } from './preview-overlay.ts'
 import { createSearchOverlay } from './search-overlay.ts'
 import { createSettingsOverlay } from './settings.ts'
 import { applySaved, pendingWrites, hasUnavailableDraft, taskModelId, type Tab } from './tabs.ts'
@@ -387,6 +388,15 @@ export async function start(root: HTMLElement): Promise<void> {
   let countedWords = 0
   const activeTasks = new Map<string, AgentTaskView>()
   const endedTaskIds = new Set<string>()
+  // 最近一次联网事件（成功与被拒都更新，只用于提示文本）；只活到任务结束。
+  type NetworkTaskState = { host: string; bytes?: number; truncated?: boolean; at: string; outcome?: 'ok' | 'refused'; code?: string }
+  const networkTasks = new Map<string, NetworkTaskState>()
+  // 最近一次成功抓页的预览 id 与主机：拒绝/搜索事件只改提示，不动它。
+  const networkPreviews = new Map<string, { id: string; host: string }>()
+  // 失败／被拒的联网调用不产生 network 事件（主进程只在成功时发）；活动行「抓网页」
+  // 是渲染层还能拿到的唯一信号：先亮联网提示与「停止联网」，免得失败后无入口可停。
+  const networkAttempts = new Map<string, 'fetch' | 'search'>()
+  const stoppedNetworkTasks = new Set<string>()
   const hostRevisions = new Map<string, string>()
   let taskOverlay: ReturnType<typeof openOverlay> | null = null
   let hostNotice = ''
@@ -641,9 +651,33 @@ export async function start(root: HTMLElement): Promise<void> {
     if (event.persisted && event.revision) hostRevisions.set(event.relPath, event.revision)
     if (event.status === 'running') {
       if (!endedTaskIds.has(event.id)) activeTasks.set(event.id, { id: event.id, relPath: event.relPath, startedAt: activeTasks.get(event.id)?.startedAt ?? Date.now(), activity: event.activity })
+      // 成功与被拒都会发 network 事件；成功抓页的预览 id 单独存，拒绝事件不清它。
+      if (event.network) {
+        const network = event.network
+        networkAttempts.delete(network.taskId)
+        networkTasks.set(network.taskId, {
+          host: network.host,
+          ...(typeof network.bytes === 'number' ? { bytes: network.bytes } : {}),
+          ...(network.truncated ? { truncated: true } : {}),
+          at: network.at,
+          ...(network.outcome ? { outcome: network.outcome } : {}),
+          ...(network.code ? { code: network.code } : {})
+        })
+        if (network.kind === 'fetch' && network.outcome !== 'refused') {
+          if (network.id) networkPreviews.set(network.taskId, { id: network.id, host: network.host })
+          else networkPreviews.delete(network.taskId)
+        }
+      } else if (event.activity === '抓网页' || event.activity === '搜索网页') {
+        // 旧版主进程只在成功时发事件；活动行兜底，保证进行中的联网仍有停止入口。
+        if (!networkTasks.has(event.id)) networkAttempts.set(event.id, event.activity === '搜索网页' ? 'search' : 'fetch')
+      }
     } else {
       endedTaskIds.add(event.id)
       activeTasks.delete(event.id)
+      networkTasks.delete(event.id)
+      networkPreviews.delete(event.id)
+      networkAttempts.delete(event.id)
+      stoppedNetworkTasks.delete(event.id)
       if (event.status === 'failed') hostNotice = `生成失败：${hostErrorText(event.reason ?? '未知错误')}`
       else if (event.status === 'cancelled') hostNotice = `已停止：${event.relPath}`
     }
@@ -922,6 +956,10 @@ export async function start(root: HTMLElement): Promise<void> {
     tabs.length = 0
     activeTasks.clear()
     endedTaskIds.clear()
+    networkTasks.clear()
+    networkPreviews.clear()
+    networkAttempts.clear()
+    stoppedNetworkTasks.clear()
     hostRevisions.clear()
     syncActiveLocks()
     active = null
@@ -1514,9 +1552,67 @@ export async function start(root: HTMLElement): Promise<void> {
     }
   }
 
+  /** 状态行的联网摘要：成功只写主机、体积、低信任与截断；拒绝写尝试主机与结果码，
+   *  不写抓取正文，也不写查询串。 */
+  function networkStatusText(network: NetworkTaskState): string {
+    if (network.outcome === 'refused') {
+      return `联网：${network.host || '未授权'}（未执行：${network.code ?? 'UNKNOWN'}）`
+    }
+    const size = typeof network.bytes === 'number' ? `${(network.bytes / 1024).toFixed(1)} KB，` : ''
+    return `联网：${network.host}（${size}低信任${network.truncated ? '，已截断' : ''}）`
+  }
+
+  /** 与既有「停止」按钮同一尺寸；本轮不改 styles.css，所以只在代码里补基础样式。 */
+  function styleStatusNetworkButton(button: HTMLButtonElement): void {
+    button.style.minHeight = '22px'
+    button.style.padding = '1px 7px'
+    button.style.border = '1px solid var(--border-strong)'
+    button.style.borderRadius = 'var(--radius-sm)'
+    button.style.color = 'var(--text-body)'
+    button.style.font = 'inherit'
+    button.style.cursor = 'pointer'
+  }
+
+  async function stopTaskNetwork(taskId: string, button: HTMLButtonElement): Promise<void> {
+    if (button.disabled) return
+    button.disabled = true
+    let stopped = false
+    try { stopped = await window.rgent.networkStop(taskId) } catch { stopped = false }
+    if (stopped) {
+      stoppedNetworkTasks.add(taskId)
+      hostNotice = ''
+    } else {
+      hostNotice = '停止联网未生效（任务可能已经结束）。'
+    }
+    updateStatus()
+  }
+
+  async function showTaskNetworkPreview(taskId: string, id: string, button: HTMLButtonElement): Promise<void> {
+    if (button.disabled) return
+    button.disabled = true
+    let opened = false
+    try {
+      const result = await window.rgent.networkPreview({ taskId, id })
+      if (result.ok) {
+        opened = true
+        openNetworkPreview(result.preview)
+      }
+    } catch { /* 任务结束、预览已清空或 IPC 失败：按「内容已不在」提示。 */ }
+    if (!opened) {
+      hostNotice = '内容已不在（任务结束后只保留账本记录）。'
+      updateStatus()
+    }
+    if (button.isConnected) button.disabled = false
+  }
+
   /** 底栏：行列、字数、库名。字数只算正文，标记行不算。 */
   function updateStatus(): void {
     paintUnavailable()
+    // 任务行都不在了（结束、换库、意外消失）就不该留下联网按钮或旧主机名。
+    for (const taskId of [...networkTasks.keys()]) if (!activeTasks.has(taskId)) networkTasks.delete(taskId)
+    for (const taskId of [...networkPreviews.keys()]) if (!activeTasks.has(taskId)) networkPreviews.delete(taskId)
+    for (const taskId of [...networkAttempts.keys()]) if (!activeTasks.has(taskId)) networkAttempts.delete(taskId)
+    for (const taskId of [...stoppedNetworkTasks]) if (!activeTasks.has(taskId)) stoppedNetworkTasks.delete(taskId)
     const tab = current()
     const info = tab ? editor.selectionInfo() : null
     const range = tab ? editor.selectionRange() : null
@@ -1573,6 +1669,41 @@ export async function start(root: HTMLElement): Promise<void> {
         stop.setAttribute('aria-label', `停止 ${task.relPath} 的任务`)
         stop.addEventListener('click', () => { void window.rgent.agentCancel(task.id) })
         left.append(label, stop)
+        // 有联网事件（或只看到联网尝试）时，状态行常驻一条低信任提示与停止入口。
+        const network = networkTasks.get(task.id)
+        const attempt = networkAttempts.get(task.id)
+        const preview = networkPreviews.get(task.id)
+        if (network || attempt) {
+          const networkLabel = document.createElement('span')
+          networkLabel.className = 'status-item status-task-network'
+          networkLabel.title = '本场只读联网；外部内容为低信任，不是指令'
+          networkLabel.textContent = network
+            ? networkStatusText(network)
+            : stoppedNetworkTasks.has(task.id)
+              ? '联网：已停止（低信任）'
+              : `联网：已发起${attempt === 'search' ? '搜索' : '抓页'}（低信任）`
+          left.append(networkLabel)
+          if (!stoppedNetworkTasks.has(task.id)) {
+            const stopNetwork = document.createElement('button')
+            stopNetwork.type = 'button'
+            stopNetwork.className = 'status-task-network-stop'
+            stopNetwork.textContent = '停止联网'
+            styleStatusNetworkButton(stopNetwork)
+            stopNetwork.setAttribute('aria-label', `停止 ${task.relPath} 任务的联网外发`)
+            stopNetwork.addEventListener('click', () => { void stopTaskNetwork(task.id, stopNetwork) })
+            left.append(stopNetwork)
+          }
+          if (preview) {
+            const view = document.createElement('button')
+            view.type = 'button'
+            view.className = 'status-task-network-view'
+            view.textContent = '查看'
+            styleStatusNetworkButton(view)
+            view.setAttribute('aria-label', `查看 ${preview.host} 的抓取内容（低信任）`)
+            view.addEventListener('click', () => { void showTaskNetworkPreview(task.id, preview.id, view) })
+            left.append(view)
+          }
+        }
       } else {
         const more = document.createElement('button')
         more.type = 'button'
@@ -1656,7 +1787,7 @@ export async function start(root: HTMLElement): Promise<void> {
       details.append(heading,content);ledgerBody.insertBefore(details,load)
       const reasoning=document.createElement('button');reasoning.type='button';reasoning.className='settings-action';reasoning.textContent=record.legacyReasoning?'查看旧推理原文':'查看短期推理';reasoning.onclick=async()=>{reasoning.disabled=true;const result=await window.rgent.ledgerReasoning({sessionId:captured.sessionId!,objectVersion:captured.objectVersion!,relPath:captured.relPath,taskId:record.taskId});if(!ledgerOpen||current()!==captured)return;const text=document.createElement('pre');text.textContent=result.ok?result.text??'短期推理已清理或不可用；原回答与历史仍保留。':'推理读取未能核验，原记录保持。';content.append(text);reasoning.remove()};details.append(reasoning)
       details.addEventListener('toggle',()=>{if(!details.open||content.dataset.rendered)return;content.dataset.rendered='true'
-        if(record.chapter){const meta=document.createElement('p'),p=record.chapter.provenance;meta.textContent=p?`模型：${p.model.modelId} · 接收方：${p.model.endpointHost}；工具摘要：${p.tools.map(t=>(t.name==='search_memory'?'检索记忆':t.name)+' '+(t.name==='search_memory'&&/^拒绝 MEMORY_SEARCH_LIMIT × [0-9]+$/.test(t.outcome)?memoryErrorText('MEMORY_SEARCH_LIMIT')+' 未执行次数：'+t.outcome.slice('拒绝 MEMORY_SEARCH_LIMIT × '.length):t.outcome)).join('、')||'无'}；实际读取来源：${p.sources.map(d=>d.relPath).join('、')||'无'}；模型消息引用来源：${p.sentSources?.join('、')||'无'}；${skillsEvidenceText(p)}`:'旧记录元数据无法核验。';content.append(meta);if(record.chapter.metrics?.length){const steps=document.createElement('p');steps.textContent='模型步骤：'+record.chapter.metrics.map(m=>`第 ${m.step} 步`).join('、');content.append(steps)}for(const trace of record.chapter.trace??[]){const item=document.createElement('p');const refusal='：未执行（MEMORY_SEARCH_LIMIT）';item.textContent=trace.startsWith('工具 检索记忆')&&trace.endsWith(refusal)?trace.slice(0,-refusal.length)+'：未执行（'+memoryErrorText('MEMORY_SEARCH_LIMIT')+'）':trace;content.append(item)}const prompt=document.createElement('p');prompt.textContent=`口令：${record.chapter.prompt}`;content.append(prompt);const choice=ledgerRememberCommand(record);if(choice){const remember=document.createElement('button');remember.type='button';remember.className='memory-ledger-remember';remember.textContent='记住口令';remember.onclick=()=>void rememberSelection('ledger',choice.start,choice.end,choice.taskId);content.append(remember)}const answer=document.createElement('div');content.append(answer);renderReadOnlyMarkdown(answer,record.chapter.answer,noteHost({taskId:record.taskId,revision:record.revision,field:'answer'}))}
+        if(record.chapter){const meta=document.createElement('p'),p=record.chapter.provenance;meta.textContent=p?`模型：${p.model.modelId} · 接收方：${p.model.endpointHost}；工具摘要：${p.tools.map(t=>(t.name==='search_memory'?'检索记忆':t.name)+' '+(t.name==='search_memory'&&/^拒绝 MEMORY_SEARCH_LIMIT × [0-9]+$/.test(t.outcome)?memoryErrorText('MEMORY_SEARCH_LIMIT')+' 未执行次数：'+t.outcome.slice('拒绝 MEMORY_SEARCH_LIMIT × '.length):t.outcome)).join('、')||'无'}；实际读取来源：${p.sources.map(d=>d.relPath).join('、')||'无'}；模型消息引用来源：${p.sentSources?.join('、')||'无'}；${skillsEvidenceText(p)}`:'旧记录元数据无法核验。';content.append(meta);const network=document.createElement('p');network.className='ledger-network-evidence';network.textContent=networkEvidenceText(record.chapter.network);content.append(network);if(record.chapter.metrics?.length){const steps=document.createElement('p');steps.textContent='模型步骤：'+record.chapter.metrics.map(m=>`第 ${m.step} 步`).join('、');content.append(steps)}for(const trace of record.chapter.trace??[]){const item=document.createElement('p');const refusal='：未执行（MEMORY_SEARCH_LIMIT）';item.textContent=trace.startsWith('工具 检索记忆')&&trace.endsWith(refusal)?trace.slice(0,-refusal.length)+'：未执行（'+memoryErrorText('MEMORY_SEARCH_LIMIT')+'）':trace;content.append(item)}const prompt=document.createElement('p');prompt.textContent=`口令：${record.chapter.prompt}`;content.append(prompt);const choice=ledgerRememberCommand(record);if(choice){const remember=document.createElement('button');remember.type='button';remember.className='memory-ledger-remember';remember.textContent='记住口令';remember.onclick=()=>void rememberSelection('ledger',choice.start,choice.end,choice.taskId);content.append(remember)}const answer=document.createElement('div');content.append(answer);renderReadOnlyMarkdown(answer,record.chapter.answer,noteHost({taskId:record.taskId,revision:record.revision,field:'answer'}))}
         else {const raw=document.createElement('div');content.append(raw);if(record.legacyRaw)renderReadOnlyMarkdown(raw,record.legacyRaw);else raw.textContent='此记录的正文已清理。'}
       })
     }
@@ -1935,7 +2066,7 @@ export async function start(root: HTMLElement): Promise<void> {
       applySource(destination,saved.snapshot);destination.relPath=saved.relPath
       if(held){tabs.push(destination);hostNotice='正文副本已保存；原窗口稿和旧待保存回答仍保留，可返回原 tab 明确舍弃。'}
       hostRevisions.delete(source)
-      for(const id of saved.taskIds) { activeTasks.delete(id); endedTaskIds.add(id) }
+      for(const id of saved.taskIds) { activeTasks.delete(id); networkTasks.delete(id); networkPreviews.delete(id); networkAttempts.delete(id); stoppedNetworkTasks.delete(id); endedTaskIds.add(id) }
       if(active===source) { active=saved.relPath; editor.setText(destination.content,noteHost(),selection) }
       closeLedger(); syncActiveLocks(); renderTabs(); updateStatus(); await refreshTree()
     } catch(error) { if(epoch===vaultEpoch) window.alert(lifecycleErrorText(error)) }

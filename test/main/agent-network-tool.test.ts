@@ -8,6 +8,7 @@ import { closeSecureFs, secureFsFor } from '../../src/main/secure-fs.ts'
 import { hostLedgerFixture } from './host-ledger-fixture.ts'
 import { buildShingles } from '../../src/main/content-echo.ts'
 import { createScopedAgentTools } from '../../src/main/scoped-agent-tools.ts'
+import { fetchText } from '../../src/main/text-fetch.ts'
 import type { TaskGrant } from '../../src/main/task-authorization.ts'
 import { AgentHost, type HostDependencies } from '../../src/main/agent-host.ts'
 import { partitionSource } from '../../src/markdown/partition.ts'
@@ -165,6 +166,40 @@ describe('fetch_url 联网只读工具', () => {
     expect(record.trace?.join('\n')).toContain('工具 抓网页「example.com」：已执行（42 B，低信任）')
     expect(JSON.stringify(app.events)).toContain('"activity":"抓网页"')
     expect((app.events as { network?: { host?: string; path?: string } }[]).some(event => event.network?.host === 'example.com' && event.network.path === '/page')).toBe(true)
+    const fetchEvents = (app.events as { network?: { kind?: string; outcome?: string } }[]).filter(event => event.network?.kind === 'fetch')
+    expect(fetchEvents).toHaveLength(1)
+    expect(fetchEvents[0]!.network!.outcome).toBe('ok')
+  })
+
+  it('工具层参数没过校验时不发网络事件、也不写账本', async () => {
+    const invalid = { id: 'c-invalid', name: 'fetch_url', input: { url: 'https://127.0.0.1/x' }, invalid: true } as Call
+    const app = networkHarness({ steps: [[invalid], []] })
+    const task = await app.run()
+    expect(await task.done).toEqual({ status: 'completed' })
+    expect(app.fetched).toEqual([])
+    expect((app.events as { network?: unknown }[]).filter(event => event.network)).toEqual([])
+    const record = app.history.records().at(-1)!
+    expect(record.network).toBeUndefined()
+    expect(record.trace?.join('\n')).toContain('INVALID_TOOL_ARGUMENTS')
+  })
+
+  it('抓页被拒也发一条 refused 事件：主机来自尝试目标，拒绝码单独给', async () => {
+    const app = networkHarness({
+      steps: [fetchCall('https://127.0.0.1/x'), []],
+      // 走真实出口核心：回环地址在解析后被拒，不会发任何 socket。
+      fetch: async (url, signal) => {
+        await fetchText(url, { signal })
+        throw Error('UNREACHABLE')
+      }
+    })
+    const task = await app.run()
+    expect(await task.done).toEqual({ status: 'completed' })
+    const networkEvents = (app.events as { network?: { kind?: string; host?: string; path?: string; outcome?: string; code?: string } }[]).filter(event => event.network)
+    expect(networkEvents).toHaveLength(1)
+    expect(networkEvents[0]!.network).toMatchObject({ kind: 'fetch', host: '127.0.0.1', path: '/x', outcome: 'refused', code: 'EGRESS_INVALID_URL' })
+    expect(JSON.stringify(networkEvents[0])).not.toContain('SECRET_QUERY')
+    const record = app.history.records().at(-1)!
+    expect(record.network).toEqual([expect.objectContaining({ action: 'fetch', host: '127.0.0.1', path: '/x', outcome: 'refused:EGRESS_INVALID_URL' })])
   })
 
   it('命中授权正文词片时拒绝外发，记 refused:EGRESS_CONTENT_ECHO 且不调用 fetch', async () => {
@@ -213,6 +248,12 @@ describe('fetch_url 联网只读工具', () => {
     expect(trace).toContain('EGRESS_ABORTED')
     expect(trace).toContain('NETWORK_NOT_AUTHORIZED')
     expect(record.network?.map(item => item.outcome)).toEqual(['refused:EGRESS_ABORTED', 'refused:NETWORK_NOT_AUTHORIZED'])
+    const refusedEvents = (app.events as { network?: { code?: string; host?: string; path?: string; outcome?: string } }[]).filter(event => event.network?.outcome === 'refused')
+    expect(refusedEvents.map(event => event.network!.code)).toEqual(['EGRESS_ABORTED', 'NETWORK_NOT_AUTHORIZED'])
+    expect(refusedEvents[0]!.network).toMatchObject({ host: record.network![0]!.host, path: record.network![0]!.path })
+    // NETWORK_NOT_AUTHORIZED 的事件主机与账本同源，不再人为置空。
+    expect(refusedEvents[1]!.network).toMatchObject({ host: record.network![1]!.host, path: record.network![1]!.path })
+    expect(record.network![1]).toMatchObject({ host: 'example.com', path: '/after' })
     expect(app.content()).toContain('已答。')
   })
 
@@ -299,6 +340,13 @@ describe('账本 network[] 形状', () => {
       expect(() => store.prepare('a.md', { ...base, taskId: 'task-extra', network: [{ ...searchEntry, extra: 'secret' }] as never })).toThrow('LEDGER_RECORD_INVALID')
       expect(() => store.prepare('a.md', { ...base, taskId: 'task-action', network: [{ ...entry, action: 'download' }] as never })).toThrow('LEDGER_RECORD_INVALID')
       expect(store.prepare('a.md', { ...base, taskId: 'task-longest', network: [{ ...searchEntry, query: 'x'.repeat(120) }] })).toBeTruthy()
+      // 搜索成功的结果条数：只有 search 可有，且必须是 1–10 的整数。
+      expect(store.prepare('a.md', { ...base, taskId: 'task-count', network: [{ ...searchEntry, count: 2 }] })).toBeTruthy()
+      expect(store.getRecord('a.md', 'task-count').chapter?.network).toEqual([{ ...searchEntry, count: 2 }])
+      expect(() => store.prepare('a.md', { ...base, taskId: 'task-count-zero', network: [{ ...searchEntry, count: 0 }] })).toThrow('LEDGER_RECORD_INVALID')
+      expect(() => store.prepare('a.md', { ...base, taskId: 'task-count-high', network: [{ ...searchEntry, count: 11 }] })).toThrow('LEDGER_RECORD_INVALID')
+      expect(() => store.prepare('a.md', { ...base, taskId: 'task-count-fraction', network: [{ ...searchEntry, count: 1.5 }] })).toThrow('LEDGER_RECORD_INVALID')
+      expect(() => store.prepare('a.md', { ...base, taskId: 'task-count-fetch', network: [{ ...entry, count: 1 }] as never })).toThrow('LEDGER_RECORD_INVALID')
       expect(() => store.prepare('a.md', { ...base, taskId: 'task-limit', network: Array.from({ length: 51 }, () => entry) })).toThrow('LEDGER_RECORD_INVALID')
     } finally { closeSecureFs(root); rmSync(root, { recursive: true, force: true }) }
   })
@@ -344,13 +392,16 @@ describe('search_web 联网只读搜索', () => {
     expect(wrapped).toContain('（服务返回的结果多于本次取用条数，已截取）')
     const record = app.history.records().at(-1)!
     expect(record.network).toEqual([expect.objectContaining({
-      action: 'search', host: 'api.tavily.com', path: '', query: '小猫', truncated: true, outcome: 'ok'
+      action: 'search', host: 'api.tavily.com', path: '', query: '小猫', truncated: true, outcome: 'ok', count: 1
     })])
     expect(record.provenance?.tools?.find(item => item.name === 'search_web')?.outcome).toContain('ok:api.tavily.com·1条·低信任')
     expect(record.trace?.join('\n')).toContain('工具 搜索「小猫」：已执行（低信任·tavily）')
-    const events = app.events as { network?: { kind?: string; host?: string; path?: string; provider?: string; id?: string } }[]
+    const events = app.events as { network?: { kind?: string; host?: string; path?: string; provider?: string; id?: string; count?: number; outcome?: string } }[]
     expect(events.some(event => event.network?.kind === 'search' && event.network.host === 'api.tavily.com' &&
       event.network.path === '' && event.network.provider === 'tavily')).toBe(true)
+    const searchEvents = events.filter(event => event.network?.kind === 'search')
+    expect(searchEvents).toHaveLength(1)
+    expect(searchEvents[0]!.network).toMatchObject({ outcome: 'ok', count: 1 })
     expect(events.find(event => event.network?.kind === 'search')!.network!.id).toBeUndefined()
     expect(previewIdsDuring).toEqual([])
     expect(JSON.stringify(record)).not.toContain('小猫 研究')
@@ -400,6 +451,10 @@ describe('search_web 联网只读搜索', () => {
     // 与抓页一致：工具层摘要只记 refused，具体错误码在过程行与账本 outcome 里。
     expect(record.provenance?.tools?.find(item => item.name === 'search_web')?.outcome).toBe('refused (1)')
     expect(record.network).toEqual([expect.objectContaining({ action: 'search', host: 'api.tavily.com', query: '小猫 研究', outcome: 'refused:SEARCH_EMPTY' })])
+    const refused = (app.events as { network?: { kind?: string; host?: string; path?: string; outcome?: string; code?: string } }[]).find(event => event.network?.outcome === 'refused')
+    expect(refused?.network).toMatchObject({ kind: 'search', host: 'api.tavily.com', path: '', code: 'SEARCH_EMPTY' })
+    // 事件不带查询串，查询只留在账本里。
+    expect(JSON.stringify(refused)).not.toContain('小猫 研究')
   })
 
   it('停止联网会 abort 在途搜索并拒绝后续调用，但整场继续', async () => {

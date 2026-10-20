@@ -36,6 +36,8 @@ export type LedgerNetworkEntry = {
   path: string
   /** 只对 search 出现：查询截断到 120 字。 */
   query?: string
+  /** 仅搜索成功：结果条数（1–10）。 */
+  count?: number
   bytes?: number
   truncated?: boolean
   outcome: string

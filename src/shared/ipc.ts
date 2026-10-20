@@ -200,6 +200,12 @@ export type AgentNetworkEvent = {
   provider?: NetworkProvider
   bytes?: number
   truncated?: boolean
+  /** 仅搜索成功：本次结果条数（1–10）。 */
+  count?: number
+  /** 本次尝试的结局；旧事件没有该字段时按成功处理。 */
+  outcome?: 'ok' | 'refused'
+  /** 拒绝码（如 `EGRESS_INVALID_URL`／`NETWORK_NOT_AUTHORIZED`）；成功时没有。 */
+  code?: string
   at: string
 }
 export type AgentEvent = {
