@@ -26,6 +26,18 @@ export type SentSummary = {
   dependencies: {sourceId:string;hash:string;provenance?:LedgerProvenance}[]
 }
 
+/** 一次联网只读抓取的审计条目：只进账本记录，不进笔记正文，也不含查询串与正文。 */
+export type LedgerNetworkEntry = {
+  at: string
+  action: 'fetch'
+  host: string
+  /** pathname（去查询串），最长 120 字。 */
+  path: string
+  bytes?: number
+  truncated?: boolean
+  outcome: string
+}
+
 export interface LedgerChapterWrite {
   material?:import('./host-material.ts').SentTaskMaterial
   metrics?:{step:number;estimatedInput:number;actualInput:number|null;actualOutput:number|null}[]
@@ -39,6 +51,8 @@ export interface LedgerChapterWrite {
   answer: string
   reason?: string
   provenance?: LedgerProvenance
+  /** 本场外发记录：主机、去查询串的路径、字节数、是否截断、结果。 */
+  network?: readonly LedgerNetworkEntry[]
   /** 模型自述思考。只进账本的「推理」，不进正文；超长时截断。 */
   reasoning?: string
   /** 按发生顺序的一句话过程：模型步、工具调用与结果、收尾。 */

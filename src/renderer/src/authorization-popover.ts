@@ -6,8 +6,9 @@ export type AuthorizationPopoverOptions = {
   anchor:{left:number;top:number;bottom:number}
   origin:string
   entries:TreeEntry[]
-  preview:(references:string[])=>Promise<AgentAuthorizationResult>
-  send:(preview:AgentAuthorizationPreview)=>Promise<AgentStartResult>
+  /** `network` 是本场联网勾选：预览与 start 都带它，主进程核对一致才放行。 */
+  preview:(references:string[],network:boolean)=>Promise<AgentAuthorizationResult>
+  send:(preview:AgentAuthorizationPreview,network:boolean)=>Promise<AgentStartResult>
   discard?:(id:string)=>Promise<void>
   onClose?:()=>void
   returnFocus?:()=>HTMLElement|null
@@ -24,6 +25,8 @@ function sessionToolLabels(origin:string, sources:readonly {relPath:string;tier:
 /** Command-local confirmation; scope changes never reuse the previous displayed grant. */
 export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Overlay {
   const selected=new Set<string>();let prepared:AgentAuthorizationPreview|null=null;let generation=0;let submitting=false
+  // 联网勾选默认不勾；只有主进程说可用时才出现，切换会重新核对预览（防重放）。
+  let networkSelected=false
   const panel=openOverlay({label:'确认本场参考范围与模型接收方',initialFocus:()=>document.activeElement instanceof HTMLElement && panel.root.contains(document.activeElement)?document.activeElement:panel.root,returnFocus:options.returnFocus,onClose:()=>{generation++;if(prepared)void options.discard?.(prepared.id);prepared=null;options.onClose?.()}})
   panel.root.classList.add('overlay-authorization')
   panel.root.tabIndex=-1
@@ -33,6 +36,7 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
   const memoryDisclosure=document.createElement('p');memoryDisclosure.className='authorization-memory settings-hint';memoryDisclosure.setAttribute('aria-live','polite');panel.root.querySelector('.authorization-disclosure')!.after(memoryDisclosure)
   // 技能只报名称：正文不进这张卡（合同取舍）；不可用的另起一句，让人当场决定要不要重来。
   const skillsDisclosure=document.createElement('p');skillsDisclosure.className='authorization-skills settings-hint';skillsDisclosure.setAttribute('aria-live','polite');memoryDisclosure.after(skillsDisclosure)
+  const networkDisclosure=document.createElement('div');networkDisclosure.className='authorization-network';networkDisclosure.setAttribute('aria-live','polite');skillsDisclosure.after(networkDisclosure)
   const manifest=panel.root.querySelector('.authorization-manifest')!
   const status=panel.root.querySelector('.authorization-status')!
   const send=panel.root.querySelector<HTMLButtonElement>('.authorization-send')!
@@ -59,7 +63,7 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
     if(prepared)void options.discard?.(prepared.id)
     const current=++generation;prepared=null;manifest.replaceChildren();send.disabled=true;status.textContent='核对对象、权限与模型…'
     try{
-      const result=await options.preview([...selected])
+      const result=await options.preview([...selected],networkSelected)
       if(current!==generation || !panel.isOpen()){if(result.ok)void options.discard?.(result.preview.id);return}
       if(!result.ok){recipient.textContent='接收方尚未核验';status.textContent=`无法准备：${hostErrorText(result.error)}`;return}
       prepared=result.preview
@@ -76,10 +80,32 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
         ? `${skillNames.length?`本场技能：${skillNames.join('、')}。`:''}${unavailable.length?`已启用但未加载：${unavailable.join('、')}（原因见设置页「技能」）。`:''}技能内容不在此处展开，账本记有名称与内容哈希。`
         : '本场无技能。'
       if(prepared.summaryGenerators?.length){const generators=document.createElement('p');generators.textContent='本篇账本可复用历史摘要（仍须在发送前核验）：'+prepared.summaryGenerators.map(g=>`${g.modelId} · ${g.host} · ${g.time}`).join('；');manifest.append(generators)}
+      // 联网只读：可用才给勾选（默认不勾）；不可用如实写原因，不提供降级绕过。
+      networkDisclosure.replaceChildren()
+      const network=prepared.network
+      if(!network?.available){
+        networkSelected=false
+        const note=document.createElement('p');note.className='settings-hint'
+        note.textContent=network?.reason==='not-configured'
+          ? '本场不能联网只读：尚未配置联网服务（设置「模型」页）。'
+          : network?.reason==='off'||!network
+            ? '本场不能联网只读：联网总开关已关闭（设置「模型」页打开）。'
+            : '本场不能联网只读。'
+        networkDisclosure.append(note)
+      }else{
+        const label=document.createElement('label')
+        const input=document.createElement('input');input.type='checkbox';input.checked=networkSelected
+        const text=document.createElement('span')
+        text.textContent=network.providerHost?`本场允许联网只读（抓网页；目标 ${network.providerHost}）`:'本场允许联网只读（抓网页）'
+        input.addEventListener('change',()=>{networkSelected=input.checked;void refresh()})
+        label.append(input,text);networkDisclosure.append(label)
+      }
       const title=document.createElement('p');title.textContent='本场固定对象：';manifest.append(title)
       const paths=document.createElement('ul');for(const source of prepared.sources){const item=document.createElement('li');item.textContent=source.relPath;paths.append(item)}manifest.append(paths)
       recipient.textContent=`模型：${prepared.recipient.modelId} · 接口主机：${prepared.recipient.host}`
-      status.textContent=`已核对 ${prepared.sources.length} 篇笔记；本场工具：${sessionToolLabels(options.origin, prepared.sources).join('、')}。其他篇账本、附件不在本场范围。`
+      const labels=sessionToolLabels(options.origin, prepared.sources)
+      if(networkSelected&&prepared.network?.available)labels.push('联网只读（抓网页）')
+      status.textContent=`已核对 ${prepared.sources.length} 篇笔记；本场工具：${labels.join('、')}。其他篇账本、附件不在本场范围。`
       send.disabled=false
       if(document.activeElement===panel.root)send.focus({preventScroll:true})
     }catch{if(current===generation && panel.isOpen())status.textContent='准备失败，请取消后重试。'}
@@ -90,9 +116,10 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
     // Disabled focused controls can send focus to body; retain the confirmation context.
     panel.root.focus({preventScroll:true})
     send.disabled=true;fieldset.disabled=true
+    networkDisclosure.querySelectorAll('input').forEach(input=>{input.disabled=true})
     const displayed=prepared
     try{
-      const result=await options.send(displayed)
+      const result=await options.send(displayed,networkSelected)
       if(!panel.isOpen())return
       if(result.ok){panel.close();return}
       status.textContent=`未发送：${hostErrorText(result.error)}`
@@ -100,7 +127,7 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
       if(prepared)status.textContent='范围与接收方已重新核对。请查看并再次确认；刚才没有启动任务。'
 
     }catch{if(panel.isOpen()){status.textContent='发送失败，口令仍保留。';send.disabled=false}}
-    finally{submitting=false;fieldset.disabled=false}
+    finally{submitting=false;fieldset.disabled=false;networkDisclosure.querySelectorAll('input').forEach(input=>{input.disabled=false})}
   }
   send.addEventListener('click',()=>void submit())
   panel.root.querySelector('.authorization-cancel')!.addEventListener('click',()=>panel.close())

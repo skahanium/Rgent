@@ -42,11 +42,25 @@ export function validSentSummary(value:unknown):value is import('./host-source.t
  try{if(value.dependencies.some(d=>!obj(d)||!exact(d,['sourceId','hash',...('provenance'in d?['provenance']:[])])||!(covered as unknown[]).includes(d.sourceId)||typeof d.hash!=='string'||!/^[a-f0-9]{64}$/.test(d.hash)||d.provenance!==undefined&&ledgerProvenance(encodeLedgerProvenance(d.provenance as LedgerProvenance)).status!=='valid'))return false}catch{return false}
  return new Set(value.dependencies.map(d=>(d as {sourceId:string}).sourceId)).size===value.dependencies.length
 }
+/** 账本 `network[]` 的一条外发记录：≤50 条／场，字段类型固定，无查询串与正文。 */
+function validNetworkEntry(v:unknown):boolean{
+ if(!obj(v))return false
+ if(Object.keys(v).some(k=>!['at','action','host','path','bytes','truncated','outcome'].includes(k)))return false
+ if(v.action!=='fetch')return false
+ if(typeof v.at!=='string'||!Number.isFinite(Date.parse(v.at)))return false
+ if(typeof v.host!=='string'||!v.host||v.host.length>255)return false
+ if(typeof v.path!=='string'||v.path.length>120)return false
+ if(typeof v.outcome!=='string'||!v.outcome||v.outcome.length>128)return false
+ if(v.bytes!==undefined&&(!Number.isSafeInteger(v.bytes)||Number(v.bytes)<0))return false
+ if(v.truncated!==undefined&&typeof v.truncated!=='boolean')return false
+ return true
+}
 function validChapter(v:unknown):v is LedgerRecord['chapter']{
  if(v===null)return true
  if(!obj(v)||!id(v.taskId)||typeof v.startedAt!=='string'||!Number.isFinite(Date.parse(v.startedAt))||!['completed','cancelled','failed','limit'].includes(String(v.status))||typeof v.prompt!=='string'||typeof v.answer!=='string')return false
- if(Object.keys(v).some(k=>!['taskId','startedAt','status','prompt','answer','reason','provenance','trace','assistant','metrics','summaryGenerators','sentSummaries','material'].includes(k)))return false
+ if(Object.keys(v).some(k=>!['taskId','startedAt','status','prompt','answer','reason','provenance','trace','assistant','metrics','summaryGenerators','sentSummaries','material','network'].includes(k)))return false
  if(v.reason!==undefined&&typeof v.reason!=='string'||v.assistant!==undefined&&typeof v.assistant!=='string'||v.trace!==undefined&&(!Array.isArray(v.trace)||v.trace.some(t=>typeof t!=='string')))return false
+ if(v.network!==undefined&&(!Array.isArray(v.network)||v.network.length>50||!v.network.every(validNetworkEntry)))return false
  if(v.material!==undefined&&!validTaskMaterial(v.material))return false
  if(v.metrics!==undefined&&(!Array.isArray(v.metrics)||v.metrics.length>1000||v.metrics.some(m=>!obj(m)||!Number.isSafeInteger(m.step)||!Number.isFinite(m.estimatedInput)||m.actualInput!==null&&!Number.isFinite(m.actualInput)||m.actualOutput!==null&&!Number.isFinite(m.actualOutput))))return false
  if(v.sentSummaries!==undefined&&(!Array.isArray(v.sentSummaries)||!v.sentSummaries.every(validSentSummary)||!summaryAuditFits(v.sentSummaries)))return false

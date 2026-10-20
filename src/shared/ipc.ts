@@ -76,6 +76,8 @@ export const IPC = {
   agentCancel: 'agent:cancel',
   agentTasks: 'agent:tasks',
   agentEvent: 'agent:event',
+  networkStop: 'network:stop',
+  networkPreview: 'network:preview',
   memoryChanged: 'memory:changed',
   memoryGet: 'memory:get',
   memoryConfigSave: 'memory:config-save',
@@ -148,7 +150,8 @@ export type AgentCommandRequest = ObjectBinding & {
   expectedText: string
   promptText: string
 }
-export type AgentAuthorizationRequest = AgentCommandRequest & { references: string[] }
+/** 本场联网只读：默认不勾；勾选结果随预览摘要与 start 请求一起校验，防重放。 */
+export type AgentAuthorizationRequest = AgentCommandRequest & { references: string[]; network?: boolean }
 export type AuthorizedSource = ObjectBinding & { sourceId: string; relPath: string; title: string; revision: string; fingerprint: string; tier: 'reference' | 'follow' }
 export type AgentAuthorizationPreview = {
   id: string; sessionId: string; origin: string; sources: AuthorizedSource[]
@@ -159,6 +162,8 @@ export type AgentAuthorizationPreview = {
   skills?: { id: string; name: string }[]
   /** 已启用但没加载的技能：名称与人话原因，便于人当场决定是否重来。 */
   skillsUnavailable?: { name: string | null; reason: import('./skills.ts').SkillUnavailableReason }[]
+  /** 本场联网只读的可用性；`reason` 只给不可用的原因，不含服务密钥。 */
+  network?: { available: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' }
 }
 /** 写类工具的人确认：主进程发起请求，渲染层只回一个是否同意。
  *  建给「落点＋正文」；改名／挪给「旧路径 → 新路径＋影响面（引用与权限条数）」；删给路径。 */
@@ -169,9 +174,11 @@ export type AgentWritePreview =
 export type AgentWriteDecision = { requestId: string; approved: boolean }
 
 export type AgentAuthorizationResult = { ok: true; preview: AgentAuthorizationPreview } | { ok: false; error: string }
-export type AgentStartRequest = AgentCommandRequest & { previewId: string }
+export type AgentStartRequest = AgentCommandRequest & { previewId: string; network?: boolean }
 export type AgentStartResult = { ok: true; id: string } | { ok: false; error: string }
 export type AgentTaskView = { id: string; relPath: string; startedAt: number; activity?: string }
+/** 网络事件只带主机与去查询串的路径，不带正文、密钥或查询参数。 */
+export type AgentNetworkEvent = { taskId: string; kind: 'fetch'; host: string; path: string; bytes?: number; truncated?: boolean; at: string }
 export type AgentEvent = {
   id: string
   relPath: string
@@ -183,7 +190,23 @@ export type AgentEvent = {
   sessionId?: string
   objectVersion?: string
   activity?: string
+  network?: AgentNetworkEvent
 }
+
+/** 只读预览：按任务与预览 id 取回抓到的纯文本（包裹前的原文）。 */
+export type NetworkPreviewRequest = { taskId: string; id: string }
+export type NetworkPreviewView = {
+  id: string
+  url: string
+  host: string
+  title?: string
+  text: string
+  bytes: number
+  truncated: boolean
+  fetchedAt: string
+  lowTrust: true
+}
+export type NetworkPreviewResult = { ok: true; preview: NetworkPreviewView } | { ok: false; error: string }
 
 export type ImageContext = {
   noteRelPath: string

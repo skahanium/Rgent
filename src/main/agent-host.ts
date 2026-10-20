@@ -10,7 +10,8 @@ const memoryHash = (text:string) => createHash('sha256').update(text).digest('he
 import { validTaskMaterial, TaskMaterialTracker, type SavedTaskMaterial } from './host-material.ts'
 import { encodeLedgerProvenance, historicalContextPolicy } from './ledger-provenance.ts'
 import type {FrozenSkills} from './skills.ts'
-import { READ_ONLY_TOOL_SCHEMAS, WRITE_TOOL_SCHEMAS, type ScopedWriteTool } from './scoped-agent-tools.ts'
+import { READ_ONLY_TOOL_SCHEMAS, WRITE_TOOL_SCHEMAS, NETWORK_TOOL_SCHEMAS, type ScopedWriteTool, type ScopedNetworkTool } from './scoped-agent-tools.ts'
+import { buildShingles, containsEcho } from './content-echo.ts'
 import { createWriteGate } from './agent-write.ts'
 import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 
@@ -20,11 +21,11 @@ import { MODEL_STREAM_BOUNDS, type ModelStepEvent, type ToolSchema } from './mod
 import { randomUUID } from 'node:crypto'
 import { AgentTasks, type TaskResult, type StopReason, type ActiveTask } from './agent-tasks.ts'
 import { buildHostContext, type ContextChapter, type ContextSummary } from './host-context.ts'
-import { appendAiBlock, markPrompt, upsertAiAnswer, type LedgerChapterWrite, type SentSummary } from './host-source.ts'
+import { appendAiBlock, markPrompt, upsertAiAnswer, type LedgerChapterWrite, type LedgerNetworkEntry, type SentSummary } from './host-source.ts'
 import { assistantSystemBlock, assistantSummary, type AssistantHabits } from '../shared/assistant.ts'
 import type { ModelCredential, RunLimits } from './model-config.ts'
 import type { SourceRange } from '../markdown/types.ts'
-import type { ObjectBinding, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
+import type { AgentNetworkEvent, NetworkPreviewView, ObjectBinding, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
 import type { TaskGrant } from './task-authorization.ts'
 import { compile, parseMarker } from '../markdown/index.ts'
 
@@ -40,6 +41,8 @@ export type HostEvent = {
   sessionId?: string
   objectVersion?: string
   activity?: string
+  /** 一次联网抓取的状态行摘要：只带主机与去查询串的路径，不带正文。 */
+  network?: AgentNetworkEvent
 }
 
 export type HostStart = Partial<ObjectBinding> & {
@@ -59,15 +62,54 @@ export type HostStart = Partial<ObjectBinding> & {
   range: SourceRange
   expectedText: string
   promptText: string
+  /** 本场网络勾选；必须与预览时冻结的一致（由 TaskAuthorizationRegistry 校验）。 */
+  network?: boolean
 }
 
-export /** 过程只记「调了什么、结果如何」，不铺工具返回的正文。 */
-function toolTraceLine(call: { name: string; input: unknown }, failure?: string): string {
+export /** 过程只记「调了什么、结果如何」，不铺工具返回的正文。
+ *  抓页只留主机（查询串与正文都不进过程）。 */
+function toolTraceLine(call: { name: string; input: unknown }, failure?: string, network?: { host?: string; bytes?: number; truncated?: boolean }): string {
+  if (call.name === 'fetch_url') {
+    const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
+    let host = network?.host ?? ''
+    if (!host) { try { host = new URL(String(input.url)).host } catch { host = '' } }
+    const label = host ? `抓网页「${host}」` : '抓网页'
+    if (failure) return `工具 ${label}：未执行（${failure}）`
+    return `工具 ${label}：已执行（${formatBytes(network?.bytes ?? 0)}，低信任${network?.truncated ? '/截断' : ''}）`
+  }
   const label = call.name === 'read_library' ? '读库' : call.name === 'search_library' ? '搜库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name === 'delete_note' ? '删笔记' : call.name==='search_memory'?'检索记忆':call.name
   const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
   const query = typeof input.query === 'string' ? input.query.replace(/\s+/g, ' ').slice(0, 80) : ''
   const what = (label === '搜库'||label==='检索记忆') && query ? `${label}「${query}」` : label
   return `工具 ${what}：${failure ? `未执行（${failure}）` : '已执行'}`
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0 B'
+  if (value < 1024) return `${Math.round(value)} B`
+  return `${(value / 1024).toFixed(1)} KB`
+}
+
+/** 抓页状态行只认工具结果里的公开字段。 */
+function networkTraceOf(value: unknown): { host: string; bytes: number; truncated: boolean } | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  return {
+    host: typeof record.host === 'string' ? record.host : '',
+    bytes: typeof record.bytes === 'number' ? record.bytes : 0,
+    truncated: record.truncated === true
+  }
+}
+
+/** 只取主机与去查询串的路径；解析不了就不记账（绝不把原文塞进账本）。 */
+function networkTarget(raw: unknown): { host: string; path: string } | null {
+  try {
+    const url = new URL(String(raw))
+    if (url.protocol !== 'https:') return null
+    // 账本字段有长度上限：主机超长就不记这条，避免因为审计字段让整场写入失败。
+    if (!url.host || url.host.length > 255) return null
+    return { host: url.host, path: url.pathname.slice(0, 120) }
+  } catch { return null }
 }
 
 export type HostDependencies = {
@@ -105,7 +147,14 @@ export type HostDependencies = {
   /** Handoff outcome only, never a claim that consolidation succeeded. Sink must be local and synchronous. */
   onTaskMaterialResult?: (result: {sessionId?: string; taskId: string; status: 'handed-off' | 'unavailable' | 'failed'; reason?: string}) => void
   memory?: MemoryUsePort
-  createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker, write?: ScopedWriteTool) => ScopedAgentTools
+  createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker, write?: ScopedWriteTool, network?: ScopedNetworkTool) => ScopedAgentTools
+  /** 联网只读能力（P3 只有抓页，P4 再接搜索）：出口、偷渡词片与可用性都由主进程给。 */
+  network?: {
+    fetch(url: string, signal: AbortSignal): Promise<{ text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true }>
+    /** 额外的偷渡词片（例如搜索服务）；授权来源正文由 Host 在任务开始时建。 */
+    echoShingles?: Set<string>
+    availability(): { available: boolean; providerHost: string | null; reason?: string }
+  }
   /** 「建」需要人在预览里点一下同意；没有这个入口就不宣告该工具。 */
   /** 人确认：建是「落点＋正文」，改名／挪是「旧路径 → 新路径＋影响面」，删是「路径＋是否带附件夹」。 */
   confirmWrite?: (request: AgentWriteConfirm) => Promise<boolean>
@@ -145,6 +194,23 @@ const SYSTEM_RULES = [
  *  把「删了但落点/原路径有冲突」误记成来源消失。 */
 const TRASH_SIDE_EFFECT_REASONS = new Set(['TRASH_CONFLICT', 'LANDING_MISMATCH', 'TRASH_INCOMPLETE'])
 
+/** 偷渡词片只从本场授权来源建，且读正文有界：来源数、单篇字符与总字节都封顶。 */
+const NETWORK_ECHO_SOURCES = 64
+const NETWORK_ECHO_TEXT_CHARS = 262_144
+const NETWORK_ECHO_BYTES = 8 * 1024 * 1024
+/** 预览缓存：每任务 ≤10 条、每条 ≤1 MiB；任务结束／切库清空。 */
+const NETWORK_PREVIEW_LIMIT = 10
+const NETWORK_PREVIEW_BYTES = 1_048_576
+/** 账本 `network[]` 每场上限与 `validChapter` 对齐。 */
+const NETWORK_LEDGER_LIMIT = 50
+
+type NetworkPreviewEntry = { text: string; url: string; title?: string; bytes: number; truncated: boolean; fetchedAt: string }
+
+function errorCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : ''
+  return /^[A-Z][A-Z0-9_]{1,63}$/.test(message) ? message : 'EGRESS_UNAVAILABLE'
+}
+
 /** Owns one model run from permission check to final same-note ledger entry. */
 export class AgentHost {
   private readonly tasks = new AgentTasks()
@@ -160,6 +226,10 @@ export class AgentHost {
   private readonly launching = new Set<string>()
   private readonly launchWaiters = new Set<() => void>()
   private readonly retrying = new Map<string, Promise<void>>()
+  /** 本场在途抓取的 AbortController：停止联网只 abort 这些，不终止整场任务。 */
+  private readonly networkAborts = new Map<string, Set<AbortController>>()
+  /** 本场抓页预览（包裹前纯文本）；任务结束与切库时清空。 */
+  private readonly networkPreviews = new Map<string, Map<string, NetworkPreviewEntry>>()
   private recoveringLedger = false
   private readonly ledgerVersions = new Map<string,number>()
   private readonly verifiedToolReceivers=new Set<string>()
@@ -278,6 +348,44 @@ export class AgentHost {
     if (!task) return []
     return this.grants.get(`${task.root}\0${task.relPath}`)?.sources.map(source => source.relPath) ?? [task.relPath]
   }
+  /** 停止本场联网只读：撤销网络能力并 abort 在途抓取；任务本身继续收尾。 */
+  stopNetwork(id: string): boolean {
+    const task = this.active().find(item => item.id === id)
+    if (!task) return false
+    this.grants.get(`${task.root}\0${task.relPath}`)?.revokeNetwork()
+    for (const controller of this.networkAborts.get(id) ?? []) controller.abort()
+    return true
+  }
+  /** 只读预览：只给包裹前的纯文本；未知 id 或任务结束后返回 null。 */
+  preview(taskId: string, id: string): NetworkPreviewView | null {
+    const entry = this.networkPreviews.get(taskId)?.get(id)
+    if (!entry) return null
+    return {
+      id, url: entry.url, host: networkTarget(entry.url)?.host ?? '',
+      ...(entry.title ? { title: entry.title } : {}),
+      text: entry.text, bytes: entry.bytes, truncated: entry.truncated, fetchedAt: entry.fetchedAt, lowTrust: true
+    }
+  }
+  /** 本场当前可预览的条目 id：事件与工具结果按合同不带 id，界面靠它调 `network:preview`。 */
+  networkPreviewIds(taskId: string): string[] { return [...(this.networkPreviews.get(taskId)?.keys() ?? [])] }
+  /** 切库／关闭时清空全部预览；任务结束时按任务单独清。 */
+  clearNetworkPreviews(): void { this.networkPreviews.clear() }
+  /** 任务开始时按本场授权来源正文建 8 词片集；某一篇读不到就跳过，不阻断任务。 */
+  private async networkEchoSet(grant: TaskGrant, originText: string): Promise<Set<string>> {
+    const texts = [originText.slice(0, NETWORK_ECHO_TEXT_CHARS)]
+    let bytes = Buffer.byteLength(texts[0]!, 'utf8')
+    for (const source of grant.sources) {
+      if (source.relPath === grant.origin) continue
+      if (texts.length >= NETWORK_ECHO_SOURCES || bytes >= NETWORK_ECHO_BYTES) break
+      try {
+        const snapshot = await this.deps.read(source.relPath)
+        const text = snapshot.content.slice(0, NETWORK_ECHO_TEXT_CHARS)
+        texts.push(text)
+        bytes += Buffer.byteLength(text, 'utf8')
+      } catch { /* 读不到的来源不进集合；合同要求如实说明，报告里写了 */ }
+    }
+    return buildShingles(texts)
+  }
   /** 一次文件操作会碰到的任务：任务授权范围内的来源路径与给定路径或它的子树相交。
    *  `paths` 同时按「本身」和「父目录前缀」解释，和人删除／迁移的 exact/prefixes 语义一致：
    *  任务只是在读／引用目标笔记时也会被找到，不只按任务自己的 relPath 判断。
@@ -386,22 +494,85 @@ export class AgentHost {
       const originPath = grant?.origin
       const libraryReadEnabled = Boolean(grant && originPath && grant.sources.some(source => source.relPath !== originPath))
       const structuralTargets = Boolean(grant && originPath && grant.sources.some(source => source.relPath !== originPath && source.tier !== 'follow'))
+      // 联网只读：总闸可用 + 本场勾选授权两条都在才算启用；任何一条不在都不宣告、不注册。
+      const networkAvailable = (() => { try { return this.deps.network?.availability().available === true } catch { return false } })()
+      const networkEnabled = networkAvailable && !!grant?.network && !!this.deps.network
+      const networkEcho = new Set<string>(networkEnabled ? this.deps.network?.echoShingles ?? [] : [])
+      if (networkEnabled && grant) for (const shingle of await this.networkEchoSet(grant, original.content)) networkEcho.add(shingle)
+      const networkLog: LedgerNetworkEntry[] = []
+      const networkPreviews = new Map<string, NetworkPreviewEntry>()
+      const networkAborts = new Set<AbortController>()
+      if (networkEnabled) {
+        // 任务结束／切库时清空；进行中的抓取也按任务收集，供「停止联网」abort。
+        this.networkPreviews.set(id, networkPreviews)
+        this.networkAborts.set(id, networkAborts)
+      }
+      const recordNetwork = (at: string, target: { host: string; path: string } | null, outcome: string, extra: { bytes?: number; truncated?: boolean } = {}): void => {
+        if (!target?.host) return
+        if (networkLog.length >= NETWORK_LEDGER_LIMIT) return
+        networkLog.push({ at, action: 'fetch', host: target.host, path: target.path, ...extra, outcome })
+      }
+      const networkGrant = networkEnabled ? grant : undefined
+      const networkTool: ScopedNetworkTool | undefined = networkGrant && this.deps.network ? {
+        fetch: async (url, signal) => {
+          const at = new Date().toISOString()
+          const target = networkTarget(url)
+          try { networkGrant.assertNetwork() } catch (error) {
+            // 已「停止联网」：如实记 refused，工具层按可继续错误交回模型。
+            recordNetwork(at, target, `refused:${errorCode(error)}`)
+            throw error
+          }
+          const controller = new AbortController()
+          const abort = (): void => controller.abort()
+          if (signal.aborted) controller.abort()
+          signal.addEventListener('abort', abort, { once: true })
+          networkAborts.add(controller)
+          try {
+            const result = await this.deps.network!.fetch(url, controller.signal)
+            if (controller.signal.aborted) throw Error('EGRESS_ABORTED')
+            // 同源重定向后以最终地址为准；账本与状态行都只记 host + pathname。
+            const finalTarget = networkTarget(result.url) ?? target
+            // 预览只存**包裹前**的纯文本，人看到的不是模型看到的低信任包裹。
+            try {
+              if (networkPreviews.size >= NETWORK_PREVIEW_LIMIT) networkPreviews.delete(networkPreviews.keys().next().value!)
+              if (Buffer.byteLength(result.text, 'utf8') <= NETWORK_PREVIEW_BYTES) {
+                networkPreviews.set(randomUUID(), { text: result.text, url: result.url, ...(result.title ? { title: result.title } : {}), bytes: result.bytes, truncated: result.truncated, fetchedAt: at })
+              }
+            } catch { /* 预览只是给人看的缓存；存不下不影响工具结果 */ }
+            recordNetwork(at, finalTarget, 'ok', { bytes: result.bytes, truncated: result.truncated })
+            this.deps.emit({
+              ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running',
+              network: { taskId: id, kind: 'fetch', host: result.host, path: finalTarget?.path ?? '', bytes: result.bytes, truncated: result.truncated, at }
+            })
+            return result
+          } catch (error) {
+            recordNetwork(at, target, `refused:${errorCode(error)}`)
+            throw error
+          } finally {
+            signal.removeEventListener('abort', abort)
+            networkAborts.delete(controller)
+          }
+        }
+      } : undefined
       // 补／建跟读搜拆开：仅发起篇也必须能补、能建；读库／搜库仍要范围内另有篇。
       const write = grant ? this.writeCapability(grant, root, input.relPath, id) : undefined
-      const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials, write)
+      const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials, write, networkTool)
       // 宣告与白名单必须同源：工具集没有写入能力就不宣告，宣告了就必须在白名单里。
       const writeEnabled = Boolean(write && scoped?.writes)
       const createEnabled = Boolean(write?.create && scoped?.creates)
       const structuralEnabled = Boolean(structuralTargets && write?.rename && write?.move && scoped?.renames)
       const deleteEnabled = Boolean(structuralTargets && write?.delete && scoped?.deletes)
+      const networkRegistered = Boolean(networkEnabled && scoped?.networks)
       const memorySearchEnabled=input.memorySearchAuthorized===true&&!!grant&&!!memory?.searchable&&!!this.deps.streamStep&&this.supportsMemorySearch(credential)
-      const toolsEnabled=libraryReadEnabled||writeEnabled||createEnabled||structuralEnabled||deleteEnabled||memorySearchEnabled
+      const toolsEnabled=libraryReadEnabled||writeEnabled||createEnabled||structuralEnabled||deleteEnabled||networkRegistered||memorySearchEnabled
       // 只有当这套工具**确实**带写入能力时才把写工具宣告给模型，避免宣告了却执行不了。
-      const toolSchemas={...(libraryReadEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(structuralEnabled?{rename_note:WRITE_TOOL_SCHEMAS.rename_note,move_note:WRITE_TOOL_SCHEMAS.move_note}:{}),...(deleteEnabled?{delete_note:WRITE_TOOL_SCHEMAS.delete_note}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
+      const toolSchemas={...(libraryReadEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(structuralEnabled?{rename_note:WRITE_TOOL_SCHEMAS.rename_note,move_note:WRITE_TOOL_SCHEMAS.move_note}:{}),...(deleteEnabled?{delete_note:WRITE_TOOL_SCHEMAS.delete_note}:{}),...(networkRegistered?{fetch_url:NETWORK_TOOL_SCHEMAS.fetch_url}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
       let memorySearchCalls=0,memorySearchFailures=0
       const memoryToolOutcomes:{name:string;outcome:string}[]=[]
+      // 偷渡检测在调用工具前做：命中的调用不进 execute，账本记 refused:EGRESS_CONTENT_ECHO。
+      const networkToolOutcomes:{name:string;outcome:string}[]=[]
       let successfulLibraryTool=false
-      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled || deleteEnabled) && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
+      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled || deleteEnabled || networkRegistered) && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
       if (scoped) this.scoped.set(key, scoped)
       const marked = markPrompt(original.content, { ...input, taskId: id })
       const submitted = promptBlock(marked, id)
@@ -435,7 +606,7 @@ export class AgentHost {
       const refused = new Map<string, number>()
       const recordProvenance=(summaries:readonly SentSummary[],includeStaged=false)=>{
         const inherited=summaries.flatMap(s=>s.dependencies.flatMap(d=>d.provenance?[d.provenance]:[]))
-        return {...(skills?.record.length ? { skills: skills.record } : {}), version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies(includeStaged)??[]),...(scoped?.memoryDependencies?.()??[]),...inherited.flatMap(p=>p.version===2?p.memoryDeps:[])].map(d=>[d.id,d])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:[...new Map([...(scoped?.dependencies()??[]),...inherited.flatMap(p=>p.sources)].map(d=>[d.relPath,d])).values()],sentSources:scoped?.sentSources()??[],tools:[...(scoped?.summary()??[]),...(memorySearchCalls?[{name:'search_memory',outcome:`执行 ${memorySearchCalls} 次，失败 ${memorySearchFailures} 次`}]:[]),...memoryToolOutcomes,...[...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`拒绝 ${label.split(':')[1]} × ${count}`}))]}
+        return {...(skills?.record.length ? { skills: skills.record } : {}), version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies(includeStaged)??[]),...(scoped?.memoryDependencies?.()??[]),...inherited.flatMap(p=>p.version===2?p.memoryDeps:[])].map(d=>[d.id,d])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:[...new Map([...(scoped?.dependencies()??[]),...inherited.flatMap(p=>p.sources)].map(d=>[d.relPath,d])).values()],sentSources:scoped?.sentSources()??[],tools:[...(scoped?.summary()??[]),...(memorySearchCalls?[{name:'search_memory',outcome:`执行 ${memorySearchCalls} 次，失败 ${memorySearchFailures} 次`}]:[]),...memoryToolOutcomes,...networkToolOutcomes,...[...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`拒绝 ${label.split(':')[1]} × ${count}`}))]}
       }
       let lastCheckpoint = 0
       const snapshot = (status: HostEvent['status'], reason?: string, revision?: string): void => {
@@ -444,7 +615,7 @@ export class AgentHost {
       const checkpoint = async (): Promise<void> => {
         const saving = (async () => {
         await this.rechecking.get(key)
-        {const checkpoint=await this.prepareLedger(root,input.relPath,{taskId:id,startedAt,status:'completed',prompt:input.promptText,answer,sentSummaries,provenance:recordProvenance(sentSummaries)},this.ledgerVersions.get(id),grant);this.ledgerVersions.set(id,checkpoint.revision)}
+        {const checkpoint=await this.prepareLedger(root,input.relPath,{taskId:id,startedAt,status:'completed',prompt:input.promptText,answer,sentSummaries,provenance:recordProvenance(sentSummaries),...(networkLog.length?{network:[...networkLog]}:{})},this.ledgerVersions.get(id),grant);this.ledgerVersions.set(id,checkpoint.revision)}
         const revision = await this.mutateNote(root, input.relPath, (source) => upsertAiAnswer(source, { taskId: id, answer, expectedPreviousAnswer: persisted.answer }))
         persisted.answer = answer
         lastCheckpoint = Date.now()
@@ -614,7 +785,7 @@ export class AgentHost {
           for (const call of calls) {
             if (this.structuralMoves.has(id)) break
             await guard()
-            const registered = libraryReadEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||structuralEnabled&&(call.name==='rename_note'||call.name==='move_note')||deleteEnabled&&call.name==='delete_note'||call.name==='search_memory'&&memorySearchEnabled
+            const registered = libraryReadEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||structuralEnabled&&(call.name==='rename_note'||call.name==='move_note')||deleteEnabled&&call.name==='delete_note'||networkRegistered&&call.name==='fetch_url'||call.name==='search_memory'&&memorySearchEnabled
             const duplicate = usedIds.has(call.id)
             usedIds.add(call.id)
             // Duplicate IDs cannot enter provider messages. A fresh internal refusal ID preserves their order.
@@ -623,8 +794,18 @@ export class AgentHost {
             let reportedByTool = false
             let value: unknown
             if (this.structuralMoves.has(id)) break
+            // 偷渡检测：外发前在本场授权来源的词片集里查一遍（含百分号解码形式）。
+            if (!failure && call.name === 'fetch_url' && networkRegistered) {
+              const requested = call.input && typeof call.input === 'object' ? (call.input as Record<string, unknown>).url : undefined
+              if (networkEcho.size && containsEcho(networkEcho, JSON.stringify(call.input))) {
+                failure = 'EGRESS_CONTENT_ECHO'
+                reportedByTool = true
+                networkToolOutcomes.push({ name: 'fetch_url', outcome: 'refused:EGRESS_CONTENT_ECHO' })
+                recordNetwork(new Date().toISOString(), networkTarget(requested), 'refused:EGRESS_CONTENT_ECHO')
+              }
+            }
             if (!failure) {
-              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name === 'delete_note' ? '删笔记' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
+              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name === 'delete_note' ? '删笔记' : call.name === 'fetch_url' ? '抓网页' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
               try {
                 if(call.name==='search_memory'){
                   const args=call.input as Record<string,unknown>
@@ -641,7 +822,9 @@ export class AgentHost {
                 if (!['MEMORY_SEARCH_LIMIT','UNKNOWN_TOOL', 'INVALID_TOOL_ARGUMENTS', 'OUTSIDE_TASK_SCOPE', 'INVALID_TOOL_CURSOR', 'SOURCE_METADATA_TOO_LARGE',
                   // 写门的可预期拒绝：如实报给模型并继续，不把整场弄失败；库/授权类故障仍然致命。
                   'OVER_LIMIT_BYTES','OVER_LIMIT_APPENDS','OVER_LIMIT_NOTES','OVER_LIMIT_SESSION','NOT_ALLOWED',
-                  'BAD_NAME','TARGET_EXISTS','ATTACHMENT_SUBTREE','ATTACHMENT_COLLISION','HIDDEN_PATH','CONFLICT','INVARIANT_VIOLATION','DECLINED','ORIGIN_LOCKED','OTHER_TASK_RUNNING','OVER_LIMIT_STRUCTURAL','LINK_REPAIR_OUT_OF_SCOPE','PERMISSION_DOWNGRADE','STALE_PREVIEW','STRUCTURE_BUSY','UNSAVED_DRAFT','PREVIOUS_TASK_UNSAVED','PLATFORM_UNPROVEN','PATH_CHANGED','TRASH_CONFLICT','LANDING_MISMATCH','TRASH_INCOMPLETE'].includes(reason)) throw error
+                  'BAD_NAME','TARGET_EXISTS','ATTACHMENT_SUBTREE','ATTACHMENT_COLLISION','HIDDEN_PATH','CONFLICT','INVARIANT_VIOLATION','DECLINED','ORIGIN_LOCKED','OTHER_TASK_RUNNING','OVER_LIMIT_STRUCTURAL','LINK_REPAIR_OUT_OF_SCOPE','PERMISSION_DOWNGRADE','STALE_PREVIEW','STRUCTURE_BUSY','UNSAVED_DRAFT','PREVIOUS_TASK_UNSAVED','PLATFORM_UNPROVEN','PATH_CHANGED','TRASH_CONFLICT','LANDING_MISMATCH','TRASH_INCOMPLETE',
+                  // 联网只读的可预期拒绝／取消：都让模型看见并继续，整场不废。
+                  'NETWORK_NOT_AUTHORIZED','EGRESS_INVALID_URL','EGRESS_HTTP_REFUSED','EGRESS_CROSS_ORIGIN_REFUSED','EGRESS_UNSUPPORTED_TYPE','EGRESS_ENCODING_REFUSED','EGRESS_TOO_LARGE','EGRESS_TIMEOUT','EGRESS_UNAVAILABLE','EGRESS_BUSY','EGRESS_CONTENT_ECHO','EGRESS_ABORTED'].includes(reason)) throw error
                 failure = reason
                 reportedByTool = call.name!=='search_memory'
               }
@@ -650,7 +833,7 @@ export class AgentHost {
               const label = `${registered ? call.name : 'unknown'}:${failure}`
               refused.set(label, (refused.get(label) ?? 0) + 1)
             }
-            noteTrace(toolTraceLine(call, failure))
+            noteTrace(toolTraceLine(call, failure, !failure && call.name === 'fetch_url' ? networkTraceOf(value) : undefined))
             if(!failure&&call.name==='search_memory'){const items=(value as {items:{id:string;version:number;content:string}[]}).items;const detail=`${items.map(e=>e.id+'@'+e.version).join('、')||'无匹配'}；摘要 ${items.map(e=>e.content.replace(/[\x00-\x1f]/g,' ').replace(/\s+/g,' ').slice(0,48)).join('；').slice(0,320)}`.slice(0,900);memoryToolOutcomes.push({name:'search_memory',outcome:`已执行：${detail}`});noteTrace(`记忆结果：${detail}`)}
             // 结构操作成功后旧来源已失效，再走 guard 只会把整场记成 ENOENT。
             if (!this.structuralMoves.has(id)) await guard()
@@ -682,6 +865,8 @@ export class AgentHost {
           ...(reasoning ? { reasoning } : {}),
           ...(trace.length ? { trace } : {}),
           ...(assistantLine ? { assistant: assistantLine } : {}),
+          // 外发记录只进账本，不进笔记正文；查询串与正文都不在其中。
+          ...(networkLog.length ? { network: [...networkLog] } : {}),
           provenance:recordProvenance(sentSummaries)
         }
         try {
@@ -694,13 +879,16 @@ export class AgentHost {
         } finally {
           this.finalizing.delete(key)
           this.signals.delete(key)
+          // 任务结束清空本场预览与在途抓取登记，不给下一场留可读缓存。
+          this.networkPreviews.delete(id)
+          this.networkAborts.delete(id)
           if(this.grants.get(key)===grant){this.grants.delete(key);this.scoped.delete(key);this.memoryUses.delete(key)}
         }
       })
       launched=true
       return result
     } finally {
-      if(!launched){if(startedTaskId)this.deps.onTaskStartFailed?.(startedTaskId);grant?.revoke();if(this.grants.get(key)===grant){this.grants.delete(key);this.scoped.delete(key);this.memoryUses.delete(key)}}
+      if(!launched){if(startedTaskId)this.deps.onTaskStartFailed?.(startedTaskId);grant?.revoke();if(startedTaskId){this.networkPreviews.delete(startedTaskId);this.networkAborts.delete(startedTaskId)};if(this.grants.get(key)===grant){this.grants.delete(key);this.scoped.delete(key);this.memoryUses.delete(key)}}
       this.launching.delete(key)
       if (this.launching.size === 0) {
         for (const notify of this.launchWaiters) notify()

@@ -40,6 +40,8 @@ import {
   type ModelLimitsSetRequest,
   type AgentStartRequest,
   type AgentStartResult,
+  type NetworkPreviewRequest,
+  type NetworkPreviewResult,
   type AgentTaskView,
   type AgentEvent,
   type EntryCreateRequest,
@@ -177,6 +179,8 @@ const api = {
   agentAuthorizationDiscard: (id:string): Promise<void> => invoke(IPC.agentAuthorizationDiscard,id),
   agentStart: (request: AgentStartRequest): Promise<AgentStartResult> => invoke(IPC.agentStart, request),
   agentCancel: (id: string): Promise<boolean> => invoke(IPC.agentCancel, id),
+  networkStop: (taskId: string): Promise<boolean> => invoke(IPC.networkStop, taskId),
+  networkPreview: (request: NetworkPreviewRequest): Promise<NetworkPreviewResult> => invoke(IPC.networkPreview, request),
   agentTasks: (): Promise<AgentTaskView[]> => invoke(IPC.agentTasks),
   onAgentEvent: (handler: (payload: AgentEvent) => void): (() => void) =>
     subscribe(IPC.agentEvent, (payload) => handler(payload as AgentEvent)),

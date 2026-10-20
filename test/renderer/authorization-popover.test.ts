@@ -212,3 +212,36 @@ it('extra reference preview lists read search and struct; follow-only extras omi
   expect(second.root.querySelector('.authorization-status')!.textContent).not.toContain('改名')
   second.close()
 })
+
+it('offers the network checkbox unchecked by default and sends the choice with start', async () => {
+  const withNetwork = { ...preview, network: { available: true, providerHost: null } }
+  const load = vi.fn(async (_references: string[], _network: boolean) => ({ ok: true as const, preview: withNetwork }))
+  const send = vi.fn(async (_preview: import('../../src/shared/ipc.ts').AgentAuthorizationPreview, _network: boolean) => ({ ok: true as const, id: 'task' }))
+  const popup = openAuthorizationPopover({ anchor: { left: 100, top: 100, bottom: 120 }, origin: 'a.md', entries: [], preview: load, send })
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  const input = popup.root.querySelector<HTMLInputElement>('.authorization-network input')!
+  expect(input.checked).toBe(false)
+  expect(load).toHaveBeenLastCalledWith([], false)
+  input.checked = true
+  input.dispatchEvent(new Event('change'))
+  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith([], true))
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.click()
+  await vi.waitFor(() => expect(send).toHaveBeenCalled())
+  expect(send).toHaveBeenCalledWith(expect.anything(), true)
+  popup.close()
+})
+
+it('explains why network is unavailable without offering a checkbox', async () => {
+  const off = { ...preview, network: { available: false, providerHost: null, reason: 'off' as const } }
+  const popup = openAuthorizationPopover({ anchor: { left: 100, top: 100, bottom: 120 }, origin: 'a.md', entries: [], preview: async () => ({ ok: true as const, preview: off }), send: async () => ({ ok: true as const, id: 'task' }) })
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  expect(popup.root.querySelector('.authorization-network input')).toBeNull()
+  expect(popup.root.querySelector('.authorization-network')!.textContent).toContain('联网总开关已关闭')
+  popup.close()
+  const unconfigured = { ...preview, network: { available: false, providerHost: null, reason: 'not-configured' as const } }
+  const second = openAuthorizationPopover({ anchor: { left: 100, top: 100, bottom: 120 }, origin: 'a.md', entries: [], preview: async () => ({ ok: true as const, preview: unconfigured }), send: async () => ({ ok: true as const, id: 'task' }) })
+  await vi.waitFor(() => expect(second.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  expect(second.root.querySelector('.authorization-network')!.textContent).toContain('尚未配置联网服务')
+  second.close()
+})

@@ -27,6 +27,7 @@ import { loadChromeTextPreference, saveChromeTextPreference } from './theme-pref
 import { isChromeTextPreference } from '../shared/reading-preference.ts'
 import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, RelocationPreviewRequest, RelocationPreviewView, ModelAddRequest, ModelConfigResult, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult, TrashCommitResult, TrashPreviewResult, TrashPreviewView } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
+import type { NetworkPreviewRequest, NetworkPreviewResult } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { loadAssistantHabits, saveAssistantHabits } from './assistant-preference.ts'
 import { createSkillsStore } from './skills-store.ts'
@@ -42,6 +43,8 @@ import { VAULT_MEDIA_SCHEME } from '../shared/vault-rel.ts'
 import { VaultSession } from './vault.ts'
 import { fetchModelList } from './model-list.ts'
 import { createModelConfigStore, type ModelConfigStore } from './model-config.ts'
+import { createNetworkConfigStore, type NetworkConfigStore } from './network-config.ts'
+import { fetchText } from './text-fetch.ts'
 import { TaskAuthorizationRegistry, isAuthorizationCommand } from './task-authorization.ts'
 import { createScopedAgentTools } from './scoped-agent-tools.ts'
 import { createMemoryIpc } from './memory-ipc.ts'
@@ -83,7 +86,16 @@ let themeMode: ThemeMode = 'system'
 let remoteImages: RemoteImageService | null = null
 let modelConfig: ModelConfigStore | null = null
 let modelConfigError: string | null = null
+let networkConfig: NetworkConfigStore | null = null
 let agentHost: AgentHost | null = null
+/** 联网只读的总闸与（P4 的）服务配置都在主进程判定；渲染层只拿摘要。 */
+function networkAvailability(): { available: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' } {
+  try {
+    if (!networkConfig?.enabled()) return { available: false, providerHost: null, reason: 'off' }
+    // P3 只有内置抓页，不需要服务端凭据；搜索服务主机与 key 由 P4 补。
+    return { available: true, providerHost: null }
+  } catch { return { available: false, providerHost: null, reason: 'off' } }
+}
 
 let authorizations: TaskAuthorizationRegistry | null = null
 let consolidation:WorkingMemoryConsolidation|null=null
@@ -352,6 +364,7 @@ async function settleHostBeforeClose(win: BrowserWindow): Promise<boolean> {
     // 先等 launching 落地再 cancel：cancelAll 只覆盖 running，中途撕启动会丢授权与稿。
     await agentHost?.whenLaunchesSettled()
     try { await agentHost?.cancelAll('close') } catch { /* pending answer is retained for retry below */ }
+    agentHost?.clearNetworkPreviews()
     await agentHost?.whenLaunchesSettled()
     if (agentHost?.active().length) {
       try { await agentHost.cancelAll('close') } catch { /* pending answer is retained for retry below */ }
@@ -791,6 +804,7 @@ function registerIpc(): void {
         typeof request.promptText !== 'string' || request.promptText.length > 20000 ||
         typeof request.modelRecordId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(request.modelRecordId) ||
         typeof request.sessionId !== 'string' || typeof request.objectVersion !== 'string' || typeof request.expectedRevision !== 'string' ||
+        (request.network !== undefined && typeof request.network !== 'boolean') ||
         !request.range || !Number.isSafeInteger(request.range.start) || !Number.isSafeInteger(request.range.end)) {
       return { ok: false, error: 'BAD_REQUEST' }
     }
@@ -806,6 +820,28 @@ function registerIpc(): void {
       void task.done.catch(() => {})
       return { ok: true, id: task.id }
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'AGENT_START_FAILED' } }
+  })
+  /** 停止联网：只撤本场网络能力并 abort 在途抓取，不终止整场任务。 */
+  registerTrustedHandle(IPC.networkStop, async (event, value: unknown): Promise<boolean> => {
+    if (!trusted(event) || typeof value !== 'string' || value.length > 128 || !agentHost) return false
+    const task = agentHost.active().find(item => item.id === value)
+    if (!task) return false
+    let root: string | null = null
+    try { root = vault?.requireUsableRoot() ?? null } catch { root = null }
+    if (!root || task.root !== root) return false
+    return agentHost.stopNetwork(value)
+  })
+  /** 联网预览：只给本库当下任务、且只给包裹前的纯文本；未知 id 一律拒绝。 */
+  registerTrustedHandle(IPC.networkPreview, async (event, value: unknown): Promise<NetworkPreviewResult> => {
+    if (!trusted(event) || !value || typeof value !== 'object' || !agentHost) return { ok: false, error: 'BAD_REQUEST' }
+    const request = value as Partial<NetworkPreviewRequest>
+    if (typeof request.taskId !== 'string' || request.taskId.length > 128 || typeof request.id !== 'string' || request.id.length > 128) return { ok: false, error: 'BAD_REQUEST' }
+    const task = agentHost.active().find(item => item.id === request.taskId)
+    let root: string | null = null
+    try { root = vault?.requireUsableRoot() ?? null } catch { root = null }
+    if (!task || !root || task.root !== root) return { ok: false, error: 'STALE_PREVIEW' }
+    const preview = agentHost.preview(request.taskId, request.id)
+    return preview ? { ok: true, preview } : { ok: false, error: 'STALE_PREVIEW' }
   })
   registerTrustedHandle(IPC.remoteImageGet, async (_event, value: unknown): Promise<RemoteImageGetResult> => {
     if (!remoteImages || !vault || !value || typeof value !== 'object') return { ok: false, error: 'NOT_ALLOWED' }
@@ -1392,6 +1428,7 @@ if (ownsInstance) app.whenReady().then(() => {
           current();consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED');await consolidation?.idle();current()
           await agentHost?.whenLaunchesSettled();current()
           if(vault?.root)await agentHost?.cancelAll('vault-change',vault.root).catch(()=>{})
+          agentHost?.clearNetworkPreviews()
           await agentHost?.whenLaunchesSettled();current();await vault!.idle();current()
           vault!.protectRootDrafts(sessionId,rootHeldObjects??[]);rootHeldObjects=null;protectedRootCaller=rootRecoveryIntent.caller
         }
@@ -1413,6 +1450,8 @@ if (ownsInstance) app.whenReady().then(() => {
       await consolidation?.idle(); current()
       if (previous) {
         try { await agentHost?.cancelAll('vault-change', previous) } catch {}
+        // 切库是预览缓存的硬边界：不把上一库的抓页正文留给下一库。
+        agentHost?.clearNetworkPreviews()
         current()
         await agentHost?.retryPending(previous); current()
         await agentHost?.whenLaunchesSettled(); current()
@@ -1460,6 +1499,7 @@ if (ownsInstance) app.whenReady().then(() => {
     },
     release: () => {if(rootRecoveryHold){mainWindow?.webContents.send(IPC.lifecycleFlushRequest,rootRecoveryHold.operationId,[],'recovery-release',rootRecoveryHold);rootRecoveryHold=null}send(IPC.vaultTransition,{busy:false,session:vault?.sessionId()??null,phase:'idle'})}
   })
+  networkConfig = createNetworkConfigStore(app.getPath('userData'))
   authorizations = new TaskAuthorizationRegistry({
     root:()=>{try{return vault?.requireUsableRoot()??null}catch{return null}},
     session:()=>vault?.sessionId()??null,
@@ -1475,6 +1515,7 @@ if (ownsInstance) app.whenReady().then(() => {
       if(memoryAuthorizationState(request.sessionId).signature!==state.signature)throw Error('STALE_PREVIEW')
       return {signature:state.signature+':'+memorySnapshotSignature(entries),snapshotSignature:memorySnapshotSignature(entries),search,disclosure:state.disclosure}
     },
+    network: networkAvailability,
     configuration:(_extraReferences, modelRecordId,_memorySearch)=>{
       if(!modelConfig)throw Error(modelConfigError??'MODEL_CONFIG_UNAVAILABLE')
       const config=modelConfig.getPublic()
@@ -1600,13 +1641,30 @@ if (ownsInstance) app.whenReady().then(() => {
     },
     stream: (input, signal) => streamModelText({ ...input, signal }),
     streamStep: (input, signal) => streamModelStep({ ...input, signal }),
+    // 唯一出口：fetchText 内部再用 EgressClient；错误码已是 EGRESS_*，Host 直接如实上报。
+    network: {
+      fetch: async (url, signal) => {
+        const result = await fetchText(url, { signal })
+        return {
+          text: result.text,
+          host: new URL(result.finalUrl).host,
+          url: result.finalUrl,
+          ...(result.title ? { title: result.title } : {}),
+          bytes: result.bytes,
+          truncated: result.truncated,
+          lowTrust: true as const
+        }
+      },
+      availability: networkAvailability
+    },
     // 第五个入参是写能力：必须原样转发，否则工具集看不到写工具，宿主也不会宣告它们。
-    createReadOnlyTools: (grant, taskId, memory, materials, write) => createScopedAgentTools(grant, taskId, {
+    createReadOnlyTools: (grant, taskId, memory, materials, write, network) => createScopedAgentTools(grant, taskId, {
       read: relPath => vault!.read(relPath), tier: modelTierFor,
       validateMemory: dep => memory?.validateDependency(dep) ?? Promise.resolve(false),
       validateMemoryBatch: deps => memory?.validateDependencies(deps) ?? Promise.resolve(deps.map(() => false)), materials,
       acceptsObject: (relPath, expected, current) => vault?.acceptsObject(relPath, expected, current) ?? false,
-      ...(write ? { write } : {})
+      ...(write ? { write } : {}),
+      ...(network ? { network } : {})
     }),
     emit: ({ root, ...event }) => {
       if (vault?.root === root && event.sessionId === vault.sessionId()) send(IPC.agentEvent, event)

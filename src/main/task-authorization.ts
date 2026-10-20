@@ -15,6 +15,8 @@ export type AuthorizationDependencies = {
   acceptsObject(path: string, expected: string, current: string): boolean
   ownerValid?: (owner:string)=>boolean
   memoryAuthorization?: (request:AgentCommandRequest)=>Promise<{signature:string;search:boolean;snapshotSignature?:string;disclosure?:AgentAuthorizationPreview['memory']}>
+  /** 联网只读的可用性：总闸与（P4 的）服务配置都在主进程判定，界面只拿摘要。 */
+  network?: () => { available: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' }
   configuration(extraReferences: boolean, modelRecordId: string, memorySearch?:boolean): AuthorizationConfiguration
 }
 export interface TaskGrant {
@@ -26,8 +28,14 @@ export interface TaskGrant {
   readonly credential: Readonly<ModelCredential>
   readonly limits: Readonly<RunLimits>
   readonly memorySnapshotSignature?:string
+  /** 本场联网只读：只在预览时勾选、start 校验一致后才出现；撤销后为 undefined。 */
+  readonly network?: Readonly<{ allowed: true; providerHost?: string }>
   assertActive(): void
   assertLive(action: AuthorizationAction, path?: string, signal?: AbortSignal): Promise<void>
+  /** 未获准或已撤销联网时抛 `NETWORK_NOT_AUTHORIZED`，不改任务本身。 */
+  assertNetwork(): void
+  /** 「停止联网」只撤本场网络能力，不终止整场任务。 */
+  revokeNetwork(): void
   validateSources(signal?: AbortSignal): Promise<void>
   assertWriteTarget(path: string): void
   /** 发起篇的现行核验基准：开场冻结，仅 acknowledgeOrigin 推进。 */
@@ -35,7 +43,7 @@ export interface TaskGrant {
   acknowledgeOrigin(snapshot: NoteSnapshot): void
   revoke(): void
 }
-type Prepared = { owner: string; request: AgentCommandRequest; modelRecordId: string; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number; memory?:{signature:string;search:boolean;snapshotSignature?:string} }
+type Prepared = { owner: string; request: AgentCommandRequest; modelRecordId: string; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number; memory?:{signature:string;search:boolean;snapshotSignature?:string}; network: boolean; providerHost: string|null }
 const digest = (value: unknown): string => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex')
 function command(request: AgentCommandRequest): AgentCommandRequest {
   return {modelRecordId:request.modelRecordId,relPath:request.relPath,sessionId:request.sessionId,objectVersion:request.objectVersion,expectedRevision:request.expectedRevision,
@@ -88,6 +96,7 @@ export class TaskAuthorizationRegistry {
 
   async preview(owner: string, request: AgentAuthorizationRequest): Promise<AgentAuthorizationPreview> {
     if (!owner || this.deps.ownerValid?.(owner)===false || !isAuthorizationCommand(request) || !Array.isArray(request.references) || request.references.length>1000 || !request.references.every(safePath)) throw Error('BAD_REQUEST')
+    if (request.network !== undefined && typeof request.network !== 'boolean') throw Error('BAD_REQUEST')
     const root=this.deps.root(); const session=this.deps.session()
     if(!root)throw Error('NO_VAULT')
     if(session!==request.sessionId)throw Error('VAULT_CHANGED')
@@ -123,11 +132,25 @@ export class TaskAuthorizationRegistry {
     const memory=await this.deps.memoryAuthorization?.(command(request))
     this.checkSession(root,session)
     const config=structuredClone(this.deps.configuration(sources.length>1, request.modelRecordId,memory?.search===true))
+    // 联网可用性由主进程判定；不可用时勾选不生效，start 也会因与预览不一致被拒。
+    const availability = this.networkAvailability()
+    const requested = request.network === true && availability.available
     const view:AgentAuthorizationPreview={id:randomUUID(),sessionId:session!,origin:request.relPath,sources,
-      recipient:{modelId:config.credential.modelId,host:new URL(config.credential.baseURL).host,provider:config.credential.provider},...(memory?.disclosure?{memory:{...memory.disclosure,search:{available:memory.search,calls:memory.search?4:0,sharedTools:config.limits.tools}}}:{})}
+      recipient:{modelId:config.credential.modelId,host:new URL(config.credential.baseURL).host,provider:config.credential.provider},
+      network:{available:availability.available,providerHost:availability.providerHost,...(availability.reason?{reason:availability.reason}:{})},
+      ...(memory?.disclosure?{memory:{...memory.disclosure,search:{available:memory.search,calls:memory.search?4:0,sharedTools:config.limits.tools}}}:{})}
     for(const [id,p]of this.previews)if(p.expires<Date.now() || p.owner===owner)this.previews.delete(id)
-    this.previews.set(view.id,{owner,request:command(request),view:structuredClone(view),modelRecordId:request.modelRecordId,root,config,configHash:digest(config),expires:Date.now()+300000,memory:memory?{signature:memory.signature,search:memory.search,snapshotSignature:memory.snapshotSignature}:undefined})
+    this.previews.set(view.id,{owner,request:command(request),view:structuredClone(view),modelRecordId:request.modelRecordId,root,config,configHash:digest(config),expires:Date.now()+300000,memory:memory?{signature:memory.signature,search:memory.search,snapshotSignature:memory.snapshotSignature}:undefined,
+      network:requested,providerHost:availability.providerHost})
     return structuredClone(view)
+  }
+
+  private networkAvailability(): { available: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' } {
+    try {
+      const value = this.deps.network?.()
+      if (!value) return { available: false, providerHost: null, reason: 'off' }
+      return { available: value.available === true, providerHost: value.providerHost, ...(value.reason ? { reason: value.reason } : {}) }
+    } catch { return { available: false, providerHost: null, reason: 'off' } }
   }
 
   clear(): void { this.previews.clear() }
@@ -140,6 +163,9 @@ export class TaskAuthorizationRegistry {
     // A legitimate caller consumes once, including stale submissions; retries need a new displayed preview.
     this.previews.delete(request.previewId)
     if(!isAuthorizationCommand(request) || request.modelRecordId!==prepared.modelRecordId || digest(command(request))!==digest(prepared.request))throw Error('STALE_AUTHORIZATION')
+    // 网络勾选必须与预览时冻结的那一版一致：不一致按无效授权处理（防重放）。
+    if(request.network!==undefined && typeof request.network!=='boolean')throw Error('INVALID_AUTHORIZATION')
+    if((request.network===true)!==prepared.network)throw Error('INVALID_AUTHORIZATION')
     this.checkSession(prepared.root,prepared.view.sessionId)
     if(digest(this.deps.configuration(prepared.view.sources.length>1, prepared.modelRecordId,prepared.memory?.search===true))!==prepared.configHash)throw Error('STALE_AUTHORIZATION')
     await this.checkMemory(prepared)
@@ -173,6 +199,9 @@ class LiveGrant implements TaskGrant {
   readonly limits: Readonly<RunLimits>
   readonly memorySnapshotSignature?:string
   private live=true
+  /** 联网能力独立于整场授权：停止联网只关这一项，任务照常收尾。 */
+  private networkLive=false
+  private readonly networkHost:string|null
   private readonly owner:string
   originProof:AuthorizedSource
   constructor(private readonly deps:AuthorizationDependencies,prepared:Prepared){
@@ -181,8 +210,17 @@ class LiveGrant implements TaskGrant {
     this.sources=Object.freeze(prepared.view.sources.map(s=>Object.freeze({...s})))
     this.originProof={...this.sources.find(s=>s.relPath===this.origin)!}
     this.credential=Object.freeze({...prepared.config.credential});this.limits=Object.freeze({...prepared.config.limits})
+    this.networkLive=prepared.network;this.networkHost=prepared.providerHost
+  }
+  get network(): Readonly<{allowed:true;providerHost?:string}>|undefined {
+    return this.networkLive ? {allowed:true,...(this.networkHost?{providerHost:this.networkHost}:{})} : undefined
   }
   revoke():void {this.live=false}
+  assertNetwork():void {
+    if(!this.networkLive)throw Error('NETWORK_NOT_AUTHORIZED')
+    this.assertActive()
+  }
+  revokeNetwork():void {this.networkLive=false}
   assertActive():void {
     if(!this.live||this.deps.ownerValid?.(this.owner)===false)throw Error('AUTHORIZATION_REVOKED')
     if(this.deps.root()!==this.root||this.deps.session()!==this.sessionId)throw Error('VAULT_CHANGED')
