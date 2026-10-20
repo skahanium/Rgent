@@ -80,7 +80,8 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
         ? `${skillNames.length?`本场技能：${skillNames.join('、')}。`:''}${unavailable.length?`已启用但未加载：${unavailable.join('、')}（原因见设置页「技能」）。`:''}技能内容不在此处展开，账本记有名称与内容哈希。`
         : '本场无技能。'
       if(prepared.summaryGenerators?.length){const generators=document.createElement('p');generators.textContent='本篇账本可复用历史摘要（仍须在发送前核验）：'+prepared.summaryGenerators.map(g=>`${g.modelId} · ${g.host} · ${g.time}`).join('；');manifest.append(generators)}
-      // 联网只读：可用才给勾选（默认不勾）；不可用如实写原因，不提供降级绕过。
+      // 联网只读：抓页可用就给勾选（默认不勾）；搜索可用才在文案里带上搜索。
+      // `not-configured` 只解释搜索为什么不可用，不影响抓页的勾选。
       networkDisclosure.replaceChildren()
       const network=prepared.network
       if(!network?.available){
@@ -96,15 +97,25 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
         const label=document.createElement('label')
         const input=document.createElement('input');input.type='checkbox';input.checked=networkSelected
         const text=document.createElement('span')
-        text.textContent=network.providerHost?`本场允许联网只读（抓网页；目标 ${network.providerHost}）`:'本场允许联网只读（抓网页）'
+        text.textContent=network.search
+          ? network.providerHost?`本场允许联网只读（抓网页＋搜索；目标 ${network.providerHost}）`:'本场允许联网只读（抓网页＋搜索）'
+          : '本场允许联网只读（抓网页）'
         input.addEventListener('change',()=>{networkSelected=input.checked;void refresh()})
         label.append(input,text);networkDisclosure.append(label)
+        if(!network.search){
+          // 不让「允许联网只读」被读成「本场也能搜索」。
+          const hint=document.createElement('p');hint.className='settings-hint'
+          hint.textContent=network.reason==='not-configured'
+            ? '搜索服务尚未配置，本场只能抓网页；可在设置「模型」页配置服务与密钥。'
+            : '搜索当前不可用，本场只能抓网页。'
+          networkDisclosure.append(hint)
+        }
       }
       const title=document.createElement('p');title.textContent='本场固定对象：';manifest.append(title)
       const paths=document.createElement('ul');for(const source of prepared.sources){const item=document.createElement('li');item.textContent=source.relPath;paths.append(item)}manifest.append(paths)
       recipient.textContent=`模型：${prepared.recipient.modelId} · 接口主机：${prepared.recipient.host}`
       const labels=sessionToolLabels(options.origin, prepared.sources)
-      if(networkSelected&&prepared.network?.available)labels.push('联网只读（抓网页）')
+      if(networkSelected&&prepared.network?.available)labels.push(prepared.network.search?'联网只读（抓网页＋搜索）':'联网只读（抓网页）')
       status.textContent=`已核对 ${prepared.sources.length} 篇笔记；本场工具：${labels.join('、')}。其他篇账本、附件不在本场范围。`
       send.disabled=false
       if(document.activeElement===panel.root)send.focus({preventScroll:true})

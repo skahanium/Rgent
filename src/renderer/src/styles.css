@@ -524,6 +524,15 @@ a[href]:focus-visible,
 .settings-candidate-note { flex: 0 0 auto; white-space: nowrap; color: var(--text-muted); font-size: 0.7rem; }
 .settings-hint { margin: 8px 0 0; color: var(--text-muted); font-size: 0.74rem; line-height: 1.5; }
 .settings-actions { margin-top: 12px; }
+/* 「模型」页末尾的联网只读卡片：不新增设置页，只在既有页尾加一块。 */
+.settings-network { display: grid; gap: 10px; min-width: 0; margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--border-subtle); }
+.settings-network .settings-section-title { margin: 0; }
+.settings-network .settings-hint, .settings-network .settings-error { margin: 0; }
+.settings-network-toggle { display: flex; align-items: center; gap: 8px; color: var(--text-heading); font-size: 0.84rem; }
+.settings-network-toggle input, .settings-network-provider input { width: 16px; height: 16px; accent-color: var(--accent-primary); }
+.settings-network-provider { display: flex; flex-wrap: wrap; gap: 16px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.settings-network-provider legend { margin-bottom: 6px; padding: 0; color: var(--text-muted); font-size: 0.78rem; }
+.settings-network-provider label { display: flex; align-items: center; gap: 6px; color: var(--text-heading); font-size: 0.82rem; cursor: pointer; }
 
 @media (max-width: 820px) {
   :root { --editor-top-padding: 52px; }

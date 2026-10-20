@@ -15,8 +15,8 @@ export type AuthorizationDependencies = {
   acceptsObject(path: string, expected: string, current: string): boolean
   ownerValid?: (owner:string)=>boolean
   memoryAuthorization?: (request:AgentCommandRequest)=>Promise<{signature:string;search:boolean;snapshotSignature?:string;disclosure?:AgentAuthorizationPreview['memory']}>
-  /** 联网只读的可用性：总闸与（P4 的）服务配置都在主进程判定，界面只拿摘要。 */
-  network?: () => { available: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' }
+  /** 联网只读的可用性：`available` 管抓页，`search` 另要求服务与密钥可用；界面只拿摘要。 */
+  network?: () => { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' }
   configuration(extraReferences: boolean, modelRecordId: string, memorySearch?:boolean): AuthorizationConfiguration
 }
 export interface TaskGrant {
@@ -43,7 +43,9 @@ export interface TaskGrant {
   acknowledgeOrigin(snapshot: NoteSnapshot): void
   revoke(): void
 }
-type Prepared = { owner: string; request: AgentCommandRequest; modelRecordId: string; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number; memory?:{signature:string;search:boolean;snapshotSignature?:string}; network: boolean; providerHost: string|null }
+/** 预览时冻结的联网可用性快照：start 必须逐项一致，防「确认后换目标主机」。 */
+type NetworkAvailabilitySnapshot = { available: boolean; search: boolean; providerHost: string | null }
+type Prepared = { owner: string; request: AgentCommandRequest; modelRecordId: string; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number; memory?:{signature:string;search:boolean;snapshotSignature?:string}; network: boolean; networkAvailability: NetworkAvailabilitySnapshot }
 const digest = (value: unknown): string => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex')
 function command(request: AgentCommandRequest): AgentCommandRequest {
   return {modelRecordId:request.modelRecordId,relPath:request.relPath,sessionId:request.sessionId,objectVersion:request.objectVersion,expectedRevision:request.expectedRevision,
@@ -132,25 +134,28 @@ export class TaskAuthorizationRegistry {
     const memory=await this.deps.memoryAuthorization?.(command(request))
     this.checkSession(root,session)
     const config=structuredClone(this.deps.configuration(sources.length>1, request.modelRecordId,memory?.search===true))
-    // 联网可用性由主进程判定；不可用时勾选不生效，start 也会因与预览不一致被拒。
+    // 联网可用性由主进程判定；抓页只看总闸，搜索另看服务配置。任一项不可用时勾选不生效，
+    // start 也会因与预览不一致被拒。
     const availability = this.networkAvailability()
     const requested = request.network === true && availability.available
     const view:AgentAuthorizationPreview={id:randomUUID(),sessionId:session!,origin:request.relPath,sources,
       recipient:{modelId:config.credential.modelId,host:new URL(config.credential.baseURL).host,provider:config.credential.provider},
-      network:{available:availability.available,providerHost:availability.providerHost,...(availability.reason?{reason:availability.reason}:{})},
+      network:{available:availability.available,search:availability.search,providerHost:availability.providerHost,...(availability.reason?{reason:availability.reason}:{})},
       ...(memory?.disclosure?{memory:{...memory.disclosure,search:{available:memory.search,calls:memory.search?4:0,sharedTools:config.limits.tools}}}:{})}
     for(const [id,p]of this.previews)if(p.expires<Date.now() || p.owner===owner)this.previews.delete(id)
     this.previews.set(view.id,{owner,request:command(request),view:structuredClone(view),modelRecordId:request.modelRecordId,root,config,configHash:digest(config),expires:Date.now()+300000,memory:memory?{signature:memory.signature,search:memory.search,snapshotSignature:memory.snapshotSignature}:undefined,
-      network:requested,providerHost:availability.providerHost})
+      network:requested,networkAvailability:{available:availability.available,search:availability.search,providerHost:availability.providerHost}})
     return structuredClone(view)
   }
 
-  private networkAvailability(): { available: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' } {
+  private networkAvailability(): { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' } {
     try {
       const value = this.deps.network?.()
-      if (!value) return { available: false, providerHost: null, reason: 'off' }
-      return { available: value.available === true, providerHost: value.providerHost, ...(value.reason ? { reason: value.reason } : {}) }
-    } catch { return { available: false, providerHost: null, reason: 'off' } }
+      if (!value) return { available: false, search: false, providerHost: null, reason: 'off' }
+      const available = value.available === true
+      // 搜索不可能独立于抓页可用：总闸关或本场未获准时一并置 false。
+      return { available, search: available && value.search === true, providerHost: value.providerHost, ...(value.reason ? { reason: value.reason } : {}) }
+    } catch { return { available: false, search: false, providerHost: null, reason: 'off' } }
   }
 
   clear(): void { this.previews.clear() }
@@ -166,6 +171,10 @@ export class TaskAuthorizationRegistry {
     // 网络勾选必须与预览时冻结的那一版一致：不一致按无效授权处理（防重放）。
     if(request.network!==undefined && typeof request.network!=='boolean')throw Error('INVALID_AUTHORIZATION')
     if((request.network===true)!==prepared.network)throw Error('INVALID_AUTHORIZATION')
+    // 可用性快照逐项复核：预览后换服务商（目标主机变了）或关总闸，都要求重新预览，
+    // 绝不静默按新配置启动。providerHost 也在比对里，口令卡显示的主机就是将要用的主机。
+    const availability=this.networkAvailability(), frozen=prepared.networkAvailability
+    if(availability.available!==frozen.available||availability.search!==frozen.search||availability.providerHost!==frozen.providerHost)throw Error('INVALID_AUTHORIZATION')
     this.checkSession(prepared.root,prepared.view.sessionId)
     if(digest(this.deps.configuration(prepared.view.sources.length>1, prepared.modelRecordId,prepared.memory?.search===true))!==prepared.configHash)throw Error('STALE_AUTHORIZATION')
     await this.checkMemory(prepared)
@@ -210,7 +219,7 @@ class LiveGrant implements TaskGrant {
     this.sources=Object.freeze(prepared.view.sources.map(s=>Object.freeze({...s})))
     this.originProof={...this.sources.find(s=>s.relPath===this.origin)!}
     this.credential=Object.freeze({...prepared.config.credential});this.limits=Object.freeze({...prepared.config.limits})
-    this.networkLive=prepared.network;this.networkHost=prepared.providerHost
+    this.networkLive=prepared.network;this.networkHost=prepared.networkAvailability.providerHost
   }
   get network(): Readonly<{allowed:true;providerHost?:string}>|undefined {
     return this.networkLive ? {allowed:true,...(this.networkHost?{providerHost:this.networkHost}:{})} : undefined

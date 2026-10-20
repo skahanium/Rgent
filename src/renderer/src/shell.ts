@@ -284,6 +284,13 @@ export async function start(root: HTMLElement): Promise<void> {
     readModels: (request) => window.rgent.modelList(request),
     setDefaultModel: (request) => window.rgent.modelDefaultSet(request),
     setLimits: (request) => window.rgent.modelLimitsSet(request),
+    // 联网只读卡片挂在「模型」页：总开关保存即生效，密钥保存后不显示。
+    network: () => ({
+      get: () => window.rgent.networkConfig(),
+      setEnabled: enabled => window.rgent.networkConfig({ enabled }),
+      saveProvider: request => window.rgent.networkProviderSave(request),
+      clearProvider: () => window.rgent.networkProviderClear()
+    }),
     onModelConfigChanged: () => { void refreshModelModule(); void refreshMemory() },
     onClose: () => {
       void refreshModelModule(); void refreshMemory()

@@ -78,6 +78,9 @@ export const IPC = {
   agentEvent: 'agent:event',
   networkStop: 'network:stop',
   networkPreview: 'network:preview',
+  networkConfig: 'network:config',
+  networkProviderSave: 'network:provider-save',
+  networkProviderClear: 'network:provider-clear',
   memoryChanged: 'memory:changed',
   memoryGet: 'memory:get',
   memoryConfigSave: 'memory:config-save',
@@ -162,8 +165,9 @@ export type AgentAuthorizationPreview = {
   skills?: { id: string; name: string }[]
   /** 已启用但没加载的技能：名称与人话原因，便于人当场决定是否重来。 */
   skillsUnavailable?: { name: string | null; reason: import('./skills.ts').SkillUnavailableReason }[]
-  /** 本场联网只读的可用性；`reason` 只给不可用的原因，不含服务密钥。 */
-  network?: { available: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' }
+  /** 本场联网只读的可用性：`available` 管抓页（只依赖总闸与本场勾选），`search` 另要求
+   *  预设搜索服务与密钥都可用；`reason` 只解释搜索为什么不可用，不含服务密钥。 */
+  network?: { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' }
 }
 /** 写类工具的人确认：主进程发起请求，渲染层只回一个是否同意。
  *  建给「落点＋正文」；改名／挪给「旧路径 → 新路径＋影响面（引用与权限条数）」；删给路径。 */
@@ -177,8 +181,27 @@ export type AgentAuthorizationResult = { ok: true; preview: AgentAuthorizationPr
 export type AgentStartRequest = AgentCommandRequest & { previewId: string; network?: boolean }
 export type AgentStartResult = { ok: true; id: string } | { ok: false; error: string }
 export type AgentTaskView = { id: string; relPath: string; startedAt: number; activity?: string }
+/** 预设搜索服务；同一时间只接一家，端点与主机写死在主进程。 */
+export type NetworkProvider = 'brave' | 'tavily'
+/** 渲染层只能看到「开没开、用哪家、有没有密钥」；密文与明文密钥都不出主进程。 */
+export type NetworkConfigView = { enabled: boolean; provider: NetworkProvider | null; hasKey: boolean }
+/** 总开关的写入请求（`network:config` 不带参数时只读）。 */
+export type NetworkConfigSetRequest = { enabled: boolean }
+export type NetworkProviderSaveRequest = { provider: NetworkProvider; key: string }
+export type NetworkConfigResult = { ok: true; config: NetworkConfigView } | { ok: false; error: string }
 /** 网络事件只带主机与去查询串的路径，不带正文、密钥或查询参数。 */
-export type AgentNetworkEvent = { taskId: string; kind: 'fetch'; host: string; path: string; bytes?: number; truncated?: boolean; at: string }
+export type AgentNetworkEvent = {
+  taskId: string
+  /** 成功抓页且存了预览时才有；搜索不存预览，因此没有 id。 */
+  id?: string
+  kind: 'fetch' | 'search'
+  host: string
+  path: string
+  provider?: NetworkProvider
+  bytes?: number
+  truncated?: boolean
+  at: string
+}
 export type AgentEvent = {
   id: string
   relPath: string

@@ -42,6 +42,9 @@ import {
   type AgentStartResult,
   type NetworkPreviewRequest,
   type NetworkPreviewResult,
+  type NetworkConfigResult,
+  type NetworkConfigSetRequest,
+  type NetworkProviderSaveRequest,
   type AgentTaskView,
   type AgentEvent,
   type EntryCreateRequest,
@@ -181,6 +184,10 @@ const api = {
   agentCancel: (id: string): Promise<boolean> => invoke(IPC.agentCancel, id),
   networkStop: (taskId: string): Promise<boolean> => invoke(IPC.networkStop, taskId),
   networkPreview: (request: NetworkPreviewRequest): Promise<NetworkPreviewResult> => invoke(IPC.networkPreview, request),
+  /** 不带参数只读；带 `{enabled}` 保存总开关（保存即生效，不发测试请求）。 */
+  networkConfig: (request?: NetworkConfigSetRequest): Promise<NetworkConfigResult> => invoke(IPC.networkConfig, request),
+  networkProviderSave: (request: NetworkProviderSaveRequest): Promise<NetworkConfigResult> => invoke(IPC.networkProviderSave, request),
+  networkProviderClear: (): Promise<NetworkConfigResult> => invoke(IPC.networkProviderClear),
   agentTasks: (): Promise<AgentTaskView[]> => invoke(IPC.agentTasks),
   onAgentEvent: (handler: (payload: AgentEvent) => void): (() => void) =>
     subscribe(IPC.agentEvent, (payload) => handler(payload as AgentEvent)),

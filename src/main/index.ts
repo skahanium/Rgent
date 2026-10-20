@@ -28,6 +28,7 @@ import { isChromeTextPreference } from '../shared/reading-preference.ts'
 import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, RelocationPreviewRequest, RelocationPreviewView, ModelAddRequest, ModelConfigResult, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult, TrashCommitResult, TrashPreviewResult, TrashPreviewView } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import type { NetworkPreviewRequest, NetworkPreviewResult } from '../shared/ipc.ts'
+import type { NetworkConfigResult, NetworkProviderSaveRequest } from '../shared/ipc.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { loadAssistantHabits, saveAssistantHabits } from './assistant-preference.ts'
 import { createSkillsStore } from './skills-store.ts'
@@ -43,7 +44,8 @@ import { VAULT_MEDIA_SCHEME } from '../shared/vault-rel.ts'
 import { VaultSession } from './vault.ts'
 import { fetchModelList } from './model-list.ts'
 import { createModelConfigStore, type ModelConfigStore } from './model-config.ts'
-import { createNetworkConfigStore, type NetworkConfigStore } from './network-config.ts'
+import { createNetworkConfigStore, type NetworkConfigStore, type NetworkCredential } from './network-config.ts'
+import { createSearchProvider, SEARCH_PROVIDERS } from './search.ts'
 import { fetchText } from './text-fetch.ts'
 import { TaskAuthorizationRegistry, isAuthorizationCommand } from './task-authorization.ts'
 import { createScopedAgentTools } from './scoped-agent-tools.ts'
@@ -88,13 +90,17 @@ let modelConfig: ModelConfigStore | null = null
 let modelConfigError: string | null = null
 let networkConfig: NetworkConfigStore | null = null
 let agentHost: AgentHost | null = null
-/** 联网只读的总闸与（P4 的）服务配置都在主进程判定；渲染层只拿摘要。 */
-function networkAvailability(): { available: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' } {
+/** 联网只读的可用性：抓页只依赖总闸；搜索另要求预设服务与密钥可用。渲染层只拿摘要。
+ *  配置保存后立即生效：这里按需读文件、不缓存，下一次判定自然看到新值。 */
+function networkAvailability(): { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' } {
   try {
-    if (!networkConfig?.enabled()) return { available: false, providerHost: null, reason: 'off' }
-    // P3 只有内置抓页，不需要服务端凭据；搜索服务主机与 key 由 P4 补。
-    return { available: true, providerHost: null }
-  } catch { return { available: false, providerHost: null, reason: 'off' } }
+    if (!networkConfig?.enabled()) return { available: false, search: false, providerHost: null, reason: 'off' }
+    // 抓页不需要服务商：总闸开着就可抓。服务商或密钥没配好（含密文解不开）只关搜索。
+    let credential: NetworkCredential | null = null
+    try { credential = networkConfig.credential() } catch { credential = null }
+    if (!credential) return { available: true, search: false, providerHost: null, reason: 'not-configured' }
+    return { available: true, search: true, providerHost: SEARCH_PROVIDERS[credential.provider].host }
+  } catch { return { available: false, search: false, providerHost: null, reason: 'off' } }
 }
 
 let authorizations: TaskAuthorizationRegistry | null = null
@@ -843,6 +849,66 @@ function registerIpc(): void {
     const preview = agentHost.preview(request.taskId, request.id)
     return preview ? { ok: true, preview } : { ok: false, error: 'STALE_PREVIEW' }
   })
+  const networkView = (): NetworkConfigResult => networkConfig
+    ? { ok: true, config: networkConfig.getPublic() }
+    : { ok: false, error: 'BAD_NETWORK_CONFIG' }
+  const networkWrite = (run: () => import('../shared/ipc.ts').NetworkConfigView): NetworkConfigResult => {
+    if (!networkConfig) return { ok: false, error: 'BAD_NETWORK_CONFIG' }
+    try { return { ok: true, config: run() } }
+    // 只把机读错误码回渲染层；文件系统原文（可能带路径）不外泄。
+    catch (error) {
+      const message = error instanceof Error ? error.message : ''
+      return { ok: false, error: /^[A-Z][A-Z0-9_]{1,63}$/u.test(message) ? message : 'IO_ERROR' }
+    }
+  }
+  /** 配置前后只比对「服务商／是否有密钥／密钥本身」；密钥只留在主进程内存里。 */
+  type NetworkCredentialSnapshot = { provider: string | null; hasKey: boolean; key: string | null }
+  const networkCredentialSnapshot = (): NetworkCredentialSnapshot => {
+    let provider: string | null = null
+    let hasKey = false
+    let key: string | null = null
+    try { const view = networkConfig?.getPublic(); provider = view?.provider ?? null; hasKey = view?.hasKey === true } catch { /* fail closed */ }
+    try { key = networkConfig?.credential()?.key ?? null } catch { key = null }
+    return { provider, hasKey, key }
+  }
+  const networkCredentialChanged = (before: NetworkCredentialSnapshot): boolean => {
+    const after = networkCredentialSnapshot()
+    return before.provider !== after.provider || before.hasKey !== after.hasKey || before.key !== after.key
+  }
+  /** 总开关：不带参数只读，带 `{enabled}` 保存并立即生效（下一次可用性判定直接读新值）。 */
+  registerTrustedHandle(IPC.networkConfig, (event, value: unknown): NetworkConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    if (value === undefined) return networkView()
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'BAD_REQUEST' }
+    const record = value as Record<string, unknown>
+    if (Object.keys(record).some(key => key !== 'enabled') || typeof record.enabled !== 'boolean') return { ok: false, error: 'BAD_REQUEST' }
+    const enabled = record.enabled as boolean
+    const result = networkWrite(() => networkConfig!.setEnabled(enabled))
+    // 关闭总闸即撤销所有活动任务的联网能力与在途请求；任务本身继续收尾（C11）。
+    if (result.ok && enabled === false) agentHost?.revokeNetworkForAll()
+    return result
+  })
+  /** 保存服务商与密钥：**不发任何测试请求**；key 只进加密存储，不回渲染层。 */
+  registerTrustedHandle(IPC.networkProviderSave, (event, value: unknown): NetworkConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'BAD_REQUEST' }
+    const request = value as Partial<NetworkProviderSaveRequest>
+    if (Object.keys(value).some(key => key !== 'provider' && key !== 'key')) return { ok: false, error: 'BAD_REQUEST' }
+    if (request.provider !== 'brave' && request.provider !== 'tavily') return { ok: false, error: 'BAD_REQUEST' }
+    if (typeof request.key !== 'string') return { ok: false, error: 'BAD_REQUEST' }
+    const before = networkCredentialSnapshot()
+    const result = networkWrite(() => networkConfig!.setProvider(request.provider!, request.key!))
+    // 服务商或密钥变了：已宣告的搜索目标作废，所有活动任务撤网并 abort 在途请求。
+    if (result.ok && networkCredentialChanged(before)) agentHost?.revokeNetworkForAll()
+    return result
+  })
+  registerTrustedHandle(IPC.networkProviderClear, (event): NetworkConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const before = networkCredentialSnapshot()
+    const result = networkWrite(() => networkConfig!.clearProvider())
+    if (result.ok && networkCredentialChanged(before)) agentHost?.revokeNetworkForAll()
+    return result
+  })
   registerTrustedHandle(IPC.remoteImageGet, async (_event, value: unknown): Promise<RemoteImageGetResult> => {
     if (!remoteImages || !vault || !value || typeof value !== 'object') return { ok: false, error: 'NOT_ALLOWED' }
     const request = value as import('../shared/ipc.ts').RemoteImageGetRequest
@@ -1499,7 +1565,8 @@ if (ownsInstance) app.whenReady().then(() => {
     },
     release: () => {if(rootRecoveryHold){mainWindow?.webContents.send(IPC.lifecycleFlushRequest,rootRecoveryHold.operationId,[],'recovery-release',rootRecoveryHold);rootRecoveryHold=null}send(IPC.vaultTransition,{busy:false,session:vault?.sessionId()??null,phase:'idle'})}
   })
-  networkConfig = createNetworkConfigStore(app.getPath('userData'))
+  // 搜索密钥与模型密钥同一套保护：safeStorage 加密后进 network-config.json，明文只在主进程。
+  networkConfig = createNetworkConfigStore(app.getPath('userData'), safeStorage)
   authorizations = new TaskAuthorizationRegistry({
     root:()=>{try{return vault?.requireUsableRoot()??null}catch{return null}},
     session:()=>vault?.sessionId()??null,
@@ -1653,6 +1720,21 @@ if (ownsInstance) app.whenReady().then(() => {
           bytes: result.bytes,
           truncated: result.truncated,
           lowTrust: true as const
+        }
+      },
+      // 搜索走同一出口核心；服务商与密钥只在主进程解密，错误码不夹带 key。
+      search: async (query, maxResults, signal) => {
+        let credential: NetworkCredential | null = null
+        try { credential = networkConfig?.credential() ?? null }
+        catch { credential = null }
+        if (!credential) throw Error('SEARCH_NOT_CONFIGURED')
+        const provider = createSearchProvider(credential)
+        const result = await provider.search(query, { maxResults, signal })
+        return {
+          provider: credential.provider,
+          host: SEARCH_PROVIDERS[credential.provider].host,
+          results: result.results,
+          ...(result.truncated ? { truncated: true as const } : {})
         }
       },
       availability: networkAvailability

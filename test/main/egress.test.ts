@@ -7,7 +7,7 @@ const PUBLIC_V4: ImageAddress = { address: '93.184.216.34', family: 4 }
 const PUBLIC_V6: ImageAddress = { address: '2606:4700:4700::1111', family: 6 }
 const PAYLOAD = Uint8Array.from([1, 2, 3, 4])
 type Resolve = (hostname: string) => Promise<ImageAddress[]>
-type Request = (url: URL, address: ImageAddress, signal: AbortSignal, headers?: Record<string, string>) => Promise<Response>
+type Request = (url: URL, address: ImageAddress, signal: AbortSignal, headers?: Record<string, string>, init?: { method?: 'GET' | 'POST'; body?: string }) => Promise<Response>
 const reply = (body: BodyInit | null = PAYLOAD, headers: Record<string, string> = {}): Response =>
   new Response(body, { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8', ...headers } })
 const redirect = (location: string): Response => new Response(null, { status: 302, headers: { location } })
@@ -291,5 +291,32 @@ describe('egress core', () => {
     releases[1]()
     expect((await Promise.all([first, second])).every(result => result.ok)).toBe(true)
     expect(deps.request).toHaveBeenCalledTimes(2)
+  })
+  it('sends one POST with the policy body and the same pinned address', async () => {
+    const deps = fake()
+    const result = await make(deps, { method: 'POST', body: '{"query":"汉"}' }).fetch('https://api.example/search')
+    expect(result).toMatchObject({ ok: true, status: 200, finalUrl: 'https://api.example/search', redirects: 0 })
+    expect(deps.resolve).toHaveBeenCalledTimes(1)
+    expect(deps.request).toHaveBeenCalledTimes(1)
+    expect(deps.request).toHaveBeenCalledWith(
+      new URL('https://api.example/search'), PUBLIC_V4, expect.any(AbortSignal),
+      { 'accept-encoding': 'identity' }, { method: 'POST', body: '{"query":"汉"}' }
+    )
+  })
+  it('refuses any 3xx for POST instead of falling back to GET, even with an explicit budget', async () => {
+    for (const maxRedirects of [undefined, 3]) {
+      const deps = fake(async () => redirect('https://other.example/a'))
+      const result = await make(deps, { method: 'POST', body: '{}', ...(maxRedirects === undefined ? {} : { maxRedirects }) }).fetch('https://api.example/search')
+      expect(result).toEqual({ ok: false, error: 'UNAVAILABLE' })
+      expect(deps.request).toHaveBeenCalledTimes(1)
+      expect(deps.request.mock.calls[0]![4]).toEqual({ method: 'POST', body: '{}' })
+    }
+  })
+  it('keeps GET at four request arguments', async () => {
+    const deps = fake(vi.fn().mockResolvedValueOnce(redirect('/next')).mockResolvedValue(reply()))
+    expect((await make(deps).fetch('https://images.example/a')).ok).toBe(true)
+    expect(deps.request).toHaveBeenCalledTimes(2)
+    expect(deps.request.mock.calls[0]).toHaveLength(4)
+    expect(deps.request.mock.calls[1]).toHaveLength(4)
   })
 })

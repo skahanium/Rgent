@@ -26,13 +26,16 @@ export type SentSummary = {
   dependencies: {sourceId:string;hash:string;provenance?:LedgerProvenance}[]
 }
 
-/** 一次联网只读抓取的审计条目：只进账本记录，不进笔记正文，也不含查询串与正文。 */
+/** 一次联网只读外发的审计条目：只进账本记录，不进笔记正文，也不含正文。
+ *  `fetch` 记主机与去查询串的路径；`search` 的 path 为空，另记截断到 120 字的查询。 */
 export type LedgerNetworkEntry = {
   at: string
-  action: 'fetch'
+  action: 'fetch' | 'search'
   host: string
-  /** pathname（去查询串），最长 120 字。 */
+  /** pathname（去查询串），最长 120 字；搜索用空串。 */
   path: string
+  /** 只对 search 出现：查询截断到 120 字。 */
+  query?: string
   bytes?: number
   truncated?: boolean
   outcome: string

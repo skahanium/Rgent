@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { isIP } from 'node:net'
 import ipaddr from 'ipaddr.js'
-import { resolveImageAddresses, requestPinnedImage, type ImageAddress } from './remote-image-transport.ts'
+import { resolveImageAddresses, requestPinnedImage, type ImageAddress, type PinnedRequestInit } from './remote-image-transport.ts'
 
 export type EgressError =
   | 'INVALID_URL' | 'HTTP_REFUSED' | 'CROSS_ORIGIN_REFUSED'
@@ -17,12 +17,16 @@ export type EgressPolicy = {
   allowedPorts?: readonly number[]
   requireIdentityEncoding?: boolean
   resolve?: (hostname: string) => Promise<ImageAddress[]>
-  request?: (url: URL, address: ImageAddress, signal: AbortSignal, headers?: Record<string, string>) => Promise<Response>
+  /** 第 5 个 `init` 只在 POST 时传入；既有 4 参调用方（图片／抓页）行为不变。 */
+  request?: (url: URL, address: ImageAddress, signal: AbortSignal, headers?: Record<string, string>, init?: PinnedRequestInit) => Promise<Response>
   maxBytes?: number
   timeoutMs?: number
   maxActive?: number
   maxWaiting?: number
   maxRedirects?: number
+  /** 只给预设端点的单次查询：默认 GET；POST 时 `body` 必须是完整的 JSON 字符串。 */
+  method?: 'GET' | 'POST'
+  body?: string
 }
 export type EgressOk = { ok: true; bytes: Uint8Array; status: number; finalUrl: string; headers: Record<string, string>; redirects: number }
 export type EgressConfirm = { ok: false; error: 'HTTP_CONFIRM' | 'REDIRECT_CONFIRM'; url: string; continuation: string }
@@ -50,6 +54,8 @@ export class EgressClient {
   private readonly maxActive: number
   private readonly maxWaiting: number
   private readonly maxRedirects: number
+  private readonly method: 'GET' | 'POST'
+  private readonly body?: string
   private readonly continuations = new Map<string, Attempt>()
   private active = 0
   private readonly waiting: Array<{ start: () => void; cancel: () => void }> = []
@@ -64,7 +70,10 @@ export class EgressClient {
     this.timeoutMs = policy.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.maxActive = policy.maxActive ?? DEFAULT_MAX_ACTIVE
     this.maxWaiting = policy.maxWaiting ?? DEFAULT_MAX_WAITING
-    this.maxRedirects = policy.maxRedirects ?? DEFAULT_MAX_REDIRECTS
+    this.method = policy.method === 'POST' ? 'POST' : 'GET'
+    // 非 GET 的默认重定向预算就是 0；调用方显式给值也不改变下面「POST 不跟随」的硬规则。
+    this.maxRedirects = policy.maxRedirects ?? (this.method === 'GET' ? DEFAULT_MAX_REDIRECTS : 0)
+    this.body = this.method === 'POST' ? policy.body ?? '' : undefined
   }
   async fetch(raw: string, options: FetchOptions = {}): Promise<EgressResult> {
     for (const [key, value] of this.continuations) if (value.deadline <= Date.now()) this.continuations.delete(key)
@@ -120,6 +129,11 @@ export class EgressClient {
     const continuation = randomUUID(); this.continuations.set(continuation, attempt)
     return { ok: false, error, url: attempt.current.href, continuation }
   }
+  /** GET 仍然只传 4 个参数：既有 transport 注入方不需要认识第 5 个。 */
+  private requestFor(url: URL, address: ImageAddress, signal: AbortSignal): Promise<Response> {
+    if (this.method === 'POST') return this.request(url, address, signal, IDENTITY_HEADERS, { method: 'POST', body: this.body ?? '' })
+    return this.request(url, address, signal, IDENTITY_HEADERS)
+  }
   private async fetchAttempt(attempt: Attempt, signal: AbortSignal, validate?: () => Promise<boolean>): Promise<EgressResult> {
     for (;;) {
       signal.throwIfAborted()
@@ -131,9 +145,11 @@ export class EgressClient {
       if (!answers.length || answers.some(answer => !publicAddress(answer.address) || isIP(answer.address) !== answer.family)) return fail('INVALID_URL')
       if (validate && !(await untilAbort(validate(), signal))) return fail('UNAVAILABLE')
       signal.throwIfAborted()
-      const response = await untilAbort(this.request(attempt.current, answers[0], signal, IDENTITY_HEADERS), signal)
+      const response = await untilAbort(this.requestFor(attempt.current, answers[0], signal), signal)
       if (response.status >= 300 && response.status < 400) {
         await response.body?.cancel()
+        // 非 GET 只允许预设端点的单次请求：任何 3xx 都拒绝，绝不改写成 GET 跟随。
+        if (this.method !== 'GET') return fail('UNAVAILABLE')
         if (attempt.redirects >= this.maxRedirects) return fail('UNAVAILABLE')
         const location = response.headers.get('location')
         let next: URL | null = null

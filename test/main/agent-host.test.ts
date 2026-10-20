@@ -1184,3 +1184,63 @@ describe('skills in the request', () => {
     expect(app.systems).toHaveLength(0)
   })
 })
+
+describe('start 前复核联网可用性快照', () => {
+  type Availability = { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' }
+  function availabilityHarness(initial: Availability = { available: true, search: true, providerHost: 'api.search.brave.com' }) {
+    const credential = { provider: 'custom' as const, baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 16000, apiKey: 'fixture' }
+    const limits = { seconds: 30, steps: 4, tools: 0 }
+    let content = '/问\n'
+    let availability = initial
+    let streams = 0
+    const read = async () => ({ content, revision: 'r', sessionId: 's', objectVersion: 'o' })
+    const registry = new TaskAuthorizationRegistry({
+      root: () => '/v', session: () => 's',
+      tree: async () => [{ kind: 'note', relPath: 'a.md', name: 'a.md' }],
+      read, tier: async () => 'reference', acceptsObject: () => false,
+      configuration: () => ({ credential, limits }),
+      network: () => availability
+    })
+    const request = {
+      modelRecordId: 'm', relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: 'r',
+      range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', references: [], network: true
+    }
+    const host = new AgentHost({
+      ledger: hostLedgerFixture().ledger,
+      root: () => '/v', session: () => 's', acceptsObject: () => false, tier: async () => 'reference',
+      read, write: async (_path, next) => { content = next; return { revision: 'r2', sessionId: 's', objectVersion: 'o' } },
+      credential: () => credential, limits: () => limits,
+      authorize: input => registry.consume('owner', input as never),
+      stream: async function* () { streams += 1; yield '回答' },
+      emit: () => {}
+    })
+    return {
+      registry, request, host,
+      preview: () => registry.preview('owner', request),
+      setAvailability: (next: Availability) => { availability = next },
+      streams: () => streams,
+      content: () => content
+    }
+  }
+
+  it('rejects start when the search provider changed between preview and start, before any model request', async () => {
+    const app = availabilityHarness()
+    const preview = await app.preview()
+    expect(preview.network).toEqual({ available: true, search: true, providerHost: 'api.search.brave.com' })
+    // 预览后换到另一家：目标主机变了，旧预览不得静默按新配置启动。
+    app.setAvailability({ available: true, search: true, providerHost: 'api.tavily.com' })
+    await expect(app.host.start({ ...app.request, previewId: preview.id })).rejects.toThrow('INVALID_AUTHORIZATION')
+    expect(app.streams()).toBe(0)
+    expect(app.content()).toBe('/问\n')
+  })
+
+  it('rejects start when the master switch was turned off after preview, before any model request', async () => {
+    const app = availabilityHarness()
+    const preview = await app.preview()
+    expect(preview.network).toEqual({ available: true, search: true, providerHost: 'api.search.brave.com' })
+    app.setAvailability({ available: false, search: false, providerHost: null, reason: 'off' })
+    await expect(app.host.start({ ...app.request, previewId: preview.id })).rejects.toThrow('INVALID_AUTHORIZATION')
+    expect(app.streams()).toBe(0)
+    expect(app.content()).toBe('/问\n')
+  })
+})

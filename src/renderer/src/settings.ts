@@ -9,6 +9,7 @@ import { isReadingPreference, READING_FONTS } from '../../shared/reading-prefere
 import { CHROME_TEXT_SIZES, isChromeTextPreference, type ChromeTextPreference } from '../../shared/reading-preference.ts'
 import type { ChromeTextSetResult } from '../../shared/ipc.ts'
 import { mountModelPage, modelPageAvailable, type ModelPageHandlers } from './settings-model.ts'
+import { mountNetworkCard, type NetworkCardHandlers } from './settings-network.ts'
 import { mountSkillsPage, type SkillsPageHandlers } from './settings-skills.ts'
 import { ASSISTANT_LIMITS, ASSISTANT_TONE_LABELS, ASSISTANT_TONES, DEFAULT_ASSISTANT_HABITS, isAssistantHabits, type AssistantHabits, type AssistantTone } from '../../shared/assistant.ts'
 import { openOverlay, type Overlay } from './overlay.ts'
@@ -28,6 +29,8 @@ export type SettingsHandlers = {
   getChromeText?: () => Promise<ChromeTextPreference>
   setChromeText?: (value: ChromeTextPreference) => Promise<ChromeTextSetResult>
   getConfig?: () => Promise<ModelConfigResult>
+  /** 「模型」页末尾的联网只读卡片；只写设备配置，不发测试请求。 */
+  network?: () => NetworkCardHandlers | null
   saveProvider?: (request: ModelProviderSaveRequest) => Promise<ModelConfigResult>
   removeProvider?: (request: ModelProviderRemoveRequest) => Promise<ModelConfigResult>
   deleteKey?: (request: ModelKeyDeleteRequest) => Promise<ModelConfigResult>
@@ -472,13 +475,24 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       disposeModelPage?.()
       disposeModelPage = null
       const { body, error } = pageFrame('模型', '配置连接与模型。密钥只保存在此设备；设备默认在助手页保存，底栏可为下一场临时选择。')
-      disposeModelPage = mountModelPage({
+      // 联网只读卡片挂在既有「模型」页末尾：不新增页、不新增导航项。
+      const network = handlers.network?.() ?? null
+      let trailing: HTMLElement | null = null
+      let disposeNetwork: (() => void) | null = null
+      if (network) {
+        trailing = document.createElement('section')
+        trailing.className = 'settings-network'
+        disposeNetwork = mountNetworkCard({ body: trailing, isCurrent: () => current.isOpen() && openedPage === '模型' }, network)
+      }
+      const disposeModel = mountModelPage({
         body,
         showError: (message) => showError(error, message),
         configErrorText,
         isCurrent: () => current.isOpen() && openedPage === '模型',
-        onChanged: () => handlers.onModelConfigChanged?.()
+        onChanged: () => handlers.onModelConfigChanged?.(),
+        ...(trailing ? { trailing } : {})
       }, page)
+      disposeModelPage = () => { disposeModel(); disposeNetwork?.(); disposeNetwork = null }
     }
 
     async function renderRunPage(): Promise<void> {

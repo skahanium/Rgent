@@ -41,7 +41,7 @@ export type HostEvent = {
   sessionId?: string
   objectVersion?: string
   activity?: string
-  /** 一次联网抓取的状态行摘要：只带主机与去查询串的路径，不带正文。 */
+  /** 一次联网只读外发的状态行摘要：只带主机、去查询串的路径与服务商，不带正文与查询。 */
   network?: AgentNetworkEvent
 }
 
@@ -67,8 +67,8 @@ export type HostStart = Partial<ObjectBinding> & {
 }
 
 export /** 过程只记「调了什么、结果如何」，不铺工具返回的正文。
- *  抓页只留主机（查询串与正文都不进过程）。 */
-function toolTraceLine(call: { name: string; input: unknown }, failure?: string, network?: { host?: string; bytes?: number; truncated?: boolean }): string {
+ *  抓页只留主机（查询串与正文都不进过程）；搜索只留截 80 字的查询或服务商名。 */
+function toolTraceLine(call: { name: string; input: unknown }, failure?: string, network?: { host?: string; bytes?: number; truncated?: boolean; provider?: string }): string {
   if (call.name === 'fetch_url') {
     const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
     let host = network?.host ?? ''
@@ -76,6 +76,14 @@ function toolTraceLine(call: { name: string; input: unknown }, failure?: string,
     const label = host ? `抓网页「${host}」` : '抓网页'
     if (failure) return `工具 ${label}：未执行（${failure}）`
     return `工具 ${label}：已执行（${formatBytes(network?.bytes ?? 0)}，低信任${network?.truncated ? '/截断' : ''}）`
+  }
+  if (call.name === 'search_web') {
+    const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
+    const query = typeof input.query === 'string' ? input.query.replace(/\s+/g, ' ').slice(0, 80) : ''
+    // 不写链接与摘要；没有查询可截时退回服务商名。
+    const label = query ? `搜索「${query}」` : network?.provider ? `搜索（${network.provider}）` : '搜索'
+    if (failure) return `工具 ${label}：未执行（${failure}）`
+    return `工具 ${label}：已执行（低信任${network?.provider ? `·${network.provider}` : ''}）`
   }
   const label = call.name === 'read_library' ? '读库' : call.name === 'search_library' ? '搜库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name === 'delete_note' ? '删笔记' : call.name==='search_memory'?'检索记忆':call.name
   const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
@@ -99,6 +107,13 @@ function networkTraceOf(value: unknown): { host: string; bytes: number; truncate
     bytes: typeof record.bytes === 'number' ? record.bytes : 0,
     truncated: record.truncated === true
   }
+}
+
+/** 搜索过程行只带服务商名（查询另行截 80 字），不铺链接与摘要。 */
+function searchTraceOf(value: unknown): { provider?: string } | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const provider = (value as Record<string, unknown>).provider
+  return typeof provider === 'string' ? { provider } : undefined
 }
 
 /** 只取主机与去查询串的路径；解析不了就不记账（绝不把原文塞进账本）。 */
@@ -148,12 +163,18 @@ export type HostDependencies = {
   onTaskMaterialResult?: (result: {sessionId?: string; taskId: string; status: 'handed-off' | 'unavailable' | 'failed'; reason?: string}) => void
   memory?: MemoryUsePort
   createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker, write?: ScopedWriteTool, network?: ScopedNetworkTool) => ScopedAgentTools
-  /** 联网只读能力（P3 只有抓页，P4 再接搜索）：出口、偷渡词片与可用性都由主进程给。 */
+  /** 联网只读能力：出口、偷渡词片与可用性都由主进程给。搜索只在服务商与密钥配置好后出现。 */
   network?: {
     fetch(url: string, signal: AbortSignal): Promise<{ text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true }>
+    search?(query: string, maxResults: number, signal: AbortSignal): Promise<{
+      provider: 'brave' | 'tavily'
+      host: string
+      results: { title: string; url: string; snippet: string }[]
+      truncated?: boolean
+    }>
     /** 额外的偷渡词片（例如搜索服务）；授权来源正文由 Host 在任务开始时建。 */
     echoShingles?: Set<string>
-    availability(): { available: boolean; providerHost: string | null; reason?: string }
+    availability(): { available: boolean; search: boolean; providerHost: string | null; reason?: string }
   }
   /** 「建」需要人在预览里点一下同意；没有这个入口就不宣告该工具。 */
   /** 人确认：建是「落点＋正文」，改名／挪是「旧路径 → 新路径＋影响面」，删是「路径＋是否带附件夹」。 */
@@ -356,6 +377,17 @@ export class AgentHost {
     for (const controller of this.networkAborts.get(id) ?? []) controller.abort()
     return true
   }
+  /** 设备级配置变了（关总闸／换服务商或密钥）：所有活动任务一起撤网并 abort 在途请求，
+   *  但**不取消任务**——回答与账本照常收尾，后续联网调用按 NETWORK_NOT_AUTHORIZED 拒。
+   *  返回被撤网的任务数。 */
+  revokeNetworkForAll(): number {
+    const tasks = this.active()
+    for (const task of tasks) {
+      this.grants.get(`${task.root}\0${task.relPath}`)?.revokeNetwork()
+      for (const controller of this.networkAborts.get(task.id) ?? []) controller.abort()
+    }
+    return tasks.length
+  }
   /** 只读预览：只给包裹前的纯文本；未知 id 或任务结束后返回 null。 */
   preview(taskId: string, id: string): NetworkPreviewView | null {
     const entry = this.networkPreviews.get(taskId)?.get(id)
@@ -495,8 +527,12 @@ export class AgentHost {
       const libraryReadEnabled = Boolean(grant && originPath && grant.sources.some(source => source.relPath !== originPath))
       const structuralTargets = Boolean(grant && originPath && grant.sources.some(source => source.relPath !== originPath && source.tier !== 'follow'))
       // 联网只读：总闸可用 + 本场勾选授权两条都在才算启用；任何一条不在都不宣告、不注册。
-      const networkAvailable = (() => { try { return this.deps.network?.availability().available === true } catch { return false } })()
+      const availability = (() => { try { return this.deps.network?.availability() ?? null } catch { return null } })()
+      const networkAvailable = availability?.available === true
+      // `available` 管抓页（只依赖总闸与本场授权）；`search` 另要求预设服务与密钥可用。
       const networkEnabled = networkAvailable && !!grant?.network && !!this.deps.network
+      const searchEnabled = Boolean(networkEnabled && availability?.search === true)
+      const searchHost = searchEnabled ? availability?.providerHost ?? '' : ''
       const networkEcho = new Set<string>(networkEnabled ? this.deps.network?.echoShingles ?? [] : [])
       if (networkEnabled && grant) for (const shingle of await this.networkEchoSet(grant, original.content)) networkEcho.add(shingle)
       const networkLog: LedgerNetworkEntry[] = []
@@ -507,19 +543,24 @@ export class AgentHost {
         this.networkPreviews.set(id, networkPreviews)
         this.networkAborts.set(id, networkAborts)
       }
-      const recordNetwork = (at: string, target: { host: string; path: string } | null, outcome: string, extra: { bytes?: number; truncated?: boolean } = {}): void => {
+      type NetworkRecordTarget = { action: 'fetch' | 'search'; host: string; path: string; query?: string }
+      const recordNetwork = (at: string, target: NetworkRecordTarget | null, outcome: string, extra: { bytes?: number; truncated?: boolean } = {}): void => {
         if (!target?.host) return
         if (networkLog.length >= NETWORK_LEDGER_LIMIT) return
-        networkLog.push({ at, action: 'fetch', host: target.host, path: target.path, ...extra, outcome })
+        networkLog.push({ at, action: target.action, host: target.host, path: target.path, ...(target.query ? { query: target.query } : {}), ...extra, outcome })
       }
+      const fetchTarget = (target: { host: string; path: string } | null): NetworkRecordTarget | null => target ? { action: 'fetch', ...target } : null
+      // 搜索查询进账本前截到 120 字，且只进这一场的账本章节。
+      const searchTarget = (query: string, host = searchHost): NetworkRecordTarget => ({ action: 'search', host, path: '', ...(query ? { query: query.slice(0, 120) } : {}) })
       const networkGrant = networkEnabled ? grant : undefined
+      const searchTool = searchHost ? this.deps.network?.search : undefined
       const networkTool: ScopedNetworkTool | undefined = networkGrant && this.deps.network ? {
         fetch: async (url, signal) => {
           const at = new Date().toISOString()
           const target = networkTarget(url)
           try { networkGrant.assertNetwork() } catch (error) {
             // 已「停止联网」：如实记 refused，工具层按可继续错误交回模型。
-            recordNetwork(at, target, `refused:${errorCode(error)}`)
+            recordNetwork(at, fetchTarget(target), `refused:${errorCode(error)}`)
             throw error
           }
           const controller = new AbortController()
@@ -533,26 +574,68 @@ export class AgentHost {
             // 同源重定向后以最终地址为准；账本与状态行都只记 host + pathname。
             const finalTarget = networkTarget(result.url) ?? target
             // 预览只存**包裹前**的纯文本，人看到的不是模型看到的低信任包裹。
+            let previewId: string | undefined
             try {
               if (networkPreviews.size >= NETWORK_PREVIEW_LIMIT) networkPreviews.delete(networkPreviews.keys().next().value!)
               if (Buffer.byteLength(result.text, 'utf8') <= NETWORK_PREVIEW_BYTES) {
-                networkPreviews.set(randomUUID(), { text: result.text, url: result.url, ...(result.title ? { title: result.title } : {}), bytes: result.bytes, truncated: result.truncated, fetchedAt: at })
+                previewId = randomUUID()
+                networkPreviews.set(previewId, { text: result.text, url: result.url, ...(result.title ? { title: result.title } : {}), bytes: result.bytes, truncated: result.truncated, fetchedAt: at })
               }
             } catch { /* 预览只是给人看的缓存；存不下不影响工具结果 */ }
-            recordNetwork(at, finalTarget, 'ok', { bytes: result.bytes, truncated: result.truncated })
+            recordNetwork(at, fetchTarget(finalTarget), 'ok', { bytes: result.bytes, truncated: result.truncated })
             this.deps.emit({
               ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running',
-              network: { taskId: id, kind: 'fetch', host: result.host, path: finalTarget?.path ?? '', bytes: result.bytes, truncated: result.truncated, at }
+              // 成功抓页带预览 id，界面才能在任务结束后按合同失效前取一次纯文本。
+              network: { taskId: id, ...(previewId ? { id: previewId } : {}), kind: 'fetch', host: result.host, path: finalTarget?.path ?? '', bytes: result.bytes, truncated: result.truncated, at }
             })
             return result
           } catch (error) {
-            recordNetwork(at, target, `refused:${errorCode(error)}`)
+            recordNetwork(at, fetchTarget(target), `refused:${errorCode(error)}`)
             throw error
           } finally {
             signal.removeEventListener('abort', abort)
             networkAborts.delete(controller)
           }
-        }
+        },
+        ...(searchTool ? {
+          search: async (query: string, maxResults: number, signal: AbortSignal) => {
+            const at = new Date().toISOString()
+            const target = searchTarget(query)
+            try { networkGrant.assertNetwork() } catch (error) {
+              recordNetwork(at, target, `refused:${errorCode(error)}`)
+              throw error
+            }
+            const controller = new AbortController()
+            const abort = (): void => controller.abort()
+            if (signal.aborted) controller.abort()
+            signal.addEventListener('abort', abort, { once: true })
+            networkAborts.add(controller)
+            try {
+              const result = await searchTool(query, maxResults, controller.signal)
+              if (controller.signal.aborted) throw Error('EGRESS_ABORTED')
+              const finalHost = result.host || searchHost
+              const truncated = result.truncated === true
+              // 搜索不存预览：没有可读的网页正文，P5 之前也不做结果浮层。
+              recordNetwork(at, searchTarget(query, finalHost), 'ok', truncated ? { truncated } : {})
+              this.deps.emit({
+                ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running',
+                network: { taskId: id, kind: 'search', host: finalHost, path: '', provider: result.provider, ...(truncated ? { truncated } : {}), at }
+              })
+              return result
+            } catch (error) {
+              // 停止联网／任务取消时出口核心只报 SEARCH_REFUSED；这里按 abort 还原成取消语义。
+              if (controller.signal.aborted) {
+                recordNetwork(at, target, 'refused:EGRESS_ABORTED')
+                throw Error('EGRESS_ABORTED')
+              }
+              recordNetwork(at, target, `refused:${errorCode(error)}`)
+              throw error
+            } finally {
+              signal.removeEventListener('abort', abort)
+              networkAborts.delete(controller)
+            }
+          }
+        } : {})
       } : undefined
       // 补／建跟读搜拆开：仅发起篇也必须能补、能建；读库／搜库仍要范围内另有篇。
       const write = grant ? this.writeCapability(grant, root, input.relPath, id) : undefined
@@ -563,16 +646,17 @@ export class AgentHost {
       const structuralEnabled = Boolean(structuralTargets && write?.rename && write?.move && scoped?.renames)
       const deleteEnabled = Boolean(structuralTargets && write?.delete && scoped?.deletes)
       const networkRegistered = Boolean(networkEnabled && scoped?.networks)
+      const searchRegistered = Boolean(searchEnabled && scoped?.searches)
       const memorySearchEnabled=input.memorySearchAuthorized===true&&!!grant&&!!memory?.searchable&&!!this.deps.streamStep&&this.supportsMemorySearch(credential)
-      const toolsEnabled=libraryReadEnabled||writeEnabled||createEnabled||structuralEnabled||deleteEnabled||networkRegistered||memorySearchEnabled
+      const toolsEnabled=libraryReadEnabled||writeEnabled||createEnabled||structuralEnabled||deleteEnabled||networkRegistered||searchRegistered||memorySearchEnabled
       // 只有当这套工具**确实**带写入能力时才把写工具宣告给模型，避免宣告了却执行不了。
-      const toolSchemas={...(libraryReadEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(structuralEnabled?{rename_note:WRITE_TOOL_SCHEMAS.rename_note,move_note:WRITE_TOOL_SCHEMAS.move_note}:{}),...(deleteEnabled?{delete_note:WRITE_TOOL_SCHEMAS.delete_note}:{}),...(networkRegistered?{fetch_url:NETWORK_TOOL_SCHEMAS.fetch_url}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
+      const toolSchemas={...(libraryReadEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(structuralEnabled?{rename_note:WRITE_TOOL_SCHEMAS.rename_note,move_note:WRITE_TOOL_SCHEMAS.move_note}:{}),...(deleteEnabled?{delete_note:WRITE_TOOL_SCHEMAS.delete_note}:{}),...(networkRegistered?{fetch_url:NETWORK_TOOL_SCHEMAS.fetch_url}:{}),...(searchRegistered?{search_web:NETWORK_TOOL_SCHEMAS.search_web}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
       let memorySearchCalls=0,memorySearchFailures=0
       const memoryToolOutcomes:{name:string;outcome:string}[]=[]
       // 偷渡检测在调用工具前做：命中的调用不进 execute，账本记 refused:EGRESS_CONTENT_ECHO。
       const networkToolOutcomes:{name:string;outcome:string}[]=[]
       let successfulLibraryTool=false
-      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled || deleteEnabled || networkRegistered) && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
+      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled || deleteEnabled || networkRegistered || searchRegistered) && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
       if (scoped) this.scoped.set(key, scoped)
       const marked = markPrompt(original.content, { ...input, taskId: id })
       const submitted = promptBlock(marked, id)
@@ -785,7 +869,7 @@ export class AgentHost {
           for (const call of calls) {
             if (this.structuralMoves.has(id)) break
             await guard()
-            const registered = libraryReadEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||structuralEnabled&&(call.name==='rename_note'||call.name==='move_note')||deleteEnabled&&call.name==='delete_note'||networkRegistered&&call.name==='fetch_url'||call.name==='search_memory'&&memorySearchEnabled
+            const registered = libraryReadEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||structuralEnabled&&(call.name==='rename_note'||call.name==='move_note')||deleteEnabled&&call.name==='delete_note'||networkRegistered&&call.name==='fetch_url'||searchRegistered&&call.name==='search_web'||call.name==='search_memory'&&memorySearchEnabled
             const duplicate = usedIds.has(call.id)
             usedIds.add(call.id)
             // Duplicate IDs cannot enter provider messages. A fresh internal refusal ID preserves their order.
@@ -795,17 +879,22 @@ export class AgentHost {
             let value: unknown
             if (this.structuralMoves.has(id)) break
             // 偷渡检测：外发前在本场授权来源的词片集里查一遍（含百分号解码形式）。
-            if (!failure && call.name === 'fetch_url' && networkRegistered) {
-              const requested = call.input && typeof call.input === 'object' ? (call.input as Record<string, unknown>).url : undefined
+            // 搜索的查询串与抓页的网址走同一道检查，命中就都不外发。
+            if (!failure && (call.name === 'fetch_url' && networkRegistered || call.name === 'search_web' && searchRegistered)) {
+              const requested = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
               if (networkEcho.size && containsEcho(networkEcho, JSON.stringify(call.input))) {
                 failure = 'EGRESS_CONTENT_ECHO'
                 reportedByTool = true
-                networkToolOutcomes.push({ name: 'fetch_url', outcome: 'refused:EGRESS_CONTENT_ECHO' })
-                recordNetwork(new Date().toISOString(), networkTarget(requested), 'refused:EGRESS_CONTENT_ECHO')
+                networkToolOutcomes.push({ name: call.name, outcome: 'refused:EGRESS_CONTENT_ECHO' })
+                recordNetwork(new Date().toISOString(),
+                  call.name === 'search_web'
+                    ? searchTarget(typeof requested.query === 'string' ? requested.query : '')
+                    : fetchTarget(networkTarget(requested.url)),
+                  'refused:EGRESS_CONTENT_ECHO')
               }
             }
             if (!failure) {
-              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name === 'delete_note' ? '删笔记' : call.name === 'fetch_url' ? '抓网页' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
+              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name === 'delete_note' ? '删笔记' : call.name === 'fetch_url' ? '抓网页' : call.name === 'search_web' ? '搜索网页' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
               try {
                 if(call.name==='search_memory'){
                   const args=call.input as Record<string,unknown>
@@ -824,7 +913,9 @@ export class AgentHost {
                   'OVER_LIMIT_BYTES','OVER_LIMIT_APPENDS','OVER_LIMIT_NOTES','OVER_LIMIT_SESSION','NOT_ALLOWED',
                   'BAD_NAME','TARGET_EXISTS','ATTACHMENT_SUBTREE','ATTACHMENT_COLLISION','HIDDEN_PATH','CONFLICT','INVARIANT_VIOLATION','DECLINED','ORIGIN_LOCKED','OTHER_TASK_RUNNING','OVER_LIMIT_STRUCTURAL','LINK_REPAIR_OUT_OF_SCOPE','PERMISSION_DOWNGRADE','STALE_PREVIEW','STRUCTURE_BUSY','UNSAVED_DRAFT','PREVIOUS_TASK_UNSAVED','PLATFORM_UNPROVEN','PATH_CHANGED','TRASH_CONFLICT','LANDING_MISMATCH','TRASH_INCOMPLETE',
                   // 联网只读的可预期拒绝／取消：都让模型看见并继续，整场不废。
-                  'NETWORK_NOT_AUTHORIZED','EGRESS_INVALID_URL','EGRESS_HTTP_REFUSED','EGRESS_CROSS_ORIGIN_REFUSED','EGRESS_UNSUPPORTED_TYPE','EGRESS_ENCODING_REFUSED','EGRESS_TOO_LARGE','EGRESS_TIMEOUT','EGRESS_UNAVAILABLE','EGRESS_BUSY','EGRESS_CONTENT_ECHO','EGRESS_ABORTED'].includes(reason)) throw error
+                  'NETWORK_NOT_AUTHORIZED','EGRESS_INVALID_URL','EGRESS_HTTP_REFUSED','EGRESS_CROSS_ORIGIN_REFUSED','EGRESS_UNSUPPORTED_TYPE','EGRESS_ENCODING_REFUSED','EGRESS_TOO_LARGE','EGRESS_TIMEOUT','EGRESS_UNAVAILABLE','EGRESS_BUSY','EGRESS_CONTENT_ECHO','EGRESS_ABORTED',
+                  // 搜索的可预期拒绝：密钥无效、服务拒绝、结构异常、空结果都让模型看见并继续。
+                  'SEARCH_NOT_CONFIGURED','SEARCH_UNAUTHORIZED','SEARCH_REFUSED','SEARCH_MALFORMED','SEARCH_EMPTY'].includes(reason)) throw error
                 failure = reason
                 reportedByTool = call.name!=='search_memory'
               }
@@ -833,7 +924,7 @@ export class AgentHost {
               const label = `${registered ? call.name : 'unknown'}:${failure}`
               refused.set(label, (refused.get(label) ?? 0) + 1)
             }
-            noteTrace(toolTraceLine(call, failure, !failure && call.name === 'fetch_url' ? networkTraceOf(value) : undefined))
+            noteTrace(toolTraceLine(call, failure, !failure && call.name === 'fetch_url' ? networkTraceOf(value) : !failure && call.name === 'search_web' ? searchTraceOf(value) : undefined))
             if(!failure&&call.name==='search_memory'){const items=(value as {items:{id:string;version:number;content:string}[]}).items;const detail=`${items.map(e=>e.id+'@'+e.version).join('、')||'无匹配'}；摘要 ${items.map(e=>e.content.replace(/[\x00-\x1f]/g,' ').replace(/\s+/g,' ').slice(0,48)).join('；').slice(0,320)}`.slice(0,900);memoryToolOutcomes.push({name:'search_memory',outcome:`已执行：${detail}`});noteTrace(`记忆结果：${detail}`)}
             // 结构操作成功后旧来源已失效，再走 guard 只会把整场记成 ENOENT。
             if (!this.structuralMoves.has(id)) await guard()

@@ -42,15 +42,20 @@ export function validSentSummary(value:unknown):value is import('./host-source.t
  try{if(value.dependencies.some(d=>!obj(d)||!exact(d,['sourceId','hash',...('provenance'in d?['provenance']:[])])||!(covered as unknown[]).includes(d.sourceId)||typeof d.hash!=='string'||!/^[a-f0-9]{64}$/.test(d.hash)||d.provenance!==undefined&&ledgerProvenance(encodeLedgerProvenance(d.provenance as LedgerProvenance)).status!=='valid'))return false}catch{return false}
  return new Set(value.dependencies.map(d=>(d as {sourceId:string}).sourceId)).size===value.dependencies.length
 }
-/** 账本 `network[]` 的一条外发记录：≤50 条／场，字段类型固定，无查询串与正文。 */
+/** 账本 `network[]` 的一条外发记录：≤50 条／场，字段类型固定，不含正文。
+ *  抓页记 path；搜索 path 为空并另记截断 120 字的 query（只有 search 允许 query）。 */
 function validNetworkEntry(v:unknown):boolean{
  if(!obj(v))return false
- if(Object.keys(v).some(k=>!['at','action','host','path','bytes','truncated','outcome'].includes(k)))return false
- if(v.action!=='fetch')return false
+ if(Object.keys(v).some(k=>!['at','action','host','path','query','bytes','truncated','outcome'].includes(k)))return false
+ if(v.action!=='fetch'&&v.action!=='search')return false
  if(typeof v.at!=='string'||!Number.isFinite(Date.parse(v.at)))return false
  if(typeof v.host!=='string'||!v.host||v.host.length>255)return false
  if(typeof v.path!=='string'||v.path.length>120)return false
  if(typeof v.outcome!=='string'||!v.outcome||v.outcome.length>128)return false
+ if(v.query!==undefined){
+  if(v.action!=='search')return false
+  if(typeof v.query!=='string'||!v.query||v.query.length>120)return false
+ }
  if(v.bytes!==undefined&&(!Number.isSafeInteger(v.bytes)||Number(v.bytes)<0))return false
  if(v.truncated!==undefined&&typeof v.truncated!=='boolean')return false
  return true

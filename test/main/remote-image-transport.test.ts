@@ -55,4 +55,31 @@ describe('Node direct image socket', () => {
     expect(seen).not.toHaveProperty('servername')
     expect(Object.keys(seen!.headers as object)).toEqual(['accept','accept-encoding'])
   })
+  it('sends a POST body with JSON headers only when the init asks for POST', async () => {
+    let seen: Record<string, unknown> | undefined
+    let sent: string | undefined
+    vi.spyOn(https, 'request').mockImplementation(((url: URL, options: Record<string, unknown>, received: (incoming: PassThrough) => void) => {
+      seen = options
+      const request = new EventEmitter() as EventEmitter & { end: (body?: string) => void }
+      request.end = (body?: string) => {
+        sent = body
+        const incoming = Object.assign(new PassThrough(), { statusCode: 200, headers: { 'content-type': 'application/json' } })
+        received(incoming); incoming.end(Buffer.from('{"ok":true}'))
+      }
+      return request
+    }) as never)
+    const response = await requestPinnedImage(
+      new URL('https://api.example/search'), { address: '93.184.216.34', family: 4 }, new AbortController().signal,
+      { 'accept-encoding': 'identity', accept: 'application/json' }, { method: 'POST', body: '{"query":"汉"}' }
+    )
+    expect(seen).toMatchObject({
+      method: 'POST',
+      headers: {
+        accept: 'application/json', 'accept-encoding': 'identity',
+        'content-type': 'application/json', 'content-length': String(Buffer.byteLength('{"query":"汉"}', 'utf8'))
+      }
+    })
+    expect(sent).toBe('{"query":"汉"}')
+    expect(new TextDecoder().decode(await response.arrayBuffer())).toBe('{"ok":true}')
+  })
 })
