@@ -11,11 +11,12 @@ export async function resolveImageAddresses(hostname: string): Promise<ImageAddr
 
 /** Fresh direct socket; only the prechecked address is supplied to Node's connection lookup.
  * The URL hostname remains the Host header and TLS certificate verification name. */
-export function requestPinnedImage(url: URL, address: ImageAddress, signal: AbortSignal): Promise<Response> {
+export function requestPinnedImage(url: URL, address: ImageAddress, signal: AbortSignal, headers: Record<string, string> = { 'accept-encoding': 'identity' }): Promise<Response> {
   return new Promise((resolve, reject) => {
+    const mergedHeaders = Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]))
     const options: https.RequestOptions & { autoSelectFamily: boolean } = {
       method: 'GET', agent: false, signal, autoSelectFamily: false, rejectUnauthorized: true,
-      headers: { accept: 'image/*', 'accept-encoding': 'identity' },
+      headers: { accept: 'image/*', ...mergedHeaders },
       ...(url.protocol === 'https:' && !isIP(url.hostname.replace(/^\[|\]$/g, ''))
         ? { servername: url.hostname } : {}),
       lookup: (_hostname, _options, callback) => callback(null, address.address, address.family)
