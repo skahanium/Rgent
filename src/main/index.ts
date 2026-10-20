@@ -370,7 +370,7 @@ async function settleHostBeforeClose(win: BrowserWindow): Promise<boolean> {
     // 先等 launching 落地再 cancel：cancelAll 只覆盖 running，中途撕启动会丢授权与稿。
     await agentHost?.whenLaunchesSettled()
     try { await agentHost?.cancelAll('close') } catch { /* pending answer is retained for retry below */ }
-    agentHost?.clearNetworkPreviews()
+    agentHost?.clearNetworkPreviews?.()
     await agentHost?.whenLaunchesSettled()
     if (agentHost?.active().length) {
       try { await agentHost.cancelAll('close') } catch { /* pending answer is retained for retry below */ }
@@ -885,7 +885,7 @@ function registerIpc(): void {
     const enabled = record.enabled as boolean
     const result = networkWrite(() => networkConfig!.setEnabled(enabled))
     // 关闭总闸即撤销所有活动任务的联网能力与在途请求；任务本身继续收尾（C11）。
-    if (result.ok && enabled === false) agentHost?.revokeNetworkForAll()
+    if (result.ok && enabled === false) agentHost?.revokeNetworkForAll?.()
     return result
   })
   /** 保存服务商与密钥：**不发任何测试请求**；key 只进加密存储，不回渲染层。 */
@@ -899,14 +899,14 @@ function registerIpc(): void {
     const before = networkCredentialSnapshot()
     const result = networkWrite(() => networkConfig!.setProvider(request.provider!, request.key!))
     // 服务商或密钥变了：已宣告的搜索目标作废，所有活动任务撤网并 abort 在途请求。
-    if (result.ok && networkCredentialChanged(before)) agentHost?.revokeNetworkForAll()
+    if (result.ok && networkCredentialChanged(before)) agentHost?.revokeNetworkForAll?.()
     return result
   })
   registerTrustedHandle(IPC.networkProviderClear, (event): NetworkConfigResult => {
     if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
     const before = networkCredentialSnapshot()
     const result = networkWrite(() => networkConfig!.clearProvider())
-    if (result.ok && networkCredentialChanged(before)) agentHost?.revokeNetworkForAll()
+    if (result.ok && networkCredentialChanged(before)) agentHost?.revokeNetworkForAll?.()
     return result
   })
   registerTrustedHandle(IPC.remoteImageGet, async (_event, value: unknown): Promise<RemoteImageGetResult> => {
@@ -1494,7 +1494,7 @@ if (ownsInstance) app.whenReady().then(() => {
           current();consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED');await consolidation?.idle();current()
           await agentHost?.whenLaunchesSettled();current()
           if(vault?.root)await agentHost?.cancelAll('vault-change',vault.root).catch(()=>{})
-          agentHost?.clearNetworkPreviews()
+          agentHost?.clearNetworkPreviews?.()
           await agentHost?.whenLaunchesSettled();current();await vault!.idle();current()
           vault!.protectRootDrafts(sessionId,rootHeldObjects??[]);rootHeldObjects=null;protectedRootCaller=rootRecoveryIntent.caller
         }
@@ -1517,7 +1517,7 @@ if (ownsInstance) app.whenReady().then(() => {
       if (previous) {
         try { await agentHost?.cancelAll('vault-change', previous) } catch {}
         // 切库是预览缓存的硬边界：不把上一库的抓页正文留给下一库。
-        agentHost?.clearNetworkPreviews()
+        agentHost?.clearNetworkPreviews?.()
         current()
         await agentHost?.retryPending(previous); current()
         await agentHost?.whenLaunchesSettled(); current()

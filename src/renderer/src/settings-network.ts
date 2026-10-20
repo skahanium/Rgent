@@ -98,7 +98,7 @@ export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHan
   clear.textContent = '清除服务配置'
   clear.dataset.network = 'clear'
   actions.append(save, clear)
-  const error = element('p', 'settings-error')
+  const error = element('p', 'settings-network-error')
   error.setAttribute('role', 'alert')
   error.hidden = true
   error.dataset.network = 'error'

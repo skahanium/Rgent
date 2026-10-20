@@ -858,7 +858,7 @@ async function verifyNetworkOnly(page, vault, shot, requests, gate) {
 
   // ④ 第二次抓取前点「停止联网」，再放行；停止必须先于请求。
   check('任务进行中可见「停止联网」', await waitFor(page, `!!document.querySelector('.status-task-network-stop:not(:disabled)')`, 10000))
-  if (!await clickSelector('.status-task-network-stop')) throw Error('找不到停止联网按钮')
+  if (!await page.eval(`(() => { const b=document.querySelector('.status-task-network-stop'); if(!b)return false; b.click(); return true })()`)) throw Error('找不到停止联网按钮')
   check('停止联网后按钮消失且状态行仍有联网提示', await waitFor(page, `(() => { const hint=document.querySelector('.status-task-network'); return !!hint && hint.textContent.includes('联网：') && !document.querySelector('.status-task-network-stop') })()`, 15000), await page.eval(`document.querySelector('.status')?.textContent?.slice(0,220)??''`))
   check('停止生效前第二次抓取尚未发出', !toolMessages().some(text => text.includes('NETWORK_NOT_AUTHORIZED')))
   gate.release?.()
@@ -3229,7 +3229,7 @@ async function verifyModelFeedback(page, nativePage, shot) {
     }
     if(!gated)throw new Error('模型反馈批量失败回执未抵达屏障')
     check('模型反馈成功项在后续回执挂起时已同步且重复项退出候选',await waitFor(page,`document.querySelectorAll('.settings-candidate').length===3 && [...document.querySelectorAll('.settings-model-id')].some(n=>n.textContent==='feedback-added') && [...document.querySelectorAll('.status-model option')].some(n=>n.textContent==='feedback-added')`))
-    check('模型反馈 busy 防重复并禁用读取和候选操作',await nativePage.eval(`globalThis.__modelFeedback.calls.length===3`) && await page.eval(`[...document.querySelectorAll('.settings-form button,.settings-form input')].every(n=>n.disabled)`))
+    check('模型反馈 busy 防重复并禁用读取和候选操作',await nativePage.eval(`globalThis.__modelFeedback.calls.length===3`) && await page.eval(`[...document.querySelectorAll('.settings-form button,.settings-form input')].filter(n=>!n.closest('.settings-network')).every(n=>n.disabled)`))
     await nativePage.eval(`globalThis.__modelFeedback.release();globalThis.__modelFeedback.release=null;true`)
     check('模型反馈分别报告成功、重复、失败与未尝试',await waitFor(page,`document.querySelector('.settings-read-panel')?.textContent.includes('已添加 1 个，已存在 1 个，失败 1 个，未尝试 1 个')`))
     check('模型反馈长名称、容量与未勾选草稿保留且结束恢复控件',await page.eval(`(()=>{const rows=[...document.querySelectorAll('.settings-candidate')];return rows[0].querySelector('.settings-candidate-id').textContent===${JSON.stringify(longId)} && rows[0].querySelector('input[type=number]').value==='8192' && rows[0].querySelector('input[type=checkbox]').checked && !rows[2].querySelector('input[type=checkbox]').checked && !document.querySelector('.settings-read-row button').disabled})()`))

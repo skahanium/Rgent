@@ -401,6 +401,8 @@ a[href]:focus-visible,
 .settings-reading-error { margin: 0 !important; }
 .settings-error { margin: 16px 0 0; color: var(--status-error); font-size: 0.78rem; }
 .settings-error[hidden] { display: none; }
+.settings-network-error { margin: 0; color: var(--status-error); font-size: 0.78rem; }
+.settings-network-error[hidden] { display: none; }
 .settings-form { display: grid; align-content: start; gap: 16px; max-width: 680px; }
 .settings-field { display: grid; gap: 5px; color: var(--text-muted); font-size: 0.78rem; }
 .settings-field input, .settings-field select { width: 100%; min-height: 38px; padding: 7px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-overlay); color: var(--text-heading); font: 0.84rem var(--font-ui); }
