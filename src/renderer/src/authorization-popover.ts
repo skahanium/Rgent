@@ -125,7 +125,7 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Ov
           : mcp?.reason==='off'
             ? '本场不能使用 MCP：设置里的 MCP 服务器都未启用（设置「模型」页）。'
             : mcp?.reason==='not-configured'
-              ? '本场不能使用 MCP：还没有可用的服务器（需启用、保存 token 并勾选白名单）。'
+              ? '本场不能使用 MCP：还没有可用的服务器（需启用并勾选白名单；公共只读服务器可以不带 token）。'
               : '本场不能使用 MCP。'
         mcpDisclosure.append(note)
       }else{

@@ -626,10 +626,10 @@ r9 冻结值（判定方向不变，只纠正引用）：DeepSeek **93.07／95.3
 
 ## 2026-10-21 远端只读 MCP 合同
 
-1. **范围**：仅 **HTTPS 远端 Streamable HTTP**，仅 **Bearer token** 认证；不接 stdio／本机进程、不挂库、不下载服务器；工具只读由**人工白名单**保证，不信任服务器自报的只读标注。OAuth、查询参数 key、写工具均不做。
+1. **范围**：仅 **HTTPS 远端 Streamable HTTP**；认证支持 **Bearer token**，**公共只读服务器可以不带 token**（此时不发 `Authorization`）；不接 stdio／本机进程、不挂库、不下载服务器；工具只读由**人工白名单**保证，不信任服务器自报的只读标注。OAuth、查询参数 key、写工具均不做。
 2. **传输**：复用钉地址传输（`requestPinnedImage`）；POST JSON-RPC；头 `Accept: application/json, text/event-stream`、`Content-Type: application/json`、`MCP-Protocol-Version`，首帧后带 `Mcp-Session-Id`；按块读取、**收到匹配 id 的响应即停**；单消息 ≤1 MiB、单次 ≤20s、可取消；3xx 不跟随、非 HTTPS／非公网拒。
 3. **客户端**：`initialize`（版本协商）→ `notifications/initialized` → `tools/list` → `tools/call`；**每任务惰性建连**、任务结束关闭；会话失效只重连一次，再失败如实报；错误码 `MCP_CONNECT_FAILED｜MCP_UNAUTHORIZED｜MCP_PROTOCOL｜MCP_TOOL_UNKNOWN｜MCP_TOOL_FAILED｜MCP_TIMEOUT｜MCP_TOO_LARGE｜MCP_CANCELLED`，服务器错误文本不进消息。
-4. **配置**：`mcp-config.json` v1（服务器数组）；token 用 `SecretProtection` 密文；`getPublic()` 永不含 token/密文；URL 校验（https、公网、443、无 userinfo）；同一 URL 只允许一条；白名单只能来自已发现工具；启用必须有 token。
+4. **配置**：`mcp-config.json` v1（服务器数组）；token 用 `SecretProtection` 密文；`getPublic()` 永不含 token/密文；URL 校验（https、公网、443、无 userinfo）；同一 URL 只允许一条；白名单只能来自已发现工具；**启用不要求 token**（公共只读服务器），但**有密文却解不开时按不可用处理**（不降级成匿名调用）。
 5. **授权（无感）**：口令卡上一次勾选（显示服务器主机与工具名），快照冻结并在 start 比对；服务器/白名单/凭据变化 → 撤销活动任务 MCP 授权并拒绝（**不取消任务**）；运行中调用零弹窗。
 6. **工具**：`mcp_call {server,tool,arguments}`；arguments 必须是 JSON 对象且 ≤16 KiB；浅层结构校验，不引入 JSON Schema 校验器；结果低信任包裹、≤32 KiB 给模型；结果不自动进笔记或记忆。
 7. **审计**：账本 `network[]` 扩 `action:'mcp'`＋`server`／`tool`；事件 `kind:'mcp'`；`network:stop` 同时撤销 MCP 并 abort 在途。

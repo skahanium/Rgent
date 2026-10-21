@@ -194,7 +194,7 @@ const MESSAGES: Record<string, string> = {
   MCP_CANCELLED: 'MCP 连接已取消。',
   MCP_BAD_NAME: '服务器名称须 1–80 字且不含控制字符。',
   MCP_BAD_URL: '服务器地址须为 https://…（443 端口、不带用户名密码、只连公网地址）。',
-  MCP_BAD_TOKEN: 'token 须 1–4096 字且不含控制字符；启用服务器前必须先保存 token。',
+  MCP_BAD_TOKEN: 'token 须 1–4096 字且不含控制字符；公共只读服务器可以留空。',
   MCP_DUPLICATE_URL: '同一个地址已经有另一台服务器，请先删除或改用别的地址。',
   MCP_TOO_MANY: '服务器、工具或说明文字超出上限（服务器最多 8 台、每台工具最多 64 个）。',
   MCP_BAD_WHITELIST: '白名单只能勾选这台服务器已发现的工具。',
