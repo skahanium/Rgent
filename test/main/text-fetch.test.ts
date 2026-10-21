@@ -47,6 +47,37 @@ describe('text fetch', () => {
     expect(result.truncated).toBe(false)
     expect(result.contentType).toBe('text/html')
     expect(result.charsetFallback).toBe(false)
+    // 这个 fixture 的正文不到 200 字：按合同回退手写提取器，原断言全部保持。
+    expect(result.method).toBe('fallback')
+    expect(result.fallbackReason).toBe('short')
+  })
+
+  it('extracts a long HTML article with readability and keeps navigation out', async () => {
+    const html = [
+      '<!doctype html><html><head><title>长文标题</title></head><body>',
+      '<nav><a href="/">首页</a><a href="/about">关于我们</a></nav>',
+      '<article><h1>长文</h1>',
+      `<p>${'正文段落内容。'.repeat(30)}</p>`,
+      `<p>${'第二段正文内容。'.repeat(30)}</p>`,
+      '</article>',
+      '<footer>版权所有 · 隐私政策</footer>',
+      '</body></html>'
+    ].join('')
+    const result = await run('https://example.com/long', reply(html, { 'content-type': 'text/html; charset=utf-8' }))
+    expect(result.method).toBe('readability')
+    expect(result).not.toHaveProperty('fallbackReason')
+    expect(result.title).toBe('长文标题')
+    expect(result.text).toContain('正文段落内容。')
+    expect(result.text).not.toContain('首页')
+    expect(result.text).not.toContain('隐私政策')
+  })
+
+  it('uses the same readable path for application/xhtml+xml', async () => {
+    const html = `<!doctype html><html><head><title>XHTML 标题</title></head><body><article><p>${'XHTML 正文段落。'.repeat(30)}</p></article></body></html>`
+    const result = await run('https://example.com/page.xhtml', reply(html, { 'content-type': 'application/xhtml+xml; charset=utf-8' }))
+    expect(result.method).toBe('readability')
+    expect(result.title).toBe('XHTML 标题')
+    expect(result.text).toContain('XHTML 正文段落。')
   })
 
   it('keeps plain text as written and accepts JSON', async () => {
@@ -54,15 +85,22 @@ describe('text fetch', () => {
     expect(plain.text).toBe('第一行\n\n  保留空格  \n\t制表符')
     expect(plain.title).toBeUndefined()
     expect(plain.contentType).toBe('text/plain')
+    // 纯文本与 JSON 不经过 readable：两个可选字段都不出现。
+    expect(plain).not.toHaveProperty('method')
+    expect(plain).not.toHaveProperty('fallbackReason')
     const json = await run('https://example.com/a.json', reply('{"a":1,"b":[true,null]}', { 'content-type': 'application/json' }))
     expect(json.text).toBe('{"a":1,"b":[true,null]}')
     expect(json.contentType).toBe('application/json')
+    expect(json).not.toHaveProperty('method')
+    expect(json).not.toHaveProperty('fallbackReason')
   })
 
   it('sniffs an HTML body without content-type only when the bytes start with "<"', async () => {
     const html = await run('https://example.com/a', reply('<p>只有段落</p>'))
     expect(html.contentType).toBe('text/html')
     expect(html.text).toBe('只有段落')
+    expect(html.method).toBe('fallback')
+    expect(html.fallbackReason).toBe('short')
     await expect(run('https://example.com/a', reply('没有尖括号'))).rejects.toThrow('EGRESS_UNSUPPORTED_TYPE')
     await expect(run('https://example.com/a', reply(Uint8Array.from([0xff, 0x00, 0x41])))).rejects.toThrow('EGRESS_UNSUPPORTED_TYPE')
   })
