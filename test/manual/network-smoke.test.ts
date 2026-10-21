@@ -21,7 +21,9 @@ describe.skipIf(!enabled)('联网只读真机烟测', () => {
   it('抓取 IANA 的示例域名说明页', async () => {
     const result = await fetchText('https://www.iana.org/help/example-domains', { signal: new AbortController().signal })
     expect(result.text.trim().length).toBeGreaterThan(0)
-    expect(result.text).toContain('Example Domains')
+    // Readability 可能把 h1 去掉，标题只在 title 字段；断言标题命中 + 正文含稳定关键词。
+    expect(result.title ?? '').toContain('Example Domains')
+    expect(result.text.toLowerCase()).toContain('example')
     expect(result.bytes).toBeGreaterThan(0)
     expect(typeof result.truncated).toBe('boolean')
     process.stdout.write(`联网烟测：${new URL(result.finalUrl).host} · ${result.bytes} 字节 · 标题 ${result.title ?? '(无)'} · 截断=${result.truncated}\n`)

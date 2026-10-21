@@ -11,6 +11,9 @@ import { TEXT_LIMITS, htmlToMarkdown, sliceToBytes } from './html-text.ts'
  *
  * 输入在这里按 UTF-8 字节截到 1 MiB（与出口上限一致）；输出不截断，
  * 交给 `fetchText` 既有的卫生／截断。
+ *
+ * Readability 抽出的正文经常不含 `<h1>`／标题；成功路径若正文开头还没出现标题，
+ * 就在最前面补一行 `# <title>` ＋空行（已在开头出现则不重复补）。兜底路径不动。
  */
 export const READABLE_MIN_CHARS = 200
 
@@ -37,6 +40,22 @@ function clean(value: string | null | undefined, limit: number): string | undefi
 /** 正文长度按去空白后的码点算（`<200 字` 判据；不把缩进与换行算进正文）。 */
 function visibleLength(value: string | null | undefined): number {
   return value ? Array.from(value.replace(/\s+/g, '')).length : 0
+}
+
+/** 回到比较用：折叠空白、去首尾、小写。 */
+function normalized(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+/**
+ * `text` 去掉前导空白后的前 200 字（按码点）里是否已出现标题（大小写与空白归一）。
+ * 空标题视为“未出现”；正文开头已有标题时不重复补，避免下游看到两遍。
+ */
+function headHasTitle(text: string, title: string): boolean {
+  const needle = normalized(title)
+  if (!needle) return false
+  const head = Array.from(text.replace(/^\s+/, '')).slice(0, 200).join('')
+  return normalized(head).includes(needle)
 }
 
 /** 回退原因只留错误类型名，不带 message，避免内部细节将来随日志／界面外泄。 */
@@ -101,10 +120,14 @@ export async function extractReadable(html: string, url: string): Promise<Readab
   if (!converted.text.trim()) return fallback('empty')
 
   const title = clean(parsedTitle, 200) ?? documentTitle
+  // 正文开头没带标题就补一行；有则原样，避免同一标题出现两遍。
+  const text = title && !headHasTitle(converted.text, title)
+    ? `# ${title}\n\n${converted.text}`
+    : converted.text
   const site = clean(siteName, 200)
   const published = clean(publishedAt, 100)
   return {
-    text: converted.text,
+    text,
     ...(title ? { title } : {}),
     ...(site ? { siteName: site } : {}),
     ...(published ? { publishedAt: published } : {}),

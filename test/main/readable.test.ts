@@ -47,6 +47,30 @@ describe('extract readable', () => {
     expect(result.publishedAt).toBe('2024-05-01T08:30:00Z')
   })
 
+  it('prepends the title as a Markdown heading when the body does not carry it', async () => {
+    const result = await extractReadable(
+      page(`<article>${paragraph('第一段：')}${paragraph('第二段：')}</article>`, '<title>只在标签里的标题</title>'),
+      'https://example.com/title-outside-body'
+    )
+    expect(result.method).toBe('readability')
+    expect(result.title).toBe('只在标签里的标题')
+    expect(result.text.startsWith('# 只在标签里的标题\n\n')).toBe(true)
+    expect(result.text).toContain('第一段：')
+    expect(result.text).toContain('第二段：')
+  })
+
+  it('does not prepend the title again when the body already has it, ignoring case and extra spaces', async () => {
+    const body = `<article><p>reader   view guide</p>${paragraph('第一段：')}${paragraph('第二段：')}</article>`
+    const result = await extractReadable(
+      page(body, '<title>Reader View Guide</title>'),
+      'https://example.com/title-in-body'
+    )
+    expect(result.method).toBe('readability')
+    expect(result.title?.toLowerCase()).toBe('reader view guide')
+    expect(result.text).not.toMatch(/^# Reader View Guide\n\n/i)
+    expect((result.text.match(/reader\s+view\s+guide/gi) ?? []).length).toBe(1)
+  })
+
   it('falls back on a page shorter than the 200-character threshold without losing text', async () => {
     const result = await extractReadable(
       page('<main><p>只有一句话，没有更多正文。</p></main>', '<title>短页</title>'),
