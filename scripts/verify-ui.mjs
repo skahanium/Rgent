@@ -4764,7 +4764,9 @@ async function main() {
     check('空段内输入的口令留在编辑器', await waitFor(page, `document.querySelector('.cm-content')?.textContent.includes('/请写两句话')`))
     await confirmSlashAuthorization(page, true)
     check('启动成功后本篇临时选择复位到设备默认', await waitFor(page, `document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test'`))
-    const running = await waitFor(page, `!!document.querySelector('.status-task-stop')`, 4000)
+    // Windows CI 上任务启动与底栏重绘更慢：先等任务登记，再给停止入口更宽的等待（断言不变）。
+    await waitFor(page, `(async () => (await window.rgent.agentTasks()).length > 0)()`, 15000)
+    const running = await waitFor(page, `!!document.querySelector('.status-task-stop')`, 15000)
     check('回车后底栏出现当前篇停止入口', running, running ? '' : await page.eval(`(async () => JSON.stringify({ status: document.querySelector('.status-left')?.innerText, note: (await window.rgent.noteRead('Host 环路.md')).content, editor: document.querySelector('.cm-content')?.textContent }))()`))
     check('回答写回正文，原始任务写入独立账本', await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead('Host 环路.md')
