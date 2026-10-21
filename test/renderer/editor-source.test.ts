@@ -298,3 +298,51 @@ it('keeps paused recovery drafts readable and prevents typing, undo and widget e
  host.setText('另一篇');expect(host.getText()).toBe('另一篇');host.view.dispatch({changes:{from:0,insert:'误写'}});expect(host.getText()).toBe('另一篇')
  host.setReadOnly(false);host.view.dispatch({changes:{from:3,insert:'可写'},userEvent:'input.type'});expect(host.getText()).toBe('另一篇可写')
 })
+
+describe('insertAtSelection', () => {
+  it('replaces the current selection and keeps the edit undoable', () => {
+    const host = editor()
+    host.setText('甲乙丙\n')
+    host.view.dispatch({ selection: { anchor: 1, head: 2 } })
+    expect(host.insertAtSelection('新')).toBe(true)
+    expect(host.getText()).toBe('甲新丙\n')
+    expect(host.view.state.selection.main.head).toBe(2)
+    expect(undo(host.view)).toBe(true)
+    expect(host.getText()).toBe('甲乙丙\n')
+    expect(redo(host.view)).toBe(true)
+    expect(host.getText()).toBe('甲新丙\n')
+  })
+
+  it('inserts at the caret when there is no selection and puts the caret after the inserted text', () => {
+    const host = editor()
+    host.setText('甲乙')
+    host.view.dispatch({ selection: { anchor: 1 } })
+    expect(host.insertAtSelection('引用\n\n正文')).toBe(true)
+    expect(host.getText()).toBe('甲引用\n\n正文乙')
+    expect(host.view.state.selection.main.head).toBe('甲引用\n\n正文'.length)
+    expect(undo(host.view)).toBe(true)
+    expect(host.getText()).toBe('甲乙')
+  })
+
+  it('returns false while read-only and leaves the note untouched', () => {
+    const host = editor()
+    host.setText('原文')
+    host.setReadOnly(true)
+    expect(host.insertAtSelection('插入')).toBe(false)
+    expect(host.getText()).toBe('原文')
+    host.setReadOnly(false)
+    host.view.dispatch({ selection: { anchor: host.view.state.doc.length } })
+    expect(host.insertAtSelection('插入')).toBe(true)
+    expect(host.getText()).toBe('原文插入')
+  })
+
+  it('returns false when an unaccepted AI block refuses the edit', () => {
+    const host = editor()
+    const raw = '<!-- rgent:ai:v1 -->\n回答\n'
+    host.setText(raw)
+    const at = host.view.state.doc.toString().indexOf('回答')
+    host.view.dispatch({ selection: { anchor: at } })
+    expect(host.insertAtSelection('改')).toBe(false)
+    expect(host.getText()).toBe(raw)
+  })
+})

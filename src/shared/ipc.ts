@@ -40,6 +40,7 @@ export const IPC = {
   menuOpenVault: 'menu:open-vault',
   menuNewNote: 'menu:new-note',
   menuSave: 'menu:save',
+  menuFetchWeb: 'menu:fetch-web',
   flushRequest: 'app:flush-request',
   flushDone: 'app:flush-done',
   backlinks: 'note:backlinks',
@@ -81,6 +82,10 @@ export const IPC = {
   networkConfig: 'network:config',
   networkProviderSave: 'network:provider-save',
   networkProviderClear: 'network:provider-clear',
+  networkHumanFetch: 'network:human-fetch',
+  networkHumanSearch: 'network:human-search',
+  networkHumanAbort: 'network:human-abort',
+  networkEgressLog: 'network:egress-log',
   memoryChanged: 'memory:changed',
   memoryGet: 'memory:get',
   memoryConfigSave: 'memory:config-save',
@@ -189,6 +194,51 @@ export type NetworkConfigView = { enabled: boolean; provider: NetworkProvider | 
 export type NetworkConfigSetRequest = { enabled: boolean }
 export type NetworkProviderSaveRequest = { provider: NetworkProvider; key: string }
 export type NetworkConfigResult = { ok: true; config: NetworkConfigView } | { ok: false; error: string }
+
+/** 人发起抓页：只发人输入的 URL；渲染层拿不到凭据，也不带笔记正文。 */
+export type HumanFetchRequest = { url: string; requestId?: string }
+/** 人发起搜索：只发人输入的查询；maxResults 由主进程夹在 1–10。 */
+export type HumanSearchRequest = { query: string; maxResults?: number; requestId?: string }
+/** 停止一次人发起的在途抓页／搜索（requestId 由渲染层生成并随请求带上）。 */
+export type HumanAbortRequest = { requestId: string }
+/** 抓页结果：正文只回渲染层显示／插入，不进日志；审计写盘失败时如实标 `degraded`。 */
+export type HumanFetchResult =
+  | {
+    ok: true
+    url: string
+    host: string
+    title?: string
+    text: string
+    bytes: number
+    truncated: boolean
+    fetchedAt: string
+    degraded?: 'log-failed'
+  }
+  | { ok: false; error: string }
+export type HumanSearchResult =
+  | {
+    ok: true
+    provider: NetworkProvider
+    host: string
+    results: { title: string; url: string; snippet: string }[]
+    truncated?: boolean
+    degraded?: 'log-failed'
+  }
+  | { ok: false; error: string }
+
+/** 人发起外发日志的一条：只有时间／类型／主机／字节／条数／结果码，永不含 URL、查询、正文或凭据。 */
+export type EgressLogEntry = {
+  at: string
+  action: 'fetch' | 'search'
+  host: string
+  bytes?: number
+  count?: number
+  outcome: 'ok' | 'refused'
+  code?: string
+}
+export type EgressLogRequest = { limit?: number }
+export type EgressLogView = { entries: EgressLogEntry[]; skipped: number }
+export type EgressLogResult = { ok: true; view: EgressLogView } | { ok: false; error: string }
 /** 网络事件只带主机与去查询串的路径，不带正文、密钥或查询参数。 */
 export type AgentNetworkEvent = {
   taskId: string

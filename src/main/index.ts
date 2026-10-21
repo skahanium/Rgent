@@ -29,6 +29,9 @@ import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRet
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import type { NetworkPreviewRequest, NetworkPreviewResult } from '../shared/ipc.ts'
 import type { NetworkConfigResult, NetworkProviderSaveRequest } from '../shared/ipc.ts'
+import type { EgressLogResult, HumanFetchResult, HumanSearchResult } from '../shared/ipc.ts'
+import { createEgressLog, type EgressLog } from './egress-log.ts'
+import { createHumanNetwork, applyHumanNetworkGate, type HumanNetwork } from './human-network.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { loadAssistantHabits, saveAssistantHabits } from './assistant-preference.ts'
 import { createSkillsStore } from './skills-store.ts'
@@ -89,6 +92,9 @@ let remoteImages: RemoteImageService | null = null
 let modelConfig: ModelConfigStore | null = null
 let modelConfigError: string | null = null
 let networkConfig: NetworkConfigStore | null = null
+/** 人发起外发的两条设备级设施：审计日志与抓页／搜索门面。 */
+let egressLog: EgressLog | null = null
+let humanNetwork: HumanNetwork | null = null
 let agentHost: AgentHost | null = null
 /** 联网只读的可用性：抓页只依赖总闸；搜索另要求预设服务与密钥可用。渲染层只拿摘要。
  *  配置保存后立即生效：这里按需读文件、不缓存，下一次判定自然看到新值。 */
@@ -101,6 +107,66 @@ function networkAvailability(): { available: boolean; search: boolean; providerH
     if (!credential) return { available: true, search: false, providerHost: null, reason: 'not-configured' }
     return { available: true, search: true, providerHost: SEARCH_PROVIDERS[credential.provider].host }
   } catch { return { available: false, search: false, providerHost: null, reason: 'off' } }
+}
+
+/** 人发起外发只允许把已知拒绝码回报渲染层／写日志；错误消息本身一律不外泄。 */
+const HUMAN_NETWORK_ERRORS = new Set([
+  'NETWORK_NOT_AUTHORIZED',
+  'SEARCH_NOT_CONFIGURED', 'SEARCH_UNAUTHORIZED', 'SEARCH_REFUSED', 'SEARCH_MALFORMED', 'SEARCH_EMPTY',
+  'EGRESS_INVALID_URL', 'EGRESS_HTTP_REFUSED', 'EGRESS_CROSS_ORIGIN_REFUSED', 'EGRESS_UNSUPPORTED_TYPE',
+  'EGRESS_ENCODING_REFUSED', 'EGRESS_TOO_LARGE', 'EGRESS_TIMEOUT', 'EGRESS_UNAVAILABLE', 'EGRESS_BUSY',
+  'EGRESS_CONTENT_ECHO', 'EGRESS_ABORTED'
+])
+function humanErrorCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
+  return HUMAN_NETWORK_ERRORS.has(message) ? message : 'EGRESS_UNAVAILABLE'
+}
+const HUMAN_LIMITS = { maxUrl: 2048, maxQuery: 256, maxResults: 10, maxLogLimit: 50 } as const
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u
+const REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/u
+/** 停止标识只接受字母数字与 `-`／`_`；缺省表示这次请求不提供单独停止入口。 */
+function humanRequestId(value: unknown): string | undefined | 'BAD_REQUEST' {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !REQUEST_ID.test(value)) return 'BAD_REQUEST'
+  return value
+}
+/** 入参只接受合同字段；多给、少给或越界都按 `BAD_REQUEST`，不猜调用方意图。 */
+function humanFetchArguments(value: unknown): { url: string; requestId?: string } | 'BAD_REQUEST' {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'BAD_REQUEST'
+  const record = value as Record<string, unknown>
+  if (Object.keys(record).some(key => key !== 'url' && key !== 'requestId')) return 'BAD_REQUEST'
+  if (typeof record.url !== 'string') return 'BAD_REQUEST'
+  const requestId = humanRequestId(record.requestId)
+  if (requestId === 'BAD_REQUEST') return 'BAD_REQUEST'
+  const url = record.url.trim()
+  if (!url || url.length > HUMAN_LIMITS.maxUrl || CONTROL_CHARS.test(url)) return 'BAD_REQUEST'
+  return { url, ...(requestId ? { requestId } : {}) }
+}
+function humanSearchArguments(value: unknown): { query: string; maxResults?: number; requestId?: string } | 'BAD_REQUEST' {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'BAD_REQUEST'
+  const record = value as Record<string, unknown>
+  if (Object.keys(record).some(key => key !== 'query' && key !== 'maxResults' && key !== 'requestId')) return 'BAD_REQUEST'
+  if (typeof record.query !== 'string') return 'BAD_REQUEST'
+  const requestId = humanRequestId(record.requestId)
+  if (requestId === 'BAD_REQUEST') return 'BAD_REQUEST'
+  const query = record.query.trim()
+  if (!query || query.length > HUMAN_LIMITS.maxQuery || CONTROL_CHARS.test(query)) return 'BAD_REQUEST'
+  if (record.maxResults !== undefined) {
+    const maxResults = record.maxResults
+    if (!Number.isSafeInteger(maxResults) || (maxResults as number) < 1 || (maxResults as number) > HUMAN_LIMITS.maxResults) return 'BAD_REQUEST'
+    return { query, maxResults: maxResults as number, ...(requestId ? { requestId } : {}) }
+  }
+  return { query, ...(requestId ? { requestId } : {}) }
+}
+function egressLogLimit(value: unknown): number | undefined | 'BAD_REQUEST' {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'BAD_REQUEST'
+  const record = value as Record<string, unknown>
+  if (Object.keys(record).some(key => key !== 'limit')) return 'BAD_REQUEST'
+  if (record.limit === undefined) return undefined
+  const limit = record.limit
+  if (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > HUMAN_LIMITS.maxLogLimit) return 'BAD_REQUEST'
+  return limit as number
 }
 
 let authorizations: TaskAuthorizationRegistry | null = null
@@ -560,6 +626,11 @@ function buildMenu(): void {
           accelerator: 'CmdOrCtrl+S',
           click: () => send(IPC.menuSave)
         },
+        {
+          label: '抓取网页…',
+          accelerator: 'CmdOrCtrl+Shift+U',
+          click: () => send(IPC.menuFetchWeb)
+        },
         { type: 'separator' },
         process.platform === 'darwin' ? { role: 'close' } : { role: 'quit' }
       ]
@@ -886,6 +957,8 @@ function registerIpc(): void {
     const result = networkWrite(() => networkConfig!.setEnabled(enabled))
     // 关闭总闸即撤销所有活动任务的联网能力与在途请求；任务本身继续收尾（C11）。
     if (result.ok && enabled === false) agentHost?.revokeNetworkForAll?.()
+    // 人发起的在途抓页／搜索同样中止（没有 requestId 的也由 abortAll 收掉）。
+    if (result.ok) applyHumanNetworkGate(humanNetwork, enabled)
     return result
   })
   /** 保存服务商与密钥：**不发任何测试请求**；key 只进加密存储，不回渲染层。 */
@@ -908,6 +981,47 @@ function registerIpc(): void {
     const result = networkWrite(() => networkConfig!.clearProvider())
     if (result.ok && networkCredentialChanged(before)) agentHost?.revokeNetworkForAll?.()
     return result
+  })
+  // 人发起：菜单／快捷键打开对话框，人点「抓取／搜索」即授权；总闸关闭时同样拒绝。
+  // 只发人输入的 URL 或查询，不带笔记正文；异常一律收成已知机读码，原始消息不外泄。
+  registerTrustedHandle(IPC.networkHumanFetch, async (event, value: unknown): Promise<HumanFetchResult> => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const request = humanFetchArguments(value)
+    if (request === 'BAD_REQUEST') return { ok: false, error: 'BAD_REQUEST' }
+    if (!humanNetwork) return { ok: false, error: 'NETWORK_NOT_AUTHORIZED' }
+    try {
+      const result = await humanNetwork.fetchPage(request.url, request.requestId ? { requestId: request.requestId } : undefined)
+      // 返回的失败码也过白名单：出口模块未来多出的码不会顺带把新文案带进渲染层。
+      return result.ok ? result : { ok: false, error: humanErrorCode(result.error) }
+    } catch (error) { return { ok: false, error: humanErrorCode(error) } }
+  })
+  registerTrustedHandle(IPC.networkHumanSearch, async (event, value: unknown): Promise<HumanSearchResult> => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const request = humanSearchArguments(value)
+    if (request === 'BAD_REQUEST') return { ok: false, error: 'BAD_REQUEST' }
+    if (!humanNetwork) return { ok: false, error: 'NETWORK_NOT_AUTHORIZED' }
+    try {
+      const result = await humanNetwork.search(request.query, request.maxResults, request.requestId ? { requestId: request.requestId } : undefined)
+      return result.ok ? result : { ok: false, error: humanErrorCode(result.error) }
+    } catch (error) { return { ok: false, error: humanErrorCode(error) } }
+  })
+  /** 人主动停止：只停自己这次带上的 requestId；找不到或参数不合法都回 false，不泄露内部状态。 */
+  registerTrustedHandle(IPC.networkHumanAbort, (event, value: unknown): boolean => {
+    if (!trusted(event)) return false
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+    const record = value as Record<string, unknown>
+    if (Object.keys(record).some(key => key !== 'requestId')) return false
+    if (typeof record.requestId !== 'string' || !REQUEST_ID.test(record.requestId)) return false
+    return humanNetwork?.abort(record.requestId) === true
+  })
+  /** 外发日志只读：没有 URL、查询串、正文与凭据，坏行由日志模块自己跳过并计数。 */
+  registerTrustedHandle(IPC.networkEgressLog, (event, value: unknown): EgressLogResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const limit = egressLogLimit(value)
+    if (limit === 'BAD_REQUEST') return { ok: false, error: 'BAD_REQUEST' }
+    if (!egressLog) return { ok: false, error: 'IO_ERROR' }
+    try { return { ok: true, view: egressLog.recent(limit) } }
+    catch { return { ok: false, error: 'IO_ERROR' } }
   })
   registerTrustedHandle(IPC.remoteImageGet, async (_event, value: unknown): Promise<RemoteImageGetResult> => {
     if (!remoteImages || !vault || !value || typeof value !== 'object') return { ok: false, error: 'NOT_ALLOWED' }
@@ -1567,6 +1681,25 @@ if (ownsInstance) app.whenReady().then(() => {
   })
   // 搜索密钥与模型密钥同一套保护：safeStorage 加密后进 network-config.json，明文只在主进程。
   networkConfig = createNetworkConfigStore(app.getPath('userData'), safeStorage)
+  // 人发起外发：设备级日志与门面。总闸每次现读，保存配置后立即生效；凭据只在主进程解密。
+  egressLog = createEgressLog(app.getPath('userData'))
+  humanNetwork = createHumanNetwork({
+    enabled: () => networkConfig?.enabled() === true,
+    fetchText: (url, options) => fetchText(url, options),
+    searchProvider: async () => {
+      let credential: NetworkCredential | null = null
+      try { credential = networkConfig?.credential() ?? null }
+      catch { credential = null }
+      if (!credential) throw Error('SEARCH_NOT_CONFIGURED')
+      const provider = createSearchProvider(credential)
+      return {
+        provider: credential.provider,
+        host: SEARCH_PROVIDERS[credential.provider].host,
+        search: (query, options) => provider.search(query, options)
+      }
+    },
+    log: egressLog
+  })
   authorizations = new TaskAuthorizationRegistry({
     root:()=>{try{return vault?.requireUsableRoot()??null}catch{return null}},
     session:()=>vault?.sessionId()??null,

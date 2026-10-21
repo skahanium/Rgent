@@ -45,6 +45,13 @@ import {
   type NetworkConfigResult,
   type NetworkConfigSetRequest,
   type NetworkProviderSaveRequest,
+  type HumanFetchRequest,
+  type HumanFetchResult,
+  type HumanSearchRequest,
+  type HumanSearchResult,
+  type HumanAbortRequest,
+  type EgressLogRequest,
+  type EgressLogResult,
   type AgentTaskView,
   type AgentEvent,
   type EntryCreateRequest,
@@ -75,7 +82,7 @@ async function invoke(channel: string, ...args: unknown[]): Promise<any> {
   return result
 }
 
-const menuChannels = [IPC.menuOpenVault, IPC.menuNewNote, IPC.menuSave] as const
+const menuChannels = [IPC.menuOpenVault, IPC.menuNewNote, IPC.menuSave, IPC.menuFetchWeb] as const
 
 const api = {
   ledgerRepair:(request:import('../shared/ledger.ts').LedgerRepairRequest):Promise<import('../shared/ledger.ts').LedgerRepairResult>=>invoke(IPC.ledgerRepair,request),
@@ -188,6 +195,13 @@ const api = {
   networkConfig: (request?: NetworkConfigSetRequest): Promise<NetworkConfigResult> => invoke(IPC.networkConfig, request),
   networkProviderSave: (request: NetworkProviderSaveRequest): Promise<NetworkConfigResult> => invoke(IPC.networkProviderSave, request),
   networkProviderClear: (): Promise<NetworkConfigResult> => invoke(IPC.networkProviderClear),
+  /** 人发起抓页／搜索：只发人输入的 URL 或查询，凭据与正文都不经过渲染层的这段接口。 */
+  networkHumanFetch: (request: HumanFetchRequest): Promise<HumanFetchResult> => invoke(IPC.networkHumanFetch, request),
+  networkHumanSearch: (request: HumanSearchRequest): Promise<HumanSearchResult> => invoke(IPC.networkHumanSearch, request),
+  /** 停止一次在途的人发起请求；返回是否真的中止了一个请求。 */
+  networkHumanAbort: (request: HumanAbortRequest): Promise<boolean> => invoke(IPC.networkHumanAbort, request),
+  /** 只读查看设备级外发日志的最近条目；不含 URL、查询串与正文。 */
+  networkEgressLog: (request?: EgressLogRequest): Promise<EgressLogResult> => invoke(IPC.networkEgressLog, request),
   agentTasks: (): Promise<AgentTaskView[]> => invoke(IPC.agentTasks),
   onAgentEvent: (handler: (payload: AgentEvent) => void): (() => void) =>
     subscribe(IPC.agentEvent, (payload) => handler(payload as AgentEvent)),

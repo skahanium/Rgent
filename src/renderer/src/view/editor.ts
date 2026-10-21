@@ -485,6 +485,8 @@ export type EditorHost = {
   /** 空段段首按 `/` 留下的命令起点（原文偏移）；打开已有空段口令也算；未发起则为 null。 */
   slashCommandStart: () => number | null
   setText: (text: string, host?: NoteHost, selection?: { anchor: number; head: number }) => void
+  /** 在光标处插入、有选区时替换选区；只读／被身份锁拦下时返回 false。保留撤销。 */
+  insertAtSelection: (text: string) => boolean
   /** Apply a saved Host change without replacing this tab's history or scroll position. */
   applyExternalText: (text: string) => void
   setReadOnly: (value: boolean) => void
@@ -663,6 +665,22 @@ export function mountEditor(
         userEvent: 'rgent.setText'
       })
       applying = false
+    },
+    insertAtSelection: (text) => {
+      if (readOnly) return false
+      const insert = normalizeSource(text)
+      if (!insert) return false
+      const selection = view.state.selection.main
+      const before = view.state.doc.toString()
+      view.dispatch({
+        changes: { from: selection.from, to: selection.to, insert },
+        // 光标落在插入内容末尾；若事务过滤补了断段符，它会按自己的映射把选区右移。
+        selection: { anchor: selection.from + insert.length },
+        scrollIntoView: true,
+        userEvent: 'input.paste'
+      })
+      // 未采纳的 AI 块会由 identityLock 整笔拦下：没有变化就是没插入，不能报成功。
+      return view.state.doc.toString() !== before
     },
     applyExternalText: (text) => {
       if (sourceOf(view.state).raw === text) return

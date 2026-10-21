@@ -10,6 +10,7 @@ import { composeSource, partitionSource } from '@markdown'
 import { RecoveryDraftGate, reportFlush, saveWorkspacePosition } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
 import { openLifecycleStatus, promptNewNote, promptText } from './dialogs.ts'
+import { openFetchDialog } from './fetch-dialog.ts'
 import { promptConflict } from './conflict.ts'
 import { openOverlay } from './overlay.ts'
 import { openNetworkPreview } from './preview-overlay.ts'
@@ -484,6 +485,23 @@ export async function start(root: HTMLElement): Promise<void> {
     if (restoringWorkspace || transitionBusy || settingsOverlay.isBusy()) return
     void flushSave()
   })
+  // 人发起抓页／搜索：菜单快捷键只负责开对话框；人点「抓取／搜索」即授权，不再二次确认。
+  window.rgent.onMenu(IPC.menuFetchWeb, () => {
+    if (vaultBusy()) {
+      hostNotice = '笔记库正在切换，暂时不能抓取网页或搜索。'
+      updateStatus()
+      return
+    }
+    // 浮层只有一个栈：已有模态（冲突选择、设置等）时不能把它顶掉。
+    if (conflictDecisionOpen || document.querySelector('dialog[open]')) return
+    openFetchDialog({
+      canInsert: () => canInsertNetworkResult(),
+      insert: text => editor.insertAtSelection(text),
+      humanFetch: request => window.rgent.networkHumanFetch(request),
+      humanSearch: request => window.rgent.networkHumanSearch(request),
+      humanAbort: requestId => window.rgent.networkHumanAbort({ requestId })
+    })
+  })
   window.rgent.onTreeChanged(() => {
     void refreshLifecycle().then(() => refreshTree()).then(() => checkOpenNotes())
   })
@@ -891,6 +909,14 @@ export async function start(root: HTMLElement): Promise<void> {
 
   function syncInteractionGate(): void { root.inert = restoringWorkspace || transitionBusy }
   function bodyWritesPaused(): boolean { return recoveryState?.status==='invalid'||recoveryState?.operation?.kind==='ledger-repair' }
+  /** 库交接期间不开联网对话框：与其它菜单动作同一把闸。 */
+  function vaultBusy(): boolean { return restoringWorkspace || transitionBusy || settingsOverlay.isBusy() }
+  /** 插入条件：有活动 tab、对象可用、编辑器可写、该篇没有活动任务、正文写入未被暂停。 */
+  function canInsertNetworkResult(): boolean {
+    const tab = current()
+    return !!tab && !tab.availability && !editor.view.state.readOnly && !bodyWritesPaused() &&
+      ![...activeTasks.values()].some(task => task.relPath === tab.relPath)
+  }
   function syncRecoveryInput(): void {
     editor.setReadOnly(bodyWritesPaused()||recoveryDraftGate.held(vaultSession))
     if(bodyWritesPaused())clearDebounceTimers()
