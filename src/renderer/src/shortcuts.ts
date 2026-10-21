@@ -4,9 +4,10 @@
  *
  * 这一层是 window 级的：编辑器有焦点时按键照样冒泡到这里，所以键位只有一处定义。
  * 编辑器里的 Mod-s 也搬到这里，免得两处都能触发保存。
+ * 人发起抓页／搜索对话框用 ⌘⇧U／Ctrl+Shift+U，与应用菜单「抓取网页…」共用同一个打开入口。
  */
 
-export type ShortcutAction = 'search' | 'save'
+export type ShortcutAction = 'search' | 'save' | 'fetchWeb'
 
 export type Shortcut = {
   action: ShortcutAction
@@ -31,6 +32,9 @@ export function shortcutFor(event: KeyboardEvent, apple = isApple()): ShortcutAc
   const mod = apple ? event.metaKey : event.ctrlKey
   if (!mod || event.altKey) return null
   const key = event.key.toLowerCase()
+  // 抓页／搜索对话框与应用菜单「抓取网页…」共用 ⌘⇧U／Ctrl+Shift+U；不带 Shift 的
+  // Mod+U 留给输入法与浏览器，不在这里抢。
+  if (key === 'u' && event.shiftKey) return 'fetchWeb'
   if (key === 'k') return 'search'
   if (key === 's') return 'save'
   return null
@@ -39,6 +43,8 @@ export function shortcutFor(event: KeyboardEvent, apple = isApple()): ShortcutAc
 export type ShortcutHandlers = {
   onSearch: () => void
   onSave: () => void
+  /** 打开人发起抓页／搜索的对话框；外发授权发生在对话框的提交上，不在这一层。 */
+  onFetchWeb: () => void
 }
 
 export function installShortcuts(handlers: ShortcutHandlers, target: Window = window): () => void {
@@ -47,7 +53,8 @@ export function installShortcuts(handlers: ShortcutHandlers, target: Window = wi
     if (!action) return
     ;(event as KeyboardEvent).preventDefault()
     if (action === 'search') handlers.onSearch()
-    else handlers.onSave()
+    else if (action === 'save') handlers.onSave()
+    else handlers.onFetchWeb()
   }
   target.addEventListener('keydown', listener)
   return () => target.removeEventListener('keydown', listener)

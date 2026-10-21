@@ -876,6 +876,97 @@ async function verifyNetworkOnly(page, vault, shot, requests, gate) {
   await shot(page, 'network-ledger-1200')
 }
 
+/** 人发起联网专项（RGENT_UI_NETWORK_HUMAN_ONLY=1）：只证「菜单/快捷键开同一个对话框、
+ *  总闸默认关、开闸后回环在出口被拒且外发日志/统计只留这次拒绝」；零真实外网、零模型调用。
+ *  备注：总闸关闭时主进程会为这次尝试留一条 `NETWORK_NOT_AUTHORIZED` 拒绝记录（既不外发，
+ *  也不假装“没有记录”），所以第二条判据查的是「没有成功外发」，不是「日志为空」。 */
+async function verifyHumanNetwork(page, shot) {
+  process.stdout.write('\n人发起联网专项\n')
+  await waitFor(page, `document.querySelector('#app')?.inert===false && !!document.querySelector('.settings-open')`)
+  const openSettings = async () => {
+    await page.eval(`document.querySelector('.settings-open')?.click()`)
+    return waitFor(page, `!!document.querySelector('.overlay-settings') && !!document.querySelector('.settings-nav')`)
+  }
+  const openModelPage = async () => {
+    await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(button=>button.textContent==='模型')?.click()`)
+    return waitFor(page, `document.querySelector('.settings-page-title')?.textContent==='模型' && !!document.querySelector('[data-network="enabled"]:not(:disabled)')`)
+  }
+  const closeSettings = async () => {
+    await page.key('Escape', 'Escape', 0, 27)
+    return waitFor(page, `!document.querySelector('.overlay-settings')`)
+  }
+  const toggleState = () => page.eval(`(() => { const node=document.querySelector('[data-network="enabled"]'); return node ? { checked: node.checked, disabled: node.disabled } : null })()`)
+  /** macOS 用 meta(4)+shift(8)，其它平台用 ctrl(2)+shift(8)；键位与菜单加速键相同。 */
+  const openDialogByShortcut = async () => {
+    const modifiers = process.platform === 'darwin' ? 4 + 8 : 2 + 8
+    const keys = { key: 'U', code: 'KeyU', modifiers, windowsVirtualKeyCode: 85 }
+    await page.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...keys })
+    await page.call('Input.dispatchKeyEvent', { type: 'keyUp', ...keys })
+    return waitFor(page, `!!document.querySelector('dialog.fetch-dialog[open]')`)
+  }
+  const fillDialog = (value) => page.eval(`(() => { const input=document.querySelector('.fetch-dialog-input'); if(!input) return false; input.value=${JSON.stringify(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+  const submitDialog = () => page.eval(`(() => { const button=document.querySelector('.fetch-dialog-submit'); if(!button) return false; button.click(); return true })()`)
+  const dialogStatus = () => page.eval(`document.querySelector('.fetch-dialog-status')?.textContent ?? ''`)
+  const closeDialog = async () => {
+    await page.eval(`(() => { const button=document.querySelector('.fetch-dialog-close'); if(!button) return false; button.click(); return true })()`)
+    return waitFor(page, `!document.querySelector('.fetch-dialog')`)
+  }
+  const egressLog = () => page.eval(`window.rgent.networkEgressLog({ limit: 5 })`)
+
+  // ① 默认关：设置「模型」页里的总开关未勾选，且不是禁用态（能由人打开）。
+  check('人发起联网：设置页打开', await openSettings())
+  check('人发起联网：模型页的总开关默认关闭', await openModelPage() && JSON.stringify(await toggleState()) === JSON.stringify({ checked: false, disabled: false }), JSON.stringify(await toggleState()))
+  await shot(page, 'human-network-settings-off-1200')
+  check('人发起联网：关闭设置回到正文', await closeSettings())
+
+  // ② 快捷键打开同一个对话框；总闸关闭时提交被抓，零成功外发。
+  check('⌘⇧U／Ctrl+Shift+U 打开抓页对话框', await openDialogByShortcut())
+  check('对话框默认为抓页模式且输入框可用', await page.eval(`(() => { const input=document.querySelector('.fetch-dialog-input'); const mode=document.querySelector('.fetch-dialog-mode[data-mode="fetch"]'); return !!input && !input.disabled && mode?.getAttribute('aria-pressed')==='true' })()`))
+  await fillDialog('https://example.com/')
+  await submitDialog()
+  check('总闸关闭时人发起被抓并翻成人话', await waitFor(page, `(() => { const text=document.querySelector('.fetch-dialog-status')?.textContent||''; return text.includes('抓取失败') && text.includes('联网') && !text.includes('NETWORK_NOT_AUTHORIZED') })()`), await dialogStatus())
+  const refusedLog = await egressLog()
+  const refusedEntries = refusedLog?.ok ? refusedLog.view.entries : []
+  check('总闸关闭：没有任何成功外发，只留一条 NETWORK_NOT_AUTHORIZED 拒绝记录',
+    refusedLog?.ok === true && refusedEntries.length === 1 &&
+      refusedEntries[0]?.outcome === 'refused' && refusedEntries[0]?.code === 'NETWORK_NOT_AUTHORIZED' && refusedEntries[0]?.host === 'example.com',
+    JSON.stringify(refusedLog))
+  check('总闸关闭：对话框没有渲染任何结果', await page.eval(`document.querySelector('.fetch-dialog-result')?.children.length===0`))
+  await shot(page, 'human-network-gate-off-1200')
+  check('人发起联网：关闭抓页对话框', await closeDialog())
+
+  // ③ 开总闸（change 即保存）后重开对话框；回环地址在出口被拒，审计与统计只留这次拒绝。
+  check('人发起联网：回设置打开模型页', await openSettings() && await openModelPage())
+  check('勾选总开关', await page.eval(`(() => { const node=document.querySelector('[data-network="enabled"]'); if(!node || node.checked || node.disabled) return false; node.click(); return true })()`))
+  check('总开关经设置卡保存为开（控件重新可用且读回 enabled）', await waitFor(page, `(async () => { const node=document.querySelector('[data-network="enabled"]'); if(!node || !node.checked || node.disabled) return false; const result=await window.rgent.networkConfig(); return result.ok===true && result.config.enabled===true })()`), await page.eval(`document.querySelector('[data-network="status"]')?.textContent ?? ''`))
+  await shot(page, 'human-network-settings-on-1200')
+  check('人发起联网：关闭设置', await closeSettings())
+  check('再次用快捷键打开对话框', await openDialogByShortcut())
+  await fillDialog('https://127.0.0.1/x')
+  await submitDialog()
+  check('开闸后回环地址被出口拒绝并翻成人话', await waitFor(page, `(() => { const text=document.querySelector('.fetch-dialog-status')?.textContent||''; return text.includes('抓取失败') && text.includes('目标网址不合法') && !text.includes('EGRESS_INVALID_URL') })()`), await dialogStatus())
+  const invalidLog = await egressLog()
+  const invalidEntries = invalidLog?.ok ? invalidLog.view.entries.filter(entry => entry.code === 'EGRESS_INVALID_URL') : []
+  check('外发日志有且仅有 1 条 EGRESS_INVALID_URL（refused、主机 127.0.0.1）',
+    invalidLog?.ok === true && invalidEntries.length === 1 && invalidEntries[0]?.outcome === 'refused' &&
+      invalidEntries[0]?.host === '127.0.0.1' && invalidEntries[0]?.action === 'fetch',
+    JSON.stringify(invalidLog))
+  check('外发日志没有任何成功条目', invalidLog?.ok === true && invalidLog.view.entries.every(entry => entry.outcome !== 'ok'), JSON.stringify(invalidLog))
+  const stats = await page.eval(`window.rgent.networkStats()`)
+  check('外发统计把这次回环拒绝记进 humanFetch.refused', stats?.ok === true && stats.stats.kinds.humanFetch.refused >= 1, JSON.stringify(stats))
+  await shot(page, 'human-network-invalid-url-1200')
+  check('人发起联网：关闭抓页对话框', await closeDialog())
+
+  // ④ 设置卡统计区：非空、写明「抓页(人)」，最近人发起列表带这次主机。
+  check('人发起联网：设置页打开（统计）', await openSettings() && await openModelPage())
+  check('设置卡统计区可见「抓页(人)」与最近一次主机 127.0.0.1', await waitFor(page, `(() => { const node=document.querySelector('.settings-network-stats'); const text=node?.textContent||''; return !!node && text.length>0 && text.includes('抓页(人)') && text.includes('127.0.0.1') && text.includes('拒绝 EGRESS_INVALID_URL') })()`), await page.eval(`document.querySelector('.settings-network-stats')?.textContent?.slice(0,500) ?? '(无统计区)'`))
+  await shot(page, 'human-network-stats-1200')
+
+  // ⑤ 收尾：对话框与设置都关掉，别把模态留给后续默认检查。
+  check('人发起联网：关闭设置（收尾）', await closeSettings())
+  check('人发起联网：专项结束时没有残留浮层', await waitFor(page, `!document.querySelector('.fetch-dialog') && !document.querySelector('.overlay-settings')`))
+}
+
 /** 外部消失与恢复核验专项（RGENT_UI_RECOVERY_ONLY=1）：在专用临时库里真删真放回，逐条走
  *  「识别与如实呈现／原路径不可重建／核验通过／内容已变／附件缺失／设置页无删除入口」六条判据。
  *  模型只用来做登记场与恢复后复跑，全部走受控主机，零真实调用。 */
@@ -1313,6 +1404,8 @@ const writeOnly = process.env.RGENT_UI_WRITE_ONLY === '1'
 const recoveryOnly = process.env.RGENT_UI_RECOVERY_ONLY === '1'
 const trashOnly = process.env.RGENT_UI_TRASH_ONLY === '1'
 const networkOnly = process.env.RGENT_UI_NETWORK_ONLY === '1'
+// 人发起联网专项：菜单/快捷键共用的对话框、总闸门控、回环拒绝与设备级审计／统计。
+const humanNetworkOnly = process.env.RGENT_UI_NETWORK_HUMAN_ONLY === '1'
 // 付费专项：只由显式环境变量触发，普通测试／构建／CI 永不调用模型。
 const skillsLive = process.env.RGENT_UI_SKILLS_LIVE
 const v4Only = process.env.RGENT_UI_V4_ONLY === '1'
@@ -3767,6 +3860,13 @@ async function main() {
       try{await verifyNetworkOnly(page,vault,shot,networkRequests,networkGate)}catch(error){stageFailed('联网只读专项',error)}finally{networkGate.abort?.()}
       check('联网只读专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
       check('联网只读专项全程只走受控主机',networkRequests.length>=3,String(networkRequests.length))
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode=failures===0?0:1
+      return
+    }
+    if(humanNetworkOnly){
+      try{await verifyHumanNetwork(page,shot)}catch(error){stageFailed('人发起联网专项',error)}
+      check('人发起联网专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
       process.exitCode=failures===0?0:1
       return

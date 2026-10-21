@@ -416,9 +416,28 @@ export async function start(root: HTMLElement): Promise<void> {
     if (!tab.availability) scheduleSave()
   })
 
+  /** 菜单「抓取网页…」与 ⌘⇧U／Ctrl+Shift+U 共用这一个入口：只开对话框，不代替人提交。
+   *  人点「抓取／搜索」才是授权；库交接与已有模态期间不开，避免把当前浮层顶掉。 */
+  function openHumanNetworkDialog(): void {
+    if (vaultBusy()) {
+      hostNotice = '笔记库正在切换，暂时不能抓取网页或搜索。'
+      updateStatus()
+      return
+    }
+    if (conflictDecisionOpen || document.querySelector('dialog[open]')) return
+    openFetchDialog({
+      canInsert: () => canInsertNetworkResult(),
+      insert: text => editor.insertAtSelection(text),
+      humanFetch: request => window.rgent.networkHumanFetch(request),
+      humanSearch: request => window.rgent.networkHumanSearch(request),
+      humanAbort: requestId => window.rgent.networkHumanAbort({ requestId })
+    })
+  }
+
   installShortcuts({
     onSearch: () => { if (!restoringWorkspace && !transitionBusy && !settingsOverlay.isBusy() && !conflictDecisionOpen) searchOverlay.open() },
-    onSave: () => { if (!restoringWorkspace && !transitionBusy && !settingsOverlay.isBusy()) void flushSave() }
+    onSave: () => { if (!restoringWorkspace && !transitionBusy && !settingsOverlay.isBusy()) void flushSave() },
+    onFetchWeb: () => { openHumanNetworkDialog() }
   })
   shortcutHint.textContent = shortcutLabel('k')
   searchOpen.addEventListener('click', () => { if (!conflictDecisionOpen && !settingsOverlay.isBusy()) searchOverlay.open() })
@@ -489,22 +508,7 @@ export async function start(root: HTMLElement): Promise<void> {
     void flushSave()
   })
   // 人发起抓页／搜索：菜单快捷键只负责开对话框；人点「抓取／搜索」即授权，不再二次确认。
-  window.rgent.onMenu(IPC.menuFetchWeb, () => {
-    if (vaultBusy()) {
-      hostNotice = '笔记库正在切换，暂时不能抓取网页或搜索。'
-      updateStatus()
-      return
-    }
-    // 浮层只有一个栈：已有模态（冲突选择、设置等）时不能把它顶掉。
-    if (conflictDecisionOpen || document.querySelector('dialog[open]')) return
-    openFetchDialog({
-      canInsert: () => canInsertNetworkResult(),
-      insert: text => editor.insertAtSelection(text),
-      humanFetch: request => window.rgent.networkHumanFetch(request),
-      humanSearch: request => window.rgent.networkHumanSearch(request),
-      humanAbort: requestId => window.rgent.networkHumanAbort({ requestId })
-    })
-  })
+  window.rgent.onMenu(IPC.menuFetchWeb, () => { openHumanNetworkDialog() })
   window.rgent.onTreeChanged(() => {
     void refreshLifecycle().then(() => refreshTree()).then(() => checkOpenNotes())
   })
