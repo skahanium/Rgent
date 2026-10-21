@@ -614,6 +614,29 @@ r9 冻结值（判定方向不变，只纠正引用）：DeepSeek **93.07／95.3
 
 **不做**：不新增删除入口、不做 Windows 删除、不做整夹／永久删除、不清空废纸篓、不把落点核验写成原子 CAS。**本条已由本轮实现**：收据后用 `lstat` 核落点 `dev:ino`，不符即 `LANDING_MISMATCH`；原路径事后出现任何对象即 `TRASH_CONFLICT`，都如实报告、不当成功。
 
+## 2026-10-21 联网只读增补：人发起、外发日志与统计
+
+1. **人发起**：应用菜单/快捷键打开同一对话框（抓页或搜索）；**人点"抓取/搜索"即授权**，不再二次确认；总闸 `enabled=false` 时同样拒绝；只发人输入的 URL 或查询，**不发笔记内容**；明文 HTTP、私网、非 443、跨源重定向一律拒（与原合同一致）。
+2. **两条审计链**：AI 外发 → 该场笔记账本 `network[]`（现状）；**人发起外发 → 设备级 `network-egress.jsonl`**（append-only、0600、>200 条或 >256 KiB 轮转为 `.1`；字段仅时间/类型/主机/字节/结果码，**不含 URL 查询串、正文、凭据**）。设置卡可看最近 10 条。
+3. **插入**：只能把 ≤4 KiB 引用＋来源与时间插入当前笔记光标处；该篇有活动任务或不可保存时禁用并说明；插入是人的编辑行为，不写账本正文；没有打开的笔记时只允许复制。
+4. **统计**：`network-stats.json`（0600，去抖 500ms 原子写）只存计数/字节/失败码分布/最近成功时间与最近失败码（≤10）；设置卡可查看、可清空（同时清外发日志）。
+5. **提取质量**：允许 `@mozilla/readability` ＋ `jsdom`（懒加载，只在抓页时引入）；正文 <200 字、空结果或抛错时回退现有手写提取器并记录回退原因；输入 1 MiB 上限与截断标记不变。
+6. **IPC**：`network:human-fetch`、`network:human-search`、`network:egress-log`、`network:stats`、`network:stats-clear`。
+7. **不做**：人发起发送笔记内容、自动循环抓取、结果自动写笔记、无头浏览器、代理。
+
+## 2026-10-21 远端只读 MCP 合同
+
+1. **范围**：仅 **HTTPS 远端 Streamable HTTP**，仅 **Bearer token** 认证；不接 stdio／本机进程、不挂库、不下载服务器；工具只读由**人工白名单**保证，不信任服务器自报的只读标注。OAuth、查询参数 key、写工具均不做。
+2. **传输**：复用钉地址传输（`requestPinnedImage`）；POST JSON-RPC；头 `Accept: application/json, text/event-stream`、`Content-Type: application/json`、`MCP-Protocol-Version`，首帧后带 `Mcp-Session-Id`；按块读取、**收到匹配 id 的响应即停**；单消息 ≤1 MiB、单次 ≤20s、可取消；3xx 不跟随、非 HTTPS／非公网拒。
+3. **客户端**：`initialize`（版本协商）→ `notifications/initialized` → `tools/list` → `tools/call`；**每任务惰性建连**、任务结束关闭；会话失效只重连一次，再失败如实报；错误码 `MCP_CONNECT_FAILED｜MCP_UNAUTHORIZED｜MCP_PROTOCOL｜MCP_TOOL_UNKNOWN｜MCP_TOOL_FAILED｜MCP_TIMEOUT｜MCP_TOO_LARGE｜MCP_CANCELLED`，服务器错误文本不进消息。
+4. **配置**：`mcp-config.json` v1（服务器数组）；token 用 `SecretProtection` 密文；`getPublic()` 永不含 token/密文；URL 校验（https、公网、443、无 userinfo）；同一 URL 只允许一条；白名单只能来自已发现工具；启用必须有 token。
+5. **授权（无感）**：口令卡上一次勾选（显示服务器主机与工具名），快照冻结并在 start 比对；服务器/白名单/凭据变化 → 撤销活动任务 MCP 授权并拒绝（**不取消任务**）；运行中调用零弹窗。
+6. **工具**：`mcp_call {server,tool,arguments}`；arguments 必须是 JSON 对象且 ≤16 KiB；浅层结构校验，不引入 JSON Schema 校验器；结果低信任包裹、≤32 KiB 给模型；结果不自动进笔记或记忆。
+7. **审计**：账本 `network[]` 扩 `action:'mcp'`＋`server`／`tool`；事件 `kind:'mcp'`；`network:stop` 同时撤销 MCP 并 abort 在途。
+8. **证据边界**：窗口专项只证配置、门控、拒绝与账本可见；成功路径由 DI 单测＋传输测试＋**公共只读服务器手工烟测**（`https://mcp.deepwiki.com/mcp`，属手工证据、不作 CI 门）承担；协议实现若被烟测证伪，暂停并回报，兜底改用官方 SDK 需所有者批准。
+9. **IPC**：`mcp:config`、`mcp:server-save`、`mcp:server-remove`、`mcp:discover`。
+10. **不做**：stdio／本机、写工具、OAuth、自动信任标注、后台轮询、多服务器并发爆发（每任务按需、串行）。
+
 ## 2026-10-20 联网只读合同
 
 本段落实 2026-10-18 开工授权里"细目待逐条审阅"的部分；所有者已逐条审阅并批准（含方案 v2 的九处修正）。范围为只读联网，真实外发不设上限。
