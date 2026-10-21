@@ -86,6 +86,8 @@ export const IPC = {
   networkHumanSearch: 'network:human-search',
   networkHumanAbort: 'network:human-abort',
   networkEgressLog: 'network:egress-log',
+  networkStats: 'network:stats',
+  networkStatsClear: 'network:stats-clear',
   memoryChanged: 'memory:changed',
   memoryGet: 'memory:get',
   memoryConfigSave: 'memory:config-save',
@@ -239,6 +241,22 @@ export type EgressLogEntry = {
 export type EgressLogRequest = { limit?: number }
 export type EgressLogView = { entries: EgressLogEntry[]; skipped: number }
 export type EgressLogResult = { ok: true; view: EgressLogView } | { ok: false; error: string }
+
+/** 设备级外发统计的五个口子；MCP 尚未启用，但形状先留位（计数恒为 0）。 */
+export type NetworkStatKind = 'fetch' | 'search' | 'mcp' | 'humanFetch' | 'humanSearch'
+/** 每个口子只存成功／拒绝次数与抓页字节数；不存 URL、查询、正文或凭据。 */
+export type NetworkStatsCounts = { ok: number; refused: number; bytes: number }
+/** 设置卡只读快照：`corrupt` 为真表示磁盘文件读不出来，已按「保留原文件」处理。 */
+export type NetworkStatsView = {
+  version: 1
+  kinds: Record<NetworkStatKind, NetworkStatsCounts>
+  lastOkAt?: string
+  lastCodes: { code: string; at: string }[]
+  corrupt?: true
+}
+export type NetworkStatsResult = { ok: true; stats: NetworkStatsView } | { ok: false; error: string }
+/** 清空统计同时清外发日志；两步都成功后才是 `{ ok: true }`。 */
+export type NetworkStatsClearResult = { ok: true } | { ok: false; error: string }
 /** 网络事件只带主机与去查询串的路径，不带正文、密钥或查询参数。 */
 export type AgentNetworkEvent = {
   taskId: string

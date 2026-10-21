@@ -291,7 +291,10 @@ export async function start(root: HTMLElement): Promise<void> {
       get: () => window.rgent.networkConfig(),
       setEnabled: enabled => window.rgent.networkConfig({ enabled }),
       saveProvider: request => window.rgent.networkProviderSave(request),
-      clearProvider: () => window.rgent.networkProviderClear()
+      clearProvider: () => window.rgent.networkProviderClear(),
+      stats: () => window.rgent.networkStats(),
+      clearStats: () => window.rgent.networkStatsClear(),
+      egressLog: limit => window.rgent.networkEgressLog({ limit })
     }),
     onModelConfigChanged: () => { void refreshModelModule(); void refreshMemory() },
     onClose: () => {

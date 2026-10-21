@@ -29,9 +29,10 @@ import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRet
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import type { NetworkPreviewRequest, NetworkPreviewResult } from '../shared/ipc.ts'
 import type { NetworkConfigResult, NetworkProviderSaveRequest } from '../shared/ipc.ts'
-import type { EgressLogResult, HumanFetchResult, HumanSearchResult } from '../shared/ipc.ts'
+import type { EgressLogResult, HumanFetchResult, HumanSearchResult, NetworkStatKind, NetworkStatsClearResult, NetworkStatsResult } from '../shared/ipc.ts'
 import { createEgressLog, type EgressLog } from './egress-log.ts'
 import { createHumanNetwork, applyHumanNetworkGate, type HumanNetwork } from './human-network.ts'
+import { createNetworkStats, flushNetworkStats, networkErrorCode, networkFailureCode, type NetworkStatEvent, type NetworkStats } from './network-stats.ts'
 import { isThemeMode, loadReadingPreference, loadThemePreference, saveReadingPreference, saveThemePreference } from './theme-preference.ts'
 import { loadAssistantHabits, saveAssistantHabits } from './assistant-preference.ts'
 import { createSkillsStore } from './skills-store.ts'
@@ -95,6 +96,8 @@ let networkConfig: NetworkConfigStore | null = null
 /** 人发起外发的两条设备级设施：审计日志与抓页／搜索门面。 */
 let egressLog: EgressLog | null = null
 let humanNetwork: HumanNetwork | null = null
+/** 设备级外发统计：只记次数／字节／拒绝码，记录失败不影响外发本身。 */
+let networkStats: NetworkStats | null = null
 let agentHost: AgentHost | null = null
 /** 联网只读的可用性：抓页只依赖总闸；搜索另要求预设服务与密钥可用。渲染层只拿摘要。
  *  配置保存后立即生效：这里按需读文件、不缓存，下一次判定自然看到新值。 */
@@ -109,17 +112,9 @@ function networkAvailability(): { available: boolean; search: boolean; providerH
   } catch { return { available: false, search: false, providerHost: null, reason: 'off' } }
 }
 
-/** 人发起外发只允许把已知拒绝码回报渲染层／写日志；错误消息本身一律不外泄。 */
-const HUMAN_NETWORK_ERRORS = new Set([
-  'NETWORK_NOT_AUTHORIZED',
-  'SEARCH_NOT_CONFIGURED', 'SEARCH_UNAUTHORIZED', 'SEARCH_REFUSED', 'SEARCH_MALFORMED', 'SEARCH_EMPTY',
-  'EGRESS_INVALID_URL', 'EGRESS_HTTP_REFUSED', 'EGRESS_CROSS_ORIGIN_REFUSED', 'EGRESS_UNSUPPORTED_TYPE',
-  'EGRESS_ENCODING_REFUSED', 'EGRESS_TOO_LARGE', 'EGRESS_TIMEOUT', 'EGRESS_UNAVAILABLE', 'EGRESS_BUSY',
-  'EGRESS_CONTENT_ECHO', 'EGRESS_ABORTED'
-])
-function humanErrorCode(error: unknown): string {
-  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
-  return HUMAN_NETWORK_ERRORS.has(message) ? message : 'EGRESS_UNAVAILABLE'
+/** 统计写失败不能影响外发：错误码规范化与写入都包在这里，模块自己也兜一层。 */
+function recordNetworkStat(kind: NetworkStatKind, event: NetworkStatEvent): void {
+  try { networkStats?.record(kind, event) } catch { /* stats are best effort */ }
 }
 const HUMAN_LIMITS = { maxUrl: 2048, maxQuery: 256, maxResults: 10, maxLogLimit: 50 } as const
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u
@@ -992,8 +987,8 @@ function registerIpc(): void {
     try {
       const result = await humanNetwork.fetchPage(request.url, request.requestId ? { requestId: request.requestId } : undefined)
       // 返回的失败码也过白名单：出口模块未来多出的码不会顺带把新文案带进渲染层。
-      return result.ok ? result : { ok: false, error: humanErrorCode(result.error) }
-    } catch (error) { return { ok: false, error: humanErrorCode(error) } }
+      return result.ok ? result : { ok: false, error: networkErrorCode(result.error) }
+    } catch (error) { return { ok: false, error: networkErrorCode(error) } }
   })
   registerTrustedHandle(IPC.networkHumanSearch, async (event, value: unknown): Promise<HumanSearchResult> => {
     if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
@@ -1002,8 +997,8 @@ function registerIpc(): void {
     if (!humanNetwork) return { ok: false, error: 'NETWORK_NOT_AUTHORIZED' }
     try {
       const result = await humanNetwork.search(request.query, request.maxResults, request.requestId ? { requestId: request.requestId } : undefined)
-      return result.ok ? result : { ok: false, error: humanErrorCode(result.error) }
-    } catch (error) { return { ok: false, error: humanErrorCode(error) } }
+      return result.ok ? result : { ok: false, error: networkErrorCode(result.error) }
+    } catch (error) { return { ok: false, error: networkErrorCode(error) } }
   })
   /** 人主动停止：只停自己这次带上的 requestId；找不到或参数不合法都回 false，不泄露内部状态。 */
   registerTrustedHandle(IPC.networkHumanAbort, (event, value: unknown): boolean => {
@@ -1022,6 +1017,21 @@ function registerIpc(): void {
     if (!egressLog) return { ok: false, error: 'IO_ERROR' }
     try { return { ok: true, view: egressLog.recent(limit) } }
     catch { return { ok: false, error: 'IO_ERROR' } }
+  })
+  /** 外发统计只读：快照里只有计数／字节／拒绝码与时间，没有 URL、查询、正文或路径。 */
+  registerTrustedHandle(IPC.networkStats, (event): NetworkStatsResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    if (!networkStats) return { ok: false, error: 'IO_ERROR' }
+    try { return { ok: true, stats: networkStats.view() } }
+    catch { return { ok: false, error: 'IO_ERROR' } }
+  })
+  /** 先清外发日志再清统计：日志失败就整体失败且统计不动，避免「只清一半」。 */
+  registerTrustedHandle(IPC.networkStatsClear, (event): NetworkStatsClearResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    if (!egressLog || !networkStats) return { ok: false, error: 'IO_ERROR' }
+    try { egressLog.clear() } catch { return { ok: false, error: 'IO_ERROR' } }
+    try { networkStats.clear() } catch { return { ok: false, error: 'IO_ERROR' } }
+    return { ok: true }
   })
   registerTrustedHandle(IPC.remoteImageGet, async (_event, value: unknown): Promise<RemoteImageGetResult> => {
     if (!remoteImages || !vault || !value || typeof value !== 'object') return { ok: false, error: 'NOT_ALLOWED' }
@@ -1683,6 +1693,7 @@ if (ownsInstance) app.whenReady().then(() => {
   networkConfig = createNetworkConfigStore(app.getPath('userData'), safeStorage)
   // 人发起外发：设备级日志与门面。总闸每次现读，保存配置后立即生效；凭据只在主进程解密。
   egressLog = createEgressLog(app.getPath('userData'))
+  networkStats = createNetworkStats(app.getPath('userData'))
   humanNetwork = createHumanNetwork({
     enabled: () => networkConfig?.enabled() === true,
     fetchText: (url, options) => fetchText(url, options),
@@ -1698,7 +1709,8 @@ if (ownsInstance) app.whenReady().then(() => {
         search: (query, options) => provider.search(query, options)
       }
     },
-    log: egressLog
+    log: egressLog,
+    stats: { record: recordNetworkStat }
   })
   authorizations = new TaskAuthorizationRegistry({
     root:()=>{try{return vault?.requireUsableRoot()??null}catch{return null}},
@@ -1842,32 +1854,45 @@ if (ownsInstance) app.whenReady().then(() => {
     stream: (input, signal) => streamModelText({ ...input, signal }),
     streamStep: (input, signal) => streamModelStep({ ...input, signal }),
     // 唯一出口：fetchText 内部再用 EgressClient；错误码已是 EGRESS_*，Host 直接如实上报。
+    // 统计只旁听：成功记 ok＋字节，失败先按白名单规范化记 refused 再原样抛出。
     network: {
       fetch: async (url, signal) => {
-        const result = await fetchText(url, { signal })
-        return {
-          text: result.text,
-          host: new URL(result.finalUrl).host,
-          url: result.finalUrl,
-          ...(result.title ? { title: result.title } : {}),
-          bytes: result.bytes,
-          truncated: result.truncated,
-          lowTrust: true as const
+        try {
+          const result = await fetchText(url, { signal })
+          recordNetworkStat('fetch', { outcome: 'ok', bytes: result.bytes })
+          return {
+            text: result.text,
+            host: new URL(result.finalUrl).host,
+            url: result.finalUrl,
+            ...(result.title ? { title: result.title } : {}),
+            bytes: result.bytes,
+            truncated: result.truncated,
+            lowTrust: true as const
+          }
+        } catch (error) {
+          recordNetworkStat('fetch', { outcome: 'refused', code: networkFailureCode(error, signal) })
+          throw error
         }
       },
       // 搜索走同一出口核心；服务商与密钥只在主进程解密，错误码不夹带 key。
       search: async (query, maxResults, signal) => {
-        let credential: NetworkCredential | null = null
-        try { credential = networkConfig?.credential() ?? null }
-        catch { credential = null }
-        if (!credential) throw Error('SEARCH_NOT_CONFIGURED')
-        const provider = createSearchProvider(credential)
-        const result = await provider.search(query, { maxResults, signal })
-        return {
-          provider: credential.provider,
-          host: SEARCH_PROVIDERS[credential.provider].host,
-          results: result.results,
-          ...(result.truncated ? { truncated: true as const } : {})
+        try {
+          let credential: NetworkCredential | null = null
+          try { credential = networkConfig?.credential() ?? null }
+          catch { credential = null }
+          if (!credential) throw Error('SEARCH_NOT_CONFIGURED')
+          const provider = createSearchProvider(credential)
+          const result = await provider.search(query, { maxResults, signal })
+          recordNetworkStat('search', { outcome: 'ok' })
+          return {
+            provider: credential.provider,
+            host: SEARCH_PROVIDERS[credential.provider].host,
+            results: result.results,
+            ...(result.truncated ? { truncated: true as const } : {})
+          }
+        } catch (error) {
+          recordNetworkStat('search', { outcome: 'refused', code: networkFailureCode(error, signal) })
+          throw error
         }
       },
       availability: networkAvailability
@@ -1906,6 +1931,8 @@ app.on('before-quit', () => {
 
 // 必须等渲染进程写完盘再拆库：退出前那次 flush 还要经 noteWrite 落盘。
 app.on('will-quit', () => {
+  // 统计去抖 500ms：退出前同步落盘最后几条；写失败不能让退出卡住。
+  flushNetworkStats(networkStats)
   consolidation?.close()
   vault?.dispose()
 })

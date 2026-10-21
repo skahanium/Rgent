@@ -4,6 +4,7 @@ import type {
   HumanSearchResult,
   NetworkProvider
 } from '../shared/ipc.ts'
+import type { NetworkStatEvent } from './network-stats.ts'
 
 /**
  * 人发起的抓页／搜索（应用菜单 → 对话框 → 主进程）。
@@ -43,6 +44,8 @@ export type HumanNetworkDependencies = {
   /** 搜索服务：没有凭据时抛 `SEARCH_NOT_CONFIGURED`；凭据只在主进程内使用。 */
   searchProvider(): Promise<HumanSearchService>
   log: { append(entry: EgressLogEntry): void }
+  /** 设备级外发统计（可选）：同样只收次数／字节／拒绝码，不改变返回形状。 */
+  stats?: { record(kind: 'humanFetch' | 'humanSearch', event: NetworkStatEvent): void }
 }
 
 /** 渲染层生成、随请求带上并可用来停止的标识；与 IPC 校验同一套字符集。 */
@@ -93,8 +96,13 @@ export function createHumanNetwork(deps: HumanNetworkDependencies): HumanNetwork
     try { deps.log.append(entry); return true }
     catch { return false }
   }
+  /** 统计是旁路：写统计失败不能把一次已经发生（或已经拒绝）的外发变成新的失败。 */
+  const stat = (kind: 'humanFetch' | 'humanSearch', event: NetworkStatEvent): void => {
+    try { deps.stats?.record(kind, event) } catch { /* stats are best effort */ }
+  }
   const refuse = (action: 'fetch' | 'search', host: string, code: string): void => {
     record({ at: now(), action, host, outcome: 'refused', code })
+    stat(action === 'fetch' ? 'humanFetch' : 'humanSearch', { outcome: 'refused', code })
   }
   const gate = (): boolean => {
     try { return deps.enabled() === true } catch { return false }
@@ -117,6 +125,8 @@ export function createHumanNetwork(deps: HumanNetworkDependencies): HumanNetwork
         const host = hostOf(result.finalUrl) || fallbackHost
         const fetchedAt = now()
         const logged = record({ at: fetchedAt, action: 'fetch', host, bytes: result.bytes, outcome: 'ok' })
+        // 日志写失败只降级 `degraded`；外发本身成功，统计照实记 ok＋字节。
+        stat('humanFetch', { outcome: 'ok', bytes: result.bytes })
         return {
           ok: true,
           url: result.finalUrl,
@@ -164,6 +174,7 @@ export function createHumanNetwork(deps: HumanNetworkDependencies): HumanNetwork
           if (!result.results.length) throw Error('SEARCH_EMPTY')
           const at = now()
           const logged = record({ at, action: 'search', host: service.host, count: result.results.length, outcome: 'ok' })
+          stat('humanSearch', { outcome: 'ok' })
           return {
             ok: true,
             provider: service.provider,

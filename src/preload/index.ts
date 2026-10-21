@@ -52,6 +52,8 @@ import {
   type HumanAbortRequest,
   type EgressLogRequest,
   type EgressLogResult,
+  type NetworkStatsResult,
+  type NetworkStatsClearResult,
   type AgentTaskView,
   type AgentEvent,
   type EntryCreateRequest,
@@ -202,6 +204,10 @@ const api = {
   networkHumanAbort: (request: HumanAbortRequest): Promise<boolean> => invoke(IPC.networkHumanAbort, request),
   /** 只读查看设备级外发日志的最近条目；不含 URL、查询串与正文。 */
   networkEgressLog: (request?: EgressLogRequest): Promise<EgressLogResult> => invoke(IPC.networkEgressLog, request),
+  /** 设备级外发统计只读快照；损坏时如实带 `corrupt`，不假装正常。 */
+  networkStats: (): Promise<NetworkStatsResult> => invoke(IPC.networkStats),
+  /** 清空统计并同时清外发日志；两步都成功才回 ok。 */
+  networkStatsClear: (): Promise<NetworkStatsClearResult> => invoke(IPC.networkStatsClear),
   agentTasks: (): Promise<AgentTaskView[]> => invoke(IPC.agentTasks),
   onAgentEvent: (handler: (payload: AgentEvent) => void): (() => void) =>
     subscribe(IPC.agentEvent, (payload) => handler(payload as AgentEvent)),
