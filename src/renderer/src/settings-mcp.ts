@@ -56,9 +56,16 @@ const SETTINGS_PHRASES: Record<string, string> = {
   BAD_SENDER: '请求来源不受信任，未保存。',
   IO_ERROR: '写入本机配置失败，原配置保持不变。'
 }
+/** MCP_BAD_TOKEN 现在只表示「填了 token 但非法」；host-errors 里「启用前必须先保存 token」的
+ *  旧口径已不成立（公共只读服务器可以留空），卡片这里只解释 token 本身的形状。 */
+const MCP_PHRASES: Record<string, string> = {
+  MCP_BAD_TOKEN: 'token 须 1–4096 字且不含控制字符；公共只读服务器可以留空。'
+}
 /** 错误只翻译已登记码；未登记也不回显内部字符串。 */
 export const mcpErrorText = (error: string): string =>
-  (Object.hasOwn(SETTINGS_PHRASES, error) ? SETTINGS_PHRASES[error]! : null) ?? hostErrorMessage(error) ?? FALLBACK_ERROR
+  (Object.hasOwn(MCP_PHRASES, error) ? MCP_PHRASES[error]!
+    : Object.hasOwn(SETTINGS_PHRASES, error) ? SETTINGS_PHRASES[error]!
+      : hostErrorMessage(error) ?? FALLBACK_ERROR)
 
 const element = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string): HTMLElementTagNameMap[K] => {
   const node = document.createElement(tag)
@@ -79,7 +86,7 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
   const intro = element('p', 'settings-hint')
   intro.textContent = '连接远端 HTTPS 服务器，把已发现并勾选的只读工具提供给 AI 任务。'
   const guarantee = element('p', 'settings-hint')
-  guarantee.textContent = '只读由你勾选的工具保证；Rgent 只按名字与参数转发；token 只存本机加密，不显示。'
+  guarantee.textContent = '只读由你勾选的工具保证；Rgent 只按名字与参数转发；token 可选（公共只读服务器可留空），有 token 时只存本机加密、不显示。'
 
   const list = element('div', 'settings-mcp-list')
   list.dataset.mcp = 'list'
@@ -112,7 +119,7 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
   urlField.append(urlLabel, urlInput)
   const tokenField = element('label', 'settings-field')
   const tokenLabel = element('span')
-  tokenLabel.textContent = 'token（保存后清空，不再显示）'
+  tokenLabel.textContent = 'token（公共只读服务器可留空；保存后清空，不再显示）'
   const tokenInput = element('input')
   tokenInput.type = 'password'
   tokenInput.autocomplete = 'new-password'
@@ -120,7 +127,7 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
   tokenInput.dataset.mcp = 'new-token'
   tokenField.append(tokenLabel, tokenInput)
   const addHint = element('p', 'settings-hint')
-  addHint.textContent = '保存不会发测试请求；添加后先在列表里打开启用开关。要更换 token，删除后重新添加。'
+  addHint.textContent = '保存不会发测试请求；添加后先在列表里打开启用开关。公共只读服务器可以留空 token；要更换 token，删除后重新添加。'
   const addActions = element('div', 'settings-actions')
   const save = element('button', 'settings-action')
   save.type = 'button'
@@ -188,7 +195,7 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
     const counts = element('p', 'settings-mcp-counts')
     counts.dataset.mcp = 'counts'
     const state = server.enabled ? '已启用' : '未启用'
-    counts.textContent = `工具 ${server.tools.length} · 白名单 ${server.whitelist.length} · ${state}${server.hasToken ? '' : ' · 没有 token'}`
+    counts.textContent = `工具 ${server.tools.length} · 白名单 ${server.whitelist.length} · ${state}${server.hasToken ? '' : ' · 无 token'}`
 
     const toggle = element('label', 'settings-network-toggle')
     const enabled = element('input')
@@ -207,8 +214,9 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
     discover.type = 'button'
     discover.textContent = '连接并列出工具'
     discover.dataset.mcp = 'discover'
-    discover.disabled = busy || !server.hasToken
-    discover.title = server.hasToken ? `将向 ${server.host} 发送一次请求` : '先保存 token 才能连接。'
+    // token 可选：公共只读服务器没有 token 也要能发现工具（连接时不发 authorization 头）。
+    discover.disabled = busy
+    discover.title = server.hasToken ? `将向 ${server.host} 发送一次请求` : `将向 ${server.host} 发送一次请求（这台没有 token，连接不带认证头）`
     const remove = element('button', 'settings-action')
     remove.type = 'button'
     remove.textContent = '删除'
@@ -223,7 +231,7 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
       hint.dataset.mcp = 'tools-empty'
       hint.textContent = server.hasToken
         ? '还没有读取过工具。点「连接并列出工具」读取。'
-        : '这台服务器还没有 token；删除后重新添加并保存 token 才能连接。'
+        : '还没有读取过工具。公共只读服务器可以不带 token，直接点「连接并列出工具」读取。'
       toolsBox.append(hint)
     } else {
       const toolsHint = element('p', 'settings-hint')
@@ -249,12 +257,7 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
     enabled.addEventListener('change', () => {
       if (busy) return
       const next = enabled.checked
-      if (next && !server.hasToken) {
-        enabled.checked = false
-        errorText = '这台服务器还没有 token，不能启用；请删除后重新添加并保存 token。'
-        paintMessages()
-        return
-      }
+      // 启用不要求 token：公共只读服务器（没有密文）也可以直接开启。
       operate(async () => {
         const result = await handlers.save({ id: server.id, name: server.name, url: server.url, enabled: next })
         if (disposed || !host.isCurrent()) return
@@ -336,9 +339,10 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
     const token = tokenInput.value
     if (!name) { errorText = '请填写服务器名称（1–80 字）。'; paintMessages(); return }
     if (!/^https:\/\//iu.test(url)) { errorText = '服务器地址必须以 https:// 开头，且不带用户名密码。'; paintMessages(); return }
-    if (!token.trim()) { errorText = '请填写 token；保存后输入框会清空。'; paintMessages(); return }
+    // token 留空＝公共只读服务器：请求里不带 token 字段，主进程按「没有密文」保存。
+    const supplied = token.trim().length > 0
     operate(async () => {
-      const result = await handlers.save({ name, url, token, enabled: false })
+      const result = await handlers.save({ name, url, enabled: false, ...(supplied ? { token } : {}) })
       if (disposed || !host.isCurrent()) return
       if (!result.ok) { errorText = mcpErrorText(result.error); return }
       config = result.config

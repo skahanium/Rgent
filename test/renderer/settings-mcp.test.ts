@@ -63,7 +63,7 @@ describe('远端只读 MCP 设置卡', () => {
     expect(node(row, 'remove').textContent).toBe('删除')
     // 一次外发前先写明目标主机。
     expect(node(row, 'discover-hint').textContent).toContain('mcp.example.com')
-    expect(body.textContent).toContain('只读由你勾选的工具保证；Rgent 只按名字与参数转发；token 只存本机加密，不显示。')
+    expect(body.textContent).toContain('只读由你勾选的工具保证；Rgent 只按名字与参数转发；token 可选（公共只读服务器可留空），有 token 时只存本机加密、不显示。')
     // 已发现工具按勾选状态列出。
     const tools = nodes<HTMLInputElement>(row, 'tool')
     expect(tools.map(input => input.dataset.toolName)).toEqual(['read_a', 'read_b'])
@@ -101,8 +101,9 @@ describe('远端只读 MCP 设置卡', () => {
     expect(node(body, 'status').textContent).toContain('已保存')
   })
 
-  it('validates the add form locally before calling IPC', async () => {
-    const { body, handlers } = mount()
+  it('validates the add form locally and saves a public server without a token', async () => {
+    const added = server({ id: 's2', name: 'x', url: 'https://plain.example.com/mcp', host: 'plain.example.com', hasToken: false })
+    const { body, handlers } = mount(ok(view()), { save: vi.fn(async (_request: McpServerSaveRequest) => ok(view(added))) })
     await tick()
     node<HTMLButtonElement>(body, 'save').click()
     expect(node(body, 'error').textContent).toContain('名称')
@@ -110,10 +111,16 @@ describe('远端只读 MCP 设置卡', () => {
     node<HTMLInputElement>(body, 'new-url').value = 'http://plain.example.com/mcp'
     node<HTMLButtonElement>(body, 'save').click()
     expect(node(body, 'error').textContent).toContain('https://')
-    node<HTMLInputElement>(body, 'new-url').value = 'https://plain.example.com/mcp'
-    node<HTMLButtonElement>(body, 'save').click()
-    expect(node(body, 'error').textContent).toContain('token')
     expect(handlers.save).not.toHaveBeenCalled()
+    node<HTMLInputElement>(body, 'new-url').value = 'https://plain.example.com/mcp'
+    // token 留空是合法的公共只读服务器：请求里不带 token 字段，表单照常提交。
+    node<HTMLButtonElement>(body, 'save').click()
+    await tick()
+    expect(handlers.save).toHaveBeenCalledWith({ name: 'x', url: 'https://plain.example.com/mcp', enabled: false })
+    expect(node(body, 'status').textContent).toContain('已保存')
+    expect(body.textContent).toContain('公共只读服务器可以留空 token')
+    expect(node(body, 'counts').textContent).toContain('无 token')
+    expect(node(body, 'tools-empty').textContent).toContain('公共只读服务器')
   })
 
   it('discovers tools for one server, shows the host, and saves the whitelist from checkboxes', async () => {
@@ -152,7 +159,7 @@ describe('远端只读 MCP 设置卡', () => {
     expect((nodes<HTMLInputElement>(body, 'tool')[0]!).checked).toBe(true)
   })
 
-  it('saves the enabled switch immediately, but refuses to enable without a token', async () => {
+  it('saves the enabled switch immediately for servers with or without a token', async () => {
     const save = vi.fn(async (_request: McpServerSaveRequest) => ok(view(server({ enabled: true }))))
     const { body } = mount(ok(view(server({ enabled: false }))), { save })
     await tick()
@@ -160,15 +167,32 @@ describe('远端只读 MCP 设置卡', () => {
     await tick()
     expect(save).toHaveBeenCalledWith({ id: 's1', name: '示例服务器', url: 'https://mcp.example.com/mcp', enabled: true })
 
-    const noToken = mount(ok(view(server({ hasToken: false }))), { save: vi.fn(async () => ok(view(server({ hasToken: false })))) })
+    // 公共只读服务器没有 token 也能直接启用，且「连接并列出工具」不再被禁用。
+    const noTokenResult = server({ hasToken: false, enabled: true })
+    const noToken = mount(ok(view(server({ hasToken: false }))), { save: vi.fn(async () => ok(view(noTokenResult))) })
     await tick()
-    const checkbox = node<HTMLInputElement>(noToken.body, 'enabled')
-    checkbox.click()
+    node<HTMLInputElement>(noToken.body, 'enabled').click()
     await tick()
-    expect(noToken.handlers.save).not.toHaveBeenCalled()
-    expect(checkbox.checked).toBe(false)
-    expect(node(noToken.body, 'error').textContent).toContain('token')
-    expect(node<HTMLButtonElement>(noToken.body, 'discover').disabled).toBe(true)
+    expect(noToken.handlers.save).toHaveBeenCalledWith({ id: 's1', name: '示例服务器', url: 'https://mcp.example.com/mcp', enabled: true })
+    expect(node<HTMLInputElement>(noToken.body, 'enabled').checked).toBe(true)
+    expect(node(noToken.body, 'error').hidden).toBe(true)
+    expect(node<HTMLButtonElement>(noToken.body, 'discover').disabled).toBe(false)
+    expect(node(noToken.body, 'counts').textContent).toContain('无 token')
+    expect(node(noToken.body, 'tools-empty').textContent).toContain('公共只读服务器')
+  })
+
+  it('discovers tools for a server without a token', async () => {
+    const discovered = server({ hasToken: false, tools: [{ name: 'read_a' }] })
+    const discover = vi.fn(async () => ({ ok: true, id: 's1', tools: discovered.tools, config: view(discovered) }) as McpDiscoverResult)
+    const { body } = mount(ok(view(server({ hasToken: false }))), { discover })
+    await tick()
+    const button = node<HTMLButtonElement>(body, 'discover')
+    expect(button.disabled).toBe(false)
+    button.click()
+    await tick()
+    expect(discover).toHaveBeenCalledWith({ id: 's1' })
+    expect(node(body, 'status').textContent).toContain('读取 1 个工具')
+    expect(nodes<HTMLInputElement>(body, 'tool').map(input => input.dataset.toolName)).toEqual(['read_a'])
   })
 
   it('deletes a server only after the second click', async () => {
@@ -208,6 +232,10 @@ describe('远端只读 MCP 设置卡', () => {
     // 不能从对象原型上捡到「说明」（constructor 之类）。
     expect(mcpErrorText('constructor')).not.toContain('function')
     expect(mcpErrorText('constructor')).toMatch(/[\u4e00-\u9fff]/u)
+    // token 已可选：卡片不再说「启用前必须先保存 token」。
+    expect(mcpErrorText('MCP_BAD_TOKEN')).toContain('公共只读服务器可以留空')
+    expect(mcpErrorText('MCP_BAD_TOKEN')).not.toContain('启用服务器前')
+    expect(mcpErrorText('MCP_BAD_TOKEN')).not.toContain('MCP_BAD_TOKEN')
   })
 
   it('shows the empty state while reading and after a load failure, and disposes without further writes', async () => {

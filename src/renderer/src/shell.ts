@@ -400,7 +400,8 @@ export async function start(root: HTMLElement): Promise<void> {
   const activeTasks = new Map<string, AgentTaskView>()
   const endedTaskIds = new Set<string>()
   // 最近一次联网事件（成功与被拒都更新，只用于提示文本）；只活到任务结束。
-  type NetworkTaskState = { host: string; bytes?: number; truncated?: boolean; at: string; outcome?: 'ok' | 'refused'; code?: string }
+  // MCP 事件也是联网活动：另存 kind／server／tool，状态行按 `MCP <server>/<tool>` 显示。
+  type NetworkTaskState = { host: string; kind: 'fetch' | 'search' | 'mcp'; server?: string; tool?: string; bytes?: number; truncated?: boolean; at: string; outcome?: 'ok' | 'refused'; code?: string }
   const networkTasks = new Map<string, NetworkTaskState>()
   // 最近一次成功抓页的预览 id 与主机：拒绝/搜索事件只改提示，不动它。
   const networkPreviews = new Map<string, { id: string; host: string }>()
@@ -689,6 +690,9 @@ export async function start(root: HTMLElement): Promise<void> {
         networkAttempts.delete(network.taskId)
         networkTasks.set(network.taskId, {
           host: network.host,
+          kind: network.kind,
+          ...(network.server !== undefined ? { server: network.server } : {}),
+          ...(network.tool !== undefined ? { tool: network.tool } : {}),
           ...(typeof network.bytes === 'number' ? { bytes: network.bytes } : {}),
           ...(network.truncated ? { truncated: true } : {}),
           at: network.at,
@@ -1593,8 +1597,14 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   /** 状态行的联网摘要：成功只写主机、体积、低信任与截断；拒绝写尝试主机与结果码，
-   *  不写抓取正文，也不写查询串。 */
+   *  不写抓取正文，也不写查询串。MCP 事件按服务器／工具显示，且没有预览可看。 */
   function networkStatusText(network: NetworkTaskState): string {
+    if (network.kind === 'mcp') {
+      const target = `${network.server ?? '未知服务器'}/${network.tool ?? '未知工具'}`
+      if (network.outcome === 'refused') return `MCP ${target}：未执行（${network.code ?? 'UNKNOWN'}）`
+      const size = typeof network.bytes === 'number' ? `${(network.bytes / 1024).toFixed(1)} KB，` : ''
+      return `MCP ${target}：已执行（${size}低信任${network.truncated ? '，已截断' : ''}）`
+    }
     if (network.outcome === 'refused') {
       return `联网：${network.host || '未授权'}（未执行：${network.code ?? 'UNKNOWN'}）`
     }
@@ -1733,7 +1743,8 @@ export async function start(root: HTMLElement): Promise<void> {
             stopNetwork.addEventListener('click', () => { void stopTaskNetwork(task.id, stopNetwork) })
             left.append(stopNetwork)
           }
-          if (preview) {
+          if (preview && network?.kind !== 'mcp') {
+            // MCP 没有预览：状态行是 MCP 事件时不给「查看」，避免把上一次抓页内容错配到这次调用。
             const view = document.createElement('button')
             view.type = 'button'
             view.className = 'status-task-network-view'

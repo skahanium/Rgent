@@ -105,6 +105,23 @@ describe('mcp client handshake', () => {
     expect(calls[2]!.options?.headers).toMatchObject({ 'mcp-session-id': 'session-1' })
   })
 
+  it('omits the authorization header when the token is empty (public read-only server)', async () => {
+    const { transport, calls } = handshake({
+      onCall: (message) => ok({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: 'public' }] } })
+    })
+    const mcp = createMcpClient({ url: ENDPOINT, token: '', transport })
+    expect((await mcp.connect(SIGNAL)).tools.map((tool) => tool.name)).toEqual(['read', 'search'])
+    expect(await mcp.call('read', {}, SIGNAL)).toMatchObject({ text: 'public' })
+    expect(calls).toHaveLength(4)
+    for (const call of calls) {
+      // 空 token 不能发 `Bearer `（有些服务器会把它当成非法认证头）。
+      expect(call.options?.headers).not.toHaveProperty('authorization')
+      expect(call.options?.headers?.['mcp-protocol-version']).toBeTypeOf('string')
+    }
+    expect(calls[0]!.options?.headers).toEqual({ 'mcp-protocol-version': '2025-06-18' })
+    expect(calls[3]!.options?.headers).toMatchObject({ 'mcp-session-id': 'session-1' })
+  })
+
   it('uses the negotiated protocol version and session on every later request', async () => {
     const { transport, calls } = handshake({
       version: '2024-11-05',

@@ -9,9 +9,9 @@ import {
  * 远端只读 MCP 客户端（B2）：`initialize` → `notifications/initialized` → `tools/list`
  * → `tools/call`。会话失效（`MCP_PROTOCOL` 且已有 session）只重连一次并重试原请求一次。
  *
- * token 只进 `authorization` 头；本模块的运行期失败一律是标准 `Error`，`message` 恰为
- * 固定 `MCP_*` 码（宿主按 `error instanceof Error ? error.message` 取码），不会夹带
- * token、服务器 error.message 或响应正文。
+ * token 只进 `authorization` 头；空 token（公共只读服务器）不发这个头。本模块的运行期失败
+ * 一律是标准 `Error`，`message` 恰为固定 `MCP_*` 码（宿主按 `error instanceof Error ? error.message`
+ * 取码），不会夹带 token、服务器 error.message 或响应正文。
  */
 
 export type McpTool = {
@@ -37,6 +37,7 @@ export type McpClient = {
 
 export type McpClientInput = {
   url: string
+  /** 空字符串＝不带认证（公共只读服务器）；非空时发 `Bearer <token>`。 */
   token: string
   /** 生产不传，内部建 `createMcpTransport()`；测试用假 transport 记录每次请求。 */
   transport?: McpTransport
@@ -106,10 +107,9 @@ export function createMcpClient(input: McpClientInput): McpClient {
   let closed = false
 
   function headersFor(version: string): Record<string, string> {
-    const headers: Record<string, string> = {
-      authorization: `Bearer ${token}`,
-      'mcp-protocol-version': version
-    }
+    // 公共只读服务器没有 token：不能发一个空的 `Bearer ` 头。
+    const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {}
+    headers['mcp-protocol-version'] = version
     if (sessionId) headers['mcp-session-id'] = sessionId
     return headers
   }

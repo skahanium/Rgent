@@ -967,6 +967,112 @@ async function verifyHumanNetwork(page, shot) {
   check('人发起联网：专项结束时没有残留浮层', await waitFor(page, `!document.querySelector('.fetch-dialog') && !document.querySelector('.overlay-settings')`))
 }
 
+/** 远端只读 MCP 窗口专项（RGENT_UI_MCP_ONLY=1）：只证设置卡、坏地址拒绝、抓页对话框回归
+ *  与口令卡门控；零真实外网、零真实模型。公共只读服务器不带 token 也是合法形状。 */
+async function verifyMcpOnly(page, vault, shot, requests) {
+  process.stdout.write('\n远端只读 MCP 专项\n')
+  await waitFor(page, `document.querySelector('#app')?.inert===false && !!document.querySelector('.settings-open')`)
+  const openSettings = async () => {
+    await page.eval(`document.querySelector('.settings-open')?.click()`)
+    return waitFor(page, `!!document.querySelector('.overlay-settings') && !!document.querySelector('.settings-nav')`)
+  }
+  const openModelPage = async () => {
+    await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(button=>button.textContent==='模型')?.click()`)
+    return waitFor(page, `document.querySelector('.settings-page-title')?.textContent==='模型' && !!document.querySelector('.settings-mcp')`)
+  }
+  const closeSettings = async () => {
+    await page.key('Escape', 'Escape', 0, 27)
+    return waitFor(page, `!document.querySelector('.overlay-settings')`)
+  }
+  /** macOS 用 meta(4)+shift(8)，其它平台用 ctrl(2)+shift(8)；键位与菜单加速键相同（同 A4）。 */
+  const openFetchDialog = async () => {
+    const modifiers = process.platform === 'darwin' ? 4 + 8 : 2 + 8
+    const keys = { key: 'U', code: 'KeyU', modifiers, windowsVirtualKeyCode: 85 }
+    await page.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...keys })
+    await page.call('Input.dispatchKeyEvent', { type: 'keyUp', ...keys })
+    return waitFor(page, `!!document.querySelector('dialog.fetch-dialog[open]')`)
+  }
+  const closeFetchDialog = async () => {
+    await page.eval(`(() => { const button=document.querySelector('.fetch-dialog-close'); if(!button) return false; button.click(); return true })()`)
+    return waitFor(page, `!document.querySelector('.fetch-dialog')`)
+  }
+
+  // 夹具先落盘：设置页操作期间文件监听有时间把新笔记送进目录。
+  writeFileSync(path.join(vault, 'MCP 门控专项.md'), '')
+
+  // ①a 空配置：MCP 卡片可见，空服务器列表有说明文案。
+  check('MCP 专项：设置页打开（空配置）', await openSettings())
+  check('MCP 专项：MCP 卡片可见且空列表有说明文案', await openModelPage() && await waitFor(page, `(() => { const card=document.querySelector('.settings-mcp'); const empty=card?.querySelector('[data-mcp="empty"]'); return !!card && card.getBoundingClientRect().height>0 && empty?.hidden===false && empty.textContent.includes('还没有服务器') })()`), await page.eval(`document.querySelector('.settings-mcp [data-mcp="empty"]')?.textContent ?? '(无空态)'`))
+  check('MCP 专项：空配置时没有服务器行', await page.eval(`document.querySelectorAll('.settings-mcp [data-mcp="row"]').length===0`))
+  check('MCP 专项：关闭设置（空配置）', await closeSettings())
+
+  // ①b 夹具：一台不带 token 的公共只读服务器（真实 IPC）。列表因此有一行可看，工具列表仍为空。
+  const seeded = await page.eval(`window.rgent.mcpServerSave({ name: '窗口专项公共服务器', url: 'https://mcp.example.com/mcp', enabled: false })`)
+  check('MCP 专项：能保存不带 token 的公共只读服务器', seeded?.ok === true && seeded.config.servers.length === 1 && seeded.config.servers[0].hasToken === false, JSON.stringify(seeded))
+
+  // ①c 重开设置：卡片读到这一行，空工具列表有说明，「连接并列出工具」按钮在且未禁用。
+  check('MCP 专项：模型页的 MCP 卡片可见并读到夹具服务器', await openSettings() && await openModelPage() && await waitFor(page, `!!document.querySelector('.settings-mcp [data-mcp="row"]')`) && await page.eval(`(() => { const card=document.querySelector('.settings-mcp'); return !!card && card.getBoundingClientRect().height>0 && card.textContent.includes('远端只读 MCP') })()`))
+  check('MCP 专项：空工具列表有说明文案', await page.eval(`(() => { const hint=document.querySelector('.settings-mcp [data-mcp="tools-empty"]'); return !!hint && hint.textContent.includes('还没有读取过工具') })()`), await page.eval(`document.querySelector('.settings-mcp [data-mcp="tools-empty"]')?.textContent ?? '(无说明)'`))
+  check('MCP 专项：卡片有「连接并列出工具」按钮且无 token 也可点', await page.eval(`(() => { const button=document.querySelector('.settings-mcp [data-mcp="discover"]'); return !!button && button.textContent==='连接并列出工具' && !button.disabled })()`))
+  check('MCP 专项：行内状态写明无 token', await page.eval(`document.querySelector('.settings-mcp [data-mcp="counts"]')?.textContent.includes('无 token') === true`), await page.eval(`document.querySelector('.settings-mcp [data-mcp="counts"]')?.textContent ?? '(无行)'`))
+  await shot(page, 'mcp-settings-1200')
+
+  // ② 添加表单填回环地址、token 留空 → 人话错误，且没有新增行。
+  const rowsBefore = await page.eval(`document.querySelectorAll('.settings-mcp [data-mcp="row"]').length`)
+  check('MCP 专项：坏地址保存前只有夹具一行', rowsBefore === 1, String(rowsBefore))
+  await page.eval(`(() => {
+    const name=document.querySelector('.settings-mcp [data-mcp="new-name"]');
+    name.value='坏地址'; name.dispatchEvent(new Event('input',{bubbles:true}));
+    const url=document.querySelector('.settings-mcp [data-mcp="new-url"]');
+    url.value='https://127.0.0.1/mcp'; url.dispatchEvent(new Event('input',{bubbles:true}));
+    document.querySelector('.settings-mcp [data-mcp="new-token"]').value='';
+  })()`)
+  await page.eval(`document.querySelector('.settings-mcp [data-mcp="save"]')?.click()`)
+  check('MCP 专项：坏地址保存显示人话错误（地址不合法）', await waitFor(page, `(() => { const text=document.querySelector('.settings-mcp [data-mcp="error"]')?.textContent||''; return text.includes('地址') && text.includes('https') && !text.includes('MCP_BAD_URL') })()`, 10000), await page.eval(`document.querySelector('.settings-mcp [data-mcp="error"]')?.textContent ?? '(无错误)'`))
+  const rowsAfter = await page.eval(`document.querySelectorAll('.settings-mcp [data-mcp="row"]').length`)
+  check('MCP 专项：坏地址没有新增行', rowsAfter === rowsBefore, `${rowsAfter}/${rowsBefore}`)
+  const configAfterBad = await page.eval(`window.rgent.mcpConfig()`)
+  check('MCP 专项：坏地址没有写进配置', configAfterBad?.ok === true && configAfterBad.config.servers.length === 1 && configAfterBad.config.servers[0].name === '窗口专项公共服务器', JSON.stringify(configAfterBad))
+  await shot(page, 'mcp-bad-url-1200')
+
+  // ③ 回归：关闭设置后用既有快捷键打开抓页对话框再关闭，MCP 卡片的改动不影响联网对话框。
+  check('MCP 专项：关闭设置', await closeSettings())
+  check('MCP 专项：⌘⇧U／Ctrl+Shift+U 打开抓页对话框', await openFetchDialog())
+  check('MCP 专项：抓页对话框仍可输入与提交', await page.eval(`!!document.querySelector('.fetch-dialog-input:not([disabled])') && !!document.querySelector('.fetch-dialog-submit')`))
+  check('MCP 专项：关闭抓页对话框', await closeFetchDialog())
+
+  // ④ 删除夹具，恢复到「未配置 MCP」；最小任务的整张口令卡只应有原因行，没有 MCP 勾选框。
+  check('MCP 专项：回设置删除夹具', await openSettings() && await openModelPage() && await waitFor(page, `!!document.querySelector('.settings-mcp [data-mcp="row"]')`))
+  check('MCP 专项：两下确认删除夹具服务器', await page.eval(`(() => {
+    const button=document.querySelector('.settings-mcp [data-mcp="remove"]');
+    if(!button) return false;
+    button.click();
+    if(button.textContent!=='确认删除？') return false;
+    button.click();
+    return true;
+  })()`))
+  check('MCP 专项：删除后 MCP 列表为空', await waitFor(page, `!document.querySelector('.settings-mcp [data-mcp="row"]') && document.querySelector('.settings-mcp')?.textContent.includes('还没有服务器')`))
+  check('MCP 专项：关闭设置（任务前）', await closeSettings())
+  const configEmpty = await page.eval(`window.rgent.mcpConfig()`)
+  check('MCP 专项：MCP 配置已清空', configEmpty?.ok === true && configEmpty.config.servers.length === 0, JSON.stringify(configEmpty))
+
+  await page.eval(`(() => { const toggle=document.querySelector('.tree-toggle'); if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click(); return true })()`)
+  check('MCP 专项：夹具笔记进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(note=>note.dataset.path==='MCP 门控专项.md')`))
+  await page.eval(`[...document.querySelectorAll('.tree-note')].find(note=>note.dataset.path==='MCP 门控专项.md')?.click()`)
+  check('MCP 专项：打开发起篇', await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel==='MCP 门控专项.md'`))
+  check('MCP 专项：底栏模型快照就绪', await waitFor(page, `document.querySelector('.status-model')?.value!==''`))
+  await page.eval(`document.querySelector('.cm-content')?.focus()`)
+  await page.call('Input.insertText', { text: '/mcp 门控专项' })
+  await page.key('Enter', 'Enter', 0, 13)
+  check('MCP 专项：口令卡准备就绪', await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 60000), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? ''`))
+  check('MCP 专项：未配置 MCP 时只有原因行、没有 MCP 勾选框', await page.eval(`(() => { const card=document.querySelector('.authorization-mcp'); return !!card && !card.querySelector('input[type="checkbox"]') && card.textContent.includes('本场不能使用 MCP') })()`), await page.eval(`document.querySelector('.authorization-mcp')?.textContent ?? '(无 MCP 行)'`))
+  await shot(page, 'mcp-authorization-1200')
+  await page.key('Enter', 'Enter', 0, 13)
+  check('MCP 专项：最小任务正常结束并保存回答', await waitFor(page, `(async()=>{ if((await window.rgent.agentTasks()).length) return false; const note=await window.rgent.noteRead('MCP 门控专项.md'); return note.content.includes('受控回答第一句。') })()`, 60000))
+  check('MCP 专项：任务只走受控主机', requests.length >= 1, String(requests.length))
+  check('MCP 专项：专项结束时没有残留浮层', await waitFor(page, `!document.querySelector('.overlay-authorization') && !document.querySelector('.overlay-settings') && !document.querySelector('.fetch-dialog')`))
+}
+
 /** 外部消失与恢复核验专项（RGENT_UI_RECOVERY_ONLY=1）：在专用临时库里真删真放回，逐条走
  *  「识别与如实呈现／原路径不可重建／核验通过／内容已变／附件缺失／设置页无删除入口」六条判据。
  *  模型只用来做登记场与恢复后复跑，全部走受控主机，零真实调用。 */
@@ -1406,6 +1512,8 @@ const trashOnly = process.env.RGENT_UI_TRASH_ONLY === '1'
 const networkOnly = process.env.RGENT_UI_NETWORK_ONLY === '1'
 // 人发起联网专项：菜单/快捷键共用的对话框、总闸门控、回环拒绝与设备级审计／统计。
 const humanNetworkOnly = process.env.RGENT_UI_NETWORK_HUMAN_ONLY === '1'
+// 远端只读 MCP 专项：设置卡、坏地址拒绝、抓页对话框回归与口令卡门控。
+const mcpOnly = process.env.RGENT_UI_MCP_ONLY === '1'
 // 付费专项：只由显式环境变量触发，普通测试／构建／CI 永不调用模型。
 const skillsLive = process.env.RGENT_UI_SKILLS_LIVE
 const v4Only = process.env.RGENT_UI_V4_ONLY === '1'
@@ -3867,6 +3975,20 @@ async function main() {
     if(humanNetworkOnly){
       try{await verifyHumanNetwork(page,shot)}catch(error){stageFailed('人发起联网专项',error)}
       check('人发起联网专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode=failures===0?0:1
+      return
+    }
+    if(mcpOnly){
+      const mcpRequests=[]
+      hostServer=createControlledHostServer([],[],[],mcpRequests)
+      await new Promise(resolve=>hostServer.listen(0,'127.0.0.1',resolve))
+      const configured=await configureControlledHost(page,`http://127.0.0.1:${hostServer.address().port}/v1`)
+      check('MCP 专项初始化受控供应商与设备默认模型',configured===true)
+      if(!configured)throw Error('MCP 专项受控模型初始化失败')
+      try{await verifyMcpOnly(page,vault,shot,mcpRequests)}catch(error){stageFailed('远端只读 MCP 专项',error)}
+      check('远端只读 MCP 专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
+      check('远端只读 MCP 专项全程只走受控主机',mcpRequests.length>=1,String(mcpRequests.length))
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
       process.exitCode=failures===0?0:1
       return

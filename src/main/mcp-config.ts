@@ -8,13 +8,14 @@ import type { McpConfigView, McpPublicServer, McpPublicTool } from '../shared/ip
 /**
  * 远端只读 MCP 的设备级配置（`mcp-config.json`，v1、0600、原子写）。
  *
- * 一台服务器＝一个 HTTPS Streamable HTTP 端点＋一把 Bearer token＋**人工勾选**的工具白名单。
+ * 一台服务器＝一个 HTTPS Streamable HTTP 端点（可选 Bearer token）＋**人工勾选**的工具白名单。
  * token 只用 `SecretProtection`（生产是 Electron `safeStorage`）加密后按 base64 存
  * `tokenCipher`，明文只在主进程里出现；`getPublic()` 永远不含 token 或密文，
- * `servers()` 才带解密后的凭据（解密失败按「没有 token」看）。
+ * `servers()` 才带解密后的凭据（没有密文＝空 token；有密文解不开＝null）。
  *
- * 白名单只能来自 `saveDiscovered()` 存下的工具名；启用必须有 token；同一个归一化 URL
- * 只允许一条。写入沿用 network-config 的 tmp＋fsync＋rename＋0600。
+ * 白名单只能来自 `saveDiscovered()` 存下的工具名；启用**不要求** token（公共只读服务器可以
+ * 不带认证），有 token 才带 `authorization`；同一个归一化 URL 只允许一条。写入沿用
+ * network-config 的 tmp＋fsync＋rename＋0600。
  *
  * 坏文件（缺失以外的读取失败、JSON 坏了、形状／版本不认识、越过上限）**fail closed**：
  * 一律当「没有服务器」，不覆盖磁盘上的证据；人下一次显式保存前先把坏文件改名成
@@ -50,12 +51,12 @@ export type McpServerUpsert = {
   id?: string
   name: string
   url: string
-  /** 省略＝保留已有 token；提供时必须 1–4096 字。 */
+  /** 省略＝保留已有 token（原本没有就是不带 token 的公共只读）；提供时必须 1–4096 字。 */
   token?: string
   enabled: boolean
 }
 
-/** 任务授权快照只读形状：只有「已启用＋有 token＋白名单非空」的服务器。 */
+/** 任务授权快照只读形状：只有「已启用＋白名单非空」的服务器（token 可选）。 */
 export type McpAvailabilityServer = { name: string; host: string; tools: string[] }
 export type McpAvailability = { available: boolean; servers: McpAvailabilityServer[] }
 
@@ -64,7 +65,7 @@ export type McpConfigStore = {
   getPublic(): McpConfigView
   /** 主进程用：含解密凭据；解密失败的那台 `credential` 为 null。 */
   servers(): McpRuntimeServer[]
-  /** 单台凭据；未知 id、没有 token、解不开都回 null。 */
+  /** 单台凭据；未知 id、有密文但解不开回 null；没有密文回 `{ url, token: '' }`（公共只读）。 */
   credential(id: string): McpCredential | null
   upsert(input: McpServerUpsert): McpConfigView
   remove(id: string): McpConfigView
@@ -198,8 +199,7 @@ function parseServer(value: unknown): StoredServer | null {
   const url = normalizeUrl(value.url)
   if (!url || typeof value.enabled !== 'boolean') return null
   if (value.tokenCipher !== undefined && !validCipher(value.tokenCipher)) return null
-  // 启用必须有 token；文件里出现「启用却没密文」是坏形状。
-  if (value.enabled && value.tokenCipher === undefined) return null
+  // 启用不要求 token：公共只读服务器就是「启用、白名单非空、没有密文」的形状。
   if (!Array.isArray(value.tools) || value.tools.length > MAX_TOOLS) return null
   const tools: McpStoredTool[] = []
   const seen = new Set<string>()
@@ -308,9 +308,10 @@ export function createMcpConfigStore(userData: string, protection: SecretProtect
     return view
   }
 
-  /** 解密失败、没有密文、系统保护不可用都按「没有 token」看。 */
+  /** 没有密文：公共只读服务器，凭据是空 token（客户端因此不发 authorization 头）。
+   *  有密文却解不开（系统保护不可用或密文坏）仍回 null，按「这台现在不能用」fail closed。 */
   const decrypt = (server: StoredServer): McpCredential | null => {
-    if (!server.tokenCipher) return null
+    if (!server.tokenCipher) return { url: server.url, token: '' }
     if (!protection.isEncryptionAvailable()) return null
     let token: string
     try { token = protection.decryptString(Buffer.from(server.tokenCipher, 'base64')) }
@@ -375,8 +376,7 @@ export function createMcpConfigStore(userData: string, protection: SecretProtect
         try { tokenCipher = protection.encryptString(input.token).toString('base64') }
         catch { fail('MCP_CONFIG_UNAVAILABLE') }
       }
-      // 启用必须有 token：既没有旧密文，这次也没给新 token，就是非法组合。
-      if (input.enabled && !tokenCipher) fail('MCP_BAD_TOKEN')
+      // 启用不要求 token：没有旧密文、这次也没给新 token，就是公共只读服务器的形状。
       // 换了端点等于换了服务器：旧工具发现与白名单都不再适用，不把旧名字套到新端点上。
       const moved = existing !== null && existing.url !== url
       const next: StoredServer = {
@@ -445,8 +445,9 @@ export function createMcpConfigStore(userData: string, protection: SecretProtect
     },
 
     availability(): McpAvailability {
+      // token 可选：没有密文的公共只读服务器同样计入；能否真连由运行期凭据与传输决定。
       const servers = read().servers
-        .filter(server => server.enabled && server.tokenCipher !== undefined && server.whitelist.length > 0)
+        .filter(server => server.enabled && server.whitelist.length > 0)
         .map(server => ({ name: server.name, host: hostOf(server.url), tools: [...server.whitelist] }))
       return { available: servers.length > 0, servers }
     }

@@ -115,7 +115,7 @@ describe('MCP 配置存储', () => {
     }
   })
 
-  it('validates names, URLs, tokens, duplicates and server count before touching the file', () => {
+  it('validates names, URLs, provided tokens, duplicates and server count before touching the file', () => {
     const app = directory()
     try {
       const store = storeIn(app.dir)
@@ -131,12 +131,12 @@ describe('MCP 配置存储', () => {
         'https://localhost/mcp',
         'not a url'
       ]) expect(() => store.upsert({ name: 'x', url, token: 't', enabled: false })).toThrow('MCP_BAD_URL')
+      // MCP_BAD_TOKEN 只表示「提供了 token 但非法」；空／空白也算提供了非法 token。
       expect(() => store.upsert({ name: 'x', url: URL_A, token: '', enabled: false })).toThrow('MCP_BAD_TOKEN')
       expect(() => store.upsert({ name: 'x', url: URL_A, token: '   ', enabled: false })).toThrow('MCP_BAD_TOKEN')
       expect(() => store.upsert({ name: 'x', url: URL_A, token: 'x'.repeat(4097), enabled: false })).toThrow('MCP_BAD_TOKEN')
       expect(() => store.upsert({ name: 'x', url: URL_A, token: 'bad\ntoken', enabled: false })).toThrow('MCP_BAD_TOKEN')
-      // 启用必须有 token。
-      expect(() => store.upsert({ name: 'x', url: URL_A, enabled: true })).toThrow('MCP_BAD_TOKEN')
+      // 校验全部发生在落盘之前。
       expect(() => readFileSync(app.file)).toThrow()
       // 4096 字是允许的上限。
       expect(() => store.upsert({ name: 'x', url: URL_A, token: 'x'.repeat(4096), enabled: true })).not.toThrow()
@@ -151,6 +151,34 @@ describe('MCP 配置存储', () => {
       }
       expect(store.getPublic().servers).toHaveLength(8)
       expect(() => store.upsert({ name: 's9', url: 'https://mcp9.example.com/mcp', token: 't', enabled: false })).toThrow('MCP_TOO_MANY')
+    } finally { app.done() }
+  })
+
+  it('lets a public read-only server be enabled, discovered and whitelisted without a token', () => {
+    const app = directory()
+    try {
+      const store = storeIn(app.dir)
+      const view = store.upsert({ name: '公共只读', url: URL_A, enabled: true })
+      const id = view.servers[0]!.id
+      expect(view.servers[0]).toMatchObject({ id, enabled: true, hasToken: false, tools: [], whitelist: [] })
+      // 没有密文＝空 token 的凭据；客户端据此不发 authorization 头。
+      expect(store.credential(id)).toEqual({ url: URL_A, token: '' })
+      expect(store.servers()[0]!.credential).toEqual({ url: URL_A, token: '' })
+      // 还没有白名单：不算可用。
+      expect(store.availability()).toEqual({ available: false, servers: [] })
+      store.saveDiscovered(id, [{ name: 'read_a' }, { name: 'read_b' }])
+      store.saveWhitelist(id, ['read_a'])
+      expect(store.availability()).toEqual({
+        available: true,
+        servers: [{ name: '公共只读', host: 'mcp.example.com', tools: ['read_a'] }]
+      })
+      // 磁盘上就是「启用、没有密文」的形状；重新读盘仍然有效。
+      const stored = storedServer(readFileSync(app.file, 'utf8'))
+      expect(stored.enabled).toBe(true)
+      expect(stored).not.toHaveProperty('tokenCipher')
+      const reopened = storeIn(app.dir)
+      expect(reopened.getPublic().servers[0]).toMatchObject({ id, enabled: true, hasToken: false })
+      expect(reopened.credential(id)).toEqual({ url: URL_A, token: '' })
     } finally { app.done() }
   })
 
@@ -252,7 +280,7 @@ describe('MCP 配置存储', () => {
         JSON.stringify({ version: 1 }),
         JSON.stringify({ version: 1, servers: {} }),
         JSON.stringify({ version: 1, servers: [{ id: 'a', name: 'x', url: 'http://mcp.example.com/mcp', enabled: false, tools: [], whitelist: [] }] }),
-        JSON.stringify({ version: 1, servers: [{ id: 'a', name: 'x', url: URL_A, enabled: true, tools: [], whitelist: [] }] }),
+        JSON.stringify({ version: 1, servers: [{ id: 'a', name: 'x', url: URL_A, enabled: true, tokenCipher: 'not base64!', tools: [], whitelist: [] }] }),
         JSON.stringify({ version: 1, servers: [{ id: 'a', name: 'x', url: URL_A, enabled: false, tools: [], whitelist: ['nope'] }] }),
         JSON.stringify({ version: 1, servers: Array.from({ length: 9 }, (_, index) => ({ id: `s${index}`, name: 'x', url: `https://m${index}.example.com/mcp`, enabled: false, tools: [], whitelist: [] })) })
       ]
@@ -278,7 +306,7 @@ describe('MCP 配置存储', () => {
     } finally { app.done() }
   })
 
-  it('treats an undecryptable or missing cipher as no token, never leaking the cipher', () => {
+  it('treats an undecryptable cipher as unusable but a missing cipher as a public no-token server', () => {
     const app = directory()
     try {
       writeFileSync(app.file, JSON.stringify({
@@ -293,16 +321,31 @@ describe('MCP 配置存储', () => {
       const view = store.getPublic()
       expect(view.servers[0]).toMatchObject({ enabled: true, hasToken: true })
       expect(JSON.stringify(view)).not.toContain('not-sealed')
+      // 有密文却解不开：不能静默降级成「公共无 token」，这台按不可用看。
       expect(store.credential('a')).toBeNull()
       expect(store.servers()[0]!.credential).toBeNull()
-      // 加密不可用同样按没有 token 看。
+      // 加密不可用同样按「有密文却解不开」看。
       expect(storeIn(app.dir, { isEncryptionAvailable: () => false }).credential('a')).toBeNull()
       // 坏密文不是坏文件：不覆盖，人能再保存修复。
       expect(JSON.parse(readFileSync(app.file, 'utf8')).servers[0].tokenCipher).toBe(Buffer.from('not-sealed', 'utf8').toString('base64'))
+
+      // 没有密文是合法的公共只读形状：启用、有白名单，凭据是空 token。
+      writeFileSync(app.file, JSON.stringify({
+        version: 1,
+        servers: [{ id: 'public', name: '公共', url: URL_B, enabled: true, tools: [{ name: 'read_b' }], whitelist: ['read_b'] }]
+      }))
+      const publicStore = storeIn(app.dir)
+      expect(publicStore.getPublic().servers[0]).toMatchObject({ id: 'public', enabled: true, hasToken: false })
+      expect(publicStore.credential('public')).toEqual({ url: URL_B, token: '' })
+      expect(publicStore.servers()[0]!.credential).toEqual({ url: URL_B, token: '' })
+      expect(publicStore.availability()).toEqual({
+        available: true,
+        servers: [{ name: '公共', host: 'other.example.org', tools: ['read_b'] }]
+      })
     } finally { app.done() }
   })
 
-  it('availability only lists enabled servers with a token and a non-empty whitelist', () => {
+  it('availability lists enabled servers with a non-empty whitelist, with or without a token', () => {
     const app = directory()
     try {
       const store = storeIn(app.dir)
@@ -322,9 +365,21 @@ describe('MCP 配置存储', () => {
       const emptyWhitelist = addServer(store, { name: '空白名单', url: 'https://third.example.net/mcp', token: 't3' })
       store.saveDiscovered(emptyWhitelist, [{ name: 'read_d' }])
       store.upsert({ id: emptyWhitelist, name: '空白名单', url: 'https://third.example.net/mcp', enabled: true })
-      expect(store.availability().servers.map(server => server.name)).toEqual(['可用'])
+      // 启用、有白名单、没有 token：公共只读服务器同样可用（token 不再参与判定）。
+      const publicServer = store.upsert({ name: '公共只读', url: 'https://public.example.net/mcp', enabled: true }).servers
+        .find(server => server.name === '公共只读')!
+      store.saveDiscovered(publicServer.id, [{ name: 'read_e' }])
+      store.saveWhitelist(publicServer.id, ['read_e'])
+      expect(store.availability()).toEqual({
+        available: true,
+        servers: [
+          { name: '可用', host: 'mcp.example.com', tools: ['read_b'] },
+          { name: '公共只读', host: 'public.example.net', tools: ['read_e'] }
+        ]
+      })
       // 全部停用：available 为 false。
       store.upsert({ id: enabled, name: '可用', url: URL_A, enabled: false })
+      store.upsert({ id: publicServer.id, name: '公共只读', url: 'https://public.example.net/mcp', enabled: false })
       expect(store.availability()).toEqual({ available: false, servers: [] })
     } finally { app.done() }
   })
