@@ -2078,3 +2078,37 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 
 **受验提交**：`ecee8da`／`766e57e`／`3a9c35f`／`cb28913`／`486a8b6`／`1caf405`（本机、未推送、零 CI）。
 
+## 2026-10-21 远端只读 MCP B 轮（本机已交、未推送）
+
+**合同**：[2026-10-21 远端只读 MCP 合同](decisions.md#2026-10-21-远端只读-mcp-合同)（仅 HTTPS Streamable HTTP；Bearer 可选；人工工具白名单；每场一次授权；逐条账本）。
+
+**实现**
+
+- **B1 传输**（`a9d78ba`）：复用钉地址 POST（无代理/cookies、TLS 名不变、3xx 不跟随），`Accept: application/json, text/event-stream`、`MCP-Protocol-Version`、`Mcp-Session-Id`；逐块读、**按响应 id 早停**，匹配帧之后的坏帧不解析；1 MiB／20s／可取消；`MCP_*` 错误码。
+- **B2 客户端**（`a9d78ba`／`38740d8`）：initialize→initialized→tools/list→tools/call；工具名与结构校验；服务器错误只给固定码；会话失效重连一次后再失败；失败一律标准 `Error('MCP_*')`（宿主按 `error.message` 取码）。
+- **B3 配置与设置卡**（`bb33885`）：`mcp-config.json` v1（0600、原子写、坏文件改名保留）；token 只存密文、公开视图不含 token/schema；`connect and list tools` 是人点击的一次外发；白名单只能来自已发现工具；换 URL 清空旧清单。
+- **B4 工具与授权**（`80e6efd`）：`mcp_call {server,tool,arguments}`；预览冻结 `{available,servers}` 并在 start 比对；系统提示工具清单 ≤4 KiB（超限不授予）；调用前授权→白名单→echo 三步；结果低信任包裹 ≤32 KiB。
+- **B5 账本/停止**（`80e6efd`）：账本 `network[]` 扩 `action:'mcp'`＋`server/tool`（无参数/正文）；事件 `kind:'mcp'`；`network:stop` 同时撤 MCP 并 abort；配置/白名单变更 `revokeMcpForAll`；任务结束关闭该任务连接。
+- **B6 证据与收口**（`94257ac`／`c0a4482`）：token 可选（公共只读服务器不带 `Authorization`；解不开的密文仍按不可用）；MCP 状态行；窗口专项 `RGENT_UI_MCP_ONLY` 33 条。
+
+**实现期发现并修正**
+
+- **真机烟测抓到信封解包错误**：客户端把 JSON-RPC 信封当 `result` 读，假 transport 又返回未包装对象，单测全绿而真机失败（`MCP_PROTOCOL`）。改为严格解包 `result` 并让测试发送真实线缆形状，另加"裸 result 被拒"与"initialize 的 JSON-RPC error 不泄露文本"两条。
+- 合同/配置要求"启用必须有 token"挡住公共只读服务器 → token 改为可选，合同与两处旧文案同步。
+
+**门（本机 2026-10-21）**：单元 **154 文件 2527 通过／4 跳过**；文档 14 篇；构建通过；完整窗口 **380／0**；人删除 **14／0**；写工具 **41／0**；恢复 **12／0**；联网 **25／0**；人发起 **24／0**；MCP **33／0**；`delivery:check` 如实报未推送（预期）。
+
+**真实 MCP 烟测**（手工证据、不作 CI 门）：`https://mcp.deepwiki.com/mcp` 连接 **5.98s**、协议 `2025-06-18`、工具 `ask_wiki_question`／`read_wiki_contents`／`read_wiki_structure`；调用 `read_wiki_structure{repoName:"facebook/react"}` **1.25s**、**1403 字节**、`isError:false`、无截断，正文为文档目录。
+
+**已知边界**
+
+1. MCP 会话按"任务＋服务器"惰性建立、任务内复用、结束关闭；未做空闲回收；换 token 后旧任务在途连接仍用旧 token 直到结束（授权已撤，不会再发起新调用）。
+2. 只读性由**人工白名单**保证，不信任服务器自报的只读标注；工具说明与参数摘要是服务器可控文本，已在系统提示里声明不可信并降级包裹符。
+3. 系统提示工具清单超 4 KiB 时**整场不授予**（不截断已批准内容）。
+4. 同名服务器无法在调用时证明目标 → 授权时排除（fail closed）。
+5. MCP 调用没有结果预览（只有状态行与账本记录），预览只用于抓页。
+6. 窗口专项证明配置、拒绝与门控；成功路径由 DI 单测＋真实公共服务器手工烟测承担。
+7. 不做：stdio／本机可执行 MCP、写工具、OAuth、后台轮询、服务器并发爆发。
+
+**受验提交**：`38740d8`／`c0a4482`／`94257ac`／`80e6efd`／`bb33885`／`a9d78ba`（本机、未推送、零 CI）。
+
