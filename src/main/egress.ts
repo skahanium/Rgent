@@ -191,7 +191,8 @@ export class EgressClient {
 // IANA: https://www.iana.org/assignments/iana-ipv6-special-registry
 const IPV6_GLOBAL = ipaddr.parseCIDR('2000::/3') as [ipaddr.IPv6, number]
 const IPV6_SPECIAL = ['2001::/23', '3fff::/20'].map(prefix => ipaddr.parseCIDR(prefix) as [ipaddr.IPv6, number])
-function publicAddress(address: string): boolean {
+/** 公网单播判定：普通全局 IPv4，或 2000::/3 内、排除 IANA 特殊段的 IPv6；映射地址按 IPv4 判。 */
+export function publicAddress(address: string): boolean {
   try {
     let parsed = ipaddr.parse(address)
     if (parsed.kind() === 'ipv6' && (parsed as ipaddr.IPv6).isIPv4MappedAddress()) parsed = (parsed as ipaddr.IPv6).toIPv4Address()
@@ -203,7 +204,8 @@ function publicAddress(address: string): boolean {
     return true
   } catch { return false }
 }
-function egressUrl(raw: string, allowedPorts?: readonly number[]): URL | null {
+/** 只做 URL 形状与端口把关（不解析 DNS）：协议、userinfo、本地名、字面私网地址在这里拒。 */
+export function egressUrl(raw: string, allowedPorts?: readonly number[]): URL | null {
   try {
     const url = new URL(raw)
     if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password) return null
