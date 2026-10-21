@@ -10,7 +10,7 @@ const memoryHash = (text:string) => createHash('sha256').update(text).digest('he
 import { validTaskMaterial, TaskMaterialTracker, type SavedTaskMaterial } from './host-material.ts'
 import { encodeLedgerProvenance, historicalContextPolicy } from './ledger-provenance.ts'
 import type {FrozenSkills} from './skills.ts'
-import { READ_ONLY_TOOL_SCHEMAS, WRITE_TOOL_SCHEMAS, NETWORK_TOOL_SCHEMAS, type ScopedWriteTool, type ScopedNetworkTool } from './scoped-agent-tools.ts'
+import { READ_ONLY_TOOL_SCHEMAS, WRITE_TOOL_SCHEMAS, NETWORK_TOOL_SCHEMAS, MCP_TOOL_SCHEMAS, MCP_CATALOG_BYTES, type ScopedWriteTool, type ScopedNetworkTool, type ScopedMcpTool } from './scoped-agent-tools.ts'
 import { buildShingles, containsEcho } from './content-echo.ts'
 import { createWriteGate } from './agent-write.ts'
 import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
@@ -25,7 +25,7 @@ import { appendAiBlock, markPrompt, upsertAiAnswer, type LedgerChapterWrite, typ
 import { assistantSystemBlock, assistantSummary, type AssistantHabits } from '../shared/assistant.ts'
 import type { ModelCredential, RunLimits } from './model-config.ts'
 import type { SourceRange } from '../markdown/types.ts'
-import type { AgentNetworkEvent, NetworkPreviewView, ObjectBinding, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
+import type { AgentMcpAvailability, AgentNetworkEvent, NetworkPreviewView, ObjectBinding, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
 import type { TaskGrant } from './task-authorization.ts'
 import { compile, parseMarker } from '../markdown/index.ts'
 
@@ -67,8 +67,17 @@ export type HostStart = Partial<ObjectBinding> & {
 }
 
 export /** 过程只记「调了什么、结果如何」，不铺工具返回的正文。
- *  抓页只留主机（查询串与正文都不进过程）；搜索只留截 80 字的查询或服务商名。 */
+ *  抓页只留主机（查询串与正文都不进过程）；搜索只留截 80 字的查询或服务商名；
+ *  MCP 只留服务器/工具与字节数（参数与结果正文都不进过程）。 */
 function toolTraceLine(call: { name: string; input: unknown }, failure?: string, network?: { host?: string; bytes?: number; truncated?: boolean; provider?: string }): string {
+  if (call.name === 'mcp_call') {
+    const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
+    // 参数可能没通过白名单校验：这里只取有界的一段，绝不把任意文本原样写进账本。
+    const label = `MCP ${traceName(input.server, 80)}/${traceName(input.tool, 128)}`
+    if (failure) return `${label}：未执行（${failure}）`
+    // 合同只要求「已执行（字节，低信任）」；截断与否在账本 truncated 与工具结果里。
+    return `${label}：已执行（${formatBytes(network?.bytes ?? 0)}，低信任）`
+  }
   if (call.name === 'fetch_url') {
     const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
     let host = network?.host ?? ''
@@ -98,6 +107,18 @@ function formatBytes(value: number): string {
   return `${(value / 1024).toFixed(1)} KB`
 }
 
+/** 过程行与账本里的第三方名字：压成一行、限长；不是字符串或全空白就回空串。
+ *  只把控制字符折成空格、去掉首尾空白——不合并内部空格，否则配置里合法的名字会永远对不上。 */
+function boundedName(value: unknown, max: number): string {
+  if (typeof value !== 'string') return ''
+  return value.replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim().slice(0, max)
+}
+
+/** 过程行里的服务器／工具名：有界取一段；没有就写「未指定」。 */
+function traceName(value: unknown, max: number): string {
+  return boundedName(value, max) || '未指定'
+}
+
 /** 抓页状态行只认工具结果里的公开字段。 */
 function networkTraceOf(value: unknown): { host: string; bytes: number; truncated: boolean } | undefined {
   if (!value || typeof value !== 'object') return undefined
@@ -114,6 +135,13 @@ function searchTraceOf(value: unknown): { provider?: string } | undefined {
   if (!value || typeof value !== 'object') return undefined
   const provider = (value as Record<string, unknown>).provider
   return typeof provider === 'string' ? { provider } : undefined
+}
+
+/** MCP 过程行只取字节数；结果正文与是否截断都不进过程（账本另有 truncated）。 */
+function mcpTraceOf(value: unknown): { bytes: number } | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  return { bytes: typeof record.bytes === 'number' ? record.bytes : 0 }
 }
 
 /** 只取主机与去查询串的路径；解析不了就不记账（绝不把原文塞进账本）。 */
@@ -139,6 +167,22 @@ function networkEventTarget(raw: unknown): { host: string; path: string } | null
 /** 只有这些码算「网络尝试被拒」；参数错与别的工具错误都不冒充外发。 */
 function networkRefusalCode(code: string): boolean {
   return code === 'NETWORK_NOT_AUTHORIZED' || code.startsWith('EGRESS_') || code.startsWith('SEARCH_')
+}
+
+/** 只有这些码算「MCP 尝试被拒或失败」；参数形状错不冒充外发尝试。 */
+function mcpRefusalCode(code: string): boolean {
+  return code === 'EGRESS_CONTENT_ECHO' || code.startsWith('MCP_')
+}
+
+/** `mcp_call` 形状预检：server 1–80、tool 1–128；arguments 的形状由工具层判。
+ *  只做「能否定位到本场白名单里的目标」，不做 JSON Schema 校验。 */
+function mcpRequest(value: unknown): { server: string; tool: string; arguments?: unknown } | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const object = value as Record<string, unknown>
+  const server = boundedName(object.server, 80), tool = boundedName(object.tool, 128)
+  // 归一化后与原文不同（控制字符、超长、纯空白）就不算合法名字，交由参数错误处理。
+  if (!server || !tool || server !== object.server || tool !== object.tool) return null
+  return { server, tool, ...('arguments' in object ? { arguments: object.arguments } : {}) }
 }
 
 export type HostDependencies = {
@@ -176,7 +220,7 @@ export type HostDependencies = {
   /** Handoff outcome only, never a claim that consolidation succeeded. Sink must be local and synchronous. */
   onTaskMaterialResult?: (result: {sessionId?: string; taskId: string; status: 'handed-off' | 'unavailable' | 'failed'; reason?: string}) => void
   memory?: MemoryUsePort
-  createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker, write?: ScopedWriteTool, network?: ScopedNetworkTool) => ScopedAgentTools
+  createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker, write?: ScopedWriteTool, network?: ScopedNetworkTool, mcp?: ScopedMcpTool) => ScopedAgentTools
   /** 联网只读能力：出口、偷渡词片与可用性都由主进程给。搜索只在服务商与密钥配置好后出现。 */
   network?: {
     fetch(url: string, signal: AbortSignal): Promise<{ text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true }>
@@ -189,6 +233,14 @@ export type HostDependencies = {
     /** 额外的偷渡词片（例如搜索服务）；授权来源正文由 Host 在任务开始时建。 */
     echoShingles?: Set<string>
     availability(): { available: boolean; search: boolean; providerHost: string | null; reason?: string }
+  }
+  /** 远端只读 MCP：可用性（含系统提示里那份工具清单）与调用都由主进程给。
+   *  `call` 需要本场任务 id 才能按任务复用／关闭连接，所以由 Host 放进去。 */
+  mcp?: {
+    availability(): AgentMcpAvailability & { catalog?: string }
+    call(input: { taskId: string; server: string; tool: string; arguments: Record<string, unknown>; signal: AbortSignal }): Promise<{ text: string; bytes: number; isError: boolean; truncated?: boolean }>
+    /** 任务结束／取消／切库：关闭该任务的 MCP 会话。 */
+    closeTask?(taskId: string): void
   }
   /** 「建」需要人在预览里点一下同意；没有这个入口就不宣告该工具。 */
   /** 人确认：建是「落点＋正文」，改名／挪是「旧路径 → 新路径＋影响面」，删是「路径＋是否带附件夹」。 */
@@ -211,9 +263,10 @@ export type HostDependencies = {
 }
 
 /** 习惯与技能只拼在系统提示末尾，并写明它们不改变范围、工具与权限。
- *  技能块由 freezeSkills 生成，已经带上同一句边界；没有可用技能时连空行都不加。 */
-function systemText(habits: AssistantHabits | null, skills: FrozenSkills | null = null): string {
-  const blocks = [habits ? assistantSystemBlock(habits) : null, skills?.block ?? null].filter((block): block is string => !!block)
+ *  技能块由 freezeSkills 生成，已经带上同一句边界；没有可用技能时连空行都不加。
+ *  MCP 工具清单同理只在这一处出现一次：工具结果里不再重复整份清单。 */
+function systemText(habits: AssistantHabits | null, skills: FrozenSkills | null = null, mcpCatalog = ''): string {
+  const blocks = [habits ? assistantSystemBlock(habits) : null, skills?.block ?? null, mcpCatalog || null].filter((block): block is string => !!block)
   return blocks.length ? `${SYSTEM_RULES}\n\n${blocks.join('\n\n')}` : SYSTEM_RULES
 }
 
@@ -383,13 +436,23 @@ export class AgentHost {
     if (!task) return []
     return this.grants.get(`${task.root}\0${task.relPath}`)?.sources.map(source => source.relPath) ?? [task.relPath]
   }
-  /** 停止本场联网只读：撤销网络能力并 abort 在途抓取；任务本身继续收尾。 */
+  /** 停止本场联网只读：撤销网络与 MCP 两项能力并 abort 在途请求；任务本身继续收尾。 */
   stopNetwork(id: string): boolean {
     const task = this.active().find(item => item.id === id)
     if (!task) return false
-    this.grants.get(`${task.root}\0${task.relPath}`)?.revokeNetwork()
+    const grant = this.grants.get(`${task.root}\0${task.relPath}`)
+    // 合同：`network:stop` 同时撤销 MCP 并 abort 在途 MCP 调用（共用一个在途集合）。
+    grant?.revokeNetwork()
+    grant?.revokeMcp()
     for (const controller of this.networkAborts.get(id) ?? []) controller.abort()
     return true
+  }
+  /** 设备级 MCP 配置／白名单／凭据变了：所有活动任务一起撤销 MCP 授权，但**不取消任务**——
+   *  回答与账本照常收尾，后续 MCP 调用按 MCP_NOT_AUTHORIZED 拒。返回被撤销的任务数。 */
+  revokeMcpForAll(): number {
+    const tasks = this.active()
+    for (const task of tasks) this.grants.get(`${task.root}\0${task.relPath}`)?.revokeMcp()
+    return tasks.length
   }
   /** 设备级配置变了（关总闸／换服务商或密钥）：所有活动任务一起撤网并 abort 在途请求，
    *  但**不取消任务**——回答与账本照常收尾，后续联网调用按 NETWORK_NOT_AUTHORIZED 拒。
@@ -547,21 +610,29 @@ export class AgentHost {
       const networkEnabled = networkAvailable && !!grant?.network && !!this.deps.network
       const searchEnabled = Boolean(networkEnabled && availability?.search === true)
       const searchHost = searchEnabled ? availability?.providerHost ?? '' : ''
-      const networkEcho = new Set<string>(networkEnabled ? this.deps.network?.echoShingles ?? [] : [])
-      if (networkEnabled && grant) for (const shingle of await this.networkEchoSet(grant, original.content)) networkEcho.add(shingle)
+      // 远端只读 MCP：可用性（含系统提示里那份工具清单）+ 本场勾选 + 宿主能力三条都在才算启用。
+      // 清单超过 4 KiB 时主进程已判不可用；这里再判一次，确保系统提示总长不超过合同上限。
+      const mcpAvailability = (() => { try { return this.deps.mcp?.availability() ?? null } catch { return null } })()
+      const mcpCatalog = typeof mcpAvailability?.catalog === 'string' ? mcpAvailability.catalog : ''
+      const mcpAvailable = mcpAvailability?.available === true && mcpCatalog.length > 0 && Buffer.byteLength(mcpCatalog, 'utf8') <= MCP_CATALOG_BYTES
+      // 冻结的白名单快照：本场调用只看这一份，不中途回存储重算。
+      const mcpServers = grant?.mcp?.servers ?? []
+      // 没有服务器就没有可宣告的目标：宁可整场不给，也不宣告一个只能拒的工具。
+      const mcpEnabled = mcpAvailable && mcpServers.length > 0 && !!this.deps.mcp
+      // 偷渡词片：联网与 MCP 用同一份本场授权来源词片集。任一项启用就要建。
+      const networkEcho = new Set<string>(networkEnabled || mcpEnabled ? this.deps.network?.echoShingles ?? [] : [])
+      if ((networkEnabled || mcpEnabled) && grant) for (const shingle of await this.networkEchoSet(grant, original.content)) networkEcho.add(shingle)
       const networkLog: LedgerNetworkEntry[] = []
       const networkPreviews = new Map<string, NetworkPreviewEntry>()
       const networkAborts = new Set<AbortController>()
-      if (networkEnabled) {
-        // 任务结束／切库时清空；进行中的抓取也按任务收集，供「停止联网」abort。
-        this.networkPreviews.set(id, networkPreviews)
-        this.networkAborts.set(id, networkAborts)
-      }
-      type NetworkRecordTarget = { action: 'fetch' | 'search'; host: string; path: string; query?: string }
+      // 任务结束／切库时清空预览；网络与 MCP 共用同一个在途集合，`network:stop` 一次 abort 两类请求。
+      if (networkEnabled) this.networkPreviews.set(id, networkPreviews)
+      if (networkEnabled || mcpEnabled) this.networkAborts.set(id, networkAborts)
+      type NetworkRecordTarget = { action: 'fetch' | 'search' | 'mcp'; host: string; path: string; query?: string; server?: string; tool?: string }
       const recordNetwork = (at: string, target: NetworkRecordTarget | null, outcome: string, extra: { bytes?: number; truncated?: boolean; count?: number } = {}): void => {
         if (!target?.host) return
         if (networkLog.length >= NETWORK_LEDGER_LIMIT) return
-        networkLog.push({ at, action: target.action, host: target.host, path: target.path, ...(target.query ? { query: target.query } : {}), ...extra, outcome })
+        networkLog.push({ at, action: target.action, host: target.host, path: target.path, ...(target.query ? { query: target.query } : {}), ...(target.server ? { server: target.server } : {}), ...(target.tool ? { tool: target.tool } : {}), ...extra, outcome })
       }
       const fetchTarget = (target: { host: string; path: string } | null): NetworkRecordTarget | null => target ? { action: 'fetch', ...target } : null
       // 搜索查询进账本前截到 120 字，且只进这一场的账本章节。
@@ -676,9 +747,45 @@ export class AgentHost {
           }
         } : {})
       } : undefined
+      /** 账本／事件里的 MCP 目标：服务器必须在本场冻结白名单里，主机取自授权快照。 */
+      const mcpTargetFor = (call: { name: string; input: unknown }): { server: string; tool: string; host: string } | null => {
+        const request = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
+        const server = boundedName(request.server, 80), tool = boundedName(request.tool, 128)
+        if (!server || !tool) return null
+        const match = mcpServers.find(item => item.name === server)
+        return match ? { server, tool, host: match.host } : null
+      }
+      const recordMcp = (at: string, target: { server: string; tool: string; host: string }, outcome: string, extra: { bytes?: number; truncated?: boolean } = {}): void => {
+        recordNetwork(at, { action: 'mcp', host: target.host, path: '', server: target.server, tool: target.tool }, outcome, extra)
+      }
+      const emitMcp = (at: string, target: { server: string; tool: string; host: string }, outcome: 'ok' | 'refused', extra: { bytes?: number; truncated?: boolean; code?: string } = {}): void => {
+        this.deps.emit({
+          ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running',
+          // MCP 事件只带服务器与工具名；参数与结果不进事件。
+          network: { taskId: id, kind: 'mcp', host: target.host, path: '', server: target.server, tool: target.tool, ...extra, outcome, at }
+        })
+      }
+      /** MCP 能力：只在「清单可用 + 本场勾选 + 宿主有连接」时给工具集；
+       *  每次调用前复核授权（停止联网／配置变化后即使工具还在也必须拒），并登记在途请求。 */
+      const mcpTool: ScopedMcpTool | undefined = mcpEnabled && grant && this.deps.mcp ? {
+        call: async (request) => {
+          grant!.assertMcp()
+          const controller = new AbortController()
+          const abort = (): void => controller.abort()
+          if (request.signal.aborted) controller.abort()
+          request.signal.addEventListener('abort', abort, { once: true })
+          networkAborts.add(controller)
+          try {
+            return await this.deps.mcp!.call({ taskId: id, server: request.server, tool: request.tool, arguments: request.arguments, signal: controller.signal })
+          } finally {
+            request.signal.removeEventListener('abort', abort)
+            networkAborts.delete(controller)
+          }
+        }
+      } : undefined
       // 补／建跟读搜拆开：仅发起篇也必须能补、能建；读库／搜库仍要范围内另有篇。
       const write = grant ? this.writeCapability(grant, root, input.relPath, id) : undefined
-      const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials, write, networkTool)
+      const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials, write, networkTool, mcpTool)
       // 宣告与白名单必须同源：工具集没有写入能力就不宣告，宣告了就必须在白名单里。
       const writeEnabled = Boolean(write && scoped?.writes)
       const createEnabled = Boolean(write?.create && scoped?.creates)
@@ -686,22 +793,24 @@ export class AgentHost {
       const deleteEnabled = Boolean(structuralTargets && write?.delete && scoped?.deletes)
       const networkRegistered = Boolean(networkEnabled && scoped?.networks)
       const searchRegistered = Boolean(searchEnabled && scoped?.searches)
+      const mcpRegistered = Boolean(mcpEnabled && scoped?.mcps)
       const memorySearchEnabled=input.memorySearchAuthorized===true&&!!grant&&!!memory?.searchable&&!!this.deps.streamStep&&this.supportsMemorySearch(credential)
-      const toolsEnabled=libraryReadEnabled||writeEnabled||createEnabled||structuralEnabled||deleteEnabled||networkRegistered||searchRegistered||memorySearchEnabled
+      const toolsEnabled=libraryReadEnabled||writeEnabled||createEnabled||structuralEnabled||deleteEnabled||networkRegistered||searchRegistered||mcpRegistered||memorySearchEnabled
       // 只有当这套工具**确实**带写入能力时才把写工具宣告给模型，避免宣告了却执行不了。
-      const toolSchemas={...(libraryReadEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(structuralEnabled?{rename_note:WRITE_TOOL_SCHEMAS.rename_note,move_note:WRITE_TOOL_SCHEMAS.move_note}:{}),...(deleteEnabled?{delete_note:WRITE_TOOL_SCHEMAS.delete_note}:{}),...(networkRegistered?{fetch_url:NETWORK_TOOL_SCHEMAS.fetch_url}:{}),...(searchRegistered?{search_web:NETWORK_TOOL_SCHEMAS.search_web}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
+      const toolSchemas={...(libraryReadEnabled?READ_ONLY_TOOL_SCHEMAS:{}),...(writeEnabled?{append_to_note:WRITE_TOOL_SCHEMAS.append_to_note}:{}),...(createEnabled?{create_note:WRITE_TOOL_SCHEMAS.create_note}:{}),...(structuralEnabled?{rename_note:WRITE_TOOL_SCHEMAS.rename_note,move_note:WRITE_TOOL_SCHEMAS.move_note}:{}),...(deleteEnabled?{delete_note:WRITE_TOOL_SCHEMAS.delete_note}:{}),...(networkRegistered?{fetch_url:NETWORK_TOOL_SCHEMAS.fetch_url}:{}),...(searchRegistered?{search_web:NETWORK_TOOL_SCHEMAS.search_web}:{}),...(mcpRegistered?{mcp_call:MCP_TOOL_SCHEMAS.mcp_call}:{}),...(memorySearchEnabled?{search_memory:MEMORY_SEARCH_SCHEMA}:{})}
       let memorySearchCalls=0,memorySearchFailures=0
       const memoryToolOutcomes:{name:string;outcome:string}[]=[]
       // 偷渡检测在调用工具前做：命中的调用不进 execute，账本记 refused:EGRESS_CONTENT_ECHO。
       const networkToolOutcomes:{name:string;outcome:string}[]=[]
       let successfulLibraryTool=false
-      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled || deleteEnabled || networkRegistered || searchRegistered) && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
+      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled || deleteEnabled || networkRegistered || searchRegistered || mcpRegistered) && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
       if (scoped) this.scoped.set(key, scoped)
       const marked = markPrompt(original.content, { ...input, taskId: id })
       const submitted = promptBlock(marked, id)
       const placement = submitted.position
       const habits = this.deps.assistant?.() ?? null
-      const system = systemText(habits, skills)
+      // 授权工具清单只进系统提示一次（≤4 KiB）；工具结果里不再重复整份清单。
+      const system = systemText(habits, skills, mcpRegistered ? mcpCatalog : '')
       const assistantLine = habits ? assistantSummary(habits) : ''
       const budget = this.inputBudget(credential.contextTokens) - conservativeTokens(system)
       // Check that the current prompt and its nearby paragraph fit before changing disk.
@@ -908,7 +1017,7 @@ export class AgentHost {
           for (const call of calls) {
             if (this.structuralMoves.has(id)) break
             await guard()
-            const registered = libraryReadEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||structuralEnabled&&(call.name==='rename_note'||call.name==='move_note')||deleteEnabled&&call.name==='delete_note'||networkRegistered&&call.name==='fetch_url'||searchRegistered&&call.name==='search_web'||call.name==='search_memory'&&memorySearchEnabled
+            const registered = libraryReadEnabled&&(call.name === 'read_library' || call.name === 'search_library')||writeEnabled&&call.name==='append_to_note'||createEnabled&&call.name==='create_note'||structuralEnabled&&(call.name==='rename_note'||call.name==='move_note')||deleteEnabled&&call.name==='delete_note'||networkRegistered&&call.name==='fetch_url'||searchRegistered&&call.name==='search_web'||mcpRegistered&&call.name==='mcp_call'||call.name==='search_memory'&&memorySearchEnabled
             const duplicate = usedIds.has(call.id)
             usedIds.add(call.id)
             // Duplicate IDs cannot enter provider messages. A fresh internal refusal ID preserves their order.
@@ -934,8 +1043,36 @@ export class AgentHost {
                 emitNetworkRefused(at, networkAttemptTarget(call), 'EGRESS_CONTENT_ECHO')
               }
             }
+            // 远端只读 MCP：授权 → 白名单 → 偷渡检测，三步都过了才真的调用。
+            // 授权已撤（停止联网／配置变化）与白名单拒绝都不进 execute；能定位到服务器时照记一条。
+            let mcpAttempt: { server: string; tool: string; host: string } | undefined
+            if (!failure && call.name === 'mcp_call' && mcpRegistered) {
+              const request = mcpRequest(call.input)
+              if (!request) failure = 'INVALID_TOOL_ARGUMENTS'
+              else {
+                mcpAttempt = mcpTargetFor(call) ?? undefined
+                try { grant!.assertMcp() } catch { failure = 'MCP_NOT_AUTHORIZED' }
+                if (!failure) {
+                  const server = mcpAttempt ? mcpServers.find(item => item.name === mcpAttempt!.server) : undefined
+                  if (!server || !server.tools.includes(mcpAttempt!.tool)) failure = 'MCP_TOOL_UNKNOWN'
+                  else if (networkEcho.size && request.arguments !== undefined) {
+                    const serialized = JSON.stringify(request.arguments)
+                    if (serialized && containsEcho(networkEcho, serialized)) {
+                      failure = 'EGRESS_CONTENT_ECHO'
+                      reportedByTool = true
+                      networkToolOutcomes.push({ name: 'mcp_call', outcome: 'refused:EGRESS_CONTENT_ECHO' })
+                    }
+                  }
+                }
+              }
+              if (failure && mcpAttempt) {
+                const at = new Date().toISOString()
+                recordMcp(at, mcpAttempt, `refused:${failure}`)
+                emitMcp(at, mcpAttempt, 'refused', { code: failure })
+              }
+            }
             if (!failure) {
-              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name === 'delete_note' ? '删笔记' : call.name === 'fetch_url' ? '抓网页' : call.name === 'search_web' ? '搜索网页' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
+              activity = call.name === 'read_library' ? '读库' : call.name === 'append_to_note' ? '补发起篇' : call.name === 'create_note' ? '建笔记' : call.name === 'rename_note' ? '改名' : call.name === 'move_note' ? '移动' : call.name === 'delete_note' ? '删笔记' : call.name === 'fetch_url' ? '抓网页' : call.name === 'search_web' ? '搜索网页' : call.name === 'mcp_call' ? '调用 MCP' : call.name==='search_memory'?'检索记忆':'搜库'; snapshot('running')
               try {
                 if(call.name==='search_memory'){
                   const args=call.input as Record<string,unknown>
@@ -945,6 +1082,14 @@ export class AgentHost {
                   const found=await wait(memory!.search(args.query))
                   value={items:found.map(e=>({id:e.id,version:e.version,content:e.content,scope:e.scope,semantic:e.semantic,attribution:e.attribution,updatedAt:e.updatedAt,category:e.category??'long',...(e.category==='recent'?{recent:e.recent}:{}),sourceChecked:e.sourceChecked,sources:e.sources.map(s=>({relPath:s.relPath,kind:s.kind,taskId:s.taskId}))})),complete:true}
                 }else{value = await wait(scoped!.execute(call.name, call.input, signal));successfulLibraryTool=true}
+                // MCP 成功：一次尝试一条账本与一条事件，带字节数；参数与正文都不进。
+                if (call.name === 'mcp_call' && mcpAttempt) {
+                  const result = value as { bytes?: unknown; truncated?: unknown }
+                  const extra = { ...(typeof result.bytes === 'number' ? { bytes: result.bytes } : {}), ...(result.truncated === true ? { truncated: true } : {}) }
+                  const at = new Date().toISOString()
+                  recordMcp(at, mcpAttempt, 'ok', extra)
+                  emitMcp(at, mcpAttempt, 'ok', extra)
+                }
               }
               catch (error) {
                 const reason = error instanceof Error ? error.message : 'TOOL_FAILED'
@@ -956,12 +1101,20 @@ export class AgentHost {
                   // 联网只读的可预期拒绝／取消：都让模型看见并继续，整场不废。
                   'NETWORK_NOT_AUTHORIZED','EGRESS_INVALID_URL','EGRESS_HTTP_REFUSED','EGRESS_CROSS_ORIGIN_REFUSED','EGRESS_UNSUPPORTED_TYPE','EGRESS_ENCODING_REFUSED','EGRESS_TOO_LARGE','EGRESS_TIMEOUT','EGRESS_UNAVAILABLE','EGRESS_BUSY','EGRESS_CONTENT_ECHO','EGRESS_ABORTED',
                   // 搜索的可预期拒绝：密钥无效、服务拒绝、结构异常、空结果都让模型看见并继续。
-                  'SEARCH_NOT_CONFIGURED','SEARCH_UNAUTHORIZED','SEARCH_REFUSED','SEARCH_MALFORMED','SEARCH_EMPTY'].includes(reason)) throw error
+                  'SEARCH_NOT_CONFIGURED','SEARCH_UNAUTHORIZED','SEARCH_REFUSED','SEARCH_MALFORMED','SEARCH_EMPTY',
+                  // 远端只读 MCP 的可预期拒绝／取消：都让模型看见并继续，整场不废。
+                  'MCP_NOT_AUTHORIZED','MCP_TOOL_UNKNOWN','MCP_TOOL_FAILED','MCP_CONNECT_FAILED','MCP_UNAUTHORIZED','MCP_PROTOCOL','MCP_TIMEOUT','MCP_TOO_LARGE','MCP_CANCELLED','MCP_INVALID_URL'].includes(reason)) throw error
                 failure = reason
                 reportedByTool = call.name!=='search_memory'
                 // 工具执行阶段的每次联网尝试恰好一条拒绝事件；参数错不是外发尝试，不发。
                 if ((call.name === 'fetch_url' || call.name === 'search_web') && networkRefusalCode(reason)) {
                   emitNetworkRefused(new Date().toISOString(), networkAttemptTarget(call, reason === 'NETWORK_NOT_AUTHORIZED'), reason)
+                }
+                // MCP：只有真正的调用失败才记一条；参数形状错不是外发尝试。
+                if (call.name === 'mcp_call' && mcpAttempt && mcpRefusalCode(reason)) {
+                  const at = new Date().toISOString()
+                  recordMcp(at, mcpAttempt, `refused:${reason}`)
+                  emitMcp(at, mcpAttempt, 'refused', { code: reason })
                 }
               }
             }
@@ -969,7 +1122,7 @@ export class AgentHost {
               const label = `${registered ? call.name : 'unknown'}:${failure}`
               refused.set(label, (refused.get(label) ?? 0) + 1)
             }
-            noteTrace(toolTraceLine(call, failure, !failure && call.name === 'fetch_url' ? networkTraceOf(value) : !failure && call.name === 'search_web' ? searchTraceOf(value) : undefined))
+            noteTrace(toolTraceLine(call, failure, !failure && call.name === 'fetch_url' ? networkTraceOf(value) : !failure && call.name === 'search_web' ? searchTraceOf(value) : !failure && call.name === 'mcp_call' ? mcpTraceOf(value) : undefined))
             if(!failure&&call.name==='search_memory'){const items=(value as {items:{id:string;version:number;content:string}[]}).items;const detail=`${items.map(e=>e.id+'@'+e.version).join('、')||'无匹配'}；摘要 ${items.map(e=>e.content.replace(/[\x00-\x1f]/g,' ').replace(/\s+/g,' ').slice(0,48)).join('；').slice(0,320)}`.slice(0,900);memoryToolOutcomes.push({name:'search_memory',outcome:`已执行：${detail}`});noteTrace(`记忆结果：${detail}`)}
             // 结构操作成功后旧来源已失效，再走 guard 只会把整场记成 ENOENT。
             if (!this.structuralMoves.has(id)) await guard()
@@ -1015,16 +1168,17 @@ export class AgentHost {
         } finally {
           this.finalizing.delete(key)
           this.signals.delete(key)
-          // 任务结束清空本场预览与在途抓取登记，不给下一场留可读缓存。
+          // 任务结束清空本场预览与在途请求登记，不给下一场留可读缓存；同时关闭本场 MCP 会话。
           this.networkPreviews.delete(id)
           this.networkAborts.delete(id)
+          try { this.deps.mcp?.closeTask?.(id) } catch { /* 关闭会话失败不能改写已保存的回答 */ }
           if(this.grants.get(key)===grant){this.grants.delete(key);this.scoped.delete(key);this.memoryUses.delete(key)}
         }
       })
       launched=true
       return result
     } finally {
-      if(!launched){if(startedTaskId)this.deps.onTaskStartFailed?.(startedTaskId);grant?.revoke();if(startedTaskId){this.networkPreviews.delete(startedTaskId);this.networkAborts.delete(startedTaskId)};if(this.grants.get(key)===grant){this.grants.delete(key);this.scoped.delete(key);this.memoryUses.delete(key)}}
+      if(!launched){if(startedTaskId)this.deps.onTaskStartFailed?.(startedTaskId);grant?.revoke();if(startedTaskId){this.networkPreviews.delete(startedTaskId);this.networkAborts.delete(startedTaskId);try{this.deps.mcp?.closeTask?.(startedTaskId)}catch{/* 启动失败时关闭半开的会话 */}};if(this.grants.get(key)===grant){this.grants.delete(key);this.scoped.delete(key);this.memoryUses.delete(key)}}
       this.launching.delete(key)
       if (this.launching.size === 0) {
         for (const notify of this.launchWaiters) notify()

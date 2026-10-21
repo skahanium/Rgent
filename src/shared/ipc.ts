@@ -164,9 +164,21 @@ export type AgentCommandRequest = ObjectBinding & {
   expectedText: string
   promptText: string
 }
-/** 本场联网只读：默认不勾；勾选结果随预览摘要与 start 请求一起校验，防重放。 */
-export type AgentAuthorizationRequest = AgentCommandRequest & { references: string[]; network?: boolean }
+/** 本场联网只读：默认不勾；勾选结果随预览摘要与 start 请求一起校验，防重放。
+ *  远端只读 MCP 是同一张口令卡上的另一个独立勾选：`mcp` 默认不勾，与 `network` 互不影响。 */
+export type AgentAuthorizationRequest = AgentCommandRequest & { references: string[]; network?: boolean; mcp?: boolean }
 export type AuthorizedSource = ObjectBinding & { sourceId: string; relPath: string; title: string; revision: string; fingerprint: string; tier: 'reference' | 'follow' }
+/** 一台可用的远端只读 MCP 服务器：只有名字、主机与白名单工具名。
+ *  token、密文、schema 与服务器正文都不在这里。 */
+export type AgentMcpServerView = { name: string; host: string; tools: string[] }
+/** 本场 MCP 可用性：`available` 为假时不可勾选。
+ *  `reason`：`off`＝有服务器但都没启用；`not-configured`＝启用了却缺 token／白名单；
+ *  `too-many-tools`＝系统提示里的工具清单超过 4 KiB（本场不做截断，直接不可用）。 */
+export type AgentMcpAvailability = {
+  available: boolean
+  servers: AgentMcpServerView[]
+  reason?: 'off' | 'not-configured' | 'too-many-tools'
+}
 export type AgentAuthorizationPreview = {
   id: string; sessionId: string; origin: string; sources: AuthorizedSource[]
   recipient: { modelId: string; host: string; provider: ModelProvider }
@@ -179,6 +191,8 @@ export type AgentAuthorizationPreview = {
   /** 本场联网只读的可用性：`available` 管抓页（只依赖总闸与本场勾选），`search` 另要求
    *  预设搜索服务与密钥都可用；`reason` 只解释搜索为什么不可用，不含服务密钥。 */
   network?: { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' }
+  /** 本场远端只读 MCP：只有主进程判定可用时才给勾选；服务器与工具名只是白名单摘要。 */
+  mcp?: AgentMcpAvailability
 }
 /** 写类工具的人确认：主进程发起请求，渲染层只回一个是否同意。
  *  建给「落点＋正文」；改名／挪给「旧路径 → 新路径＋影响面（引用与权限条数）」；删给路径。 */
@@ -189,7 +203,7 @@ export type AgentWritePreview =
 export type AgentWriteDecision = { requestId: string; approved: boolean }
 
 export type AgentAuthorizationResult = { ok: true; preview: AgentAuthorizationPreview } | { ok: false; error: string }
-export type AgentStartRequest = AgentCommandRequest & { previewId: string; network?: boolean }
+export type AgentStartRequest = AgentCommandRequest & { previewId: string; network?: boolean; mcp?: boolean }
 export type AgentStartResult = { ok: true; id: string } | { ok: false; error: string }
 export type AgentTaskView = { id: string; relPath: string; startedAt: number; activity?: string }
 /** 预设搜索服务；同一时间只接一家，端点与主机写死在主进程。 */
@@ -293,12 +307,13 @@ export type McpDiscoverRequest = { id: string }
 export type McpDiscoverResult =
   | { ok: true; id: string; tools: McpPublicTool[]; config: McpConfigView }
   | { ok: false; error: string }
-/** 网络事件只带主机与去查询串的路径，不带正文、密钥或查询参数。 */
+/** 网络事件只带主机与去查询串的路径，不带正文、密钥或查询参数。
+ *  MCP 事件另带服务器名与工具名（都来自本场白名单），不带参数与结果。 */
 export type AgentNetworkEvent = {
   taskId: string
-  /** 成功抓页且存了预览时才有；搜索不存预览，因此没有 id。 */
+  /** 成功抓页且存了预览时才有；搜索与 MCP 不存预览，因此没有 id。 */
   id?: string
-  kind: 'fetch' | 'search'
+  kind: 'fetch' | 'search' | 'mcp'
   host: string
   path: string
   provider?: NetworkProvider
@@ -306,9 +321,12 @@ export type AgentNetworkEvent = {
   truncated?: boolean
   /** 仅搜索成功：本次结果条数（1–10）。 */
   count?: number
+  /** 仅 MCP：服务器名与工具名。 */
+  server?: string
+  tool?: string
   /** 本次尝试的结局；旧事件没有该字段时按成功处理。 */
   outcome?: 'ok' | 'refused'
-  /** 拒绝码（如 `EGRESS_INVALID_URL`／`NETWORK_NOT_AUTHORIZED`）；成功时没有。 */
+  /** 拒绝码（如 `EGRESS_INVALID_URL`／`NETWORK_NOT_AUTHORIZED`／`MCP_*`）；成功时没有。 */
   code?: string
   at: string
 }

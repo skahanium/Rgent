@@ -224,15 +224,15 @@ it('offers the network checkbox unchecked by default and says fetch plus search 
   expect(disclosure.textContent).toContain('api.tavily.com')
   const input = popup.root.querySelector<HTMLInputElement>('.authorization-network input')!
   expect(input.checked).toBe(false)
-  expect(load).toHaveBeenLastCalledWith([], false)
+  expect(load).toHaveBeenLastCalledWith([], false, false)
   input.checked = true
   input.dispatchEvent(new Event('change'))
-  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith([], true))
+  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith([], true, false))
   await vi.waitFor(() => expect(popup.root.querySelector('.authorization-status')!.textContent).toContain('联网只读（抓网页＋搜索）'))
   await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
   popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.click()
   await vi.waitFor(() => expect(send).toHaveBeenCalled())
-  expect(send).toHaveBeenCalledWith(expect.anything(), true)
+  expect(send).toHaveBeenCalledWith(expect.anything(), true, false)
   popup.close()
 })
 
@@ -250,7 +250,7 @@ it('keeps fetch available when only search is unconfigured, and offers no checkb
   expect(disclosure.textContent).toContain('搜索服务尚未配置')
   input.checked = true
   input.dispatchEvent(new Event('change'))
-  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith([], true))
+  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith([], true, false))
   await vi.waitFor(() => expect(popup.root.querySelector('.authorization-status')!.textContent).toContain('联网只读（抓网页）'))
   expect(popup.root.querySelector('.authorization-status')!.textContent).not.toContain('抓网页＋搜索')
   popup.close()
@@ -261,4 +261,79 @@ it('keeps fetch available when only search is unconfigured, and offers no checkb
   expect(second.root.querySelector('.authorization-network input')).toBeNull()
   expect(second.root.querySelector('.authorization-network')!.textContent).toContain('联网总开关已关闭')
   second.close()
+})
+
+const MCP_SERVERS = [{ name: 'deepwiki', host: 'mcp.example', tools: ['search', 'read'] }]
+const withBoth = {
+  ...preview,
+  network: { available: true, search: false, providerHost: null, reason: 'not-configured' as const },
+  mcp: { available: true, servers: MCP_SERVERS }
+}
+
+it('offers the MCP checkbox unchecked by default, names the servers and tool counts, and sends mcp true', async () => {
+  const load = vi.fn(async (_references: string[], _network: boolean, _mcp: boolean) => ({ ok: true as const, preview: withBoth }))
+  const send = vi.fn(async (_preview: import('../../src/shared/ipc.ts').AgentAuthorizationPreview, _network: boolean, _mcp: boolean) => ({ ok: true as const, id: 'task' }))
+  const popup = openAuthorizationPopover({ anchor: { left: 100, top: 100, bottom: 120 }, origin: 'a.md', entries: [], preview: load, send })
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  const disclosure = popup.root.querySelector('.authorization-mcp')!
+  expect(disclosure.textContent).toContain('本场允许只读 MCP（deepwiki：2 个工具）')
+  // token、schema 与服务器正文都不在这张卡上。
+  expect(disclosure.textContent).not.toContain('mcp.example')
+  const input = popup.root.querySelector<HTMLInputElement>('.authorization-mcp input')!
+  expect(input.checked).toBe(false)
+  expect(load).toHaveBeenLastCalledWith([], false, false)
+  input.checked = true
+  input.dispatchEvent(new Event('change'))
+  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith([], false, true))
+  await vi.waitFor(() => expect(popup.root.querySelector('.authorization-status')!.textContent).toContain('只读 MCP'))
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.click()
+  await vi.waitFor(() => expect(send).toHaveBeenCalled())
+  expect(send).toHaveBeenCalledWith(expect.anything(), false, true)
+  popup.close()
+})
+
+it('keeps the network and MCP checkboxes independent', async () => {
+  const load = vi.fn(async (_references: string[], _network: boolean, _mcp: boolean) => ({ ok: true as const, preview: withBoth }))
+  const send = vi.fn(async (_preview: import('../../src/shared/ipc.ts').AgentAuthorizationPreview, _network: boolean, _mcp: boolean) => ({ ok: true as const, id: 'task' }))
+  const popup = openAuthorizationPopover({ anchor: { left: 100, top: 100, bottom: 120 }, origin: 'a.md', entries: [], preview: load, send })
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  // 先勾联网：MCP 仍是未勾。
+  popup.root.querySelector<HTMLInputElement>('.authorization-network input')!.click()
+  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith([], true, false))
+  expect(popup.root.querySelector<HTMLInputElement>('.authorization-mcp input')!.checked).toBe(false)
+  // 再勾 MCP：联网保持勾选。
+  popup.root.querySelector<HTMLInputElement>('.authorization-mcp input')!.click()
+  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith([], true, true))
+  expect(popup.root.querySelector<HTMLInputElement>('.authorization-network input')!.checked).toBe(true)
+  // 取消联网：MCP 不受影响。
+  popup.root.querySelector<HTMLInputElement>('.authorization-network input')!.click()
+  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith([], false, true))
+  expect(popup.root.querySelector<HTMLInputElement>('.authorization-mcp input')!.checked).toBe(true)
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.click()
+  await vi.waitFor(() => expect(send).toHaveBeenCalled())
+  expect(send).toHaveBeenCalledWith(expect.anything(), false, true)
+  popup.close()
+})
+
+it('explains why MCP cannot be used and offers no checkbox', async () => {
+  const cases = [
+    { reason: 'too-many-tools' as const, text: '获准工具清单超过 4 KiB' },
+    { reason: 'off' as const, text: 'MCP 服务器都未启用' },
+    { reason: 'not-configured' as const, text: '还没有可用的服务器' }
+  ]
+  for (const item of cases) {
+    const popup = openAuthorizationPopover({
+      anchor: { left: 100, top: 100, bottom: 120 },
+      origin: 'a.md',
+      entries: [],
+      preview: async () => ({ ok: true as const, preview: { ...preview, mcp: { available: false, servers: [], reason: item.reason } } }),
+      send: async () => ({ ok: true as const, id: 'task' })
+    })
+    await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+    expect(popup.root.querySelector('.authorization-mcp input')).toBeNull()
+    expect(popup.root.querySelector('.authorization-mcp')!.textContent).toContain(item.text)
+    popup.close()
+  }
 })

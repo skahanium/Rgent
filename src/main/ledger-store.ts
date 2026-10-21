@@ -44,15 +44,22 @@ export function validSentSummary(value:unknown):value is import('./host-source.t
 }
 /** 账本 `network[]` 的一条外发记录：≤50 条／场，字段类型固定，不含正文。
  *  抓页记 path；搜索 path 为空并另记截断 120 字的 query（只有 search 允许 query），
- *  成功时另记结果条数 count（1–10，只有 search 允许）。 */
+ *  成功时另记结果条数 count（1–10，只有 search 允许）。
+ *  MCP 的 path 为空、不带 query／count，另记服务器名与工具名（都 ≤128 字）；
+ *  fetch／search 不得带 server／tool。 */
 function validNetworkEntry(v:unknown):boolean{
  if(!obj(v))return false
- if(Object.keys(v).some(k=>!['at','action','host','path','query','count','bytes','truncated','outcome'].includes(k)))return false
- if(v.action!=='fetch'&&v.action!=='search')return false
+ if(Object.keys(v).some(k=>!['at','action','host','path','query','count','bytes','truncated','outcome','server','tool'].includes(k)))return false
+ if(v.action!=='fetch'&&v.action!=='search'&&v.action!=='mcp')return false
  if(typeof v.at!=='string'||!Number.isFinite(Date.parse(v.at)))return false
  if(typeof v.host!=='string'||!v.host||v.host.length>255)return false
  if(typeof v.path!=='string'||v.path.length>120)return false
  if(typeof v.outcome!=='string'||!v.outcome||v.outcome.length>128)return false
+ if(v.action==='mcp'){
+  if(v.path!=='')return false
+  if(typeof v.server!=='string'||!v.server||v.server.length>128)return false
+  if(typeof v.tool!=='string'||!v.tool||v.tool.length>128)return false
+ }else if(v.server!==undefined||v.tool!==undefined)return false
  if(v.query!==undefined){
   if(v.action!=='search')return false
   if(typeof v.query!=='string'||!v.query||v.query.length>120)return false

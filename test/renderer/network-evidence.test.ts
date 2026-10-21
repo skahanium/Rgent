@@ -59,3 +59,35 @@ describe('ledger network evidence', () => {
     expect(text).not.toContain('/page')
   })
 })
+
+describe('ledger MCP evidence', () => {
+  const mcp = (over: Partial<NetworkEvidenceEntry> = {}): NetworkEvidenceEntry => ({
+    action: 'mcp', host: 'mcp.example', server: 'deepwiki', tool: 'search', outcome: 'ok', ...over
+  })
+
+  it('names the server and tool with size and low trust, in ledger order', () => {
+    expect(networkEvidenceText([mcp({ bytes: 1234 })])).toBe('本场外发：MCP deepwiki/search（1.2 KB，低信任）')
+    expect(networkEvidenceText([mcp({ bytes: 1234, truncated: true })])).toBe('本场外发：MCP deepwiki/search（1.2 KB，低信任，已截断）')
+    expect(networkEvidenceText([
+      entry({ bytes: 10 }),
+      mcp({ bytes: 2048 }),
+      mcp({ server: 'other', tool: 'read', bytes: 0, outcome: 'refused:MCP_TOOL_FAILED' })
+    ])).toBe('本场外发：抓网页 example.com（0.0 KB，低信任）；MCP deepwiki/search（2.0 KB，低信任）；MCP other/read（未执行：MCP_TOOL_FAILED）')
+  })
+
+  it('shows a refusal code without a size and never the arguments or result text', () => {
+    const text = networkEvidenceText([{
+      ...mcp({ bytes: 999, outcome: 'refused:EGRESS_CONTENT_ECHO' }),
+      arguments: { q: 'ARG-SECRET' },
+      text: 'BODY-SECRET'
+    } as unknown as NetworkEvidenceEntry])
+    expect(text).toBe('本场外发：MCP deepwiki/search（未执行：EGRESS_CONTENT_ECHO）')
+    expect(text).not.toContain('ARG-SECRET')
+    expect(text).not.toContain('BODY-SECRET')
+  })
+
+  it('falls back to explicit placeholders for a damaged entry instead of leaking raw values', () => {
+    const text = networkEvidenceText([mcp({ server: undefined, tool: undefined, bytes: 12 })])
+    expect(text).toBe('本场外发：MCP 未知服务器/未知工具（0.0 KB，低信任）')
+  })
+})

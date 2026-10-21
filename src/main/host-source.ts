@@ -27,17 +27,21 @@ export type SentSummary = {
 }
 
 /** 一次联网只读外发的审计条目：只进账本记录，不进笔记正文，也不含正文。
- *  `fetch` 记主机与去查询串的路径；`search` 的 path 为空，另记截断到 120 字的查询。 */
+ *  `fetch` 记主机与去查询串的路径；`search` 的 path 为空，另记截断到 120 字的查询；
+ *  `mcp` 的 path 为空，另记服务器名与工具名（参数与结果都不进账本）。 */
 export type LedgerNetworkEntry = {
   at: string
-  action: 'fetch' | 'search'
+  action: 'fetch' | 'search' | 'mcp'
   host: string
-  /** pathname（去查询串），最长 120 字；搜索用空串。 */
+  /** pathname（去查询串），最长 120 字；搜索与 MCP 用空串。 */
   path: string
   /** 只对 search 出现：查询截断到 120 字。 */
   query?: string
   /** 仅搜索成功：结果条数（1–10）。 */
   count?: number
+  /** 仅 mcp：本场白名单里的服务器名与工具名。 */
+  server?: string
+  tool?: string
   bytes?: number
   truncated?: boolean
   outcome: string
@@ -56,7 +60,7 @@ export interface LedgerChapterWrite {
   answer: string
   reason?: string
   provenance?: LedgerProvenance
-  /** 本场外发记录：主机、去查询串的路径、字节数、是否截断、结果。 */
+  /** 本场外发记录：主机、去查询串的路径、MCP 的服务器／工具名、字节数、是否截断、结果。 */
   network?: readonly LedgerNetworkEntry[]
   /** 模型自述思考。只进账本的「推理」，不进正文；超长时截断。 */
   reasoning?: string

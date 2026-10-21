@@ -58,6 +58,8 @@ function networkHarness(options: {
     acknowledgeOrigin() {},
     assertNetwork() { if (!networkLive) throw Error('NETWORK_NOT_AUTHORIZED') },
     revokeNetwork() { networkLive = false },
+    assertMcp() { throw Error('MCP_NOT_AUTHORIZED') },
+    revokeMcp() {},
     revoke() { networkLive = false },
     assertLive: async () => {}
   }
@@ -511,6 +513,8 @@ describe('revokeNetworkForAll（配置变更撤网）', () => {
         acknowledgeOrigin() {},
         assertNetwork() { if (!live.get(relPath)) throw Error('NETWORK_NOT_AUTHORIZED') },
         revokeNetwork() { live.set(relPath, false) },
+        assertMcp() { throw Error('MCP_NOT_AUTHORIZED') },
+        revokeMcp() {},
         revoke() { live.set(relPath, false) },
         assertLive: async () => {}
       }

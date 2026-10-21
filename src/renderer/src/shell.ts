@@ -658,16 +658,16 @@ export async function start(root: HTMLElement): Promise<void> {
     authorizationPopover=openAuthorizationPopover({discard:id=>window.rgent.agentAuthorizationDiscard(id),origin:tab.relPath,entries:tree,anchor:coords,
       returnFocus:()=>editor.view.contentDOM,
       onClose:()=>{authorizationPopover=null},
-      preview:async (references,network)=>{
+      preview:async (references,network,mcp)=>{
         if(current()!==tab || !tabs.includes(tab) || editor.getText()!==draft)return {ok:false,error:'STALE_AUTHORIZATION'}
         if(!await flushSave())return {ok:false,error:'UNSAVED_DRAFT'}
         displayedRequest=request()
-        return window.rgent.agentAuthorizationPreview({...displayedRequest,references,...(network?{network:true}:{})})
+        return window.rgent.agentAuthorizationPreview({...displayedRequest,references,...(network?{network:true}:{}),...(mcp?{mcp:true}:{})})
       },
-      send:async (preview,network)=>{
+      send:async (preview,network,mcp)=>{
         if(!displayedRequest || current()!==tab || !tabs.includes(tab) || editor.getText()!==draft || taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null)!==displayedRequest.modelRecordId)return {ok:false,error:'STALE_AUTHORIZATION'}
         if(!await flushSave())return {ok:false,error:'UNSAVED_DRAFT'}
-        const result=await window.rgent.agentStart({...displayedRequest,previewId:preview.id,...(network?{network:true}:{})})
+        const result=await window.rgent.agentStart({...displayedRequest,previewId:preview.id,...(network?{network:true}:{}),...(mcp?{mcp:true}:{})})
         if(!result.ok)return result
         delete tab.temporaryModelId
         if(!endedTaskIds.has(result.id))activeTasks.set(result.id,{id:result.id,relPath:tab.relPath,startedAt:Date.now()})

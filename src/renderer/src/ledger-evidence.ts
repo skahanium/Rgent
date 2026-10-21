@@ -11,13 +11,16 @@ export function skillsEvidenceText(provenance: Pick<LedgerProvenance, 'skills'> 
 }
 
 /** 账本 network[] 的只读证据行：只写主机、体积、低信任与结果码。
- *  正文、抓取路径与完整查询串都不在这里——查询只显示账本已截断的那一份。 */
-export type NetworkEvidenceEntry = Pick<LedgerNetworkEntry, 'action' | 'host' | 'query' | 'count' | 'bytes' | 'truncated' | 'outcome'>
+ *  正文、抓取路径与完整查询串都不在这里——查询只显示账本已截断的那一份。
+ *  MCP 只显示 `<server>/<tool>` 与结果；参数与结果正文一律不出现。 */
+export type NetworkEvidenceEntry = Pick<LedgerNetworkEntry, 'action' | 'host' | 'query' | 'count' | 'bytes' | 'truncated' | 'outcome' | 'server' | 'tool'>
 
 const queryLimit = 120
+/** 账本已校验过长度；这里再截一次，防止有人把多余字段塞进条目。 */
+const nameLimit = 128
 
 function oneLine(value: string): string {
-  // 查询是模型给的字符串；压成一行，免得一条证据把账本版面撑开。
+  // 查询与第三方名字都是模型／服务器给的字符串；压成一行，免得一条证据把账本版面撑开。
   return value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
@@ -26,6 +29,15 @@ function kbText(bytes: number): string {
 }
 
 function entryText(entry: NetworkEvidenceEntry): string {
+  if (entry.action === 'mcp') {
+    const server = oneLine(entry.server ?? '').slice(0, nameLimit) || '未知服务器'
+    const tool = oneLine(entry.tool ?? '').slice(0, nameLimit) || '未知工具'
+    const target = `MCP ${server}/${tool}`
+    // outcome 只有 'ok' 才算已执行；其余一律写未执行，去掉记账用的 refused: 前缀。
+    if (entry.outcome !== 'ok') return `${target}（未执行：${entry.outcome.replace(/^refused:/, '')}）`
+    const size = typeof entry.bytes === 'number' ? `${kbText(entry.bytes)}，` : ''
+    return `${target}（${size}低信任${entry.truncated ? '，已截断' : ''}）`
+  }
   const search = entry.action === 'search'
   const query = search ? oneLine(entry.query ?? '').slice(0, queryLimit) : ''
   const target = search ? `搜索${query ? `「${query}」` : ''}${entry.host}` : `抓网页 ${entry.host}`

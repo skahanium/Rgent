@@ -29,7 +29,7 @@ import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRet
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import type { NetworkPreviewRequest, NetworkPreviewResult } from '../shared/ipc.ts'
 import type { NetworkConfigResult, NetworkProviderSaveRequest } from '../shared/ipc.ts'
-import type { McpConfigResult, McpConfigView, McpDiscoverResult, McpPublicTool, McpServerSaveRequest } from '../shared/ipc.ts'
+import type { AgentMcpAvailability, AgentMcpServerView, McpConfigResult, McpConfigView, McpDiscoverResult, McpPublicTool, McpServerSaveRequest } from '../shared/ipc.ts'
 import type { EgressLogResult, HumanFetchResult, HumanSearchResult, NetworkStatKind, NetworkStatsClearResult, NetworkStatsResult } from '../shared/ipc.ts'
 import { createEgressLog, type EgressLog } from './egress-log.ts'
 import { createHumanNetwork, applyHumanNetworkGate, type HumanNetwork } from './human-network.ts'
@@ -51,11 +51,11 @@ import { fetchModelList } from './model-list.ts'
 import { createModelConfigStore, type ModelConfigStore } from './model-config.ts'
 import { createNetworkConfigStore, type NetworkConfigStore, type NetworkCredential } from './network-config.ts'
 import { createMcpConfigStore, type McpConfigStore, type McpRuntimeServer } from './mcp-config.ts'
-import { createMcpClient } from './mcp-client.ts'
+import { createMcpClient, type McpClient } from './mcp-client.ts'
 import { createSearchProvider, SEARCH_PROVIDERS } from './search.ts'
 import { fetchText } from './text-fetch.ts'
 import { TaskAuthorizationRegistry, isAuthorizationCommand } from './task-authorization.ts'
-import { createScopedAgentTools } from './scoped-agent-tools.ts'
+import { createScopedAgentTools, mcpToolCatalog, MCP_CATALOG_BYTES } from './scoped-agent-tools.ts'
 import { createMemoryIpc } from './memory-ipc.ts'
 
 import { AgentHost } from './agent-host.ts'
@@ -120,6 +120,128 @@ function networkAvailability(): { available: boolean; search: boolean; providerH
 /** 统计写失败不能影响外发：错误码规范化与写入都包在这里，模块自己也兜一层。 */
 function recordNetworkStat(kind: NetworkStatKind, event: NetworkStatEvent): void {
   try { networkStats?.record(kind, event) } catch { /* stats are best effort */ }
+}
+
+/**
+ * 远端只读 MCP 的可用性：只有「已启用 + 白名单非空 + 凭据能解密」的服务器才算可用
+ * （`availability()` 只看有没有密文，解不开的不能算）。系统提示里的工具清单只含白名单工具，
+ * 序列化超过 4 KiB 就整场不可用（`too-many-tools`），不截断清单。
+ * 配置保存后立即生效：这里按需读文件、不缓存，下一次判定自然看到新值。
+ */
+function mcpAvailability(): AgentMcpAvailability & { catalog?: string } {
+  const store = mcpConfig
+  if (!store) return { available: false, servers: [], reason: 'not-configured' }
+  let servers: McpRuntimeServer[]
+  try { servers = store.servers() } catch { return { available: false, servers: [], reason: 'not-configured' } }
+  // `availability()` 只按「有密文」判定；授权前必须再确认凭据真能解密，解不开的服务器不算可用。
+  const decryptable = (id: string): boolean => {
+    try { return store.credential(id) !== null } catch { return false }
+  }
+  const usable = servers.filter(server => server.enabled && server.whitelist.length > 0 && decryptable(server.id))
+  // 授权只带名字／主机／工具名，没有服务器 id：同名两台无法在调用时证明目标，
+  // 所以一律不计入可用集合（fail closed），绝不按「第一台」猜。
+  const nameCounts = new Map<string, number>()
+  for (const server of usable) nameCounts.set(server.name, (nameCounts.get(server.name) ?? 0) + 1)
+  const unambiguous = usable.filter(server => nameCounts.get(server.name) === 1)
+  const views: AgentMcpServerView[] = unambiguous.map(server => ({ name: server.name, host: server.host, tools: [...server.whitelist] }))
+  if (!unambiguous.length) {
+    // 一台都没配 → not-configured；配了但都没启用 → off；启用了却缺 token／白名单／重名 → not-configured。
+    const anyEnabled = servers.some(server => server.enabled)
+    return { available: false, servers: views, reason: servers.length === 0 || anyEnabled ? 'not-configured' : 'off' }
+  }
+  const catalog = mcpToolCatalog(unambiguous.map(server => ({
+    name: server.name,
+    host: server.host,
+    // 清单只列白名单工具：服务器自报的只读标注不作数。
+    tools: server.whitelist.map(name => {
+      const tool = server.tools.find(item => item.name === name)
+      return { name, ...(tool?.description ? { description: tool.description } : {}), ...(tool?.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}) }
+    })
+  })))
+  if (Buffer.byteLength(catalog, 'utf8') > MCP_CATALOG_BYTES) return { available: false, servers: views, reason: 'too-many-tools' }
+  return { available: true, servers: views, catalog }
+}
+
+/** 一台 MCP 服务器在一个任务里的连接：`ready` 是唯一一次 connect，失败即从缓存删除。 */
+type McpClientSlot = { serverId: string; client: McpClient; ready: Promise<McpClient> }
+/** 每任务每服务器一条连接（`<taskId>|<server>`），惰性建连、按任务关闭。 */
+const mcpClients = new Map<string, McpClientSlot>()
+
+/** 合同里的 MCP 运行期错误码：只有这些码交给宿主，其余异常折成连接失败。 */
+const MCP_CALL_CODES: ReadonlySet<string> = new Set([
+  'MCP_INVALID_URL', 'MCP_CONNECT_FAILED', 'MCP_UNAUTHORIZED', 'MCP_PROTOCOL',
+  'MCP_TOOL_UNKNOWN', 'MCP_TOOL_FAILED', 'MCP_TIMEOUT', 'MCP_TOO_LARGE', 'MCP_CANCELLED'
+])
+
+/** 统计用的码：已知 MCP 码原样；其它异常沿用出口核心的归一（取消／不可用）。 */
+function mcpFailureCode(error: unknown, signal: AbortSignal): string {
+  if (signal.aborted) return 'MCP_CANCELLED'
+  const message = error instanceof Error ? error.message : ''
+  return MCP_CALL_CODES.has(message) ? message : networkFailureCode(error, signal)
+}
+
+/** 交给宿主的码只允许合同里的 `MCP_*`；统计可以更宽。 */
+function mcpCallErrorCode(code: string): string {
+  return code.startsWith('MCP_') ? code : 'MCP_CONNECT_FAILED'
+}
+
+/**
+ * 调用本场白名单里的一个 MCP 工具：按 `${taskId}|${server}` 惰性建连（一次）并缓存，
+ * 后续调用复用同一连接；任务结束／取消／切库由 `closeMcpTask` 关闭并删除。
+ * 失败只回固定码，服务器错误文本与 token 都不出主进程。
+ */
+async function mcpCall(input: { taskId: string; server: string; tool: string; arguments: Record<string, unknown>; signal: AbortSignal }): Promise<{ text: string; bytes: number; isError: boolean; truncated?: boolean }> {
+  const { taskId, server, tool, signal } = input
+  try {
+    if (!mcpConfig) throw Error('MCP_CONFIG_UNAVAILABLE')
+    let servers: McpRuntimeServer[]
+    try { servers = mcpConfig.servers() } catch { throw Error('MCP_CONFIG_UNAVAILABLE') }
+    // 同名多台无法确定目标：fail closed，不猜要连哪一台。
+    const targets = servers.filter(entry => entry.name === server && entry.enabled && entry.whitelist.includes(tool))
+    if (targets.length !== 1) throw Error('MCP_TOOL_UNKNOWN')
+    const target = targets[0]!
+    const credential = mcpConfig.credential(target.id)
+    if (!credential) throw Error('MCP_UNAUTHORIZED')
+    const key = `${taskId}|${server}`
+    let slot = mcpClients.get(key)
+    // 换了端点（同一任务同名服务器被改）：旧连接不再适用，关掉重建。
+    if (slot && slot.serverId !== target.id) {
+      mcpClients.delete(key)
+      try { slot.client.close() } catch { /* 旧连接关闭失败不影响新连接 */ }
+      slot = undefined
+    }
+    if (!slot) {
+      const client = createMcpClient({ url: credential.url, token: credential.token })
+      const ready = (async () => { await client.connect(signal); return client })()
+      const created: McpClientSlot = { serverId: target.id, client, ready }
+      mcpClients.set(key, created)
+      // 建连失败不留缓存：下一次调用重新连一次，而不是一直复用坏连接。
+      ready.catch(() => { if (mcpClients.get(key) === created) mcpClients.delete(key) })
+      slot = created
+    }
+    const client = await slot.ready
+    const result = await client.call(tool, input.arguments, signal)
+    if (signal.aborted) throw Error('MCP_CANCELLED')
+    recordNetworkStat('mcp', { outcome: 'ok', bytes: result.bytes })
+    return result
+  } catch (error) {
+    // 配置不可用不是合同里的 MCP 运行期码：按连接失败上报（配置坏了也连不上）。
+    const code = error instanceof Error && error.message === 'MCP_CONFIG_UNAVAILABLE'
+      ? 'MCP_CONNECT_FAILED'
+      : mcpFailureCode(error, signal)
+    recordNetworkStat('mcp', { outcome: 'refused', code })
+    throw Error(mcpCallErrorCode(code))
+  }
+}
+
+/** 关闭某个任务的全部 MCP 会话并删除缓存；未知任务 id 是空操作。 */
+function closeMcpTask(taskId: string): void {
+  const prefix = `${taskId}|`
+  for (const [key, slot] of [...mcpClients]) {
+    if (!key.startsWith(prefix)) continue
+    mcpClients.delete(key)
+    try { slot.client.close() } catch { /* 关闭失败不影响已保存的回答 */ }
+  }
 }
 const HUMAN_LIMITS = { maxUrl: 2048, maxQuery: 256, maxResults: 10, maxLogLimit: 50 } as const
 /** 人点「连接并列出工具」的单次外发预算；与 MCP 传输的单次 20s 上限一致。 */
@@ -1098,8 +1220,10 @@ function registerIpc(): void {
       if (request.whitelist.some(name => !known.has(name))) return { ok: false, error: 'MCP_BAD_WHITELIST' }
     }
     const saved = mcpWrite(store => store.upsert(request))
-    if (!saved.ok || request.whitelist === undefined) return saved
-    return mcpWrite(store => store.saveWhitelist(request.id!, request.whitelist!))
+    const result = !saved.ok || request.whitelist === undefined ? saved : mcpWrite(store => store.saveWhitelist(request.id!, request.whitelist!))
+    // 配置／白名单变了：撤销所有活动任务的 MCP 授权（不取消任务），与网络配置变更同法。
+    if (result.ok) agentHost?.revokeMcpForAll?.()
+    return result
   })
   registerTrustedHandle(IPC.mcpServerRemove, (event, value: unknown): McpConfigResult => {
     if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
@@ -1108,7 +1232,10 @@ function registerIpc(): void {
     if (Object.keys(record).some(key => key !== 'id') || typeof record.id !== 'string' || record.id.length === 0 || record.id.length > 64) {
       return { ok: false, error: 'BAD_REQUEST' }
     }
-    return mcpWrite(store => store.remove(record.id as string))
+    const result = mcpWrite(store => store.remove(record.id as string))
+    // 删掉一台服务器同样是配置变化：撤销活动任务的 MCP 授权，后续调用按 MCP_NOT_AUTHORIZED 拒。
+    if (result.ok) agentHost?.revokeMcpForAll?.()
+    return result
   })
   /**
    * 发现＝人点击触发的一次外发：只接受已存在的 id，只连配置里的 URL 与 token，
@@ -1137,6 +1264,8 @@ function registerIpc(): void {
       const discovered = await client.connect(controller.signal)
       const config = mcpWrite(store => store.saveDiscovered(id, discovered.tools))
       if (!config.ok) return config
+      // 重新发现可能收窄白名单（白名单 ⊆ 已发现工具），所以也算配置变化：撤活动任务。
+      agentHost?.revokeMcpForAll?.()
       const tools: McpPublicTool[] = config.config.servers.find(entry => entry.id === id)?.tools ?? []
       return { ok: true, id, tools, config: config.config }
     } catch (error) {
@@ -1845,6 +1974,7 @@ if (ownsInstance) app.whenReady().then(() => {
       return {signature:state.signature+':'+memorySnapshotSignature(entries),snapshotSignature:memorySnapshotSignature(entries),search,disclosure:state.disclosure}
     },
     network: networkAvailability,
+    mcp: mcpAvailability,
     configuration:(_extraReferences, modelRecordId,_memorySearch)=>{
       if(!modelConfig)throw Error(modelConfigError??'MODEL_CONFIG_UNAVAILABLE')
       const config=modelConfig.getPublic()
@@ -2014,14 +2144,22 @@ if (ownsInstance) app.whenReady().then(() => {
       },
       availability: networkAvailability
     },
+    // 远端只读 MCP：可用性（含 4 KiB 工具清单）、按任务连接与调用、任务结束关闭都在这里。
+    mcp: {
+      availability: mcpAvailability,
+      call: mcpCall,
+      closeTask: closeMcpTask
+    },
     // 第五个入参是写能力：必须原样转发，否则工具集看不到写工具，宿主也不会宣告它们。
-    createReadOnlyTools: (grant, taskId, memory, materials, write, network) => createScopedAgentTools(grant, taskId, {
+    // 第六／七个入参是联网与 MCP 能力：必须原样转发，否则工具集看不到它们，宿主也不会宣告。
+    createReadOnlyTools: (grant, taskId, memory, materials, write, network, mcp) => createScopedAgentTools(grant, taskId, {
       read: relPath => vault!.read(relPath), tier: modelTierFor,
       validateMemory: dep => memory?.validateDependency(dep) ?? Promise.resolve(false),
       validateMemoryBatch: deps => memory?.validateDependencies(deps) ?? Promise.resolve(deps.map(() => false)), materials,
       acceptsObject: (relPath, expected, current) => vault?.acceptsObject(relPath, expected, current) ?? false,
       ...(write ? { write } : {}),
-      ...(network ? { network } : {})
+      ...(network ? { network } : {}),
+      ...(mcp ? { mcp } : {})
     }),
     emit: ({ root, ...event }) => {
       if (vault?.root === root && event.sessionId === vault.sessionId()) send(IPC.agentEvent, event)

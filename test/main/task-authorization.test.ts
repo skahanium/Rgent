@@ -325,3 +325,87 @@ it('freezes a note-only memory tool budget before preview and rechecks memory si
  p=await registry.preview('owner',request);signature='changed';await expect(registry.consume('owner',{...request,previewId:p.id})).rejects.toThrow('STALE_AUTHORIZATION')
  search=false;p=await registry.preview('owner',request);expect(p.memory?.search?.available).toBe(false);expect((await registry.consume('owner',{...request,previewId:p.id})).limits.tools).toBe(0)
 })
+
+/** 一场带 MCP 的授权：可用性与服务器清单由测试改动，便于证明 start 的逐项比对。 */
+function mcpSetup() {
+  const app = setup()
+  const servers = [{ name: 'deepwiki', host: 'mcp.example', tools: ['search'] }]
+  let availability: { available: boolean; servers: typeof servers; reason?: 'off' | 'not-configured' | 'too-many-tools' } = { available: true, servers }
+  const registry = new TaskAuthorizationRegistry({ ...app.deps, mcp: () => structuredClone(availability) })
+  const request = { ...app.request, references: [], mcp: true }
+  return {
+    ...app,
+    registry,
+    request,
+    servers,
+    set: (next: Partial<typeof availability>) => { availability = { ...availability, ...next } },
+    reset: () => { availability = { available: true, servers } }
+  }
+}
+
+describe('远端只读 MCP 授权', () => {
+  it('previews only server names, hosts and whitelisted tool names, and freezes that snapshot', async () => {
+    const app = mcpSetup()
+    const preview = await app.registry.preview('owner', app.request)
+    expect(preview.mcp).toEqual({ available: true, servers: [{ name: 'deepwiki', host: 'mcp.example', tools: ['search'] }] })
+    const grant = await app.registry.consume('owner', { ...app.request, previewId: preview.id })
+    expect(grant.mcp).toEqual({ allowed: true, servers: [{ name: 'deepwiki', host: 'mcp.example', tools: ['search'] }] })
+    expect(() => grant.assertMcp()).not.toThrow()
+  })
+
+  it.each([
+    ['a widened whitelist', (app: ReturnType<typeof mcpSetup>) => { app.set({ servers: [{ name: 'deepwiki', host: 'mcp.example', tools: ['search', 'read'] }] }) }],
+    ['a renamed server', (app: ReturnType<typeof mcpSetup>) => { app.set({ servers: [{ name: 'other', host: 'mcp.example', tools: ['search'] }] }) }],
+    ['a changed host', (app: ReturnType<typeof mcpSetup>) => { app.set({ servers: [{ name: 'deepwiki', host: 'evil.example', tools: ['search'] }] }) }],
+    ['a revoked availability', (app: ReturnType<typeof mcpSetup>) => { app.set({ available: false, reason: 'not-configured' }) }]
+  ] as const)('requires a new preview after %s between preview and start', async (_label, change) => {
+    const app = mcpSetup()
+    const preview = await app.registry.preview('owner', app.request)
+    change(app)
+    await expect(app.registry.consume('owner', { ...app.request, previewId: preview.id })).rejects.toThrow('INVALID_AUTHORIZATION')
+  })
+
+  it('rejects an mcp flag that does not match the previewed choice in either direction', async () => {
+    const app = mcpSetup()
+    let preview = await app.registry.preview('owner', app.request)
+    // 预览时勾了、start 没带 → 不要静默按「未勾选」放行。
+    await expect(app.registry.consume('owner', { ...app.request, mcp: undefined, previewId: preview.id })).rejects.toThrow('INVALID_AUTHORIZATION')
+    preview = await app.registry.preview('owner', { ...app.request, mcp: false })
+    expect(preview.mcp?.available).toBe(true)
+    // 预览时没勾、start 却带 true → 重放。
+    await expect(app.registry.consume('owner', { ...app.request, mcp: true, previewId: preview.id })).rejects.toThrow('INVALID_AUTHORIZATION')
+    preview = await app.registry.preview('owner', app.request)
+    await expect(app.registry.consume('owner', { ...app.request, mcp: 'yes' as never, previewId: preview.id })).rejects.toThrow('INVALID_AUTHORIZATION')
+    await expect(app.registry.preview('owner', { ...app.request, mcp: 'yes' as never })).rejects.toThrow('BAD_REQUEST')
+  })
+
+  it('keeps an unavailable MCP preview visible with its reason but never grantable', async () => {
+    const app = mcpSetup()
+    app.set({ available: false, reason: 'too-many-tools' })
+    const preview = await app.registry.preview('owner', app.request)
+    // 不可用也把已知服务器摘要带出来（界面据此写人话原因），只是不可勾选。
+    expect(preview.mcp).toEqual({ available: false, servers: [{ name: 'deepwiki', host: 'mcp.example', tools: ['search'] }], reason: 'too-many-tools' })
+    await expect(app.registry.consume('owner', { ...app.request, previewId: preview.id })).rejects.toThrow('INVALID_AUTHORIZATION')
+  })
+
+  it('revokeMcp closes only MCP; the task grant stays live', async () => {
+    const app = mcpSetup()
+    const preview = await app.registry.preview('owner', app.request)
+    const grant = await app.registry.consume('owner', { ...app.request, previewId: preview.id })
+    grant.revokeMcp()
+    expect(grant.mcp).toBeUndefined()
+    expect(() => grant.assertMcp()).toThrow('MCP_NOT_AUTHORIZED')
+    await expect(grant.assertLive('model')).resolves.toBeUndefined()
+    // 整场撤销后 MCP 同样永远不可用；能力检查排在整场授权之前，与联网那条门一致。
+    grant.revoke()
+    expect(() => grant.assertMcp()).toThrow('MCP_NOT_AUTHORIZED')
+  })
+
+  it('leaves MCP absent when the preview was prepared without it', async () => {
+    const app = mcpSetup()
+    const preview = await app.registry.preview('owner', { ...app.request, mcp: false })
+    const grant = await app.registry.consume('owner', { ...app.request, mcp: false, previewId: preview.id })
+    expect(grant.mcp).toBeUndefined()
+    expect(() => grant.assertMcp()).toThrow('MCP_NOT_AUTHORIZED')
+  })
+})

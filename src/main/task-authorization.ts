@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { AgentAuthorizationPreview, AgentAuthorizationRequest, AgentCommandRequest, AgentStartRequest, AuthorizedSource, NoteSnapshot, TreeEntry } from '../shared/ipc.ts'
+import type { AgentAuthorizationPreview, AgentAuthorizationRequest, AgentCommandRequest, AgentMcpAvailability, AgentMcpServerView, AgentStartRequest, AuthorizedSource, NoteSnapshot, TreeEntry } from '../shared/ipc.ts'
 import type { ModelCredential, RunLimits } from './model-config.ts'
 import { noteTitle } from '../shared/vault-rel.ts'
 
 export type AuthorizationAction = 'read' | 'model' | 'write'
+/** 一场获准的 MCP 服务器：只读名字／主机／白名单工具，token 与 schema 不在授权里。 */
+export type McpGrantServer = { readonly name: string; readonly host: string; readonly tools: readonly string[] }
 export type AuthorizationConfiguration = { credential: ModelCredential; limits: RunLimits }
 export type AuthorizationDependencies = {
   root(): string | null
@@ -17,6 +19,8 @@ export type AuthorizationDependencies = {
   memoryAuthorization?: (request:AgentCommandRequest)=>Promise<{signature:string;search:boolean;snapshotSignature?:string;disclosure?:AgentAuthorizationPreview['memory']}>
   /** 联网只读的可用性：`available` 管抓页，`search` 另要求服务与密钥可用；界面只拿摘要。 */
   network?: () => { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' }
+  /** 远端只读 MCP 的可用性：只在「有可解密的 token 且白名单非空」时为可用。 */
+  mcp?: () => AgentMcpAvailability
   configuration(extraReferences: boolean, modelRecordId: string, memorySearch?:boolean): AuthorizationConfiguration
 }
 export interface TaskGrant {
@@ -30,12 +34,18 @@ export interface TaskGrant {
   readonly memorySnapshotSignature?:string
   /** 本场联网只读：只在预览时勾选、start 校验一致后才出现；撤销后为 undefined。 */
   readonly network?: Readonly<{ allowed: true; providerHost?: string }>
+  /** 本场远端只读 MCP：冻结的是预览时看到的服务器与白名单工具；撤销后为 undefined。 */
+  readonly mcp?: Readonly<{ allowed: true; servers: readonly McpGrantServer[] }>
   assertActive(): void
   assertLive(action: AuthorizationAction, path?: string, signal?: AbortSignal): Promise<void>
   /** 未获准或已撤销联网时抛 `NETWORK_NOT_AUTHORIZED`，不改任务本身。 */
   assertNetwork(): void
   /** 「停止联网」只撤本场网络能力，不终止整场任务。 */
   revokeNetwork(): void
+  /** 未获准或已撤销 MCP 时抛 `MCP_NOT_AUTHORIZED`，不改任务本身。 */
+  assertMcp(): void
+  /** 配置／白名单／凭据变化只撤 MCP，不取消任务。 */
+  revokeMcp(): void
   validateSources(signal?: AbortSignal): Promise<void>
   assertWriteTarget(path: string): void
   /** 发起篇的现行核验基准：开场冻结，仅 acknowledgeOrigin 推进。 */
@@ -45,7 +55,10 @@ export interface TaskGrant {
 }
 /** 预览时冻结的联网可用性快照：start 必须逐项一致，防「确认后换目标主机」。 */
 type NetworkAvailabilitySnapshot = { available: boolean; search: boolean; providerHost: string | null }
-type Prepared = { owner: string; request: AgentCommandRequest; modelRecordId: string; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number; memory?:{signature:string;search:boolean;snapshotSignature?:string}; network: boolean; networkAvailability: NetworkAvailabilitySnapshot }
+/** 预览时冻结的 MCP 可用性快照：服务器名／主机／白名单工具逐项一致才放行。
+ *  只冻「有什么」，不冻 token 或服务器正文。 */
+type McpAvailabilitySnapshot = { available: boolean; servers: AgentMcpServerView[] }
+type Prepared = { owner: string; request: AgentCommandRequest; modelRecordId: string; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number; memory?:{signature:string;search:boolean;snapshotSignature?:string}; network: boolean; networkAvailability: NetworkAvailabilitySnapshot; mcp: boolean; mcpAvailability: McpAvailabilitySnapshot }
 const digest = (value: unknown): string => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex')
 function command(request: AgentCommandRequest): AgentCommandRequest {
   return {modelRecordId:request.modelRecordId,relPath:request.relPath,sessionId:request.sessionId,objectVersion:request.objectVersion,expectedRevision:request.expectedRevision,
@@ -99,6 +112,7 @@ export class TaskAuthorizationRegistry {
   async preview(owner: string, request: AgentAuthorizationRequest): Promise<AgentAuthorizationPreview> {
     if (!owner || this.deps.ownerValid?.(owner)===false || !isAuthorizationCommand(request) || !Array.isArray(request.references) || request.references.length>1000 || !request.references.every(safePath)) throw Error('BAD_REQUEST')
     if (request.network !== undefined && typeof request.network !== 'boolean') throw Error('BAD_REQUEST')
+    if (request.mcp !== undefined && typeof request.mcp !== 'boolean') throw Error('BAD_REQUEST')
     const root=this.deps.root(); const session=this.deps.session()
     if(!root)throw Error('NO_VAULT')
     if(session!==request.sessionId)throw Error('VAULT_CHANGED')
@@ -138,13 +152,19 @@ export class TaskAuthorizationRegistry {
     // start 也会因与预览不一致被拒。
     const availability = this.networkAvailability()
     const requested = request.network === true && availability.available
+    // 远端只读 MCP 同理：可用性由主进程判定（有可解密 token 且清单不超过 4 KiB），
+    // 勾选不改变「本次预览看到了什么」，start 还要逐项比对。
+    const mcpState = this.mcpAvailability()
+    const mcpRequested = request.mcp === true && mcpState.available
     const view:AgentAuthorizationPreview={id:randomUUID(),sessionId:session!,origin:request.relPath,sources,
       recipient:{modelId:config.credential.modelId,host:new URL(config.credential.baseURL).host,provider:config.credential.provider},
       network:{available:availability.available,search:availability.search,providerHost:availability.providerHost,...(availability.reason?{reason:availability.reason}:{})},
+      mcp:{available:mcpState.available,servers:mcpState.servers.map(server=>({...server,tools:[...server.tools]})),...(mcpState.reason?{reason:mcpState.reason}:{})},
       ...(memory?.disclosure?{memory:{...memory.disclosure,search:{available:memory.search,calls:memory.search?4:0,sharedTools:config.limits.tools}}}:{})}
     for(const [id,p]of this.previews)if(p.expires<Date.now() || p.owner===owner)this.previews.delete(id)
     this.previews.set(view.id,{owner,request:command(request),view:structuredClone(view),modelRecordId:request.modelRecordId,root,config,configHash:digest(config),expires:Date.now()+300000,memory:memory?{signature:memory.signature,search:memory.search,snapshotSignature:memory.snapshotSignature}:undefined,
-      network:requested,networkAvailability:{available:availability.available,search:availability.search,providerHost:availability.providerHost}})
+      network:requested,networkAvailability:{available:availability.available,search:availability.search,providerHost:availability.providerHost},
+      mcp:mcpRequested,mcpAvailability:{available:mcpState.available,servers:mcpState.servers.map(server=>({...server,tools:[...server.tools]}))}})
     return structuredClone(view)
   }
 
@@ -156,6 +176,16 @@ export class TaskAuthorizationRegistry {
       // 搜索不可能独立于抓页可用：总闸关或本场未获准时一并置 false。
       return { available, search: available && value.search === true, providerHost: value.providerHost, ...(value.reason ? { reason: value.reason } : {}) }
     } catch { return { available: false, search: false, providerHost: null, reason: 'off' } }
+  }
+
+  /** 可用性判定本身在 index.ts；这里只负责「不可用就一律按不可用记」与形状收敛。 */
+  private mcpAvailability(): AgentMcpAvailability {
+    try {
+      const value = this.deps.mcp?.()
+      const servers = Array.isArray(value?.servers) ? value.servers.map(server => ({ name: server.name, host: server.host, tools: [...server.tools] })) : []
+      if (!value || value.available !== true) return { available: false, servers, reason: value?.reason ?? 'not-configured' }
+      return { available: true, servers }
+    } catch { return { available: false, servers: [], reason: 'not-configured' } }
   }
 
   clear(): void { this.previews.clear() }
@@ -175,6 +205,12 @@ export class TaskAuthorizationRegistry {
     // 绝不静默按新配置启动。providerHost 也在比对里，口令卡显示的主机就是将要用的主机。
     const availability=this.networkAvailability(), frozen=prepared.networkAvailability
     if(availability.available!==frozen.available||availability.search!==frozen.search||availability.providerHost!==frozen.providerHost)throw Error('INVALID_AUTHORIZATION')
+    // 远端只读 MCP 同一套纪律：勾选一致、可用性一致、服务器与白名单工具逐项一致。
+    // 配置／白名单／凭据在预览后变过就要求重新预览，绝不按新清单静默启动。
+    if(request.mcp!==undefined && typeof request.mcp!=='boolean')throw Error('INVALID_AUTHORIZATION')
+    if((request.mcp===true)!==prepared.mcp)throw Error('INVALID_AUTHORIZATION')
+    const mcp=this.mcpAvailability()
+    if(mcp.available!==prepared.mcpAvailability.available||digest(mcp.servers)!==digest(prepared.mcpAvailability.servers))throw Error('INVALID_AUTHORIZATION')
     this.checkSession(prepared.root,prepared.view.sessionId)
     if(digest(this.deps.configuration(prepared.view.sources.length>1, prepared.modelRecordId,prepared.memory?.search===true))!==prepared.configHash)throw Error('STALE_AUTHORIZATION')
     await this.checkMemory(prepared)
@@ -210,7 +246,10 @@ class LiveGrant implements TaskGrant {
   private live=true
   /** 联网能力独立于整场授权：停止联网只关这一项，任务照常收尾。 */
   private networkLive=false
+  /** 远端只读 MCP 与联网是两条独立的门：任一条被撤都不影响另一条与整场授权。 */
+  private mcpLive=false
   private readonly networkHost:string|null
+  private readonly mcpServers:readonly McpGrantServer[]
   private readonly owner:string
   originProof:AuthorizedSource
   constructor(private readonly deps:AuthorizationDependencies,prepared:Prepared){
@@ -220,9 +259,15 @@ class LiveGrant implements TaskGrant {
     this.originProof={...this.sources.find(s=>s.relPath===this.origin)!}
     this.credential=Object.freeze({...prepared.config.credential});this.limits=Object.freeze({...prepared.config.limits})
     this.networkLive=prepared.network;this.networkHost=prepared.networkAvailability.providerHost
+    // 冻结的是预览时那一版服务器与白名单工具；start 已经比对过，这里不再回存储重算。
+    this.mcpLive=prepared.mcp
+    this.mcpServers=Object.freeze(prepared.mcpAvailability.servers.map(server=>Object.freeze({name:server.name,host:server.host,tools:Object.freeze([...server.tools])})))
   }
   get network(): Readonly<{allowed:true;providerHost?:string}>|undefined {
     return this.networkLive ? {allowed:true,...(this.networkHost?{providerHost:this.networkHost}:{})} : undefined
+  }
+  get mcp(): Readonly<{allowed:true;servers:readonly McpGrantServer[]}>|undefined {
+    return this.mcpLive ? {allowed:true,servers:this.mcpServers} : undefined
   }
   revoke():void {this.live=false}
   assertNetwork():void {
@@ -230,6 +275,11 @@ class LiveGrant implements TaskGrant {
     this.assertActive()
   }
   revokeNetwork():void {this.networkLive=false}
+  assertMcp():void {
+    if(!this.mcpLive)throw Error('MCP_NOT_AUTHORIZED')
+    this.assertActive()
+  }
+  revokeMcp():void {this.mcpLive=false}
   assertActive():void {
     if(!this.live||this.deps.ownerValid?.(this.owner)===false)throw Error('AUTHORIZATION_REVOKED')
     if(this.deps.root()!==this.root||this.deps.session()!==this.sessionId)throw Error('VAULT_CHANGED')
