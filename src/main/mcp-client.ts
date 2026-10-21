@@ -56,19 +56,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** JSON-RPC 响应必须是信封 `{ jsonrpc, id, result }`；`error` 只暴露固定码，不转发服务器文本。 */
+function resultOf(message: unknown): Record<string, unknown> {
+  if (!isRecord(message)) throw new Error('MCP_PROTOCOL')
+  if (message.error !== undefined && message.error !== null) throw new Error('MCP_PROTOCOL')
+  if (!isRecord(message.result)) throw new Error('MCP_PROTOCOL')
+  return message.result
+}
+
 function protocolVersionOf(message: unknown): string {
-  if (!isRecord(message) || typeof message.protocolVersion !== 'string' || message.protocolVersion.length === 0) {
-    throw new Error('MCP_PROTOCOL')
-  }
-  return message.protocolVersion
+  const result = resultOf(message)
+  if (typeof result.protocolVersion !== 'string' || result.protocolVersion.length === 0) throw new Error('MCP_PROTOCOL')
+  return result.protocolVersion
 }
 
 /** 名字 1–128、按首次出现去重、非法条目跳过；`inputSchema` 原样保留。 */
 function toolsOf(message: unknown): McpTool[] {
-  if (!isRecord(message) || !Array.isArray(message.tools)) throw new Error('MCP_PROTOCOL')
+  const result = resultOf(message)
+  if (!Array.isArray(result.tools)) throw new Error('MCP_PROTOCOL')
   const tools: McpTool[] = []
   const seen = new Set<string>()
-  for (const entry of message.tools as unknown[]) {
+  for (const entry of result.tools as unknown[]) {
     if (!isRecord(entry)) continue
     const name = entry.name
     if (typeof name !== 'string' || name.length === 0 || name.length > MAX_TOOL_NAME || seen.has(name)) continue

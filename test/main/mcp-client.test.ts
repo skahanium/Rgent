@@ -33,10 +33,10 @@ const accepted: McpTransportResult = { ok: true, message: null, status: 202 }
 const failure = (error: Extract<McpTransportResult, { ok: false }>['error']): McpTransportResult => ({ ok: false, error })
 
 const initReply = (message: Record<string, unknown>, version = '2025-06-18', sessionId = 'session-1'): McpTransportResult =>
-  ok({ jsonrpc: '2.0', id: message.id, protocolVersion: version, capabilities: {}, serverInfo: { name: 'test', version: '1.0' } }, sessionId)
+  ok({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: version, capabilities: {}, serverInfo: { name: 'test', version: '1.0' } } }, sessionId)
 
 const toolList = (message: Record<string, unknown>, tools: unknown[] = TOOLS): McpTransportResult =>
-  ok({ jsonrpc: '2.0', id: message.id, tools })
+  ok({ jsonrpc: '2.0', id: message.id, result: { tools } })
 
 function handshake(overrides: { tools?: unknown[]; version?: string; onCall?: Handler } = {}) {
   return fakeTransport((message, call) => {
@@ -318,7 +318,7 @@ describe('mcp client session expiry and close', () => {
     const { transport } = fakeTransport((message) => {
       if (message.method === 'initialize') return initReply(message)
       if (message.method === 'notifications/initialized') return accepted
-      if (message.method === 'tools/list') return ok({ jsonrpc: '2.0', id: message.id, tools: [{ name: 'read' }] })
+      if (message.method === 'tools/list') return ok({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: 'read' }] } })
       return ok({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: TOKEN }] } })
     })
     const mcp = client(transport)
@@ -390,5 +390,25 @@ describe('mcp client session expiry and close', () => {
     await expectFailure(mcp.call('read', {}, SIGNAL), 'MCP_CANCELLED')
     await expectFailure(mcp.connect(SIGNAL), 'MCP_CANCELLED')
     expect(calls).toHaveLength(before)
+  })
+})
+
+describe('mcp client wire envelope', () => {
+  it('rejects a reply that is not wrapped in the JSON-RPC envelope', async () => {
+    const { transport } = fakeTransport(message => {
+      if (message.method === 'initialize') return ok({ jsonrpc: '2.0', id: message.id, protocolVersion: '2025-06-18' })
+      if (message.method === 'notifications/initialized') return accepted
+      return failure('MCP_PROTOCOL')
+    })
+    await expectFailure(client(transport).connect(SIGNAL), 'MCP_PROTOCOL')
+  })
+
+  it('rejects a JSON-RPC error on initialize without leaking the server text', async () => {
+    const { transport } = fakeTransport(message => {
+      if (message.method === 'initialize') return ok({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: `bad ${TOKEN}` } })
+      return failure('MCP_PROTOCOL')
+    })
+    const error = await expectFailure(client(transport).connect(SIGNAL), 'MCP_PROTOCOL')
+    expect(error.message).not.toContain(TOKEN)
   })
 })
