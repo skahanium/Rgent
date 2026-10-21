@@ -296,6 +296,13 @@ export async function start(root: HTMLElement): Promise<void> {
       clearStats: () => window.rgent.networkStatsClear(),
       egressLog: limit => window.rgent.networkEgressLog({ limit })
     }),
+    // 远端只读 MCP：配置读写与「连接并列出工具」；只有人点击才会外发。
+    mcp: () => ({
+      get: () => window.rgent.mcpConfig(),
+      save: request => window.rgent.mcpServerSave(request),
+      remove: request => window.rgent.mcpServerRemove(request),
+      discover: request => window.rgent.mcpDiscover(request)
+    }),
     onModelConfigChanged: () => { void refreshModelModule(); void refreshMemory() },
     onClose: () => {
       void refreshModelModule(); void refreshMemory()

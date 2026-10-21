@@ -54,6 +54,11 @@ import {
   type EgressLogResult,
   type NetworkStatsResult,
   type NetworkStatsClearResult,
+  type McpConfigResult,
+  type McpServerSaveRequest,
+  type McpServerRemoveRequest,
+  type McpDiscoverRequest,
+  type McpDiscoverResult,
   type AgentTaskView,
   type AgentEvent,
   type EntryCreateRequest,
@@ -208,6 +213,12 @@ const api = {
   networkStats: (): Promise<NetworkStatsResult> => invoke(IPC.networkStats),
   /** 清空统计并同时清外发日志；两步都成功才回 ok。 */
   networkStatsClear: (): Promise<NetworkStatsClearResult> => invoke(IPC.networkStatsClear),
+  /** 远端只读 MCP：配置只存本机，token 加密后不回渲染层。 */
+  mcpConfig: (): Promise<McpConfigResult> => invoke(IPC.mcpConfig),
+  mcpServerSave: (request: McpServerSaveRequest): Promise<McpConfigResult> => invoke(IPC.mcpServerSave, request),
+  mcpServerRemove: (request: McpServerRemoveRequest): Promise<McpConfigResult> => invoke(IPC.mcpServerRemove, request),
+  /** 人点「连接并列出工具」＝一次外发；只接受已存在的服务器 id。 */
+  mcpDiscover: (request: McpDiscoverRequest): Promise<McpDiscoverResult> => invoke(IPC.mcpDiscover, request),
   agentTasks: (): Promise<AgentTaskView[]> => invoke(IPC.agentTasks),
   onAgentEvent: (handler: (payload: AgentEvent) => void): (() => void) =>
     subscribe(IPC.agentEvent, (payload) => handler(payload as AgentEvent)),

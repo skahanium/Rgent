@@ -75,6 +75,23 @@ export const HOST_ERROR_CODES = [...new Set([
   'SEARCH_REFUSED',
   'SEARCH_MALFORMED',
   'SEARCH_EMPTY',
+  'MCP_INVALID_URL',
+  'MCP_CONNECT_FAILED',
+  'MCP_UNAUTHORIZED',
+  'MCP_PROTOCOL',
+  'MCP_TOOL_UNKNOWN',
+  'MCP_TOOL_FAILED',
+  'MCP_TIMEOUT',
+  'MCP_TOO_LARGE',
+  'MCP_CANCELLED',
+  'MCP_BAD_NAME',
+  'MCP_BAD_URL',
+  'MCP_BAD_TOKEN',
+  'MCP_DUPLICATE_URL',
+  'MCP_TOO_MANY',
+  'MCP_BAD_WHITELIST',
+  'MCP_NOT_FOUND',
+  'MCP_CONFIG_UNAVAILABLE',
   'SECURE_STORAGE_UNAVAILABLE',
   'BAD_NETWORK_CONFIG',
   'BAD_NETWORK_PROVIDER',
@@ -164,6 +181,23 @@ const MESSAGES: Record<string, string> = {
   SEARCH_REFUSED: '搜索服务拒绝或暂时不可用，本次没有取得结果。',
   SEARCH_MALFORMED: '搜索服务返回的结构异常，已丢弃本次结果。',
   SEARCH_EMPTY: '搜索服务没有返回结果。',
+  MCP_INVALID_URL: 'MCP 服务器地址不合法（只允许 HTTPS、443 与公网地址），未连接。',
+  MCP_CONNECT_FAILED: '连接 MCP 服务器失败（DNS／TLS／HTTP 或服务器暂时不可用），请稍后再试。',
+  MCP_UNAUTHORIZED: 'MCP 服务器拒绝了 token（401／403）；请核对后删除并重新添加这台服务器。',
+  MCP_PROTOCOL: 'MCP 服务器返回的协议内容不合法，已停止本次连接。',
+  MCP_TOOL_UNKNOWN: 'MCP 服务器没有这个工具，或本场白名单里没有它。',
+  MCP_TOOL_FAILED: 'MCP 工具执行失败；服务器没有提供可用的文本结果。',
+  MCP_TIMEOUT: '连接 MCP 服务器超时（20 秒），本次连接已取消。',
+  MCP_TOO_LARGE: 'MCP 服务器返回的内容超过单次上限，已丢弃。',
+  MCP_CANCELLED: 'MCP 连接已取消。',
+  MCP_BAD_NAME: '服务器名称须 1–80 字且不含控制字符。',
+  MCP_BAD_URL: '服务器地址须为 https://…（443 端口、不带用户名密码、只连公网地址）。',
+  MCP_BAD_TOKEN: 'token 须 1–4096 字且不含控制字符；启用服务器前必须先保存 token。',
+  MCP_DUPLICATE_URL: '同一个地址已经有另一台服务器，请先删除或改用别的地址。',
+  MCP_TOO_MANY: '服务器、工具或说明文字超出上限（服务器最多 8 台、每台工具最多 64 个）。',
+  MCP_BAD_WHITELIST: '白名单只能勾选这台服务器已发现的工具。',
+  MCP_NOT_FOUND: '找不到这台 MCP 服务器；它可能已被删除。',
+  MCP_CONFIG_UNAVAILABLE: '本机 MCP 配置不可用（无法读取或写入）；笔记仍可正常使用。',
   SECURE_STORAGE_UNAVAILABLE: '系统密钥保护当前不可用，搜索密钥未保存。',
   BAD_NETWORK_CONFIG: '本机联网配置文件无法读取，请检查设置；笔记仍可正常使用。',
   BAD_NETWORK_PROVIDER: '无法使用这个搜索服务，请重新选择。',
@@ -179,5 +213,9 @@ const MESSAGES: Record<string, string> = {
  * - `COPY_*`／`SOURCE_AVAILABLE`／`STALE_PREVIEW`／`LEDGER_BASIS_UNAVAILABLE`／`BAD_BODY`／`BAD_PERMISSION`／`EEXIST`：另存与生命周期通道，由 `shell.ts` 的 `LIFECYCLE_ERRORS` 翻译。
  */
 
+/** 已登记码的中文说明；未登记返回 null，调用方可以给更贴合自己场景的兜底。 */
+export const hostErrorMessage = (error: string): string | null =>
+  Object.hasOwn(MESSAGES, error) ? MESSAGES[error]! : null
+
 /** 未知错误使用固定文案，不能回显内部字符串。 */
-export const hostErrorText = (error: string): string => MESSAGES[error] ?? '本场未完成，请检查任务状态；已有回答仍保留。'
+export const hostErrorText = (error: string): string => hostErrorMessage(error) ?? '本场未完成，请检查任务状态；已有回答仍保留。'

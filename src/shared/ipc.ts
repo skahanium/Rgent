@@ -88,6 +88,10 @@ export const IPC = {
   networkEgressLog: 'network:egress-log',
   networkStats: 'network:stats',
   networkStatsClear: 'network:stats-clear',
+  mcpConfig: 'mcp:config',
+  mcpServerSave: 'mcp:server-save',
+  mcpServerRemove: 'mcp:server-remove',
+  mcpDiscover: 'mcp:discover',
   memoryChanged: 'memory:changed',
   memoryGet: 'memory:get',
   memoryConfigSave: 'memory:config-save',
@@ -257,6 +261,38 @@ export type NetworkStatsView = {
 export type NetworkStatsResult = { ok: true; stats: NetworkStatsView } | { ok: false; error: string }
 /** 清空统计同时清外发日志；两步都成功后才是 `{ ok: true }`。 */
 export type NetworkStatsClearResult = { ok: true } | { ok: false; error: string }
+
+/** 远端只读 MCP 的工具摘要：只回名字、标题与说明，schema 与服务器文本不出主进程。 */
+export type McpPublicTool = { name: string; title?: string; description?: string }
+/** 渲染层可见的一台服务器：永不含 token 或密文，只告诉人「有没有 token」。 */
+export type McpPublicServer = {
+  id: string
+  name: string
+  url: string
+  host: string
+  enabled: boolean
+  hasToken: boolean
+  tools: McpPublicTool[]
+  whitelist: string[]
+}
+export type McpConfigView = { servers: McpPublicServer[] }
+export type McpConfigResult = { ok: true; config: McpConfigView } | { ok: false; error: string }
+/** 保存一台服务器；省略 id 是新增，省略 token 是保留原 token。
+ *  `whitelist` 只由设置卡在已发现工具上勾选后回传（白名单必须 ⊆ 已发现工具）。 */
+export type McpServerSaveRequest = {
+  id?: string
+  name: string
+  url: string
+  token?: string
+  enabled: boolean
+  whitelist?: string[]
+}
+export type McpServerRemoveRequest = { id: string }
+export type McpDiscoverRequest = { id: string }
+/** 发现结果只含 name／title／description；`config` 是保存后的新摘要（白名单可能被收窄）。 */
+export type McpDiscoverResult =
+  | { ok: true; id: string; tools: McpPublicTool[]; config: McpConfigView }
+  | { ok: false; error: string }
 /** 网络事件只带主机与去查询串的路径，不带正文、密钥或查询参数。 */
 export type AgentNetworkEvent = {
   taskId: string

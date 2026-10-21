@@ -29,6 +29,7 @@ import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRet
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import type { NetworkPreviewRequest, NetworkPreviewResult } from '../shared/ipc.ts'
 import type { NetworkConfigResult, NetworkProviderSaveRequest } from '../shared/ipc.ts'
+import type { McpConfigResult, McpConfigView, McpDiscoverResult, McpPublicTool, McpServerSaveRequest } from '../shared/ipc.ts'
 import type { EgressLogResult, HumanFetchResult, HumanSearchResult, NetworkStatKind, NetworkStatsClearResult, NetworkStatsResult } from '../shared/ipc.ts'
 import { createEgressLog, type EgressLog } from './egress-log.ts'
 import { createHumanNetwork, applyHumanNetworkGate, type HumanNetwork } from './human-network.ts'
@@ -49,6 +50,8 @@ import { VaultSession } from './vault.ts'
 import { fetchModelList } from './model-list.ts'
 import { createModelConfigStore, type ModelConfigStore } from './model-config.ts'
 import { createNetworkConfigStore, type NetworkConfigStore, type NetworkCredential } from './network-config.ts'
+import { createMcpConfigStore, type McpConfigStore, type McpRuntimeServer } from './mcp-config.ts'
+import { createMcpClient } from './mcp-client.ts'
 import { createSearchProvider, SEARCH_PROVIDERS } from './search.ts'
 import { fetchText } from './text-fetch.ts'
 import { TaskAuthorizationRegistry, isAuthorizationCommand } from './task-authorization.ts'
@@ -93,6 +96,8 @@ let remoteImages: RemoteImageService | null = null
 let modelConfig: ModelConfigStore | null = null
 let modelConfigError: string | null = null
 let networkConfig: NetworkConfigStore | null = null
+/** 远端只读 MCP 的设备级配置：token 只在这里解密，渲染层只拿摘要。 */
+let mcpConfig: McpConfigStore | null = null
 /** 人发起外发的两条设备级设施：审计日志与抓页／搜索门面。 */
 let egressLog: EgressLog | null = null
 let humanNetwork: HumanNetwork | null = null
@@ -117,6 +122,8 @@ function recordNetworkStat(kind: NetworkStatKind, event: NetworkStatEvent): void
   try { networkStats?.record(kind, event) } catch { /* stats are best effort */ }
 }
 const HUMAN_LIMITS = { maxUrl: 2048, maxQuery: 256, maxResults: 10, maxLogLimit: 50 } as const
+/** 人点「连接并列出工具」的单次外发预算；与 MCP 传输的单次 20s 上限一致。 */
+const MCP_DISCOVER_TIMEOUT_MS = 20_000
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/u
 /** 停止标识只接受字母数字与 `-`／`_`；缺省表示这次请求不提供单独停止入口。 */
@@ -1033,6 +1040,114 @@ function registerIpc(): void {
     try { networkStats.clear() } catch { return { ok: false, error: 'IO_ERROR' } }
     return { ok: true }
   })
+  /** MCP 配置只回摘要；错误只过固定码白名单，store 抛出的文件系统原文不进渲染层。 */
+  const MCP_STORE_CODES = new Set([
+    'MCP_BAD_NAME', 'MCP_BAD_URL', 'MCP_BAD_TOKEN', 'MCP_DUPLICATE_URL', 'MCP_TOO_MANY',
+    'MCP_BAD_WHITELIST', 'MCP_NOT_FOUND', 'MCP_CONFIG_UNAVAILABLE'
+  ])
+  const MCP_DISCOVER_CODES = new Set([
+    ...MCP_STORE_CODES,
+    'MCP_INVALID_URL', 'MCP_CONNECT_FAILED', 'MCP_UNAUTHORIZED', 'MCP_PROTOCOL',
+    'MCP_TOOL_UNKNOWN', 'MCP_TOOL_FAILED', 'MCP_TIMEOUT', 'MCP_TOO_LARGE', 'MCP_CANCELLED'
+  ])
+  const mcpCode = (error: unknown, allowed: ReadonlySet<string>, fallback: string): string => {
+    const message = error instanceof Error ? error.message : ''
+    return allowed.has(message) ? message : fallback
+  }
+  const mcpView = (): McpConfigResult => {
+    if (!mcpConfig) return { ok: false, error: 'MCP_CONFIG_UNAVAILABLE' }
+    try { return { ok: true, config: mcpConfig.getPublic() } }
+    catch { return { ok: false, error: 'MCP_CONFIG_UNAVAILABLE' } }
+  }
+  const mcpWrite = (run: (store: McpConfigStore) => McpConfigView): McpConfigResult => {
+    if (!mcpConfig) return { ok: false, error: 'MCP_CONFIG_UNAVAILABLE' }
+    try { return { ok: true, config: run(mcpConfig) } }
+    catch (error) { return { ok: false, error: mcpCode(error, MCP_STORE_CODES, 'MCP_CONFIG_UNAVAILABLE') } }
+  }
+  registerTrustedHandle(IPC.mcpConfig, (event): McpConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    return mcpView()
+  })
+  registerTrustedHandle(IPC.mcpServerSave, (event, value: unknown): McpConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'BAD_REQUEST' }
+    const record = value as Record<string, unknown>
+    const KEYS = ['id', 'name', 'url', 'token', 'enabled', 'whitelist']
+    if (Object.keys(record).some(key => !KEYS.includes(key))) return { ok: false, error: 'BAD_REQUEST' }
+    if (typeof record.name !== 'string' || typeof record.url !== 'string' || typeof record.enabled !== 'boolean') return { ok: false, error: 'BAD_REQUEST' }
+    if (record.id !== undefined && (typeof record.id !== 'string' || record.id.length === 0 || record.id.length > 64)) return { ok: false, error: 'BAD_REQUEST' }
+    if (record.token !== undefined && typeof record.token !== 'string') return { ok: false, error: 'BAD_REQUEST' }
+    const whitelist = record.whitelist
+    if (whitelist !== undefined && (!Array.isArray(whitelist) || whitelist.some(name => typeof name !== 'string'))) return { ok: false, error: 'BAD_REQUEST' }
+    const request: McpServerSaveRequest = {
+      name: record.name,
+      url: record.url,
+      enabled: record.enabled,
+      ...(record.id !== undefined ? { id: record.id as string } : {}),
+      ...(record.token !== undefined ? { token: record.token as string } : {}),
+      ...(whitelist !== undefined ? { whitelist: whitelist as string[] } : {})
+    }
+    // 白名单只能落在已发现工具上；先按当前摘要预检，避免「服务器存了、白名单没存」的半截状态。
+    if (request.whitelist !== undefined) {
+      if (!request.id) return { ok: false, error: 'MCP_BAD_WHITELIST' }
+      const since = mcpView()
+      if (!since.ok) return since
+      const target = since.config.servers.find(server => server.id === request.id)
+      if (!target) return { ok: false, error: 'MCP_NOT_FOUND' }
+      const known = new Set(target.tools.map(tool => tool.name))
+      if (request.whitelist.some(name => !known.has(name))) return { ok: false, error: 'MCP_BAD_WHITELIST' }
+    }
+    const saved = mcpWrite(store => store.upsert(request))
+    if (!saved.ok || request.whitelist === undefined) return saved
+    return mcpWrite(store => store.saveWhitelist(request.id!, request.whitelist!))
+  })
+  registerTrustedHandle(IPC.mcpServerRemove, (event, value: unknown): McpConfigResult => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'BAD_REQUEST' }
+    const record = value as Record<string, unknown>
+    if (Object.keys(record).some(key => key !== 'id') || typeof record.id !== 'string' || record.id.length === 0 || record.id.length > 64) {
+      return { ok: false, error: 'BAD_REQUEST' }
+    }
+    return mcpWrite(store => store.remove(record.id as string))
+  })
+  /**
+   * 发现＝人点击触发的一次外发：只接受已存在的 id，只连配置里的 URL 与 token，
+   * 带 20s AbortSignal；成功后把工具名／标题／说明存进配置并回渲染层，
+   * 服务器文本、token、schema 都不回渲染层。
+   */
+  registerTrustedHandle(IPC.mcpDiscover, async (event, value: unknown): Promise<McpDiscoverResult> => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'BAD_REQUEST' }
+    const record = value as Record<string, unknown>
+    if (Object.keys(record).some(key => key !== 'id') || typeof record.id !== 'string' || record.id.length === 0 || record.id.length > 64) {
+      return { ok: false, error: 'BAD_REQUEST' }
+    }
+    if (!mcpConfig) return { ok: false, error: 'MCP_CONFIG_UNAVAILABLE' }
+    const id = record.id
+    let server: McpRuntimeServer | undefined
+    try { server = mcpConfig.servers().find(entry => entry.id === id) }
+    catch { return { ok: false, error: 'MCP_CONFIG_UNAVAILABLE' } }
+    if (!server) return { ok: false, error: 'MCP_NOT_FOUND' }
+    if (!server.credential) return { ok: false, error: 'MCP_BAD_TOKEN' }
+    const client = createMcpClient({ url: server.credential.url, token: server.credential.token })
+    const controller = new AbortController()
+    let timedOut = false
+    const timer = setTimeout(() => { timedOut = true; controller.abort() }, MCP_DISCOVER_TIMEOUT_MS)
+    try {
+      const discovered = await client.connect(controller.signal)
+      const config = mcpWrite(store => store.saveDiscovered(id, discovered.tools))
+      if (!config.ok) return config
+      const tools: McpPublicTool[] = config.config.servers.find(entry => entry.id === id)?.tools ?? []
+      return { ok: true, id, tools, config: config.config }
+    } catch (error) {
+      // 我们自己的 20s 预算优先：transport 会把 abort 报成 MCP_CANCELLED，这里还原成超时。
+      if (timedOut) return { ok: false, error: 'MCP_TIMEOUT' }
+      return { ok: false, error: mcpCode(error, MCP_DISCOVER_CODES, 'MCP_CONNECT_FAILED') }
+    } finally {
+      clearTimeout(timer)
+      client.close()
+    }
+  })
   registerTrustedHandle(IPC.remoteImageGet, async (_event, value: unknown): Promise<RemoteImageGetResult> => {
     if (!remoteImages || !vault || !value || typeof value !== 'object') return { ok: false, error: 'NOT_ALLOWED' }
     const request = value as import('../shared/ipc.ts').RemoteImageGetRequest
@@ -1691,6 +1806,8 @@ if (ownsInstance) app.whenReady().then(() => {
   })
   // 搜索密钥与模型密钥同一套保护：safeStorage 加密后进 network-config.json，明文只在主进程。
   networkConfig = createNetworkConfigStore(app.getPath('userData'), safeStorage)
+  // MCP 服务器配置与 token 走同一套 safeStorage；坏文件按「没有服务器」，不覆盖证据。
+  mcpConfig = createMcpConfigStore(app.getPath('userData'), safeStorage)
   // 人发起外发：设备级日志与门面。总闸每次现读，保存配置后立即生效；凭据只在主进程解密。
   egressLog = createEgressLog(app.getPath('userData'))
   networkStats = createNetworkStats(app.getPath('userData'))

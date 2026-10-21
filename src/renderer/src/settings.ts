@@ -10,6 +10,7 @@ import { CHROME_TEXT_SIZES, isChromeTextPreference, type ChromeTextPreference } 
 import type { ChromeTextSetResult } from '../../shared/ipc.ts'
 import { mountModelPage, modelPageAvailable, type ModelPageHandlers } from './settings-model.ts'
 import { mountNetworkCard, type NetworkCardHandlers } from './settings-network.ts'
+import { mountMcpCard, type McpCardHandlers } from './settings-mcp.ts'
 import { mountSkillsPage, type SkillsPageHandlers } from './settings-skills.ts'
 import { ASSISTANT_LIMITS, ASSISTANT_TONE_LABELS, ASSISTANT_TONES, DEFAULT_ASSISTANT_HABITS, isAssistantHabits, type AssistantHabits, type AssistantTone } from '../../shared/assistant.ts'
 import { openOverlay, type Overlay } from './overlay.ts'
@@ -31,6 +32,8 @@ export type SettingsHandlers = {
   getConfig?: () => Promise<ModelConfigResult>
   /** 「模型」页末尾的联网只读卡片；只写设备配置，不发测试请求。 */
   network?: () => NetworkCardHandlers | null
+  /** 「模型」页末尾的远端只读 MCP 卡片；只有人点「连接并列出工具」才外发。 */
+  mcp?: () => McpCardHandlers | null
   saveProvider?: (request: ModelProviderSaveRequest) => Promise<ModelConfigResult>
   removeProvider?: (request: ModelProviderRemoveRequest) => Promise<ModelConfigResult>
   deleteKey?: (request: ModelKeyDeleteRequest) => Promise<ModelConfigResult>
@@ -475,14 +478,29 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       disposeModelPage?.()
       disposeModelPage = null
       const { body, error } = pageFrame('模型', '配置连接与模型。密钥只保存在此设备；设备默认在助手页保存，底栏可为下一场临时选择。')
-      // 联网只读卡片挂在既有「模型」页末尾：不新增页、不新增导航项。
+      // 联网只读与远端 MCP 两张卡片挂在既有「模型」页末尾：不新增页、不新增导航项。
       const network = handlers.network?.() ?? null
+      const mcp = handlers.mcp?.() ?? null
       let trailing: HTMLElement | null = null
       let disposeNetwork: (() => void) | null = null
-      if (network) {
-        trailing = document.createElement('section')
-        trailing.className = 'settings-network'
-        disposeNetwork = mountNetworkCard({ body: trailing, isCurrent: () => current.isOpen() && openedPage === '模型' }, network)
+      let disposeMcp: (() => void) | null = null
+      if (network || mcp) {
+        trailing = document.createElement('div')
+        // 仍保留 settings-network 类：既有窗口专项按它找联网卡，并用 closest('.settings-network')
+        // 把页尾两张卡一起排除在模型页的批量禁用之外。
+        trailing.className = 'settings-network settings-network-wrap'
+        if (network) {
+          const section = document.createElement('section')
+          section.className = 'settings-network-card'
+          disposeNetwork = mountNetworkCard({ body: section, isCurrent: () => current.isOpen() && openedPage === '模型' }, network)
+          trailing.append(section)
+        }
+        if (mcp) {
+          const section = document.createElement('section')
+          section.className = 'settings-mcp'
+          disposeMcp = mountMcpCard({ body: section, isCurrent: () => current.isOpen() && openedPage === '模型' }, mcp)
+          trailing.append(section)
+        }
       }
       const disposeModel = mountModelPage({
         body,
@@ -492,7 +510,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         onChanged: () => handlers.onModelConfigChanged?.(),
         ...(trailing ? { trailing } : {})
       }, page)
-      disposeModelPage = () => { disposeModel(); disposeNetwork?.(); disposeNetwork = null }
+      disposeModelPage = () => { disposeModel(); disposeNetwork?.(); disposeMcp?.(); disposeNetwork = null; disposeMcp = null }
     }
 
     async function renderRunPage(): Promise<void> {
