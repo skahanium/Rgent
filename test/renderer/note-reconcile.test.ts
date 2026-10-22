@@ -166,6 +166,7 @@ describe('a note created over an unavailable tab', () => {
     files = new Map([['甲.md', { content: '旧稿正文', revision: 'r-old', objectVersion: 'o-old' }]])
     editorHarness.text = ''; editorHarness.change = null
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+    Object.defineProperty(HTMLDialogElement.prototype, 'show', { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute('open', '') } })
     Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute('open', '') } })
     Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute('open'); this.dispatchEvent(new Event('close')) } })
     const fallback = async () => null

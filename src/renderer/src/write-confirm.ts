@@ -2,13 +2,60 @@ import { openOverlay, type Overlay } from './overlay.ts'
 import { renderReadOnlyMarkdown } from './view/read-only.ts'
 import type { AgentWriteDecision, AgentWritePreview } from '../../shared/ipc.ts'
 
-/** 「建」的人确认：模型提议新建一篇笔记，落点与正文先摆给人看，点一下才建。
- *  合同见 decisions.md「写类 AI 工具局部授权」——落点固定为发起篇所在目录，
- *  预览只给这两样（路径与正文），不提供改路径的入口。 */
+/** AI 写操作的人确认：模型提议补／建／改名／挪／删，先摆一张卡给人看，点「允许」才动。
+ *  合同见 decisions.md「交互减负」：卡是**非模态**的——不遮整屏、不抢焦点、不拦编辑器输入，
+ *  位置固定右下角；「逐次确认」与「拒绝／关闭／超时都算不允许」不变。
+ *  正文预览默认只露 3 行，全文与路径、影响面数字都在「详情」里，不拿机器信息占首屏。 */
 
 export type WriteConfirmHost = {
   onRequest: (handler: (preview: AgentWritePreview) => void) => () => void
   decide: (decision: AgentWriteDecision) => Promise<unknown> | unknown
+}
+
+/** 首行（发生了什么的标题）硬上限，与合同「首行 ≤40 汉字」一致。 */
+const TITLE_LIMIT = 40
+/** 卡片宽度上限；窄窗口再退，避免压住编辑器右缘。 */
+const CARD_WIDTH = 360
+/** 正文预览默认露几行。 */
+const PREVIEW_LINES = 3
+
+/** 卡片标题只认「笔记名」，路径全文进详情：标题要一眼能读完，不能变成第二个路径行。 */
+function noteName(relPath: string): string {
+  const base = relPath.slice(relPath.lastIndexOf('/') + 1)
+  return base.endsWith('.md') ? base.slice(0, -3) : base
+}
+
+function titleOf(preview: AgentWritePreview): string {
+  // 现有写工具没有独立的「补写」载荷：补写不经这张卡（它由写入门按追加块直接执行）。
+  switch (preview.kind) {
+    case 'create': return `AI 想新建《${noteName(preview.relPath)}》`
+    case 'rename': return `AI 想改名《${noteName(preview.source)}》`
+    case 'move': return `AI 想挪走《${noteName(preview.source)}》`
+    case 'delete': return `AI 想删除《${noteName(preview.relPath)}》`
+  }
+}
+
+/** 路径很长时标题截到上限，宁缺字也不让首行换成两行。 */
+function clampTitle(title: string): string {
+  return title.length <= TITLE_LIMIT ? title : `${title.slice(0, TITLE_LIMIT - 1)}…`
+}
+
+function previewNote(preview: AgentWritePreview): string {
+  switch (preview.kind) {
+    case 'create': return '只在这个目录里新建，正文由模型给出；不同意就什么都不写。'
+    case 'rename':
+    case 'move': return `会影响 ${preview.linkChanges} 处引用、${preview.permissionChanges} 处权限；引用在授权范围内的会被一并修好。不同意就什么都不动。`
+    case 'delete': return `${preview.hasAttachments ? '这篇（连同名附件夹）' : '这篇'}会移入废纸篓，也就是系统废纸篓。其他笔记里的链接会失效，不会代为改字。不同意就什么都不动。`
+  }
+}
+
+function previewPath(preview: AgentWritePreview): string {
+  switch (preview.kind) {
+    case 'create': return `将新建：${preview.relPath}`
+    case 'rename': return `将改名：${preview.source} → ${preview.target}`
+    case 'move': return `将移动：${preview.source} → ${preview.target}`
+    case 'delete': return `将删除：${preview.relPath}`
+  }
 }
 
 export function installWriteConfirm(host: WriteConfirmHost): () => void {
@@ -23,13 +70,15 @@ export function installWriteConfirm(host: WriteConfirmHost): () => void {
   }
 
   const stop = host.onRequest(preview => {
-    // 同一时刻只摆一个：上一张还没答就当作不建，避免两个都点出问题。
+    // 同一时刻只摆一个：上一张还没答就当作不允许，避免两个都点出问题。
     if (current && !current.decided) settle(false)
+    const title = clampTitle(titleOf(preview))
     const overlay = openOverlay({
-      label: preview.kind === 'delete' ? '移入系统废纸篓' : preview.kind === 'create' ? '确认新建笔记' : '确认结构操作',
-      initialFocus: () => overlay.root.querySelector<HTMLElement>(preview.kind === 'delete' ? '.write-confirm-cancel' : '.write-confirm-accept'),
-      // 不管怎么关掉（Esc、点面板外、程序关闭），没答过就当拒绝：
-      // 人没点头就绝不落盘，也不能让主进程干等到超时。
+      label: title,
+      // 非模态：show() 而不是 showModal()，不拿焦点、不拦快捷键。也不能给 initialFocus。
+      modal: false,
+      // 不管怎么关掉（Esc、程序关闭），没答过就当不允许：人没点头就绝不落盘，
+      // 也不能让主进程干等到超时（主进程 120 秒兜底也回不允许）。
       onClose: () => {
         const pending = current
         if (!pending || pending.overlay !== overlay) return
@@ -40,33 +89,89 @@ export function installWriteConfirm(host: WriteConfirmHost): () => void {
         }
       }
     })
-    overlay.root.classList.add('overlay-write-confirm')
-    // 建给「落点＋正文」，改名／挪给「旧路径 → 新路径＋影响面」，删给路径；都是预览＋一次点击。
-    const heading = preview.kind === 'create' ? '新建这篇笔记吗？' : preview.kind === 'rename' ? '给这篇笔记改名吗？' : preview.kind === 'move' ? '把这篇笔记挪走吗？' : '把这篇笔记移入系统废纸篓吗？'
-    const path = preview.kind === 'create'
-      ? `将新建：${preview.relPath}`
-      : preview.kind === 'delete'
-        ? `将删除：${preview.relPath}`
-      : `${preview.kind === 'rename' ? '将改名' : '将移动'}：${preview.source} → ${preview.target}`
-    const note = preview.kind === 'create'
-      ? '它只在当前库、发起篇所在目录里新建；正文内容由模型给出。不同意就什么都不写。'
-      : preview.kind === 'delete'
-        ? `${preview.hasAttachments ? '这篇连同名附件夹会一起送入系统废纸篓。' : '这篇会送入系统废纸篓。'}其他笔记里的链接会失效，不会代为改字。不同意就什么都不动。`
-      : `会影响 ${preview.linkChanges} 处引用、${preview.permissionChanges} 处权限；引用在授权范围内的会被一并修好。不同意就什么都不动。`
-    const cancel = preview.kind === 'create' ? '不建' : preview.kind === 'delete' ? '不删' : '不'
-    const acceptLabel = preview.kind === 'create' ? '建' : preview.kind === 'rename' ? '改名' : preview.kind === 'move' ? '移动' : '移入废纸篓'
-    overlay.root.innerHTML = `<h2>${heading}</h2><p class="write-confirm-path" aria-live="polite"></p><div class="write-confirm-body"></div><p class="write-confirm-note settings-hint">${note}</p><footer><button type="button" class="write-confirm-cancel">${cancel}</button><button type="button" class="write-confirm-accept">${acceptLabel}</button></footer>`
-    overlay.root.querySelector('.write-confirm-path')!.textContent = path
-    if (preview.kind === 'create') renderReadOnlyMarkdown(overlay.root.querySelector<HTMLElement>('.write-confirm-body')!, preview.body)
-    else overlay.root.querySelector<HTMLElement>('.write-confirm-body')!.remove()
-    overlay.root.querySelector('.write-confirm-cancel')!.addEventListener('click', () => settle(false))
+    overlay.root.classList.add('overlay-write-confirm', 'write-confirm')
+    // 右下角的常驻卡片：fixed 到视口，最多 360px 宽、60vh 高，内容多了在卡内滚动。
+    overlay.root.style.position = 'fixed'
+    overlay.root.style.right = '16px'
+    overlay.root.style.bottom = '16px'
+    overlay.root.style.left = 'auto'
+    overlay.root.style.top = 'auto'
+    overlay.root.style.margin = '0'
+    overlay.root.style.width = `${CARD_WIDTH}px`
+    overlay.root.style.maxWidth = 'calc(100vw - 32px)'
+    overlay.root.style.maxHeight = '60vh'
+    overlay.root.style.overflowY = 'auto'
+    overlay.root.style.zIndex = '40'
+    overlay.root.style.padding = '14px 16px'
+    overlay.root.style.display = 'grid'
+    overlay.root.style.gap = '8px'
+    overlay.root.style.alignContent = 'start'
+    overlay.root.innerHTML = '<h2 class="write-confirm-title"></h2><div class="write-confirm-body"></div><button type="button" class="write-confirm-expand" aria-expanded="false">展开</button><details class="write-confirm-details"><summary>详情</summary><p class="write-confirm-path"></p><p class="write-confirm-note settings-hint"></p></details><footer><button type="button" class="write-confirm-cancel">不允许</button><button type="button" class="write-confirm-accept">允许</button></footer>'
+    const titleEl = overlay.root.querySelector<HTMLElement>('.write-confirm-title')!
+    titleEl.textContent = title
+    titleEl.style.margin = '0'
+    titleEl.style.fontSize = '0.95rem'
+    titleEl.style.lineHeight = '1.5'
+    titleEl.style.color = 'var(--text-heading)'
+    titleEl.style.overflowWrap = 'anywhere'
+    // 路径与影响面数字是「详情」：首屏只留一句发生了什么。
+    overlay.root.querySelector('.write-confirm-path')!.textContent = previewPath(preview)
+    overlay.root.querySelector('.write-confirm-note')!.textContent = previewNote(preview)
+    const details = overlay.root.querySelector<HTMLElement>('.write-confirm-details')!
+    details.style.fontSize = '0.8rem'
+    details.style.color = 'var(--text-muted)'
+    const pathEl = overlay.root.querySelector<HTMLElement>('.write-confirm-path')!
+    pathEl.style.margin = '4px 0'
+    pathEl.style.overflowWrap = 'anywhere'
+    const body = overlay.root.querySelector<HTMLElement>('.write-confirm-body')!
+    const expand = overlay.root.querySelector<HTMLButtonElement>('.write-confirm-expand')!
+    if (preview.kind === 'create') {
+      renderReadOnlyMarkdown(body, preview.body)
+      body.style.overflow = 'hidden'
+      body.style.overflowWrap = 'anywhere'
+      const collapse = (): void => {
+        body.dataset.collapsed = 'true'
+        body.style.display = '-webkit-box'
+        body.style.setProperty('-webkit-box-orient', 'vertical')
+        // 新旧两种写法都留：老 Chromium 只认 `-webkit-`，新写法留给以后的浏览器。
+        body.style.setProperty('-webkit-line-clamp', String(PREVIEW_LINES))
+        body.style.setProperty('line-clamp', String(PREVIEW_LINES))
+        expand.textContent = '展开'
+        expand.setAttribute('aria-expanded', 'false')
+      }
+      const expandBody = (): void => {
+        body.dataset.collapsed = 'false'
+        body.style.display = 'block'
+        body.style.removeProperty('-webkit-box-orient')
+        body.style.removeProperty('-webkit-line-clamp')
+        body.style.removeProperty('line-clamp')
+        expand.textContent = '收起'
+        expand.setAttribute('aria-expanded', 'true')
+      }
+      collapse()
+      expand.addEventListener('click', () => {
+        if (body.dataset.collapsed === 'true') expandBody()
+        else collapse()
+      })
+      // 正文为空时没什么可折的，就不留一个点了没反应的按钮。
+      if (!body.textContent?.trim()) {
+        body.remove()
+        expand.remove()
+      }
+    } else {
+      body.remove()
+      expand.remove()
+    }
+    const footer = overlay.root.querySelector<HTMLElement>('footer')!
+    footer.style.display = 'flex'
+    footer.style.justifyContent = 'flex-end'
+    footer.style.gap = '8px'
+    footer.style.marginTop = '4px'
+    const cancel = overlay.root.querySelector<HTMLElement>('.write-confirm-cancel')!
+    cancel.addEventListener('click', () => settle(false))
     const accept = overlay.root.querySelector<HTMLElement>('.write-confirm-accept')!
     accept.addEventListener('click', () => settle(true))
-    // 内容是在浮层打开之后才装进去的。删除的破坏性按钮不能当默认焦点。
-    const focus = preview.kind === 'delete'
-      ? overlay.root.querySelector<HTMLElement>('.write-confirm-cancel')!
-      : accept
-    focus.focus()
+    // 不调 focus()：卡出现时编辑器的焦点与输入都不动。
     current = { overlay, requestId: preview.requestId, decided: false }
   })
 
