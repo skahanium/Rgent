@@ -272,21 +272,28 @@ async function confirmSlashAuthorization(page, inspect = false) {
       return (await window.rgent.agentTasks()).length===0 && popup.querySelector('.authorization-recipient').textContent.includes('127.0.0.1:') &&
         popup.querySelectorAll('.authorization-manifest li').length===1 && popup.querySelector('.authorization-disclosure').textContent.includes('发送')
     })()`))
-    check('口令旁授权浮层具有真实轮廓、可见位置及内部焦点', await page.eval(`(() => {
+    check('口令旁授权浮层具有真实轮廓、可见位置且不抢焦点', await page.eval(`(() => {
       const popup=document.querySelector('.overlay-authorization');if(!popup)return false;const r=popup.getBoundingClientRect();const style=getComputedStyle(popup);
       return r.width>=300 && r.width<=450 && r.left>=0 && r.top>=0 && r.right<=innerWidth+1 && r.bottom<=innerHeight+1 &&
-        style.position==='fixed' && parseFloat(style.borderTopWidth)>0 && popup.contains(document.activeElement)
+        style.position==='fixed' && parseFloat(style.borderTopWidth)>0 && !popup.contains(document.activeElement)
     })()`))
     await page.eval(`document.querySelector('.overlay-authorization')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',isComposing:true,bubbles:true,cancelable:true}))`)
     check('输入法组合回车不启动模型任务', await page.eval(`(async () => (await window.rgent.agentTasks()).length===0 && !!document.querySelector('.overlay-authorization[open]'))()`))
     await page.eval(`document.querySelector('.overlay-authorization')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',keyCode:229,bubbles:true,cancelable:true}))`)
     check('单独 keyCode 229 不启动模型任务', await page.eval(`(async () => (await window.rgent.agentTasks()).length===0 && !!document.querySelector('.overlay-authorization[open]'))()`))
+    // 非模态卡只在焦点进入卡片时才接管 Esc（不抢焦点是合同）。
+    await page.eval(`document.querySelector('.overlay-authorization')?.focus()`)
     await page.key('Escape','Escape',0,27)
-    check('取消授权保留原始口令且焦点回到正文', await waitFor(page, `!document.querySelector('.overlay-authorization[open]') && document.querySelector('.cm-content')?.textContent.includes('/请写两句话') && document.querySelector('.cm-editor')?.contains(document.activeElement)`))
+    const cancelled = await waitFor(page, `!document.querySelector('.overlay-authorization[open]') && document.querySelector('.cm-content')?.textContent.includes('/请写两句话')`)
+    // 非模态关闭不会代还焦点（它从未把焦点拿走）；把焦点放回正文，再走 re-open。
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    check('取消授权保留原始口令且焦点回到正文', cancelled && await page.eval(`document.querySelector('.cm-editor')?.contains(document.activeElement)`))
     check('取消准备保留该篇临时模型', await page.eval(`document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test-override'`) === true)
     await page.key('Enter','Enter',0,13)
     if(!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`))return false
   }
+  // 非模态卡不抢焦点：发送前必须由测试把焦点放到发送键上。
+  await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
   await page.key('Enter', 'Enter', 0, 13)
   return true
 }
@@ -342,7 +349,12 @@ async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) 
   await page.call('Input.insertText',{text:'/长期记住：后续回答请用中文简短表达（记忆验收）。'})
   await page.key('Enter','Enter',0,13)
   await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)
-  check('原授权浮层只读披露独立记忆用途与实际整理接收方', await waitFor(page, `document.querySelector('.authorization-memory')?.textContent.includes('memory-ui-fixture') && document.querySelector('.authorization-memory')?.textContent.includes('独立记忆使用许可') && !document.querySelector('.authorization-memory select')`))
+  check('原授权浮层只读披露独立记忆用途与实际整理接收方', await waitFor(page, `(() => {
+    const text = document.querySelector('.authorization-memory')?.textContent ?? ''
+    return text.includes('本场使用独立记忆') && text.includes('memory-ui-fixture') && text.includes('后台整理') && !document.querySelector('.authorization-memory select')
+  })()`))
+  // 非模态卡不抢焦点：发送前把焦点放到发送键。
+  await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
   await page.key('Enter','Enter',0,13)
   check('回答和本篇账本成功保存后后台整理完成', await waitFor(page, `(async()=>{const state=await window.rgent.vaultGet();const memory=await window.rgent.memoryGet({sessionId:state.sessionId});const note=await window.rgent.noteRead('记忆长期.md');return memory.ok&&memory.value.entries.some(e=>e.content==='后续回答请用中文简短表达（记忆验收）。'&&e.layer==='core')&&memory.value.jobs.some(j=>j.outcome==='applied')&&!note.content.includes('rgent:ledger:v1')&&(await window.rgent.ledgerGet({sessionId:note.sessionId,objectVersion:note.objectVersion,relPath:'记忆长期.md'})).value?.records.some(r=>r.state==='saved'&&r.chapter?.prompt.includes('长期记住'))&&(await window.rgent.agentTasks()).length===0})()`,15000))
   check('独立后台仅发送获准材料、不把回答当事实且工具为零', requests.some(r=>{if(r.model!=='memory-ui-fixture'||r.tools?.length)return false;const input=JSON.parse(r.messages.find(m=>m.role==='user').content);return input.sources?.some(s=>s.classification==='command'&&s.text.includes('长期记住'))&&!input.sources.some(s=>s.classification==='ai')&&!JSON.stringify(r).includes('隐藏工具推理')}))
@@ -569,7 +581,10 @@ async function verifyScopedHost(page, vault, shot, requests) {
       process.stdout.write('DEBUG_START popover ' + await page.eval(`JSON.stringify({ editor: document.querySelector('.cm-content')?.innerText, popover: !!document.querySelector('.overlay-authorization'), send: document.querySelector('.authorization-send')?.disabled ?? null, status: document.querySelector('.status-task')?.textContent ?? null })`) + '\n')
       return false
     }
-    check('新场工具授权默认仅发起篇', await page.eval(`document.querySelectorAll('.authorization-manifest li').length===1 && [...document.querySelectorAll('.authorization-choices input')].every(input=>!input.checked)`))
+    // 授权范围在同一会话内记忆：每次准备都用「只读本笔记」预设清回发起篇，再按本场需要选参考。
+    await page.eval(`document.querySelector('.authorization-preset-origin')?.click()`)
+    if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===1 && [...document.querySelectorAll('.authorization-choices input')].every(input=>!input.checked) && !!document.querySelector('.authorization-send:not(:disabled)')`)) return '「只读本笔记」预设没就绪'
+    check('「只读本笔记」预设清回仅发起篇', await page.eval(`document.querySelectorAll('.authorization-manifest li').length===1 && [...document.querySelectorAll('.authorization-choices input')].every(input=>!input.checked)`))
     // HTMLElement.click() does not focus a checkbox. A refresh disables the initially
     // focused send button, so native mouse clicks must establish focus before refresh.
     for (const [at, name] of ['工具参考.md', '工具其他.md'].entries()) {
@@ -585,7 +600,10 @@ async function verifyScopedHost(page, vault, shot, requests) {
   check('两篇额外参考逐场核对进入固定清单', await choose())
   await shot(page, 'auth-scope-1200')
   await page.key('Escape', 'Escape', 0, 27)
-  check('取消工具范围授权保留口令并归还焦点', await waitFor(page, `!document.querySelector('.overlay-authorization[open]') && document.querySelector('.cm-content')?.textContent.includes('/工具查证') && document.querySelector('.cm-editor')?.contains(document.activeElement)`))
+  const scopeCancelled = await waitFor(page, `!document.querySelector('.overlay-authorization[open]') && document.querySelector('.cm-content')?.textContent.includes('/工具查证')`)
+  // 非模态关闭不代还焦点（它从未把焦点拿走）；把焦点放回正文再继续。
+  await page.eval(`document.querySelector('.cm-content')?.focus()`)
+  check('取消工具范围授权保留口令并归还焦点', scopeCancelled && await page.eval(`document.querySelector('.cm-editor')?.contains(document.activeElement)`))
   await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
   check('窄窗重新准备三篇范围', await choose())
   check('窄窗范围、主机和内部焦点可辨', await page.eval(`(() => { const popup=document.querySelector('.overlay-authorization');if(!popup)return false;const r=popup.getBoundingClientRect();return r.left>=0 && r.top>=0 && r.right<=innerWidth+1 && r.bottom<=innerHeight+1 && popup.contains(document.activeElement) && popup.querySelector('.authorization-recipient').textContent.includes('127.0.0.1:') })()`), await page.eval(`(() => {const popup=document.querySelector('.overlay-authorization');if(!popup)return 'no-popup';const r=popup.getBoundingClientRect();return JSON.stringify({bounds:{left:r.left,top:r.top,right:r.right,bottom:r.bottom},viewport:{width:innerWidth,height:innerHeight},focus:document.activeElement?.outerHTML.slice(0,150),recipient:popup.querySelector('.authorization-recipient').textContent})})()`))
@@ -665,12 +683,17 @@ async function verifyWriteTools(page, vault, shot, requests) {
       const state = await page.eval(`JSON.stringify({editor:document.querySelector('.cm-content')?.innerText,notice:document.querySelector('.status')?.textContent??null,tab:document.querySelector('.tab[aria-selected=true]')?.dataset.rel??null,session:document.querySelector('.tab[aria-selected=true]')?.dataset.session??null,statuses:[...document.querySelectorAll('.status *')].map(n=>n.textContent).filter(Boolean).slice(0,4)})`)
       return '授权弹窗没出现：' + state
     }
+    // 授权范围在同一会话内记忆：先用「只读本笔记」预设清回发起篇，再选本场这一篇参考。
+    await page.eval(`document.querySelector('.authorization-preset-origin')?.click()`)
+    if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===1 && !!document.querySelector('.authorization-send:not(:disabled)')`)) return '「只读本笔记」预设没就绪'
     // 选一篇额外参考：这样本场才是"有工具档"，写工具才会出现。
     const point = await page.eval(`(() => { const input=[...document.querySelectorAll('.authorization-choices input')].find(input=>input.value===${JSON.stringify(reference)}); if(!input||input.disabled)return null; input.scrollIntoView({block:'nearest'}); const r=input.getBoundingClientRect(); return { x: r.left+r.width/2, y: r.top+r.height/2 } })()`)
     if (!point) return false
     await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
     await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
-    if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===2`)) return '清单没变成 2 条'
+    if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===2 && !!document.querySelector('.authorization-send:not(:disabled)')`)) return '清单没变成 2 条'
+    // 非模态卡不抢焦点：勾选参考后焦点在复选框上，发送前必须把焦点放回发送键。
+    await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
     await page.key('Enter', 'Enter', 0, 13)
     return true
   }
@@ -1067,6 +1090,8 @@ async function verifyMcpOnly(page, vault, shot, requests) {
   check('MCP 专项：口令卡准备就绪', await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 60000), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? ''`))
   check('MCP 专项：未配置 MCP 时只有原因行、没有 MCP 勾选框', await page.eval(`(() => { const card=document.querySelector('.authorization-mcp'); return !!card && !card.querySelector('input[type="checkbox"]') && card.textContent.includes('本场不能使用 MCP') })()`), await page.eval(`document.querySelector('.authorization-mcp')?.textContent ?? '(无 MCP 行)'`))
   await shot(page, 'mcp-authorization-1200')
+  // 非模态卡不抢焦点：发送前把焦点放到发送键。
+  await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
   await page.key('Enter', 'Enter', 0, 13)
   check('MCP 专项：最小任务正常结束并保存回答', await waitFor(page, `(async()=>{ if((await window.rgent.agentTasks()).length) return false; const note=await window.rgent.noteRead('MCP 门控专项.md'); return note.content.includes('受控回答第一句。') })()`, 60000))
   check('MCP 专项：任务只走受控主机', requests.length >= 1, String(requests.length))
@@ -1171,6 +1196,8 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
       const manifest = await page.eval(`[...document.querySelectorAll('.authorization-manifest li')].map(node => node.textContent)`)
       if (manifest.length !== 1 || manifest[0] !== name) return `授权清单不是仅有发起篇：${JSON.stringify(manifest)}`
     }
+    // 非模态卡不抢焦点：发送前把焦点放到发送键。
+    await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
     await page.key('Enter', 'Enter', 0, 13)
     if (!await waitFor(page, `!document.querySelector('.status-task')`, 60000)) return `任务没有收尾（${name}）`
     if (!await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content.includes('受控回答第一句。'))()`, 30000)) return `回答没有落盘（${name}）`
@@ -1692,6 +1719,273 @@ async function verifyJourney(page, vault, shot) {
   }
 }
 
+/** 交互减负专项的受控主机（RGENT_UI_UX_ONLY=1）：只按专属口令回脚本化回答，
+ *  「UX建许可」「UX建拒绝」两个口令各发一次 create_note；其余请求给既有受控回答。
+ *  独立于 createControlledHostServer，既有专项的口令与分流一个字节都不动。 */
+function createUxHostServer(requests) {
+  const server = createHttpServer((request, response) => {
+    let body = ''
+    request.on('data', (chunk) => { body += String(chunk) })
+    request.on('end', () => {
+      let decoded
+      try { decoded = JSON.parse(body) } catch { response.writeHead(400, { 'content-type': 'text/plain' }); response.end('bad request'); return }
+      requests.push(decoded)
+      const transcript = JSON.stringify(decoded.messages ?? [])
+      const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'ux-ui', object: 'chat.completion.chunk', created: 1, model: decoded.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      const toolResults = (decoded.messages ?? []).filter((message) => message.role === 'tool')
+      const scenario = transcript.includes('UX建许可') ? 'allow' : transcript.includes('UX建拒绝') ? 'deny' : null
+      if (scenario && toolResults.length === 0) {
+        // 第一轮只提议一次新建；写确认卡由人点允许／不允许，第二轮才收尾。
+        const call = scenario === 'allow'
+          ? { name: 'create_note', input: { name: 'UX确认样张', body: '# UX 确认样张\n\n交互减负受控正文。' } }
+          : { name: 'create_note', input: { name: 'UX拒绝样张', body: '# UX 拒绝样张\n\n不应该落盘。' } }
+        emit({ tool_calls: [{ index: 0, id: 'ux-' + scenario, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.input) } }] })
+        emit({}, 'tool_calls')
+      } else {
+        emit({ content: scenario === 'allow' ? 'UX 写许可完成。' : scenario === 'deny' ? 'UX 写拒绝完成。' : '受控回答第一句。第二句。' })
+        emit({}, 'stop')
+      }
+      response.end('data: [DONE]\n\n')
+    })
+  })
+  return server
+}
+
+/** 交互减负专项（RGENT_UI_UX_ONLY=1）：授权卡与写确认卡非模态、卡内 Enter 发送、
+ *  冲突先出可点横幅再进核对浮层、正常路径零原生 alert／confirm、卡片文案首行短且无机器码。
+ *  模型是受控主机脚本，零真实供应商调用。 */
+async function verifyUx(page, vault, shot) {
+  process.stdout.write('\n交互减负（非模态卡片、冲突横幅、零原生弹窗）\n')
+  const modifier = process.platform === 'darwin' ? 4 : 2
+  const nativeDialogs = []
+  await page.call('Page.enable', {})
+  // 沿用各专项的拦截模式：记下每一条原生对话框并立刻确认，免得自动化被卡死。断言只认 0 条。
+  page.onEvent = (message) => {
+    if (message.method !== 'Page.javascriptDialogOpening') return
+    nativeDialogs.push(message.params.message)
+    void page.call('Page.handleJavaScriptDialog', { accept: true })
+  }
+  const at = (name) => path.join(vault, name)
+  for (const [name, body] of Object.entries({ 'UX 授权.md': '', 'UX 写许可.md': '', 'UX 写拒绝.md': '', 'UX 冲突.md': '# UX 冲突\n\n窗口正文。\n' })) writeFileSync(at(name), body)
+  // 外壳、库与文件树都就绪后再开设置页；否则设置关闭后的模型快照刷新可能还没轮到。
+  const vaultReady = await waitFor(page, `(async () => { const state = await window.rgent.vaultGet(); return !!state?.sessionId && state.status === 'ready' })()`, 20000)
+  await waitFor(page, `!!document.querySelector('.tree-toggle') && !!document.querySelector('.status')`, 20000)
+  await setTreeExpanded(page, true)
+  await selectBrowserFolder(page, '')
+  const fixturesReady = await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter((node) => ['UX 授权.md', 'UX 写许可.md', 'UX 写拒绝.md', 'UX 冲突.md'].includes(node.dataset.path)).length === 4`, 20000)
+  // 受控供应商是经 IPC 配的；渲染层模型快照要开关一次设置页才刷新（与写工具专项同一条路）。
+  await page.eval(`document.querySelector('.settings-open')?.click()`)
+  await waitFor(page, `!!document.querySelector('.settings-nav')`)
+  await page.key('Escape', 'Escape', 0, 27)
+  await waitFor(page, `!document.querySelector('.settings-nav')`)
+  await setTreeExpanded(page, true)
+  await selectBrowserFolder(page, '')
+
+  const editorText = () => page.eval(`document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null`)
+  const clickSelector = async (selector) => {
+    const point = await page.eval(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; el.scrollIntoView({ block: 'nearest' }); const rect = el.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } })()`)
+    if (!point) return false
+    await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    return true
+  }
+  const waitFile = async (file, timeout = 20000) => {
+    const deadline = Date.now() + timeout
+    while (Date.now() < deadline) {
+      if (existsSync(file)) return true
+      await sleep(200)
+    }
+    return false
+  }
+  const openNote = async (name) => {
+    await selectBrowserFolder(page, '')
+    if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((node) => node.dataset.path === ${JSON.stringify(name)})`, 15000)) return false
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find((node) => node.dataset.path === ${JSON.stringify(name)})?.click()`)
+    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(name)}`, 10000)) return false
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    return true
+  }
+  const prepareAuthorization = async (prompt) => {
+    await page.call('Input.insertText', { text: '/' + prompt })
+    await page.key('Enter', 'Enter', 0, 13)
+    return waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 30000)
+  }
+  // 非模态卡不抢焦点：测试必须先把焦点放进卡里，再按 Enter；只有焦点在卡内时 Esc／Enter 才归卡片。
+  const confirmInCard = async () => {
+    const focused = await page.eval(`(() => { const button = document.querySelector('.authorization-send'); if (!button || button.disabled) return false; button.focus({ preventScroll: true }); return document.activeElement === button })()`)
+    if (!focused) return { ok: false, focused }
+    await page.key('Enter', 'Enter', 0, 13)
+    let sent = await waitFor(page, `!document.querySelector('.overlay-authorization[open]')`, 12000)
+    if (!sent && await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 15000)) {
+      // 卡片开着时在正文里打过字：内容变化会让卡片自我刷新一次，再按一次仍是卡内 Enter 发送。
+      await page.eval(`document.querySelector('.authorization-send')?.focus()`)
+      await page.key('Enter', 'Enter', 0, 13)
+      sent = await waitFor(page, `!document.querySelector('.overlay-authorization[open]')`, 12000)
+    }
+    return { ok: sent, focused }
+  }
+
+  // 一、授权卡非模态：卡开着，编辑器仍能输入。
+  const openedAuth = await openNote('UX 授权.md')
+  // 设置页关闭后才异步刷新模型快照；状态栏的模型下拉出现即证明它已经换了新配置。
+  const modelReady = await waitFor(page, `!!document.querySelector('.status-model')`, 15000)
+  await page.call('Input.insertText', { text: '/请写一句话' })
+  const draftBeforeCard = await editorText()
+  await page.key('Enter', 'Enter', 0, 13)
+  const authReady = await waitFor(page, `!!document.querySelector('dialog[open][data-modal="false"].overlay-authorization .authorization-send:not(:disabled)')`, 30000)
+  const authState = authReady ? await page.eval(`(() => {
+    const card = document.querySelector('dialog[open][data-modal="false"].overlay-authorization')
+    if (!card) return null
+    let modal = null
+    let modalSupported = true
+    try { modal = card.matches(':modal') } catch { modalSupported = false }
+    const rect = card.getBoundingClientRect()
+    return {
+      open: card.open,
+      dataModal: card.dataset.modal,
+      modal,
+      modalSupported,
+      inViewport: rect.width > 0 && rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1,
+      tookFocus: card.contains(document.activeElement),
+      text: card.innerText,
+      first: card.querySelector('h2')?.innerText?.trim() ?? ''
+    }
+  })()`) : null
+  const editorReachable = authState ? await page.eval(`(() => { const content = document.querySelector('.cm-content'); if (!content) return false; content.focus(); return document.activeElement === content || document.querySelector('.cm-editor')?.contains(document.activeElement) })()`) : false
+  await page.call('Input.insertText', { text: 'UX非模态输入' })
+  const inputLanded = await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').includes('UX非模态输入')`, 5000)
+  const cardStayedOpen = await page.eval(`!!document.querySelector('dialog[open][data-modal="false"].overlay-authorization')`)
+  check('UX：授权卡非模态，打开时编辑器仍能输入', vaultReady && fixturesReady && openedAuth && modelReady && authReady && !!authState && authState.modalSupported && authState.modal === false && authState.open === true && authState.dataModal === 'false' && authState.inViewport && authState.tookFocus === false && editorReachable && inputLanded && cardStayedOpen, JSON.stringify({ vaultReady, fixturesReady, openedAuth, modelReady, authReady, authState: authState ? { open: authState.open, dataModal: authState.dataModal, modal: authState.modal, modalSupported: authState.modalSupported, inViewport: authState.inViewport, tookFocus: authState.tookFocus } : null, editorReachable, inputLanded, cardStayedOpen }))
+  await shot(page, 'ux-authorization-1200')
+
+  // 二、卡内 Enter 发送：焦点放在发送键上按 Enter，任务启动并落回答。
+  // 输入测试改过正文；先撤销回原稿。撤销可能把两次输入并成一组，所以再以事务精确还原一次：
+  // submitSlash 捕获的是开卡时的全文，正文必须逐字回到那一刻，卡片才可能发送成功。
+  let undoRestored = await editorText() === draftBeforeCard
+  for (let attempt = 0; attempt < 3 && !undoRestored; attempt += 1) {
+    await page.key('z', 'KeyZ', modifier, 90)
+    undoRestored = await editorText() === draftBeforeCard
+  }
+  if (!undoRestored && typeof draftBeforeCard === 'string') {
+    await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: ${JSON.stringify(draftBeforeCard)} } }); view.focus(); return true })()`)
+    undoRestored = await editorText() === draftBeforeCard
+  }
+  const confirmation = await confirmInCard()
+  const answered = confirmation.ok && await waitFor(page, `(async () => { const note = await window.rgent.noteRead('UX 授权.md'); return note.content.includes('受控回答第一句。') && (await window.rgent.agentTasks()).length === 0 })()`, 60000)
+  check('UX：焦点在卡内按 Enter 就发送并完成', confirmation.focused === true && confirmation.ok && answered, JSON.stringify({ ...confirmation, undoRestored, answered }))
+
+  // 三、写确认卡非模态：受控模型在「UX建许可」这场发 create_note，点允许才落盘。
+  const openedAllow = await openNote('UX 写许可.md')
+  const allowReady = openedAllow && await prepareAuthorization('UX建许可')
+  const allowSent = allowReady && (await confirmInCard()).ok
+  const allowConfirm = allowSent && await waitFor(page, `!!document.querySelector('.overlay-write-confirm[open]')`, 30000)
+  const allowState = allowConfirm ? await page.eval(`(() => {
+    const card = document.querySelector('.overlay-write-confirm')
+    if (!card) return null
+    const openDialogs = [...document.querySelectorAll('dialog[open]')]
+    let anyModal = false
+    let modalSupported = true
+    for (const dialog of openDialogs) {
+      try { if (dialog.matches(':modal')) anyModal = true } catch { modalSupported = false }
+    }
+    const rect = card.getBoundingClientRect()
+    return {
+      open: card.open,
+      dataModal: card.dataset.modal,
+      openDialogs: openDialogs.length,
+      anyModal,
+      modalSupported,
+      inViewport: rect.width > 0 && rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1,
+      tookFocus: card.contains(document.activeElement),
+      text: card.innerText,
+      first: card.querySelector('.write-confirm-title')?.innerText?.trim() ?? ''
+    }
+  })()`) : null
+  const editorStillFocusable = allowState ? await page.eval(`(() => { const content = document.querySelector('.cm-content'); if (!content) return false; content.focus(); return document.activeElement === content || document.querySelector('.cm-editor')?.contains(document.activeElement) })()`) : false
+  await shot(page, 'ux-write-confirm-1200')
+  const accepted = allowState && await clickSelector('.write-confirm-accept')
+  const created = accepted && await waitFile(at('UX确认样张.md'))
+  const createdBody = created ? readFileSync(at('UX确认样张.md'), 'utf8') : ''
+  const allowSettled = created && await waitFor(page, `(async () => { const note = await window.rgent.noteRead('UX 写许可.md'); return note.content.includes('UX 写许可完成。') && (await window.rgent.agentTasks()).length === 0 })()`, 60000)
+  check('UX：写确认卡非模态，点「允许」才落盘', openedAllow && allowReady && allowSent && allowConfirm && !!allowState && allowState.open === true && allowState.dataModal === 'false' && allowState.modalSupported && allowState.anyModal === false && allowState.openDialogs === 1 && allowState.inViewport && allowState.tookFocus === false && editorStillFocusable && accepted && created && createdBody.includes('交互减负受控正文。') && allowSettled, JSON.stringify({ openedAllow, allowReady, allowSent, allowConfirm, allowState: allowState ? { open: allowState.open, dataModal: allowState.dataModal, openDialogs: allowState.openDialogs, anyModal: allowState.anyModal, modalSupported: allowState.modalSupported, inViewport: allowState.inViewport, tookFocus: allowState.tookFocus } : null, editorStillFocusable, accepted, created, allowSettled }))
+
+  // 四、拒绝不落盘：再跑一场发 create_note，点不允许；文件不在、任务照常收尾、没有弹窗。
+  const openedDeny = await openNote('UX 写拒绝.md')
+  const denyReady = openedDeny && await prepareAuthorization('UX建拒绝')
+  const denySent = denyReady && (await confirmInCard()).ok
+  const denyConfirm = denySent && await waitFor(page, `!!document.querySelector('.overlay-write-confirm[open]')`, 30000)
+  const denied = denyConfirm && await clickSelector('.write-confirm-cancel')
+  const denySettled = denied && await waitFor(page, `(async () => { const note = await window.rgent.noteRead('UX 写拒绝.md'); return note.content.includes('UX 写拒绝完成。') && (await window.rgent.agentTasks()).length === 0 })()`, 60000)
+  const denyClean = denySettled && await page.eval(`document.querySelectorAll('dialog[open]').length === 0 && !document.querySelector('.overlay-write-confirm')`)
+  check('UX：点「不允许」不落盘，任务照常收尾且无弹窗', openedDeny && denyReady && denySent && denyConfirm && denied && !existsSync(at('UX拒绝样张.md')) && denySettled && denyClean, JSON.stringify({ openedDeny, denyReady, denySent, denyConfirm, denied, rejectedAbsent: !existsSync(at('UX拒绝样张.md')), denySettled, denyClean }))
+
+  // 五、冲突先横幅：编辑器里的未保存稿 vs 磁盘上的外部改动；Cmd/Ctrl+S 后只出 notice，
+  //    点 notice 的「核对」才进既有的模态核对浮层。这里用真文件改写构造冲突。
+  const openedConflict = await openNote('UX 冲突.md')
+  const conflictCaret = openedConflict && await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ selection: { anchor: view.state.doc.length } }); view.focus(); return true })()`)
+  await page.call('Input.insertText', { text: '窗口未保存标记' })
+  const windowDraft = await editorText()
+  // 正文已与开篇夹具不同（=窗口里的未保存稿）；不拿 dot 当判据，避免自动保存抢在检查前。
+  const conflictDirty = typeof windowDraft === 'string' && windowDraft.includes('窗口未保存标记') && windowDraft !== '# UX 冲突\n\n窗口正文。\n'
+  writeFileSync(at('UX 冲突.md'), '# UX 冲突\n\n磁盘改动标记：外部改了这一版。\n')
+  await page.key('s', 'KeyS', modifier, 83)
+  const noticeShown = await waitFor(page, `(() => { const notice = [...document.querySelectorAll('.notice')].find((node) => (node.innerText || '').includes('不一致')); return !!notice && [...notice.querySelectorAll('button')].some((button) => button.textContent.trim() === '核对') })()`, 15000)
+  const noticeState = noticeShown ? await page.eval(`(() => {
+    const notice = [...document.querySelectorAll('.notice')].find((node) => (node.innerText || '').includes('不一致'))
+    if (!notice) return null
+    return { text: notice.innerText, first: notice.querySelector('.notice-title')?.innerText?.trim() ?? '', dialogs: document.querySelectorAll('dialog[open]').length, actions: [...notice.querySelectorAll('button')].map((button) => button.textContent.trim()) }
+  })()`) : null
+  await shot(page, 'ux-conflict-notice-1200')
+  // 极端慢机器上自动保存可能先一步把草稿写盘：tab 不脏时「核对」只会重跑对照、不开模态。
+  // 补一个字再按一次保存，重新制造窗口稿 vs 磁盘的对照；正常时序下这段不执行。
+  const dirtyForReview = await page.eval(`!!document.querySelector('.tab[aria-selected=true] .tab-dirty')`)
+  if (noticeShown && !dirtyForReview) {
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    await page.call('Input.insertText', { text: '（补记）' })
+    await page.key('s', 'KeyS', modifier, 83)
+  }
+  const reviewClicked = noticeShown && await clickSelector('.notice-action')
+  const conflictShown = reviewClicked && await waitFor(page, `!!document.querySelector('dialog[open].conflict')`, 15000)
+  const conflictState = conflictShown ? await page.eval(`(() => { const dialog = document.querySelector('dialog[open].conflict'); let modal = null; let modalSupported = true; try { modal = dialog.matches(':modal') } catch { modalSupported = false } return { modal, modalSupported, dataModal: dialog.dataset.modal } })()`) : null
+  await shot(page, 'ux-conflict-dialog-1200')
+  // 关闭核对浮层按「继续编辑」算：两份都留着，什么都不写。横幅随后由测试清掉，收尾才可能干净。
+  const conflictClosed = conflictShown && await page.eval(`(() => { document.querySelector('[data-action="continue"]')?.click(); return true })()`) && await waitFor(page, `!document.querySelector('dialog[open]')`, 15000)
+  const noticeCleared = conflictClosed && await page.eval(`(() => { document.querySelector('.notice-close')?.click(); return true })()`) && await waitFor(page, `!document.querySelector('.notice')`, 5000)
+  check('UX：冲突先出横幅，点「核对」才进模态', openedConflict && conflictDirty && noticeShown && noticeState?.dialogs === 0 && noticeState.text.includes('不一致') && noticeState.actions.includes('核对') && reviewClicked && conflictShown && conflictState?.modalSupported && conflictState.modal === true && conflictClosed && noticeCleared, JSON.stringify({ openedConflict, conflictCaret, conflictDirty, windowDraft, noticeShown, noticeState: noticeState ? { dialogs: noticeState.dialogs, actions: noticeState.actions } : null, dirtyForReview, reviewClicked, conflictShown, conflictState, conflictClosed, noticeCleared }))
+
+  // 六、零原生弹窗：全程只在 Page.javascriptDialogOpening 上记数。
+  check('UX：全程零原生 alert／confirm', nativeDialogs.length === 0, JSON.stringify({ dialogs: nativeDialogs.slice(0, 3) }))
+
+  // 七、文案：三张卡片的可见文本无机器码，首行不超过 60 字。
+  const MACHINE_CODE = /\b[A-Z][A-Z0-9_]{5,}\b/
+  const copyCards = [
+    { card: '授权卡', text: authState?.text ?? '', first: authState?.first ?? '' },
+    { card: '写确认卡', text: allowState?.text ?? '', first: allowState?.first ?? '' },
+    { card: '冲突横幅', text: noticeState?.text ?? '', first: noticeState?.first ?? '' }
+  ]
+  const machineFree = copyCards.every((item) => item.text.length > 0 && !MACHINE_CODE.test(item.text))
+  const firstLinesShort = copyCards.every((item) => item.first.length > 0 && [...item.first].length <= 60)
+  check('UX：卡片与横幅没有机器码，首行不超过 60 字', !!authState && !!allowState && !!noticeState && machineFree && firstLinesShort, JSON.stringify(copyCards.map((item) => ({ card: item.card, first: item.first, firstLength: [...item.first].length, machineCode: MACHINE_CODE.test(item.text) }))))
+
+  // 八、收尾：横幅与模态都已清掉、任务清空，正文两侧都没被这次冲突破坏。
+  const endState = await page.eval(`(async () => ({
+    tasks: (await window.rgent.agentTasks()).length,
+    taskBar: !!document.querySelector('.status-task'),
+    notices: document.querySelectorAll('.notice').length,
+    dialogs: document.querySelectorAll('dialog[open]').length,
+    editor: document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null
+  }))()`)
+  const authorizedContent = await page.eval(`(async () => (await window.rgent.noteRead('UX 授权.md')).content)()`)
+  const conflictDisk = readFileSync(at('UX 冲突.md'), 'utf8')
+  const conflictDraft = typeof endState.editor === 'string' ? endState.editor : ''
+  const createdKept = existsSync(at('UX确认样张.md')) && readFileSync(at('UX确认样张.md'), 'utf8').includes('交互减负受控正文。')
+  const contentIntact = createdKept && !existsSync(at('UX拒绝样张.md')) && authorizedContent.includes('受控回答第一句。') &&
+    conflictDisk === '# UX 冲突\n\n磁盘改动标记：外部改了这一版。\n' &&
+    conflictDraft.includes('窗口正文。') && conflictDraft.includes('窗口未保存标记')
+  check('UX：收尾无横幅无模态、任务清空、笔记内容未被破坏', endState.tasks === 0 && !endState.taskBar && endState.notices === 0 && endState.dialogs === 0 && contentIntact && page.errors.length === 0, JSON.stringify({ endState, contentIntact, dialogs: nativeDialogs, errors: page.errors.slice(0, 1) }))
+}
+
 async function availablePort() {
   const server = createServer()
   await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve))
@@ -1746,6 +2040,8 @@ const humanNetworkOnly = process.env.RGENT_UI_NETWORK_HUMAN_ONLY === '1'
 const mcpOnly = process.env.RGENT_UI_MCP_ONLY === '1'
 // 端到端旅程专项：建→写→补→改名→挪→人删除→账本可审，跨能力集成证据。
 const journeyOnly = process.env.RGENT_UI_JOURNEY_ONLY === '1'
+// 交互减负专项：非模态授权／写确认卡、冲突先横幅、零原生弹窗与卡片文案上限。
+const uxOnly = process.env.RGENT_UI_UX_ONLY === '1'
 // 付费专项：只由显式环境变量触发，普通测试／构建／CI 永不调用模型。
 const skillsLive = process.env.RGENT_UI_SKILLS_LIVE
 const v4Only = process.env.RGENT_UI_V4_ONLY === '1'
@@ -3173,6 +3469,8 @@ async function verifyV4MemoryTools(page,nativePage,vault,shot) {
     check('单篇真实授权浮层披露四次检索及共享额度',await waitFor(page,`document.querySelector('.authorization-memory')?.textContent.includes('最多 4 次') && document.querySelectorAll('.authorization-manifest li').length===1 && !!document.querySelector('.authorization-send:not(:disabled)')`))
     await v4Shots(page,shot,'memory-only-authorization','.overlay-authorization')
     const at=requests.length
+    // 非模态卡不抢焦点：发送前把焦点放到发送键。
+    await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
     await page.key('Enter','Enter',0,13)
     check('memory-only 六次请求只执行四次、第五及第六拒绝后仍能回答',await waitFor(page,`(async()=>{const n=await window.rgent.noteRead('V4检索.md');return n.content.includes('V4记忆工具回答保稿')&&!(await window.rgent.agentTasks()).length})()`))
     // The inherited learning model may also run after save. Associate this
@@ -3865,6 +4163,8 @@ async function verifySkillsLive(page, vault, profile, shot) {
     await page.key('Enter', 'Enter', 0, 13)
     if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 60000)) throw new Error('授权浮层未就绪')
     const preview = await page.eval(`document.querySelector('.authorization-skills')?.textContent||''`)
+    // 非模态卡不抢焦点：发送前把焦点放到发送键。
+    await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
     await page.key('Enter', 'Enter', 0, 13)
     calls += 1
     const finished = await waitFor(page, `(async()=>{if((await window.rgent.agentTasks()).length>0)return false;const n=await window.rgent.noteRead(${JSON.stringify(rel)});const r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(rel)}});return r.ok&&r.value.records.some(rec=>String(rec.chapter?.answer??'').length>0)})()`, 180000)
@@ -4237,6 +4537,18 @@ async function main() {
       try{await verifyJourney(page,vault,shot)}catch(error){stageFailed('端到端旅程专项',error)}
       check('旅程：专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
       check('旅程：全程只走受控主机',journeyRequests.length>=1,String(journeyRequests.length))
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode=failures===0?0:1
+      return
+    }
+    if(uxOnly){
+      // 交互减负只有 8 条判据：初始化只作为前置条件，失败直接抛给总账，不另占一条检查。
+      const uxRequests=[]
+      hostServer=createUxHostServer(uxRequests)
+      await new Promise(resolve=>hostServer.listen(0,'127.0.0.1',resolve))
+      const configured=await configureControlledHost(page,`http://127.0.0.1:${hostServer.address().port}/v1`)
+      if(!configured)throw Error('交互减负专项受控模型初始化失败')
+      try{await verifyUx(page,vault,shot)}catch(error){stageFailed('交互减负专项',error)}
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
       process.exitCode=failures===0?0:1
       return
@@ -4799,8 +5111,19 @@ async function main() {
     const dirty = (await page.eval(`document.querySelectorAll('.tab-dirty').length`)) > 0
     check('造出脏稿（点进正文敲了一个字）', dirty)
     writeFileSync(path.join(vault, '研究记录.md'), `${marked}磁盘改的一行。\n`)
-    const appeared = await waitFor(page, `document.querySelectorAll('dialog.conflict[open]').length > 0`, 12000)
-    await probe('脏稿遇上外部改动会弹冲突', async () => appeared)
+    // 非模态合同：自动保存路径遇到冲突先出可点横幅，不弹模态；点「核对」才进双预览。
+    const noticeAppeared = await waitFor(page, `(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) => (node.innerText || '').includes('不一致'))
+      return !!notice && [...notice.querySelectorAll('button')].some((button) => button.textContent.trim() === '核对') && document.querySelector('dialog[open]') === null
+    })()`, 12000)
+    await probe('脏稿遇上外部改动先出可点横幅（不弹模态）', async () => noticeAppeared)
+    const reviewed = noticeAppeared && await page.eval(`(() => {
+      const notice = [...document.querySelectorAll('.notice')].find((node) => (node.innerText || '').includes('不一致'))
+      const button = notice?.querySelector('.notice-action')
+      button?.click()
+      return !!button
+    })()`) && await waitFor(page, `document.querySelectorAll('dialog.conflict[open]').length > 0`, 12000)
+    await probe('点「核对」才进入冲突双预览', async () => reviewed)
     await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
     await sleep(300)
     await probe('并排两栏、各自标清是哪一份', async () => {
@@ -4821,11 +5144,19 @@ async function main() {
     await probe('只强调变化处', async () =>
       (await page.eval(`document.querySelectorAll('.conflict-emph').length > 0`)) === true
     )
+    await page.eval(`document.querySelector('.conflict [data-action="disk"]')?.click()`)
+    await probe('选「听磁盘」后横幅消失、保存完成', async () => {
+      // 只认这篇笔记的冲突横幅；窗口里别的提示不替它下结论。
+      const settled = reviewed && await waitFor(page, `!document.querySelector('dialog.conflict[open]') && !document.querySelector('.notice[data-notice-key^="conflict:"]')`, 15000)
+      const diskShown = settled && await page.eval(`(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').includes('磁盘改的一行。')`)
+      // 观察项：reviewConflict 选完盘后没有重绘 tab，脏点可能留在 DOM 里（内部 dirty 已 false）。
+      const staleDirty = settled && await page.eval(`!!document.querySelector('.tab[data-rel="研究记录.md"] .tab-dirty')`)
+      return { ok: settled && diskShown, detail: JSON.stringify({ diskShown, staleDirty }) }
+    })
 
     } catch (error) { stageFailed('冲突双预览', error) }
     process.stdout.write('\n长文响应\n')
     try {
-    await page.eval(`document.querySelector('.conflict [data-action="disk"]')?.click()`)
     await page.call('Emulation.clearDeviceMetricsOverride', {})
     for (let i = 1; i <= 5; i += 1) {
       const paragraphs = Array.from({ length: 450 }, (_, n) => `第 ${n} 段：这是一段用于观察长文输入和滚动响应的混合文字 English ${i}。`)
