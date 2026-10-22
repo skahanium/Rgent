@@ -609,16 +609,22 @@ export async function start(root: HTMLElement): Promise<void> {
   })
   // 「建」的人确认：主进程发起请求，这里只摆一张卡并回一个是否同意。
   let pendingDeletePath: string | null = null
+  let pendingCreatePath: string | null = null
   installWriteConfirm({
     onRequest: handler => window.rgent.onAgentWriteRequest(preview => {
       pendingDeletePath = preview.kind === 'delete' ? preview.relPath : null
+      pendingCreatePath = preview.kind === 'create' ? preview.relPath : null
       handler(preview)
     }),
     decide: async decision => {
       const path = pendingDeletePath
+      const created = pendingCreatePath
       const result = await window.rgent.agentWriteConfirm(decision)
       if (decision.approved && path) await closeTrashedTabs(path, { includeAttachment: false })
+      // AI 的「建」也要走同一个打开入口：否则文件树里点新笔记会复用同路径那个不可用的旧 tab。
+      if (decision.approved && created) await openCreatedNote(created)
       pendingDeletePath = null
+      pendingCreatePath = null
       return result
     }
   })
