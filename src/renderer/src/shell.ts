@@ -401,10 +401,11 @@ export async function start(root: HTMLElement): Promise<void> {
   const endedTaskIds = new Set<string>()
   // 最近一次联网事件（成功与被拒都更新，只用于提示文本）；只活到任务结束。
   // MCP 事件也是联网活动：另存 kind／server／tool，状态行按 `MCP <server>/<tool>` 显示。
-  type NetworkTaskState = { host: string; kind: 'fetch' | 'search' | 'mcp'; server?: string; tool?: string; bytes?: number; truncated?: boolean; at: string; outcome?: 'ok' | 'refused'; code?: string }
+  type NetworkTaskState = { host: string; kind: 'fetch' | 'search' | 'mcp'; server?: string; tool?: string; bytes?: number; truncated?: boolean; reused?: boolean; at: string; outcome?: 'ok' | 'refused'; code?: string }
   const networkTasks = new Map<string, NetworkTaskState>()
-  // 最近一次成功抓页的预览 id 与主机：拒绝/搜索事件只改提示，不动它。
-  const networkPreviews = new Map<string, { id: string; host: string }>()
+  // 最近一次成功抓页／MCP 调用的预览 id；拒绝/搜索事件只改提示，不动它。
+  // 记录 kind 是为了只在状态行与预览同源时才挂「查看」，避免把上一次抓页内容错配给这次 MCP 调用。
+  const networkPreviews = new Map<string, { id: string; host: string; kind: 'fetch' | 'mcp' }>()
   // 失败／被拒的联网调用不产生 network 事件（主进程只在成功时发）；活动行「抓网页」
   // 是渲染层还能拿到的唯一信号：先亮联网提示与「停止联网」，免得失败后无入口可停。
   const networkAttempts = new Map<string, 'fetch' | 'search'>()
@@ -695,12 +696,14 @@ export async function start(root: HTMLElement): Promise<void> {
           ...(network.tool !== undefined ? { tool: network.tool } : {}),
           ...(typeof network.bytes === 'number' ? { bytes: network.bytes } : {}),
           ...(network.truncated ? { truncated: true } : {}),
+          ...(network.reused ? { reused: true } : {}),
           at: network.at,
           ...(network.outcome ? { outcome: network.outcome } : {}),
           ...(network.code ? { code: network.code } : {})
         })
-        if (network.kind === 'fetch' && network.outcome !== 'refused') {
-          if (network.id) networkPreviews.set(network.taskId, { id: network.id, host: network.host })
+        if ((network.kind === 'fetch' || network.kind === 'mcp') && network.outcome !== 'refused') {
+          // 成功事件带 id 才可查看；没有 id（未缓存）就撤掉旧入口，免得指错内容。
+          if (network.id) networkPreviews.set(network.taskId, { id: network.id, host: network.host, kind: network.kind })
           else networkPreviews.delete(network.taskId)
         }
       } else if (event.activity === '抓网页' || event.activity === '搜索网页') {
@@ -1597,7 +1600,8 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   /** 状态行的联网摘要：成功只写主机、体积、低信任与截断；拒绝写尝试主机与结果码，
-   *  不写抓取正文，也不写查询串。MCP 事件按服务器／工具显示，且没有预览可看。 */
+   *  不写抓取正文，也不写查询串。复用事件（没有再次外发）如实说明；
+   *  MCP 事件按服务器／工具显示，带预览 id 时才有「查看」。 */
   function networkStatusText(network: NetworkTaskState): string {
     if (network.kind === 'mcp') {
       const target = `${network.server ?? '未知服务器'}/${network.tool ?? '未知工具'}`
@@ -1608,6 +1612,7 @@ export async function start(root: HTMLElement): Promise<void> {
     if (network.outcome === 'refused') {
       return `联网：${network.host || '未授权'}（未执行：${network.code ?? 'UNKNOWN'}）`
     }
+    if (network.reused) return `联网：${network.host}（本任务已有结果，未再次外发）`
     const size = typeof network.bytes === 'number' ? `${(network.bytes / 1024).toFixed(1)} KB，` : ''
     return `联网：${network.host}（${size}低信任${network.truncated ? '，已截断' : ''}）`
   }
@@ -1743,14 +1748,17 @@ export async function start(root: HTMLElement): Promise<void> {
             stopNetwork.addEventListener('click', () => { void stopTaskNetwork(task.id, stopNetwork) })
             left.append(stopNetwork)
           }
-          if (preview && network?.kind !== 'mcp') {
-            // MCP 没有预览：状态行是 MCP 事件时不给「查看」，避免把上一次抓页内容错配到这次调用。
+          // 仅当状态行与最近一次成功预览同源时才挂「查看」：MCP 事件没有 id（未缓存）时
+          // 不能还指着上一次抓页内容，那会把两边错配。
+          if (preview && network && preview.kind === network.kind) {
             const view = document.createElement('button')
             view.type = 'button'
             view.className = 'status-task-network-view'
             view.textContent = '查看'
             styleStatusNetworkButton(view)
-            view.setAttribute('aria-label', `查看 ${preview.host} 的抓取内容（低信任）`)
+            view.setAttribute('aria-label', preview.kind === 'mcp'
+              ? `查看 MCP ${network.server ?? '未知服务器'}/${network.tool ?? '未知工具'} 的结果（低信任）`
+              : `查看 ${preview.host} 的抓取内容（低信任）`)
             view.addEventListener('click', () => { void showTaskNetworkPreview(task.id, preview.id, view) })
             left.append(view)
           }

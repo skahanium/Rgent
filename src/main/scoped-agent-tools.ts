@@ -165,9 +165,10 @@ export function mcpToolCatalog(servers: readonly McpCatalogServer[]): string {
   return lines.join('\n')
 }
 
-/** 宿主给的联网能力：只返回包裹前的纯文本与元数据，不暴露出口通道。 */
+/** 宿主给的联网能力：只返回包裹前的纯文本与元数据，不暴露出口通道。
+ *  `reused` 只在宿主直接返回本任务同 URL 的既有成功结果时出现（没有再次外发）。 */
 export type ScopedNetworkTool = {
-  fetch(url: string, signal: AbortSignal): Promise<{ text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true }>
+  fetch(url: string, signal: AbortSignal): Promise<{ text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true; reused?: true }>
   /** 只有服务商与密钥都配置好时宿主才给这一支；结果已做结构校验，包裹由工具层做。 */
   search?(query: string, maxResults: number, signal: AbortSignal): Promise<{
     provider: 'brave' | 'tavily'
@@ -608,8 +609,12 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
           const request = args(input, ['url'], [])
           await check(signal)
           const result = await awaiting(deps.network!.fetch(request.url!, signal), signal)
+          // 复用：本任务已有同一 URL 的结果，没有再次外发；outcome 如实标「复用」且不记字节。
+          const reused = result.reused === true
           // 账本只记能审的量：主机、字节数、是否截断；查询串不进 outcome。
-          outcome = `ok:${result.host}·${result.bytes}B·低信任${result.truncated ? '·截断' : ''}`
+          outcome = reused
+            ? `ok:${result.host}·复用·低信任`
+            : `ok:${result.host}·${result.bytes}B·低信任${result.truncated ? '·截断' : ''}`
           return {
             ok: true,
             url: result.url,
@@ -618,6 +623,7 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
             text: wrappedExternalContent({ url: result.url, ...(result.title ? { title: result.title } : {}), text: result.text }),
             bytes: result.bytes,
             truncated: result.truncated,
+            ...(reused ? { reused: true as const } : {}),
             lowTrust: true as const
           }
         }

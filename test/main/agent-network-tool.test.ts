@@ -323,6 +323,105 @@ describe('fetch_url 联网只读工具', () => {
   })
 })
 
+describe('同任务抓取复用', () => {
+  const call = (id: string, url: string): Call => ({ id, name: 'fetch_url', input: { url } })
+  const fetchEvents = (events: unknown[]) => (events as { network?: { kind?: string; id?: string; host?: string; path?: string; reused?: unknown; outcome?: string } }[])
+    .filter(event => event.network?.kind === 'fetch')
+
+  it('同任务同 URL 第二次直接复用：只外发一次、只写一条账本、事件与过程行如实说明', async () => {
+    const url = 'https://example.com/page?q=1'
+    const app = networkHarness({ steps: [[call('c1', url)], [call('c2', url)], []] })
+    const task = await app.run()
+    expect(await task.done).toEqual({ status: 'completed' })
+    // 第二次没有外发。
+    expect(app.fetched.map(item => item.url)).toEqual([url])
+    const record = app.history.records().at(-1)!
+    expect(record.network).toHaveLength(1)
+    expect(record.network![0]).toMatchObject({ action: 'fetch', host: 'example.com', path: '/page', bytes: 42, outcome: 'ok' })
+    expect(JSON.stringify(record.network)).not.toContain('q=1')
+    // 工具结果摘要：第一次按字节，第二次标「复用」且不记字节。
+    expect(record.provenance?.tools?.filter(item => item.name === 'fetch_url').map(item => item.outcome))
+      .toEqual(['ok:example.com·42B·低信任 (1)', 'ok:example.com·复用·低信任 (1)'])
+    // 过程行写明没有再次外发。
+    expect(record.trace?.join('\n')).toContain('抓页 example.com：复用本任务已有结果（未再次外发）')
+    // 事件：两条都成功，第二条带 reused，且仍指向第一次的预览 id。
+    const events = fetchEvents(app.events)
+    expect(events).toHaveLength(2)
+    expect(events[0]!.network?.reused).toBeUndefined()
+    expect(events[1]!.network).toMatchObject({ host: 'example.com', path: '/page', outcome: 'ok', reused: true })
+    expect(events[1]!.network?.id).toBe(events[0]!.network?.id)
+    // 模型拿到的第二次结果带 reused 标记，正文与第一次完全一致。
+    const toolMessages = app.requests[2]!.messages.filter(message => message.role === 'tool') as unknown as
+      { content: { output: { value: { text: string; reused?: boolean } } }[] }[]
+    expect(toolMessages).toHaveLength(2)
+    expect(toolMessages[1]!.content[0]!.output.value.reused).toBe(true)
+    expect(toolMessages[1]!.content[0]!.output.value.text).toBe(toolMessages[0]!.content[0]!.output.value.text)
+    expect(JSON.stringify(app.requests[2]!.messages)).toContain('"reused":true')
+  })
+
+  it('复用键按 new URL(url).href 归一化：https://example.com 与 https://example.com/ 是同一地址', async () => {
+    const app = networkHarness({ steps: [[call('c1', 'https://example.com')], [call('c2', 'https://example.com/')], []] })
+    const task = await app.run()
+    expect(await task.done).toEqual({ status: 'completed' })
+    expect(app.fetched).toHaveLength(1)
+    const events = fetchEvents(app.events)
+    expect(events).toHaveLength(2)
+    expect(events[1]!.network).toMatchObject({ host: 'example.com', path: '/', reused: true, outcome: 'ok' })
+    expect(events[1]!.network?.id).toBe(events[0]!.network?.id)
+    expect(app.history.records().at(-1)!.network).toHaveLength(1)
+  })
+
+  it('不同 URL 仍各自外发，不复用', async () => {
+    const app = networkHarness({ steps: [[call('c1', 'https://example.com/a')], [call('c2', 'https://example.com/b')], []] })
+    const task = await app.run()
+    expect(await task.done).toEqual({ status: 'completed' })
+    expect(app.fetched.map(item => item.url)).toEqual(['https://example.com/a', 'https://example.com/b'])
+    expect(fetchEvents(app.events).every(event => event.network?.reused === undefined)).toBe(true)
+    expect(app.history.records().at(-1)!.network).toHaveLength(2)
+  })
+
+  it('失败结果不缓存：同 URL 连续两次失败仍各外发一次，不出现复用事件', async () => {
+    const url = 'https://example.com/flaky'
+    const app = networkHarness({
+      steps: [[call('c1', url)], [call('c2', url)], []],
+      fetch: async () => { throw Error('EGRESS_TIMEOUT') }
+    })
+    const task = await app.run()
+    expect(await task.done).toEqual({ status: 'completed' })
+    expect(app.fetched).toHaveLength(2)
+    const record = app.history.records().at(-1)!
+    expect(record.network?.map(item => item.outcome)).toEqual(['refused:EGRESS_TIMEOUT', 'refused:EGRESS_TIMEOUT'])
+    expect(record.provenance?.tools?.find(item => item.name === 'fetch_url')?.outcome).toBe('refused (2)')
+    expect(record.trace?.join('\n').match(/未执行（EGRESS_TIMEOUT）/g)).toHaveLength(2)
+    expect(fetchEvents(app.events).every(event => event.network?.reused === undefined)).toBe(true)
+    expect(app.host.networkPreviewIds(task.id)).toEqual([])
+  })
+
+  it('失败不入缓存：先失败后成功仍各外发一次，成功之后才可复用', async () => {
+    const url = 'https://example.com/retry'
+    let attempts = 0
+    const app = networkHarness({
+      steps: [[call('c1', url)], [call('c2', url)], [call('c3', url)], []],
+      fetch: async (requested: string) => {
+        attempts += 1
+        if (attempts === 1) throw Error('EGRESS_TIMEOUT')
+        return { text: '外部正文。', host: 'example.com', url: requested, bytes: 42, truncated: false, lowTrust: true }
+      }
+    })
+    const task = await app.run()
+    expect(await task.done).toEqual({ status: 'completed' })
+    // 失败那次与成功那次各外发一次；第三次命中成功结果，不再外发。
+    expect(attempts).toBe(2)
+    const record = app.history.records().at(-1)!
+    expect(record.network?.map(item => item.outcome)).toEqual(['refused:EGRESS_TIMEOUT', 'ok'])
+    const events = fetchEvents(app.events)
+    expect(events.map(event => event.network?.outcome)).toEqual(['refused', 'ok', 'ok'])
+    expect(events[1]!.network?.reused).toBeUndefined()
+    expect(events[2]!.network?.reused).toBe(true)
+    expect(events[2]!.network?.id).toBe(events[1]!.network?.id)
+  })
+})
+
 describe('账本 network[] 形状', () => {
   const base = { taskId: 'task-net', startedAt: '2026-10-20T00:00:00.000Z', status: 'completed' as const, prompt: '问', answer: '答' }
   const entry = { at: '2026-10-20T00:00:00.000Z', action: 'fetch' as const, host: 'example.com', path: '/a', bytes: 12, truncated: false, outcome: 'ok' }

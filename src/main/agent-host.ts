@@ -69,7 +69,7 @@ export type HostStart = Partial<ObjectBinding> & {
 export /** 过程只记「调了什么、结果如何」，不铺工具返回的正文。
  *  抓页只留主机（查询串与正文都不进过程）；搜索只留截 80 字的查询或服务商名；
  *  MCP 只留服务器/工具与字节数（参数与结果正文都不进过程）。 */
-function toolTraceLine(call: { name: string; input: unknown }, failure?: string, network?: { host?: string; bytes?: number; truncated?: boolean; provider?: string }): string {
+function toolTraceLine(call: { name: string; input: unknown }, failure?: string, network?: { host?: string; bytes?: number; truncated?: boolean; provider?: string; reused?: boolean }): string {
   if (call.name === 'mcp_call') {
     const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
     // 参数可能没通过白名单校验：这里只取有界的一段，绝不把任意文本原样写进账本。
@@ -84,6 +84,8 @@ function toolTraceLine(call: { name: string; input: unknown }, failure?: string,
     if (!host) { try { host = new URL(String(input.url)).host } catch { host = '' } }
     const label = host ? `抓网页「${host}」` : '抓网页'
     if (failure) return `工具 ${label}：未执行（${failure}）`
+    // 复用：没有再次外发，过程行要说清楚，别让人以为又抓了一次。
+    if (network?.reused) return `抓页 ${host || '未知主机'}：复用本任务已有结果（未再次外发）`
     return `工具 ${label}：已执行（${formatBytes(network?.bytes ?? 0)}，低信任${network?.truncated ? '/截断' : ''}）`
   }
   if (call.name === 'search_web') {
@@ -119,14 +121,15 @@ function traceName(value: unknown, max: number): string {
   return boundedName(value, max) || '未指定'
 }
 
-/** 抓页状态行只认工具结果里的公开字段。 */
-function networkTraceOf(value: unknown): { host: string; bytes: number; truncated: boolean } | undefined {
+/** 抓页状态行与过程行只认工具结果里的公开字段。 */
+function networkTraceOf(value: unknown): { host: string; bytes: number; truncated: boolean; reused?: boolean } | undefined {
   if (!value || typeof value !== 'object') return undefined
   const record = value as Record<string, unknown>
   return {
     host: typeof record.host === 'string' ? record.host : '',
     bytes: typeof record.bytes === 'number' ? record.bytes : 0,
-    truncated: record.truncated === true
+    truncated: record.truncated === true,
+    ...(record.reused === true ? { reused: true } : {})
   }
 }
 
@@ -289,10 +292,35 @@ const NETWORK_ECHO_BYTES = 8 * 1024 * 1024
 /** 预览缓存：每任务 ≤10 条、每条 ≤1 MiB；任务结束／切库清空。 */
 const NETWORK_PREVIEW_LIMIT = 10
 const NETWORK_PREVIEW_BYTES = 1_048_576
+/** MCP 结果预览：只给人看包裹前原文，单条压到 32 KiB（与回给模型的工具结果同一数量级）。 */
+const MCP_PREVIEW_BYTES = 32 * 1024
 /** 账本 `network[]` 每场上限与 `validChapter` 对齐。 */
 const NETWORK_LEDGER_LIMIT = 50
 
-type NetworkPreviewEntry = { text: string; url: string; title?: string; bytes: number; truncated: boolean; fetchedAt: string }
+type NetworkPreviewEntry = {
+  text: string
+  url: string
+  title?: string
+  bytes: number
+  truncated: boolean
+  fetchedAt: string
+  /** 仅 MCP 预览：抓页条目保持旧形状，浮层行为一字不改。 */
+  kind?: 'mcp'
+  host?: string
+  server?: string
+  tool?: string
+}
+/** 本任务成功抓取的结果：键是 `new URL(url).href`（非法 URL 不进缓存）。 */
+type CachedFetchResult = { text: string; bytes: number; host: string; title?: string; url: string; truncated: boolean; fetchedAt: string; previewId?: string }
+
+/** 按 UTF-8 字节截断，不切出半个字符；预览比工具结果更宽松，但同样有界。 */
+function slicePreviewText(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
+  const bytes = Buffer.from(text, 'utf8')
+  let end = maxBytes
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1
+  return bytes.subarray(0, end).toString('utf8')
+}
 
 function errorCode(error: unknown): string {
   const message = error instanceof Error ? error.message : ''
@@ -465,17 +493,21 @@ export class AgentHost {
     }
     return tasks.length
   }
-  /** 只读预览：只给包裹前的纯文本；未知 id 或任务结束后返回 null。 */
+  /** 只读预览：只给包裹前的纯文本；未知 id 或任务结束后返回 null。
+   *  MCP 条目按 `kind:'mcp'` 带上服务器／工具，`host` 用缓存时记下的服务器主机。 */
   preview(taskId: string, id: string): NetworkPreviewView | null {
     const entry = this.networkPreviews.get(taskId)?.get(id)
     if (!entry) return null
     return {
-      id, url: entry.url, host: networkTarget(entry.url)?.host ?? '',
+      id, url: entry.url, host: entry.host ?? networkTarget(entry.url)?.host ?? '',
       ...(entry.title ? { title: entry.title } : {}),
+      ...(entry.kind ? { kind: entry.kind } : {}),
+      ...(entry.server ? { server: entry.server } : {}),
+      ...(entry.tool ? { tool: entry.tool } : {}),
       text: entry.text, bytes: entry.bytes, truncated: entry.truncated, fetchedAt: entry.fetchedAt, lowTrust: true
     }
   }
-  /** 本场当前可预览的条目 id：事件与工具结果按合同不带 id，界面靠它调 `network:preview`。 */
+  /** 本场当前可预览的条目 id：界面靠它调 `network:preview`（成功事件也带同一个 id）。 */
   networkPreviewIds(taskId: string): string[] { return [...(this.networkPreviews.get(taskId)?.keys() ?? [])] }
   /** 切库／关闭时清空全部预览；任务结束时按任务单独清。 */
   clearNetworkPreviews(): void { this.networkPreviews.clear() }
@@ -624,9 +656,12 @@ export class AgentHost {
       if ((networkEnabled || mcpEnabled) && grant) for (const shingle of await this.networkEchoSet(grant, original.content)) networkEcho.add(shingle)
       const networkLog: LedgerNetworkEntry[] = []
       const networkPreviews = new Map<string, NetworkPreviewEntry>()
+      // 同任务成功抓取的结果（键 `new URL(url).href`）：再次请求同 URL 直接复用，不再外发。
+      const fetchedByUrl = new Map<string, CachedFetchResult>()
       const networkAborts = new Set<AbortController>()
       // 任务结束／切库时清空预览；网络与 MCP 共用同一个在途集合，`network:stop` 一次 abort 两类请求。
-      if (networkEnabled) this.networkPreviews.set(id, networkPreviews)
+      // 只勾 MCP、没勾抓页时也要有预览缓存：MCP 结果同样给人看。
+      if (networkEnabled || mcpEnabled) this.networkPreviews.set(id, networkPreviews)
       if (networkEnabled || mcpEnabled) this.networkAborts.set(id, networkAborts)
       type NetworkRecordTarget = { action: 'fetch' | 'search' | 'mcp'; host: string; path: string; query?: string; server?: string; tool?: string }
       const recordNetwork = (at: string, target: NetworkRecordTarget | null, outcome: string, extra: { bytes?: number; truncated?: boolean; count?: number } = {}): void => {
@@ -670,8 +705,28 @@ export class AgentHost {
           const target = networkTarget(url)
           try { networkGrant.assertNetwork() } catch (error) {
             // 已「停止联网」：如实记 refused，工具层按可继续错误交回模型。
+            // 授权先于复用：停网后连缓存也不能再当工具结果交回，否则「停止」看着没生效。
             recordNetwork(at, fetchTarget(target), `refused:${errorCode(error)}`)
             throw error
+          }
+          // 复用键只认规范化后的请求地址；解析不了就不进缓存（本次仍照常尝试）。
+          let cacheKey: string | undefined
+          try { cacheKey = new URL(url).href } catch { cacheKey = undefined }
+          const cached = cacheKey ? fetchedByUrl.get(cacheKey) : undefined
+          if (cached) {
+            // 同任务同 URL 已有成功结果：不外发、不写账本、不计外发统计；失败结果从不入缓存。
+            // 预览 id 仍指向第一次成功抓到的原文；缓存被挤掉时退回「不可查看」。
+            const finalTarget = networkTarget(cached.url) ?? target
+            const previewId = cached.previewId && networkPreviews.has(cached.previewId) ? cached.previewId : undefined
+            this.deps.emit({
+              ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running',
+              network: { taskId: id, ...(previewId ? { id: previewId } : {}), kind: 'fetch', host: cached.host, path: finalTarget?.path ?? '', bytes: cached.bytes, truncated: cached.truncated, reused: true, outcome: 'ok', at }
+            })
+            return {
+              text: cached.text, host: cached.host, url: cached.url,
+              ...(cached.title ? { title: cached.title } : {}),
+              bytes: cached.bytes, truncated: cached.truncated, lowTrust: true as const, reused: true as const
+            }
           }
           const controller = new AbortController()
           const abort = (): void => controller.abort()
@@ -692,6 +747,13 @@ export class AgentHost {
                 networkPreviews.set(previewId, { text: result.text, url: result.url, ...(result.title ? { title: result.title } : {}), bytes: result.bytes, truncated: result.truncated, fetchedAt: at })
               }
             } catch { /* 预览只是给人看的缓存；存不下不影响工具结果 */ }
+            // 只有成功结果进复用缓存；超限的预览文本也照样复用（只是不可查看）。
+            if (cacheKey) fetchedByUrl.set(cacheKey, {
+              text: result.text, bytes: result.bytes, host: result.host,
+              ...(result.title ? { title: result.title } : {}),
+              url: result.url, truncated: result.truncated, fetchedAt: at,
+              ...(previewId ? { previewId } : {})
+            })
             recordNetwork(at, fetchTarget(finalTarget), 'ok', { bytes: result.bytes, truncated: result.truncated })
             this.deps.emit({
               ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running',
@@ -758,25 +820,53 @@ export class AgentHost {
       const recordMcp = (at: string, target: { server: string; tool: string; host: string }, outcome: string, extra: { bytes?: number; truncated?: boolean } = {}): void => {
         recordNetwork(at, { action: 'mcp', host: target.host, path: '', server: target.server, tool: target.tool }, outcome, extra)
       }
-      const emitMcp = (at: string, target: { server: string; tool: string; host: string }, outcome: 'ok' | 'refused', extra: { bytes?: number; truncated?: boolean; code?: string } = {}): void => {
+      const emitMcp = (at: string, target: { server: string; tool: string; host: string }, outcome: 'ok' | 'refused', extra: { bytes?: number; truncated?: boolean; code?: string; id?: string } = {}): void => {
         this.deps.emit({
           ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running',
           // MCP 事件只带服务器与工具名；参数与结果不进事件。
           network: { taskId: id, kind: 'mcp', host: target.host, path: '', server: target.server, tool: target.tool, ...extra, outcome, at }
         })
       }
+      /** 最近一次成功 MCP 调用存下的预览 id（调用是串行的）：工具环在成功的同一步发给事件。
+       *  抛错的调用不缓存，下一次调用会覆盖它，不会把上一次的结果错配给这一次。 */
+      let lastMcpPreview: { id: string; server: string; tool: string } | undefined
       /** MCP 能力：只在「清单可用 + 本场勾选 + 宿主有连接」时给工具集；
        *  每次调用前复核授权（停止联网／配置变化后即使工具还在也必须拒），并登记在途请求。 */
       const mcpTool: ScopedMcpTool | undefined = mcpEnabled && grant && this.deps.mcp ? {
         call: async (request) => {
           grant!.assertMcp()
+          lastMcpPreview = undefined
           const controller = new AbortController()
           const abort = (): void => controller.abort()
           if (request.signal.aborted) controller.abort()
           request.signal.addEventListener('abort', abort, { once: true })
           networkAborts.add(controller)
           try {
-            return await this.deps.mcp!.call({ taskId: id, server: request.server, tool: request.tool, arguments: request.arguments, signal: controller.signal })
+            const result = await this.deps.mcp!.call({ taskId: id, server: request.server, tool: request.tool, arguments: request.arguments, signal: controller.signal })
+            // 调用成功（含工具级 isError 结果）就把**包裹前**原文存进与抓页同一套预览缓存；
+            // 抛出的失败（超时／取消／协议错误）不缓存，失败本来也不该被当成结果给人看。
+            try {
+              const at = new Date().toISOString()
+              const textBytes = Buffer.byteLength(result.text, 'utf8')
+              const truncated = result.truncated === true || textBytes > MCP_PREVIEW_BYTES
+              if (networkPreviews.size >= NETWORK_PREVIEW_LIMIT) networkPreviews.delete(networkPreviews.keys().next().value!)
+              const previewId = randomUUID()
+              networkPreviews.set(previewId, {
+                kind: 'mcp',
+                // url 只是给浮层看的占位来源；host 取本场白名单快照里的服务器主机。
+                url: `mcp:${request.server}/${request.tool}`,
+                host: mcpServers.find(item => item.name === request.server)?.host ?? '',
+                title: `${request.server}/${request.tool}`,
+                text: truncated ? slicePreviewText(result.text, MCP_PREVIEW_BYTES) : result.text,
+                bytes: result.bytes,
+                truncated,
+                fetchedAt: at,
+                server: request.server,
+                tool: request.tool
+              })
+              lastMcpPreview = { id: previewId, server: request.server, tool: request.tool }
+            } catch { /* 预览只是给人看的缓存；存不下不影响工具结果与账本 */ }
+            return result
           } finally {
             request.signal.removeEventListener('abort', abort)
             networkAborts.delete(controller)
@@ -1086,9 +1176,12 @@ export class AgentHost {
                 if (call.name === 'mcp_call' && mcpAttempt) {
                   const result = value as { bytes?: unknown; truncated?: unknown }
                   const extra = { ...(typeof result.bytes === 'number' ? { bytes: result.bytes } : {}), ...(result.truncated === true ? { truncated: true } : {}) }
+                  // 只有成功且这次确实存进预览时才给 id（界面据此出「查看」）。
+                  const previewId = lastMcpPreview && lastMcpPreview.server === mcpAttempt.server && lastMcpPreview.tool === mcpAttempt.tool ? lastMcpPreview.id : undefined
+                  lastMcpPreview = undefined
                   const at = new Date().toISOString()
                   recordMcp(at, mcpAttempt, 'ok', extra)
-                  emitMcp(at, mcpAttempt, 'ok', extra)
+                  emitMcp(at, mcpAttempt, 'ok', { ...extra, ...(previewId ? { id: previewId } : {}) })
                 }
               }
               catch (error) {

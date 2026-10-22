@@ -311,9 +311,11 @@ export type McpDiscoverResult =
  *  MCP 事件另带服务器名与工具名（都来自本场白名单），不带参数与结果。 */
 export type AgentNetworkEvent = {
   taskId: string
-  /** 成功抓页且存了预览时才有；搜索与 MCP 不存预览，因此没有 id。 */
+  /** 成功抓页或成功的 MCP 调用且存了预览时才有；搜索不存预览，因此没有 id。 */
   id?: string
   kind: 'fetch' | 'search' | 'mcp'
+  /** 仅抓页：本任务已有同一 URL 的成功结果，本次直接返回缓存、没有再次外发。 */
+  reused?: true
   host: string
   path: string
   provider?: NetworkProvider
@@ -344,7 +346,8 @@ export type AgentEvent = {
   network?: AgentNetworkEvent
 }
 
-/** 只读预览：按任务与预览 id 取回抓到的纯文本（包裹前的原文）。 */
+/** 只读预览：按任务与预览 id 取回抓到或 MCP 拿到的纯文本（包裹前的原文）。
+ *  `kind` 缺省按抓页处理（旧条目）；MCP 条目带 `server`／`tool`，`url` 是占位来源。 */
 export type NetworkPreviewRequest = { taskId: string; id: string }
 export type NetworkPreviewView = {
   id: string
@@ -356,6 +359,11 @@ export type NetworkPreviewView = {
   truncated: boolean
   fetchedAt: string
   lowTrust: true
+  /** 预览来源：缺省按抓页（`fetch`）处理，`mcp` 时标题与提示按工具结果调整。 */
+  kind?: 'fetch' | 'mcp'
+  /** 仅 MCP：服务器名与工具名（都来自本场白名单）。 */
+  server?: string
+  tool?: string
 }
 export type NetworkPreviewResult = { ok: true; preview: NetworkPreviewView } | { ok: false; error: string }
 

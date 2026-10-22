@@ -89,3 +89,38 @@ describe('network preview overlay', () => {
     expect(document.querySelector('.overlay-network-preview')).toBeNull()
   })
 })
+
+describe('MCP preview overlay', () => {
+  const mcp = (over: Partial<NetworkPreviewView> = {}): NetworkPreviewView => view({
+    kind: 'mcp',
+    url: 'mcp:deepwiki/read_page',
+    host: 'mcp.example',
+    title: 'deepwiki/read_page',
+    server: 'deepwiki',
+    tool: 'read_page',
+    text: '外部结果正文。',
+    ...over
+  })
+
+  it('titles the overlay with MCP server/tool, adds the read-only notice and renders text literally', () => {
+    const overlay = show(mcp({ text: '<img src=x onerror="window.__mcpPwned=1">结果' }))
+    expect(overlay.root.querySelector('h2')!.textContent).toBe('MCP deepwiki/read_page')
+    expect(overlay.root.querySelector('.network-preview-meta')!.textContent).toContain('来源：MCP deepwiki/read_page')
+    expect(overlay.root.querySelector('.network-preview-notice')!.textContent).toBe('外部只读内容，低信任，未核对；账本只记调用不记正文')
+    const pre = overlay.root.querySelector('pre')!
+    expect(pre.textContent).toBe('<img src=x onerror="window.__mcpPwned=1">结果')
+    expect(overlay.root.querySelector('img')).toBeNull()
+    expect((window as unknown as { __mcpPwned?: number }).__mcpPwned).toBeUndefined()
+  })
+
+  it('keeps the truncation marker for MCP while fetch previews stay unchanged', () => {
+    const mcpOverlay = show(mcp({ truncated: true, bytes: 40000 }))
+    const meta = mcpOverlay.root.querySelector('.network-preview-meta')!
+    expect(meta.textContent).toContain('字节数：40000 字节')
+    expect(meta.textContent).toContain('已截断')
+    // 抓页浮层一字不改：既有标题，且没有 MCP 说明行。
+    const fetchOverlay = show()
+    expect(fetchOverlay.root.querySelector('h2')!.textContent).toBe('外部内容（低信任·未核对）')
+    expect(fetchOverlay.root.querySelector('.network-preview-notice')).toBeNull()
+  })
+})
