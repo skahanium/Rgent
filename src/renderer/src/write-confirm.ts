@@ -104,12 +104,12 @@ export function installWriteConfirm(host: WriteConfirmHost): () => void {
     })
     overlay.root.classList.add('overlay-write-confirm', 'write-confirm')
     // 右下角的常驻卡片：定位与尺寸在 styles.css 的 `.write-confirm`，内容多了在卡内滚动。
-    // 非模态卡片是状态更新，不是模态对话框：用 role="status" 让读屏播报，但不抢焦点。
-    overlay.root.setAttribute('role', 'status')
-    overlay.root.setAttribute('aria-live', 'polite')
-    overlay.root.innerHTML = '<button type="button" class="write-confirm-close" aria-label="关闭，不允许这次操作">×</button><h2 class="write-confirm-title"></h2><div class="write-confirm-body"></div><button type="button" class="write-confirm-expand" aria-expanded="false">展开</button><details class="write-confirm-details"><summary>详情</summary><p class="write-confirm-path"></p><p class="write-confirm-note settings-hint"></p></details><footer><button type="button" class="write-confirm-cancel">不允许</button><button type="button" class="write-confirm-accept">允许</button></footer>'
+    // 保留 dialog 语义（根节点不改成 role=status）；播报用内层 live region，避免覆盖对话框角色。
+    overlay.root.setAttribute('aria-label', title)
+    overlay.root.innerHTML = '<span class="write-confirm-announce" role="status" aria-live="polite"></span><button type="button" class="write-confirm-close" aria-label="关闭，不允许这次操作">×</button><h2 class="write-confirm-title"></h2><div class="write-confirm-body"></div><button type="button" class="write-confirm-expand" aria-expanded="false">展开</button><details class="write-confirm-details"><summary>详情</summary><p class="write-confirm-path"></p><p class="write-confirm-note settings-hint"></p></details><footer><button type="button" class="write-confirm-cancel">不允许</button><button type="button" class="write-confirm-accept">允许</button></footer>'
     const titleEl = overlay.root.querySelector<HTMLElement>('.write-confirm-title')!
     titleEl.textContent = title
+    overlay.root.querySelector('.write-confirm-announce')!.textContent = title
     // 路径与影响面数字是「详情」：首屏只留一句发生了什么。
     overlay.root.querySelector('.write-confirm-path')!.textContent = previewPath(preview)
     overlay.root.querySelector('.write-confirm-note')!.textContent = previewNote(preview)

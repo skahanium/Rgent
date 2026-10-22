@@ -196,19 +196,21 @@ export function pushNotice(input: NoticeInput): () => void {
     return appendCard(key, input.title, detail, tone, input.action ?? null).dismiss
   }
 
-  // 已满：把最早的并进「另有多条提示」，新提示留在最后——最新的一条总是看得见。
-  // 合并卡自己占一格，所以个体卡最多两张；这里先留出一张给即将加进来的这条。
-  const displaced = cards.splice(0, cards.length - 1)
-  for (const card of displaced) {
-    card.root.remove()
+  // 已满：优先挤出「没有动作按钮」的那张（动作常常是「核对」，不能先丢），
+  // 只剩有动作的卡片时才丢最早的一张。被挤出的进「另有多条提示」。
+  // 不变量：出现合并卡后个体卡最多 MAX_NOTICES-1 张（合并卡自己占一格）。
+  while (cards.length >= (overflow ? MAX_NOTICES - 1 : MAX_NOTICES)) {
+    const victim = cards.find((card) => !card.action) ?? cards[0]
+    cards.splice(cards.indexOf(victim), 1)
+    victim.root.remove()
     // 持旧卡片撤函数的人（例如冲突横幅）仍能把它从合并计数里去掉。
-    card.dismiss = () => dismissHidden(card.key)
-  }
-  if (overflow) {
-    for (const card of displaced) overflow.keys.add(card.key)
-    paintOverflow()
-  } else {
-    showOverflow(displaced.map((card) => card.key))
+    victim.dismiss = () => dismissHidden(victim.key)
+    if (overflow) {
+      overflow.keys.add(victim.key)
+      paintOverflow()
+    } else {
+      showOverflow([victim.key])
+    }
   }
   return appendCard(key, input.title, detail, tone, input.action ?? null).dismiss
 }

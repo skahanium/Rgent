@@ -18,6 +18,8 @@ export type AuthorizationPopover = Overlay & { setStale:()=>void }
 /** 同一渲染会话里沿用上次勾选的范围：只在内存，重启即忘。
  *  恢复时只认当前树里还看得见的项；已消失或已变禁用的旧路径不会悄悄带进下一张卡。 */
 let rememberedScope:string[]=[]
+/** 换库时清空：同名路径在新库里可能是另一篇笔记，不能沿用上一库的勾选。 */
+export function resetScopeMemory():void{rememberedScope=[]}
 
 function parentDirectory(relPath:string):string{const at=relPath.lastIndexOf('/');return at<0?'':relPath.slice(0,at)}
 /** 只找树里看得见的目录项：附件子树不渲染，文件不是目录。 */

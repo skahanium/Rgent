@@ -1940,6 +1940,8 @@ a[href]:focus-visible,
 .save-copy-preview { max-width: min(34rem, calc(100vw - 2rem)); }
 
 /* AI 写确认卡：右下角非模态卡片，不遮屏、不抢焦点；关闭「×」＝不允许。 */
+.write-confirm-announce { position:absolute; width:1px; height:1px; overflow:hidden; clip-path: inset(50%); white-space:nowrap; }
+
 .write-confirm {
   position: fixed;
   right: 16px;

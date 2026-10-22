@@ -27,7 +27,7 @@ import { modelModuleGroups, renderStatusbar, statusModel, wordsOf, type StatusMo
 
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
-import { openAuthorizationPopover } from './authorization-popover.ts'
+import { openAuthorizationPopover, resetScopeMemory } from './authorization-popover.ts'
 import { installWriteConfirm } from './write-confirm.ts'
 import { hostErrorText } from './host-errors.ts'
 import { pendingSlash } from './slash.ts'
@@ -1150,6 +1150,7 @@ export async function start(root: HTMLElement): Promise<void> {
 
   function resetSession(): void {
     clearDebounceTimers()
+    resetScopeMemory()
     vaultEpoch += 1
     // 换库后旧横幅的「核对」已经指向不存在的窗口稿，连同待兑现的选择一起作废；
     // 其余通知也在描述上一个库的操作，不能跟着进新库。

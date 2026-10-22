@@ -85,8 +85,8 @@ describe('status bar notices', () => {
     pushNotice({ title: '提示 4' })
     expect(document.querySelectorAll('.notice')).toHaveLength(3)
     expect(noticeText()).toContain('另有多条提示')
+    // 没有可保留的动作卡时，与旧行为一致：挤出最早两张，最新一条始终可见。
     expect(noticeText()).toContain('另有 2 条提示没有展开。')
-    // 最早的两条并进合并卡，最新的一条始终单独可见。
     expect(noticeText()).not.toContain('提示 1')
     expect(noticeText()).not.toContain('提示 2')
     expect(noticeText()).toContain('提示 3')
@@ -101,9 +101,19 @@ describe('status bar notices', () => {
     pushNotice({ title: '提示 5' })
     expect(document.querySelectorAll('.notice')).toHaveLength(3)
     expect(noticeText()).toContain('另有 3 条提示没有展开。')
-    expect(noticeText()).not.toContain('提示 3')
-    expect(noticeText()).toContain('提示 4')
-    expect(noticeText()).toContain('提示 5')
+  })
+
+  it('never drops a notice that carries an action while an action-less one can go', () => {
+    pushNotice({ title: '只读提示 1' })
+    pushNotice({ title: '有动作的提示', action: { label: '核对', run: () => {} } })
+    pushNotice({ title: '只读提示 3' })
+    pushNotice({ title: '只读提示 4' })
+    expect(document.querySelectorAll('.notice')).toHaveLength(3)
+    expect(noticeText()).toContain('有动作的提示')
+    expect([...document.querySelectorAll('.notice-action')].map((node) => node.textContent)).toContain('核对')
+    // 最早的一条只读提示被挤出；有动作的那张和最新一条都还在。
+    expect(noticeText()).not.toContain('只读提示 1')
+    expect(noticeText()).toContain('只读提示 4')
 
     // 关掉合并卡就丢掉被合并的那些提示。
     const overflow = [...document.querySelectorAll<HTMLElement>('.notice')].find(card =>

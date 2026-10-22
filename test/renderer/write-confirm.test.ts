@@ -257,8 +257,9 @@ it('卡片是读屏的状态更新，且关闭「×」等于不允许', () => {
   const app = mount()
   app.send(createPreview())
   const dialog = app.dialog()!
-  expect(dialog.getAttribute('role')).toBe('status')
-  expect(dialog.getAttribute('aria-live')).toBe('polite')
+  expect(dialog.getAttribute('role')).not.toBe('status')
+  expect(dialog.getAttribute('aria-label')).toBeTruthy()
+  expect(dialog.querySelector('.write-confirm-announce')?.getAttribute('aria-live')).toBe('polite')
   const close = dialog.querySelector<HTMLButtonElement>('.write-confirm-close')!
   expect(close.textContent).toBe('×')
   expect(close.getAttribute('aria-label')).toBe('关闭，不允许这次操作')
