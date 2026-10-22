@@ -401,6 +401,27 @@ a[href]:focus-visible,
 .settings-reading-error { margin: 0 !important; }
 .settings-error { margin: 16px 0 0; color: var(--status-error); font-size: 0.78rem; }
 .settings-error[hidden] { display: none; }
+
+/*
+ * 切库前的未保存提醒：以前是原生 confirm，现在留在页内并直接阻止切换；
+ * 下一次可以切换时自己收起（见 settings.ts prepareVaultChange）。
+ */
+.settings-vault-blocked {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  z-index: 2;
+  max-width: min(560px, calc(100vw - 80px));
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--status-error);
+  border-radius: var(--radius-md);
+  background: var(--surface-overlay);
+  color: var(--status-error);
+  box-shadow: var(--shadow-1);
+  font: 0.78rem/1.45 var(--font-ui);
+}
+.settings-vault-blocked[hidden] { display: none; }
 .settings-network-error { margin: 0; color: var(--status-error); font-size: 0.78rem; }
 .settings-network-error[hidden] { display: none; }
 .settings-form { display: grid; align-content: start; gap: 16px; max-width: 680px; }
@@ -1127,6 +1148,94 @@ a[href]:focus-visible,
 .status-task-stop:hover, .status-task-more:hover { border-color: var(--focus-ring); color: var(--accent-primary); }
 .status-task-stop:focus-visible, .status-task-more:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .overlay-tasks { width: min(420px, calc(100vw - 40px)); }
+
+/*
+ * 状态栏通知（2026-10-23 交互减负）：正常路径的原生弹窗改到这里。
+ * 非模态：不遮编辑器、不抢焦点；最多 3 条，超出的合并在「另有多条提示」里（notice.ts）。
+ * 挂在状态栏上方、左下角，避开右下角的写确认卡与状态栏右侧的库名。
+ */
+.notice-stack {
+  position: fixed;
+  left: 12px;
+  /* 状态栏 min-height 38px，再留 10px 间隙；容器本身脱开布局，不挤压编辑器。 */
+  bottom: 48px;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(360px, calc(100vw - 24px));
+  /* 通知区不挡点击，只有卡片本身接事件。 */
+  pointer-events: none;
+}
+
+.notice {
+  pointer-events: auto;
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-overlay);
+  color: var(--text-body);
+  box-shadow: var(--shadow-1);
+  font: 0.78rem/1.45 var(--font-ui);
+  animation: notice-in var(--motion-fast) ease-out;
+}
+.notice[data-tone='warning'] { border-left-color: var(--status-offline); }
+.notice[data-tone='error'] { border-left-color: var(--status-error); }
+
+.notice-title { margin: 0; color: var(--text-heading); font-weight: 600; }
+.notice[data-tone='error'] .notice-title { color: var(--status-error); }
+.notice-detail { margin: 0; color: var(--text-muted); white-space: pre-line; overflow-wrap: anywhere; }
+.notice-detail[hidden] { display: none; }
+.notice-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 3px; }
+
+.notice-action,
+.notice-close {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-heading);
+  font: inherit;
+  cursor: pointer;
+}
+.notice-action { color: var(--accent-primary); }
+.notice-action:hover, .notice-close:hover { background: var(--state-hover); border-color: var(--focus-ring); }
+.notice-close { padding: 0; border-color: transparent; color: var(--text-muted); font-size: 0.95rem; line-height: 1; }
+
+@keyframes notice-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 减动效时直接出现；上面的全局规则已经把时长压到 0，这里明确关掉动画本身。 */
+@media (prefers-reduced-motion: reduce) {
+  .notice { animation: none; }
+}
+
+/* 删除落点不符这类不可逆风险保留模态：短标题＋可复制的详情。 */
+.copyable-notice { width: min(560px, calc(100vw - 40px)); }
+.copyable-notice-detail {
+  max-height: 40vh;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-nav);
+  color: var(--text-body);
+  font: 0.76rem/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.copyable-notice-hint { min-height: 1em; margin: 0; color: var(--text-muted); font-size: 0.74rem; }
+.copyable-notice-hint:empty { display: none; }
+.discard-dialog { width: min(460px, calc(100vw - 40px)); }
 .overlay-tasks h2 { margin: 0 0 16px; font-size: 1rem; }
 .task-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border-subtle); font-size: 0.82rem; }
 .task-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

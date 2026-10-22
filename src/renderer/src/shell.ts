@@ -12,7 +12,8 @@ import { renderBacklinks } from './backlinks.ts'
 import { openLifecycleStatus, promptNewNote, promptText } from './dialogs.ts'
 import { openFetchDialog } from './fetch-dialog.ts'
 import { promptConflict } from './conflict.ts'
-import { openOverlay } from './overlay.ts'
+import { modalOpen, openOverlay } from './overlay.ts'
+import { clearNotices, pushNotice } from './notice.ts'
 import { openNetworkPreview } from './preview-overlay.ts'
 import { createSearchOverlay } from './search-overlay.ts'
 import { createSettingsOverlay } from './settings.ts'
@@ -73,6 +74,82 @@ export const lifecycleErrorText = (error: unknown): string => {
   return LIFECYCLE_ERRORS[code] ?? raw
 }
 const ROOT_UNAVAILABLE_NOTICE = '笔记库暂时无法读取，窗口稿和账本已保留。恢复原库后重新核验；换库前须处理或明确舍弃。'
+
+/**
+ * 不可逆风险（删除落点不符、路径冲突）保留模态：短标题只说发生了什么，
+ * 原文、路径与落点都进可复制的详情，不再用原生 alert 糊成一整段。
+ */
+function openCopyableNotice(title: string, detail: string): void {
+  const overlay = openOverlay({ label: title })
+  overlay.root.classList.add('modal', 'copyable-notice')
+  const heading = document.createElement('h2')
+  heading.textContent = title
+  const body = document.createElement('p')
+  body.className = 'copyable-notice-detail'
+  body.textContent = detail
+  const hint = document.createElement('p')
+  hint.className = 'copyable-notice-hint'
+  hint.setAttribute('role', 'status')
+  const actions = document.createElement('div')
+  actions.className = 'modal-actions'
+  const selectBody = (): void => {
+    const range = document.createRange()
+    range.selectNodeContents(body)
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+  }
+  const copyButton = document.createElement('button')
+  copyButton.type = 'button'
+  copyButton.textContent = '复制详情'
+  copyButton.addEventListener('click', () => {
+    const clipboard = navigator.clipboard
+    if (!clipboard || typeof clipboard.writeText !== 'function') {
+      selectBody()
+      hint.textContent = '这个环境不能写入剪贴板；详情已选中，请手动复制。'
+      return
+    }
+    void clipboard.writeText(detail).then(() => {
+      if (overlay.isOpen()) hint.textContent = '已复制。'
+    }).catch(() => {
+      selectBody()
+      if (overlay.isOpen()) hint.textContent = '复制失败；详情已选中，请手动复制。'
+    })
+  })
+  const done = document.createElement('button')
+  done.type = 'button'
+  done.textContent = '知道了'
+  done.addEventListener('click', () => overlay.close())
+  actions.append(copyButton, done)
+  overlay.root.append(heading, body, hint, actions)
+}
+
+/** 放弃窗口稿仍是不可逆动作，保留模态；文案短，默认焦点放在「保留」。 */
+function confirmDiscardWindowDraft(): Promise<boolean> {
+  return new Promise((resolve) => {
+    let answer = false
+    const overlay = openOverlay({ label: '明确舍弃窗口稿', onClose: () => resolve(answer) })
+    overlay.root.classList.add('modal', 'discard-dialog')
+    const heading = document.createElement('h2')
+    heading.textContent = '明确舍弃这篇窗口稿？'
+    const copy = document.createElement('p')
+    copy.textContent = '这篇原对象的窗口稿及尚未落盘的生成内容会一起舍弃；磁盘同名文件不会改动。'
+    const actions = document.createElement('div')
+    actions.className = 'modal-actions'
+    const keep = document.createElement('button')
+    keep.type = 'button'
+    keep.textContent = '保留窗口稿'
+    keep.addEventListener('click', () => overlay.close())
+    const discard = document.createElement('button')
+    discard.type = 'button'
+    discard.className = 'discard-confirm'
+    discard.textContent = '明确舍弃'
+    discard.addEventListener('click', () => { answer = true; overlay.close() })
+    actions.append(keep, discard)
+    overlay.root.append(heading, copy, actions)
+    queueMicrotask(() => keep.focus())
+  })
+}
 
 export async function start(root: HTMLElement): Promise<void> {
   root.innerHTML = `
@@ -222,6 +299,9 @@ export async function start(root: HTMLElement): Promise<void> {
   const recoveryDraftGate = new RecoveryDraftGate()
   let recoveryOverlay: ReturnType<typeof openLifecycleStatus> | null = null
   let conflictDecisionOpen = false
+  // 横幅「核对」里人选过一次听窗口/听磁盘：只对同一份对照兑现一次，之后重新出横幅。
+  let pendingConflictChoice: { relPath: string; windowBody: string; diskBody: string; choice: 'window' | 'disk' } | null = null
+  const conflictNotices = new Map<string, { epoch: number; dismiss: () => void }>()
   let deferredVaultBodyConflict = false
   let permissionState: PermissionState = { status: 'ready', entries: [] }
   let vaultNameText: string | null = null
@@ -309,7 +389,7 @@ export async function start(root: HTMLElement): Promise<void> {
       const serial = stateSerial
       if (vaultSession || restoringWorkspace || transitionBusy) return
       void window.rgent.vaultGet().then(state => {
-        if (serial === stateSerial && !vaultSession && !restoringWorkspace && !transitionBusy && !document.querySelector('dialog[open]') && state.status === 'needs-pick') showVaultPicker(state.reason, state.diagnostic)
+        if (serial === stateSerial && !vaultSession && !restoringWorkspace && !transitionBusy && !modalOpen() && state.status === 'needs-pick') showVaultPicker(state.reason, state.diagnostic)
       }).catch(() => {})
     }
   })
@@ -433,7 +513,7 @@ export async function start(root: HTMLElement): Promise<void> {
       updateStatus()
       return
     }
-    if (conflictDecisionOpen || document.querySelector('dialog[open]')) return
+    if (conflictDecisionOpen || modalOpen()) return
     openFetchDialog({
       canInsert: () => canInsertNetworkResult(),
       insert: text => editor.insertAtSelection(text),
@@ -476,12 +556,12 @@ export async function start(root: HTMLElement): Promise<void> {
     const selection = editor.selectionRange()
     if (selection.anchor !== selection.head) return
     const submission = pendingSlash(editor.getText(), selection.head, editor.slashCommandStart())
-    if (!submission || conflictDecisionOpen || document.querySelector('dialog[open]')) return
+    if (!submission || conflictDecisionOpen || modalOpen()) return
     event.preventDefault()
     void submitSlash(submission)
   }, { capture: true })
   document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229 || editor.view.compositionStarted || !active || document.querySelector('dialog[open]')) return
+    if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229 || editor.view.compositionStarted || !active || modalOpen()) return
     const task = [...activeTasks.values()].find((item) => item.relPath === active)
     if (!task) return
     event.preventDefault()
@@ -587,6 +667,11 @@ export async function start(root: HTMLElement): Promise<void> {
     const revisions = [...hostRevisions.entries()]
     hostRevisions.clear()
     for (const [relPath, revision] of revisions) hostRevisions.set(remap(relPath), revision)
+    // 冲突横幅跟着对象走；还没兑现的「听窗口/听磁盘」对旧路径无效了。
+    const conflictEntries = [...conflictNotices.entries()]
+    conflictNotices.clear()
+    for (const [relPath, entry] of conflictEntries) conflictNotices.set(remap(relPath), entry)
+    pendingConflictChoice = null
     syncEditorHost()
     renderTabs()
     void refreshTree()
@@ -763,6 +848,8 @@ export async function start(root: HTMLElement): Promise<void> {
     tab.sessionId = snapshot.sessionId
     tab.dirty = merged !== part.body
     if (active === tab.relPath) editor.applyExternalText(merged)
+    // Host 已把两份正文合上：之前的冲突横幅不再成立。
+    dismissConflictNotice(tab.relPath)
     if (tab.dirty) scheduleSave()
     if (ledgerOpen && active === tab.relPath) {
       ledgerOpen = false
@@ -786,28 +873,87 @@ export async function start(root: HTMLElement): Promise<void> {
           deferredVaultBodyConflict = true
           return 'continue'
         }
-        conflictDecisionOpen = true
-        try {
-          return await promptConflict({
-            title: titleOf(tab.relPath.split('/').pop() ?? tab.relPath),
-            windowText: windowBody,
-            diskText: diskBody
-          })
-        } finally {
-          conflictDecisionOpen = false
+        // 人刚在横幅点过「核对」并选了听窗口/听磁盘：只对同一份对照兑现一次。
+        const pending = pendingConflictChoice
+        if (pending && pending.relPath === tab.relPath && pending.windowBody === windowBody && pending.diskBody === diskBody) {
+          pendingConflictChoice = null
+          return pending.choice
         }
+        // 自动路径不再弹模态：先出可点横幅，保存仍被拒、草稿保留；点「核对」才进核对浮层。
+        showConflictNotice(tab, epoch)
+        return 'continue'
       },
       write: (request) => window.rgent.noteWrite(request),
       applyDisk: (snapshot) => {
         applySource(tab, snapshot)
         if (active === tab.relPath) editor.setText(tab.content)
+        dismissConflictNotice(tab.relPath)
       },
       applySaved: (body, ledger, revision) => {
         tab.ledger = ledger
         applySaved(tab, body, revision)
+        dismissConflictNotice(tab.relPath)
         void refreshBacklinks()
       }
     })
+  }
+
+  /** 冲突横幅：同一篇笔记反复冲突只保留一条，动作换成最新一次。 */
+  function showConflictNotice(tab: Tab, epoch: number): void {
+    const dismiss = pushNotice({
+      key: `conflict:${tab.relPath}`,
+      title: '这篇笔记和磁盘不一致',
+      detail: '保存已暂缓；核对后再继续。',
+      tone: 'warning',
+      action: { label: '核对', run: () => reviewConflict(tab, epoch) }
+    })
+    conflictNotices.set(tab.relPath, { epoch, dismiss })
+  }
+
+  function dismissConflictNotice(relPath: string): void {
+    const entry = conflictNotices.get(relPath)
+    if (!entry) return
+    conflictNotices.delete(relPath)
+    entry.dismiss()
+  }
+
+  /** 只有人点横幅上的「核对」才打开现有核对浮层（promptConflict）。 */
+  function reviewConflict(tab: Tab, epoch: number): void {
+    if (conflictDecisionOpen || epoch !== vaultEpoch || !tabs.includes(tab) || tab.availability) return
+    conflictDecisionOpen = true
+    void (async () => {
+      try {
+        const snapshot = await readBoundTab(tab).catch(() => null)
+        if (!snapshot) {
+          // 读不到磁盘了（消失/被替换/换库）：横幅已经没有可核对的对照，撤掉。
+          dismissConflictNotice(tab.relPath)
+          return
+        }
+        if (epoch !== vaultEpoch || !tabs.includes(tab) || tab.availability) return
+        const windowBody = tab.relPath === active ? editor.getText() : tab.content
+        const diskBody = partitionSource(snapshot.content).body
+        // 磁盘已经和窗口稿一致（或草稿已空）时不必再核对，照常重跑一次让保存自行收敛。
+        if (!tab.dirty || windowBody === diskBody) {
+          await runExclusiveConflict(() => reconcileTab(tab, epoch))
+          return
+        }
+        const choice = await promptConflict({
+          title: titleOf(tab.relPath.split('/').pop() ?? tab.relPath),
+          windowText: windowBody,
+          diskText: diskBody
+        })
+        if (choice === 'continue' || epoch !== vaultEpoch || !tabs.includes(tab)) return
+        const pending = { relPath: tab.relPath, windowBody, diskBody, choice }
+        pendingConflictChoice = pending
+        try {
+          await runExclusiveConflict(() => reconcileTab(tab, epoch))
+        } finally {
+          if (pendingConflictChoice === pending) pendingConflictChoice = null
+        }
+      } finally {
+        conflictDecisionOpen = false
+      }
+    })()
   }
 
   await applyState(await window.rgent.vaultGet())
@@ -1001,6 +1147,11 @@ export async function start(root: HTMLElement): Promise<void> {
   function resetSession(): void {
     clearDebounceTimers()
     vaultEpoch += 1
+    // 换库后旧横幅的「核对」已经指向不存在的窗口稿，连同待兑现的选择一起作废；
+    // 其余通知也在描述上一个库的操作，不能跟着进新库。
+    clearNotices()
+    conflictNotices.clear()
+    pendingConflictChoice = null
     recoveryState = null
     syncRecoveryInput()
     recoveryOverlay?.close(); recoveryOverlay = null
@@ -1317,7 +1468,7 @@ export async function start(root: HTMLElement): Promise<void> {
       }
       if (action === 'trash') {
         if (entry.kind !== 'note' || !window.rgent.humanTrashOnThisPlatform) return
-        if (!(await flushSave())) { window.alert('有草稿尚未保存，请先处理保存冲突。'); return }
+        if (!(await flushSave())) { pushNotice({ title:'有草稿尚未保存', detail:'请先处理保存冲突，再做这次操作。', tone:'warning' }); return }
         const prepared = await window.rgent.noteTrashPreview({ relPath: entry.relPath })
         if (epoch !== vaultEpoch) return
         if (!prepared.ok) throw new Error(prepared.error)
@@ -1327,9 +1478,11 @@ export async function start(root: HTMLElement): Promise<void> {
         const result = await window.rgent.noteTrashCommit({ id: prepared.preview.id, allow })
         if (epoch !== vaultEpoch) return
         if (!result.ok) {
-          // 落点核验不符或原路径冲突时，错误里带着系统实际落点：直接摆出来，人才能去废纸篓找回。
+          // 落点核验不符或原路径冲突时，错误里带着系统实际落点：摆出来，人才能去废纸篓找回。
+          // 这是不可逆风险，保留模态；标题只写发生了什么，原文与落点都进可复制的详情。
           const text = lifecycleErrorText(result.error)
-          window.alert(result.landing ? `${text}\n本次落点：${result.landing}` : text)
+          if (result.landing) openCopyableNotice('删除没有完成，请核对落点', `${text}\n本次落点：${result.landing}`)
+          else pushNotice({ title:'删除没有完成', detail:text, tone:'error' })
           return
         }
         if (result.cancelled) return
@@ -1346,7 +1499,7 @@ export async function start(root: HTMLElement): Promise<void> {
         updateStatus()
         return
       }
-      if (!(await flushSave())) { window.alert('有草稿尚未保存，请先处理保存冲突。'); return }
+      if (!(await flushSave())) { pushNotice({ title:'有草稿尚未保存', detail:'请先处理保存冲突，再做这次操作。', tone:'warning' }); return }
       const source = entry.relPath
       const parts = source.split('/')
       const oldName = parts.pop() ?? ''
@@ -1374,23 +1527,29 @@ export async function start(root: HTMLElement): Promise<void> {
       if (!result.ok) throw new Error(result.error)
       applyRelocation(result.moved)
       await refreshTree()
-      if (result.unrepaired.length) window.alert(`文件已移动；以下引用因内容变化未修复：\n${result.unrepaired.join('\n')}`)
+      if (result.unrepaired.length) {
+        pushNotice({
+          title: '文件已移动，部分引用没有修复',
+          detail: `以下引用因内容变化没有自动修复：\n${result.unrepaired.join('\n')}`,
+          tone: 'warning'
+        })
+      }
     } catch (error) {
-      if (epoch === vaultEpoch) window.alert(lifecycleErrorText(error))
+      if (epoch === vaultEpoch) pushNotice({ title:'文件操作没有完成', detail:lifecycleErrorText(error), tone:'error' })
     }
     finally { if (epoch === vaultEpoch) void refreshLifecycle() }
   }
 
   async function changePermission(relPath: string, tier: PermissionTier): Promise<void> {
     if (permissionState.status === 'invalid') {
-      window.alert('权限名单损坏或无法读取，请先在库根修复 .rgent-permissions。')
+      pushNotice({ title:'权限名单损坏或无法读取', detail:'请先在库根修复 .rgent-permissions 后重试。', tone:'error' })
       return
     }
     try {
       permissionState = await window.rgent.permissionsSet({ relPath, tier })
       await refreshTree()
     } catch (error) {
-      window.alert(lifecycleErrorText(error))
+      pushNotice({ title:'权限没有改成', detail:lifecycleErrorText(error), tone:'error' })
     }
   }
 
@@ -1935,6 +2094,8 @@ export async function start(root: HTMLElement): Promise<void> {
     if (opts.save !== false && tab.dirty && (!(await writeTab(tab)) || tab.dirty)) return
     const index = tabs.findIndex((item) => item.relPath === relPath)
     tabs.splice(index, 1)
+    dismissConflictNotice(relPath)
+    pendingConflictChoice = null
     if (active === relPath) {
       closeLedger()
       const next = tabs[index] ?? tabs[index - 1]
@@ -2007,6 +2168,7 @@ export async function start(root: HTMLElement): Promise<void> {
       tab.objectVersion = result.objectVersion
       tab.sessionId = result.sessionId
       applySaved(tab, body, result.revision)
+      dismissConflictNotice(tab.relPath)
       await refreshLifecycle()
       if(epoch!==vaultEpoch||!tabs.includes(tab))return false
       if (hostNotice === LIFECYCLE_ERRORS.LEDGER_BOUNDARY_INVALID) { hostNotice = ''; updateStatus() }
@@ -2135,12 +2297,12 @@ export async function start(root: HTMLElement): Promise<void> {
       for(const id of saved.taskIds) { activeTasks.delete(id); networkTasks.delete(id); networkPreviews.delete(id); networkAttempts.delete(id); stoppedNetworkTasks.delete(id); endedTaskIds.add(id) }
       if(active===source) { active=saved.relPath; editor.setText(destination.content,noteHost(),selection) }
       closeLedger(); syncActiveLocks(); renderTabs(); updateStatus(); await refreshTree()
-    } catch(error) { if(epoch===vaultEpoch) window.alert(lifecycleErrorText(error)) }
+    } catch(error) { if(epoch===vaultEpoch) pushNotice({ title:'另存没有完成', detail:lifecycleErrorText(error), tone:'error' }) }
   }
   async function discardMissing(): Promise<void> {
     const tab=current(); const epoch=vaultEpoch
     if(!tab?.availability || !tab.sessionId || !tab.objectVersion) return
-    if(!window.confirm('明确舍弃这篇原对象的窗口稿及尚未落盘的生成内容？磁盘同名文件不会改动。')) return
+    if(!(await confirmDiscardWindowDraft())) return
     const ok=await window.rgent.noteAbandon({relPath:tab.relPath,sessionId:tab.sessionId===vaultSession?tab.sessionId:vaultSession!,...(tab.sessionId!==vaultSession?{sourceSessionId:tab.sessionId}:{}),objectVersion:tab.objectVersion})
     if(ok&&epoch===vaultEpoch){await closeTab(tab.relPath,{save:false});if(!tabs.some(t=>t.sessionId&&t.sessionId!==vaultSession)){restoredSession=null;hostNotice='旧窗口稿已逐篇处理。请恢复原工作区位置；恢复前不覆盖位置记录。';workspaceRecovery.querySelector('span')!.textContent=hostNotice;workspaceRecovery.hidden=false;updateStatus()}}
   }
@@ -2237,7 +2399,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const epoch = vaultEpoch
     const sessionId = vaultSession
     const parent = fileBrowser.selectedFolder
-    if (!sessionId || !fileBrowser.canCreate) { window.alert('目录暂时无法核验，请恢复后重新选择。'); return }
+    if (!sessionId || !fileBrowser.canCreate) { pushNotice({ title:'目录暂时无法核验', detail:'请恢复目录后重新选择。', tone:'warning' }); return }
     const name = await promptNewNote()
     if (!name || epoch !== vaultEpoch) return
     try {
@@ -2247,7 +2409,7 @@ export async function start(root: HTMLElement): Promise<void> {
       await refreshTree()
       await openCreatedNote(relPath)
     } catch (err) {
-      window.alert(lifecycleErrorText(err))
+      pushNotice({ title:'新建笔记没有完成', detail:lifecycleErrorText(err), tone:'error' })
     }
   }
 }

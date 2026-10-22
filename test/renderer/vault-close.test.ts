@@ -95,6 +95,50 @@ it('real draft conflict during switching preserves both bodies and settings fold
  expect(editorHarness.text).toBe('window draft');expect(disk).toBe('disk draft');expect(document.querySelectorAll('dialog[open]')).toHaveLength(1)
  expect(input.value).toBe('name draft');expect(fold.open).toBe(true);expect(document.activeElement).toBe(input);expect([input.selectionStart,input.selectionEnd]).toEqual([1,3])
 })
+it('an automatic conflict shows a non-modal banner, keeps the draft and opens the preview only on 核对',async()=>{
+ // 真实 Chromium 的 close 事件是异步的；这里也异步派发，才能测到「听窗口」先于 onClose 生效。
+ Object.defineProperty(HTMLDialogElement.prototype,'close',{configurable:true,value:function(this:HTMLDialogElement){this.removeAttribute('open');setTimeout(()=>this.dispatchEvent(new Event('close')),0)}})
+ let disk='original'
+ api.vaultWorkspaceGet=async()=>({version:1,tabs:[{relPath:'one.md'}],active:'one.md',sidebarHidden:true,treeScroll:0,resourceScroll:0})
+ api.noteRead=async()=>({content:disk,revision:disk,objectVersion:'object',sessionId:'old'})
+ api.noteInspect=async()=>({status:'ready',snapshot:await api.noteRead()})
+ api.noteWrite=vi.fn(async()=>({ok:false,error:'CONFLICT'}))
+ await start(root);editorHarness.text='window draft';editorHarness.change!('window draft');disk='disk draft'
+ handlers.onLifecycleFlushRequest('flush',[])
+ await vi.waitFor(()=>expect(root.querySelector('.notice-stack')).not.toBeNull())
+ // 自动路径不再弹模态：保存被拒、草稿保留，提示先出来。
+ expect(api.lifecycleFlushDone).toHaveBeenCalledWith('flush',false)
+ expect(document.querySelector('dialog[open]')).toBeNull()
+ const stack=root.querySelector('.notice-stack')!
+ expect(stack.getAttribute('aria-live')).toBe('polite')
+ expect(stack.textContent).toContain('这篇笔记和磁盘不一致')
+ expect(stack.textContent).toContain('保存已暂缓；核对后再继续。')
+ expect(editorHarness.text).toBe('window draft')
+ expect(api.noteWrite).toHaveBeenCalledWith(expect.objectContaining({content:'window draft',expectedRevision:'original'}))
+ // 同一冲突重复触发：保存继续被拒，但只有一条通知。
+ handlers.onLifecycleFlushRequest('flush-again',[])
+ await vi.waitFor(()=>expect(api.lifecycleFlushDone).toHaveBeenCalledWith('flush-again',false))
+ expect(root.querySelectorAll('.notice')).toHaveLength(1)
+ expect(editorHarness.text).toBe('window draft')
+ // 点「核对」才进现有核对浮层。
+ root.querySelector<HTMLButtonElement>('.notice-action')!.click()
+ await vi.waitFor(()=>expect(document.querySelector('dialog[open]')?.textContent).toContain('稿不一样了'))
+ expect(document.querySelector('dialog[open]')!.textContent).toContain('窗口里还没保存的稿')
+ ;[...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find(b=>b.textContent==='继续编辑')!.click()
+ await vi.waitFor(()=>expect(document.querySelector('dialog[open]')).toBeNull())
+ expect(editorHarness.text).toBe('window draft')
+ expect(root.querySelectorAll('.notice')).toHaveLength(1)
+ expect(root.querySelector('.notice-stack')?.textContent).toContain('这篇笔记和磁盘不一致')
+ expect(api.noteWrite).toHaveBeenCalledWith(expect.objectContaining({content:'window draft'}))
+ // 再点「核对」并选「听窗口」：按最新磁盘修订值写一次，横幅自己撤掉。
+ api.noteWrite=vi.fn(async()=>({ok:true,revision:'saved',objectVersion:'object',sessionId:'old'}))
+ root.querySelector<HTMLButtonElement>('.notice-action')!.click()
+ await vi.waitFor(()=>expect(document.querySelector('dialog[open]')?.textContent).toContain('稿不一样了'))
+ ;[...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find(b=>b.textContent==='听窗口')!.click()
+ await vi.waitFor(()=>expect(api.noteWrite).toHaveBeenCalledWith(expect.objectContaining({content:'window draft',expectedRevision:'disk draft'})))
+ await vi.waitFor(()=>expect(root.querySelectorAll('.notice')).toHaveLength(0))
+})
+
 it('an old restore completion cannot acknowledge or unlock a newer restoration gate',async()=>{
  await start(root)
  let session='first',first!:(v:any)=>void,second!:(v:any)=>void
@@ -354,12 +398,17 @@ it('real shell holds two old-session drafts across explicit root attach and igno
  await vi.waitFor(()=>expect(root.querySelectorAll('.tab')).toHaveLength(3))
  expect(api.noteSaveCopyPreview).toHaveBeenCalledWith(expect.objectContaining({sessionId:'new',sourceSessionId:'old',source:'one.md',body:'draft one'}))
  expect(editorHarness.text).toBe('draft one')
- api.noteAbandon=vi.fn(async()=>true);vi.spyOn(window,'confirm').mockReturnValue(true)
+ api.noteAbandon=vi.fn(async()=>true)
+ // 放弃窗口稿仍走模态，但换成我们自己的浮层：标题短，磁盘同名文件不动。
+ const acceptDiscard=async()=>{await vi.waitFor(()=>expect(document.querySelector('.discard-confirm')).not.toBeNull());document.querySelector<HTMLButtonElement>('.discard-confirm')!.click()}
  ;[...root.querySelectorAll<HTMLElement>('.tab')].find(n=>n.textContent?.includes('one')&&!n.textContent.includes('kept'))!.click()
  root.querySelector<HTMLButtonElement>('.note-discard')!.click()
+ await vi.waitFor(()=>expect(document.querySelector('dialog[open]')?.textContent).toContain('明确舍弃这篇窗口稿？'))
+ await acceptDiscard()
  await vi.waitFor(()=>expect(api.noteAbandon).toHaveBeenCalledWith({sessionId:'new',sourceSessionId:'old',relPath:'one.md',objectVersion:'one.md'}))
  await vi.waitFor(()=>expect(root.querySelectorAll('.tab')).toHaveLength(2))
  ;[...root.querySelectorAll<HTMLElement>('.tab')].find(n=>n.textContent?.includes('two'))!.click();root.querySelector<HTMLButtonElement>('.note-discard')!.click()
+ await acceptDiscard()
  await vi.waitFor(()=>expect(root.querySelectorAll('.tab')).toHaveLength(1))
  expect(api.vaultWorkspaceSave.mock.calls.filter(([session]:[string])=>session==='new')).toEqual([])
  expect(root.querySelector<HTMLElement>('.workspace-recovery')!.hidden).toBe(false)

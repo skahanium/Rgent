@@ -792,7 +792,7 @@ it('refreshes the model options on return without clearing an unsaved memory mod
  panel.close()
 })
 
-it('keeps settings drafts when switching is cancelled and keeps the panel through accepted preparation', async () => {
+it('blocks vault switching with an in-page notice while settings drafts are unsaved', async () => {
   const save = vi.fn()
   const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async (mode: 'day' | 'night' | 'system') => ({ ok: true, mode }),
     getChromeText: async () => ({ tabs: 'default', sidebar: 'default' }), setChromeText: save } as never)
@@ -800,16 +800,21 @@ it('keeps settings drafts when switching is cancelled and keeps the panel throug
   await new Promise(resolve => setTimeout(resolve, 0))
   const input = document.querySelector<HTMLSelectElement>('[data-setting="chrome-tabs"]')!
   input.value = 'large'; input.dispatchEvent(new Event('change', { bubbles: true }))
-  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+  const notice = document.querySelector<HTMLElement>('.settings-vault-blocked')!
+  expect(notice.hidden).toBe(true)
   try {
+    // 未保存：不弹原生 confirm，也不放行切换，草稿与面板都留着。
     expect(panel.prepareVaultChange()).toBe(false)
+    expect(notice.hidden).toBe(false)
+    expect(notice.textContent).toBe('设置还未保存，先保存再切换笔记库。')
     expect(panel.isOpen()).toBe(true)
     expect(input.value).toBe('large')
     expect(save).not.toHaveBeenCalled()
-    confirm.mockReturnValue(true)
+    // 设置页以「本次打开期间动过设置」为准；关掉（草稿随之丢弃）再开才重新计。
+    panel.close()
+    panel.open()
     expect(panel.prepareVaultChange()).toBe(true)
-    expect(panel.isOpen()).toBe(true)
-  } finally { confirm.mockRestore(); panel.close() }
+  } finally { panel.close() }
 })
 
 const vaultFlush = async () => { for (let i=0;i<8;i++) await Promise.resolve() }
@@ -845,12 +850,12 @@ it('tracks unsaved name locally and stops treating successfully saved names as g
  const {panel}=vaultSettings();panel.open('笔记库');await vaultFlush()
  document.querySelector<HTMLButtonElement>('[data-vault-action="edit-name"]')!.click()
  const input=document.querySelector<HTMLInputElement>('.vault-settings-name input')!;input.value='已保存名';input.dispatchEvent(new Event('input',{bubbles:true}))
- const confirm=vi.spyOn(window,'confirm').mockReturnValue(false)
+ const notice=document.querySelector<HTMLElement>('.settings-vault-blocked')!
  try {
- expect(panel.prepareVaultChange()).toBe(false);expect(confirm).toHaveBeenCalledTimes(1)
+ expect(panel.prepareVaultChange()).toBe(false);expect(notice.hidden).toBe(false)
  document.querySelector<HTMLButtonElement>('[data-vault-action="label"]')!.click();await vaultFlush()
- expect(panel.prepareVaultChange()).toBe(true);expect(confirm).toHaveBeenCalledTimes(1);expect(panel.isOpen()).toBe(true)
- } finally {confirm.mockRestore();panel.close()}
+ expect(panel.prepareVaultChange()).toBe(true);expect(notice.hidden).toBe(true);expect(panel.isOpen()).toBe(true)
+ } finally {panel.close()}
 })
 
 it('repeated ordinary settings entry and same vault route preserve an active name draft',async()=>{

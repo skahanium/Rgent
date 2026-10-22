@@ -59,6 +59,7 @@ export type SettingsOverlay = {
   close: () => void
   isOpen: () => boolean
   isBusy: () => boolean
+  /** 切库前调用：有未保存的设置就返回 false，并在页内说明原因（不再弹 confirm）。 */
   prepareVaultChange: () => boolean
 }
 
@@ -102,6 +103,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
   let inputsEdited = false
   let vaultPage: VaultManagerPage | null = null
   let vaultBusy = false
+  let vaultBlocked: HTMLElement | null = null
   let navigate: ((page: SettingsPage) => void) | null = null
   let request = 0
   let readingSaveSerial = 0
@@ -123,6 +125,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         overlay = null
         navigate = null
         vaultPage?.dispose(); vaultPage = null; vaultBusy = false
+        vaultBlocked = null
         disposeMemoryPage?.()
         disposeMemoryPage = null
         disposeModelPage?.()
@@ -137,6 +140,13 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     overlay = current
     inputsEdited = false
     const root = current.root
+    // 切库被未保存设置挡住时的页内提醒；藏在页面上方，不挡内容也不弹原生窗口。
+    const blocked = document.createElement('p')
+    blocked.className = 'settings-vault-blocked'
+    blocked.setAttribute('role', 'alert')
+    blocked.textContent = '设置还未保存，先保存再切换笔记库。'
+    blocked.hidden = true
+    vaultBlocked = blocked
     const trackInput = (event: Event): void => {
       if (!(event.target instanceof Element) || !event.target.closest('.vault-settings')) inputsEdited = true
     }
@@ -216,7 +226,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     readingSection.className = 'settings-reading'
     main.append(title, intro, group, readingSection)
     layout.append(nav, main)
-    root.append(layout)
+    root.append(blocked, layout)
     const themeNodes = [title, intro, group, readingSection]
     let openedPage: SettingsPage = '界面'
     let themeRequest = 0
@@ -811,7 +821,11 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
   }
 
   return { open, close, isOpen: () => overlay?.isOpen() ?? false, isBusy: () => vaultBusy, prepareVaultChange: () => {
-    if (overlay?.isOpen() && (inputsEdited || vaultPage?.isDirty()) && !window.confirm('还有未保存的设置或显示名称。请先保存；继续切换将在新库提交后放弃这些修改。是否继续？')) return false
-    return true
+    if (!overlay?.isOpen()) return true
+    // 围栏 2026-10-23：切库只保留主进程那一次确认，设置页不再二次 confirm；
+    // 有未保存的设置/显示名称时直接在页内说明并阻止切换（草稿原样保留）。
+    const blocked = inputsEdited || vaultPage?.isDirty() === true
+    if (vaultBlocked) vaultBlocked.hidden = !blocked
+    return !blocked
   } }
 }
