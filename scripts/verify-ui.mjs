@@ -1462,14 +1462,6 @@ async function verifyHumanTrash(page, vault, shot) {
   }
 }
 
-function reclaimJourneyTrash() {
-  const trash = path.join(homedir(), '.Trash')
-  for (const name of ['旅程删除样张.md', '旅程删除样张']) {
-    try { rmSync(path.join(trash, name), { recursive: true, force: true }) } catch { /* 废纸篓列举会 EPERM */ }
-  }
-  spawnSync('osascript', ['-e', 'tell application "Finder"\ntry\ndelete (every item of trash whose name contains "旅程删除样张")\nend try\nend tell'], { encoding: 'utf8', timeout: 10000 })
-}
-
 /** 端到端旅程专项（RGENT_UI_JOURNEY_ONLY=1）：一条真人旅程走完建、写、补、改名、挪、
  *  人删除与账本可审，作为跨能力集成证据；不复制各专项的细断言，零真实外网与真实模型。 */
 async function verifyJourney(page, vault, shot) {
@@ -1481,6 +1473,7 @@ async function verifyJourney(page, vault, shot) {
   const bodyText = '旅程正文：这条笔记从界面新建，正文由人输入。'
   const prompt = '把下面一句补到这篇：旅程补写一句。'
   const scratchPath = '旅程删除样张.md'
+  const scratchBody = '旅程删除样张正文：这一篇在本次旅程中新建，删前先确认它有内容。'
   const expectedRoot = ['一个特别特别长的笔记文件名用来验证省略号.md', '研究记录.md', '资料', '过程稿.md']
 
   const openMenu = async (selector) => {
@@ -1594,12 +1587,21 @@ async function verifyJourney(page, vault, shot) {
     const movedRead = located ? await noteText(movedPath) : null
     check('旅程：挪到资料后文件树位置正确、新路径可读', moved && located && existsSync(path.join(vault, '资料', renamedPath)) && String(movedRead).includes(bodyText), JSON.stringify({ movePreview, moved, located, tab: await activeRel() }))
     await shot(page, 'journey-moved-1200')
+    const journeyTabBefore = await page.eval(`(() => { const tab = document.querySelector('.tab[data-rel=${JSON.stringify(movedPath)}]'); return tab ? { label: tab.querySelector('.tab-label')?.textContent ?? '', title: tab.title } : null })()`)
 
     // 六、人删除：另建一篇旅程样张，右键删除 + 确认卡两步；旅程笔记留着做第七步的账本审计。
     //    旅程笔记本身不能在这里删：删掉后标签关闭，第七步就没有可打开的账本了。
     if (darwin) {
       await selectBrowserFolder(page, '')
+      const scratchWasAbsent = !existsSync(path.join(vault, scratchPath))
       const scratchCreated = await createNote('旅程删除样张')
+      let scratchRead = null
+      if (scratchCreated) {
+        await page.eval(`document.querySelector('.cm-content')?.focus()`)
+        await page.call('Input.insertText', { text: scratchBody })
+        const scratchSaved = await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(scratchPath)})).content.includes(${JSON.stringify(scratchBody)}))()`, 15000)
+        scratchRead = scratchSaved ? await noteText(scratchPath) : null
+      }
       const scratchInTree = scratchCreated && await waitFor(page, `!!document.querySelector('.tree-note[data-path=${JSON.stringify(scratchPath)}]')`, 10000)
       let menuOpened = false
       let confirmShown = false
@@ -1613,7 +1615,9 @@ async function verifyJourney(page, vault, shot) {
       const tabClosed = gone && await page.eval(`![...document.querySelectorAll('.tab')].some(tab => tab.dataset.rel === ${JSON.stringify(scratchPath)})`)
       const noticeOk = gone && await waitFor(page, `(document.querySelector('.status-host-notice')?.textContent ?? '').includes('笔记已移入系统废纸篓')`, 10000)
       const notice = await page.eval(`document.querySelector('.status-host-notice')?.textContent ?? ''`)
-      check('旅程：右键删除两步确认后树里消失、tab 关闭、废纸篓无异常', scratchCreated && scratchInTree && menuOpened && confirmShown && gone && tabClosed && noticeOk && !existsSync(path.join(vault, scratchPath)) && !/未能|未核验|孤儿/.test(notice), JSON.stringify({ scratchCreated, scratchInTree, menuOpened, confirmShown, gone, tabClosed, notice }))
+      const journeyTabAfter = await page.eval(`(() => { const tab = document.querySelector('.tab[data-rel=${JSON.stringify(movedPath)}]'); return tab ? { label: tab.querySelector('.tab-label')?.textContent ?? '', title: tab.title } : null })()`)
+      const journeyTabKept = !!journeyTabBefore && !!journeyTabAfter && journeyTabAfter.label === journeyTabBefore.label && journeyTabAfter.title === journeyTabBefore.title && journeyTabAfter.label === '旅程笔记改'
+      check('旅程：右键删除两步确认后树里消失、tab 关闭、废纸篓无异常', scratchWasAbsent && scratchCreated && String(scratchRead).includes(scratchBody) && scratchInTree && menuOpened && confirmShown && gone && tabClosed && journeyTabKept && noticeOk && !existsSync(path.join(vault, scratchPath)) && !/未能|未核验|孤儿/.test(notice), JSON.stringify({ scratchWasAbsent, scratchCreated, scratchSaved: String(scratchRead).includes(scratchBody), scratchInTree, menuOpened, confirmShown, gone, tabClosed, journeyTabKept, journeyTabBefore, journeyTabAfter, notice }))
       await shot(page, 'journey-trash-1200')
     } else {
       check('（跳过）旅程：人删除（当前平台没有删除入口）', true, `platform=${process.platform}`)
@@ -1622,8 +1626,11 @@ async function verifyJourney(page, vault, shot) {
     // 七、账本可审：回到旅程笔记打开账本，本章节与补写记录都在；关掉回正文。
     await selectBrowserFolder(page, '资料')
     const reopened = await page.eval(`(() => { const row = document.querySelector('.tree-note[data-path=${JSON.stringify(movedPath)}]'); if (!row) return false; row.click(); return true })()`) && await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(movedPath)}`)
+    // 先把焦点放回正文，再确认当前 tab 就是旅程笔记，避免上一步残留的树焦点带错对象。
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    const activeBeforeLedger = await page.eval(`document.querySelector('.tab[aria-selected=true]')?.dataset.rel ?? null`)
     await page.eval(`document.querySelector('.ledger-open')?.click()`)
-    const ledgerListed = reopened && await waitFor(page, `!!document.querySelector('.ledger-body details')`, 15000)
+    const ledgerListed = reopened && activeBeforeLedger === movedPath && await waitFor(page, `!!document.querySelector('.ledger-body details')`, 15000)
     if (ledgerListed) {
       await page.eval(`document.querySelectorAll('.ledger-body details').forEach(details => { details.open = true })`)
       await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`, 15000)
@@ -1631,7 +1638,7 @@ async function verifyJourney(page, vault, shot) {
     const ledgerText = await page.eval(`document.querySelector('.ledger-body')?.textContent ?? ''`)
     await page.eval(`document.querySelector('.ledger-close')?.click()`)
     const ledgerClosed = await waitFor(page, `document.querySelector('.ledger-view')?.hidden === true`, 10000)
-    check('旅程：账本本章节可见且含补写记录，关闭后回到正文', reopened && ledgerListed && ledgerText.includes('append_to_note') && ledgerText.includes('ok (1)') && ledgerText.includes('口令：把下面一句补到这篇') && ledgerClosed, ledgerText.slice(0, 260))
+    check('旅程：账本本章节可见且含补写记录，关闭后回到正文', reopened && activeBeforeLedger === movedPath && ledgerListed && ledgerText.includes('append_to_note') && ledgerText.includes('ok (1)') && ledgerText.includes('口令：把下面一句补到这篇') && ledgerClosed, JSON.stringify({ reopened, activeBeforeLedger, ledgerListed, ledgerClosed, text: ledgerText.slice(0, 220) }))
     await shot(page, 'journey-ledger-1200')
 
     // 八、收尾：没有残留浮层或任务；一次性库里只剩旅程笔记，删除样张已不在。
@@ -1645,7 +1652,7 @@ async function verifyJourney(page, vault, shot) {
     const finalRead = await noteText(movedPath)
     check('旅程：收尾无残留浮层与任务、笔记库无测试垃圾', endState.tasks === 0 && !endState.statusTask && endState.overlays === 0 && String(finalRead).includes(bodyText) && !existsSync(path.join(vault, scratchPath)) && JSON.stringify(rootNames) === JSON.stringify(expectedRoot) && JSON.stringify(movedNames) === JSON.stringify([renamedPath]), JSON.stringify({ endState, rootNames, movedNames }))
   } finally {
-    if (darwin) reclaimJourneyTrash()
+    // 删除样张已真实进系统废纸篓；这里不清理废纸篓，报告里如实写明。
   }
 }
 
