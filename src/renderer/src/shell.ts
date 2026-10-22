@@ -401,7 +401,7 @@ export async function start(root: HTMLElement): Promise<void> {
   const endedTaskIds = new Set<string>()
   // 最近一次联网事件（成功与被拒都更新，只用于提示文本）；只活到任务结束。
   // MCP 事件也是联网活动：另存 kind／server／tool，状态行按 `MCP <server>/<tool>` 显示。
-  type NetworkTaskState = { host: string; kind: 'fetch' | 'search' | 'mcp'; server?: string; tool?: string; bytes?: number; truncated?: boolean; reused?: boolean; at: string; outcome?: 'ok' | 'refused'; code?: string }
+  type NetworkTaskState = { host: string; kind: 'fetch' | 'search' | 'mcp'; server?: string; tool?: string; toolError?: boolean; bytes?: number; truncated?: boolean; reused?: boolean; at: string; outcome?: 'ok' | 'refused'; code?: string }
   const networkTasks = new Map<string, NetworkTaskState>()
   // 最近一次成功抓页／MCP 调用的预览 id；拒绝/搜索事件只改提示，不动它。
   // 记录 kind 是为了只在状态行与预览同源时才挂「查看」，避免把上一次抓页内容错配给这次 MCP 调用。
@@ -693,6 +693,7 @@ export async function start(root: HTMLElement): Promise<void> {
           host: network.host,
           kind: network.kind,
           ...(network.server !== undefined ? { server: network.server } : {}),
+          ...(network.toolError === true ? { toolError: true } : {}),
           ...(network.tool !== undefined ? { tool: network.tool } : {}),
           ...(typeof network.bytes === 'number' ? { bytes: network.bytes } : {}),
           ...(network.truncated ? { truncated: true } : {}),
@@ -1607,7 +1608,7 @@ export async function start(root: HTMLElement): Promise<void> {
       const target = `${network.server ?? '未知服务器'}/${network.tool ?? '未知工具'}`
       if (network.outcome === 'refused') return `MCP ${target}：未执行（${network.code ?? 'UNKNOWN'}）`
       const size = typeof network.bytes === 'number' ? `${(network.bytes / 1024).toFixed(1)} KB，` : ''
-      return `MCP ${target}：已执行（${size}低信任${network.truncated ? '，已截断' : ''}）`
+      return `MCP ${target}：已执行（${network.toolError ? '工具报错，' : ''}${size}低信任${network.truncated ? '，已截断' : ''}）`
     }
     if (network.outcome === 'refused') {
       return `联网：${network.host || '未授权'}（未执行：${network.code ?? 'UNKNOWN'}）`

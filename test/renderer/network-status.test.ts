@@ -83,3 +83,11 @@ describe('network status row', () => {
     await vi.waitFor(() => expect(document.querySelector('.overlay-network-preview')).not.toBeNull())
   })
 })
+
+describe('reused fetch status', () => {
+  it('says a reused fetch came from this task instead of pretending a fresh fetch', async () => {
+    await start(root)
+    emitNetwork({ taskId: 'task-1', kind: 'fetch', host: 'example.com', path: '/p', outcome: 'ok', bytes: 1234, reused: true, at: new Date().toISOString() })
+    expect(root.querySelector('.status-task-network')?.textContent ?? '').toContain('未再次外发')
+  })
+})

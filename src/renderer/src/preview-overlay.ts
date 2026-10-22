@@ -27,7 +27,7 @@ export function openNetworkPreview(view: NetworkPreviewView): Overlay {
   const notice = isMcp ? document.createElement('p') : null
   if (notice) {
     notice.className = 'network-preview-notice settings-hint'
-    notice.textContent = '外部只读内容，低信任，未核对；账本只记调用不记正文'
+    notice.textContent = '外部只读内容，低信任，未核对；账本只记调用不记正文；预览最多显示 32 KiB'
   }
 
   const body = document.createElement('pre')

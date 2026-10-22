@@ -326,6 +326,8 @@ export type AgentNetworkEvent = {
   /** 仅 MCP：服务器名与工具名。 */
   server?: string
   tool?: string
+  /** 仅 MCP：工具层返回了错误结果（调用本身成功，账本仍记 ok）。 */
+  toolError?: true
   /** 本次尝试的结局；旧事件没有该字段时按成功处理。 */
   outcome?: 'ok' | 'refused'
   /** 拒绝码（如 `EGRESS_INVALID_URL`／`NETWORK_NOT_AUTHORIZED`／`MCP_*`）；成功时没有。 */

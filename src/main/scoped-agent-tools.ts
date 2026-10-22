@@ -641,6 +641,7 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
             text: wrappedMcpContent({ server: request.server, tool: request.tool, text: result.text }),
             bytes: result.bytes,
             ...(result.truncated ? { truncated: true } : {}),
+            ...(result.isError ? { toolError: true as const } : {}),
             lowTrust: true as const
           }
         }

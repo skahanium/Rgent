@@ -141,7 +141,7 @@ describe('MCP status row', () => {
     })
     expect(overlay.querySelector('h2')!.textContent).toBe('MCP 示例服务器/read_page')
     expect(overlay.querySelector('.network-preview-text')!.textContent).toBe('外部结果正文。')
-    expect(overlay.querySelector('.network-preview-notice')!.textContent).toBe('外部只读内容，低信任，未核对；账本只记调用不记正文')
+    expect(overlay.querySelector('.network-preview-notice')!.textContent).toBe('外部只读内容，低信任，未核对；账本只记调用不记正文；预览最多显示 32 KiB')
   })
 
   it('clears the MCP status row and its stop button when the task ends', async () => {
@@ -153,5 +153,13 @@ describe('MCP status row', () => {
     expect(statusText()).toBeNull()
     expect(root.querySelector('.status-task-network-stop')).toBeNull()
     expect(root.querySelector('.status-task')).toBeNull()
+  })
+})
+
+describe('mcp status tool errors', () => {
+  it('marks a tool-level error result instead of claiming a clean execution', async () => {
+    await start(root)
+    emit({ network: { taskId: 'task-1', kind: 'mcp', host: 'mcp.example', path: '', server: 'deepwiki', tool: 'read', outcome: 'ok', bytes: 100, toolError: true, at: new Date().toISOString() } })
+    expect(statusText()).toContain('工具报错')
   })
 })

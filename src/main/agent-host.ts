@@ -1174,8 +1174,8 @@ export class AgentHost {
                 }else{value = await wait(scoped!.execute(call.name, call.input, signal));successfulLibraryTool=true}
                 // MCP 成功：一次尝试一条账本与一条事件，带字节数；参数与正文都不进。
                 if (call.name === 'mcp_call' && mcpAttempt) {
-                  const result = value as { bytes?: unknown; truncated?: unknown }
-                  const extra = { ...(typeof result.bytes === 'number' ? { bytes: result.bytes } : {}), ...(result.truncated === true ? { truncated: true } : {}) }
+                  const result = value as { bytes?: unknown; truncated?: unknown; toolError?: unknown }
+                  const extra = { ...(typeof result.bytes === 'number' ? { bytes: result.bytes } : {}), ...(result.truncated === true ? { truncated: true } : {}), ...(result.toolError === true ? { toolError: true as const } : {}) }
                   // 只有成功且这次确实存进预览时才给 id（界面据此出「查看」）。
                   const previewId = lastMcpPreview && lastMcpPreview.server === mcpAttempt.server && lastMcpPreview.tool === mcpAttempt.tool ? lastMcpPreview.id : undefined
                   lastMcpPreview = undefined

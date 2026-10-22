@@ -106,7 +106,7 @@ describe('MCP preview overlay', () => {
     const overlay = show(mcp({ text: '<img src=x onerror="window.__mcpPwned=1">结果' }))
     expect(overlay.root.querySelector('h2')!.textContent).toBe('MCP deepwiki/read_page')
     expect(overlay.root.querySelector('.network-preview-meta')!.textContent).toContain('来源：MCP deepwiki/read_page')
-    expect(overlay.root.querySelector('.network-preview-notice')!.textContent).toBe('外部只读内容，低信任，未核对；账本只记调用不记正文')
+    expect(overlay.root.querySelector('.network-preview-notice')!.textContent).toBe('外部只读内容，低信任，未核对；账本只记调用不记正文；预览最多显示 32 KiB')
     const pre = overlay.root.querySelector('pre')!
     expect(pre.textContent).toBe('<img src=x onerror="window.__mcpPwned=1">结果')
     expect(overlay.root.querySelector('img')).toBeNull()
