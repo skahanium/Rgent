@@ -1692,13 +1692,13 @@ function registerIpc(): void {
     if (!request?.name) throw new Error('BAD_PATH')
     if (!vault) throw new Error('NO_VAULT')
     if (request.sessionId !== undefined) vault.assertSession(request.sessionId)
-    return vault.create(request.name, request.parent)
+    return vault.create(request.name, request.parent, { humanInitiated: true })
   })
   registerTrustedHandle(IPC.folderCreate, async (_event, value: unknown) => {
     const request = parseEntryCreateRequest(value)
     if (!request || !vault) throw new Error('BAD_PATH')
     if (request.sessionId !== undefined) vault.assertSession(request.sessionId)
-    return vault.createFolder(request.name, request.parent)
+    return vault.createFolder(request.name, request.parent, { humanInitiated: true })
   })
   registerTrustedHandle(IPC.relocationPreview, async (event, value: unknown): Promise<RelocationPreviewResult> => {
     const request = parseRelocationPreviewRequest(value)

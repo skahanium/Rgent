@@ -56,7 +56,7 @@ const LIFECYCLE_ERRORS: Record<string, string> = {
   PREVIOUS_TASK_UNSAVED: '运行任务的内容尚未保存，请先处理再修改文件位置。',
   LIFECYCLE_RECOVERY_REQUIRED: '文件操作中断且无法自动核对。恢复记录仍在库中；AI 访问已暂停，请人工检查。',
   STRUCTURE_BUSY: '另一个文件位置操作正在进行，请稍后重试。',
-  PATH_RESERVED: '这个路径的原笔记曾在库外消失，核验恢复前这个名字被保留、不能复用。原对象还在系统废纸篓时，请原样放回后在设置「笔记库」重扫核验；原对象已不在废纸篓时核验不可能通过，这个名称只能靠整库恢复或人工处理。',
+  PATH_RESERVED: '这个路径的原笔记曾在库外消失。现在从界面新建同名笔记会直接接替它，旧记录转为历史；如果更想找回原对象，请把它原样放回后在设置「笔记库」重扫核验。',
   PLATFORM_UNPROVEN: '这台电脑上的系统废纸篓还没有可证明的删除实现，没有执行删除。',
   PATH_CHANGED: '文件在确认前被换掉了，没有删除。请重新查看后再试。',
   TRASH_CONFLICT: '删除后原路径又出现了另一个对象，这次不能当成功。请到系统废纸篓核对本次落点；新出现的对象要你自己确认，别把它当成刚删的笔记。',
@@ -1306,7 +1306,7 @@ export async function start(root: HTMLElement): Promise<void> {
           : await window.rgent.folderCreate({ name, parent, sessionId })
         if (epoch !== vaultEpoch || sessionId !== vaultSession) return
         await refreshTree()
-        if (action === 'new-note') await openNote(created)
+        if (action === 'new-note') await openCreatedNote(created)
         return
       }
       if (action === 'trash') {
@@ -2152,6 +2152,75 @@ export async function start(root: HTMLElement): Promise<void> {
     tab.dirty = false
   }
 
+  /** 旧文件消失后，人又建了同名笔记：不能把新正文交给还占着该路径的坏 tab。
+   *  先把旧窗口稿另存为同目录兄弟笔记，再关掉坏 tab、打开新笔记；任何一步失败都保留旧 tab。 */
+  async function openCreatedNote(created: string): Promise<void> {
+    const held = tabs.find(tab => tab.relPath === created && tab.availability)
+    if (!held) { await openNote(created); return }
+    const epoch = vaultEpoch
+    const session = vaultSession
+    const body = held.relPath === active ? editor.getText() : held.content
+    let copyPath: string | null = null
+    if (body.length > 0) {
+      try {
+        copyPath = await saveDraftBeside(created, body, epoch)
+      } catch {
+        if (epoch !== vaultEpoch || session !== vaultSession || !tabs.includes(held)) return
+        hostNotice = '同名笔记已建立，但旧标签仍占用该路径，请关闭旧标签后重新打开'
+        updateStatus()
+        // 新文件已经存在，失败时也要让人在树里看见它；旧 tab 和旧稿原样保留。
+        await refreshTree()
+        return
+      }
+      if (epoch !== vaultEpoch || session !== vaultSession || !tabs.includes(held)) return
+    }
+    await closeTab(created, { save: false })
+    hostNotice = copyPath ? `旧稿已另存为 ${copyPath}；原标签已关闭。` : '原标签窗口稿为空，已关闭。'
+    updateStatus()
+    await refreshTree()
+    await openNote(created)
+  }
+
+  function restoredDraftName(stem: string, attempt: number): string {
+    return attempt === 0 ? `${stem}（恢复的旧稿）` : `${stem}（恢复的旧稿 ${attempt + 1}）`
+  }
+
+  function isCreateCollision(error: unknown): boolean {
+    const text = error instanceof Error ? error.message : String(error)
+    return text.includes('EEXIST') || text.includes('已有同名笔记')
+  }
+
+  /** 把旧稿写成同目录的兄弟笔记；名字被占就从「… 2」试到「… 5」。 */
+  async function saveDraftBeside(created: string, body: string, epoch: number): Promise<string> {
+    const session = vaultSession
+    if (!session) throw Error('VAULT_CHANGED')
+    const slash = created.lastIndexOf('/')
+    const parent = slash < 0 ? '' : created.slice(0, slash)
+    const stem = created.slice(slash + 1).replace(/\.md$/i, '')
+    let lastError: unknown
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      let target: string
+      try {
+        target = await window.rgent.noteCreateAt({ name: restoredDraftName(stem, attempt), parent, sessionId: session })
+      } catch (error) {
+        lastError = error
+        if (isCreateCollision(error)) continue
+        throw error
+      }
+      if (epoch !== vaultEpoch || session !== vaultSession) throw Error('VAULT_CHANGED')
+      const source = await window.rgent.noteRead(target)
+      if (epoch !== vaultEpoch || session !== vaultSession || source.sessionId !== session) throw Error('VAULT_CHANGED')
+      const result = await window.rgent.noteWrite({
+        sessionId: source.sessionId, objectVersion: source.objectVersion, relPath: target,
+        content: body, expectedRevision: source.revision
+      })
+      if (epoch !== vaultEpoch || session !== vaultSession) throw Error('VAULT_CHANGED')
+      if (!result.ok) throw Error(result.error)
+      return target
+    }
+    throw lastError ?? Error('EEXIST')
+  }
+
   async function createNote(): Promise<void> {
     let state = await window.rgent.vaultGet()
     if (state.status !== 'ready') {
@@ -2170,7 +2239,7 @@ export async function start(root: HTMLElement): Promise<void> {
       const relPath = await window.rgent.noteCreateAt({ name, parent, sessionId })
       if (epoch !== vaultEpoch || sessionId !== vaultSession) return
       await refreshTree()
-      await openNote(relPath)
+      await openCreatedNote(relPath)
     } catch (err) {
       window.alert(lifecycleErrorText(err))
     }

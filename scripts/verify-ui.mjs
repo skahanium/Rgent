@@ -1074,7 +1074,7 @@ async function verifyMcpOnly(page, vault, shot, requests) {
 }
 
 /** 外部消失与恢复核验专项（RGENT_UI_RECOVERY_ONLY=1）：在专用临时库里真删真放回，逐条走
- *  「识别与如实呈现／原路径不可重建／核验通过／内容已变／附件缺失／设置页无删除入口」六条判据。
+ *  「识别与如实呈现／人原地重建同名笔记／核验通过／内容已变／附件缺失／设置页无删除入口」六条判据。
  *  模型只用来做登记场与恢复后复跑，全部走受控主机，零真实调用。 */
 async function verifyExternalRecovery(page, vault, staging, shot, requests, shotDir) {
   const modifier = process.platform === 'darwin' ? 4 : 2
@@ -1093,8 +1093,8 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
   mkdirSync(at('恢复丙'))
   writeFileSync(path.join(at('恢复丙'), '附件.txt'), '受控附件内容。\n')
   const evidence = { dialogs: [], menus: {}, scans: [] }
-  // 原生 alert 是「同名新建被拒」在界面上的唯一落点：只截获并立刻确认它，判据读的是
-  // 应用自己交给人的那句话，不替换、不改写文案。
+  // 原生 alert 只作兜底：路径保留放行后人新建同名笔记应当直接成功、不该再弹拒绝文案。
+  // 仍截获并立刻确认，避免自动化被原生对话框卡死；dialog 只进 evidence 供诊断，不作断言。
   await page.call('Page.enable', {})
   page.onEvent = (message) => {
     if (message.method !== 'Page.javascriptDialogOpening') return
@@ -1220,24 +1220,9 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
     JSON.stringify({ tabWentUnavailable, notRecreated, treeHasNoGhost, draftRestored, row: missingRow.row, message: missingRow.panel?.message }))
   await shot(page, 'recovery-missing-settings-1200')
 
-  // 二、原路径不可重建：同名新建被拒，界面给的是可读、且不指向不可能完成核验的那句话。
+  // 二、按原身份放回（同 inode）：核验未过之前它仍不是可用的原对象。
+  // 重扫停在设置页，先离开它：下面看的是目录树上的标记与编辑器里的不可用提示。
   await leaveSettings()
-  await selectBrowserFolder(page, '')
-  const filesBefore = readdirSync(vault).filter((name) => name.endsWith('.md')).sort()
-  await page.eval(`document.querySelector('.tab-new').click()`)
-  if (!await waitFor(page, `!!document.querySelector('dialog[open] input')`)) throw Error('新建笔记的人确认框没有出现')
-  await page.eval(`(() => { const dialog = document.querySelector('dialog[open]'); const input = dialog.querySelector('input'); input.value = '恢复甲'; input.dispatchEvent(new Event('input', { bubbles: true })); dialog.querySelector('button[value=ok]').click() })()`)
-  for (let attempt = 0; attempt < 40 && !evidence.dialogs.length; attempt += 1) await sleep(250)
-  const refusal = evidence.dialogs[0] ?? ''
-  const filesAfter = readdirSync(vault).filter((name) => name.endsWith('.md')).sort()
-  check('原路径不可重建：同名新建被拒 PATH_RESERVED，界面文案不指向不可能完成的核验',
-    evidence.dialogs.length === 1 &&
-      refusal.includes('不能复用') && refusal.includes('核验不可能通过') && refusal.includes('整库恢复或人工处理') && !refusal.includes('PATH_RESERVED') &&
-      !existsSync(at('恢复甲.md')) && JSON.stringify(filesAfter) === JSON.stringify(filesBefore),
-    JSON.stringify({ dialogs: evidence.dialogs, filesBefore, filesAfter }))
-  await shot(page, 'recovery-path-reserved-1200')
-
-  // 三、按原身份放回（同 inode）：核验未过之前它仍不是可用的原对象。
   const inodeRestored = inodeOf(parked('恢复甲.md'))
   renameSync(parked('恢复甲.md'), at('恢复甲.md'))
   if (inodeOf(at('恢复甲.md')) !== inodeRestored) throw Error('夹具放回后 inode 变了，构造不出同身份恢复')
@@ -1254,7 +1239,7 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
     JSON.stringify({ pendingMarked, stillUnavailable, suspendedRead, row: restorableRow.row }))
   await shot(page, 'recovery-pending-row-1200')
 
-  // 四、核验通过：点「核验并恢复」，记录清除、树标记消失、tab 与来源恢复可用。
+  // 三、核验通过：点「核验并恢复」，记录清除、树标记消失、tab 与来源恢复可用。
   await page.eval(`document.querySelector('[data-recovery-confirm="恢复甲.md"]').click()`)
   await waitFor(page, `document.querySelector('.settings-main .vault-settings')?.getAttribute('aria-busy') === 'false'`, 30000)
   const clearedRows = await waitFor(page, `(() => { const section = [...document.querySelectorAll('.settings-main section')].find(node => node.querySelector('h3')?.textContent === '外部消失与恢复核验'); return !!section && section.querySelectorAll('li').length === 0 })()`, 20000)
@@ -1270,6 +1255,57 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
     clearedRows && confirmMessage.includes('核验通过') && confirmMessage.includes('来源恢复可用') && treeMarkerGone && tabUsable && readWorks && rerun === true && answeredTwice,
     JSON.stringify({ clearedRows, confirmMessage, treeMarkerGone, tabUsable, readWorks, rerun, answeredTwice }))
   await shot(page, 'recovery-restored-1200')
+
+  // 四、人原地重建同名笔记（路径保留放行）：旧记录不再占着名字拦人，人用原名字新建应当成功；
+  // 旧记录转为历史，重扫后不再出现在「待恢复」。这一步放在甲的恢复核验之后，甲的路径不参与。
+  // 丁登记进账本后移出库外，留着它的不可用 tab 当当前 tab 去新建：产品会先把旧窗口稿另存为
+  // 同目录兄弟笔记（名字见 shell.ts 的 restoredDraftName），再关旧 tab、开新 tab；副本随临时库删除。
+  writeFileSync(at('恢复丁.md'), '# 恢复丁\n\n受控原正文，用来核对同名重建。\n')
+  const registeredD = await register('恢复丁.md', '恢复登记丁')
+  if (registeredD !== true) throw Error('丁没有登记进账本：' + registeredD)
+  renameSync(at('恢复丁.md'), parked('恢复丁.md'))
+  if (!await waitFor(page, `document.querySelector('.note-unavailable:not([hidden]) span')?.textContent === '文件已消失，窗口稿已保留；原路径不会重建。'`, 30000)) throw Error('丁消失后 tab 没有进入不可用')
+  // 先证明旧记录真的在：否则「不再出现」只是空断言。
+  const scannedD0 = await rescan()
+  if (scannedD0 !== true) throw Error('设置「笔记库」页没能重扫核验：' + scannedD0)
+  const missingD = await rowFor('恢复丁.md')
+  await leaveSettings()
+  // 不切走：丁的不可用 tab 必须保持当前 tab，重建才会走「旧稿另存、关旧 tab、开新 tab」那条路。
+  const heldBefore = await page.eval(`document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '恢复丁.md' && document.querySelector('.note-unavailable')?.hidden === false`)
+  if (!heldBefore) throw Error('丁的不可用 tab 没有保持为当前 tab')
+  await selectBrowserFolder(page, '')
+  await page.eval(`document.querySelector('.tab-new').click()`)
+  if (!await waitFor(page, `!!document.querySelector('dialog[open] input')`)) throw Error('新建笔记的人确认框没有出现')
+  await page.eval(`(() => { const dialog = document.querySelector('dialog[open]'); const input = dialog.querySelector('input'); input.value = '恢复丁'; input.dispatchEvent(new Event('input', { bubbles: true })); dialog.querySelector('button[value=ok]').click() })()`)
+  const dingFile = await waitFor(page, `window.rgent.noteRead('恢复丁.md').then(() => true, () => false)`, 30000)
+  const dingTree = await waitFor(page, `!!document.querySelector('.tree-note[data-path="恢复丁.md"]')`, 20000)
+  // 旧 tab 还占着时横幅不会消失；先等横幅消失（旧 tab 已关），再确认当前 tab 是丁（新 tab 已打开）。
+  const dingUsable = await waitFor(page, `document.querySelector('.note-unavailable')?.hidden === true`, 20000)
+  const dingTab = await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '恢复丁.md'`, 20000)
+  const dingIdle = await page.eval(`document.querySelector('.note-unavailable')?.hidden === true`)
+  // 编辑器可编辑：真敲一段，等它落盘到新笔记。
+  await page.eval(`document.querySelector('.cm-content')?.cmTile?.root?.view?.focus()`)
+  await page.call('Input.insertText', { text: '重建后的正文。' })
+  const typedInEditor = await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').includes('重建后的正文。')`, 10000)
+  const typedSaved = await waitFor(page, `window.rgent.noteRead('恢复丁.md').then(note => note.content.includes('重建后的正文。'), () => false)`, 20000)
+  // 旧窗口稿是产品行为（保留窗口稿），另存为同目录兄弟笔记；副本随临时库一起删除，不额外清理。
+  const draftCopy = '恢复丁（恢复的旧稿）.md'
+  const draftCopyFile = await waitFor(page, `window.rgent.noteRead(${JSON.stringify(draftCopy)}).then(() => true, () => false)`, 20000)
+  const draftCopyTree = await waitFor(page, `!!document.querySelector('.tree-note[data-path=${JSON.stringify(draftCopy)}]')`, 20000)
+  const draftCopyContent = await page.eval(`window.rgent.noteRead(${JSON.stringify(draftCopy)}).then(note => note.content, () => null)`)
+  const scannedD1 = await rescan()
+  if (scannedD1 !== true) throw Error('设置「笔记库」页没能重扫核验：' + scannedD1)
+  const dingRowAfter = await rowFor('恢复丁.md')
+  check('恢复：人原地重建同名笔记成功且旧记录不再拦人',
+    missingD.row?.verdict === 'still-missing' && heldBefore && existsSync(at('恢复丁.md')) &&
+      dingFile && dingTree && dingUsable && dingTab && dingIdle && typedInEditor && typedSaved && dingRowAfter.row === null,
+    JSON.stringify({ disappearedRow: missingD.row, heldBefore, exists: existsSync(at('恢复丁.md')), dingFile, dingTree, dingUsable, dingTab, dingIdle, typedInEditor, typedSaved, rowAfter: dingRowAfter.row, dialogs: evidence.dialogs }))
+  check('恢复：重建同名笔记时旧窗口稿另存为兄弟笔记且内容保住',
+    existsSync(at(draftCopy)) && draftCopyFile && draftCopyTree &&
+      typeof draftCopyContent === 'string' && draftCopyContent.includes('受控原正文，用来核对同名重建。'),
+    JSON.stringify({ copy: draftCopy, exists: existsSync(at(draftCopy)), noteRead: draftCopyFile, tree: draftCopyTree, content: typeof draftCopyContent === 'string' ? draftCopyContent.slice(0, 200) : draftCopyContent }))
+  await leaveSettings()
+  await shot(page, 'recovery-human-recreate-1200')
 
   // 五、内容已变：同 inode、同路径放回，但内容不同——不许冒充通过。
   await selectBrowserFolder(page, '')

@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { it, expect, vi } from 'vitest'
 import { VaultSession } from '../../src/main/vault.ts'
+import { VaultLifecycle } from '../../src/main/vault-lifecycle.ts'
 import { WorkingMemoryService } from '../../src/main/working-memory-service.ts'
 import { serializeStoredVault } from '../../src/main/notes-fs.ts'
 import { markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
@@ -44,7 +45,7 @@ async function moveOut(root: string, stash: string, relPath: string): Promise<vo
 async function moveBack(root: string, stash: string, relPath: string): Promise<void> {
   await rename(path.join(stash, relPath.replaceAll('/', '__')), path.join(root, relPath))
 }
-async function journal(root: string): Promise<{ version: number; active: unknown; missing?: unknown[] }> {
+async function journal(root: string): Promise<{ version: number; active: unknown; missing?: unknown[]; retired?: unknown[] }> {
   return JSON.parse(await readFile(path.join(root, '.rgent-lifecycle'), 'utf8'))
 }
 
@@ -77,7 +78,7 @@ it('registers an external disappearance as a lifecycle record reusing the existi
   } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
 })
 
-it('fails closed for the disappeared object: no rebuild of the path, sources invalid but never forgotten', async () => {
+it('keeps the default create path reserved and the sources invalid but never forgotten', async () => {
   const f = await fixture()
   try {
     const service = new WorkingMemoryService(f.vault, () => null)
@@ -94,10 +95,145 @@ it('fails closed for the disappeared object: no rebuild of the path, sources inv
     expect(paused?.reason).toBe('MEMORY_SOURCE_CHANGED')
     expect(f.vault.memorySnapshot().record.entries.some(item => item.id === entry.id)).toBe(true)
     await expect(f.vault.write('a.md', '草稿', hash(f.content), f.binding)).rejects.toThrow()
+    // 默认入口（无 humanInitiated 标记）行为不变：消失记录占着路径就拒，不重建。
     await expect(f.vault.create('a')).rejects.toThrow('PATH_RESERVED')
-    await expect(f.vault.createWithContent('a', '', '新正文')).rejects.toThrow('PATH_RESERVED')
     expect(await readdir(f.root)).toEqual(expect.arrayContaining(['a']))
     expect((await readdir(f.root)).filter(name => name === 'a.md')).toEqual([])
+    // 合同变更（有意）：人确认预览的「建」不再拒；它先退休旧记录再创建（详细断言见「建」放行用例）。
+    expect((await f.vault.createWithContent('a', '', '新正文')).relPath).toBe('a.md')
+    expect((await journal(f.root)).missing ?? []).toEqual([])
+  } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
+})
+
+it('lets a person recreate the same path, retiring the old record and leaving no recovery row', async () => {
+  const f = await fixture()
+  try {
+    const service = new WorkingMemoryService(f.vault, () => null)
+    const source = await service.sourceForPrompt('a.md', 'task')
+    await moveOut(f.root, f.stash, 'a.md')
+    expect((await f.vault.noteStatus('a.md', f.binding)).status).toBe('missing')
+    expect(await service.verifySource(source)).toBe(false)
+    // 人在原路径新建同名笔记：成功、不弹确认、旧记录退休而不是继续占着路径。
+    expect(await f.vault.create('a', '', { humanInitiated: true })).toBe('a.md')
+    const record = await journal(f.root)
+    expect(record.missing ?? []).toEqual([])
+    expect(record.retired).toHaveLength(1)
+    expect(record.retired![0]).toMatchObject({ relPath: 'a.md', reason: 'recreated' })
+    expect(Number.isFinite(Date.parse((record.retired![0] as { retiredAt: string }).retiredAt))).toBe(true)
+    const retired = new VaultLifecycle(f.root).retiredObjects()
+    expect(retired.map(item => item.relPath)).toEqual(['a.md'])
+    expect(retired[0]!.reason).toBe('recreated')
+    // 新对象是全新身份：可读可写，重扫不再把它列成待恢复。
+    const note = await f.vault.read('a.md')
+    expect(note.content).toBe('')
+    expect(await f.vault.write('a.md', '新正文', note.revision)).toMatch(/^[a-f0-9]{64}$/)
+    expect((await f.vault.read('a.md')).content).toBe('新正文')
+    expect((await f.vault.recoveryScan()).rows).toEqual([])
+    // 旧来源不因新对象出现而复活。
+    expect(await service.verifySource(source)).toBe(false)
+  } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
+})
+
+it('lets the confirmed create tool recreate the path and still refuses the old object', async () => {
+  const f = await fixture()
+  try {
+    await moveOut(f.root, f.stash, 'a.md')
+    expect((await f.vault.noteStatus('a.md', f.binding)).status).toBe('missing')
+    const created = await f.vault.createWithContent('a', '', '新正文')
+    expect(created.relPath).toBe('a.md')
+    expect(created.revision).toBe(hash('新正文'))
+    expect((await journal(f.root)).missing ?? []).toEqual([])
+    const retired = new VaultLifecycle(f.root).retiredObjects()
+    expect(retired).toHaveLength(1)
+    expect(retired[0]).toMatchObject({ relPath: 'a.md', reason: 'recreated' })
+    expect((await f.vault.recoveryScan()).rows).toEqual([])
+    expect((await f.vault.read('a.md')).content).toBe('新正文')
+    // 旧对象回来不静默覆盖：旧正文写回磁盘后，旧 binding 与旧 revision 都不再被接受。
+    await writeFile(path.join(f.root, 'a.md'), f.content)
+    expect((await f.vault.noteStatus('a.md', f.binding)).status).toBe('replaced')
+    await expect(f.vault.write('a.md', '旧草稿', hash(f.content), f.binding)).rejects.toThrow('NOTE_REPLACED')
+    expect(await readFile(path.join(f.root, 'a.md'), 'utf8')).toBe(f.content)
+  } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
+})
+
+it('lets a person create a folder that owns the vanished note name and retires its record', async () => {
+  const f = await fixture()
+  try {
+    await rm(path.join(f.root, 'a'), { recursive: true })
+    await moveOut(f.root, f.stash, 'a.md')
+    expect((await f.vault.noteStatus('a.md', f.binding)).status).toBe('missing')
+    // 同名附件夹与 `a.md` 是同一条记录；人新建文件夹同样退休它（默认入口两条都拒，见上一条用例）。
+    expect(await f.vault.createFolder('a', '', { humanInitiated: true })).toBe('a')
+    expect(await readdir(f.root)).toContain('a')
+    const record = await journal(f.root)
+    expect(record.missing ?? []).toEqual([])
+    expect(record.retired).toHaveLength(1)
+    expect(record.retired![0]).toMatchObject({ relPath: 'a.md', reason: 'recreated' })
+    expect(new VaultLifecycle(f.root).retiredObjects().map(item => item.relPath)).toEqual(['a.md'])
+  } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
+})
+
+it('keeps a retired identity out of recovery rows across repeated scans', async () => {
+  const f = await fixture()
+  try {
+    await rm(path.join(f.root, 'a'), { recursive: true })
+    await moveOut(f.root, f.stash, 'a.md')
+    expect((await f.vault.noteStatus('a.md', f.binding)).status).toBe('missing')
+    expect(await f.vault.createFolder('a', '', { humanInitiated: true })).toBe('a')
+    // 人已放弃这条旧身份（原笔记文件确实仍不在）：重扫不许把同版本的消失记录再造回活跃列表，
+    // 否则每次重扫都把已放弃的记录恢复成活跃死路，退休等于白做。
+    expect((await f.vault.recoveryScan()).rows).toEqual([])
+    expect((await f.vault.recoveryScan()).rows).toEqual([])
+    const record = await journal(f.root)
+    expect(record.missing ?? []).toEqual([])
+    expect(record.retired).toHaveLength(1)
+    expect(record.retired![0]).toMatchObject({ relPath: 'a.md', objectVersion: f.binding.objectVersion, reason: 'recreated' })
+  } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
+})
+
+it('still records a disappeared identity that is not the retired one', async () => {
+  const f = await fixture()
+  try {
+    await moveOut(f.root, f.stash, 'a.md')
+    expect((await f.vault.noteStatus('a.md', f.binding)).status).toBe('missing')
+    // 人重建同名笔记：旧身份（f.binding 的版本）退休，a.md 现在是一个新对象。
+    const created = await f.vault.createWithContent('a', '', '新正文')
+    expect(created.relPath).toBe('a.md')
+    // 旧对象被登记到另一个路径，旧 owner 随身份让位；新对象随后被任务登记（owner 版本=新对象）。
+    await rename(path.join(f.stash, 'a.md'), path.join(f.root, 'old.md'))
+    await f.vault.ledgerPrepare('old.md', { taskId: 'task-old', startedAt: new Date().toISOString(), status: 'completed', prompt: '旧对象', answer: '已登记' })
+    await f.vault.ledgerPrepare('a.md', { taskId: 'task-new', startedAt: new Date().toISOString(), status: 'completed', prompt: '新对象', answer: '已登记' })
+    // 新身份再次移出库外：版本与退休记录不同，仍按外部消失登记（抑制只对旧身份）。
+    await moveOut(f.root, f.stash, 'a.md')
+    await expect(f.vault.read('a.md')).rejects.toThrow('NOTE_MISSING')
+    const record = await journal(f.root)
+    expect(record.missing).toHaveLength(1)
+    expect((record.missing![0] as Record<string, unknown>).objectVersion).toBe(created.objectVersion)
+    expect(record.retired).toHaveLength(1)
+    expect((record.retired![0] as Record<string, unknown>).objectVersion).toBe(f.binding.objectVersion)
+    expect((await f.vault.recoveryScan()).rows.map(row => row.relPath)).toContain('a.md')
+  } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
+})
+
+it('rolls the retirement back when the create fails, keeping the record active', async () => {
+  const f = await fixture()
+  try {
+    const record = {
+      relPath: 'gone/a.md', noteId: 'note-gone', objectVersion: 'obj-gone', bodyRevision: hash('gone'),
+      attachments: [], rootIdentity: vaultRootIdentity(f.root), permissionTier: 'reference' as const,
+      detectedAt: '2026-10-22T00:00:00.000Z', cause: 'external' as const
+    }
+    await writeFile(path.join(f.root, '.rgent-lifecycle'), JSON.stringify({ version: 1, active: null, missing: [record] }))
+    // 父目录不存在：退休成功之后创建必然失败，回滚必须把记录放回活跃列表。
+    await expect(f.vault.create('a', 'gone', { humanInitiated: true })).rejects.toThrow()
+    const after = await journal(f.root)
+    expect(after.missing).toHaveLength(1)
+    expect((after.missing![0] as Record<string, unknown>).relPath).toBe('gone/a.md')
+    expect(after.retired ?? []).toEqual([])
+    expect(new VaultLifecycle(f.root).retiredObjects()).toEqual([])
+    await expect(f.vault.createWithContent('a', 'gone', '新正文')).rejects.toThrow()
+    expect((await journal(f.root)).missing).toHaveLength(1)
+    expect((await journal(f.root)).retired ?? []).toEqual([])
   } finally { f.vault.dispose(); await rm(f.base, { recursive: true, force: true }) }
 })
 
@@ -272,7 +408,11 @@ it('keeps PATH_RESERVED after the missing-record limit swallows a later disappea
     expect((await f.vault.noteStatus('a.md', f.binding)).status).toBe('missing')
     expect((await journal(f.root)).missing).toHaveLength(64)
     await expect(f.vault.create('a')).rejects.toThrow('PATH_RESERVED')
-    await expect(f.vault.createWithContent('a', '', '新正文')).rejects.toThrow('PATH_RESERVED')
+    // 合同变更（有意）：记录没能落盘（超限，只留在内存 reservedMissing），没有可退休的证据可移；
+    // 「建」仍拒，但改为如实上报恢复中断，而不是把无记录的路径当成 PATH_RESERVED。
+    await expect(f.vault.createWithContent('a', '', '新正文')).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+    expect((await journal(f.root)).missing).toHaveLength(64)
+    expect((await journal(f.root)).retired ?? []).toEqual([])
     await expect(f.vault.write('a.md', '草稿', hash(f.content), f.binding)).rejects.toThrow()
     expect(await readdir(f.root)).toEqual(expect.arrayContaining(['a']))
     expect((await readdir(f.root)).filter(name => name === 'a.md')).toEqual([])

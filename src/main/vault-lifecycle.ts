@@ -76,8 +76,12 @@ export type MissingObject = {
   detectedAt: string
   cause: 'external' | 'trash'
 }
-type Journal = { version: 1; active: PendingMove | PendingLedgerRepair | LedgerPublication | null; missing?: MissingObject[] }
+/** 人（含人工确认过的「建」）已在原路径重建同名对象：这条记录不再占路径，
+ *  移入有界的 `retired[]` 作为历史。旧对象之后回到同一路径也不会静默顶替新对象。 */
+export type RetiredObject = MissingObject & { retiredAt: string; reason: 'recreated' }
+type Journal = { version: 1; active: PendingMove | PendingLedgerRepair | LedgerPublication | null; missing?: MissingObject[]; retired?: RetiredObject[] }
 const MISSING_LIMIT = 64
+const RETIRED_LIMIT = 64
 
 function validPath(relPath: string, allowHidden = false): boolean {
   if (!relPath || relPath.startsWith('/') || relPath.includes('\\') || (!allowHidden && hasHiddenSegment(relPath))) return false
@@ -232,6 +236,69 @@ export class VaultLifecycle {
       if (missing.length >= MISSING_LIMIT) throw new Error('MISSING_RECORD_LIMIT')
       try {
         this.saveJournal({ version: 1, active: null, missing: [...missing, entry] }, raw)
+        return true
+      } catch (error) {
+        if (attempt === 2) throw error
+      }
+    }
+    return false
+  }
+
+  /** 人（含人工确认过的「建」）在原路径重建同名对象＝放弃旧对象的恢复核验：
+   *  记录从 `missing[]` 移入 `retired[]` 末尾，路径随即释放。`retired[]` 有界（最旧的先丢）。
+   *  与 `clearMissing` 同一套 CAS 与三次重试；有中断或记录不可读时按恢复中断拒绝。
+   *  找不到活跃记录（或原本就没有）返回 false，由调用方决定是否放行。 */
+  retireMissing(relPath: string, at: string): boolean {
+    this.assertCurrent()
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const raw = this.readOptional(JOURNAL)
+      const journal = parseJournal(raw)
+      if (journal.active) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      const missing = journal.missing ?? []
+      const item = missing.find((entry) => entry.relPath === relPath)
+      if (!item) return false
+      const retired = [...(journal.retired ?? []), { ...item, retiredAt: at, reason: 'recreated' as const }].slice(-RETIRED_LIMIT)
+      try {
+        this.saveJournal({ version: 1, active: null, missing: missing.filter((entry) => entry.relPath !== relPath), retired }, raw)
+        return true
+      } catch (error) {
+        if (attempt === 2) throw error
+      }
+    }
+    return false
+  }
+
+  /** 已退休（原路径被重建）的消失记录。只读；不参与 `hasMissing` 的占位判据。 */
+  retiredObjects(): RetiredObject[] {
+    this.assertCurrent()
+    return (this.loadJournal().retired ?? []).map((item) => structuredClone(item))
+  }
+
+  /** 创建失败时撤销一次退休：把同一项从 `retired[]` 放回 `missing[]`（若调用方已先按
+   *  `recordMissing` 写回活跃列表，则只撤销退休项）。单次 CAS 写完两处，不留下
+   *  「既活跃又退休」的矛盾记录，也不让证据随失败的创建一起消失。
+   *  找不到对应退休项返回 false；写回失败抛错，由调用方按恢复中断处理。 */
+  restoreRetired(retired: RetiredObject): boolean {
+    this.assertCurrent()
+    const { retiredAt, reason: _reason, ...original } = retired
+    if (!validMissing(original)) throw new Error('BAD_REQUEST')
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const raw = this.readOptional(JOURNAL)
+      const journal = parseJournal(raw)
+      if (journal.active) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      const entries = journal.retired ?? []
+      let index = -1
+      for (let probe = entries.length - 1; probe >= 0; probe -= 1) {
+        if (entries[probe]!.relPath === retired.relPath && entries[probe]!.retiredAt === retiredAt) { index = probe; break }
+      }
+      if (index < 0) return false
+      const missing = journal.missing ?? []
+      const present = missing.some((item) => item.relPath === original.relPath)
+      const restored = present ? missing : [...missing, original]
+      if (!present && restored.length > MISSING_LIMIT) throw new Error('MISSING_RECORD_LIMIT')
+      try {
+        this.saveJournal({ version: 1, active: null, missing: restored,
+          retired: [...entries.slice(0, index), ...entries.slice(index + 1)] }, raw)
         return true
       } catch (error) {
         if (attempt === 2) throw error
@@ -607,12 +674,22 @@ export class VaultLifecycle {
   }
 
   private saveJournal(next: Journal, expected = this.readOptional(JOURNAL)): string {
-    // 外部消失记录不随移动／账本恢复的 journal 重写而消失；调用方显式给出 missing 时以它为准。
+    // 外部消失记录与退休历史不随移动／账本恢复／其它记录重写而消失；调用方显式给出时以它为准。
     let preserved = next.missing
-    if (preserved === undefined) {
-      try { preserved = parseJournal(expected).missing } catch { preserved = [] }
+    let retired = next.retired
+    if (preserved === undefined || retired === undefined) {
+      try {
+        const prior = parseJournal(expected)
+        if (preserved === undefined) preserved = prior.missing
+        if (retired === undefined) retired = prior.retired
+      } catch {
+        if (preserved === undefined) preserved = []
+        if (retired === undefined) retired = []
+      }
     }
     const payload: Journal = { ...next, ...(preserved?.length ? { missing: preserved } : {}) }
+    if (retired?.length) payload.retired = retired
+    else delete payload.retired
     const raw = `${JSON.stringify(payload)}\n`
     secureFsFor(this.root).replace(JOURNAL, expected, raw)
     return raw
@@ -748,9 +825,15 @@ function parseJournal(raw: string | null): Journal {
       throw new Error('BAD_JOURNAL')
     }
     const missing = (parsed as Journal).missing
-    if (missing !== undefined && (!Array.isArray(missing) || missing.length > MISSING_LIMIT || !missing.every(validMissing) ||
+    if (missing !== undefined && (!Array.isArray(missing) || missing.length > MISSING_LIMIT || !missing.every((item) => validMissing(item)) ||
         new Set(missing.map((item) => item.relPath)).size !== missing.length)) throw new Error('BAD_JOURNAL')
-    return { version: 1, active: (parsed as Journal).active, ...(missing?.length ? { missing } : {}) }
+    const retired = (parsed as Journal).retired
+    // 退休是历史，允许同一路径多次出现；但形状、上限与原因必须可校验，未知 reason 一律拒收。
+    if (retired !== undefined && (!Array.isArray(retired) || retired.length > RETIRED_LIMIT || !retired.every(validRetired))) {
+      throw new Error('BAD_JOURNAL')
+    }
+    return { version: 1, active: (parsed as Journal).active,
+      ...(missing?.length ? { missing } : {}), ...(retired?.length ? { retired } : {}) }
   } catch { throw new Error('LIFECYCLE_RECOVERY_REQUIRED') }
 }
 
@@ -838,10 +921,10 @@ function validPending(value: unknown): value is PendingMove {
     typeof item.repairLinks === 'boolean'
 }
 
-function validMissing(value: unknown): value is MissingObject {
+function validMissing(value: unknown, extraKeys: readonly string[] = []): value is MissingObject {
   if (!value || typeof value !== 'object') return false
   const item = value as MissingObject
-  const keys = ['attachments', 'bodyRevision', 'detectedAt', 'noteId', 'objectVersion', 'permissionTier', 'relPath', 'rootIdentity']
+  const keys = ['attachments', 'bodyRevision', 'detectedAt', 'noteId', 'objectVersion', 'permissionTier', 'relPath', 'rootIdentity', ...extraKeys]
   if ('cause' in item) keys.push('cause')
   if (Object.keys(item).sort().join() !== keys.sort().join()) return false
   return validPath(item.relPath) && isNotePath(item.relPath) &&
@@ -858,6 +941,13 @@ function validMissing(value: unknown): value is MissingObject {
       typeof part.relPath === 'string' && !part.relPath.split('/').some((name) => !name || name === '.' || name === '..') &&
       ((part.kind === 'dir' && part.hash === undefined) ||
         (part.kind === 'file' && typeof part.hash === 'string' && /^[a-f0-9]{64}$/.test(part.hash))))
+}
+
+function validRetired(value: unknown): value is RetiredObject {
+  // 退休项 = 一条完整的消失记录＋退休时间与原因；没有 `reason` 或未知原因都不算历史。
+  if (!validMissing(value, ['retiredAt', 'reason'])) return false
+  const item = value as Partial<RetiredObject>
+  return typeof item.retiredAt === 'string' && Number.isFinite(Date.parse(item.retiredAt)) && item.reason === 'recreated'
 }
 
 function validPermissionRaw(raw: unknown): raw is string | null {

@@ -10,7 +10,7 @@ import { dialog, type BrowserWindow } from 'electron'
 import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, RecoveryRow, RecoveryScanView, RecoveryVerdict, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
 import { createFolder, createNote, createNoteWithBody, listVaultTree, parseStoredVault, readNoteSnapshot, requireOrdinaryNotes as verifyOrdinaryNotes, revisionOf, serializeStoredVault, writeNote } from './notes-fs.ts'
 import { VaultMutationQueue } from './vault-mutation-queue.ts'
-import { VaultLifecycle, type MissingObject, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite, type TrashPreview } from './vault-lifecycle.ts'
+import { VaultLifecycle, type MissingObject, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite, type RetiredObject, type TrashPreview } from './vault-lifecycle.ts'
 import { sameRootInode } from './vault-catalog.ts'
 import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 import { isOwnEcho, type RecentWrite } from './echo.ts'
@@ -530,6 +530,11 @@ export class VaultSession {
       // 只有已登记身份的对象才有可核验的记录；未登记笔记消失不造记录。
       try { owners = ledger.recoveryOwners().owners } catch { return }
       const owner = owners.find((item) => item.relPath === relPath)
+      // 人已在原路径重建同名对象并退休的旧身份不再登记「外部消失」：否则每次重扫都会把
+      // 已放弃的记录又造回活跃列表，路径重新变成死路，退休等于白做。
+      // 判据只看登记身份：owner 的 objectVersion 变了（换了新对象／旧对象已更新并以新版本登记）
+      // 时不抑制，新身份的消失照常登记。拿不到 owner 版本时按「同路径有退休记录就抑制」保守处理。
+      if (this.retiredIdentity(relPath, owner?.objectVersion ?? null)) return
       if (!owner) return
       observed = true
       const snapshot = await loadPermissionSnapshot(root)
@@ -549,6 +554,17 @@ export class VaultSession {
     }
   }
 
+  /** 人已放弃的旧身份：`retired[]` 里同路径、且（有可比版本时）同对象版本的记录。
+   *  有可比版本却对不上，说明登记身份已经换了对象，不能抑制新身份的消失。
+   *  拿不到可比版本（没有 owner 条目／账本暂时读不出身份）时保守按「同路径有退休记录」抑制：
+   *  宁可不重复登记，也不把已放弃的旧记录造回活跃列表；此时本来也不会为新对象建档，
+   *  所以这条保守分支不会吞掉一次真正的登记。退休历史读不出来则不抑制，继续按失败关闭处理。 */
+  private retiredIdentity(relPath: string, objectVersion: string | null): boolean {
+    let retired: RetiredObject[]
+    try { retired = this.lifecycle?.retiredObjects() ?? [] } catch { return false }
+    return retired.some((item) => item.relPath === relPath && (objectVersion === null || item.objectVersion === objectVersion))
+  }
+
   /** 消失的对象在被核验恢复前占着自己的路径：同路径新建会顶替它的身份，一律拒绝。 */
   private refuseReservedPath(name: string, parent: string): void {
     const fileName = sanitizeNoteName(name)
@@ -563,6 +579,48 @@ export class VaultSession {
   private refuseReservedFolder(name: string, parent: string): void {
     const folderName = sanitizeFolderName(name)
     if (this.missingRecord(parent ? `${parent}/${folderName}.md` : `${folderName}.md`)) throw new Error('PATH_RESERVED')
+  }
+
+  /** 人在原路径新建同名笔记＝同意放弃旧对象的恢复核验：记录先退休，再创建。
+   *  没有记录时什么都不做；记录在案却退休不了（含只登记在内存 `reservedMissing` 的情况）
+   *  按恢复中断拒绝，绝不在有证据的情况下静默放行覆盖。 */
+  private retireReservedNote(name: string, parent: string): RetiredObject | null {
+    const fileName = sanitizeNoteName(name)
+    return this.retireReserved(parent ? `${parent}/${fileName}` : fileName)
+  }
+
+  /** 同名附件夹也对应 `<stem>.md` 这条记录：人新建它同样是放弃旧对象。 */
+  private retireReservedFolder(name: string, parent: string): RetiredObject | null {
+    const folderName = sanitizeFolderName(name)
+    return this.retireReserved(parent ? `${parent}/${folderName}.md` : `${folderName}.md`)
+  }
+
+  private retireReserved(relPath: string): RetiredObject | null {
+    if (!this.missingRecord(relPath)) return null
+    const lifecycle = this.lifecycle
+    if (!lifecycle) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+    const at = new Date().toISOString()
+    if (!lifecycle.retireMissing(relPath, at)) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+    this.reservedMissing.delete(relPath)
+    const retired = lifecycle.retiredObjects().find((item) => item.relPath === relPath && item.retiredAt === at)
+    if (!retired) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+    return retired
+  }
+
+  /** 创建失败时把刚退休的记录放回活跃列表：先按既有登记入口 `recordMissing` 写回（形状必须过
+   *  `validMissing`），再撤销这次退休项。写回失败按恢复中断上报，不静默丢证据；两步之间崩溃时
+   *  记录已经在活跃列表（路径继续占着，失败关闭），最多留下一条多余的退休历史，不会丢证据。 */
+  private restoreRetired(reserved: readonly RetiredObject[]): void {
+    if (!reserved.length) return
+    const lifecycle = this.lifecycle
+    if (!lifecycle) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+    for (const item of reserved) {
+      const { retiredAt: _retiredAt, reason: _reason, ...original } = item
+      try { lifecycle.recordMissing(original) } catch { throw new Error('LIFECYCLE_RECOVERY_REQUIRED') }
+      try {
+        if (!lifecycle.restoreRetired(item)) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      } catch { throw new Error('LIFECYCLE_RECOVERY_REQUIRED') }
+    }
   }
 
   /** 只读重扫：清点外部消失的记录，给出核验判据的分支结论。 */
@@ -1031,12 +1089,23 @@ export class VaultSession {
     return identity
   }
 
-  async create(name: string, parent = ''): Promise<string> {
+  /** `options.humanInitiated` 只由人用的新建入口设置：人确实在原路径重新建同名对象时，
+   *  旧记录退休（不再占路径）并照常创建；默认（AI／无标记调用）行为不变，路径被占仍拒。 */
+  async create(name: string, parent = '', options: { humanInitiated?: boolean } = {}): Promise<string> {
     const token = this.captureSession(); const root = this.requireUsableRoot()
     const relPath = await this.mutations.run(async () => {
       this.assertSession(token); this.requireUsableRoot()
-      this.refuseReservedPath(name, parent)
-      return createNote(root, name, parent)
+      const reserved: RetiredObject[] = []
+      try {
+        if (options.humanInitiated) {
+          const retired = this.retireReservedNote(name, parent)
+          if (retired) reserved.push(retired)
+        } else this.refuseReservedPath(name, parent)
+        return await createNote(root, name, parent)
+      } catch (error) {
+        this.restoreRetired(reserved)
+        throw error
+      }
     })
     this.assertSession(token); this.requireUsableRoot()
     this.index.markDirty()
@@ -1044,15 +1113,26 @@ export class VaultSession {
   }
 
   /** 「建」的原子落地：正文与文件一次出现（库层排他创建），写失败不留空笔记。
-   *  走与 `create` 同一条写入队列与索引失效，不新增删除路径来回收半成品。 */
+   *  走与 `create` 同一条写入队列与索引失效，不新增删除路径来回收半成品。
+   *  前提：本入口只由「建」工具在**人确认预览（含确切 relPath）之后**调用——那次确认即同意
+   *  放弃原路径旧对象的恢复核验，所以这里先退休记录再创建；没有人工确认的调用方不得走本入口。 */
   async createWithContent(name: string, parent: string, content: string): Promise<{ relPath: string; revision: string; objectVersion: string }> {
     const token = this.captureSession(); const root = this.requireUsableRoot()
     const result = await this.mutations.run(async () => {
       this.assertSession(token); this.requireUsableRoot()
-      // 与人的写入同一条边界：正文里不许藏着机器账本分区，新笔记不能带着「假历史」出生。
-      if (partitionSource(content).ledger !== null) throw new Error('LEDGER_BOUNDARY_INVALID')
-      this.refuseReservedPath(name, parent)
-      const created = await createNoteWithBody(root, name, parent, content)
+      const reserved: RetiredObject[] = []
+      let created!: { relPath: string; revision: string; objectVersion: string }
+      try {
+        // 与人的写入同一条边界：正文里不许藏着机器账本分区，新笔记不能带着「假历史」出生。
+        if (partitionSource(content).ledger !== null) throw new Error('LEDGER_BOUNDARY_INVALID')
+        const retired = this.retireReservedNote(name, parent)
+        if (retired) reserved.push(retired)
+        // 只把创建本身放进回滚范围：创建成功后的会话／库根复查失败不该把记录退回活跃列表。
+        created = await createNoteWithBody(root, name, parent, content)
+      } catch (error) {
+        this.restoreRetired(reserved)
+        throw error
+      }
       this.assertSession(token); this.requireUsableRoot()
       return created
     })
@@ -1063,14 +1143,28 @@ export class VaultSession {
     return result
   }
 
-  async createFolder(name: string, parent = ''): Promise<string> {
+  /** 目录也占路径：`b` 是 `b.md` 的附件身份，`b.md` 本身则是它的原路径，两者都对应同一条记录。
+   *  人新建时两条身份都退休；默认仍两条都拒。 */
+  async createFolder(name: string, parent = '', options: { humanInitiated?: boolean } = {}): Promise<string> {
     const token = this.captureSession(); const root = this.requireUsableRoot()
     const relPath = await this.mutations.run(async () => {
       this.assertSession(token); this.requireUsableRoot()
-      // 目录也占路径：`b` 是 `b.md` 的附件身份，`b.md` 本身则是它的原路径，两者都拒。
-      this.refuseReservedPath(name, parent)
-      this.refuseReservedFolder(name, parent)
-      return createFolder(root, name, parent)
+      const reserved: RetiredObject[] = []
+      try {
+        if (options.humanInitiated) {
+          const note = this.retireReservedNote(name, parent)
+          if (note) reserved.push(note)
+          const folder = this.retireReservedFolder(name, parent)
+          if (folder) reserved.push(folder)
+        } else {
+          this.refuseReservedPath(name, parent)
+          this.refuseReservedFolder(name, parent)
+        }
+        return await createFolder(root, name, parent)
+      } catch (error) {
+        this.restoreRetired(reserved)
+        throw error
+      }
     })
     this.assertSession(token); this.requireUsableRoot()
     this.index.markDirty()
