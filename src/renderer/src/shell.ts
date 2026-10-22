@@ -935,6 +935,8 @@ export async function start(root: HTMLElement): Promise<void> {
         // 磁盘已经和窗口稿一致（或草稿已空）时不必再核对，照常重跑一次让保存自行收敛。
         if (!tab.dirty || windowBody === diskBody) {
           await runExclusiveConflict(() => reconcileTab(tab, epoch))
+          // 保存收敛可能改了 dirty/revision：重绘 tab 与底栏，别让脏点留到下次重绘。
+          renderTabs(); updateStatus()
           return
         }
         const choice = await promptConflict({
@@ -950,6 +952,8 @@ export async function start(root: HTMLElement): Promise<void> {
         } finally {
           if (pendingConflictChoice === pending) pendingConflictChoice = null
         }
+        // 选「听磁盘/听窗口」后状态已经落定：立即重绘 tab 与底栏，脏点不能等下一次重绘才消失。
+        renderTabs(); updateStatus()
       } finally {
         conflictDecisionOpen = false
       }
