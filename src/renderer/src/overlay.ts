@@ -102,6 +102,9 @@ export function openOverlay(options: OverlayOptions): Overlay {
     })
   } else {
     root.show()
+    // Chromium 的 show() 会把焦点移进对话框；非模态卡片的合同是"不抢焦点"，
+    // 所以显式把焦点还给打开前的元素（jsdom 不模拟这一步，真实窗口靠它）。
+    if (previouslyFocused?.isConnected && document.activeElement !== previouslyFocused) previouslyFocused.focus()
   }
 
   return overlay
