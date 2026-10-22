@@ -3,10 +3,12 @@ import { beforeEach, afterEach, expect, it, vi } from 'vitest'
 import { openAuthorizationPopover } from '../../src/renderer/src/authorization-popover.ts'
 import { SKILL_REASON_TEXT } from '../../src/shared/skills.ts'
 beforeEach(()=>{
+  // jsdom 没实现 dialog 的 show/showModal；卡片现在走非模态 show()。
+  Object.defineProperty(HTMLDialogElement.prototype,'show',{configurable:true,value:function(){this.setAttribute('open','')}})
   Object.defineProperty(HTMLDialogElement.prototype,'showModal',{configurable:true,value:function(){this.setAttribute('open','')}})
   Object.defineProperty(HTMLDialogElement.prototype,'close',{configurable:true,value:function(){this.removeAttribute('open');this.dispatchEvent(new Event('close'))}})
 })
-afterEach(()=>document.body.replaceChildren())
+afterEach(()=>{document.body.replaceChildren();vi.restoreAllMocks()})
 const preview={id:'p',sessionId:'s',origin:'a.md',sources:[{sourceId:'a',relPath:'a.md',title:'a',revision:'r',objectVersion:'o',sessionId:'s',fingerprint:'x',tier:'reference' as const}],recipient:{modelId:'model',host:'model.example',provider:'custom' as const}}
 it('does not send before preview, preserves prompt on dismissal, and discloses recipient',async()=>{
   let resolve!: (v:any)=>void;const send=vi.fn(async()=>({ok:true as const,id:'task'}));const closed=vi.fn()
@@ -15,6 +17,8 @@ it('does not send before preview, preserves prompt on dismissal, and discloses r
   dialog.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))
   expect(send).not.toHaveBeenCalled()
   resolve({ok:true,preview});await vi.waitFor(()=>expect(dialog.textContent).toContain('model.example'))
+  // 非模态卡片不抢焦点；Esc 只在焦点已经进入卡片时由 overlay 接管。
+  dialog.focus()
   dialog.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))
   expect(send).not.toHaveBeenCalled();expect(closed).toHaveBeenCalled()
 })
@@ -39,15 +43,18 @@ it('Enter on cancel never sends; closed late preview is discarded',async()=>{
   resolve({ok:true,preview});await vi.waitFor(()=>expect(discard).toHaveBeenCalledWith('p'))
   expect(send).not.toHaveBeenCalled()
 })
-it('single-note default focus confirms with the next Enter and does not override a chosen cancel focus',async()=>{
+it('does not steal editor focus on open or on preview, and Enter in the card sends',async()=>{
   const send=vi.fn(async()=>({ok:true as const,id:'task'}))
+  const editor=document.createElement('textarea');document.body.append(editor);editor.focus()
   let finish!: (v:any)=>void
   const popup=openAuthorizationPopover({anchor:{left:100,top:100,bottom:120},origin:'a.md',entries:[],preview:()=>new Promise(resolve=>finish=resolve),send})
   await Promise.resolve()
-  expect(document.activeElement).toBe(popup.root)
+  expect(document.activeElement).toBe(editor)
   finish({ok:true,preview})
-  await vi.waitFor(()=>expect(document.activeElement).toBe(popup.root.querySelector('.authorization-send')))
-  document.activeElement!.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))
+  await vi.waitFor(()=>expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  expect(document.activeElement).toBe(editor)
+  popup.root.focus()
+  popup.root.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))
   await vi.waitFor(()=>expect(send).toHaveBeenCalledTimes(1))
 
   const second=openAuthorizationPopover({anchor:{left:100,top:100,bottom:120},origin:'a.md',entries:[],preview:()=>new Promise(resolve=>finish=resolve),send})
@@ -65,18 +72,37 @@ it('translates a machine failure code instead of showing it raw',async()=>{
     preview:async()=>({ok:false as const,error:'STALE_AUTHORIZATION'}),send:async()=>({ok:true as const,id:'task'})})
   const status=popup.root.querySelector('.authorization-status')!
   await vi.waitFor(()=>expect(status.textContent).toContain('无法准备'))
-  expect(status.textContent).toContain('重新核对')
+  expect(status.textContent).toBe('无法准备。内容已改，重新核对。')
   expect(status.textContent).not.toContain('STALE_AUTHORIZATION')
+  // 预览已经失效：发送必须保持禁用，不能拿旧范围继续。
+  expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(true)
   popup.close()
 })
 
-it('initial confirmation focus does not scroll the recipient and origin out of view', async()=>{
+it('opens as a non-modal card without focusing or scrolling anything', async()=>{
+  const editor=document.createElement('textarea');document.body.append(editor);editor.focus()
   const focus=vi.spyOn(HTMLElement.prototype,'focus')
   const popup=openAuthorizationPopover({anchor:{left:100,top:100,bottom:120},origin:'a.md',entries:[],preview:async()=>({ok:true as const,preview}),send:async()=>({ok:true as const,id:'task'})})
-  await vi.waitFor(()=>expect(document.activeElement).toBe(popup.root.querySelector('.authorization-send')))
-  const at=focus.mock.contexts.findIndex((node,i)=>node===popup.root.querySelector('.authorization-send') && focus.mock.calls[i]?.[0]?.preventScroll)
-  expect(at).toBeGreaterThanOrEqual(0)
+  expect(popup.root.dataset.modal).toBe('false')
+  await vi.waitFor(()=>expect(document.activeElement).toBe(editor))
+  await vi.waitFor(()=>expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  expect(document.activeElement).toBe(editor)
+  expect(focus).not.toHaveBeenCalled()
   focus.mockRestore()
+  popup.close()
+})
+
+it('leaves Escape to the editor until focus enters the card',async()=>{
+  const editor=document.createElement('textarea');document.body.append(editor);editor.focus()
+  const closed=vi.fn()
+  const popup=openAuthorizationPopover({anchor:{left:100,top:100,bottom:120},origin:'a.md',entries:[],preview:async()=>({ok:true as const,preview}),send:async()=>({ok:true as const,id:'task'}),onClose:closed})
+  await vi.waitFor(()=>expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  editor.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))
+  expect(popup.isOpen()).toBe(true)
+  popup.root.focus()
+  popup.root.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))
+  expect(popup.isOpen()).toBe(false)
+  expect(closed).toHaveBeenCalled()
 })
 
 it('keeps focus inside while submitting a selected range and after stale reconfirmation',async()=>{
@@ -336,4 +362,260 @@ it('explains why MCP cannot be used and offers no checkbox', async () => {
     expect(popup.root.querySelector('.authorization-mcp')!.textContent).toContain(item.text)
     popup.close()
   }
+})
+
+it('offers scope presets that clear to the origin and select the visible parent directory entry', async () => {
+  type Entries = import('../../src/shared/ipc.ts').TreeEntry[]
+  const entries: Entries = [
+    { name: 'folder', relPath: 'folder', kind: 'dir', children: [
+      { name: 'origin.md', relPath: 'folder/origin.md', kind: 'note' },
+      { name: 'peer.md', relPath: 'folder/peer.md', kind: 'note' },
+      { name: 'follow.md', relPath: 'folder/follow.md', kind: 'note', tier: 'follow' },
+      { name: 'forbidden.md', relPath: 'folder/forbidden.md', kind: 'note', tier: 'forbidden' },
+      { name: 'sub', relPath: 'folder/sub', kind: 'dir', children: [
+        { name: 'deep.md', relPath: 'folder/sub/deep.md', kind: 'note' }
+      ] },
+      { name: 'attachments', relPath: 'folder/attachments', kind: 'dir', attachmentOf: 'folder/origin.md', children: [
+        { name: 'inside.md', relPath: 'folder/attachments/inside.md', kind: 'note' }
+      ] }
+    ] }
+  ]
+  const load = vi.fn(async (_references: string[]) => ({ ok: true as const, preview }))
+  const send = vi.fn(async () => ({ ok: true as const, id: 'task' }))
+  const popup = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'folder/origin.md',
+    entries,
+    preview: load,
+    send
+  })
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  // 默认仍是空范围，不因为出现预设而自动勾选。
+  expect(load).toHaveBeenLastCalledWith([], false, false)
+  const [onlyOrigin, onlyDirectory] = [...popup.root.querySelectorAll<HTMLButtonElement>('.authorization-presets button')]
+  expect(onlyOrigin!.textContent).toBe('只读本笔记')
+  expect(onlyDirectory!.textContent).toBe('本目录只读')
+  expect(onlyDirectory!.disabled).toBe(false)
+  // 预设放在范围区，且首开仍是空勾选。
+  expect(popup.root.querySelector('.authorization-scope .authorization-presets')).not.toBeNull()
+  expect([...popup.root.querySelectorAll<HTMLInputElement>('.authorization-choices input')].some(input => input.checked)).toBe(false)
+
+  onlyDirectory!.click()
+  // 与主进程对齐：只勾父目录这一项，由主进程按“目录成员”递归展开；不展开成子笔记列表。
+  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith(['folder'], false, false))
+  const checked = [...popup.root.querySelectorAll<HTMLInputElement>('.authorization-choices input')].filter(input => input.checked).map(input => input.value)
+  expect(checked).toEqual(['folder'])
+  expect(popup.root.querySelector<HTMLInputElement>('.authorization-choices input[value="folder/peer.md"]')!.checked).toBe(false)
+  expect(popup.root.querySelector<HTMLInputElement>('.authorization-choices input[value="folder/follow.md"]')!.checked).toBe(false)
+  expect(popup.root.querySelector<HTMLInputElement>('.authorization-choices input[value="folder/forbidden.md"]')!.disabled).toBe(true)
+  expect(popup.root.querySelector<HTMLInputElement>('.authorization-choices input[value="folder/sub/deep.md"]')!.checked).toBe(false)
+
+  onlyOrigin!.click()
+  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith([], false, false))
+  expect([...popup.root.querySelectorAll<HTMLInputElement>('.authorization-choices input')].some(input => input.checked)).toBe(false)
+  onlyDirectory!.click()
+  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith(['folder'], false, false))
+  // 主进程把 references 绑在这笔 preview 上；send 只带 previewId，所以断言 preview 请求含目录。
+  expect(load.mock.calls.at(-1)?.[0]).toEqual(['folder'])
+  popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.click()
+  await vi.waitFor(() => expect(send).toHaveBeenCalled())
+  expect(send).toHaveBeenCalledWith(expect.anything(), false, false)
+})
+
+it('does not offer the directory preset at the vault root', async () => {
+  type Entries = import('../../src/shared/ipc.ts').TreeEntry[]
+  const entries: Entries = [
+    { name: 'a.md', relPath: 'a.md', kind: 'note' },
+    { name: 'b.md', relPath: 'b.md', kind: 'note' },
+    { name: 'sub', relPath: 'sub', kind: 'dir', children: [{ name: 'deep.md', relPath: 'sub/deep.md', kind: 'note' }] }
+  ]
+  const load = vi.fn(async (_references: string[]) => ({ ok: true as const, preview }))
+  const popup = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'a.md',
+    entries,
+    preview: load,
+    send: async () => ({ ok: true as const, id: 'task' })
+  })
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  expect(load).toHaveBeenLastCalledWith([], false, false)
+  // 根目录等于全库：不提供一键扩大范围；只保留“只读本笔记”。
+  expect(popup.root.querySelector('.authorization-preset-directory')).toBeNull()
+  expect([...popup.root.querySelectorAll<HTMLButtonElement>('.authorization-presets button')].map(button => button.textContent)).toEqual(['只读本笔记'])
+  popup.root.querySelector<HTMLButtonElement>('.authorization-preset-origin')!.click()
+  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith([], false, false))
+  expect([...popup.root.querySelectorAll<HTMLInputElement>('.authorization-choices input')].some(input => input.checked)).toBe(false)
+  popup.close()
+})
+
+it('disables the directory preset when the parent directory is not selectable', async () => {
+  type Entries = import('../../src/shared/ipc.ts').TreeEntry[]
+  const invisibleEntries: Entries = [
+    { name: 'a.md', relPath: 'a.md', kind: 'note' },
+    { name: 'b.md', relPath: 'b.md', kind: 'note' }
+  ]
+  const invisibleLoad = vi.fn(async (_references: string[]) => ({ ok: true as const, preview }))
+  const invisible = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'missing/origin.md',
+    entries: invisibleEntries,
+    preview: invisibleLoad,
+    send: async () => ({ ok: true as const, id: 'task' })
+  })
+  await vi.waitFor(() => expect(invisible.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  const invisibleButton = invisible.root.querySelector<HTMLButtonElement>('.authorization-preset-directory')!
+  expect(invisibleButton.disabled).toBe(true)
+  expect(invisibleButton.title).toContain('不可见')
+  const invisibleCalls = invisibleLoad.mock.calls.length
+  invisibleButton.click()
+  await Promise.resolve()
+  expect(invisibleLoad).toHaveBeenCalledTimes(invisibleCalls)
+  expect([...invisible.root.querySelectorAll<HTMLInputElement>('.authorization-choices input')].some(input => input.checked)).toBe(false)
+  invisible.close()
+
+  const forbiddenEntries: Entries = [
+    { name: 'folder', relPath: 'folder', kind: 'dir', tier: 'forbidden', children: [
+      { name: 'origin.md', relPath: 'folder/origin.md', kind: 'note' },
+      { name: 'peer.md', relPath: 'folder/peer.md', kind: 'note' }
+    ] }
+  ]
+  const forbiddenLoad = vi.fn(async (_references: string[]) => ({ ok: true as const, preview }))
+  const forbidden = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'folder/origin.md',
+    entries: forbiddenEntries,
+    preview: forbiddenLoad,
+    send: async () => ({ ok: true as const, id: 'task' })
+  })
+  await vi.waitFor(() => expect(forbidden.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  const forbiddenButton = forbidden.root.querySelector<HTMLButtonElement>('.authorization-preset-directory')!
+  expect(forbiddenButton.disabled).toBe(true)
+  expect(forbiddenButton.title).toContain('禁止')
+  const forbiddenCalls = forbiddenLoad.mock.calls.length
+  forbiddenButton.click()
+  await Promise.resolve()
+  expect(forbiddenLoad).toHaveBeenCalledTimes(forbiddenCalls)
+  expect(forbidden.root.querySelector<HTMLInputElement>('.authorization-choices input[value="folder"]')!.disabled).toBe(true)
+  // 不静默降级成子笔记：peer 仍可手动勾，但预设没有替你勾。
+  expect(forbidden.root.querySelector<HTMLInputElement>('.authorization-choices input[value="folder/peer.md"]')!.checked).toBe(false)
+  forbidden.close()
+})
+
+it('does not send Enter from a textarea in the card', async () => {
+  const send = vi.fn(async () => ({ ok: true as const, id: 'task' }))
+  const popup = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'a.md',
+    entries: [],
+    preview: async () => ({ ok: true as const, preview }),
+    send
+  })
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  const area = document.createElement('textarea')
+  popup.root.append(area)
+  area.focus()
+  area.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  expect(send).not.toHaveBeenCalled()
+  popup.close()
+})
+
+it('remembers the last scope within the session and restores it on reopen', async () => {
+  type Entries = import('../../src/shared/ipc.ts').TreeEntry[]
+  const entries: Entries = [
+    { name: 'a.md', relPath: 'a.md', kind: 'note' },
+    { name: 'b.md', relPath: 'b.md', kind: 'note' }
+  ]
+  const firstLoad = vi.fn(async (_references: string[]) => ({ ok: true as const, preview }))
+  const first = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'a.md',
+    entries,
+    preview: firstLoad,
+    send: async () => ({ ok: true as const, id: 'task' })
+  })
+  await vi.waitFor(() => expect(first.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  // 从空范围开始，确保这条用例测的是本条自己写下的记忆。
+  first.root.querySelector<HTMLButtonElement>('.authorization-preset-origin')!.click()
+  await vi.waitFor(() => expect(firstLoad).toHaveBeenLastCalledWith([], false, false))
+  const choose = first.root.querySelector<HTMLInputElement>('.authorization-choices input[value="b.md"]')!
+  choose.checked = true
+  choose.dispatchEvent(new Event('change'))
+  await vi.waitFor(() => expect(firstLoad).toHaveBeenLastCalledWith(['b.md'], false, false))
+  first.close()
+
+  const secondLoad = vi.fn(async (_references: string[]) => ({ ok: true as const, preview }))
+  const second = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'a.md',
+    entries,
+    preview: secondLoad,
+    send: async () => ({ ok: true as const, id: 'task' })
+  })
+  expect(second.root.querySelector<HTMLInputElement>('.authorization-choices input[value="b.md"]')!.checked).toBe(true)
+  await vi.waitFor(() => expect(secondLoad).toHaveBeenLastCalledWith(['b.md'], false, false))
+  // 清掉记忆，避免影响同一文件后面的用例。
+  second.root.querySelector<HTMLButtonElement>('.authorization-preset-origin')!.click()
+  await vi.waitFor(() => expect(secondLoad).toHaveBeenLastCalledWith([], false, false))
+  second.close()
+})
+
+it('exposes setStale to block sending until a fresh preview succeeds', async () => {
+  const load = vi.fn(async () => ({ ok: true as const, preview }))
+  const send = vi.fn(async () => ({ ok: true as const, id: 'task' }))
+  const popup = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'a.md',
+    entries: [{ name: 'b.md', relPath: 'b.md', kind: 'note' }],
+    preview: load,
+    send
+  })
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  const status = popup.root.querySelector('.authorization-status')!
+  popup.setStale()
+  expect(status.textContent).toBe('内容已改，重新核对。')
+  expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(true)
+  expect(send).not.toHaveBeenCalled()
+
+  const choose = popup.root.querySelector<HTMLInputElement>('.authorization-choices input[value="b.md"]')!
+  choose.checked = true
+  choose.dispatchEvent(new Event('change'))
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  expect(status.textContent).not.toContain('内容已改，重新核对。')
+  expect(load).toHaveBeenCalledTimes(2)
+  // 清掉记忆，避免影响同一文件后面的用例。
+  popup.root.querySelector<HTMLButtonElement>('.authorization-preset-origin')!.click()
+  await vi.waitFor(() => expect(load).toHaveBeenLastCalledWith([], false, false))
+  popup.close()
+})
+
+it('keeps each notice first sentence short and machine codes off the card', async () => {
+  const expanded = {
+    ...preview,
+    memory: {
+      use: true,
+      consolidate: true,
+      recipient: { modelId: 'summarizer', host: 'memory.example' },
+      limits: { seconds: 600, calls: 4, tools: 0 },
+      search: { available: true, calls: 2, sharedTools: 6 }
+    },
+    network: { available: true, search: true, providerHost: 'api.tavily.com' },
+    mcp: { available: true, servers: [{ name: 'deepwiki', host: 'mcp.example', tools: ['search', 'read'] }] }
+  }
+  const popup = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'a.md',
+    entries: [],
+    preview: async () => ({ ok: true as const, preview: expanded }),
+    send: async () => ({ ok: true as const, id: 'task' })
+  })
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  const firstLine = (element: Element): string => element.textContent!.split('。')[0]!
+  const characters = (text: string): number => [...text.replace(/\s/g, '')].length
+  for (const selector of ['.authorization-disclosure', '.authorization-memory', '.authorization-scope-hint', '.authorization-status', '.authorization-network', '.authorization-mcp']) {
+    const element = popup.root.querySelector(selector)!
+    expect(element.textContent!.length).toBeGreaterThan(0)
+    expect(characters(firstLine(element))).toBeLessThanOrEqual(40)
+  }
+  expect(popup.root.textContent).not.toMatch(/[A-Z]{2,}_[A-Z_]{2,}/)
+  popup.close()
 })
