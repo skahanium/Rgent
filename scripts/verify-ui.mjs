@@ -1462,6 +1462,193 @@ async function verifyHumanTrash(page, vault, shot) {
   }
 }
 
+function reclaimJourneyTrash() {
+  const trash = path.join(homedir(), '.Trash')
+  for (const name of ['旅程删除样张.md', '旅程删除样张']) {
+    try { rmSync(path.join(trash, name), { recursive: true, force: true }) } catch { /* 废纸篓列举会 EPERM */ }
+  }
+  spawnSync('osascript', ['-e', 'tell application "Finder"\ntry\ndelete (every item of trash whose name contains "旅程删除样张")\nend try\nend tell'], { encoding: 'utf8', timeout: 10000 })
+}
+
+/** 端到端旅程专项（RGENT_UI_JOURNEY_ONLY=1）：一条真人旅程走完建、写、补、改名、挪、
+ *  人删除与账本可审，作为跨能力集成证据；不复制各专项的细断言，零真实外网与真实模型。 */
+async function verifyJourney(page, vault, shot) {
+  process.stdout.write('\n端到端旅程\n')
+  const darwin = process.platform === 'darwin'
+  const journeyPath = '旅程笔记.md'
+  const renamedPath = '旅程笔记改.md'
+  const movedPath = `资料/${renamedPath}`
+  const bodyText = '旅程正文：这条笔记从界面新建，正文由人输入。'
+  const prompt = '把下面一句补到这篇：旅程补写一句。'
+  const scratchPath = '旅程删除样张.md'
+  const expectedRoot = ['一个特别特别长的笔记文件名用来验证省略号.md', '研究记录.md', '资料', '过程稿.md']
+
+  const openMenu = async (selector) => {
+    const dropped = await page.eval(`(() => {
+      const row = document.querySelector(${JSON.stringify(selector)})
+      if (!row) return false
+      const rect = row.getBoundingClientRect()
+      row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.left + 20, clientY: rect.top + 12 }))
+      return true
+    })()`)
+    return dropped && waitFor(page, `!!document.querySelector('.tier-menu')`)
+  }
+  const menuClick = async (label) => page.eval(`[...document.querySelectorAll('.tier-menu button')].find(node => node.textContent === ${JSON.stringify(label)})?.click()`)
+  const fillModal = async (value) => {
+    if (!await waitFor(page, `!!document.querySelector('.modal input')`)) return false
+    await page.eval(`(() => {
+      const input = document.querySelector('.modal input')
+      input.value = ${JSON.stringify(value)}
+      document.querySelector('.modal button[value=ok]')?.click()
+    })()`)
+    return true
+  }
+  const createNote = async (name) => {
+    if (!await waitFor(page, `(() => { const button = document.querySelector('.resource-create'); return !!button && !button.hidden && !button.disabled })()`, 10000)) return false
+    const clicked = await page.eval(`(() => { const button = document.querySelector('.resource-create'); if (!button) return false; button.click(); return true })()`)
+    if (!clicked || !await fillModal(name)) return false
+    return waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(`${name}.md`)}`, 15000)
+  }
+  const activeRel = () => page.eval(`document.querySelector('.tab[aria-selected=true]')?.dataset.rel ?? null`)
+  const noteText = (rel) => page.eval(`window.rgent.noteRead(${JSON.stringify(rel)}).then(note => note.content).catch(() => null)`)
+
+  try {
+    await waitFor(page, `!!document.querySelector('.tree-toggle') && document.querySelectorAll('.tree-row').length > 0`)
+    // 渲染层的模型快照要开一次设置页才刷新；不刷新的话按 Enter 只会得到「请选择可用模型」。
+    await page.eval(`document.querySelector('.settings-open')?.click()`)
+    await waitFor(page, `!!document.querySelector('.settings-nav')`)
+    await page.key('Escape', 'Escape', 0, 27)
+    await waitFor(page, `!document.querySelector('.settings-nav')`)
+    await setTreeExpanded(page, true)
+    await selectBrowserFolder(page, '')
+
+    // 一、建：界面新建，编辑器与文件树同时出现。
+    const created = await createNote('旅程笔记')
+    const editorReady = created && await waitFor(page, `!!document.querySelector('.cm-content') && document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(journeyPath)}`)
+    const treeReady = editorReady && await waitFor(page, `!!document.querySelector('.tree-note[data-path=${JSON.stringify(journeyPath)}]')`) && await page.eval(`(() => { const row = document.querySelector('.tree-note[data-path=${JSON.stringify(journeyPath)}]'); return !!row && row.getBoundingClientRect().width > 0 && document.querySelector('.tree-toggle')?.getAttribute('aria-expanded') === 'true' })()`)
+    check('旅程：界面新建笔记后编辑器出现且文件树可见', created && editorReady && treeReady, JSON.stringify({ created, editorReady, treeReady, tab: await activeRel(), tree: await page.eval(`[...document.querySelectorAll('.tree-note')].map(node => node.dataset.path).slice(0, 8)`) }))
+    await shot(page, 'journey-created-1200')
+
+    // 二、写：中文正文自动保存，noteRead 与磁盘都含这段。
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    await page.call('Input.insertText', { text: bodyText })
+    const saved = await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(journeyPath)})).content.includes(${JSON.stringify(bodyText)}))()`, 15000)
+    const onDisk = saved && existsSync(path.join(vault, journeyPath)) && readFileSync(path.join(vault, journeyPath), 'utf8').includes(bodyText)
+    const readBack = saved ? await noteText(journeyPath) : null
+    check('旅程：中文正文保存后 noteRead 与磁盘都含该段', saved && onDisk && String(readBack).includes(bodyText), JSON.stringify({ saved, onDisk, read: String(readBack ?? '').slice(0, 120) }))
+
+    // 三、补：受控模型按口令追加一句；正文与账本各留证据。
+    // 口令必须是空段落开头：正文与口令之间留一个空行，否则 `/` 只是普通字符。
+    await page.key('Enter', 'Enter', 0, 13)
+    await page.key('Enter', 'Enter', 0, 13)
+    await page.call('Input.insertText', { text: `/${prompt}` })
+    const confirmed = await confirmSlashAuthorization(page)
+    const finished = confirmed && await waitFor(page, `(async () => {
+      const note = await window.rgent.noteRead(${JSON.stringify(journeyPath)})
+      const history = await window.rgent.ledgerGet({ sessionId: note.sessionId, objectVersion: note.objectVersion, relPath: ${JSON.stringify(journeyPath)} })
+      return history.ok && history.value.records.some(record => record.chapter?.status === 'completed') && note.content.includes('part="append"') && (await window.rgent.agentTasks()).length === 0
+    })()`, 90000)
+    const afterTask = finished ? await page.eval(`(async () => {
+      const note = await window.rgent.noteRead(${JSON.stringify(journeyPath)})
+      const history = await window.rgent.ledgerGet({ sessionId: note.sessionId, objectVersion: note.objectVersion, relPath: ${JSON.stringify(journeyPath)} })
+      return {
+        content: note.content,
+        tasks: (await window.rgent.agentTasks()).length,
+        appendRecorded: history.ok && history.value.records.some(record => record.chapter?.status === 'completed' && (record.chapter.provenance?.tools ?? []).some(tool => tool.name === 'append_to_note' && String(tool.outcome).startsWith('ok')))
+      }
+    })()`) : null
+    const bodyAfter = afterTask ? String(afterTask.content).split('<!-- rgent:ledger')[0] : ''
+    const appendIndex = bodyAfter.indexOf('part="append"')
+    const appendCopies = (bodyAfter.match(/旅程补写一句。/g) ?? []).length
+    const appended = appendIndex >= 0 && bodyAfter.slice(appendIndex).includes('旅程补写一句。') && appendCopies >= 2
+    check('旅程：受控模型补写后正文出现补写句、账本记下补写', confirmed && finished && afterTask?.tasks === 0 && appended && afterTask?.appendRecorded === true, JSON.stringify({ confirmed, finished, tasks: afterTask?.tasks ?? null, appended, appendCopies, appendRecorded: afterTask?.appendRecorded ?? null, tail: bodyAfter.slice(-160) }))
+    // 任务收尾后宿主会把新正文同步回编辑器；等它落地再做结构操作，避免把旧窗口稿当成脏稿保存。
+    await waitFor(page, `(() => { const view = document.querySelector('.cm-content')?.cmTile?.root?.view; const text = view?.state?.doc?.toString() ?? ''; return text.includes('part="append"') && text.includes('写工具核验完成。') })()`, 15000)
+    await shot(page, 'journey-appended-1200')
+
+    // 四、改名：文件树右键 → 改名 → 预览 → 确认；tab 跟着走。
+    let renamePreview = false
+    if (await openMenu(`.tree-note[data-path=${JSON.stringify(journeyPath)}]`)) {
+      await menuClick('改名')
+      renamePreview = await fillModal('旅程笔记改') && await waitFor(page, `document.querySelector('.lifecycle-dialog')?.textContent.includes(${JSON.stringify(`${journeyPath} → ${renamedPath}`)})`, 10000)
+    }
+    if (renamePreview) await page.eval(`document.querySelector('.lifecycle-actions button:last-child')?.click()`)
+    const renamed = renamePreview && await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(renamedPath)} && !!document.querySelector('.tree-note[data-path=${JSON.stringify(renamedPath)}]')`, 15000)
+    const renamedRead = renamed ? await noteText(renamedPath) : null
+    check('旅程：改名后文件名、noteRead 路径与 tab 一致', renamed && existsSync(path.join(vault, renamedPath)) && !existsSync(path.join(vault, journeyPath)) && String(renamedRead).includes(bodyText), JSON.stringify({ renamePreview, renamed, tab: await activeRel(), read: String(renamedRead ?? '').slice(0, 120) }))
+    await shot(page, 'journey-renamed-1200')
+
+    // 五、挪：右键 → 移动 → 选资料 → 预览 → 确认；树里位置与新路径都可核。
+    let movePreview = false
+    if (await openMenu(`.tree-note[data-path=${JSON.stringify(renamedPath)}]`)) {
+      await menuClick('移动')
+      if (await waitFor(page, `!!document.querySelector('.lifecycle-dialog select')`, 10000)) {
+        await page.eval(`(() => { const select = document.querySelector('.lifecycle-dialog select'); select.value = '资料' })()`)
+        await page.eval(`[...document.querySelectorAll('.lifecycle-dialog button')].find(node => node.textContent === '查看预览')?.click()`)
+        movePreview = await waitFor(page, `document.querySelector('.lifecycle-dialog')?.textContent.includes(${JSON.stringify(`${renamedPath} → ${movedPath}`)})`, 10000)
+      }
+    }
+    if (movePreview) await page.eval(`document.querySelector('.lifecycle-actions button:last-child')?.click()`)
+    const moved = movePreview && await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(movedPath)}`, 15000)
+    const located = moved && await selectBrowserFolder(page, '资料') && await waitFor(page, `!!document.querySelector('.resource-scroll .tree-note[data-path=${JSON.stringify(movedPath)}]')`, 10000)
+    const movedRead = located ? await noteText(movedPath) : null
+    check('旅程：挪到资料后文件树位置正确、新路径可读', moved && located && existsSync(path.join(vault, '资料', renamedPath)) && String(movedRead).includes(bodyText), JSON.stringify({ movePreview, moved, located, tab: await activeRel() }))
+    await shot(page, 'journey-moved-1200')
+
+    // 六、人删除：另建一篇旅程样张，右键删除 + 确认卡两步；旅程笔记留着做第七步的账本审计。
+    //    旅程笔记本身不能在这里删：删掉后标签关闭，第七步就没有可打开的账本了。
+    if (darwin) {
+      await selectBrowserFolder(page, '')
+      const scratchCreated = await createNote('旅程删除样张')
+      const scratchInTree = scratchCreated && await waitFor(page, `!!document.querySelector('.tree-note[data-path=${JSON.stringify(scratchPath)}]')`, 10000)
+      let menuOpened = false
+      let confirmShown = false
+      if (scratchInTree && await openMenu(`.tree-note[data-path=${JSON.stringify(scratchPath)}]`)) {
+        menuOpened = true
+        await menuClick('删除')
+        confirmShown = await waitFor(page, `(() => { const text = document.querySelector('.overlay-write-confirm')?.textContent ?? ''; return text.includes(${JSON.stringify(scratchPath)}) && text.includes('移入系统废纸篓') })()`, 15000)
+      }
+      if (confirmShown) await page.eval(`document.querySelector('.write-confirm-accept')?.click()`)
+      const gone = confirmShown && await waitFor(page, `!document.querySelector('.tree-note[data-path=${JSON.stringify(scratchPath)}]')`, 15000)
+      const tabClosed = gone && await page.eval(`![...document.querySelectorAll('.tab')].some(tab => tab.dataset.rel === ${JSON.stringify(scratchPath)})`)
+      const noticeOk = gone && await waitFor(page, `(document.querySelector('.status-host-notice')?.textContent ?? '').includes('笔记已移入系统废纸篓')`, 10000)
+      const notice = await page.eval(`document.querySelector('.status-host-notice')?.textContent ?? ''`)
+      check('旅程：右键删除两步确认后树里消失、tab 关闭、废纸篓无异常', scratchCreated && scratchInTree && menuOpened && confirmShown && gone && tabClosed && noticeOk && !existsSync(path.join(vault, scratchPath)) && !/未能|未核验|孤儿/.test(notice), JSON.stringify({ scratchCreated, scratchInTree, menuOpened, confirmShown, gone, tabClosed, notice }))
+      await shot(page, 'journey-trash-1200')
+    } else {
+      check('（跳过）旅程：人删除（当前平台没有删除入口）', true, `platform=${process.platform}`)
+    }
+
+    // 七、账本可审：回到旅程笔记打开账本，本章节与补写记录都在；关掉回正文。
+    await selectBrowserFolder(page, '资料')
+    const reopened = await page.eval(`(() => { const row = document.querySelector('.tree-note[data-path=${JSON.stringify(movedPath)}]'); if (!row) return false; row.click(); return true })()`) && await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(movedPath)}`)
+    await page.eval(`document.querySelector('.ledger-open')?.click()`)
+    const ledgerListed = reopened && await waitFor(page, `!!document.querySelector('.ledger-body details')`, 15000)
+    if (ledgerListed) {
+      await page.eval(`document.querySelectorAll('.ledger-body details').forEach(details => { details.open = true })`)
+      await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`, 15000)
+    }
+    const ledgerText = await page.eval(`document.querySelector('.ledger-body')?.textContent ?? ''`)
+    await page.eval(`document.querySelector('.ledger-close')?.click()`)
+    const ledgerClosed = await waitFor(page, `document.querySelector('.ledger-view')?.hidden === true`, 10000)
+    check('旅程：账本本章节可见且含补写记录，关闭后回到正文', reopened && ledgerListed && ledgerText.includes('append_to_note') && ledgerText.includes('ok (1)') && ledgerText.includes('口令：把下面一句补到这篇') && ledgerClosed, ledgerText.slice(0, 260))
+    await shot(page, 'journey-ledger-1200')
+
+    // 八、收尾：没有残留浮层或任务；一次性库里只剩旅程笔记，删除样张已不在。
+    const endState = await page.eval(`(async () => ({
+      tasks: (await window.rgent.agentTasks()).length,
+      statusTask: !!document.querySelector('.status-task'),
+      overlays: document.querySelectorAll('dialog[open], .overlay-write-confirm[open], .tier-menu').length
+    }))()`)
+    const rootNames = readdirSync(vault).filter(name => !name.startsWith('.')).sort()
+    const movedNames = readdirSync(path.join(vault, '资料')).filter(name => !name.startsWith('.')).sort()
+    const finalRead = await noteText(movedPath)
+    check('旅程：收尾无残留浮层与任务、笔记库无测试垃圾', endState.tasks === 0 && !endState.statusTask && endState.overlays === 0 && String(finalRead).includes(bodyText) && !existsSync(path.join(vault, scratchPath)) && JSON.stringify(rootNames) === JSON.stringify(expectedRoot) && JSON.stringify(movedNames) === JSON.stringify([renamedPath]), JSON.stringify({ endState, rootNames, movedNames }))
+  } finally {
+    if (darwin) reclaimJourneyTrash()
+  }
+}
+
 async function availablePort() {
   const server = createServer()
   await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve))
@@ -1514,6 +1701,8 @@ const networkOnly = process.env.RGENT_UI_NETWORK_ONLY === '1'
 const humanNetworkOnly = process.env.RGENT_UI_NETWORK_HUMAN_ONLY === '1'
 // 远端只读 MCP 专项：设置卡、坏地址拒绝、抓页对话框回归与口令卡门控。
 const mcpOnly = process.env.RGENT_UI_MCP_ONLY === '1'
+// 端到端旅程专项：建→写→补→改名→挪→人删除→账本可审，跨能力集成证据。
+const journeyOnly = process.env.RGENT_UI_JOURNEY_ONLY === '1'
 // 付费专项：只由显式环境变量触发，普通测试／构建／CI 永不调用模型。
 const skillsLive = process.env.RGENT_UI_SKILLS_LIVE
 const v4Only = process.env.RGENT_UI_V4_ONLY === '1'
@@ -3517,7 +3706,7 @@ function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequest
         }
         // 只按写工具专项自己的口令识别：工具链场景现在也带写工具，按工具名匹配会把它整个劫持走。
         const writeBody = JSON.stringify(decoded.messages)
-        const writePrompts = ['建样张一', '建样张二', '补样张', '超限样张', '改名样张', '挪样张', '越权样张', '删样张', '不删样张']
+        const writePrompts = ['建样张一', '建样张二', '补样张', '超限样张', '改名样张', '挪样张', '越权样张', '删样张', '不删样张', '旅程补写']
         if (writePrompts.some(prompt => writeBody.includes(prompt))) {
           writeRequests.push(decoded)
           const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'write-ui', object: 'chat.completion.chunk', created: 1, model: decoded.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
@@ -3543,7 +3732,9 @@ function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequest
                   ? { name: 'create_note', input: { name: '写工具样张', body: '# 写工具样张\n\n受控正文。' } }
                   : prompts.includes('超限样张')
                     ? { name: 'append_to_note', input: { text: '汉'.repeat(4000) } }
-                    : { name: 'append_to_note', input: { text: '补充依据。' } }
+                    : prompts.includes('旅程补写')
+                      ? { name: 'append_to_note', input: { text: '旅程补写一句。' } }
+                      : { name: 'append_to_note', input: { text: '补充依据。' } }
             const [name, args] = [call.name, JSON.stringify(call.input)]
             emit({ tool_calls: [{ index: 0, id: `ui-write-${name}`, type: 'function', function: { name, arguments: args } }] })
             emit({}, 'tool_calls')
@@ -3989,6 +4180,20 @@ async function main() {
       try{await verifyMcpOnly(page,vault,shot,mcpRequests)}catch(error){stageFailed('远端只读 MCP 专项',error)}
       check('远端只读 MCP 专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
       check('远端只读 MCP 专项全程只走受控主机',mcpRequests.length>=1,String(mcpRequests.length))
+      process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
+      process.exitCode=failures===0?0:1
+      return
+    }
+    if(journeyOnly){
+      const journeyRequests=[]
+      hostServer=createControlledHostServer([],[],journeyRequests)
+      await new Promise(resolve=>hostServer.listen(0,'127.0.0.1',resolve))
+      const configured=await configureControlledHost(page,`http://127.0.0.1:${hostServer.address().port}/v1`)
+      check('旅程：专项初始化受控供应商与设备默认模型',configured===true)
+      if(!configured)throw Error('旅程专项受控模型初始化失败')
+      try{await verifyJourney(page,vault,shot)}catch(error){stageFailed('端到端旅程专项',error)}
+      check('旅程：专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
+      check('旅程：全程只走受控主机',journeyRequests.length>=1,String(journeyRequests.length))
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
       process.exitCode=failures===0?0:1
       return
