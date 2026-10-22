@@ -13,11 +13,17 @@ export type OverlayOptions = {
   dismissable?: boolean
   /** 动态阻止用户关闭；程序提交新状态后仍可 close。 */
   canDismiss?: () => boolean
-  /** 打开时聚焦的元素；不给就找浮层里第一个可聚焦项。 */
+  /** 打开时聚焦的元素；不给就找浮层里第一个可聚焦项。仅模态浮层使用。 */
   initialFocus?: () => HTMLElement | null
-  /** 触发元素消失时，调用方可提供仍可见的返回位置。 */
+  /** 触发元素消失时，调用方可提供仍可见的返回位置。仅模态浮层使用。 */
   returnFocus?: () => HTMLElement | null
   onClose?: () => void
+  /**
+   * 是否模态，默认 true。
+   * 非模态用于「人需要随时可继续编辑」的卡片（本场授权、写操作确认）：不遮背景、不抢焦点、
+   * 不拦快捷键；它们同样进栈，但 `modalOpen()` 只把模态算作"挡住快捷键的浮层"。
+   */
+  modal?: boolean
 }
 
 export type Overlay = {
@@ -29,8 +35,10 @@ export type Overlay = {
 const stack: Overlay[] = []
 
 export function openOverlay(options: OverlayOptions): Overlay {
+  const modal = options.modal !== false
   const root = document.createElement('dialog')
   root.className = 'overlay'
+  root.dataset.modal = modal ? 'true' : 'false'
   root.setAttribute('aria-label', options.label)
   document.body.append(root)
 
@@ -60,6 +68,8 @@ export function openOverlay(options: OverlayOptions): Overlay {
     // Disabling a focused action can move focus to body. Catch Escape before
     // Chromium dispatches a close-watcher cancel that may be non-cancelable.
     if (!root.open || stack.at(-1) !== overlay || event.key !== 'Escape' || event.isComposing || event.keyCode === 229) return
+    // 非模态卡片只在焦点进入卡片时接管 Esc；否则 Esc 仍归编辑器/搜索框。
+    if (!modal && !root.contains(document.activeElement)) return
     event.preventDefault()
     event.stopPropagation()
     if (options.dismissable !== false && options.canDismiss?.() !== false) overlay.close()
@@ -70,24 +80,36 @@ export function openOverlay(options: OverlayOptions): Overlay {
     document.removeEventListener('keydown', handleEscape, true)
     root.remove()
     options.onClose?.()
-    // 关掉之后把焦点还给触发它的地方。
+    // 关掉之后把焦点还给触发它的地方（只对模态：非模态从未把焦点拿走）。
     // close 事件可能在下一帧才到；若已有新模态打开，旧浮层不能把焦点抢回底层。
+    if (!modal) return
     const target = options.returnFocus?.() ?? previouslyFocused
     if (target?.isConnected && !stack.some((item) => item.isOpen())) target.focus()
   })
 
-  // 模态之上再开一个模态：拒绝，栈里永远只有一个。
-  const top = stack[stack.length - 1]
-  if (top?.isOpen()) top.close()
+  // 模态打开时收掉已开的浮层（保持"同时只有一个模态"）；非模态卡片不挤掉别人。
+  if (modal) {
+    const top = stack[stack.length - 1]
+    if (top?.isOpen()) top.close()
+  }
   stack.push(overlay)
 
-  root.showModal()
-  queueMicrotask(() => {
-    const target = options.initialFocus?.() ?? firstFocusable(root)
-    target?.focus()
-  })
+  if (modal) {
+    root.showModal()
+    queueMicrotask(() => {
+      const target = options.initialFocus?.() ?? firstFocusable(root)
+      target?.focus()
+    })
+  } else {
+    root.show()
+  }
 
   return overlay
+}
+
+/** 只有模态浮层会挡住快捷键与提交；非模态卡片不该拦编辑器。 */
+export function modalOpen(): boolean {
+  return document.querySelector('dialog[open][data-modal="true"]') !== null
 }
 
 function firstFocusable(root: HTMLElement): HTMLElement | null {
