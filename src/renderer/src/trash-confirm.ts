@@ -1,6 +1,13 @@
 import { openOverlay } from './overlay.ts'
 import type { TrashPreviewView } from '../../shared/ipc.ts'
 
+/** 首句只说会发生什么，第二句只说链接失效；「同名附件夹」「链接会失效」「不会代为改字」
+ *  是窗口专项依赖的原话，改写时不能动。 */
+export const TRASH_CONFIRM_NOTES = {
+  withAttachments: '这篇笔记和同名附件夹会一起进系统废纸篓。其他笔记里的链接会失效，不会代为改字。',
+  withoutAttachments: '这篇笔记会进系统废纸篓。没有同名附件夹；其他笔记里的链接会失效，不会代为改字。'
+} as const
+
 /** 人删除确认：预览＋一次点击。Esc／点外面＝不删。 */
 export function confirmTrash(preview: TrashPreviewView): Promise<boolean> {
   return new Promise((resolve) => {
@@ -11,9 +18,7 @@ export function confirmTrash(preview: TrashPreviewView): Promise<boolean> {
       onClose: () => { if (!decided) { decided = true; resolve(false) } }
     })
     overlay.root.classList.add('overlay-write-confirm')
-    const note = preview.hasAttachments
-      ? '这篇笔记和同名附件夹会一起进系统废纸篓。其他笔记里的链接会失效，不会代为改字。不同意就什么都不动。'
-      : '这篇笔记会进系统废纸篓。没有同名附件夹。其他笔记里的链接会失效，不会代为改字。不同意就什么都不动。'
+    const note = preview.hasAttachments ? TRASH_CONFIRM_NOTES.withAttachments : TRASH_CONFIRM_NOTES.withoutAttachments
     overlay.root.innerHTML = `<h2>把这篇笔记移入系统废纸篓吗？</h2><p class="write-confirm-path"></p><p class="write-confirm-note settings-hint"></p><footer><button type="button" class="write-confirm-cancel">不删</button><button type="button" class="write-confirm-accept">移入废纸篓</button></footer>`
     overlay.root.querySelector('.write-confirm-path')!.textContent = preview.relPath
     overlay.root.querySelector('.write-confirm-note')!.textContent = note

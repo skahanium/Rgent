@@ -1,8 +1,17 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { modalOpen } from '../../src/renderer/src/overlay.ts'
 import { installWriteConfirm } from '../../src/renderer/src/write-confirm.ts'
 import type { AgentWritePreview } from '../../src/shared/ipc.ts'
+
+/** U5：卡片定位与尺寸搬进 styles.css；测试直接钉 CSS 规则，避免样式只活在 JS 内联里。 */
+const STYLES = readFileSync('src/renderer/src/styles.css', 'utf8')
+const writeConfirmRule = (): string => {
+  const match = /(?:^|\n)\.write-confirm \{([^}]*)\}/u.exec(STYLES)
+  if (!match) throw new Error('styles.css 里找不到 .write-confirm 规则')
+  return match[1]!
+}
 
 /** U3：AI 写确认卡改成右下角的非模态卡片——不抢编辑器焦点、正文预览折 3 行、
  *  路径与引用／权限数字进「详情」，确认语义（逐次、允许才落盘、关闭算不允许）不变。 */
@@ -219,17 +228,43 @@ it('删除卡标题是「AI 想删除」，详情写明送篓且不代改引用'
   expect(app.calls).toHaveLength(0)
 })
 
-it('卡片固定在右下角：宽 ≤360px、最高 60vh、内部滚动', () => {
+it('卡片固定在右下角：宽 360px、最高 60vh、内部滚动，样式在 styles.css 里', () => {
   const app = mount()
   app.send(createPreview())
   const dialog = app.dialog()!
   expect(dialog.classList.contains('write-confirm')).toBe(true)
-  expect(dialog.style.position).toBe('fixed')
-  expect(dialog.style.right).toBe('16px')
-  expect(dialog.style.bottom).toBe('16px')
-  expect(Number.parseInt(dialog.style.width, 10)).toBeLessThanOrEqual(360)
-  expect(dialog.style.maxHeight).toBe('60vh')
-  expect(dialog.style.overflowY).toBe('auto')
+  // 定位不再写在 JS 内联里：样式只在 styles.css 维护一份。
+  expect(dialog.style.position).toBe('')
+  expect(dialog.style.right).toBe('')
+  expect(dialog.style.width).toBe('')
+  const rule = writeConfirmRule()
+  expect(rule).toContain('position: fixed')
+  expect(rule).toContain('right: 16px')
+  expect(rule).toContain('bottom: 16px')
+  expect(rule).toContain('width: 360px')
+  expect(rule).toContain('max-width: calc(100vw - 32px)')
+  expect(rule).toContain('max-height: 60vh')
+  expect(rule).toContain('overflow-y: auto')
+  expect(rule).toContain('z-index: 40')
+  expect(rule).toContain('padding: 14px 16px')
+  expect(rule).toContain('display: grid')
+  // 保留既有类名与两个按钮选择器。
+  expect(STYLES).toMatch(/\.write-confirm \.write-confirm-accept/u)
+  expect(STYLES).toMatch(/\.write-confirm \.write-confirm-cancel/u)
+})
+
+it('卡片是读屏的状态更新，且关闭「×」等于不允许', () => {
+  const app = mount()
+  app.send(createPreview())
+  const dialog = app.dialog()!
+  expect(dialog.getAttribute('role')).toBe('status')
+  expect(dialog.getAttribute('aria-live')).toBe('polite')
+  const close = dialog.querySelector<HTMLButtonElement>('.write-confirm-close')!
+  expect(close.textContent).toBe('×')
+  expect(close.getAttribute('aria-label')).toBe('关闭，不允许这次操作')
+  close.click()
+  expect(app.calls).toEqual([{ requestId: 'r1', approved: false }])
+  expect(app.dialog()).toBeNull()
 })
 
 it('关掉卡片（焦点在卡里按 Esc、程序关闭）都按不允许结清', () => {

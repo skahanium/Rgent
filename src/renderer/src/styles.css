@@ -1939,6 +1939,68 @@ a[href]:focus-visible,
 .note-unavailable > span { flex: 1 1 14rem; }
 .save-copy-preview { max-width: min(34rem, calc(100vw - 2rem)); }
 
+/* AI 写确认卡：右下角非模态卡片，不遮屏、不抢焦点；关闭「×」＝不允许。 */
+.write-confirm {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  left: auto;
+  top: auto;
+  margin: 0;
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  max-height: 60vh;
+  overflow-y: auto;
+  z-index: 40;
+  padding: 14px 16px;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+.write-confirm .write-confirm-title {
+  margin: 0;
+  padding-right: 26px;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--text-heading);
+  overflow-wrap: anywhere;
+}
+.write-confirm .write-confirm-body { overflow-wrap: anywhere; }
+.write-confirm .write-confirm-details { font-size: 0.8rem; color: var(--text-muted); }
+.write-confirm .write-confirm-path { margin: 4px 0; overflow-wrap: anywhere; }
+.write-confirm footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.write-confirm .write-confirm-accept,
+.write-confirm .write-confirm-cancel {
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-overlay);
+  color: var(--text-body);
+  cursor: pointer;
+  font: inherit;
+}
+.write-confirm .write-confirm-accept { color: var(--accent); }
+.write-confirm .write-confirm-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: 1rem/1 var(--font-ui);
+}
+.write-confirm .write-confirm-close:hover { background: var(--state-hover); color: var(--text-heading); }
+.write-confirm .write-confirm-accept:focus-visible,
+.write-confirm .write-confirm-cancel:focus-visible,
+.write-confirm .write-confirm-close:focus-visible,
+.write-confirm .write-confirm-expand:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
 /* 本场授权依附口令，复用工作区浮层 token；不扩展设置页。 */
 .overlay-authorization {
   position: fixed;

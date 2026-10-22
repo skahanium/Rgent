@@ -86,7 +86,7 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
   const intro = element('p', 'settings-hint')
   intro.textContent = '连接远端 HTTPS 服务器，把已发现并勾选的只读工具提供给 AI 任务。'
   const guarantee = element('p', 'settings-hint')
-  guarantee.textContent = '只读由你勾选的工具保证；Rgent 只按名字与参数转发；token 可选（公共只读服务器可留空），有 token 时只存本机加密、不显示。'
+  guarantee.textContent = '只读由你勾选的工具保证。Rgent 只按名字与参数转发；token 可选，公共只读服务器可留空，有 token 时只存本机加密、不显示。'
 
   const list = element('div', 'settings-mcp-list')
   list.dataset.mcp = 'list'
@@ -127,7 +127,7 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
   tokenInput.dataset.mcp = 'new-token'
   tokenField.append(tokenLabel, tokenInput)
   const addHint = element('p', 'settings-hint')
-  addHint.textContent = '保存不会发测试请求；添加后先在列表里打开启用开关。公共只读服务器可以留空 token；要更换 token，删除后重新添加。'
+  addHint.textContent = '保存不会发测试请求，添加后在列表里打开启用开关。公共只读服务器可以留空 token；要更换 token，删除后重新添加。'
   const addActions = element('div', 'settings-actions')
   const save = element('button', 'settings-action')
   save.type = 'button'
@@ -207,7 +207,7 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
 
     const discoverHint = element('p', 'settings-hint')
     discoverHint.dataset.mcp = 'discover-hint'
-    discoverHint.textContent = `「连接并列出工具」会向 ${server.host} 发送一次请求；返回内容只作展示。`
+    discoverHint.textContent = `「连接并列出工具」会向 ${server.host} 发送一次请求。返回内容只作展示。`
 
     const actions = element('div', 'settings-actions')
     const discover = element('button', 'settings-action')
@@ -274,7 +274,7 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
         if (disposed || !host.isCurrent()) return
         if (!result.ok) { errorText = mcpErrorText(result.error); return }
         config = result.config
-        notice = `已从 ${server.host} 读取 ${result.tools.length} 个工具；勾选白名单后保存即生效。`
+        notice = `已从 ${server.host} 读取 ${result.tools.length} 个工具。勾选白名单后保存才生效。`
       })
     })
 
@@ -305,7 +305,7 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
         if (disposed || !host.isCurrent()) return
         if (!result.ok) { errorText = mcpErrorText(result.error); return }
         config = result.config
-        notice = `白名单已保存（${whitelist.length} 个工具）；未勾选的工具不会提供给任务。`
+        notice = `白名单已保存（${whitelist.length} 个工具）。未勾选的工具不会提供给任务。`
       })
     })
 

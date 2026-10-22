@@ -210,7 +210,7 @@ describe('embedded vault settings page', () => {
 
   it.each([
     ['UNSAVED_DRAFT', '笔记草稿尚未保存，已留在当前库。请先处理保存问题，再重试切换。'],
-    ['VAULT_SWITCH_TIMEOUT', '切换准备未在时限内完成，仍留在当前库。窗口稿和设置修改已保留；请重试，或先处理保存与任务问题。'],
+    ['VAULT_SWITCH_TIMEOUT', '切换准备超时，仍留在当前库。窗口稿和设置修改已保留；请重试，或先处理保存与任务问题。'],
     ['PREVIOUS_TASK_UNSAVED', '生成回答尚未保存，已留在原库。请先处理保存问题，再重试切换。'],
     ['VAULT_TARGET_INVALID', '无法打开所选位置。请检查目录是否存在及访问权限后重试。']
   ])('keeps the overlay and provides recovery steps for %s', async (code, message) => {
@@ -265,7 +265,7 @@ it('retains settings drafts and explains how to resolve a deferred body conflict
  expect(overlay.isOpen()).toBe(true);expect(row('a').querySelector('input')).toBe(input);expect(row('a').querySelector('details')).toBe(path)
  expect(input.value).toBe('未保存名称');expect(path.open).toBe(true);expect(document.activeElement).toBe(input);expect([input.selectionStart,input.selectionEnd]).toEqual([1,3])
  expect(page.isBusy()).toBe(false);expect(page.isDirty()).toBe(true)
- expect(overlay.root.querySelector('[role="status"]')!.textContent).toBe('窗口稿与磁盘稿发生冲突，两份均已保留。请先关闭设置，处理正文保存冲突后，再重试切换。')
+ expect(overlay.root.querySelector('[role="status"]')!.textContent).toBe('窗口稿与磁盘稿发生冲突，两份均已保留。请先关闭设置处理正文保存冲突，再重试切换。')
  expect(overlay.root.textContent).not.toContain('VAULT_SWITCH_BODY_CONFLICT')
 })
 it('shows recovery authorization in the existing vault page and supports paused progress',async()=>{

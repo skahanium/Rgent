@@ -110,14 +110,14 @@ export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHan
   const heading = element('h3', 'settings-section-title')
   heading.textContent = '联网只读'
   const intro = element('p', 'settings-hint')
-  intro.textContent = '内置只读抓页与搜索。默认关闭；关闭时不再外发。'
+  intro.textContent = '内置只读抓页与搜索，默认关闭。开启后才会外发，关闭即停止。'
   const toggleLabel = element('label', 'settings-network-toggle')
   const enabled = element('input')
   enabled.type = 'checkbox'
   enabled.dataset.network = 'enabled'
   toggleLabel.append(enabled, document.createTextNode('允许联网只读（总开关，保存即生效）'))
   const scope = element('p', 'settings-hint')
-  scope.textContent = '每场任务还需要单独勾选授权；这里只决定设备级总闸。'
+  scope.textContent = '每场任务还要单独授权。这里只管设备总闸。'
   const providerGroup = element('fieldset', 'settings-network-provider')
   const legend = element('legend')
   legend.textContent = '搜索服务（同一时间只接一家）'
@@ -170,7 +170,7 @@ export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHan
   const statsHeading = element('h4', 'settings-network-stats-title')
   statsHeading.textContent = '外发统计'
   const statsIntro = element('p', 'settings-hint')
-  statsIntro.textContent = '只记次数、字节与失败码；不含 URL、查询、正文或凭据。'
+  statsIntro.textContent = '只记次数、字节与失败码。不显示 URL、查询、正文或凭据。'
   const corruptNote = element('p', 'settings-network-warning')
   corruptNote.dataset.networkStats = 'corrupt'
   corruptNote.setAttribute('role', 'alert')
@@ -287,7 +287,7 @@ export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHan
         ? `还没有人发起的外发记录（另有 ${egressView.skipped} 条无法读取）。`
         : '还没有人发起的外发记录。'
     } else {
-      logNote.textContent = `最近 ${egressView.entries.length} 条；只显示时间、类型、主机与结果，不含 URL 或查询。`
+      logNote.textContent = `最近 ${egressView.entries.length} 条外发记录。只显示时间、类型、主机与结果，不含 URL 或查询。`
       if (egressView.skipped) logNote.textContent += `（跳过 ${egressView.skipped} 条无法读取的记录）`
     }
     if (!egressView || unavailable) return

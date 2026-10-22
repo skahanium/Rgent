@@ -63,7 +63,7 @@ describe('远端只读 MCP 设置卡', () => {
     expect(node(row, 'remove').textContent).toBe('删除')
     // 一次外发前先写明目标主机。
     expect(node(row, 'discover-hint').textContent).toContain('mcp.example.com')
-    expect(body.textContent).toContain('只读由你勾选的工具保证；Rgent 只按名字与参数转发；token 可选（公共只读服务器可留空），有 token 时只存本机加密、不显示。')
+    expect(body.textContent).toContain('只读由你勾选的工具保证。Rgent 只按名字与参数转发；token 可选，公共只读服务器可留空，有 token 时只存本机加密、不显示。')
     // 已发现工具按勾选状态列出。
     const tools = nodes<HTMLInputElement>(row, 'tool')
     expect(tools.map(input => input.dataset.toolName)).toEqual(['read_a', 'read_b'])

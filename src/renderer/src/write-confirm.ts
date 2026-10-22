@@ -14,8 +14,6 @@ export type WriteConfirmHost = {
 
 /** 首行（发生了什么的标题）硬上限，与合同「首行 ≤40 汉字」一致。 */
 const TITLE_LIMIT = 40
-/** 卡片宽度上限；窄窗口再退，避免压住编辑器右缘。 */
-const CARD_WIDTH = 360
 /** 正文预览默认露几行。 */
 const PREVIEW_LINES = 3
 
@@ -40,12 +38,27 @@ function clampTitle(title: string): string {
   return title.length <= TITLE_LIMIT ? title : `${title.slice(0, TITLE_LIMIT - 1)}…`
 }
 
-function previewNote(preview: AgentWritePreview): string {
+/** 卡片实际标题（已截到 40 字）；窗口专项按这句原文断言，改文案前先查 scripts/verify-ui.mjs。 */
+export const writeConfirmTitle = (preview: AgentWritePreview): string => clampTitle(titleOf(preview))
+
+/** 首句只说「发生什么」；引用数与权限数这类细节留到第二句。
+ *  「移入废纸篓」「链接会失效」「不会代为改字」「同名附件夹」是窗口专项依赖的原话。 */
+export function writeConfirmLead(preview: AgentWritePreview): string {
   switch (preview.kind) {
-    case 'create': return '只在这个目录里新建，正文由模型给出；不同意就什么都不写。'
+    case 'create': return '只在这个目录里新建，正文由模型给出。'
     case 'rename':
-    case 'move': return `会影响 ${preview.linkChanges} 处引用、${preview.permissionChanges} 处权限；引用在授权范围内的会被一并修好。不同意就什么都不动。`
-    case 'delete': return `${preview.hasAttachments ? '这篇（连同名附件夹）' : '这篇'}会移入废纸篓，也就是系统废纸篓。其他笔记里的链接会失效，不会代为改字。不同意就什么都不动。`
+    case 'move': return `会影响 ${preview.linkChanges} 处引用、${preview.permissionChanges} 处权限。`
+    case 'delete': return `${preview.hasAttachments ? '这篇（连同名附件夹）' : '这篇'}会移入废纸篓，也就是系统废纸篓。`
+  }
+}
+
+function previewNote(preview: AgentWritePreview): string {
+  const lead = writeConfirmLead(preview)
+  switch (preview.kind) {
+    case 'create': return `${lead}不同意就什么都不写。`
+    case 'rename':
+    case 'move': return `${lead}引用在授权范围内的会被一并修好；不同意就什么都不动。`
+    case 'delete': return `${lead}其他笔记里的链接会失效，不会代为改字；不同意就什么都不动。`
   }
 }
 
@@ -72,7 +85,7 @@ export function installWriteConfirm(host: WriteConfirmHost): () => void {
   const stop = host.onRequest(preview => {
     // 同一时刻只摆一个：上一张还没答就当作不允许，避免两个都点出问题。
     if (current && !current.decided) settle(false)
-    const title = clampTitle(titleOf(preview))
+    const title = writeConfirmTitle(preview)
     const overlay = openOverlay({
       label: title,
       // 非模态：show() 而不是 showModal()，不拿焦点、不拦快捷键。也不能给 initialFocus。
@@ -90,39 +103,16 @@ export function installWriteConfirm(host: WriteConfirmHost): () => void {
       }
     })
     overlay.root.classList.add('overlay-write-confirm', 'write-confirm')
-    // 右下角的常驻卡片：fixed 到视口，最多 360px 宽、60vh 高，内容多了在卡内滚动。
-    overlay.root.style.position = 'fixed'
-    overlay.root.style.right = '16px'
-    overlay.root.style.bottom = '16px'
-    overlay.root.style.left = 'auto'
-    overlay.root.style.top = 'auto'
-    overlay.root.style.margin = '0'
-    overlay.root.style.width = `${CARD_WIDTH}px`
-    overlay.root.style.maxWidth = 'calc(100vw - 32px)'
-    overlay.root.style.maxHeight = '60vh'
-    overlay.root.style.overflowY = 'auto'
-    overlay.root.style.zIndex = '40'
-    overlay.root.style.padding = '14px 16px'
-    overlay.root.style.display = 'grid'
-    overlay.root.style.gap = '8px'
-    overlay.root.style.alignContent = 'start'
-    overlay.root.innerHTML = '<h2 class="write-confirm-title"></h2><div class="write-confirm-body"></div><button type="button" class="write-confirm-expand" aria-expanded="false">展开</button><details class="write-confirm-details"><summary>详情</summary><p class="write-confirm-path"></p><p class="write-confirm-note settings-hint"></p></details><footer><button type="button" class="write-confirm-cancel">不允许</button><button type="button" class="write-confirm-accept">允许</button></footer>'
+    // 右下角的常驻卡片：定位与尺寸在 styles.css 的 `.write-confirm`，内容多了在卡内滚动。
+    // 非模态卡片是状态更新，不是模态对话框：用 role="status" 让读屏播报，但不抢焦点。
+    overlay.root.setAttribute('role', 'status')
+    overlay.root.setAttribute('aria-live', 'polite')
+    overlay.root.innerHTML = '<button type="button" class="write-confirm-close" aria-label="关闭，不允许这次操作">×</button><h2 class="write-confirm-title"></h2><div class="write-confirm-body"></div><button type="button" class="write-confirm-expand" aria-expanded="false">展开</button><details class="write-confirm-details"><summary>详情</summary><p class="write-confirm-path"></p><p class="write-confirm-note settings-hint"></p></details><footer><button type="button" class="write-confirm-cancel">不允许</button><button type="button" class="write-confirm-accept">允许</button></footer>'
     const titleEl = overlay.root.querySelector<HTMLElement>('.write-confirm-title')!
     titleEl.textContent = title
-    titleEl.style.margin = '0'
-    titleEl.style.fontSize = '0.95rem'
-    titleEl.style.lineHeight = '1.5'
-    titleEl.style.color = 'var(--text-heading)'
-    titleEl.style.overflowWrap = 'anywhere'
     // 路径与影响面数字是「详情」：首屏只留一句发生了什么。
     overlay.root.querySelector('.write-confirm-path')!.textContent = previewPath(preview)
     overlay.root.querySelector('.write-confirm-note')!.textContent = previewNote(preview)
-    const details = overlay.root.querySelector<HTMLElement>('.write-confirm-details')!
-    details.style.fontSize = '0.8rem'
-    details.style.color = 'var(--text-muted)'
-    const pathEl = overlay.root.querySelector<HTMLElement>('.write-confirm-path')!
-    pathEl.style.margin = '4px 0'
-    pathEl.style.overflowWrap = 'anywhere'
     const body = overlay.root.querySelector<HTMLElement>('.write-confirm-body')!
     const expand = overlay.root.querySelector<HTMLButtonElement>('.write-confirm-expand')!
     if (preview.kind === 'create') {
@@ -162,11 +152,9 @@ export function installWriteConfirm(host: WriteConfirmHost): () => void {
       body.remove()
       expand.remove()
     }
-    const footer = overlay.root.querySelector<HTMLElement>('footer')!
-    footer.style.display = 'flex'
-    footer.style.justifyContent = 'flex-end'
-    footer.style.gap = '8px'
-    footer.style.marginTop = '4px'
+    const close = overlay.root.querySelector<HTMLElement>('.write-confirm-close')!
+    // 关闭就是不允许：和 Esc、程序关闭同一条结清路径。
+    close.addEventListener('click', () => settle(false))
     const cancel = overlay.root.querySelector<HTMLElement>('.write-confirm-cancel')!
     cancel.addEventListener('click', () => settle(false))
     const accept = overlay.root.querySelector<HTMLElement>('.write-confirm-accept')!

@@ -2,11 +2,11 @@ import { openOverlay, type Overlay } from './overlay.ts'
 import type { LifecycleRetryRequest, LifecycleStatus } from '../../shared/ipc.ts'
 
 const recoveryReasons = {
-  'journal-invalid': '恢复记录损坏，原记录已保留。请人工检查库根的 .rgent-lifecycle。',
-  'journal-unreadable': '恢复记录无法读取，原记录已保留。请检查访问权限。',
-  'object-changed': '部分对象、内容或目录成员发生变化，尚不能安全续跑。',
-  'policy-changed': '权限名单与操作记录不一致，尚不能安全续跑。',
-  'recovery-required': '操作尚未完成。重新核验身份、内容和权限后才能续跑。'
+  'journal-invalid': '恢复记录损坏，请人工检查。原记录仍保留，文件在库根 .rgent-lifecycle。',
+  'journal-unreadable': '恢复记录读不到，请检查文件访问权限。原记录仍保留。',
+  'object-changed': '对象、内容或目录成员已变，请重新核验。暂不能安全续跑。',
+  'policy-changed': '权限名单和操作记录对不上，请重新核验。暂不能安全续跑。',
+  'recovery-required': '操作还没完成，请重新核验身份、内容和权限。核验通过后才能续跑。'
 } as const
 
 export function openLifecycleStatus(initial: LifecycleStatus,

@@ -65,9 +65,9 @@ export function mountVaultManager(context: {
     if(!alive()||state&&state.sessionId!==request.sessionId)return
     recoveryState=state??{sessionId:request.sessionId,status:'invalid',revision:null,items:[]}
     showRecovery()
-    if(!state)recoveryMessage.textContent='本次操作已返回，但当前恢复状态无法读取。请重新打开本页检查；已有回答和恢复记录保留。'
+    if(!state)recoveryMessage.textContent='本次操作已返回，但当前恢复状态无法读取，请重新打开本页。已有回答和恢复记录保留。'
     else if(progress.status==='complete'&&state.status==='ready')recoveryMessage.textContent='恢复已完成。账本和合格来源已核验；未通过的来源仍暂停。'
-    else if(progress.status==='pending'&&state.status==='pending'&&state.revision===progress.revision)recoveryMessage.textContent=`已核验 ${progress.processed} / ${progress.total} 项。可暂停并离开本库，进度保留；如有窗口稿，请先继续恢复，再保存后离库。`
+    else if(progress.status==='pending'&&state.status==='pending'&&state.revision===progress.revision)recoveryMessage.textContent=`已核验 ${progress.processed} / ${progress.total} 项，可暂停并离开本库。进度保留；有窗口稿就先继续恢复，保存后再离库。`
   }}
   function showRecovery(){
     recovery.hidden=!recoveryState;recoveryRows.replaceChildren();recoveryActions.replaceChildren();if(!recoveryState)return
@@ -78,9 +78,9 @@ export function mountVaultManager(context: {
       const cancel=button('取消恢复预览',()=>{void run('取消预览…',async()=>{await repair({sessionId,action:'cancel',previewId:preview.id});if(alive()){recoveryPreview=null;showRecovery()}})})
       recoveryActions.append(cancel,confirm)
     }else if(recoveryState.status!=='ready'){
-      recoveryMessage.textContent=recoveryState.status==='invalid'?'恢复记录无法核验，原记录保留。可以退出本页或切换笔记库。':recoveryState.operation?.kind==='ledger-repair'?'整库恢复已暂停，可核验并继续一批，或离开本库。正文可读，编辑和保存暂停；已有窗口稿保留，先继续恢复再保存后离库。任务、结构操作和整理写入暂停。':'文件操作尚未完成，请先核验现有恢复记录。'
+      recoveryMessage.textContent=recoveryState.status==='invalid'?'恢复记录无法核验，原记录保留。可以退出本页或切换笔记库。':recoveryState.operation?.kind==='ledger-repair'?'整库恢复已暂停，请核验并继续一批，或先离开本库。正文仍可读；编辑、保存、任务、结构操作和整理写入暂停，窗口稿保留。':'文件操作尚未完成，请先核验现有恢复记录。'
       if(recoveryState.status==='pending'&&recoveryState.operation?.kind==='ledger-repair'&&recoveryState.revision){const revision=recoveryState.revision;recoveryActions.append(button('核验并继续一批',()=>{void run('正在续接恢复…',()=>repair({sessionId,action:'resume',revision}))}))}
-    }else{recoveryMessage.textContent='登记损坏可先重建原描述；整库复制或恢复后，须预览并明确授权新关联。单篇复制仍是新笔记。'
+    }else{recoveryMessage.textContent='登记损坏可先重建原描述。整库复制或恢复后，须预览并明确授权新关联；单篇复制仍是新笔记。'
       for(const [mode,label]of [['rebuild','预览重建登记'],['restore','预览整库恢复']]as const)recoveryActions.append(button(label,()=>{void run('正在核验整库…',()=>repair({sessionId,action:'preview',mode}))}))
     }
   }
@@ -96,7 +96,7 @@ export function mountVaultManager(context: {
   function confirmAbandon(item:HTMLElement,relPath:string){
     if(item.querySelector('.vault-settings-confirmation'))return
     const panel=element('div','vault-settings-confirmation')
-    panel.append(element('p','','只清除 Rgent 库内的恢复记录并释放路径，不会动系统废纸篓里的文件。若文件还在废纸篓，需要你自己处理。'))
+    panel.append(element('p','','只清除 Rgent 库内的恢复记录并释放路径。不会动系统废纸篓里的文件；若文件还在废纸篓，需要你自己处理。'))
     const actions=element('div','vault-settings-shortcuts')
     const cancel=button('取消',()=>panel.remove())
     const confirm=button('确认放弃恢复',()=>{
@@ -121,7 +121,7 @@ export function mountVaultManager(context: {
     if(!externalView)return
     external.hidden=false
     if(externalView.rows.length===0){externalMessage.textContent='没有已登记对象在库外消失。恢复由人在访达／资源管理器执行，这里只做核验。';externalActions.append(rescan);return}
-    externalMessage.textContent='这些对象曾在库外消失。来源对 AI 保持失效，记忆不会被自动遗忘；只有内容、同名附件夹与权限档都与记录一致才恢复可用。'
+    externalMessage.textContent='这些对象曾在库外消失，来源仍对 AI 失效。记忆不会自动遗忘；内容、同名附件夹与权限档都与记录一致才恢复可用。'
     for(const row of externalView.rows){
       const item=element('li','',`${row.relPath} · ${verdictLabels[row.verdict]}：${row.message}`)
       item.dataset.recoveryVerdict=row.verdict
@@ -237,7 +237,7 @@ export function mountVaultManager(context: {
       if(p){
         const technical=element('details','vault-root-technical')
         technical.append(element('summary','','技术信息'),element('p','',`登记对象 ${p.previousIdentity} → 当前对象 ${p.rootIdentity}`))
-        rootProof.append(element('p','',`${p.previousPath} → ${p.path}`),element('p','',p.workspace==='unavailable'?'无法恢复本库上次的工作位置；原记录保留，正文仍可打开。':p.workspace==='restore'?'恢复本库上次的工作位置。':'没有可恢复的上次工作位置。'),element('p','','确认只建立此设备上的新关联，不证明这是原来的目录。账本和记忆会分别核验。旧任务会停止，待保存回答和窗口稿会保留；旧稿不会自动写入当前目录，另存正文需要再次确认。'),technical,button('取消恢复预览',()=>{void rootChange('root-cancel')}),button('确认建立新关联',()=>{void rootChange('root-confirm')}))
+        rootProof.append(element('p','',`${p.previousPath} → ${p.path}`),element('p','',p.workspace==='unavailable'?'无法恢复本库上次的工作位置；原记录保留，正文仍可打开。':p.workspace==='restore'?'恢复本库上次的工作位置。':'没有可恢复的上次工作位置。'),element('p','','确认只建立此设备上的新关联，不证明这是原来的目录。账本和记忆会分别核验；旧任务会停止，窗口稿和待保存回答保留。旧稿不会自动写入当前目录，另存正文需要再次确认。'),technical,button('取消恢复预览',()=>{void rootChange('root-cancel')}),button('确认建立新关联',()=>{void rootChange('root-confirm')}))
       }
     }
     menu.append(relocate,previewRoot,chooseRoot,remove,relocateHint)
@@ -334,9 +334,9 @@ function errorText(error: unknown): string {
   if(message.includes('STALE_PREVIEW'))return '根对象、目录登记、工作区或会话已变更，预览已失效。请重新预览；窗口稿保留。'
   if(message.includes('STALE_RECOVERY'))return '文件、附件或权限已改变，恢复已停止；已核验进度保留，请核查后重试。'
   if (message.includes('VAULT_SWITCH_CANCELLED')) return ''
-  if (message.includes('VAULT_SWITCH_TIMEOUT')) return '切换准备未在时限内完成，仍留在当前库。窗口稿和设置修改已保留；请重试，或先处理保存与任务问题。'
-  if (message.includes('VAULT_SWITCH_BODY_CONFLICT')) return '窗口稿与磁盘稿发生冲突，两份均已保留。请先关闭设置，处理正文保存冲突后，再重试切换。'
-  if (message==='RECOVERY_UNSAVED_DRAFT') return '窗口稿已保留。请先关闭设置处理保存问题，再重新预览；如恢复尚未完成，请先继续恢复，完成后保存草稿。'
+  if (message.includes('VAULT_SWITCH_TIMEOUT')) return '切换准备超时，仍留在当前库。窗口稿和设置修改已保留；请重试，或先处理保存与任务问题。'
+  if (message.includes('VAULT_SWITCH_BODY_CONFLICT')) return '窗口稿与磁盘稿发生冲突，两份均已保留。请先关闭设置处理正文保存冲突，再重试切换。'
+  if (message==='RECOVERY_UNSAVED_DRAFT') return '窗口稿已保留。请先关闭设置处理保存问题，再重新预览；恢复未完成就先继续恢复，完成后保存草稿。'
   if (message.includes('UNSAVED_DRAFT')) return '笔记草稿尚未保存，已留在当前库。请先处理保存问题，再重试切换。'
   if (message.includes('PREVIOUS_TASK_UNSAVED')) return '生成回答尚未保存，已留在原库。请先处理保存问题，再重试切换。'
   if (message.includes('VAULT_TARGET_INVALID')) return '无法打开所选位置。请检查目录是否存在及访问权限后重试。'
