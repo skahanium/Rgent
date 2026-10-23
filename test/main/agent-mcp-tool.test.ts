@@ -18,7 +18,7 @@ type Call = { id: string; name: string; input: unknown }
 type Stepped = Parameters<NonNullable<HostDependencies['streamStep']>>[0]
 
 const CREDENTIAL = { provider: 'custom' as const, baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 32000, apiKey: 'fixture' }
-const SERVERS = [{ name: 'deepwiki', host: 'mcp.example', tools: ['search', 'read'] }]
+const SERVERS = [{ name: 'deepwiki', host: 'mcp.example', tools: ['search', 'read'], searchChannel: true }]
 /** 系统提示里那份清单：只含白名单工具，带说明摘要与 schema 摘要。 */
 const CATALOG = mcpToolCatalog([{
   name: 'deepwiki',
@@ -38,7 +38,7 @@ function mcpHarness(options: {
   available?: boolean
   reason?: 'off' | 'not-configured' | 'too-many-tools'
   catalog?: string
-  servers?: { name: string; host: string; tools: string[] }[]
+  servers?: { name: string; host: string; tools: string[]; searchChannel: boolean }[]
   steps?: Call[][]
   call?: (input: McpInput) => Promise<McpResult>
   echoShingles?: Set<string>
@@ -63,7 +63,8 @@ function mcpHarness(options: {
   const grant: TaskGrant = {
     id: 'g', root: '/vault', sessionId: 's', origin: 'a.md',
     originProof: source('a.md'), sources: [source('a.md'), source('b.md')],
-    credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 },
+    credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, level:'write' as const, autoApproveWrites:false, 
+    get network() { return { allowed: true as const } },
     get mcp() { return mcpLive ? { allowed: true as const, servers } : undefined },
     assertActive() {},
     validateSources: async () => {},
@@ -540,7 +541,8 @@ function mcpPairHarness() {
     const proof = source(relPath)
     return {
       id: `g-${relPath}`, root: '/vault', sessionId: 's', origin: relPath, originProof: proof, sources: [proof],
-      credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 },
+      credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, level:'write' as const, autoApproveWrites:false, 
+      get network() { return { allowed: true as const } },
       get mcp() { return live.get(relPath) ? { allowed: true as const, servers: SERVERS } : undefined },
       assertActive() {},
       validateSources: async () => {},
@@ -571,7 +573,7 @@ function mcpPairHarness() {
   const host = new AgentHost({
     ledger: history.ledger, root: () => '/vault', session: () => 's',
     read, write, tier: async () => 'reference', acceptsObject: () => false,
-    credential: () => CREDENTIAL, limits: () => ({ seconds: 30, steps: 6, tools: 6 }),
+    credential: () => CREDENTIAL, limits: () => ({ seconds: 30, steps: 6, tools: 6 }), 
     authorize: async input => grantFor(input.relPath),
     stream: async function* () {},
     streamStep: async function* (input) {

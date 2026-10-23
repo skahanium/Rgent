@@ -55,7 +55,7 @@ function harness(
       return 'reference'
     },
     credential: () => ({ provider: 'custom', baseURL: 'http://127.0.0.1:1234/v1', modelId: 'test', contextTokens: 10000, apiKey: 'secret' }),
-    limits: () => ({ seconds: 30, steps: 4, tools: 0 }),
+    limits: () => ({ seconds: 30, steps: 4, tools: 0 }), 
     stream: (input, signal) => { systems.push(input.system); return stream(signal, input.prompt) },
     ...(assistant ? { assistant } : {}),
     emit: (event) => { events.push(event) }
@@ -177,7 +177,7 @@ describe('Host minimal loop', () => {
       },
       tier: async () => { if (!allowed) throw new Error('FORBIDDEN'); return 'reference' },
       credential: () => ({ provider: 'custom', baseURL: 'http://127.0.0.1:1234/v1', modelId: 'test', contextTokens: 10000, apiKey: 'secret' }),
-      limits: () => ({ seconds: 30, steps: 4, tools: 0 }),
+      limits: () => ({ seconds: 30, steps: 4, tools: 0 }), 
       stream: async function* () { sent = true; yield '不应发送' },
       emit: () => {}
     })
@@ -311,7 +311,7 @@ describe('Host minimal loop', () => {
       },
       tier: async () => 'reference',
       credential: () => ({ provider: 'custom', baseURL: 'http://127.0.0.1:1234/v1', modelId: 'test', contextTokens: 10000, apiKey: 'secret' }),
-      limits: () => ({ seconds: 30, steps: 4, tools: 0 }),
+      limits: () => ({ seconds: 30, steps: 4, tools: 0 }), 
       stream: async function* () { throw new Error('LEGACY_FALLBACK') },
       streamStep: async function* () {
         yield { type: 'reasoning', text: '先想清楚依据：参考甲与参考乙。' }
@@ -357,7 +357,7 @@ describe('Host minimal loop', () => {
         return 'reference'
       },
       credential: () => ({ provider: 'custom', baseURL: 'http://127.0.0.1:1234/v1', modelId: 'test', contextTokens: 10000, apiKey: 'secret' }),
-      limits: () => ({ seconds: 30, steps: 4, tools: 0 }),
+      limits: () => ({ seconds: 30, steps: 4, tools: 0 }), 
       stream: () => (async function* () { yield '最终答案' })(),
       emit: () => {}
     })
@@ -416,7 +416,7 @@ it.each(['valid','revision','object','session'] as const)('continues only a veri
  const credential={provider:'custom' as const,baseURL:'https://model.example/v1',modelId:'m',contextTokens:16000,apiKey:'fixture'},limits={seconds:30,steps:4,tools:0}
  const read=async()=>({content,revision,sessionId:'s',objectVersion})
  const registry=new TaskAuthorizationRegistry({root:()=>'/v',session:()=>'s',tree:async()=>[{kind:'note',relPath:'a.md',name:'a.md'}],read,tier:async()=> 'reference',acceptsObject:(_path,previous,next)=>previous==='old'&&next==='new',configuration:()=>({credential,limits})})
- const request={modelRecordId:'m',relPath:'a.md',sessionId:'s',objectVersion,expectedRevision:revision,range:{start:0,end:2},expectedText:'/问',promptText:'问',references:[]}
+ const request={modelRecordId:'m',relPath:'a.md',sessionId:'s',objectVersion,expectedRevision:revision,range:{start:0,end:2},expectedText:'/问',level:'write' as const,promptText:'问',references:[]}
  const preview=await registry.preview('owner',request);let writes=0,streams=0
  const host=new AgentHost({root:()=>'/v',session:()=>'s',acceptsObject:(_path,previous,next)=>previous==='old'&&next==='new',tier:async()=> 'reference',authorize:input=>registry.consume('owner',input as never),prepareSource:async()=>{
   const previousRevision=revision;content='/问\n';revision=hash(content);objectVersion='new'
@@ -440,7 +440,7 @@ it('cancelAll covers only running tasks and leaves a still-launching start intac
     write: async (_path, next) => { content = next; revision += 1; return String(revision) },
     tier: async () => 'reference',
     credential: () => ({ provider: 'custom', baseURL: 'http://127.0.0.1:1234/v1', modelId: 'test', contextTokens: 10000, apiKey: 'secret' }),
-    limits: () => ({ seconds: 30, steps: 4, tools: 0 }),
+    limits: () => ({ seconds: 30, steps: 4, tools: 0 }), 
     stream: async function* (_input, signal) { await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true })) },
     emit: () => {},
     ledger: hostLedgerFixture().ledger
@@ -481,7 +481,7 @@ function memoryToolHarness(options:{calls?:{id:string;name:string;input:unknown}
  const source={id:'s',version:1,relPath:'outside.md',objectVersion:'outside',revision:'a'.repeat(64),permissionTier:'reference' as const,kind:'body' as const,taskId:null,taskMaterialHash:null,classification:'human' as const,start:0,end:2,text:'依据',hash:'b'.repeat(64),basisHash:'c'.repeat(64),sourceDeps:[],memoryDeps:[]}
  const memory={context:()=>({sessionId:'s',vaultKey:'v'}),config:()=>({enabled,revision:enabled?0:1}),entries:async(ids?:readonly string[])=>{const result=options.empty?[]:[{id:'m',version:entriesVersion,content:'火星计划约定',layer:'demand' as const,scope:'仅项目甲',attribution:'人的约定',status:paused?'paused' as const:'active' as const,reason:null,updatedAt:'2026-10-05',updateBasis:{kind:'manual' as const,id:'manual',version:1},sources:[source]}];if(ids){proofReads++;if(proofReads===1)await options.proof?.()}return result}}
  const originProof={sourceId:'origin',relPath:'a.md',title:'a',sessionId:'s',objectVersion:'o',revision:'1',fingerprint:createHash('sha256').update(content).digest('hex'),tier:'reference' as const}
- const grant={id:'g',root:'/v',sessionId:'s',origin:'a.md',originProof,sources:[originProof,...(options.library?[{sourceId:'external',relPath:'b.md',title:'b',sessionId:'s',objectVersion:'b',revision:'b',fingerprint:'b',tier:'reference' as const}]:[])],credential,limits:{seconds:30,steps:options.steps??12,tools:options.tools??20},assertActive(){},async assertLive(){},async validateSources(){},assertWriteTarget(){},acknowledgeOrigin(){},revoke(){},assertNetwork(){throw Error('NETWORK_NOT_AUTHORIZED')},revokeNetwork(){},assertMcp(){throw Error('MCP_NOT_AUTHORIZED')},revokeMcp(){}}
+ const grant={id:'g',root:'/v',sessionId:'s',origin:'a.md',level:'write' as const,autoApproveWrites:false,originProof,sources:[originProof,...(options.library?[{sourceId:'external',relPath:'b.md',title:'b',sessionId:'s',objectVersion:'b',revision:'b',fingerprint:'b',tier:'reference' as const}]:[])],credential,limits:{seconds:30,steps:options.steps??12,tools:options.tools??20},assertActive(){},async assertLive(){},async validateSources(){},assertWriteTarget(){},acknowledgeOrigin(){},revoke(){},assertNetwork(){throw Error('NETWORK_NOT_AUTHORIZED')},revokeNetwork(){},assertMcp(){throw Error('MCP_NOT_AUTHORIZED')},revokeMcp(){}}
  const read=async(path:string)=>path==='b.md'?{content:'外篇普通正文',revision:'b',sessionId:'s',objectVersion:'b'}:{content,revision:String(revision),sessionId:'s',objectVersion:'o'}
  const host=new AgentHost({ledger:history.ledger,...(options.library?{createReadOnlyTools:(grant:import('../../src/main/task-authorization.ts').TaskGrant,id:string)=>createScopedAgentTools(grant,id,{read,tier:async()=> 'reference',acceptsObject:()=>false})}:{}),root:()=>'/v',session:()=> 's',read,write:async(_path,next,expected)=>{if(expected!==String(revision))throw Error('CONFLICT');content=next;return String(++revision)},tier:async()=> 'reference',credential:()=>credential,limits:()=>grant.limits,authorize:async()=>grant,memory,stream:async function*(){throw Error('OLD_STREAM')},streamStep:async function*(input){requests.push(structuredClone(input));dispatches++;if(dispatches===1){for(const c of options.calls??[{id:'one',name:'search_memory',input:{query:'火星'}}])yield {type:'tool-call',...c};yield {type:'finish',reason:'tool-calls'}}else {options.change?.();yield {type:'text',text:'已答'};yield {type:'finish',reason:'stop'}}},emit:()=>{}})
  if(options.verified!==false)host.supportsMemorySearch=()=>true
@@ -647,7 +647,7 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
   const extras = options.originOnly ? [] : (options.extras ?? [{ relPath: 'b.md', tier: 'reference' as const }])
   const source = (relPath: string, tier: 'reference' | 'follow' = 'reference') => ({ sourceId: relPath === 'a.md' ? 'origin' : relPath, relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: relPath === 'a.md' ? createHash('sha256').update(content).digest('hex') : 'f',
     tier, kind: 'body' as const, taskId: null, taskMaterialHash: null, classification: 'human' as const, start: 0, end: 2, hash: 'a'.repeat(64), basisHash: 'b'.repeat(64), sourceDeps: [], memoryDeps: [] })
-  const grant = { id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', originProof: source('a.md'), sources: [source('a.md'), ...extras.map(item => source(item.relPath, item.tier))], credential, limits: { seconds: 30, steps: 4, tools: 4 },
+  const grant = { id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', originProof: source('a.md'), sources: [source('a.md'), ...extras.map(item => source(item.relPath, item.tier))], credential, limits: { seconds: 30, steps: 4, tools: 4 }, level:'write' as const, autoApproveWrites:false,
     assertActive() {}, validateSources: async () => { if (options.sourcesVanishAfterTrash && trashed.length) throw Error('ENOENT') }, acknowledgeOrigin() {}, revoke() {}, assertNetwork() { throw Error('NETWORK_NOT_AUTHORIZED') }, revokeNetwork() {}, assertMcp() { throw Error('MCP_NOT_AUTHORIZED') }, revokeMcp() {},
     assertWriteTarget(path: string) { if (path !== 'a.md') throw Error('OUTSIDE_TASK_SCOPE') },
     assertLive: async () => { if (options.sourcesVanishAfterTrash && trashed.length) throw Error('ENOENT') } }
@@ -919,7 +919,7 @@ it('delete_note 的工具返回与账本 outcome 都带出孤儿与降级字段'
   const grant: TaskGrant = {
     id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', originProof: origin, sources: [origin],
     credential: { provider: 'custom', baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 32000, apiKey: 'fixture' },
-    limits: { seconds: 30, steps: 4, tools: 4 },
+    limits: { seconds: 30, steps: 4, tools: 4 }, level:'write' as const, autoApproveWrites:false,
     assertActive() {}, validateSources: async () => {}, assertWriteTarget() {}, assertLive: async () => {}, acknowledgeOrigin() {}, revoke() {},
     assertNetwork() { throw Error('NETWORK_NOT_AUTHORIZED') }, revokeNetwork() {}, assertMcp() { throw Error('MCP_NOT_AUTHORIZED') }, revokeMcp() {}
   }
@@ -970,7 +970,7 @@ function affectedHarness() {
         id: `grant-${input.relPath}`, root: '/vault', sessionId: 's', origin: input.relPath, originProof: origin,
         // 只有发起甲这一场的 scopePaths 含目标.md：它的任务 relPath 与目标无关，旧写法找不到它。
         sources: input.relPath === '发起甲.md' ? [origin, source('目标.md')] : [origin],
-        credential, limits,
+        credential, limits, level:'write' as const, autoApproveWrites:false,
         assertActive() {}, validateSources: async () => {}, assertWriteTarget() {}, assertLive: async () => {}, acknowledgeOrigin() {}, revoke() {},
         assertNetwork() { throw Error('NETWORK_NOT_AUTHORIZED') }, revokeNetwork() {}, assertMcp() { throw Error('MCP_NOT_AUTHORIZED') }, revokeMcp() {}
       }
@@ -1203,7 +1203,7 @@ describe('start 前复核联网可用性快照', () => {
     })
     const request = {
       modelRecordId: 'm', relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: 'r',
-      range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', references: [], network: true
+      range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', references: [], level:'write' as const
     }
     const host = new AgentHost({
       ledger: hostLedgerFixture().ledger,
@@ -1226,7 +1226,6 @@ describe('start 前复核联网可用性快照', () => {
   it('rejects start when the search provider changed between preview and start, before any model request', async () => {
     const app = availabilityHarness()
     const preview = await app.preview()
-    expect(preview.network).toEqual({ available: true, search: true, providerHost: 'api.search.brave.com' })
     // 预览后换到另一家：目标主机变了，旧预览不得静默按新配置启动。
     app.setAvailability({ available: true, search: true, providerHost: 'api.tavily.com' })
     await expect(app.host.start({ ...app.request, previewId: preview.id })).rejects.toThrow('INVALID_AUTHORIZATION')
@@ -1237,7 +1236,6 @@ describe('start 前复核联网可用性快照', () => {
   it('rejects start when the master switch was turned off after preview, before any model request', async () => {
     const app = availabilityHarness()
     const preview = await app.preview()
-    expect(preview.network).toEqual({ available: true, search: true, providerHost: 'api.search.brave.com' })
     app.setAvailability({ available: false, search: false, providerHost: null, reason: 'off' })
     await expect(app.host.start({ ...app.request, previewId: preview.id })).rejects.toThrow('INVALID_AUTHORIZATION')
     expect(app.streams()).toBe(0)

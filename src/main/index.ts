@@ -29,7 +29,7 @@ import { isChromeTextPreference } from '../shared/reading-preference.ts'
 import type { AssistantResult, AgentStartRequest, AgentStartResult, LifecycleRetryResult, LimitTier, RelocationPreviewRequest, RelocationPreviewView, ModelAddRequest, ModelConfigResult, ModelDefaultSetRequest, ModelKeyDeleteRequest, ModelLimitsSetRequest, ModelListRequest, ModelListResult, ModelProviderRemoveRequest, ModelProviderSaveRequest, ModelRemoveRequest, ModelUpdateRequest, ReadingPreference, ReadingSetResult, RelocationCommitResult, RelocationPreviewResult, ThemeMode, ThemeSetResult, TrashCommitResult, TrashPreviewResult, TrashPreviewView } from '../shared/ipc.ts'
 import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import type { NetworkPreviewRequest, NetworkPreviewResult } from '../shared/ipc.ts'
-import type { NetworkConfigResult, NetworkProviderSaveRequest } from '../shared/ipc.ts'
+import type { DeepSeekKeySource, FetchService, NetworkConfigResult, NetworkConfigSetRequest, NetworkProvider, NetworkProviderClearRequest, NetworkProviderSaveRequest } from '../shared/ipc.ts'
 import type { AgentMcpAvailability, AgentMcpServerView, McpConfigResult, McpConfigView, McpDiscoverResult, McpPublicTool, McpServerSaveRequest } from '../shared/ipc.ts'
 import type { EgressLogResult, HumanFetchResult, HumanSearchResult, NetworkStatKind, NetworkStatsClearResult, NetworkStatsResult } from '../shared/ipc.ts'
 import { createEgressLog, type EgressLog } from './egress-log.ts'
@@ -55,6 +55,7 @@ import { createMcpConfigStore, type McpConfigStore, type McpRuntimeServer } from
 import { createMcpClient, type McpClient } from './mcp-client.ts'
 import { createSearchProvider, SEARCH_PROVIDERS } from './search.ts'
 import { fetchText } from './text-fetch.ts'
+import { fetchViaDeepSeek, resolveFetchRoute } from './deepseek-fetch.ts'
 import { TaskAuthorizationRegistry, isAuthorizationCommand } from './task-authorization.ts'
 import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 import { createScopedAgentTools, mcpToolCatalog, MCP_CATALOG_BYTES } from './scoped-agent-tools.ts'
@@ -106,17 +107,34 @@ let humanNetwork: HumanNetwork | null = null
 /** 设备级外发统计：只记次数／字节／拒绝码，记录失败不影响外发本身。 */
 let networkStats: NetworkStats | null = null
 let agentHost: AgentHost | null = null
-/** 联网只读的可用性：抓页只依赖总闸；搜索另要求预设服务与密钥可用。渲染层只拿摘要。
+/** 联网搜索与抓取的可用性：抓页只依赖总闸；搜索另要求当前搜索服务与该家凭据可用。
  *  配置保存后立即生效：这里按需读文件、不缓存，下一次判定自然看到新值。 */
 function networkAvailability(): { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' } {
   try {
-    if (!networkConfig?.enabled()) return { available: false, search: false, providerHost: null, reason: 'off' }
-    // 抓页不需要服务商：总闸开着就可抓。服务商或密钥没配好（含密文解不开）只关搜索。
-    let credential: NetworkCredential | null = null
-    try { credential = networkConfig.credential() } catch { credential = null }
+    const config = networkConfig?.getPublic()
+    if (!config || !config.enabled) return { available: false, search: false, providerHost: null, reason: 'off' }
+    // 抓页不需要服务商：总闸开着就可抓。搜索服务或密钥没配好（含密文解不开）只关搜索。
+    const provider = config.searchProvider
+    if (!provider) return { available: true, search: false, providerHost: null, reason: 'not-configured' }
+    const credential = networkSearchCredential()
     if (!credential) return { available: true, search: false, providerHost: null, reason: 'not-configured' }
-    return { available: true, search: true, providerHost: SEARCH_PROVIDERS[credential.provider].host }
+    return { available: true, search: true, providerHost: SEARCH_PROVIDERS[provider].host }
   } catch { return { available: false, search: false, providerHost: null, reason: 'off' } }
+}
+
+/** 搜索凭据：DeepSeek 允许复用模型页的密钥；其余按联网配置里的独立密钥。 */
+function networkSearchCredential(): NetworkCredential | null {
+  try {
+    const config = networkConfig?.getPublic()
+    if (!config?.searchProvider) return null
+    if (config.searchProvider === 'deepseek' && config.deepseekKeySource === 'model') {
+      try {
+        const secret = modelConfig?.providerSecret('deepseek')
+        return secret?.apiKey ? { provider: 'deepseek', key: secret.apiKey } : null
+      } catch { return null }
+    }
+    return networkConfig!.credential(config.searchProvider)
+  } catch { return null }
 }
 
 /** 统计写失败不能影响外发：错误码规范化与写入都包在这里，模块自己也兜一层。 */
@@ -139,13 +157,15 @@ function mcpAvailability(): AgentMcpAvailability & { catalog?: string } {
   const decryptable = (id: string): boolean => {
     try { return store.credential(id) !== null } catch { return false }
   }
-  const usable = servers.filter(server => server.enabled && server.whitelist.length > 0 && decryptable(server.id))
+  // 搜索类 MCP 与内置搜索共用同一个设备闸；非搜索类只受启用＋白名单约束。
+  const gateOpen = (() => { try { return networkConfig?.enabled() === true } catch { return false } })()
+  const usable = servers.filter(server => server.enabled && server.whitelist.length > 0 && decryptable(server.id) && (!server.searchChannel || gateOpen))
   // 授权只带名字／主机／工具名，没有服务器 id：同名两台无法在调用时证明目标，
   // 所以一律不计入可用集合（fail closed），绝不按「第一台」猜。
   const nameCounts = new Map<string, number>()
   for (const server of usable) nameCounts.set(server.name, (nameCounts.get(server.name) ?? 0) + 1)
   const unambiguous = usable.filter(server => nameCounts.get(server.name) === 1)
-  const views: AgentMcpServerView[] = unambiguous.map(server => ({ name: server.name, host: server.host, tools: [...server.whitelist] }))
+  const views: AgentMcpServerView[] = unambiguous.map(server => ({ name: server.name, host: server.host, tools: [...server.whitelist], searchChannel: server.searchChannel }))
   if (!unambiguous.length) {
     // 一台都没配 → not-configured；配了但都没启用 → off；启用了却缺 token／白名单／重名 → not-configured。
     const anyEnabled = servers.some(server => server.enabled)
@@ -1007,7 +1027,7 @@ function registerIpc(): void {
         typeof request.promptText !== 'string' || request.promptText.length > 20000 ||
         typeof request.modelRecordId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(request.modelRecordId) ||
         typeof request.sessionId !== 'string' || typeof request.objectVersion !== 'string' || typeof request.expectedRevision !== 'string' ||
-        (request.network !== undefined && typeof request.network !== 'boolean') ||
+        (request.level !== 'read' && request.level !== 'reference' && request.level !== 'write' && request.level !== 'auto') ||
         !request.range || !Number.isSafeInteger(request.range.start) || !Number.isSafeInteger(request.range.end)) {
       return { ok: false, error: 'BAD_REQUEST' }
     }
@@ -1058,53 +1078,100 @@ function registerIpc(): void {
       return { ok: false, error: /^[A-Z][A-Z0-9_]{1,63}$/u.test(message) ? message : 'IO_ERROR' }
     }
   }
-  /** 配置前后只比对「服务商／是否有密钥／密钥本身」；密钥只留在主进程内存里。 */
-  type NetworkCredentialSnapshot = { provider: string | null; hasKey: boolean; key: string | null }
+  /** 配置前后比对「用哪家、哪些家已有密钥、当前密钥、抓页路径、DeepSeek 密钥来源」；
+   *  密钥只留在主进程内存里。任一项变化都撤销活动任务的联网能力（在途请求随之中止）。 */
+  type NetworkCredentialSnapshot = {
+    searchProvider: string | null
+    keyedProviders: string
+    key: string | null
+    fetch: string
+    deepseekKeySource: string
+  }
   const networkCredentialSnapshot = (): NetworkCredentialSnapshot => {
-    let provider: string | null = null
-    let hasKey = false
+    let searchProvider: string | null = null
+    let keyedProviders = ''
+    let fetch = ''
+    let deepseekKeySource = ''
     let key: string | null = null
-    try { const view = networkConfig?.getPublic(); provider = view?.provider ?? null; hasKey = view?.hasKey === true } catch { /* fail closed */ }
+    try {
+      const view = networkConfig?.getPublic()
+      searchProvider = view?.searchProvider ?? null
+      keyedProviders = (view?.keyedProviders ?? []).join(',')
+      fetch = view?.fetch ?? ''
+      deepseekKeySource = view?.deepseekKeySource ?? ''
+    } catch { /* fail closed */ }
     try { key = networkConfig?.credential()?.key ?? null } catch { key = null }
-    return { provider, hasKey, key }
+    return { searchProvider, keyedProviders, key, fetch, deepseekKeySource }
   }
   const networkCredentialChanged = (before: NetworkCredentialSnapshot): boolean => {
     const after = networkCredentialSnapshot()
-    return before.provider !== after.provider || before.hasKey !== after.hasKey || before.key !== after.key
+    return before.searchProvider !== after.searchProvider || before.keyedProviders !== after.keyedProviders ||
+      before.key !== after.key || before.fetch !== after.fetch || before.deepseekKeySource !== after.deepseekKeySource
   }
-  /** 总开关：不带参数只读，带 `{enabled}` 保存并立即生效（下一次可用性判定直接读新值）。 */
+  /** 设备级选项：不带参数只读，带 `{enabled?, fetch?, nativeSearch?, deepseekKeySource?}` 保存并立即生效。
+   *  所有字段先校验再写，避免同一请求里前一项落盘、后一项被拒的半套状态。 */
   registerTrustedHandle(IPC.networkConfig, (event, value: unknown): NetworkConfigResult => {
     if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
     if (value === undefined) return networkView()
     if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'BAD_REQUEST' }
     const record = value as Record<string, unknown>
-    if (Object.keys(record).some(key => key !== 'enabled') || typeof record.enabled !== 'boolean') return { ok: false, error: 'BAD_REQUEST' }
-    const enabled = record.enabled as boolean
-    const result = networkWrite(() => networkConfig!.setEnabled(enabled))
-    // 关闭总闸即撤销所有活动任务的联网能力与在途请求；任务本身继续收尾（C11）。
-    if (result.ok && enabled === false) agentHost?.revokeNetworkForAll?.()
-    // 人发起的在途抓页／搜索同样中止（没有 requestId 的也由 abortAll 收掉）。
-    if (result.ok) applyHumanNetworkGate(humanNetwork, enabled)
+    const fields = Object.keys(record)
+    if (!fields.length || fields.some(key => !['enabled', 'fetch', 'nativeSearch', 'deepseekKeySource'].includes(key))) {
+      return { ok: false, error: 'BAD_REQUEST' }
+    }
+    if ('enabled' in record && typeof record.enabled !== 'boolean') return { ok: false, error: 'BAD_REQUEST' }
+    if ('fetch' in record && record.fetch !== 'direct' && record.fetch !== 'deepseek') return { ok: false, error: 'BAD_REQUEST' }
+    if ('deepseekKeySource' in record && record.deepseekKeySource !== 'own' && record.deepseekKeySource !== 'model') {
+      return { ok: false, error: 'BAD_REQUEST' }
+    }
+    const nativeSearch = record.nativeSearch
+    if ('nativeSearch' in record && (!nativeSearch || typeof nativeSearch !== 'object' || Array.isArray(nativeSearch) ||
+      Object.keys(nativeSearch).length !== 1 || typeof (nativeSearch as Record<string, unknown>).minimax !== 'boolean')) {
+      return { ok: false, error: 'BAD_REQUEST' }
+    }
+    const request = record as NetworkConfigSetRequest
+    const before = networkCredentialSnapshot()
+    const result = networkWrite(() => {
+      let view = networkConfig!.getPublic()
+      if (request.enabled !== undefined) view = networkConfig!.setEnabled(request.enabled)
+      if (request.fetch !== undefined) view = networkConfig!.setFetch(request.fetch)
+      if (nativeSearch !== undefined) view = networkConfig!.setNativeSearch((nativeSearch as { minimax: boolean }).minimax)
+      if (request.deepseekKeySource !== undefined) view = networkConfig!.setDeepSeekKeySource(request.deepseekKeySource)
+      return view
+    })
+    // 任一项变化都让活动任务按旧凭据／旧路径宣告过的联网目标作废；关闭总闸同样撤销。
+    if (result.ok && (networkCredentialChanged(before) || request.enabled === false)) agentHost?.revokeNetworkForAll?.()
+    // 关闭总闸立即中止人发起的在途抓页／搜索（没有 requestId 的也由 abortAll 收掉）。
+    if (result.ok && request.enabled === false) applyHumanNetworkGate(humanNetwork, false)
     return result
   })
-  /** 保存服务商与密钥：**不发任何测试请求**；key 只进加密存储，不回渲染层。 */
+  /** 保存服务商密钥并选中该家：**不发任何测试请求**；key 只进加密存储，不回渲染层。 */
   registerTrustedHandle(IPC.networkProviderSave, (event, value: unknown): NetworkConfigResult => {
     if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
     if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'BAD_REQUEST' }
     const request = value as Partial<NetworkProviderSaveRequest>
     if (Object.keys(value).some(key => key !== 'provider' && key !== 'key')) return { ok: false, error: 'BAD_REQUEST' }
-    if (request.provider !== 'brave' && request.provider !== 'tavily') return { ok: false, error: 'BAD_REQUEST' }
-    if (typeof request.key !== 'string') return { ok: false, error: 'BAD_REQUEST' }
+    if (typeof request.provider !== 'string' || typeof request.key !== 'string') return { ok: false, error: 'BAD_REQUEST' }
     const before = networkCredentialSnapshot()
-    const result = networkWrite(() => networkConfig!.setProvider(request.provider!, request.key!))
+    // provider 白名单与 key 形状都由存储层校验，避免 IPC 层与存储层两份清单走散。
+    const result = networkWrite(() => networkConfig!.saveKey(request.provider as NetworkProvider, request.key as string))
     // 服务商或密钥变了：已宣告的搜索目标作废，所有活动任务撤网并 abort 在途请求。
     if (result.ok && networkCredentialChanged(before)) agentHost?.revokeNetworkForAll?.()
     return result
   })
-  registerTrustedHandle(IPC.networkProviderClear, (event): NetworkConfigResult => {
+  /** 清除某家密钥；不带参数时清当前搜索服务商（兼容旧渲染层调用）。 */
+  registerTrustedHandle(IPC.networkProviderClear, (event, value: unknown): NetworkConfigResult => {
     if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    let provider: NetworkProvider | undefined
+    if (value !== undefined) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'BAD_REQUEST' }
+      const request = value as NetworkProviderClearRequest
+      if (Object.keys(value).some(key => key !== 'provider')) return { ok: false, error: 'BAD_REQUEST' }
+      if (request.provider !== undefined && typeof request.provider !== 'string') return { ok: false, error: 'BAD_REQUEST' }
+      provider = request.provider
+    }
     const before = networkCredentialSnapshot()
-    const result = networkWrite(() => networkConfig!.clearProvider())
+    const result = networkWrite(() => networkConfig!.clearKey(provider))
     if (result.ok && networkCredentialChanged(before)) agentHost?.revokeNetworkForAll?.()
     return result
   })
@@ -1196,9 +1263,10 @@ function registerIpc(): void {
     if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
     if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'BAD_REQUEST' }
     const record = value as Record<string, unknown>
-    const KEYS = ['id', 'name', 'url', 'token', 'enabled', 'whitelist']
+    const KEYS = ['id', 'name', 'url', 'token', 'enabled', 'searchChannel', 'whitelist']
     if (Object.keys(record).some(key => !KEYS.includes(key))) return { ok: false, error: 'BAD_REQUEST' }
     if (typeof record.name !== 'string' || typeof record.url !== 'string' || typeof record.enabled !== 'boolean') return { ok: false, error: 'BAD_REQUEST' }
+    if (record.searchChannel !== undefined && typeof record.searchChannel !== 'boolean') return { ok: false, error: 'BAD_REQUEST' }
     if (record.id !== undefined && (typeof record.id !== 'string' || record.id.length === 0 || record.id.length > 64)) return { ok: false, error: 'BAD_REQUEST' }
     if (record.token !== undefined && typeof record.token !== 'string') return { ok: false, error: 'BAD_REQUEST' }
     const whitelist = record.whitelist
@@ -1207,6 +1275,7 @@ function registerIpc(): void {
       name: record.name,
       url: record.url,
       enabled: record.enabled,
+      ...(record.searchChannel !== undefined ? { searchChannel: record.searchChannel as boolean } : {}),
       ...(record.id !== undefined ? { id: record.id as string } : {}),
       ...(record.token !== undefined ? { token: record.token as string } : {}),
       ...(whitelist !== undefined ? { whitelist: whitelist as string[] } : {})
@@ -1953,9 +2022,7 @@ if (ownsInstance) app.whenReady().then(() => {
     enabled: () => networkConfig?.enabled() === true,
     fetchText: (url, options) => fetchText(url, options),
     searchProvider: async () => {
-      let credential: NetworkCredential | null = null
-      try { credential = networkConfig?.credential() ?? null }
-      catch { credential = null }
+      const credential = networkSearchCredential()
       if (!credential) throw Error('SEARCH_NOT_CONFIGURED')
       const provider = createSearchProvider(credential)
       return {
@@ -2110,12 +2177,17 @@ if (ownsInstance) app.whenReady().then(() => {
     },
     stream: (input, signal) => streamModelText({ ...input, signal }),
     streamStep: (input, signal) => streamModelStep({ ...input, signal }),
-    // 唯一出口：fetchText 内部再用 EgressClient；错误码已是 EGRESS_*，Host 直接如实上报。
+    // 唯一出口：两条路内部都走 EgressClient；错误码已是 EGRESS_*，Host 直接如实上报。
+    // 任务内抓页按设备配置读：选了 DeepSeek 就必须有 DeepSeek 凭据，缺凭据不静默降级直连
+    // （`resolveFetchRoute` 抛 SEARCH_NOT_CONFIGURED）。人发起抓页仍直连，不走这里。
     // 统计只旁听：成功记 ok＋字节，失败先按白名单规范化记 refused 再原样抛出。
     network: {
       fetch: async (url, signal) => {
         try {
-          const result = await fetchText(url, { signal })
+          const route = resolveFetchRoute(networkConfig?.getPublic().fetch ?? 'direct', networkSearchCredential())
+          const result = route.service === 'deepseek'
+            ? await fetchViaDeepSeek(url, route.key, { signal })
+            : await fetchText(url, { signal })
           recordNetworkStat('fetch', { outcome: 'ok', bytes: result.bytes })
           return {
             text: result.text,
@@ -2134,9 +2206,7 @@ if (ownsInstance) app.whenReady().then(() => {
       // 搜索走同一出口核心；服务商与密钥只在主进程解密，错误码不夹带 key。
       search: async (query, maxResults, signal) => {
         try {
-          let credential: NetworkCredential | null = null
-          try { credential = networkConfig?.credential() ?? null }
-          catch { credential = null }
+          const credential = networkSearchCredential()
           if (!credential) throw Error('SEARCH_NOT_CONFIGURED')
           const provider = createSearchProvider(credential)
           const result = await provider.search(query, { maxResults, signal })

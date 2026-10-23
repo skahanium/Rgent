@@ -178,7 +178,8 @@ function renderNetworkDot(right: HTMLElement, network: StatusNetwork): void {
   const enabled = network.enabled
   button.dataset.state = enabled ? 'online' : 'offline'
   button.setAttribute('aria-pressed', enabled ? 'true' : 'false')
-  const label = enabled ? '联网只读已开' : '联网只读已关'
+  // 小球是设备级「联网搜索与抓取」总闸：只管搜索／抓取，其他 MCP 不受此闸约束。
+  const label = enabled ? '联网搜索与抓取：已开' : '联网搜索与抓取：已关'
   button.setAttribute('aria-label', label)
   button.title = label
   button.onclick = network.onToggle

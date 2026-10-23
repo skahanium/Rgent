@@ -9,8 +9,9 @@ import { isReadingPreference, READING_FONTS } from '../../shared/reading-prefere
 import { CHROME_TEXT_SIZES, isChromeTextPreference, type ChromeTextPreference } from '../../shared/reading-preference.ts'
 import type { ChromeTextSetResult } from '../../shared/ipc.ts'
 import { mountModelPage, modelPageAvailable, type ModelPageHandlers } from './settings-model.ts'
-import { mountNetworkCard, type NetworkCardHandlers } from './settings-network.ts'
-import { mountMcpCard, type McpCardHandlers } from './settings-mcp.ts'
+import type { NetworkCardHandlers } from './settings-network.ts'
+import type { McpCardHandlers } from './settings-mcp.ts'
+import { mountNetworkPage } from './settings-network-page.ts'
 import { mountSkillsPage, type SkillsPageHandlers } from './settings-skills.ts'
 import { ASSISTANT_LIMITS, ASSISTANT_TONE_LABELS, ASSISTANT_TONES, DEFAULT_ASSISTANT_HABITS, isAssistantHabits, type AssistantHabits, type AssistantTone } from '../../shared/assistant.ts'
 import { openOverlay, type Overlay } from './overlay.ts'
@@ -30,9 +31,9 @@ export type SettingsHandlers = {
   getChromeText?: () => Promise<ChromeTextPreference>
   setChromeText?: (value: ChromeTextPreference) => Promise<ChromeTextSetResult>
   getConfig?: () => Promise<ModelConfigResult>
-  /** 「模型」页末尾的联网只读卡片；只写设备配置，不发测试请求。 */
+  /** 「联网」页：设备总闸、内置搜索/抓取与搜索类 MCP；只写设备配置，不发测试请求。 */
   network?: () => NetworkCardHandlers | null
-  /** 「模型」页末尾的远端只读 MCP 卡片；只有人点「连接并列出工具」才外发。 */
+  /** 「联网」页里的远端只读 MCP 渠道；只有人点「连接并列出工具」才外发。 */
   mcp?: () => McpCardHandlers | null
   saveProvider?: (request: ModelProviderSaveRequest) => Promise<ModelConfigResult>
   removeProvider?: (request: ModelProviderRemoveRequest) => Promise<ModelConfigResult>
@@ -51,7 +52,7 @@ export type SettingsHandlers = {
   onClose?: () => void
 }
 
-type SettingsPage = '笔记库' | '界面' | '助手' | '记忆' | '技能' | '模型' | '运行'
+type SettingsPage = '笔记库' | '界面' | '联网' | '助手' | '记忆' | '技能' | '模型' | '运行'
 
 export type SettingsOverlay = {
   /** 打开设置；可指定落到哪一页（底栏模型模块的「配置」用它直达「模型」页）。 */
@@ -141,6 +142,8 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         disposeAssistantPage = null
         disposeSkillsPage?.()
         disposeSkillsPage = null
+        disposeNetworkPage?.()
+        disposeNetworkPage = null
         setWorkspaceChrome(true)
         handlers.onClose?.()
       }
@@ -202,6 +205,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     navGroup('工作区')
     if (handlers.vault) addNav('笔记库', 'folder')
     addNav('界面', 'appearance')
+    addNav('联网', 'network')
     const assistantReady = Boolean(handlers.getAssistant && handlers.setAssistant)
     const modelsReady = modelPageAvailable(handlers) && Boolean(handlers.setLimits)
     if (assistantReady || modelsReady || handlers.memory || handlers.skills) {
@@ -249,6 +253,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       if (name !== '模型') { disposeModelPage?.(); disposeModelPage = null }
       if (name !== '助手') disposeAssistantPage?.()
       if (name !== '技能') { disposeSkillsPage?.(); disposeSkillsPage = null }
+      if (name !== '联网') { disposeNetworkPage?.(); disposeNetworkPage = null }
       for (const [label, button] of navButtons) {
         button.className = label === name ? 'settings-nav-current' : 'settings-nav-item'
         if (label === name) button.setAttribute('aria-current', 'page')
@@ -259,6 +264,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       else if (name === '助手') renderAssistantPage()
       else if (name === '记忆') renderMemoryPage()
       else if (name === '技能') renderSkillsPage()
+      else if (name === '联网') renderNetworkPage()
       else if (name === '模型') renderModelPage()
       else void renderRunPage()
     }
@@ -492,6 +498,19 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       disposeSkillsPage = mountSkillsPage({ body, isCurrent: () => current.isOpen() && openedPage === '技能' }, skills)
     }
 
+    let disposeNetworkPage: (() => void) | null = null
+    function renderNetworkPage(): void {
+      disposeNetworkPage?.()
+      disposeNetworkPage = null
+      const { body, error } = pageFrame('联网', '只读抓页、搜索与 MCP；不会写入外部服务。')
+      const network = handlers.network?.() ?? null
+      if (!network) { showError(error, '联网设置当前不可用。'); return }
+      disposeNetworkPage = mountNetworkPage(
+        { body, isCurrent: () => current.isOpen() && openedPage === '联网' },
+        { network, mcp: handlers.mcp?.() ?? null }
+      )
+    }
+
     let disposeModelPage: (() => void) | null = null
     const modelHandlers = (): ModelPageHandlers | null => modelPageAvailable(handlers) ? handlers : null
     function renderModelPage(): void {
@@ -500,45 +519,20 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       disposeModelPage?.()
       disposeModelPage = null
       const { body, error } = pageFrame('模型', '配置连接与模型。密钥只保存在此设备；设备默认在助手页保存，底栏可为下一场临时选择。')
-      // 联网只读与远端 MCP 两张卡片挂在既有「模型」页末尾：不新增页、不新增导航项。
-      const network = handlers.network?.() ?? null
-      const mcp = handlers.mcp?.() ?? null
-      let trailing: HTMLElement | null = null
-      let disposeNetwork: (() => void) | null = null
-      let disposeMcp: (() => void) | null = null
-      if (network || mcp) {
-        trailing = document.createElement('div')
-        // 仍保留 settings-network 类：既有窗口专项按它找联网卡，并用 closest('.settings-network')
-        // 把页尾两张卡一起排除在模型页的批量禁用之外。
-        trailing.className = 'settings-network settings-network-wrap'
-        if (network) {
-          const section = document.createElement('section')
-          section.className = 'settings-network-card'
-          disposeNetwork = mountNetworkCard({ body: section, isCurrent: () => current.isOpen() && openedPage === '模型' }, network)
-          trailing.append(section)
-        }
-        if (mcp) {
-          const section = document.createElement('section')
-          section.className = 'settings-mcp'
-          disposeMcp = mountMcpCard({ body: section, isCurrent: () => current.isOpen() && openedPage === '模型' }, mcp)
-          trailing.append(section)
-        }
-      }
       const disposeModel = mountModelPage({
         body,
         showError: (message) => showError(error, message),
         configErrorText,
         isCurrent: () => current.isOpen() && openedPage === '模型',
-        onChanged: () => handlers.onModelConfigChanged?.(),
-        ...(trailing ? { trailing } : {})
+        onChanged: () => handlers.onModelConfigChanged?.()
       }, page)
-      disposeModelPage = () => { disposeModel(); disposeNetwork?.(); disposeMcp?.(); disposeNetwork = null; disposeMcp = null }
+      disposeModelPage = () => { disposeModel() }
     }
 
     async function renderRunPage(): Promise<void> {
       if (!handlers.getConfig || !handlers.setLimits) return
       const mine = ++request
-      const { body, error } = pageFrame('运行', '模型与工具上限按任务启动时的快照生效；联网与 MCP 尚未开放。')
+      const { body, error } = pageFrame('运行', '模型与工具上限按任务启动时的快照生效。')
       const result = await handlers.getConfig().catch(() => ({ ok: false, error: '读取失败' }) as ModelConfigResult)
       if (!current.isOpen() || openedPage !== '运行' || mine !== request) return
       if (!result.ok) { showError(error, `运行设置不可用：${configErrorText(result.error)}`); return }

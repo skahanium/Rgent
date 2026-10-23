@@ -274,6 +274,6 @@ describe('human network', () => {
 
   it('wires the gate close into network:config so a saved-off switch stops in-flight calls', () => {
     const source = readFileSync(path.join(root, 'src/main/index.ts'), 'utf8')
-    expect(source).toContain('applyHumanNetworkGate(humanNetwork, enabled)')
+    expect(source).toContain('applyHumanNetworkGate(humanNetwork, false)')
   })
 })

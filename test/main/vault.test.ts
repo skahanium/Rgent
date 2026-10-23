@@ -730,7 +730,7 @@ it('uses actual native alias resolution for attachment ancestors and rejects mis
 
 async function migrationGrant(session:VaultSession,relPath:string){
  const note=await session.read(relPath),registry=new TaskAuthorizationRegistry({root:()=>session.root,session:()=>session.sessionId(),tree:()=>session.tree(),read:path=>session.read(path),tier:modelTierFor,assertOrdinaryNotes:paths=>session.requireOrdinaryNotes(paths),acceptsObject:(path,before,after)=>session.acceptsObject(path,before,after),configuration:()=>({credential:{provider:'custom',baseURL:'https://fixture.example/v1',modelId:'fixture',contextTokens:16000,apiKey:'fixture'},limits:{seconds:30,steps:4,tools:0}})})
- const request={...note,relPath,expectedRevision:note.revision,range:{start:0,end:2},expectedText:note.content.slice(0,2),promptText:'问',modelRecordId:'fixture',references:[]},preview=await registry.preview('owner',request)
+ const request={...note,relPath,expectedRevision:note.revision,range:{start:0,end:2},expectedText:note.content.slice(0,2),level:'reference' as const,promptText:'问',modelRecordId:'fixture',references:[]},preview=await registry.preview('owner',request)
  return registry.consume('owner',{...request,previewId:preview.id})
 }
 it('keeps open tab binding continuous after explicit batch migration and permits its next body save',async()=>{

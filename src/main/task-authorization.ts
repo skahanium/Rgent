@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { AgentAuthorizationPreview, AgentAuthorizationRequest, AgentCommandRequest, AgentMcpAvailability, AgentMcpServerView, AgentStartRequest, AuthorizedSource, NoteSnapshot, TreeEntry } from '../shared/ipc.ts'
+import type { AgentAuthorizationPreview, AgentAuthorizationRequest, AgentCommandRequest, AgentMcpAvailability, AgentMcpServerView, AgentPermissionLevel, AgentStartRequest, AuthorizedSource, NoteSnapshot, TreeEntry } from '../shared/ipc.ts'
 import type { ModelCredential, RunLimits } from './model-config.ts'
 import { noteTitle } from '../shared/vault-rel.ts'
 
 export type AuthorizationAction = 'read' | 'model' | 'write'
 /** 一场获准的 MCP 服务器：只读名字／主机／白名单工具，token 与 schema 不在授权里。 */
-export type McpGrantServer = { readonly name: string; readonly host: string; readonly tools: readonly string[] }
+export type McpGrantServer = { readonly name: string; readonly host: string; readonly tools: readonly string[]; readonly searchChannel: boolean }
 export type AuthorizationConfiguration = { credential: ModelCredential; limits: RunLimits }
 export type AuthorizationDependencies = {
   root(): string | null
@@ -34,9 +34,12 @@ export interface TaskGrant {
   readonly credential: Readonly<ModelCredential>
   readonly limits: Readonly<RunLimits>
   readonly memorySnapshotSignature?:string
-  /** 本场联网只读：只在预览时勾选、start 校验一致后才出现；撤销后为 undefined。 */
+  /** 四档：read/reference 不宣告写工具；auto 只自动批准新建。 */
+  readonly level: AgentPermissionLevel
+  readonly autoApproveWrites: boolean
+  /** 搜索/抓取闸（设备级）：任务开始时开启才有；撤销后为 undefined。 */
   readonly network?: Readonly<{ allowed: true; providerHost?: string }>
-  /** 本场远端只读 MCP：冻结的是预览时看到的服务器与白名单工具；撤销后为 undefined。 */
+  /** 设备级 MCP：搜索类受闸，非搜索类不受；闸关时只剩非搜索组。 */
   readonly mcp?: Readonly<{ allowed: true; servers: readonly McpGrantServer[] }>
   assertActive(): void
   assertLive(action: AuthorizationAction, path?: string, signal?: AbortSignal): Promise<void>
@@ -59,8 +62,7 @@ export interface TaskGrant {
 type NetworkAvailabilitySnapshot = { available: boolean; search: boolean; providerHost: string | null }
 /** 预览时冻结的 MCP 可用性快照：服务器名／主机／白名单工具逐项一致才放行。
  *  只冻「有什么」，不冻 token 或服务器正文。 */
-type McpAvailabilitySnapshot = { available: boolean; servers: AgentMcpServerView[] }
-type Prepared = { owner: string; request: AgentCommandRequest; modelRecordId: string; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number; memory?:{signature:string;search:boolean;snapshotSignature?:string}; network: boolean; networkAvailability: NetworkAvailabilitySnapshot; mcp: boolean; mcpAvailability: McpAvailabilitySnapshot }
+type Prepared = { owner: string; request: AgentCommandRequest; modelRecordId: string; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number; memory?:{signature:string;search:boolean;snapshotSignature?:string}; level: AgentPermissionLevel; write: boolean; autoApproveWrites: boolean; networkAvailable: NetworkAvailabilitySnapshot; mcpServers: readonly McpGrantServer[] }
 const digest = (value: unknown): string => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex')
 function command(request: AgentCommandRequest): AgentCommandRequest {
   return {modelRecordId:request.modelRecordId,relPath:request.relPath,sessionId:request.sessionId,objectVersion:request.objectVersion,expectedRevision:request.expectedRevision,
@@ -113,8 +115,9 @@ export class TaskAuthorizationRegistry {
 
   async preview(owner: string, request: AgentAuthorizationRequest): Promise<AgentAuthorizationPreview> {
     if (!owner || this.deps.ownerValid?.(owner)===false || !isAuthorizationCommand(request) || !Array.isArray(request.references) || request.references.length>1000 || !request.references.every(safePath)) throw Error('BAD_REQUEST')
-    if (request.network !== undefined && typeof request.network !== 'boolean') throw Error('BAD_REQUEST')
-    if (request.mcp !== undefined && typeof request.mcp !== 'boolean') throw Error('BAD_REQUEST')
+    if (!['read','reference','write','auto'].includes(request.level)) throw Error('BAD_REQUEST')
+    // 只读档不许带参考：范围必须由档位本身与预览一致，防止渲染层用空档偷带范围。
+    if (request.level === 'read' && request.references.length > 0) throw Error('OUTSIDE_TASK_SCOPE')
     const root=this.deps.root(); const session=this.deps.session()
     if(!root)throw Error('NO_VAULT')
     if(session!==request.sessionId)throw Error('VAULT_CHANGED')
@@ -153,21 +156,14 @@ export class TaskAuthorizationRegistry {
     // 联网可用性由主进程判定；抓页只看总闸，搜索另看服务配置。任一项不可用时勾选不生效，
     // start 也会因与预览不一致被拒。
     const availability = this.networkAvailability()
-    const requested = request.network === true && availability.available
-    // 远端只读 MCP 同理：可用性由主进程判定（有可解密 token 且清单不超过 4 KiB），
-    // 勾选不改变「本次预览看到了什么」，start 还要逐项比对。
-    const mcpState = this.mcpAvailability()
-    const mcpRequested = request.mcp === true && mcpState.available
+    const mcpServers = this.mcpGrantServers()
     const view:AgentAuthorizationPreview={id:randomUUID(),sessionId:session!,origin:request.relPath,sources,
       recipient:{modelId:config.credential.modelId,host:new URL(config.credential.baseURL).host,provider:config.credential.provider},
-      network:{available:availability.available,search:availability.search,providerHost:availability.providerHost,...(availability.reason?{reason:availability.reason}:{})},
-      mcp:{available:mcpState.available,servers:mcpState.servers.map(server=>({...server,tools:[...server.tools]})),...(mcpState.reason?{reason:mcpState.reason}:{})},
+      level:request.level,write:request.level==='write'||request.level==='auto',autoApproveWrites:request.level==='auto',
       deleteEnabled:this.deps.deleteAvailable?.()===true,
       ...(memory?.disclosure?{memory:{...memory.disclosure,search:{available:memory.search,calls:memory.search?4:0,sharedTools:config.limits.tools}}}:{})}
     for(const [id,p]of this.previews)if(p.expires<Date.now() || p.owner===owner)this.previews.delete(id)
-    this.previews.set(view.id,{owner,request:command(request),view:structuredClone(view),modelRecordId:request.modelRecordId,root,config,configHash:digest(config),expires:Date.now()+300000,memory:memory?{signature:memory.signature,search:memory.search,snapshotSignature:memory.snapshotSignature}:undefined,
-      network:requested,networkAvailability:{available:availability.available,search:availability.search,providerHost:availability.providerHost},
-      mcp:mcpRequested,mcpAvailability:{available:mcpState.available,servers:mcpState.servers.map(server=>({...server,tools:[...server.tools]}))}})
+    this.previews.set(view.id,{owner,request:command(request),view:structuredClone(view),modelRecordId:request.modelRecordId,root,config,configHash:digest(config),expires:Date.now()+300000,memory:memory?{signature:memory.signature,search:memory.search,...(memory.snapshotSignature?{snapshotSignature:memory.snapshotSignature}:{})}:undefined,level:request.level,write:request.level==='write'||request.level==='auto',autoApproveWrites:request.level==='auto',networkAvailable:{available:availability.available,search:availability.search,providerHost:availability.providerHost},mcpServers:mcpServers.map(server=>({...server,tools:[...server.tools]}))})
     return structuredClone(view)
   }
 
@@ -181,14 +177,13 @@ export class TaskAuthorizationRegistry {
     } catch { return { available: false, search: false, providerHost: null, reason: 'off' } }
   }
 
-  /** 可用性判定本身在 index.ts；这里只负责「不可用就一律按不可用记」与形状收敛。 */
-  private mcpAvailability(): AgentMcpAvailability {
+  /** 设备级 MCP 快照：启用＋白名单非空；搜索类带标记，闸关时由 LiveGrant 过滤。 */
+  private mcpGrantServers(): readonly McpGrantServer[] {
     try {
       const value = this.deps.mcp?.()
-      const servers = Array.isArray(value?.servers) ? value.servers.map(server => ({ name: server.name, host: server.host, tools: [...server.tools] })) : []
-      if (!value || value.available !== true) return { available: false, servers, reason: value?.reason ?? 'not-configured' }
-      return { available: true, servers }
-    } catch { return { available: false, servers: [], reason: 'not-configured' } }
+      if (!value || value.available !== true || !Array.isArray(value.servers)) return []
+      return value.servers.map(server => Object.freeze({ name: server.name, host: server.host, tools: Object.freeze([...server.tools]), searchChannel: server.searchChannel === true }))
+    } catch { return [] }
   }
 
   clear(): void { this.previews.clear() }
@@ -201,19 +196,13 @@ export class TaskAuthorizationRegistry {
     // A legitimate caller consumes once, including stale submissions; retries need a new displayed preview.
     this.previews.delete(request.previewId)
     if(!isAuthorizationCommand(request) || request.modelRecordId!==prepared.modelRecordId || digest(command(request))!==digest(prepared.request))throw Error('STALE_AUTHORIZATION')
-    // 网络勾选必须与预览时冻结的那一版一致：不一致按无效授权处理（防重放）。
-    if(request.network!==undefined && typeof request.network!=='boolean')throw Error('INVALID_AUTHORIZATION')
-    if((request.network===true)!==prepared.network)throw Error('INVALID_AUTHORIZATION')
-    // 可用性快照逐项复核：预览后换服务商（目标主机变了）或关总闸，都要求重新预览，
-    // 绝不静默按新配置启动。providerHost 也在比对里，口令卡显示的主机就是将要用的主机。
-    const availability=this.networkAvailability(), frozen=prepared.networkAvailability
+    // 档位必须与预览一致；read 档的 references 已由 preview 强制为空。
+    if(request.level!==prepared.level)throw Error('INVALID_AUTHORIZATION')
+    // 闸与 MCP 都是设备级：预览后换服务商／关闸／改动服务器，都要求重新预览。
+    const availability=this.networkAvailability(), frozen=prepared.networkAvailable
     if(availability.available!==frozen.available||availability.search!==frozen.search||availability.providerHost!==frozen.providerHost)throw Error('INVALID_AUTHORIZATION')
-    // 远端只读 MCP 同一套纪律：勾选一致、可用性一致、服务器与白名单工具逐项一致。
-    // 配置／白名单／凭据在预览后变过就要求重新预览，绝不按新清单静默启动。
-    if(request.mcp!==undefined && typeof request.mcp!=='boolean')throw Error('INVALID_AUTHORIZATION')
-    if((request.mcp===true)!==prepared.mcp)throw Error('INVALID_AUTHORIZATION')
-    const mcp=this.mcpAvailability()
-    if(mcp.available!==prepared.mcpAvailability.available||digest(mcp.servers)!==digest(prepared.mcpAvailability.servers))throw Error('INVALID_AUTHORIZATION')
+    const mcp=this.mcpGrantServers()
+    if(digest(mcp)!==digest(prepared.mcpServers))throw Error('INVALID_AUTHORIZATION')
     this.checkSession(prepared.root,prepared.view.sessionId)
     if(digest(this.deps.configuration(prepared.view.sources.length>1, prepared.modelRecordId,prepared.memory?.search===true))!==prepared.configHash)throw Error('STALE_AUTHORIZATION')
     await this.checkMemory(prepared)
@@ -246,10 +235,12 @@ class LiveGrant implements TaskGrant {
   readonly credential: Readonly<ModelCredential>
   readonly limits: Readonly<RunLimits>
   readonly memorySnapshotSignature?:string
+  readonly level: AgentPermissionLevel
+  readonly autoApproveWrites: boolean
   private live=true
-  /** 联网能力独立于整场授权：停止联网只关这一项，任务照常收尾。 */
+  /** 搜索/抓取闸：停止后只关搜索/抓取类能力（含搜索类 MCP），任务照常收尾。 */
   private networkLive=false
-  /** 远端只读 MCP 与联网是两条独立的门：任一条被撤都不影响另一条与整场授权。 */
+  /** 设备级 MCP：配置变化撤销全部；搜索类另受闸控制。 */
   private mcpLive=false
   private readonly networkHost:string|null
   private readonly mcpServers:readonly McpGrantServer[]
@@ -261,16 +252,19 @@ class LiveGrant implements TaskGrant {
     this.sources=Object.freeze(prepared.view.sources.map(s=>Object.freeze({...s})))
     this.originProof={...this.sources.find(s=>s.relPath===this.origin)!}
     this.credential=Object.freeze({...prepared.config.credential});this.limits=Object.freeze({...prepared.config.limits})
-    this.networkLive=prepared.network;this.networkHost=prepared.networkAvailability.providerHost
+    this.level=prepared.level;this.autoApproveWrites=prepared.autoApproveWrites
+    this.networkLive=prepared.networkAvailable.available;this.networkHost=prepared.networkAvailable.providerHost
     // 冻结的是预览时那一版服务器与白名单工具；start 已经比对过，这里不再回存储重算。
-    this.mcpLive=prepared.mcp
-    this.mcpServers=Object.freeze(prepared.mcpAvailability.servers.map(server=>Object.freeze({name:server.name,host:server.host,tools:Object.freeze([...server.tools])})))
+    this.mcpLive=prepared.mcpServers.length>0
+    this.mcpServers=Object.freeze(prepared.mcpServers.map(server=>Object.freeze({name:server.name,host:server.host,tools:Object.freeze([...server.tools]),searchChannel:server.searchChannel})))
   }
   get network(): Readonly<{allowed:true;providerHost?:string}>|undefined {
     return this.networkLive ? {allowed:true,...(this.networkHost?{providerHost:this.networkHost}:{})} : undefined
   }
   get mcp(): Readonly<{allowed:true;servers:readonly McpGrantServer[]}>|undefined {
-    return this.mcpLive ? {allowed:true,servers:this.mcpServers} : undefined
+    if(!this.mcpLive)return undefined
+    const servers=this.mcpServers.filter(server=>!server.searchChannel||this.networkLive)
+    return servers.length?{allowed:true,servers}:undefined
   }
   revoke():void {this.live=false}
   assertNetwork():void {

@@ -1,6 +1,9 @@
 import type {
+  DeepSeekKeySource,
+  EgressLogEntry,
   EgressLogResult,
   EgressLogView,
+  FetchService,
   NetworkConfigResult,
   NetworkConfigView,
   NetworkProvider,
@@ -13,19 +16,26 @@ import type {
 import { confirmAction } from './settings-model.ts'
 
 /**
- * 「模型」页末尾的「联网只读」卡片：总开关、搜索服务二选一、密钥（保存后清空）、清除，
- * 以及只读的「外发统计」区。
+ * 「联网」页的设备总闸与「联网搜索与抓取」卡：
+ * 搜索服务、密钥（保存后清空）、DeepSeek 密钥来源、抓取服务，以及只读的「外发统计」区。
  *
  * 配置只写设备文件：**不发任何测试请求**（代价是坏密钥要等首次使用才暴露），
  * 密钥只进本机加密存储，界面只显示「已配置／未配置」，不回显密钥或密文。
  * 统计区只展示计数、字节、时间、主机与拒绝码；**不显示 URL、查询串或正文**。
- * 不新增设置页或导航项；挂在既有「模型」页，围栏见 docs/decisions.md 的 2026-10-20／21 合同。
+ * 总闸只管搜索／抓取与搜索类 MCP；非搜索类 MCP 不受它管。围栏见 docs/decisions.md
+ * 的 2026-10-20／21 合同与 2026-10-23 联网搜索与抓取整合。
  */
 export type NetworkCardHandlers = {
   get: () => Promise<NetworkConfigResult>
   setEnabled: (enabled: boolean) => Promise<NetworkConfigResult>
   saveProvider: (request: NetworkProviderSaveRequest) => Promise<NetworkConfigResult>
-  clearProvider: () => Promise<NetworkConfigResult>
+  clearProvider: (provider?: NetworkProvider) => Promise<NetworkConfigResult>
+  /** DeepSeek 搜索／抓取用本卡独立密钥，还是复用模型页保存的那把。 */
+  setDeepSeekKeySource: (source: DeepSeekKeySource) => Promise<NetworkConfigResult>
+  /** 任务内抓页走直连还是 DeepSeek；人发起抓页仍直连。 */
+  setFetch: (service: FetchService) => Promise<NetworkConfigResult>
+  /** 模型自带联网（MiniMax）的启用选择；是否可用由主进程探测，本页只存选择。 */
+  setNativeSearch: (enabled: boolean) => Promise<NetworkConfigResult>
   /** 设备级外发统计（可选：测试或旧宿主没接时，卡片如实显示不可用）。 */
   stats?: () => Promise<NetworkStatsResult>
   /** 清空统计并同时清外发日志；主进程保证「日志失败则统计不动」。 */
@@ -38,9 +48,14 @@ export type NetworkCardHost = {
   isCurrent: () => boolean
 }
 
-const PROVIDERS: NetworkProvider[] = ['brave', 'tavily']
-const PROVIDER_NAMES: Record<NetworkProvider, string> = { brave: 'Brave', tavily: 'Tavily' }
-const PROVIDER_HOSTS: Record<NetworkProvider, string> = { brave: 'api.search.brave.com', tavily: 'api.tavily.com' }
+const PROVIDERS: NetworkProvider[] = ['brave', 'tavily', 'deepseek']
+const PROVIDER_NAMES: Record<NetworkProvider, string> = { brave: 'Brave', tavily: 'Tavily', deepseek: 'DeepSeek' }
+// 端点与主机由主进程写死；这里只显示人将要外发到哪台主机，不开放自定义。
+const PROVIDER_HOSTS: Record<NetworkProvider, string> = {
+  brave: 'api.search.brave.com',
+  tavily: 'api.tavily.com',
+  deepseek: 'api.deepseek.com'
+}
 const NETWORK_ERRORS: Record<string, string> = {
   BAD_NETWORK_CONFIG: '本机联网配置无法读取，请检查后重试；笔记仍可正常使用。',
   SECURE_STORAGE_UNAVAILABLE: '系统密钥保护当前不可用，密钥未保存。',
@@ -89,7 +104,7 @@ function formatMoment(iso: string | undefined): string {
 const STAT_KINDS: readonly { kind: NetworkStatKind; label: string }[] = [
   { kind: 'fetch', label: '抓页(AI)' },
   { kind: 'search', label: '搜索(AI)' },
-  { kind: 'mcp', label: 'MCP（未启用）' },
+  { kind: 'mcp', label: 'MCP' },
   { kind: 'humanFetch', label: '抓页(人)' },
   { kind: 'humanSearch', label: '搜索(人)' }
 ]
@@ -100,24 +115,86 @@ const element = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: stri
   return node
 }
 
-export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHandlers): () => void {
+/**
+ * 页头总闸：与底栏最右小球是同一个设备级开关，只覆盖搜索／抓取与搜索类 MCP。
+ * 首次开启的披露由外壳（状态栏通知）负责，这里只写一行静态说明，不再弹模态。
+ */
+export function mountNetworkGate(host: NetworkCardHost, handlers: Pick<NetworkCardHandlers, 'get' | 'setEnabled'>): () => void {
   const body = host.body
   let config: NetworkConfigView | null = null
-  let selected: NetworkProvider = 'brave'
   let busy = false
   let disposed = false
 
-  const heading = element('h3', 'settings-section-title')
-  heading.textContent = '联网只读'
-  const intro = element('p', 'settings-hint')
-  intro.textContent = '内置只读抓页与搜索，默认关闭。开启后才会外发，关闭即停止。'
+  const gate = element('section', 'settings-network-gate')
+  const gateHeading = element('h3', 'settings-section-title')
+  gateHeading.textContent = '设备总闸'
   const toggleLabel = element('label', 'settings-network-toggle')
   const enabled = element('input')
   enabled.type = 'checkbox'
   enabled.dataset.network = 'enabled'
-  toggleLabel.append(enabled, document.createTextNode('允许联网只读（总开关，保存即生效）'))
-  const scope = element('p', 'settings-hint')
-  scope.textContent = '每场任务还要单独授权。这里只管设备总闸。'
+  toggleLabel.append(enabled, document.createTextNode('允许联网搜索与抓取（设备总闸，保存即生效）'))
+  const boundary = element('p', 'settings-hint')
+  boundary.textContent = '关闭后内置抓页/搜索、搜索类 MCP、模型自带联网立即停止；非搜索类 MCP 不受影响'
+  const staticNote = element('p', 'settings-hint')
+  staticNote.textContent = '与底栏最右的小球是同一个开关；小球首次开启时会在状态栏说明一次。'
+  const error = element('p', 'settings-network-error')
+  error.setAttribute('role', 'alert')
+  error.hidden = true
+  error.dataset.network = 'error'
+  gate.append(gateHeading, toggleLabel, boundary, staticNote, error)
+  body.append(gate)
+
+  const showError = (message: string): void => { error.textContent = message; error.hidden = !message }
+  const paint = (): void => {
+    const ready = config !== null
+    enabled.checked = config?.enabled === true
+    enabled.disabled = busy || !ready
+  }
+  enabled.addEventListener('change', () => {
+    if (busy || !config) return
+    // 先取值再重绘：paint() 会按已保存的配置重置勾选。
+    const next = enabled.checked
+    busy = true
+    showError('')
+    paint()
+    void handlers.setEnabled(next).then(result => {
+      if (disposed || !host.isCurrent()) return
+      if (!result.ok) { showError(networkErrorText(result.error)); return }
+      config = result.config
+    }).catch(() => {
+      if (!disposed && host.isCurrent()) showError('保存失败，请重试。')
+    }).finally(() => {
+      if (!disposed) { busy = false; paint() }
+    })
+  })
+
+  paint()
+  void handlers.get().then(result => {
+    if (disposed || !host.isCurrent()) return
+    if (!result.ok) { showError(networkErrorText(result.error)); return }
+    config = result.config
+  }).catch(() => {
+    if (!disposed && host.isCurrent()) showError('暂时无法读取联网配置。')
+  }).finally(() => {
+    if (!disposed) paint()
+  })
+
+  return () => { disposed = true }
+}
+
+export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHandlers): () => void {
+  const body = host.body
+  let config: NetworkConfigView | null = null
+  let selected: NetworkProvider = 'brave'
+  let sourceChoice: DeepSeekKeySource = 'own'
+  let fetchChoice: FetchService = 'direct'
+  let busy = false
+  let disposed = false
+
+  const heading = element('h3', 'settings-section-title')
+  heading.textContent = '联网搜索与抓取'
+  const intro = element('p', 'settings-hint')
+  intro.textContent = '只影响本设备的搜索/抓取；非搜索类 MCP 单独管理。'
   const providerGroup = element('fieldset', 'settings-network-provider')
   const legend = element('legend')
   legend.textContent = '搜索服务（同一时间只接一家）'
@@ -148,6 +225,42 @@ export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHan
   const status = element('p', 'settings-hint')
   status.dataset.network = 'status'
   status.setAttribute('role', 'status')
+
+  // ---- DeepSeek 密钥来源 ----
+  const sourceWrap = element('div', 'settings-network-deepseek')
+  const sourceLabel = element('label', 'settings-network-toggle')
+  const source = element('input')
+  source.type = 'checkbox'
+  source.dataset.network = 'deepseek-source'
+  sourceLabel.append(source, document.createTextNode('使用模型页的 DeepSeek 密钥'))
+  const sourceHint = element('p', 'settings-hint')
+  sourceHint.textContent = '仅在选择 DeepSeek 时可改；勾选后不再使用本卡片单独保存的 DeepSeek 密钥。'
+  sourceWrap.append(sourceLabel, sourceHint)
+
+  // ---- 抓页服务：直连（默认）／DeepSeek 代抓 ----
+  const fetchGroup = element('fieldset', 'settings-network-fetch')
+  const fetchLegend = element('legend')
+  fetchLegend.textContent = '抓页服务（任务内抓页）'
+  fetchGroup.append(fetchLegend)
+  const fetchRadios = new Map<FetchService, HTMLInputElement>()
+  for (const [service, name] of [['direct', '直连目标网址（默认）'], ['deepseek', 'DeepSeek 代抓']] as const) {
+    const label = element('label')
+    const radio = element('input')
+    radio.type = 'radio'
+    radio.name = 'network-fetch'
+    radio.value = service
+    radio.dataset.network = 'fetch'
+    radio.dataset.fetch = service
+    label.append(radio, document.createTextNode(name))
+    fetchGroup.append(label)
+    fetchRadios.set(service, radio)
+  }
+  const fetchHint = element('p', 'settings-hint')
+  fetchHint.textContent = 'DeepSeek 代抓会把目标网址发给 api.deepseek.com、按次计费；人发起抓页仍直连。'
+  const fetchMissing = element('p', 'settings-hint')
+  fetchMissing.dataset.network = 'fetch-missing'
+  fetchMissing.hidden = true
+
   const actions = element('div', 'settings-actions')
   const save = element('button', 'settings-action')
   save.type = 'button'
@@ -208,7 +321,10 @@ export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHan
     statsHeading, statsIntro, corruptNote, rowsBox, lastOk,
     codesTitle, codesBox, humanHeading, logNote, logBox, statsErrorEl, statsNotice, statsActions
   )
-  body.append(heading, intro, toggleLabel, scope, providerGroup, hostHint, fieldLabel, status, actions, error, note, statsSection)
+  body.append(
+    heading, intro, providerGroup, hostHint, fieldLabel, status,
+    sourceWrap, fetchGroup, fetchHint, fetchMissing, actions, error, note, statsSection
+  )
 
   // 统计与日志各自独立读取：统计坏了不影响外发记录，反过来也一样。
   let statsView: NetworkStatsView | null = null
@@ -275,6 +391,17 @@ export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHan
     clearStats.title = handlers.clearStats ? '' : '外发统计当前不可用。'
   }
 
+  /** 只按固定字段重建：服务名认不出就原样显示，不吞掉也不解释成别的渠道。 */
+  const serviceText = (value: unknown): string => {
+    if (typeof value !== 'string') return ''
+    const clean = value.replace(/[\u0000-\u001f\u007f]/gu, '').trim().slice(0, 40)
+    if (!clean) return ''
+    if (clean === 'direct') return '直连'
+    if (clean === 'deepseek') return 'DeepSeek'
+    if (clean === 'provider') return '模型服务商'
+    return clean
+  }
+
   const renderEgress = (): void => {
     logBox.replaceChildren()
     const unavailable = !!egressError || !handlers.egressLog
@@ -287,7 +414,7 @@ export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHan
         ? `还没有人发起的外发记录（另有 ${egressView.skipped} 条无法读取）。`
         : '还没有人发起的外发记录。'
     } else {
-      logNote.textContent = `最近 ${egressView.entries.length} 条外发记录。只显示时间、类型、主机与结果，不含 URL 或查询。`
+      logNote.textContent = `最近 ${egressView.entries.length} 条外发记录。只显示时间、类型、服务、主机与结果，不含 URL 或查询。`
       if (egressView.skipped) logNote.textContent += `（跳过 ${egressView.skipped} 条无法读取的记录）`
     }
     if (!egressView || unavailable) return
@@ -295,9 +422,12 @@ export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHan
       const item = element('li', 'settings-network-log-entry')
       item.dataset.networkStats = 'log-entry'
       const action = entry.action === 'fetch' ? '抓页' : '搜索'
+      // service 是后续日志（N7）才补的字段；旧记录没有就不显示，未知值原样显示。
+      const service = serviceText((entry as EgressLogEntry & { service?: unknown }).service)
+      if (service) item.dataset.service = service
       // 只按固定字段重建：日志里就算混进 URL／查询，也不会经这里显示出去。
       const outcome = entry.outcome === 'ok' ? '成功' : `拒绝${entry.code ? ` ${entry.code}` : ''}`
-      item.textContent = `${formatMoment(entry.at)} · ${action} · ${entry.host || '（未知主机）'} · ${outcome}`
+      item.textContent = `${formatMoment(entry.at)} · ${action}${service ? ` · ${service}` : ''} · ${entry.host || '（未知主机）'} · ${outcome}`
       logBox.append(item)
     }
   }
@@ -383,48 +513,79 @@ export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHan
 
   const paint = (): void => {
     const ready = config !== null
-    enabled.checked = config?.enabled === true
+    const keyed = ready ? config!.keyedProviders : []
+    const deepseekSource = ready && config!.deepseekKeySource === 'model'
+    const deepseekCredential = ready && (deepseekSource || keyed.includes('deepseek'))
     for (const [provider, radio] of radios) radio.checked = provider === selected
     hostHint.textContent = `目标主机：${PROVIDER_HOSTS[selected]}（写死，不可自定义）`
+    // 每家密钥分开记：界面只按当前选中的服务显示「已配置／未配置」，不回显密钥。
     status.textContent = !ready
       ? '读取中…'
-      : config!.hasKey
-        ? `${config!.provider ? PROVIDER_NAMES[config!.provider] : '搜索服务'} · 已配置`
-        : '未配置'
-    for (const control of [enabled, ...radios.values(), key, save, clear]) control.disabled = busy || !ready
+      : selected === 'deepseek' && deepseekSource
+        ? 'DeepSeek · 使用模型页密钥'
+        : keyed.includes(selected)
+          ? `${PROVIDER_NAMES[selected]} · 已配置`
+          : '未配置'
+    source.checked = sourceChoice === 'model'
+    source.disabled = busy || !ready || selected !== 'deepseek'
+    for (const [service, radio] of fetchRadios) radio.checked = fetchChoice === service
+    fetchRadios.get('direct')!.disabled = busy || !ready
+    fetchRadios.get('deepseek')!.disabled = busy || !ready || !deepseekCredential
+    fetchMissing.hidden = !ready || deepseekCredential
+    fetchMissing.textContent = 'DeepSeek 无密钥：先在搜索服务里保存 DeepSeek 密钥或勾选使用模型密钥。'
+    for (const control of [...radios.values(), key, save, clear]) control.disabled = busy || !ready
     // 保存必须有新密钥：已保存的密钥不回显、不重复使用。
     if (ready) save.disabled = busy || !key.value.trim()
-    if (ready) clear.disabled = busy || (!config!.hasKey && config!.provider === null)
+    // 清除只作用于当前选中的服务；这家没有密钥就没有可清的东西。
+    if (ready) clear.disabled = busy || !keyed.includes(selected)
   }
   const adopt = (next: NetworkConfigView): void => {
     config = next
-    if (next.provider) selected = next.provider
+    if (next.searchProvider) selected = next.searchProvider
+    sourceChoice = next.deepseekKeySource
+    fetchChoice = next.fetch
   }
   const settle = (result: NetworkConfigResult): boolean => {
     if (disposed || !host.isCurrent()) return false
-    if (!result.ok) { showError(networkErrorText(result.error)); return false }
+    if (!result.ok) {
+      // 失败的写入不更新本地视图：选项回到已保存的状态。
+      sourceChoice = config?.deepseekKeySource ?? 'own'
+      fetchChoice = config?.fetch ?? 'direct'
+      showError(networkErrorText(result.error))
+      return false
+    }
     adopt(result.config)
     return true
   }
 
-  enabled.addEventListener('change', () => {
-    if (busy || !config) return
-    // 先取值再重绘：paint() 会按已保存的配置重置勾选。
-    const next = enabled.checked
-    busy = true
-    showError('')
-    paint()
-    void handlers.setEnabled(next).then(result => {
-      settle(result)
-    }).catch(() => { if (!disposed) showError('保存失败，请重试。') })
-      .finally(() => { if (!disposed) { busy = false; paint() } })
-  })
   for (const [provider, radio] of radios) {
     radio.addEventListener('change', () => {
       if (!radio.checked || busy) return
       selected = provider
       showError('')
       paint()
+    })
+  }
+  source.addEventListener('change', () => {
+    if (busy || !config || source.disabled) return
+    sourceChoice = source.checked ? 'model' : 'own'
+    busy = true
+    showError('')
+    paint()
+    void handlers.setDeepSeekKeySource(sourceChoice).then(settle).catch(() => {
+      if (!disposed) showError('保存失败，请重试。')
+    }).finally(() => { if (!disposed) { busy = false; paint() } })
+  })
+  for (const [service, radio] of fetchRadios) {
+    radio.addEventListener('change', () => {
+      if (!radio.checked || busy || radio.disabled) return
+      fetchChoice = service
+      busy = true
+      showError('')
+      paint()
+      void handlers.setFetch(service).then(settle).catch(() => {
+        if (!disposed) showError('保存失败，请重试。')
+      }).finally(() => { if (!disposed) { busy = false; paint() } })
     })
   }
   key.addEventListener('input', () => { showError(''); paint() })
@@ -447,7 +608,7 @@ export function mountNetworkCard(host: NetworkCardHost, handlers: NetworkCardHan
     busy = true
     showError('')
     paint()
-    void handlers.clearProvider().then(result => {
+    void handlers.clearProvider(selected).then(result => {
       if (settle(result)) key.value = ''
     }).catch(() => { if (!disposed) showError('清除失败，请重试。') })
       .finally(() => { if (!disposed) { busy = false; paint() } })

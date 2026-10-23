@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createSettingsOverlay } from '../../src/renderer/src/settings.ts'
 import { DEFAULT_READING_PREFERENCE } from '../../src/shared/reading-preference.ts'
 import type { AssistantHabits } from '../../src/shared/assistant.ts'
-import type { AssistantResult } from '../../src/shared/ipc.ts'
+import type { AssistantResult, McpConfigView, NetworkConfigView } from '../../src/shared/ipc.ts'
 
 beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
@@ -239,6 +239,94 @@ describe('settings interface page', () => {
   }
   const buttonByText = (text: string): HTMLButtonElement | undefined =>
     [...document.querySelectorAll<HTMLButtonElement>('.settings-action, .settings-row-action, .settings-back')].find((button) => button.textContent === text)
+
+  const networkConfig = (over: Partial<NetworkConfigView> = {}): NetworkConfigView => ({
+    enabled: false,
+    searchProvider: null,
+    keyedProviders: [],
+    deepseekKeySource: 'own',
+    fetch: 'direct',
+    nativeSearch: { minimax: false },
+    provider: null,
+    hasKey: false,
+    ...over
+  })
+  const networkHandlers = (config = networkConfig()) => ({
+    get: vi.fn(async () => ({ ok: true as const, config })),
+    setEnabled: vi.fn(async (enabled: boolean) => ({ ok: true as const, config: { ...config, enabled } })),
+    setDeepSeekKeySource: vi.fn(async (source: 'own' | 'model') => ({ ok: true as const, config: { ...config, deepseekKeySource: source } })),
+    setFetch: vi.fn(async (fetch: 'direct' | 'deepseek') => ({ ok: true as const, config: { ...config, fetch } })),
+    setNativeSearch: vi.fn(async (minimax: boolean) => ({ ok: true as const, config: { ...config, nativeSearch: { minimax } } })),
+    saveProvider: vi.fn(async (request: { provider: 'brave' | 'tavily' | 'deepseek'; key: string }) => ({
+      ok: true as const,
+      config: { ...config, searchProvider: request.provider, keyedProviders: [request.provider] }
+    })),
+    clearProvider: vi.fn(async () => ({ ok: true as const, config }))
+  })
+  const mcpHandlers = (config: McpConfigView = { servers: [] }) => ({
+    get: vi.fn(async () => ({ ok: true as const, config })),
+    save: vi.fn(async () => ({ ok: true as const, config })),
+    remove: vi.fn(async () => ({ ok: true as const, config })),
+    discover: vi.fn(async () => ({ ok: true as const, id: 's1', tools: [], config }))
+  })
+
+  it('puts 联网 in the workspace after 界面 and mounts only the network page there', async () => {
+    const network = networkHandlers()
+    const panel = createSettingsOverlay({
+      getMode: async () => 'day',
+      setMode: async (mode) => ({ ok: true, mode }),
+      vault: {} as never,
+      getAssistant: async () => ({ ok: true, habits: { address: '', tone: 'plain', note: '' } }),
+      setAssistant: async (habits) => ({ ok: true, habits }),
+      network: () => network,
+      ...modelHandlers()
+    })
+    panel.open()
+    const nav = [...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')]
+    expect(nav.map((button) => button.textContent)).toEqual(['笔记库', '界面', '联网', '助手', '模型', '运行'])
+
+    nav.find((button) => button.textContent === '联网')!.click()
+    await vi.waitFor(() => expect(document.querySelector('.settings-page-title')?.textContent).toBe('联网'))
+    expect(document.querySelector('.settings-intro')?.textContent).toBe('只读抓页、搜索与 MCP；不会写入外部服务。')
+    await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>('[data-network="enabled"]')?.disabled).toBe(false))
+    expect(document.querySelector('.settings-network-page')).not.toBeNull()
+    expect(document.querySelector('[data-network="enabled"]')).not.toBeNull()
+    const native = document.querySelector<HTMLInputElement>('[data-native="minimax"]')!
+    expect(native).not.toBeNull()
+    expect(document.querySelector('[data-native="status"]')?.textContent).toContain('未启用/不可用')
+    const headless = document.querySelector<HTMLButtonElement>('.settings-network-headless-state')!
+    expect(headless.textContent).toBe('未开放')
+    expect(headless.disabled).toBe(true)
+
+    await vi.waitFor(() => expect(native.disabled).toBe(false))
+    native.click()
+    await vi.waitFor(() => expect(network.setNativeSearch).toHaveBeenCalledWith(true))
+
+    // 离开联网页即 dispose，页面节点与卡片一起撤掉。
+    nav.find((button) => button.textContent === '界面')!.click()
+    expect(document.querySelector('.settings-network-page')).toBeNull()
+    expect(document.querySelector('.settings-page-title')?.textContent).toBe('界面')
+    panel.close()
+  })
+
+  it('leaves the model page with models only (no network or MCP cards)', async () => {
+    const panel = createSettingsOverlay({
+      getMode: async () => 'day',
+      setMode: async (mode) => ({ ok: true, mode }),
+      network: () => networkHandlers(),
+      mcp: () => mcpHandlers(),
+      ...modelHandlers()
+    })
+    panel.open()
+    const nav = [...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')]
+    nav.find((button) => button.textContent === '模型')!.click()
+    await vi.waitFor(() => expect(document.querySelector('.settings-providers')).not.toBeNull())
+    expect(document.querySelector('.settings-network, .settings-network-card, .settings-mcp')).toBeNull()
+    expect(document.querySelector('[data-network="enabled"]')).toBeNull()
+    expect(document.querySelector('[data-mcp="list"]')).toBeNull()
+    expect(document.querySelector('.settings-form')?.textContent).not.toContain('远端只读 MCP')
+    panel.close()
+  })
 
   it('lists every provider once and opens that provider as a sub-page', async () => {
     const handlers = modelHandlers()
@@ -556,7 +644,7 @@ describe('settings interface page', () => {
     })
     panel.open()
     const nav = [...document.querySelectorAll<HTMLButtonElement>('.settings-nav button')]
-    expect(nav.map((button) => button.textContent)).toEqual(['界面', '助手'])
+    expect(nav.map((button) => button.textContent)).toEqual(['界面', '联网', '助手'])
     nav.find((button) => button.textContent === '助手')?.click()
     await vi.waitFor(() => expect(document.querySelector('.settings-page-title')?.textContent).toBe('助手'))
     const address = document.querySelector<HTMLInputElement>('.settings-form input')!
@@ -870,7 +958,7 @@ it('routes vault management into an already open settings dialog and defaults or
  expect(document.querySelector('.settings-page-title')!.textContent).toBe('界面')
  panel.open('笔记库');await vaultFlush()
  expect(document.querySelectorAll('dialog')).toHaveLength(1);expect(document.querySelector('dialog')).toBe(dialog)
- expect([...document.querySelectorAll('.settings-nav button')].map(b=>b.textContent)).toEqual(['笔记库','界面'])
+ expect([...document.querySelectorAll('.settings-nav button')].map(b=>b.textContent)).toEqual(['笔记库','界面','联网'])
  expect(document.querySelector('.settings-page-title')!.textContent).toBe('笔记库');panel.close()
 })
 it('guards busy vault operations against Escape, backdrop, direct routing and navigation',async()=>{
@@ -914,14 +1002,14 @@ it('reopens the vault page before a delayed prior close without reusing its disp
  await new Promise(resolve=>setTimeout(resolve,0));expect(panel.isOpen()).toBe(true);panel.close()
 })
 
-it('offers all six available pages with vault management first in workspace',()=>{
+it('offers all seven available pages with vault management first in workspace',()=>{
  const {vault}=vaultSettings()
  const config={providers:[],models:[],defaultModelId:null,limits:{none:{seconds:180,steps:4,tools:0},local:{seconds:300,steps:12,tools:24},network:{seconds:600,steps:20,tools:40}}}
  const ok=async()=>({ok:true as const,config})
  const panel=createSettingsOverlay({getMode:async()=>'day',setMode:async mode=>({ok:true,mode}),vault,memory:()=>null,
  getAssistant:async()=>({ok:true,habits:{address:'',tone:'plain',note:''}}),setAssistant:async habits=>({ok:true,habits}),
  getConfig:ok,saveProvider:ok,removeProvider:ok,deleteKey:ok,addModel:ok,updateModel:ok,removeModel:ok,readModels:async()=>({ok:true,models:[]}),setLimits:ok})
- panel.open();expect([...document.querySelectorAll('.settings-nav button')].map(b=>b.textContent)).toEqual(['笔记库','界面','助手','记忆','模型','运行'])
+ panel.open();expect([...document.querySelectorAll('.settings-nav button')].map(b=>b.textContent)).toEqual(['笔记库','界面','联网','助手','记忆','模型','运行'])
  expect(document.querySelector('.settings-page-title')!.textContent).toBe('界面');panel.close()
 })
 it('ignores an initial vault receipt after navigating away from its page',async()=>{

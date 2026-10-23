@@ -28,8 +28,6 @@ export type ModelPageHost = {
   isCurrent: () => boolean
   /** 配置写入成功后通知外壳（底栏模型模块据此刷新）。 */
   onChanged?: () => void
-  /** 页尾附挂的卡片（联网只读）：每次重绘都放回末尾，卡片自身状态不被重绘清掉。 */
-  trailing?: HTMLElement
 }
 
 const PROVIDERS: ModelProvider[] = ['deepseek', 'minimax', 'custom']
@@ -483,13 +481,8 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
     const hint = element('p', 'settings-hint')
     hint.textContent = '用哪个模型在底栏的模型模块里选择；运行上限在「运行」页调整。'
     body.append(hint)
-    // 联网只读卡片挂在模型页末尾；重绘后放回，避免被 replaceChildren 清掉。
-    if (host.trailing) body.append(host.trailing)
     if (adding) {
-      // 页尾卡片有自己的忙碌状态；模型批量添加不能把它永久按在禁用态。
-      for (const control of body.querySelectorAll<HTMLInputElement | HTMLButtonElement>('button, input')) {
-        if (!host.trailing?.contains(control)) control.disabled = true
-      }
+      for (const control of body.querySelectorAll<HTMLInputElement | HTMLButtonElement>('button, input')) control.disabled = true
     }
     if (focusSelector) {
       const target = body.querySelector<HTMLElement>(focusSelector)
@@ -498,8 +491,6 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
     }
   }
 
-  // 模型配置读不出来时也要让页尾卡片可读（它读的是另一份文件）。
-  if (host.trailing) host.body.append(host.trailing)
   void handlers.getConfig().then((result) => {
     if (disposed || !host.isCurrent()) return
     if (!result.ok) { host.showError(host.configErrorText(result.error)); return }

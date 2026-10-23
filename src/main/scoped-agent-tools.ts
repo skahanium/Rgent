@@ -3,7 +3,7 @@ import type { TaskMaterialTracker, MaterialDependencies } from './host-material.
 import { createHash, randomUUID } from 'node:crypto'
 import { compile } from '../markdown/index.ts'
 import type { CompileResult } from '../markdown/types.ts'
-import type { NoteSnapshot, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
+import type { NetworkProvider, NoteSnapshot, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
 import type { TaskGrant } from './task-authorization.ts'
 import { blankMarkers, folderOf, searchDocuments, searchSnippetRange } from './vault-index.ts'
 import { bodyFingerprint, historicalContextPolicy, ledgerProvenance, chapterProvenance, type LedgerSource, type LedgerMemoryDependency } from './ledger-provenance.ts'
@@ -171,7 +171,7 @@ export type ScopedNetworkTool = {
   fetch(url: string, signal: AbortSignal): Promise<{ text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true; reused?: true }>
   /** 只有服务商与密钥都配置好时宿主才给这一支；结果已做结构校验，包裹由工具层做。 */
   search?(query: string, maxResults: number, signal: AbortSignal): Promise<{
-    provider: 'brave' | 'tavily'
+    provider: NetworkProvider
     host: string
     results: { title: string; url: string; snippet: string }[]
     truncated?: boolean

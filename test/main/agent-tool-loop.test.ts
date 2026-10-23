@@ -58,7 +58,7 @@ describe('Host loop over the real grant and tools', () => {
       read: readNote, tier, acceptsObject: () => false,
       configuration: () => ({ credential: { provider: 'custom', baseURL: 'http://127.0.0.1:1/v1', modelId: 'm', contextTokens: 20000, apiKey: 'k' }, limits: { seconds: 30, steps: 4, tools: 6 } })
     })
-    const request = { modelRecordId: 'model-record', relPath: 'a.md', sessionId: 's', objectVersion: 'oa', expectedRevision: 'ra', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', references: ['b.md'] }
+    const request = { modelRecordId: 'model-record', relPath: 'a.md', sessionId: 's', objectVersion: 'oa', expectedRevision: 'ra', range: { start: 0, end: 2 }, expectedText: '/问', level:'reference' as const, promptText: '问', references: ['b.md'] }
     const preview = await registry.preview('owner', request)
     let revision = 1
     const sent: unknown[][] = []

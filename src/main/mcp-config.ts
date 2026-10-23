@@ -17,6 +17,10 @@ import type { McpConfigView, McpPublicServer, McpPublicTool } from '../shared/ip
  * 不带认证），有 token 才带 `authorization`；同一个归一化 URL 只允许一条。写入沿用
  * network-config 的 tmp＋fsync＋rename＋0600。
  *
+ * `searchChannel` 是「用途：联网搜索/抓取」标记：勾选后这台服务器受设备级搜索闸管，不勾选则
+ * 只受启用与白名单约束。配置仍是 v1；旧文件缺这个字段的按 `true` 迁移（保守受闸），新服务器
+ * 缺省 `false`，已有服务器在请求里省略时保留原值。
+ *
  * 坏文件（缺失以外的读取失败、JSON 坏了、形状／版本不认识、越过上限）**fail closed**：
  * 一律当「没有服务器」，不覆盖磁盘上的证据；人下一次显式保存前先把坏文件改名成
  * `mcp-config.json.corrupt-<ISO>` 保留，改名失败就不写新文件。
@@ -42,6 +46,8 @@ export type McpRuntimeServer = {
   url: string
   host: string
   enabled: boolean
+  /** 用途标记：false＝不归搜索闸管；true＝联网搜索/抓取渠道。 */
+  searchChannel: boolean
   tools: McpStoredTool[]
   whitelist: string[]
   credential: McpCredential | null
@@ -54,6 +60,8 @@ export type McpServerUpsert = {
   /** 省略＝保留已有 token（原本没有就是不带 token 的公共只读）；提供时必须 1–4096 字。 */
   token?: string
   enabled: boolean
+  /** 省略＝已有服务器保留原值、新增服务器默认 false；提供时必须是 boolean。 */
+  searchChannel?: boolean
 }
 
 /** 任务授权快照只读形状：只有「已启用＋白名单非空」的服务器（token 可选）。 */
@@ -96,6 +104,7 @@ type StoredServer = {
   name: string
   url: string
   enabled: boolean
+  searchChannel: boolean
   tokenCipher?: string
   tools: McpStoredTool[]
   whitelist: string[]
@@ -173,6 +182,7 @@ function publicFrom(stored: Stored): McpConfigView {
         url: server.url,
         host: hostOf(server.url),
         enabled: server.enabled,
+        searchChannel: server.searchChannel,
         hasToken: server.tokenCipher !== undefined,
         tools: server.tools.map(publicTool),
         whitelist: [...server.whitelist]
@@ -198,6 +208,9 @@ function parseServer(value: unknown): StoredServer | null {
   if (!validId(value.id) || !validName(value.name)) return null
   const url = normalizeUrl(value.url)
   if (!url || typeof value.enabled !== 'boolean') return null
+  // v1 旧文件没有用途标记：迁移成 true（保守受闸）。写了就必须是 boolean，别的形状按坏文件处理。
+  const searchChannel = value.searchChannel === undefined ? true : value.searchChannel
+  if (typeof searchChannel !== 'boolean') return null
   if (value.tokenCipher !== undefined && !validCipher(value.tokenCipher)) return null
   // 启用不要求 token：公共只读服务器就是「启用、白名单非空、没有密文」的形状。
   if (!Array.isArray(value.tools) || value.tools.length > MAX_TOOLS) return null
@@ -223,6 +236,7 @@ function parseServer(value: unknown): StoredServer | null {
     name: value.name.trim(),
     url,
     enabled: value.enabled,
+    searchChannel,
     ...(value.tokenCipher !== undefined ? { tokenCipher: value.tokenCipher } : {}),
     tools,
     whitelist
@@ -339,6 +353,7 @@ export function createMcpConfigStore(userData: string, protection: SecretProtect
         url: server.url,
         host: hostOf(server.url),
         enabled: server.enabled,
+        searchChannel: server.searchChannel,
         tools: cloneTools(server.tools),
         whitelist: [...server.whitelist],
         credential: decrypt(server)
@@ -358,6 +373,7 @@ export function createMcpConfigStore(userData: string, protection: SecretProtect
       const name = (input.name as string).trim()
       const url = normalizeUrl(input.url) ?? fail('MCP_BAD_URL')
       if (typeof input.enabled !== 'boolean') fail('MCP_CONFIG_UNAVAILABLE')
+      if (input.searchChannel !== undefined && typeof input.searchChannel !== 'boolean') fail('MCP_CONFIG_UNAVAILABLE')
       const stored = read()
       let index = -1
       if (input.id !== undefined) {
@@ -384,6 +400,8 @@ export function createMcpConfigStore(userData: string, protection: SecretProtect
         name,
         url,
         enabled: input.enabled,
+        // 新服务器默认不是搜索渠道；已有服务器省略时保留原值（旧文件迁移值也是从这里读回）。
+        searchChannel: input.searchChannel ?? existing?.searchChannel ?? false,
         ...(tokenCipher !== undefined ? { tokenCipher } : {}),
         tools: moved ? [] : cloneTools(existing?.tools ?? []),
         whitelist: moved ? [] : [...(existing?.whitelist ?? [])]

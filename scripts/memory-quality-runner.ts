@@ -250,7 +250,7 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
     const authorization=new TaskAuthorizationRegistry({root:()=>root,session:()=>session.sessionId(),tree:()=>session.tree(),read:rel=>session.readOpened(rel),tier:modelTierFor,
      acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),configuration:()=>({credential,limits:{seconds:120,steps:1,tools:0}})})
     const next=await session.readOpened(relPath),start=next.content.lastIndexOf(raw)
-    const command={...next,modelRecordId:'quality-controlled',expectedRevision:next.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:prompt}
+    const command={...next,level:'reference' as const,modelRecordId:'quality-controlled',expectedRevision:next.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:prompt}
     const preview=await authorization.preview('quality-evaluator',{...command,references:[]})
     const host=new AgentHost({root:()=>root,session:()=>session.sessionId(),
      acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),
@@ -394,7 +394,7 @@ export async function runControlledQualityHost(session:VaultSession,service:Work
  const port={context:()=>service.context(),config:()=>({enabled:true,revision:1}),entries:(ids?:readonly string[])=>service.entries(ids)}
  const authorization=new TaskAuthorizationRegistry({root:()=>root,session:()=>session.sessionId(),tree:()=>session.tree(),read:rel=>session.readOpened(rel),tier:modelTierFor,acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),configuration:()=>({credential,limits:{seconds:120,steps:1,tools:0}})})
  const note=await session.readOpened(relPath),start=note.content.lastIndexOf(raw)
- const command={...note,modelRecordId:'quality-controlled',expectedRevision:note.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:prompt}
+ const command={...note,level:'reference' as const,modelRecordId:'quality-controlled',expectedRevision:note.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:prompt}
  const preview=await authorization.preview('quality-evaluator',{...command,references:[]})
  let saved:SavedTaskMaterial|null=null
  const host=new AgentHost({root:()=>root,session:()=>session.sessionId(),acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),read:rel=>session.readOpened(rel),write:(rel,text,revision,binding)=>{if(!binding)throw Error('NOTE_REPLACED');return session.write(rel,text,revision,binding)},authorize:()=>authorization.consume('quality-evaluator',{...command,previewId:preview.id}),tier:modelTierFor,credential:()=>credential,limits:()=>({seconds:120,steps:1,tools:0}),memory:port,

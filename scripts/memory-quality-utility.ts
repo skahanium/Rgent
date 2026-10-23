@@ -97,7 +97,7 @@ async function utilityHost(artifact:UtilityArtifact,task:typeof UTILITY_TASKS[nu
   const history=await session.ledgerContexts(relPath);if(history.length)throw Error('EVALUATION_UTILITY_HISTORY')
   const entries=await service.entries(),port={context:()=>service.context(),config:()=>({enabled,revision:1}),entries:(ids?:readonly string[])=>service.entries(ids)}
   const authorization=new TaskAuthorizationRegistry({root:()=>root,session:()=>session.sessionId(),tree:()=>session.tree(),read:rel=>session.readOpened(rel),tier:modelTierFor,acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),configuration:()=>({credential,limits:{seconds:120,steps:1,tools:0}})})
-  const note=await session.readOpened(relPath),start=note.content.lastIndexOf(raw),command={...note,modelRecordId:'utility',expectedRevision:note.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:task.prompt}
+  const note=await session.readOpened(relPath),start=note.content.lastIndexOf(raw),command={...note,level:'reference' as const,modelRecordId:'utility',expectedRevision:note.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:task.prompt}
   const preview=await authorization.preview('utility',{...command,references:[]})
   let observed:ReturnType<typeof publicInput>|null=null,bodyOutput='',finishReason:string|null=null,usage:unknown=null,streamError:string|null=null,gateError:unknown=null,calls=0
   const started=performance.now()

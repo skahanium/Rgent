@@ -44,6 +44,7 @@ import {
   type NetworkPreviewResult,
   type NetworkConfigResult,
   type NetworkConfigSetRequest,
+  type NetworkProviderClearRequest,
   type NetworkProviderSaveRequest,
   type HumanFetchRequest,
   type HumanFetchResult,
@@ -199,10 +200,11 @@ const api = {
   agentCancel: (id: string): Promise<boolean> => invoke(IPC.agentCancel, id),
   networkStop: (taskId: string): Promise<boolean> => invoke(IPC.networkStop, taskId),
   networkPreview: (request: NetworkPreviewRequest): Promise<NetworkPreviewResult> => invoke(IPC.networkPreview, request),
-  /** 不带参数只读；带 `{enabled}` 保存总开关（保存即生效，不发测试请求）。 */
+  /** 不带参数只读；带 `{enabled?, fetch?, nativeSearch?, deepseekKeySource?}` 保存设备级选项。 */
   networkConfig: (request?: NetworkConfigSetRequest): Promise<NetworkConfigResult> => invoke(IPC.networkConfig, request),
   networkProviderSave: (request: NetworkProviderSaveRequest): Promise<NetworkConfigResult> => invoke(IPC.networkProviderSave, request),
-  networkProviderClear: (): Promise<NetworkConfigResult> => invoke(IPC.networkProviderClear),
+  /** 清除某家密钥；不带参数时清当前搜索服务商（兼容旧调用）。 */
+  networkProviderClear: (request?: NetworkProviderClearRequest): Promise<NetworkConfigResult> => invoke(IPC.networkProviderClear, request),
   /** 人发起抓页／搜索：只发人输入的 URL 或查询，凭据与正文都不经过渲染层的这段接口。 */
   networkHumanFetch: (request: HumanFetchRequest): Promise<HumanFetchResult> => invoke(IPC.networkHumanFetch, request),
   networkHumanSearch: (request: HumanSearchRequest): Promise<HumanSearchResult> => invoke(IPC.networkHumanSearch, request),

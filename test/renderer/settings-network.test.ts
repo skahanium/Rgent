@@ -1,9 +1,18 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { formatStatsBytes, mountNetworkCard, networkErrorText, networkStatsErrorText, type NetworkCardHandlers } from '../../src/renderer/src/settings-network.ts'
+import {
+  formatStatsBytes,
+  mountNetworkCard,
+  mountNetworkGate,
+  networkErrorText,
+  networkStatsErrorText,
+  type NetworkCardHandlers
+} from '../../src/renderer/src/settings-network.ts'
 import type {
+  DeepSeekKeySource,
   EgressLogEntry,
   EgressLogResult,
+  FetchService,
   NetworkConfigResult,
   NetworkProviderSaveRequest,
   NetworkConfigView,
@@ -14,7 +23,22 @@ import type {
 
 afterEach(() => document.body.replaceChildren())
 
-const view = (over: Partial<NetworkConfigView> = {}): NetworkConfigView => ({ enabled: false, provider: null, hasKey: false, ...over })
+/** 新 v3 视图；deprecated 的 provider/hasKey 由 searchProvider/keyedProviders 推导，保持与主进程一致。 */
+const view = (over: Partial<NetworkConfigView> = {}): NetworkConfigView => {
+  const searchProvider = over.searchProvider !== undefined ? over.searchProvider : null
+  const keyedProviders = over.keyedProviders ?? []
+  return {
+    enabled: false,
+    searchProvider,
+    keyedProviders,
+    deepseekKeySource: 'own',
+    fetch: 'direct',
+    nativeSearch: { minimax: false },
+    ...over,
+    provider: searchProvider,
+    hasKey: searchProvider !== null && keyedProviders.includes(searchProvider)
+  }
+}
 const ok = (config: NetworkConfigView): NetworkConfigResult => ({ ok: true, config })
 const fail = (error: string): NetworkConfigResult => ({ ok: false, error })
 const tick = () => new Promise(resolve => setTimeout(resolve, 0))
@@ -46,8 +70,17 @@ function mount(initial: NetworkConfigResult = ok(view()), overrides: Partial<Net
   const handlers: NetworkCardHandlers = {
     get: vi.fn(async () => initial),
     setEnabled: vi.fn(async (enabled: boolean) => ok(view({ enabled }))),
-    saveProvider: vi.fn(async (request: NetworkProviderSaveRequest) => ok(view({ provider: request.provider, hasKey: true }))),
+    saveProvider: vi.fn(async (request: NetworkProviderSaveRequest) => ok(view({
+      searchProvider: request.provider,
+      keyedProviders: [request.provider]
+    }))),
     clearProvider: vi.fn(async () => ok(view())),
+    setDeepSeekKeySource: vi.fn(async (source: DeepSeekKeySource) => ok(view({
+      searchProvider: 'deepseek',
+      deepseekKeySource: source
+    }))),
+    setFetch: vi.fn(async (service: FetchService) => ok(view({ fetch: service }))),
+    setNativeSearch: vi.fn(async (minimax: boolean) => ok(view({ nativeSearch: { minimax } }))),
     stats: vi.fn(async () => statsOk(statsView())),
     clearStats: vi.fn(async () => cleared),
     egressLog: vi.fn(async () => logOk()),
@@ -57,32 +90,35 @@ function mount(initial: NetworkConfigResult = ok(view()), overrides: Partial<Net
   return { body, handlers, dispose }
 }
 
-describe('联网只读设置卡', () => {
-  it('默认关闭，说明只保存配置、不发测试请求、密钥不显示', async () => {
-    const { body } = mount()
+function mountGate(initial: NetworkConfigResult = ok(view()), overrides: Partial<Pick<NetworkCardHandlers, 'get' | 'setEnabled'>> = {}) {
+  const body = document.createElement('section')
+  document.body.append(body)
+  const handlers = {
+    get: vi.fn(async () => initial),
+    setEnabled: vi.fn(async (enabled: boolean) => ok(view({ enabled }))),
+    ...overrides
+  }
+  const dispose = mountNetworkGate({ body, isCurrent: () => true }, handlers)
+  return { body, handlers, dispose }
+}
+
+describe('联网总闸（页头）', () => {
+  it('默认关闭，写明只关搜索/抓取，保存失败回滚并显示人话', async () => {
+    const { body, handlers } = mountGate()
     await tick()
     const toggle = node<HTMLInputElement>(body, 'enabled')
     expect(toggle.checked).toBe(false)
     expect(toggle.disabled).toBe(false)
-    expect(body.textContent).toContain('联网只读')
-    expect(body.textContent).toContain('未配置')
-    expect(body.textContent).toContain('只保存配置，不会发测试请求')
-    expect(body.textContent).toContain('密钥只存本机加密，不显示')
-    expect(body.querySelector<HTMLInputElement>('[data-network="key"]')!.type).toBe('password')
-    expect(node<HTMLButtonElement>(body, 'clear').disabled).toBe(true)
-  })
-
-  it('保存总开关时调用 IPC，失败则回滚勾选并显示人话', async () => {
-    const saved = mount()
-    await tick()
-    const toggle = node<HTMLInputElement>(saved.body, 'enabled')
+    expect(body.textContent).toContain('关闭后内置抓页/搜索、搜索类 MCP、模型自带联网立即停止；非搜索类 MCP 不受影响')
+    expect(body.textContent).toContain('与底栏最右的小球是同一个开关')
+    expect(body.textContent).not.toContain('每场任务还要单独授权')
     toggle.checked = true
     toggle.dispatchEvent(new Event('change'))
     await tick()
-    expect(saved.handlers.setEnabled).toHaveBeenCalledWith(true)
+    expect(handlers.setEnabled).toHaveBeenCalledWith(true)
     expect(toggle.checked).toBe(true)
 
-    const rejected = mount(ok(view()), { setEnabled: vi.fn(async () => fail('IO_ERROR')) })
+    const rejected = mountGate(ok(view()), { setEnabled: vi.fn(async () => fail('IO_ERROR')) })
     await tick()
     const second = node<HTMLInputElement>(rejected.body, 'enabled')
     second.checked = true
@@ -90,6 +126,22 @@ describe('联网只读设置卡', () => {
     await tick()
     expect(second.checked).toBe(false)
     expect(rejected.body.textContent).toContain(networkErrorText('IO_ERROR'))
+  })
+})
+
+describe('联网搜索与抓取设置卡', () => {
+  it('卡片不再放第二个总闸，只写设备搜索/抓取边界与密钥说明', async () => {
+    const { body } = mount()
+    await tick()
+    expect(body.querySelector('[data-network="enabled"]')).toBeNull()
+    expect(body.textContent).toContain('联网搜索与抓取')
+    expect(body.textContent).toContain('只影响本设备的搜索/抓取；非搜索类 MCP 单独管理')
+    expect(body.textContent).not.toContain('每场任务还要单独授权')
+    expect(body.textContent).toContain('未配置')
+    expect(body.textContent).toContain('只保存配置，不会发测试请求')
+    expect(body.textContent).toContain('密钥只存本机加密，不显示')
+    expect(body.querySelector<HTMLInputElement>('[data-network="key"]')!.type).toBe('password')
+    expect(node<HTMLButtonElement>(body, 'clear').disabled).toBe(true)
   })
 
   it('保存服务与密钥后清空输入框，界面只显示“已配置”而不回显密钥', async () => {
@@ -112,8 +164,43 @@ describe('联网只读设置卡', () => {
     expect(save.disabled).toBe(true)
   })
 
+  it('按 searchProvider/keyedProviders 显示每家状态，并可选择 DeepSeek', async () => {
+    const { body, handlers } = mount(
+      ok(view({ enabled: true, searchProvider: 'brave', keyedProviders: ['brave'] })),
+      {
+        saveProvider: vi.fn(async (request: NetworkProviderSaveRequest) => ok(view({
+          searchProvider: request.provider,
+          keyedProviders: ['brave', 'deepseek']
+        })))
+      }
+    )
+    await tick()
+    const deepseek = body.querySelector<HTMLInputElement>('[data-network="provider"][data-provider="deepseek"]')!
+    expect(deepseek).not.toBeNull()
+    expect(body.textContent).toContain('DeepSeek')
+    deepseek.checked = true
+    deepseek.dispatchEvent(new Event('change'))
+    // 选中的 DeepSeek 还没有密钥：状态如实显示未配置，清除也不可用。
+    expect(body.textContent).toContain('未配置')
+    expect(node<HTMLButtonElement>(body, 'clear').disabled).toBe(true)
+    expect(body.textContent).toContain('api.deepseek.com')
+    const key = node<HTMLInputElement>(body, 'key')
+    key.value = 'ds-key'
+    key.dispatchEvent(new Event('input'))
+    node<HTMLButtonElement>(body, 'save').click()
+    await tick()
+    expect(handlers.saveProvider).toHaveBeenCalledWith({ provider: 'deepseek', key: 'ds-key' })
+    expect(body.textContent).toContain('DeepSeek · 已配置')
+    expect(node<HTMLButtonElement>(body, 'clear').disabled).toBe(false)
+    // 切回 Brave：按 keyedProviders 独立判断，仍显示 Brave 已配置。
+    const brave = body.querySelector<HTMLInputElement>('[data-network="provider"][data-provider="brave"]')!
+    brave.checked = true
+    brave.dispatchEvent(new Event('change'))
+    expect(body.textContent).toContain('Brave · 已配置')
+  })
+
   it('没有新密钥时不允许保存，避免把已保存的密钥重复提交', async () => {
-    const { body, handlers } = mount(ok(view({ enabled: true, provider: 'brave', hasKey: true })))
+    const { body, handlers } = mount(ok(view({ enabled: true, searchProvider: 'brave', keyedProviders: ['brave'] })))
     await tick()
     const save = node<HTMLButtonElement>(body, 'save')
     expect(save.disabled).toBe(true)
@@ -130,11 +217,12 @@ describe('联网只读设置卡', () => {
     expect(error.hidden).toBe(false)
     expect(error.textContent).toBe(networkErrorText('BAD_NETWORK_CONFIG'))
     expect(body.textContent).not.toContain('BAD_NETWORK_CONFIG')
-    expect(node<HTMLInputElement>(body, 'enabled').disabled).toBe(true)
+    expect(node<HTMLInputElement>(body, 'key').disabled).toBe(true)
+    expect(node<HTMLButtonElement>(body, 'save').disabled).toBe(true)
   })
 
   it('清除要二次确认；确认后清空输入并回到未配置', async () => {
-    const { body, handlers } = mount(ok(view({ enabled: true, provider: 'brave', hasKey: true })))
+    const { body, handlers } = mount(ok(view({ enabled: true, searchProvider: 'brave', keyedProviders: ['brave'] })))
     await tick()
     const key = node<HTMLInputElement>(body, 'key')
     key.value = 'typed-but-not-saved'
@@ -147,12 +235,13 @@ describe('联网只读设置卡', () => {
     clear.click()
     await tick()
     expect(handlers.clearProvider).toHaveBeenCalledTimes(1)
+    expect(handlers.clearProvider).toHaveBeenCalledWith('brave')
     expect(key.value).toBe('')
     expect(body.textContent).toContain('未配置')
   })
 
   it('清除失败时保留原状态并显示错误', async () => {
-    const { body } = mount(ok(view({ enabled: true, provider: 'brave', hasKey: true })), { clearProvider: vi.fn(async () => fail('IO_ERROR')) })
+    const { body } = mount(ok(view({ enabled: true, searchProvider: 'brave', keyedProviders: ['brave'] })), { clearProvider: vi.fn(async () => fail('IO_ERROR')) })
     await tick()
     const clear = node<HTMLButtonElement>(body, 'clear')
     clear.click()
@@ -160,6 +249,95 @@ describe('联网只读设置卡', () => {
     await tick()
     expect(body.textContent).toContain(networkErrorText('IO_ERROR'))
     expect(body.textContent).toContain('Brave · 已配置')
+  })
+
+  it('DeepSeek 密钥来源只在选中 DeepSeek 时可改，切换即保存并失败回滚', async () => {
+    const { body, handlers } = mount(
+      ok(view({ enabled: true, searchProvider: 'brave', keyedProviders: ['brave'] })),
+      {
+        setDeepSeekKeySource: vi.fn(async (source: DeepSeekKeySource) => ok(view({
+          searchProvider: 'deepseek',
+          keyedProviders: ['brave'],
+          deepseekKeySource: source,
+          fetch: 'deepseek'
+        })))
+      }
+    )
+    await tick()
+    const source = node<HTMLInputElement>(body, 'deepseek-source')
+    expect(source.disabled).toBe(true)
+    expect(source.checked).toBe(false)
+    const deepseek = body.querySelector<HTMLInputElement>('[data-network="provider"][data-provider="deepseek"]')!
+    deepseek.checked = true
+    deepseek.dispatchEvent(new Event('change'))
+    expect(source.disabled).toBe(false)
+    source.click()
+    await tick()
+    expect(handlers.setDeepSeekKeySource).toHaveBeenCalledWith('model')
+    expect(source.checked).toBe(true)
+    expect(body.textContent).toContain('DeepSeek · 使用模型页密钥')
+
+    const rejected = mount(ok(view({ searchProvider: 'deepseek' })), {
+      setDeepSeekKeySource: vi.fn(async () => fail('IO_ERROR'))
+    })
+    await tick()
+    const failing = node<HTMLInputElement>(rejected.body, 'deepseek-source')
+    expect(failing.disabled).toBe(false)
+    failing.click()
+    await tick()
+    expect(failing.checked).toBe(false)
+    expect(rejected.body.textContent).toContain(networkErrorText('IO_ERROR'))
+  })
+
+  it('抓取服务默认直连；DeepSeek 无密钥时禁用并说明先去配密钥', async () => {
+    const { body } = mount(ok(view({ searchProvider: 'brave', keyedProviders: ['brave'] })))
+    await tick()
+    const direct = body.querySelector<HTMLInputElement>('[data-network="fetch"][data-fetch="direct"]')!
+    const deepseek = body.querySelector<HTMLInputElement>('[data-network="fetch"][data-fetch="deepseek"]')!
+    expect(direct.checked).toBe(true)
+    expect(deepseek.checked).toBe(false)
+    expect(deepseek.disabled).toBe(true)
+    expect(body.textContent).toContain('先在搜索服务里保存 DeepSeek 密钥或勾选使用模型密钥')
+    expect(body.textContent).toContain('会把目标网址发给 api.deepseek.com、按次计费')
+    expect(body.textContent).toContain('人发起抓页仍直连')
+  })
+
+  it('有 DeepSeek 密钥或使用模型密钥时可切到 DeepSeek 代抓，保存即调 setFetch，失败回滚', async () => {
+    const { body, handlers } = mount(
+      ok(view({ searchProvider: 'brave', keyedProviders: ['brave', 'deepseek'] })),
+      {
+        setFetch: vi.fn(async (service: FetchService) => ok(view({
+          searchProvider: 'brave',
+          keyedProviders: ['brave', 'deepseek'],
+          fetch: service
+        })))
+      }
+    )
+    await tick()
+    const direct = body.querySelector<HTMLInputElement>('[data-network="fetch"][data-fetch="direct"]')!
+    const deepseek = body.querySelector<HTMLInputElement>('[data-network="fetch"][data-fetch="deepseek"]')!
+    expect(deepseek.disabled).toBe(false)
+    deepseek.click()
+    await tick()
+    expect(handlers.setFetch).toHaveBeenCalledWith('deepseek')
+    expect(deepseek.checked).toBe(true)
+    expect(direct.checked).toBe(false)
+
+    // 复用模型页密钥也算有凭据：抓页服务可切过去。
+    const modelKey = mount(ok(view({ searchProvider: 'deepseek', deepseekKeySource: 'model' })))
+    await tick()
+    expect(modelKey.body.querySelector<HTMLInputElement>('[data-network="fetch"][data-fetch="deepseek"]')!.disabled).toBe(false)
+
+    const rejected = mount(ok(view({ keyedProviders: ['deepseek'] })), {
+      setFetch: vi.fn(async () => fail('IO_ERROR'))
+    })
+    await tick()
+    const failing = rejected.body.querySelector<HTMLInputElement>('[data-network="fetch"][data-fetch="deepseek"]')!
+    failing.click()
+    await tick()
+    expect(failing.checked).toBe(false)
+    expect(rejected.body.querySelector<HTMLInputElement>('[data-network="fetch"][data-fetch="direct"]')!.checked).toBe(true)
+    expect(rejected.body.textContent).toContain(networkErrorText('IO_ERROR'))
   })
 
   it('renders five stat rows with counts and human-readable bytes', async () => {
@@ -192,7 +370,7 @@ describe('联网只读设置卡', () => {
     expect(rows[0]!.textContent).toContain('1.2 KB')
     expect(rows[1]!.textContent).toContain('搜索(AI)')
     expect(rows[1]!.textContent).toContain('0 B')
-    expect(rows[2]!.textContent).toContain('MCP（未启用）')
+    expect(rows[2]!.textContent).toContain('MCP')
     expect(rows[3]!.textContent).toContain('抓页(人)')
     expect(rows[3]!.textContent).toContain('1.2 MB')
     expect(rows[4]!.textContent).toContain('搜索(人)')
@@ -265,6 +443,27 @@ describe('联网只读设置卡', () => {
     expect(body.textContent).not.toContain('SECRET_QUERY')
     expect(body.textContent).not.toContain('https://example.com/page')
     expect(egressLog).toHaveBeenCalledWith(10)
+  })
+
+  it('shows a service column and keeps an unknown service value verbatim', async () => {
+    const entries = [
+      { at: '2026-10-21T05:00:00.000Z', action: 'fetch', host: 'direct.example.com', outcome: 'ok', service: 'direct' },
+      { at: '2026-10-21T05:01:00.000Z', action: 'fetch', host: 'ds.example.com', outcome: 'ok', service: 'deepseek' },
+      { at: '2026-10-21T05:02:00.000Z', action: 'search', host: 'other.example.com', outcome: 'refused', code: 'X', service: 'third-party' },
+      { at: '2026-10-21T05:03:00.000Z', action: 'fetch', host: 'old.example.com', outcome: 'ok' }
+    ] as unknown as EgressLogEntry[]
+    const { body } = mount(ok(view()), { egressLog: vi.fn(async () => logOk(entries)) })
+    await tick()
+    const items = body.querySelectorAll<HTMLElement>('[data-network-stats="log-entry"]')
+    expect(items[0]!.textContent).toContain('直连')
+    expect(items[0]!.dataset.service).toBe('直连')
+    expect(items[1]!.textContent).toContain('DeepSeek')
+    expect(items[2]!.textContent).toContain('third-party')
+    expect(items[2]!.dataset.service).toBe('third-party')
+    // 旧记录没有 service：不补猜，也不显示空列。
+    expect(items[3]!.textContent).not.toContain('third-party')
+    expect(items[3]!.dataset.service).toBeUndefined()
+    expect(statNode<HTMLElement>(body, 'log-note').textContent).toContain('服务')
   })
 
   it('turns a failed stats or egress request into human text, not an internal code', async () => {

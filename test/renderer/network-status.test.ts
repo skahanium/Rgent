@@ -31,6 +31,7 @@ let networkEnabled = false
 beforeEach(() => {
   handlers = {}
   networkEnabled = false
+  localStorage.clear()
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute('open', '') } })
   Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute('open'); this.dispatchEvent(new Event('close')) } })
@@ -77,14 +78,40 @@ describe('network chrome after status-bar strip', () => {
     expect(document.querySelector<HTMLElement>('.task-dock')?.dataset.kind).toBe('others')
   })
 
-  it('toggles the device gate from the right-side ball', async () => {
+  it('discloses the first enable with a non-modal notice before writing the device gate', async () => {
     await start(root)
     await vi.waitFor(() => expect(root.querySelector('.status-dot')).not.toBeNull())
     const button = root.querySelector<HTMLButtonElement>('.status-dot')!
     expect(button.dataset.state).toBe('offline')
+    expect(button.getAttribute('aria-label')).toBe('联网搜索与抓取：已关')
     button.click()
+    // 首次开启不直接写配置：先出可点的非模态披露。
+    await vi.waitFor(() => expect(document.querySelector('.notice')).not.toBeNull())
+    expect(document.querySelector('.notice-title')?.textContent).toBe('开启联网搜索与抓取？')
+    expect(document.querySelector('.notice-detail')?.textContent).toContain('检索词与网址')
+    expect(api.networkConfig).not.toHaveBeenCalledWith({ enabled: true })
+    expect(localStorage.getItem('rgent.network.acknowledged')).toBeNull()
+    ;(document.querySelector('.notice-action') as HTMLButtonElement).click()
     await vi.waitFor(() => expect(api.networkConfig).toHaveBeenCalledWith({ enabled: true }))
     await vi.waitFor(() => expect(button.dataset.state).toBe('online'))
-    expect(button.getAttribute('aria-pressed')).toBe('true')
+    expect(button.getAttribute('aria-label')).toBe('联网搜索与抓取：已开')
+    expect(localStorage.getItem('rgent.network.acknowledged')).toBe('1')
+    await vi.waitFor(() => expect(document.querySelector('.notice')).toBeNull())
+  })
+
+  it('turns the gate off directly without a prompt, and remembers only the first-enable disclosure', async () => {
+    await start(root)
+    await vi.waitFor(() => expect(root.querySelector('.status-dot')).not.toBeNull())
+    const button = root.querySelector<HTMLButtonElement>('.status-dot')!
+    localStorage.setItem('rgent.network.acknowledged', '1')
+    button.click()
+    // 已看过披露：不再出通知，直接开启。
+    await vi.waitFor(() => expect(api.networkConfig).toHaveBeenCalledWith({ enabled: true }))
+    await vi.waitFor(() => expect(button.dataset.state).toBe('online'))
+    expect(document.querySelector('.notice')).toBeNull()
+    button.click()
+    await vi.waitFor(() => expect(api.networkConfig).toHaveBeenCalledWith({ enabled: false }))
+    await vi.waitFor(() => expect(button.dataset.state).toBe('offline'))
+    expect(document.querySelector('.notice')).toBeNull()
   })
 })

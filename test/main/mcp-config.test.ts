@@ -196,6 +196,70 @@ describe('MCP 配置存储', () => {
     } finally { app.done() }
   })
 
+  it('migrates an old v1 server without a search-channel flag to true and keeps it on later saves', () => {
+    const app = directory()
+    try {
+      writeFileSync(app.file, JSON.stringify({
+        version: 1,
+        servers: [{
+          id: 'legacy', name: '旧服务器', url: URL_A, enabled: true,
+          tools: [{ name: 'read_a' }], whitelist: ['read_a']
+        }]
+      }))
+      const store = storeIn(app.dir)
+      expect(store.getPublic().servers[0]).toMatchObject({ id: 'legacy', searchChannel: true })
+      expect(store.servers()[0]).toMatchObject({ id: 'legacy', searchChannel: true })
+      // 省略不等于回落到 false：迁移值在后续保存里保留。
+      expect(store.upsert({ id: 'legacy', name: '旧服务器', url: URL_A, enabled: true }).servers[0]!.searchChannel).toBe(true)
+      expect(storedServer(readFileSync(app.file, 'utf8')).searchChannel).toBe(true)
+      // 落盘后仍能读回。
+      expect(storeIn(app.dir).getPublic().servers[0]!.searchChannel).toBe(true)
+    } finally { app.done() }
+  })
+
+  it('defaults a new server to not a search channel and preserves or replaces the flag only when asked', () => {
+    const app = directory()
+    try {
+      const store = storeIn(app.dir)
+      const created = store.upsert({ name: '新服务器', url: URL_A, enabled: false })
+      const id = created.servers[0]!.id
+      expect(created.servers[0]!.searchChannel).toBe(false)
+      expect(store.servers()[0]!.searchChannel).toBe(false)
+      // 显式 true，然后省略保存保留 true。
+      expect(store.upsert({ id, name: '新服务器', url: URL_A, enabled: false, searchChannel: true }).servers[0]!.searchChannel).toBe(true)
+      expect(store.upsert({ id, name: '新服务器', url: URL_A, enabled: false }).servers[0]!.searchChannel).toBe(true)
+      expect(storedServer(readFileSync(app.file, 'utf8')).searchChannel).toBe(true)
+      // 显式 false 才取消。
+      expect(store.upsert({ id, name: '新服务器', url: URL_A, enabled: false, searchChannel: false }).servers[0]!.searchChannel).toBe(false)
+      expect(storedServer(readFileSync(app.file, 'utf8')).searchChannel).toBe(false)
+      expect(storeIn(app.dir).servers()[0]!.searchChannel).toBe(false)
+    } finally { app.done() }
+  })
+
+  it('requires the search-channel flag to be a boolean and fails closed on a malformed stored value', () => {
+    const app = directory()
+    try {
+      const store = storeIn(app.dir)
+      const id = addServer(store)
+      expect(() => store.upsert({ id, name: 'x', url: URL_A, enabled: false, searchChannel: 'yes' as unknown as boolean })).toThrow('MCP_CONFIG_UNAVAILABLE')
+      expect(() => store.upsert({ name: 'y', url: URL_B, enabled: false, searchChannel: 1 as unknown as boolean })).toThrow('MCP_CONFIG_UNAVAILABLE')
+      // 校验失败不落盘、也不改已有值。
+      expect(store.getPublic().servers).toHaveLength(1)
+      expect(store.getPublic().servers[0]!.searchChannel).toBe(false)
+      // 手改出来的非 boolean 按坏文件处理：读不到任何服务器，也不覆盖证据。
+      const tampered = JSON.parse(readFileSync(app.file, 'utf8')) as { servers: Record<string, unknown>[] }
+      tampered.servers[0]!.searchChannel = 'yes'
+      writeFileSync(app.file, JSON.stringify(tampered))
+      const bad = readFileSync(app.file, 'utf8')
+      expect(storeIn(app.dir).getPublic()).toEqual({ servers: [] })
+      expect(readFileSync(app.file, 'utf8')).toBe(bad)
+      // 下一次显式写入前保留坏文件。
+      storeIn(app.dir).upsert({ name: '另一台', url: URL_B, enabled: false })
+      expect(corruptFiles(app.dir)).toHaveLength(1)
+      expect(storeIn(app.dir).getPublic().servers).toHaveLength(1)
+    } finally { app.done() }
+  })
+
   it('clears discovered tools and whitelist when the endpoint changes', () => {
     const app = directory()
     try {

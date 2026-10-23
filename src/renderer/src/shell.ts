@@ -5,7 +5,7 @@ import { memoryErrorText, renderMemoryPreview, ledgerRememberCommand, type Memor
 import type { SkillsPageHandlers } from './settings-skills.ts'
 import type { SkillsResult } from '../../shared/skills.ts'
 import { networkEvidenceText, skillsEvidenceText } from './ledger-evidence.ts'
-import { IPC, type AgentEvent, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type PublicModelConfig, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
+import { IPC, type AgentEvent, type AgentPermissionLevel, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type PublicModelConfig, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { RecoveryDraftGate, reportFlush, saveWorkspacePosition } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
@@ -293,6 +293,10 @@ export async function start(root: HTMLElement): Promise<void> {
   let permissionState: PermissionState = { status: 'ready', entries: [] }
   let vaultNameText: string | null = null
   let networkEnabled = false
+  // 同会话沿用上次手动档位；自动档只对本场有效，成功启动后回落成可写。
+  let sessionLevel: AgentPermissionLevel = 'read'
+  // 首次打开联网总闸之前先出一次非模态披露；这里只记浏览偏好，不是授权证明。
+  const NETWORK_ACK_KEY = 'rgent.network.acknowledged'
   // 声明放在状态区：applyState 会在定义点之前调用 closeVaultPicker，
   // 用 let 声明在后面会撞 TDZ（实测 ReferenceError）。
   let vaultPicker: ReturnType<typeof openOverlay> | null = null
@@ -358,7 +362,8 @@ export async function start(root: HTMLElement): Promise<void> {
     readModels: (request) => window.rgent.modelList(request),
     setDefaultModel: (request) => window.rgent.modelDefaultSet(request),
     setLimits: (request) => window.rgent.modelLimitsSet(request),
-    // 联网只读卡片挂在「模型」页：总开关保存即生效，密钥保存后不显示。
+    // 「联网」页：总闸保存即生效，密钥保存后不显示；DeepSeek 来源、抓页服务与
+    // 模型自带联网都只写设备配置，不发测试请求。
     network: () => ({
       get: () => window.rgent.networkConfig(),
       setEnabled: async enabled => {
@@ -366,8 +371,11 @@ export async function start(root: HTMLElement): Promise<void> {
         if (result.ok) { networkEnabled = result.config.enabled; updateStatus() }
         return result
       },
+      setDeepSeekKeySource: source => window.rgent.networkConfig({ deepseekKeySource: source }),
+      setFetch: service => window.rgent.networkConfig({ fetch: service }),
+      setNativeSearch: minimax => window.rgent.networkConfig({ nativeSearch: { minimax } }),
       saveProvider: request => window.rgent.networkProviderSave(request),
-      clearProvider: () => window.rgent.networkProviderClear(),
+      clearProvider: provider => window.rgent.networkProviderClear(provider ? { provider } : undefined),
       stats: () => window.rgent.networkStats(),
       clearStats: () => window.rgent.networkStatsClear(),
       egressLog: limit => window.rgent.networkEgressLog({ limit })
@@ -728,7 +736,7 @@ export async function start(root: HTMLElement): Promise<void> {
     updateStatus()
   }).catch(() => {})
 
-  async function submitSlash(submission: { range: { start: number; end: number }; prompt: string }, initials?: { initialNetwork?: boolean; initialMcp?: boolean }): Promise<void> {
+  async function submitSlash(submission: { range: { start: number; end: number }; prompt: string }, initials?: { level?: AgentPermissionLevel }): Promise<void> {
     const tab=current();if(!tab || authorizationPopover || conflictDecisionOpen)return
     if(tab.availability || !tab.sessionId || !tab.objectVersion)return
     const selectedModelId = taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null)
@@ -746,21 +754,22 @@ export async function start(root: HTMLElement): Promise<void> {
     const coords=editor.view.coordsAtPos(editor.view.state.selection.main.head)??editor.view.dom.getBoundingClientRect()
     authorizationPopover=openAuthorizationPopover({discard:id=>window.rgent.agentAuthorizationDiscard(id),origin:tab.relPath,entries:tree,anchor:coords,
       returnFocus:()=>editor.view.contentDOM,
+      initialLevel:initials?.level ?? sessionLevel,
       onClose:()=>{authorizationPopover=null},
-      ...(initials?.initialNetwork?{initialNetwork:true}:{}),
-      ...(initials?.initialMcp?{initialMcp:true}:{}),
-      preview:async (references,network,mcp)=>{
+      preview:async (references,level)=>{
         if(current()!==tab || !tabs.includes(tab) || editor.getText()!==draft)return {ok:false,error:'STALE_AUTHORIZATION'}
         if(!await flushSave())return {ok:false,error:'UNSAVED_DRAFT'}
         displayedRequest=request()
-        return window.rgent.agentAuthorizationPreview({...displayedRequest,references,...(network?{network:true}:{}),...(mcp?{mcp:true}:{})})
+        return window.rgent.agentAuthorizationPreview({...displayedRequest,references,level})
       },
-      send:async (preview,network,mcp)=>{
+      send:async (preview,level)=>{
         if(!displayedRequest || current()!==tab || !tabs.includes(tab) || editor.getText()!==draft || taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null)!==displayedRequest.modelRecordId)return {ok:false,error:'STALE_AUTHORIZATION'}
         if(!await flushSave())return {ok:false,error:'UNSAVED_DRAFT'}
-        const result=await window.rgent.agentStart({...displayedRequest,previewId:preview.id,...(network?{network:true}:{}),...(mcp?{mcp:true}:{})})
+        const result=await window.rgent.agentStart({...displayedRequest,previewId:preview.id,level})
         if(!result.ok)return result
-        tab.pausedRestart={promptText:displayedRequest.promptText,modelRecordId:displayedRequest.modelRecordId,...(network?{network:true}:{}),...(mcp?{mcp:true}:{})}
+        // 档位记进暂停重启；自动档绝不带到下一场。
+        tab.pausedRestart={promptText:displayedRequest.promptText,modelRecordId:displayedRequest.modelRecordId,level}
+        sessionLevel=level==='auto'?'write':level
         tab.pausedByUser=false
         if(!endedTaskIds.has(result.id))activeTasks.set(result.id,{id:result.id,relPath:tab.relPath,startedAt:Date.now()})
         hostNotice='';syncActiveLocks();updateStatus()
@@ -772,6 +781,16 @@ export async function start(root: HTMLElement): Promise<void> {
 
   function onHostEvent(event: AgentEvent): void {
     if (event.sessionId && event.sessionId !== vaultSession) return
+    // 自动档的新建没有确认卡：给一条可打开落点的非模态通知，标题只取文件名。
+    if (event.created?.relPath) {
+      const created = event.created.relPath
+      pushNotice({
+        title: `已新建《${titleOf(created.slice(created.lastIndexOf('/') + 1))}》`,
+        detail: '已按自动档创建；可以打开查看。',
+        tone: 'info',
+        action: { label: '打开', run: () => { void openCreatedNote(created) } }
+      })
+    }
     if (event.persisted && event.revision) hostRevisions.set(event.relPath, event.revision)
     if (event.status === 'running') {
       if (!endedTaskIds.has(event.id)) activeTasks.set(event.id, { id: event.id, relPath: event.relPath, startedAt: activeTasks.get(event.id)?.startedAt ?? Date.now(), activity: event.activity })
@@ -1126,6 +1145,8 @@ export async function start(root: HTMLElement): Promise<void> {
   function resetSession(): void {
     clearDebounceTimers()
     resetScopeMemory()
+    // 换库即新的一场：档位也回到默认只读，不把上一个库的手动档带进新库。
+    sessionLevel = 'read'
     vaultEpoch += 1
     // 换库后旧横幅的「核对」已经指向不存在的窗口稿，连同待兑现的选择一起作废；
     // 其余通知也在描述上一个库的操作，不能跟着进新库。
@@ -1800,11 +1821,35 @@ export async function start(root: HTMLElement): Promise<void> {
     updateStatus()
   }
 
-  function toggleNetworkGate(): void {
-    void window.rgent.networkConfig({ enabled: !networkEnabled }).then((result) => {
-      if (result.ok) { networkEnabled = result.config.enabled; updateStatus() }
-      else { hostNotice = '联网总闸没有改成。'; updateStatus() }
+  /** 非权威浏览偏好：记的是「人已看过首次开启披露」，不是联网授权本身。 */
+  function networkAcknowledged(): boolean {
+    try { return localStorage.getItem(NETWORK_ACK_KEY) === '1' } catch { return false }
+  }
+  function markNetworkAcknowledged(): void {
+    try { localStorage.setItem(NETWORK_ACK_KEY, '1') } catch { /* 偏好写不进去也不挡开启 */ }
+  }
+
+  function applyNetworkGate(enabled: boolean, dismiss?: () => void): void {
+    void window.rgent.networkConfig({ enabled }).then((result) => {
+      if (result.ok) {
+        networkEnabled = result.config.enabled
+        if (networkEnabled) markNetworkAcknowledged()
+        dismiss?.()
+        updateStatus()
+      } else { hostNotice = '联网总闸没有改成。'; updateStatus() }
     }).catch(() => { hostNotice = '联网总闸没有改成。'; updateStatus() })
+  }
+
+  function toggleNetworkGate(): void {
+    // 关闭直接生效、不提示；首次开启前先出非模态披露，人点「开启」才真正写配置。
+    if (networkEnabled) { applyNetworkGate(false); return }
+    if (networkAcknowledged()) { applyNetworkGate(true); return }
+    const dismiss = pushNotice({
+      title: '开启联网搜索与抓取？',
+      detail: '开启后，检索词与网址会发给外部服务；关闭即撤回。该闸只管搜索与抓取，其他 MCP 不受影响。',
+      tone: 'info',
+      action: { label: '开启', run: () => { applyNetworkGate(true, dismiss) } }
+    })
   }
 
   function abortCurrent(): void {
@@ -1828,7 +1873,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const tab = current()
     if (!tab?.pausedRestart || authorizationPopover || conflictDecisionOpen) return
     if ([...activeTasks.values()].some((task) => task.relPath === tab.relPath)) return
-    const { promptText, modelRecordId, network, mcp } = tab.pausedRestart
+    const { promptText, modelRecordId, level } = tab.pausedRestart
     if (modelRecordId) tab.temporaryModelId = modelRecordId
     const marker = `/${promptText}`
     let text = editor.getText()
@@ -1849,7 +1894,7 @@ export async function start(root: HTMLElement): Promise<void> {
         return
       }
     }
-    await submitSlash({ range: { start, end: start + marker.length }, prompt: promptText }, { initialNetwork: network, initialMcp: mcp })
+    await submitSlash({ range: { start, end: start + marker.length }, prompt: promptText }, { level })
   }
 
   /** 底栏：行列、字数、总闸。字数只算正文，标记行不算。库名只写在 #app[data-vault]。 */

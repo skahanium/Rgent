@@ -50,7 +50,7 @@ function networkHarness(options: {
   const grant: TaskGrant = {
     id: 'g', root: '/vault', sessionId: 's', origin: 'a.md',
     originProof: source('a.md'), sources: [source('a.md'), source('b.md')],
-    credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 },
+    credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, level:'write' as const, autoApproveWrites:false, 
     get network() { return networkLive ? { allowed: true as const } : undefined },
     assertActive() {},
     validateSources: async () => {},
@@ -108,7 +108,7 @@ function networkHarness(options: {
       } } : {}),
       ...(options.echoShingles ? { echoShingles: options.echoShingles } : {}),
       // 生产语义：抓页只看总闸；搜索另要求服务商（与密钥）可用。
-      availability: () => options.available === false
+      availability: () => options.available === false || options.authorized === false
         ? { available: false, search: false, providerHost: null, reason: 'off' }
         : {
             available: true,
@@ -127,7 +127,7 @@ function networkHarness(options: {
 }
 
 describe('fetch_url 联网只读工具', () => {
-  it('未授权时既不宣告也不注册，硬叫只吃 TOOL_NOT_ALLOWED', async () => {
+  it('设备闸关闭时既不宣告也不注册，硬叫只吃 TOOL_NOT_ALLOWED', async () => {
     const app = networkHarness({ authorized: false, steps: [fetchCall()] })
     const task = await app.run()
     expect(await task.done).toEqual({ status: 'completed' })
@@ -604,7 +604,7 @@ describe('revokeNetworkForAll（配置变更撤网）', () => {
       const proof = source(relPath)
       return {
         id: `g-${relPath}`, root: '/vault', sessionId: 's', origin: relPath, originProof: proof, sources: [proof],
-        credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 },
+        credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, level:'write' as const, autoApproveWrites:false, 
         get network() { return live.get(relPath) ? { allowed: true as const } : undefined },
         assertActive() {},
         validateSources: async () => {},
@@ -643,7 +643,7 @@ describe('revokeNetworkForAll（配置变更撤网）', () => {
     const host = new AgentHost({
       ledger: history.ledger, root: () => '/vault', session: () => 's',
       read, write, tier: async () => 'reference', acceptsObject: () => false,
-      credential: () => CREDENTIAL, limits: () => ({ seconds: 30, steps: 6, tools: 6 }),
+      credential: () => CREDENTIAL, limits: () => ({ seconds: 30, steps: 6, tools: 6 }), 
       authorize: async input => grantFor(input.relPath),
       stream: async function* () {},
       streamStep: async function* (input) {

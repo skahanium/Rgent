@@ -618,10 +618,21 @@ a[href]:focus-visible,
 .settings-network-stats-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 2px; }
 .settings-network-stats-actions .settings-action.is-confirming { border-color: var(--status-error); color: var(--status-error); }
 
-/* 模型页页尾：联网只读卡与远端 MCP 卡叠在同一容器里，沿用 .settings-network 的分隔与文字规则。 */
-.settings-network-wrap { display: grid; gap: 14px; }
-.settings-network-card, .settings-mcp { display: grid; gap: 10px; min-width: 0; }
-.settings-network-wrap > section + section { padding-top: 18px; border-top: 1px solid var(--border-subtle); }
+/* 「联网」页：总闸、搜索/抓取卡、MCP、模型自带联网与无头浏览器占位。 */
+.settings-network-page { display: grid; gap: 18px; min-width: 0; }
+.settings-network-gate { display: grid; gap: 8px; min-width: 0; }
+.settings-network-card, .settings-network-native, .settings-network-headless, .settings-mcp { display: grid; gap: 10px; min-width: 0; }
+.settings-network-card, .settings-network-native, .settings-network-headless { padding-top: 18px; border-top: 1px solid var(--border-subtle); }
+.settings-network-page .settings-hint { margin: 0; }
+.settings-network-page .settings-section-title { margin: 0; }
+.settings-network-page .settings-mcp { padding-top: 18px; border-top: 1px solid var(--border-subtle); }
+.settings-network-deepseek { display: grid; gap: 4px; min-width: 0; }
+.settings-network-fetch { display: flex; flex-wrap: wrap; gap: 16px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.settings-network-fetch legend { width: 100%; margin-bottom: 6px; padding: 0; color: var(--text-muted); font-size: 0.78rem; }
+.settings-network-fetch label { display: flex; align-items: center; gap: 6px; color: var(--text-heading); font-size: 0.82rem; cursor: pointer; }
+.settings-network-fetch input { width: 16px; height: 16px; accent-color: var(--accent-primary); }
+.settings-network-headless-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-canvas); color: var(--text-muted); font-size: 0.8rem; }
+.settings-network-headless-state { padding: 5px 10px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-nav); color: var(--text-muted); font: 0.76rem var(--font-ui); opacity: 0.7; cursor: not-allowed; }
 .settings-mcp .settings-section-title { margin: 0; }
 .settings-mcp .settings-hint { margin: 0; }
 .settings-mcp-list { display: grid; gap: 10px; min-width: 0; }
@@ -2173,18 +2184,25 @@ a[href]:focus-visible,
 .overlay-authorization::backdrop { background: rgb(0 0 0 / 16%); }
 .overlay-authorization h2 { margin: 0 0 10px; font-size: 1rem; color: var(--text-heading); }
 .authorization-origin, .authorization-recipient { margin: 6px 0; overflow-wrap: anywhere; }
-.authorization-disclosure { margin: 12px 0; color: var(--text-muted); }
+.authorization-disclosure { margin: 12px 0 0; color: var(--text-muted); }
+/* 四档授权：一行 chip，选中档的说明紧贴下一行；档位与范围共用一张卡。 */
+.authorization-levels { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
+.authorization-levels .authorization-level { min-width: 0; }
+.authorization-levels .authorization-level[aria-checked="true"] { border-color: var(--focus-ring); color: var(--text-heading); background: var(--state-selected); }
+.authorization-level-hint { min-height: 1.55em; margin: 2px 0 8px; color: var(--text-muted); }
+.authorization-scope-summary { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; }
+.authorization-scope-text { color: var(--text-body); }
+.authorization-scope-summary .authorization-scope-toggle { min-height: 28px; padding: 2px 10px; }
+.authorization-scope-detail[hidden] { display: none; }
+.authorization-scope-hint { margin: 0 0 8px; }
+.authorization-presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
 .authorization-scope { min-width: 0; margin: 0; padding: 10px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); }
 .authorization-choices { display: grid; gap: 6px; max-height: 180px; overflow: auto; }
 .authorization-choices label { display: flex; align-items: center; gap: 7px; min-height: 28px; }
 .authorization-choices label span { overflow-wrap: anywhere; }
 .authorization-choices input { flex: 0 0 auto; accent-color: var(--focus-ring); }
 .authorization-choices .icon { flex: 0 0 auto; }
-/* 联网与 MCP 两条独立勾选共用同一套行样式：勾选框在左、说明可折行。 */
-.authorization-network label, .authorization-mcp label { display: flex; align-items: center; gap: 7px; min-height: 28px; margin: 6px 0; }
-.authorization-network p, .authorization-mcp p { margin: 6px 0; }
-.authorization-network label span, .authorization-mcp label span { overflow-wrap: anywhere; }
-.authorization-network input, .authorization-mcp input { flex: 0 0 auto; accent-color: var(--focus-ring); }
+.authorization-memory, .authorization-skills { margin: 6px 0; }
 .authorization-status { min-height: 1.55em; margin: 12px 0; color: var(--text-muted); }
 .overlay-authorization footer { display: flex; justify-content: flex-end; gap: 10px; }
 .overlay-authorization button { min-height: 32px; padding: 5px 12px; color: var(--text-body); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-overlay); cursor: pointer; font: inherit; }

@@ -11,7 +11,7 @@ import { hostErrorMessage } from './host-errors.ts'
 import { confirmAction } from './settings-model.ts'
 
 /**
- * 「模型」页末尾的「远端只读 MCP」卡片（B3）：服务器列表、添加表单、启用开关、
+ * 「联网」页里的「远端只读 MCP」卡片：服务器列表、添加表单、启用开关、
  * 「连接并列出工具」与白名单勾选。
  *
  * 只写设备配置：保存不发测试请求；**只有人点「连接并列出工具」才会外发一次**，
@@ -19,7 +19,10 @@ import { confirmAction } from './settings-model.ts'
  * 列表不显示 token 或密文，要更换 token 只能删除后重新添加。
  *
  * 只读由人工白名单保证（不信任服务器自报的只读标注）；白名单只能勾选已发现的工具。
- * 不新增设置页或导航项；围栏见 docs/decisions.md 的 2026-10-21 远端只读 MCP 合同。
+ * 「用途：联网搜索/抓取」是每台服务器的设备级标记：勾选后受底栏搜索总闸管，不勾选则不受该闸；
+ * 发现工具后若名字像搜索/抓取，只在界面上建议勾选，真正落盘仍要等人保存。
+ * 围栏见 docs/decisions.md 的 2026-10-21 远端只读 MCP 合同
+ * 与 2026-10-23 联网搜索与抓取整合。
  */
 export type McpCardHandlers = {
   get: () => Promise<McpConfigResult>
@@ -34,7 +37,8 @@ export type McpCardHost = {
 
 /** 供 B6 窗口专项使用的选择器：`[data-mcp="…"]`，每一行另带 `data-mcp-id`。
  *  - 列表：`[data-mcp="list"]`、行 `[data-mcp="row"]`、名称／主机／计数 `name`／`host`／`counts`
- *  - 启用：`[data-mcp="enabled"]`；删除：`[data-mcp="remove"]`；连接：`[data-mcp="discover"]`
+ *  - 启用：`[data-mcp="enabled"]`；用途标记：`[data-mcp="search-channel"]`
+ *  - 删除：`[data-mcp="remove"]`；连接：`[data-mcp="discover"]`
  *  - 添加表单：`[data-mcp="new-name"]`／`"new-url"`／`"new-token"`／`"save"`
  *  - 结果：工具容器 `[data-mcp="tools"]`、单个工具 `[data-mcp="tool"]`（带 `data-tool-name`）
  *  - 文案：`[data-mcp="status"]`、`[data-mcp="error"]`
@@ -43,13 +47,17 @@ export const MCP_SELECTORS = {
   list: '[data-mcp="list"]',
   row: '[data-mcp="row"]',
   enabled: '[data-mcp="enabled"]',
+  searchChannel: '[data-mcp="search-channel"]',
   discover: '[data-mcp="discover"]',
   remove: '[data-mcp="remove"]',
   tool: '[data-mcp="tool"]',
-  save: '[data-mcp="save"]'
+  save: '[data-mcp="save"]',
+  gateHint: '[data-mcp="gate-hint"]'
 } as const
 
 const FALLBACK_ERROR = '操作未完成，请重试；仍然失败时请检查 MCP 配置。'
+/** 发现工具后的用途建议只按名字判断；匹配也仅预勾，不替人保存。 */
+const SEARCH_TOOL_NAME = /search|fetch|web|browse|crawl/i
 /** 设置卡的通用码用「未保存」口径；MCP_* 的文案仍以 host-errors.ts 为准。 */
 const SETTINGS_PHRASES: Record<string, string> = {
   BAD_REQUEST: '请求不合法，未保存。',
@@ -80,11 +88,19 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
   let disposed = false
   let errorText = ''
   let notice = ''
+  /** 只在界面层的用途建议：发现工具后名字像搜索/抓取，且人没手动改过，才预勾。 */
+  const suggested = new Set<string>()
+  /** 人在本卡里手动改过用途标记的服务器：不再用发现结果覆盖他的选择。 */
+  const touched = new Set<string>()
 
   const heading = element('h3', 'settings-section-title')
   heading.textContent = '远端只读 MCP'
   const intro = element('p', 'settings-hint')
   intro.textContent = '连接远端 HTTPS 服务器，把已发现并勾选的只读工具提供给 AI 任务。'
+  // 顶部先写清闸的边界：只有标为搜索/抓取的服务器受搜索闸管。
+  const gateHint = element('p', 'settings-hint')
+  gateHint.dataset.mcp = 'gate-hint'
+  gateHint.textContent = '非搜索类 MCP 不受搜索闸管；勾选『用于联网搜索/抓取』的服务器才受闸。'
   const guarantee = element('p', 'settings-hint')
   guarantee.textContent = '只读由你勾选的工具保证。Rgent 只按名字与参数转发；token 可选，公共只读服务器可留空，有 token 时只存本机加密、不显示。'
 
@@ -145,7 +161,7 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
   errorEl.setAttribute('role', 'alert')
   errorEl.hidden = true
 
-  body.append(heading, intro, guarantee, list, empty, addForm, noticeEl, errorEl)
+  body.append(heading, intro, gateHint, guarantee, list, empty, addForm, noticeEl, errorEl)
 
   const paintMessages = (): void => {
     errorEl.textContent = errorText
@@ -205,6 +221,16 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
     enabled.disabled = busy
     toggle.append(enabled, document.createTextNode('启用（保存即生效；启用后任务才可能用到）'))
 
+    // 用途标记：只决定这台服务器归不归底栏「联网搜索与抓取」总闸管，不是每场勾选。
+    const searchToggle = element('label', 'settings-network-toggle')
+    const searchChannel = element('input')
+    searchChannel.type = 'checkbox'
+    searchChannel.dataset.mcp = 'search-channel'
+    searchChannel.checked = server.searchChannel || suggested.has(server.id)
+    searchChannel.disabled = busy
+    searchChannel.title = '勾选后这台服务器受底栏「联网搜索与抓取」总闸管；不勾选则只受启用与白名单约束。'
+    searchToggle.append(searchChannel, document.createTextNode('用于联网搜索/抓取（受搜索闸管）'))
+
     const discoverHint = element('p', 'settings-hint')
     discoverHint.dataset.mcp = 'discover-hint'
     discoverHint.textContent = `「连接并列出工具」会向 ${server.host} 发送一次请求。返回内容只作展示。`
@@ -252,18 +278,49 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
       }
     }
 
-    row.append(head, counts, toggle, discoverHint, actions, toolsBox)
+    row.append(head, counts, toggle, searchToggle, discoverHint, actions, toolsBox)
 
     enabled.addEventListener('change', () => {
       if (busy) return
       const next = enabled.checked
       // 启用不要求 token：公共只读服务器（没有密文）也可以直接开启。
       operate(async () => {
-        const result = await handlers.save({ id: server.id, name: server.name, url: server.url, enabled: next })
+        const result = await handlers.save({
+          id: server.id,
+          name: server.name,
+          url: server.url,
+          enabled: next,
+          searchChannel: searchChannel.checked
+        })
         if (disposed || !host.isCurrent()) return
         if (!result.ok) { errorText = mcpErrorText(result.error); return }
         config = result.config
+        // 这次保存已把界面上的用途值一起落盘，建议不再需要。
+        suggested.delete(server.id)
         notice = next ? `已启用「${server.name}」。` : `已停用「${server.name}」。`
+      })
+    })
+
+    searchChannel.addEventListener('change', () => {
+      if (busy) return
+      const next = searchChannel.checked
+      // 人一改就记住：本卡挂载期间不再用发现结果覆盖这个选择。
+      touched.add(server.id)
+      suggested.delete(server.id)
+      operate(async () => {
+        const result = await handlers.save({
+          id: server.id,
+          name: server.name,
+          url: server.url,
+          enabled: server.enabled,
+          searchChannel: next
+        })
+        if (disposed || !host.isCurrent()) return
+        if (!result.ok) { errorText = mcpErrorText(result.error); return }
+        config = result.config
+        notice = next
+          ? `已把「${server.name}」标为联网搜索/抓取渠道，受底栏总闸管。`
+          : `已取消「${server.name}」的联网搜索/抓取标记，不再受底栏总闸管。`
       })
     })
 
@@ -273,8 +330,15 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
         const result = await handlers.discover({ id: server.id })
         if (disposed || !host.isCurrent()) return
         if (!result.ok) { errorText = mcpErrorText(result.error); return }
+        const matched = result.tools.some(tool => SEARCH_TOOL_NAME.test(tool.name))
+        // 只在界面预勾：人手动改过用途、或本来就已勾选，就不再动它。
+        const suggest = matched && !server.searchChannel && !touched.has(server.id)
+        if (suggest) suggested.add(server.id)
+        else suggested.delete(server.id)
         config = result.config
-        notice = `已从 ${server.host} 读取 ${result.tools.length} 个工具。勾选白名单后保存才生效。`
+        notice = suggest
+          ? `已从 ${server.host} 读取 ${result.tools.length} 个工具；工具名像搜索/抓取，已建议勾上用途标记，保存后生效。`
+          : `已从 ${server.host} 读取 ${result.tools.length} 个工具。勾选白名单后保存才生效。`
       })
     })
 
@@ -300,11 +364,14 @@ export function mountMcpCard(host: McpCardHost, handlers: McpCardHandlers): () =
           name: server.name,
           url: server.url,
           enabled: server.enabled,
+          searchChannel: searchChannel.checked,
           whitelist
         })
         if (disposed || !host.isCurrent()) return
         if (!result.ok) { errorText = mcpErrorText(result.error); return }
         config = result.config
+        // 白名单保存已把界面上的用途值一并落盘（包括发现后的建议）。
+        suggested.delete(server.id)
         notice = `白名单已保存（${whitelist.length} 个工具）。未勾选的工具不会提供给任务。`
       })
     })

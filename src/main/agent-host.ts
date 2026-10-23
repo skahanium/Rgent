@@ -41,6 +41,8 @@ export type HostEvent = {
   sessionId?: string
   objectVersion?: string
   activity?: string
+  /** 自动批准的新建：界面用非模态通知给出可打开的落点。 */
+  created?: { relPath: string }
   /** 一次联网只读外发的状态行摘要：只带主机、去查询串的路径与服务商，不带正文与查询。 */
   network?: AgentNetworkEvent
 }
@@ -228,7 +230,7 @@ export type HostDependencies = {
   network?: {
     fetch(url: string, signal: AbortSignal): Promise<{ text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true }>
     search?(query: string, maxResults: number, signal: AbortSignal): Promise<{
-      provider: 'brave' | 'tavily'
+      provider: import('../shared/ipc.ts').NetworkProvider
       host: string
       results: { title: string; url: string; snippet: string }[]
       truncated?: boolean
@@ -635,11 +637,11 @@ export class AgentHost {
       const originPath = grant?.origin
       const libraryReadEnabled = Boolean(grant && originPath && grant.sources.some(source => source.relPath !== originPath))
       const structuralTargets = Boolean(grant && originPath && grant.sources.some(source => source.relPath !== originPath && source.tier !== 'follow'))
-      // 联网只读：总闸可用 + 本场勾选授权两条都在才算启用；任何一条不在都不宣告、不注册。
+      // 搜索/抓取闸是设备级：任务开始时开即可用；运行中关闭由 revokeNetwork 撤掉。
       const availability = (() => { try { return this.deps.network?.availability() ?? null } catch { return null } })()
       const networkAvailable = availability?.available === true
-      // `available` 管抓页（只依赖总闸与本场授权）；`search` 另要求预设服务与密钥可用。
-      const networkEnabled = networkAvailable && !!grant?.network && !!this.deps.network
+      // `available` 管抓页；`search` 另要求预设服务与密钥可用。
+      const networkEnabled = networkAvailable && !!grant && !!this.deps.network
       const searchEnabled = Boolean(networkEnabled && availability?.search === true)
       const searchHost = searchEnabled ? availability?.providerHost ?? '' : ''
       // 远端只读 MCP：可用性（含系统提示里那份工具清单）+ 本场勾选 + 宿主能力三条都在才算启用。
@@ -830,11 +832,14 @@ export class AgentHost {
       /** 最近一次成功 MCP 调用存下的预览 id（调用是串行的）：工具环在成功的同一步发给事件。
        *  抛错的调用不缓存，下一次调用会覆盖它，不会把上一次的结果错配给这一次。 */
       let lastMcpPreview: { id: string; server: string; tool: string } | undefined
-      /** MCP 能力：只在「清单可用 + 本场勾选 + 宿主有连接」时给工具集；
-       *  每次调用前复核授权（停止联网／配置变化后即使工具还在也必须拒），并登记在途请求。 */
+      /** MCP 能力：设备级清单可用 + 宿主有连接就给工具集；
+       *  每次调用前复核授权（搜索类还要求闸开着；配置变化后即使工具还在也必须拒）。 */
       const mcpTool: ScopedMcpTool | undefined = mcpEnabled && grant && this.deps.mcp ? {
         call: async (request) => {
           grant!.assertMcp()
+          const target = grant!.mcp?.servers.find(item => item.name === request.server)
+          if (!target) throw Error('MCP_NOT_AUTHORIZED')
+          if (target.searchChannel && !grant!.network) throw Error('MCP_NOT_AUTHORIZED')
           lastMcpPreview = undefined
           const controller = new AbortController()
           const abort = (): void => controller.abort()
@@ -874,7 +879,8 @@ export class AgentHost {
         }
       } : undefined
       // 补／建跟读搜拆开：仅发起篇也必须能补、能建；读库／搜库仍要范围内另有篇。
-      const write = grant ? this.writeCapability(grant, root, input.relPath, id) : undefined
+      // 只读/参考档不宣告写工具；写能力本身也由档位决定，避免"宣告了却执行不了"。
+      const write = grant && grant.level !== 'read' && grant.level !== 'reference' ? this.writeCapability(grant, root, input.relPath, id) : undefined
       const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials, write, networkTool, mcpTool)
       // 宣告与白名单必须同源：工具集没有写入能力就不宣告，宣告了就必须在白名单里。
       const writeEnabled = Boolean(write && scoped?.writes)
@@ -1341,10 +1347,15 @@ export class AgentHost {
         const preview = await gate.previewCreate({ name })
         if (!preview.ok) return preview
         if (signal.aborted) { gate.discardCreate(preview.previewId); return { ok: false as const, reason: 'TASK_CANCELLED' } }
-        let approved = false
-        try { approved = await this.deps.confirmWrite!({ kind: 'create', relPath: preview.relPath, body, signal }) } catch { approved = false }
+        let approved = grant.autoApproveWrites
+        if (!approved) {
+          try { approved = await this.deps.confirmWrite!({ kind: 'create', relPath: preview.relPath, body, signal }) } catch { approved = false }
+        }
         if (!approved) { gate.discardCreate(preview.previewId); return { ok: false as const, reason: signal.aborted ? 'TASK_CANCELLED' : 'DECLINED' } }
-        return gate.commitCreate({ previewId: preview.previewId, body })
+        const created = await gate.commitCreate({ previewId: preview.previewId, body })
+        // 自动档没有确认卡，必须给界面一条可打开的落点通知；普通档由确认后的 openCreatedNote 负责。
+        if (grant.autoApproveWrites && created.ok) this.deps.emit({ ...this.bindings.get(`${root}\0${relPath}`), id: taskId, root, relPath, status: 'running', created: { relPath: created.relPath } })
+        return created
       }
       : undefined
     const structural = this.deps.relocationPreview && this.deps.relocationCommit

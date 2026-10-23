@@ -18,6 +18,7 @@ const server = (over: Partial<McpPublicServer> = {}): McpPublicServer => ({
   host: 'mcp.example.com',
   enabled: false,
   hasToken: true,
+  searchChannel: false,
   tools: [],
   whitelist: [],
   ...over
@@ -59,10 +60,15 @@ describe('远端只读 MCP 设置卡', () => {
     expect(node(row, 'counts').textContent).toContain('白名单 1')
     expect(node(row, 'counts').textContent).toContain('已启用')
     expect((node<HTMLInputElement>(row, 'enabled')).checked).toBe(true)
+    // 用途标记是每台服务器的设备级复选框，默认不勾。
+    const searchChannel = node<HTMLInputElement>(row, 'search-channel')
+    expect(searchChannel.checked).toBe(false)
+    expect(searchChannel.closest('label')!.textContent).toBe('用于联网搜索/抓取（受搜索闸管）')
     expect(node(row, 'discover').textContent).toBe('连接并列出工具')
     expect(node(row, 'remove').textContent).toBe('删除')
     // 一次外发前先写明目标主机。
     expect(node(row, 'discover-hint').textContent).toContain('mcp.example.com')
+    expect(node(body, 'gate-hint').textContent).toBe('非搜索类 MCP 不受搜索闸管；勾选『用于联网搜索/抓取』的服务器才受闸。')
     expect(body.textContent).toContain('只读由你勾选的工具保证。Rgent 只按名字与参数转发；token 可选，公共只读服务器可留空，有 token 时只存本机加密、不显示。')
     // 已发现工具按勾选状态列出。
     const tools = nodes<HTMLInputElement>(row, 'tool')
@@ -143,6 +149,8 @@ describe('远端只读 MCP 设置卡', () => {
     const tools = nodes<HTMLInputElement>(body, 'tool')
     expect(tools.map(input => input.dataset.toolName)).toEqual(['read_a', 'read_b'])
     expect(tools.every(input => !input.checked)).toBe(true)
+    // 名字不像搜索/抓取：不做用途建议。
+    expect(node<HTMLInputElement>(body, 'search-channel').checked).toBe(false)
     expect(node(body, 'status').textContent).toContain('mcp.example.com')
     tools[0]!.click()
     await tick()
@@ -151,6 +159,7 @@ describe('远端只读 MCP 设置卡', () => {
       name: '示例服务器',
       url: 'https://mcp.example.com/mcp',
       enabled: false,
+      searchChannel: false,
       whitelist: ['read_a']
     })
     const request = (handlers.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as McpServerSaveRequest
@@ -165,7 +174,7 @@ describe('远端只读 MCP 设置卡', () => {
     await tick()
     node<HTMLInputElement>(body, 'enabled').click()
     await tick()
-    expect(save).toHaveBeenCalledWith({ id: 's1', name: '示例服务器', url: 'https://mcp.example.com/mcp', enabled: true })
+    expect(save).toHaveBeenCalledWith({ id: 's1', name: '示例服务器', url: 'https://mcp.example.com/mcp', enabled: true, searchChannel: false })
 
     // 公共只读服务器没有 token 也能直接启用，且「连接并列出工具」不再被禁用。
     const noTokenResult = server({ hasToken: false, enabled: true })
@@ -173,7 +182,7 @@ describe('远端只读 MCP 设置卡', () => {
     await tick()
     node<HTMLInputElement>(noToken.body, 'enabled').click()
     await tick()
-    expect(noToken.handlers.save).toHaveBeenCalledWith({ id: 's1', name: '示例服务器', url: 'https://mcp.example.com/mcp', enabled: true })
+    expect(noToken.handlers.save).toHaveBeenCalledWith({ id: 's1', name: '示例服务器', url: 'https://mcp.example.com/mcp', enabled: true, searchChannel: false })
     expect(node<HTMLInputElement>(noToken.body, 'enabled').checked).toBe(true)
     expect(node(noToken.body, 'error').hidden).toBe(true)
     expect(node<HTMLButtonElement>(noToken.body, 'discover').disabled).toBe(false)
@@ -193,6 +202,85 @@ describe('远端只读 MCP 设置卡', () => {
     expect(discover).toHaveBeenCalledWith({ id: 's1' })
     expect(node(body, 'status').textContent).toContain('读取 1 个工具')
     expect(nodes<HTMLInputElement>(body, 'tool').map(input => input.dataset.toolName)).toEqual(['read_a'])
+  })
+
+  it('marks a server as a search/fetch channel from its row and saves the flag', async () => {
+    const save = vi.fn(async (_request: McpServerSaveRequest) => ok(view(server({ searchChannel: false }))))
+    const { body } = mount(ok(view(server({ searchChannel: true }))), { save })
+    await tick()
+    const checkbox = node<HTMLInputElement>(body, 'search-channel')
+    expect(checkbox.checked).toBe(true)
+    checkbox.click()
+    await tick()
+    expect(save).toHaveBeenCalledWith({
+      id: 's1',
+      name: '示例服务器',
+      url: 'https://mcp.example.com/mcp',
+      enabled: false,
+      searchChannel: false
+    })
+    expect(node(body, 'status').textContent).toContain('联网搜索/抓取')
+    expect(node<HTMLInputElement>(body, 'search-channel').checked).toBe(false)
+  })
+
+  it('suggests the flag after discovering search-like tools, without saving until a later save', async () => {
+    const initial = server({ tools: [], whitelist: [], searchChannel: false })
+    const discovered = server({
+      tools: [{ name: 'web_search' }, { name: 'read_a' }],
+      whitelist: [],
+      searchChannel: false
+    })
+    const saved = server({ tools: discovered.tools, whitelist: ['read_a'], searchChannel: true })
+    const save = vi.fn(async (_request: McpServerSaveRequest) => ok(view(saved)))
+    const discover = vi.fn(async () => ({ ok: true, id: 's1', tools: discovered.tools, config: view(discovered) }) as McpDiscoverResult)
+    const { body } = mount(ok(view(initial)), { discover, save })
+    await tick()
+    node<HTMLButtonElement>(body, 'discover').click()
+    await tick()
+    expect(discover).toHaveBeenCalledWith({ id: 's1' })
+    // 工具名命中搜索/抓取：只在界面上预勾，发现本身不写配置。
+    expect(node<HTMLInputElement>(body, 'search-channel').checked).toBe(true)
+    expect(node(body, 'status').textContent).toContain('建议')
+    expect(save).not.toHaveBeenCalled()
+    // 下一次保存（这里点白名单）把界面上的用途值一起回传，这时才落盘。
+    nodes<HTMLInputElement>(body, 'tool')[1]!.click()
+    await tick()
+    expect(save).toHaveBeenCalledWith({
+      id: 's1',
+      name: '示例服务器',
+      url: 'https://mcp.example.com/mcp',
+      enabled: false,
+      searchChannel: true,
+      whitelist: ['read_a']
+    })
+  })
+
+  it('does not re-suggest over a manual choice about the flag', async () => {
+    const initial = server({ searchChannel: true })
+    const unset = server({ searchChannel: false })
+    const discovered = server({ tools: [{ name: 'fetch_url' }], whitelist: [], searchChannel: false })
+    const save = vi.fn(async (_request: McpServerSaveRequest) => ok(view(unset)))
+    const discover = vi.fn(async () => ({ ok: true, id: 's1', tools: discovered.tools, config: view(discovered) }) as McpDiscoverResult)
+    const { body } = mount(ok(view(initial)), { discover, save })
+    await tick()
+    // 人手动取消用途标记：立即保存。
+    node<HTMLInputElement>(body, 'search-channel').click()
+    await tick()
+    expect(save).toHaveBeenCalledWith({
+      id: 's1',
+      name: '示例服务器',
+      url: 'https://mcp.example.com/mcp',
+      enabled: false,
+      searchChannel: false
+    })
+    expect(node<HTMLInputElement>(body, 'search-channel').checked).toBe(false)
+    // 手动改过之后，即使发现命中名字，也不再给建议覆盖人的选择。
+    node<HTMLButtonElement>(body, 'discover').click()
+    await tick()
+    expect(discover).toHaveBeenCalledWith({ id: 's1' })
+    expect(node<HTMLInputElement>(body, 'search-channel').checked).toBe(false)
+    expect(node(body, 'status').textContent).toContain('读取 1 个工具')
+    expect(node(body, 'status').textContent).not.toContain('建议')
   })
 
   it('deletes a server only after the second click', async () => {

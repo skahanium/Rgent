@@ -220,7 +220,7 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
     write: async (path, content, expected) => { if (expected !== source[path]!.revision) throw Error('CONFLICT'); source[path] = { ...source[path]!, content, revision: String(++revision) }; return { ...source[path]! } },
     credential: () => credential, limits: () => limits, stream: (input, signal) => streamModelText({ ...input, signal }), streamStep: (input, signal) => streamModelStep({ ...input, signal }), createReadOnlyTools: (grant, id) => createScopedAgentTools(grant, id, { read, tier, acceptsObject: () => false }), emit: () => {}
   })
-  const command = { modelRecordId: 'model-record', relPath: 'a.md', sessionId: 'session', objectVersion: 'a', expectedRevision: '1', range: { start: 0, end: '/查证 needle'.length }, expectedText: '/查证 needle', promptText: '查证 needle', references: ['b.md', 'c.md'] }
+  const command = { modelRecordId: 'model-record', relPath: 'a.md', sessionId: 'session', objectVersion: 'a', expectedRevision: '1', range: { start: 0, end: '/查证 needle'.length }, expectedText: '/查证 needle', level:'write' as const,promptText: '查证 needle', references: ['b.md', 'c.md'] }
   const preview = await registry.preview('owner', command)
   const task = await host.start({ ...command, previewId: preview.id })
   expect(await task.done).toEqual({ status: 'completed' })

@@ -165,13 +165,15 @@ export type AgentCommandRequest = ObjectBinding & {
   expectedText: string
   promptText: string
 }
+/** 四档授权：只读/参考不宣告写工具；自动只自动批准新建。 */
+export type AgentPermissionLevel = 'read' | 'reference' | 'write' | 'auto'
 /** 本场联网只读：默认不勾；勾选结果随预览摘要与 start 请求一起校验，防重放。
  *  远端只读 MCP 是同一张口令卡上的另一个独立勾选：`mcp` 默认不勾，与 `network` 互不影响。 */
-export type AgentAuthorizationRequest = AgentCommandRequest & { references: string[]; network?: boolean; mcp?: boolean }
+export type AgentAuthorizationRequest = AgentCommandRequest & { references: string[]; level: AgentPermissionLevel }
 export type AuthorizedSource = ObjectBinding & { sourceId: string; relPath: string; title: string; revision: string; fingerprint: string; tier: 'reference' | 'follow' }
 /** 一台可用的远端只读 MCP 服务器：只有名字、主机与白名单工具名。
  *  token、密文、schema 与服务器正文都不在这里。 */
-export type AgentMcpServerView = { name: string; host: string; tools: string[] }
+export type AgentMcpServerView = { name: string; host: string; tools: string[]; searchChannel: boolean }
 /** 本场 MCP 可用性：`available` 为假时不可勾选。
  *  `reason`：`off`＝有服务器但都没启用；`not-configured`＝启用了却缺 token／白名单；
  *  `too-many-tools`＝系统提示里的工具清单超过 4 KiB（本场不做截断，直接不可用）。 */
@@ -189,11 +191,10 @@ export type AgentAuthorizationPreview = {
   skills?: { id: string; name: string }[]
   /** 已启用但没加载的技能：名称与人话原因，便于人当场决定是否重来。 */
   skillsUnavailable?: { name: string | null; reason: import('./skills.ts').SkillUnavailableReason }[]
-  /** 本场联网只读的可用性：`available` 管抓页（只依赖总闸与本场勾选），`search` 另要求
-   *  预设搜索服务与密钥都可用；`reason` 只解释搜索为什么不可用，不含服务密钥。 */
-  network?: { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' }
-  /** 本场远端只读 MCP：只有主进程判定可用时才给勾选；服务器与工具名只是白名单摘要。 */
-  mcp?: AgentMcpAvailability
+  /** 四档授权：只读/参考不宣告写工具；自动只自动批准新建。 */
+  level: AgentPermissionLevel
+  write: boolean
+  autoApproveWrites: boolean
   /** 本场是否可能宣告删笔记：主进程已有删除实现时为 true（macOS）；Windows 仍关。渲染层不猜平台。 */
   deleteEnabled?: boolean
 }
@@ -206,16 +207,36 @@ export type AgentWritePreview =
 export type AgentWriteDecision = { requestId: string; approved: boolean }
 
 export type AgentAuthorizationResult = { ok: true; preview: AgentAuthorizationPreview } | { ok: false; error: string }
-export type AgentStartRequest = AgentCommandRequest & { previewId: string; network?: boolean; mcp?: boolean }
+export type AgentStartRequest = AgentCommandRequest & { previewId: string; level: AgentPermissionLevel }
 export type AgentStartResult = { ok: true; id: string } | { ok: false; error: string }
 export type AgentTaskView = { id: string; relPath: string; startedAt: number; activity?: string }
 /** 预设搜索服务；同一时间只接一家，端点与主机写死在主进程。 */
-export type NetworkProvider = 'brave' | 'tavily'
+export type NetworkProvider = 'brave' | 'tavily' | 'deepseek'
+/** 任务内抓页走直连还是 DeepSeek Fetch；人发起抓页始终直连。 */
+export type FetchService = 'direct' | 'deepseek'
+export type DeepSeekKeySource = 'own' | 'model'
 /** 渲染层只能看到「开没开、用哪家、有没有密钥」；密文与明文密钥都不出主进程。 */
-export type NetworkConfigView = { enabled: boolean; provider: NetworkProvider | null; hasKey: boolean }
-/** 总开关的写入请求（`network:config` 不带参数时只读）。 */
-export type NetworkConfigSetRequest = { enabled: boolean }
+export type NetworkConfigView = {
+  enabled: boolean
+  searchProvider: NetworkProvider | null
+  keyedProviders: NetworkProvider[]
+  deepseekKeySource: DeepSeekKeySource
+  fetch: FetchService
+  nativeSearch: { minimax: boolean }
+  /** @deprecated 旧字段，兼容渲染层迁移；新代码用 searchProvider/hasKey。 */
+  provider: NetworkProvider | null
+  hasKey: boolean
+}
+/** 写入设备级选项（`network:config` 不带参数时只读）。 */
+export type NetworkConfigSetRequest = {
+  enabled?: boolean
+  fetch?: FetchService
+  nativeSearch?: { minimax: boolean }
+  deepseekKeySource?: DeepSeekKeySource
+}
 export type NetworkProviderSaveRequest = { provider: NetworkProvider; key: string }
+/** 清除某个服务商的密钥；不带参数时清除当前搜索服务商（兼容旧调用）。 */
+export type NetworkProviderClearRequest = { provider?: NetworkProvider }
 export type NetworkConfigResult = { ok: true; config: NetworkConfigView } | { ok: false; error: string }
 
 /** 人发起抓页：只发人输入的 URL；渲染层拿不到凭据，也不带笔记正文。 */
@@ -289,6 +310,8 @@ export type McpPublicServer = {
   host: string
   enabled: boolean
   hasToken: boolean
+  /** 是否属于"联网搜索/抓取"渠道：受搜索闸管；其余 MCP 不受闸。 */
+  searchChannel: boolean
   tools: McpPublicTool[]
   whitelist: string[]
 }
@@ -302,6 +325,8 @@ export type McpServerSaveRequest = {
   url: string
   token?: string
   enabled: boolean
+  /** 省略时保留原值；新增默认 false，旧服务器迁移为 true。 */
+  searchChannel?: boolean
   whitelist?: string[]
 }
 export type McpServerRemoveRequest = { id: string }
@@ -322,6 +347,8 @@ export type AgentNetworkEvent = {
   host: string
   path: string
   provider?: NetworkProvider
+  /** 实际外发路径：直连、DeepSeek 服务或模型服务商自带联网。 */
+  service?: 'direct' | 'deepseek' | 'provider'
   bytes?: number
   truncated?: boolean
   /** 仅搜索成功：本次结果条数（1–10）。 */
@@ -349,6 +376,8 @@ export type AgentEvent = {
   objectVersion?: string
   activity?: string
   network?: AgentNetworkEvent
+  /** 自动批准的新建落盘后通知界面（仅自动档；普通档由确认卡随后打开）。 */
+  created?: { relPath: string }
 }
 
 /** 只读预览：按任务与预览 id 取回抓到或 MCP 拿到的纯文本（包裹前的原文）。
