@@ -175,6 +175,7 @@ const api = {
   readingSet: (reading: ReadingPreference): Promise<ReadingSetResult> => invoke(IPC.readingSet, reading),
   chromeTextGet: (): Promise<ChromeTextPreference> => invoke(IPC.chromeTextGet),
   chromeTextSet: (value: ChromeTextPreference): Promise<ChromeTextSetResult> => invoke(IPC.chromeTextSet, value),
+  windowChromeSet: (interactive: boolean): Promise<boolean> => invoke(IPC.windowChromeSet, interactive),
   remoteImageGet: (request: RemoteImageGetRequest): Promise<RemoteImageGetResult> =>
     invoke(IPC.remoteImageGet, request),
   skillsGet: (request: SkillsGetRequest): Promise<SkillsResult> => invoke(IPC.skillsGet, request),

@@ -2469,10 +2469,10 @@ async function captureVisualBaseline(page, shot, nativeShot) {
         const style = getComputedStyle(dialog, '::backdrop')
         const blur = style.backdropFilter || style.webkitBackdropFilter
         const labels = [...dialog.querySelectorAll('.settings-nav button')].map((button) => button.textContent)
-        return JSON.stringify({ blur, labels, icons: dialog.querySelectorAll('.settings-nav .icon').length })
+        return JSON.stringify({ blur, labels, icons: dialog.querySelectorAll('.settings-nav .icon').length, workspaceChrome: document.documentElement.dataset.workspaceChrome })
       })()`))
       return {
-        ok: typeof state.blur === 'string' && state.blur.includes('blur(') && JSON.stringify(state.labels) === JSON.stringify(['笔记库','界面','助手','记忆','技能','模型','运行']) && state.icons === 7,
+        ok: typeof state.blur === 'string' && state.blur.includes('blur(') && JSON.stringify(state.labels) === JSON.stringify(['笔记库','界面','助手','记忆','技能','模型','运行']) && state.icons === 7 && state.workspaceChrome === 'off',
         detail: JSON.stringify(state)
       }
     })
@@ -4867,8 +4867,11 @@ async function main() {
     await page.eval(`document.querySelector('.tree-toggle').click()`)
     await page.eval(`document.querySelector('.settings-open')?.click()`)
     await waitFor(page, `!!document.querySelector('.overlay-settings[open]')`)
+    check('设置打开时收起原生窗口控制', await page.eval(`document.documentElement.dataset.workspaceChrome === 'off'`) === true)
     await verifyChromeText(page, shot, 'functional')
     await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
+    await waitFor(page, `!document.querySelector('.overlay-settings')`)
+    check('关闭设置后恢复原生窗口控制', await page.eval(`document.documentElement.dataset.workspaceChrome === 'on'`) === true)
     await probe('账本入口固定在画布右上角且不增加 tab', async () => {
       const state = JSON.parse(await page.eval(`(() => {
         const button = document.querySelector('.ledger-open')

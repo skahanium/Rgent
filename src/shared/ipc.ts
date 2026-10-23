@@ -53,6 +53,7 @@ export const IPC = {
   readingSet: 'reading:set',
   chromeTextGet: 'chrome-text:get',
   chromeTextSet: 'chrome-text:set',
+  windowChromeSet: 'window:chrome',
   remoteImageGet: 'image:get',
   assistantGet: 'assistant:get',
   agentWriteConfirm: 'agent:write-confirm',

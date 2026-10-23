@@ -21,6 +21,7 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.replaceChildren()
+  delete document.documentElement.dataset.workspaceChrome
   for (const key of ['--reading-font-family', '--heading-font-family', '--reading-font-size', '--reading-line-height', '--reading-max-width', '--tab-name-font-size', '--sidebar-name-font-size']) {
     document.documentElement.style.removeProperty(key)
   }
@@ -46,6 +47,19 @@ it('previews interface text only in samples and applies it after a successful sa
 })
 
 describe('settings interface page', () => {
+  it('asks the shell to drop window controls while settings is open', () => {
+    const windowChromeSet = vi.fn(async () => true)
+    Object.defineProperty(window, 'rgent', { configurable: true, value: { windowChromeSet } })
+    const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async (mode) => ({ ok: true, mode }) })
+    panel.open()
+    expect(document.documentElement.dataset.workspaceChrome).toBe('off')
+    expect(windowChromeSet).toHaveBeenCalledWith(false)
+    panel.close()
+    expect(document.documentElement.dataset.workspaceChrome).toBe('on')
+    expect(windowChromeSet).toHaveBeenCalledWith(true)
+    Reflect.deleteProperty(window, 'rgent')
+  })
+
   it('has no top bar and closes only from backdrop or Escape', () => {
     const panel = createSettingsOverlay({ getMode: async () => 'day', setMode: async (mode) => ({ ok: true, mode }) })
     panel.open()

@@ -98,6 +98,12 @@ const configErrorText = (error: string): string => Object.hasOwn(CONFIG_ERRORS, 
   ? CONFIG_ERRORS[error]!
   : '操作未完成，请重试；仍然失败时请检查模型配置。'
 
+function setWorkspaceChrome(interactive: boolean): void {
+  document.documentElement.dataset.workspaceChrome = interactive ? 'on' : 'off'
+  const api = window.rgent
+  if (typeof api?.windowChromeSet === 'function') void api.windowChromeSet(interactive)
+}
+
 export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverlay {
   let overlay: Overlay | null = null
   let inputsEdited = false
@@ -135,10 +141,12 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
         disposeAssistantPage = null
         disposeSkillsPage?.()
         disposeSkillsPage = null
+        setWorkspaceChrome(true)
         handlers.onClose?.()
       }
     })
     overlay = current
+    setWorkspaceChrome(false)
     inputsEdited = false
     const root = current.root
     // 切库被未保存设置挡住时的页内提醒；藏在页面上方，不挡内容也不弹原生窗口。

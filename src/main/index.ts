@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CloseFlow, timeoutAction, type CloseAction, type CloseDecision } from '../shared/flush.ts'
 import { asString, parseEntryCreateRequest, parseFlushDone, parseLifecycleRetryRequest, parseNoteName, parseNoteWriteRequest, parseRelocationCommitRequest, parseRelocationPreviewRequest, parseSetPermissionRequest, parseTrashCommitRequest, parseTrashPreviewRequest } from '../shared/ipc-guard.ts'
+import { applyWorkspaceWindowChrome } from './window-chrome.ts'
 import { IPC, type VaultState } from '../shared/ipc.ts'
 import type { ChromeTextSetResult } from '../shared/ipc.ts'
 import { loadChromeTextPreference, saveChromeTextPreference } from './theme-preference.ts'
@@ -1322,6 +1323,13 @@ function registerIpc(): void {
       saveAssistantHabits(app.getPath('userData'), value)
       return { ok: true, habits: value }
     } catch { return { ok: false, error: 'IO_ERROR' } }
+  })
+  registerTrustedHandle(IPC.windowChromeSet, (event, value: unknown): boolean => {
+    if (typeof value !== 'boolean') return false
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return false
+    applyWorkspaceWindowChrome(win, value)
+    return true
   })
   registerTrustedHandle(IPC.themeGet, () => themeMode)
   registerTrustedHandle(IPC.readingGet, () => loadReadingPreference(app.getPath('userData')))
