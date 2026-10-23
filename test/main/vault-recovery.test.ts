@@ -8,6 +8,7 @@ import { VaultLifecycle } from '../../src/main/vault-lifecycle.ts'
 import { WorkingMemoryService } from '../../src/main/working-memory-service.ts'
 import { serializeStoredVault } from '../../src/main/notes-fs.ts'
 import { markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
+import { draftSource } from './draft-fixture.ts'
 import { vaultRootIdentity } from '../../src/main/watch.ts'
 import { IPC } from '../../src/shared/ipc.ts'
 vi.mock('electron', () => ({ dialog: { showOpenDialog: vi.fn() } }))
@@ -23,7 +24,7 @@ async function fixture() {
   await writeFile(path.join(base, 'vault.json'), serializeStoredVault(root))
   await mkdir(path.join(root, 'a'))
   await writeFile(path.join(root, 'a', '附件.txt'), '附件正文')
-  const marked = markPrompt('/以后用中文', { taskId: 'task', range: { start: 0, end: 6 }, expectedText: '/以后用中文', promptText: '以后用中文' })
+  const marked = markPrompt(draftSource('以后用中文').source, { taskId: 'task', ...draftSource('以后用中文'), expectedText: '以后用中文', promptText: '以后用中文' })
   await writeFile(path.join(root, 'a.md'), marked)
   const vault = new VaultSession(base, vi.fn())
   vault.restore()

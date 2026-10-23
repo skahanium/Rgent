@@ -80,6 +80,65 @@ const SCOPE_LABELS = { note: '本篇', folder: '同册', vault: '整库' }
 /** 零确认：没有授权卡、写确认卡、删除确认卡，也没有任何打开的模态。 */
 const NO_CONFIRM_SURFACE = `document.querySelectorAll('dialog[open]').length === 0 && !document.querySelector('.overlay-authorization, .overlay-write-confirm, .overlay-trash-confirm, .write-confirm, .trash-confirm')`
 
+/**
+ * 提问块：`⌘⇧↵`／`Ctrl+Shift+Enter` 是唯一创建入口；`/` 已退役成普通正文，
+ * 所以窗口脚本里也不能再往编辑器里输 `/prompt`。
+ */
+const DRAFT_MARKER_TEXT = '<!-- rgent:prompt:v1 state="draft" -->'
+/** CDP 修饰键位：Meta 4／Ctrl 2／Shift 8。 */
+const ASK_MODIFIERS = process.platform === 'darwin' ? 4 + 8 : 2 + 8
+
+/**
+ * 光标处草稿块的可判定状态：marker 只认 `state="draft"`，已发送（带 task-id）的块不算草稿。
+ * `Shift+Enter` 的软换行仍属同一个提问块（CommonMark 里是同一段落），所以按行块算正文。
+ */
+const PROMPT_STATE = `(() => {
+  const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+  if (!view) return null
+  const doc = view.state.doc
+  const head = view.state.selection.main.head
+  const marker = ${JSON.stringify(DRAFT_MARKER_TEXT)}
+  const caretLine = doc.lineAt(head).number
+  let start = caretLine
+  while (start > 1) {
+    const above = doc.line(start - 1).text
+    if (above.trim() === '' || above === marker) break
+    start -= 1
+  }
+  const draft = start > 1 && doc.line(start - 1).text === marker
+  let end = start - 1
+  while (end < doc.lines) {
+    const next = doc.line(end + 1)
+    if (next.text.trim() === '') break
+    end = next.number
+  }
+  const promptText = end >= start ? doc.sliceString(doc.line(start).from, doc.line(end).to) : ''
+  return {
+    draft,
+    empty: draft && promptText.trim() === '',
+    promptText,
+    head,
+    atDocEnd: head === doc.length,
+    draftCount: doc.toString().split(marker).length - 1,
+    commandLines: document.querySelectorAll('.cm-content .cm-line.rgent-block-command').length
+  }
+})()`
+
+/**
+ * 编辑器内没有按钮／图标／提示类提问入口：草稿行只有文字，标记 chip 只有既有的「删标记」。
+ * 围栏要求「编辑器里没有按钮/图标/提示」，创建只由快捷键与菜单触发。
+ */
+const NO_ASK_ENTRY = `(() => {
+  const host = document.querySelector('.editor-host')
+  if (!host) return false
+  const clean = [...host.querySelectorAll('.cm-line.rgent-block-command')]
+    .every(line => !line.querySelector('button, [role="button"], img, svg, a[href], [data-ask]'))
+  const chipButtons = [...host.querySelectorAll('.rgent-marker-command')]
+    .flatMap(chip => [...chip.querySelectorAll('button')].map(button => button.textContent.trim()))
+  const extra = host.querySelectorAll('[data-ask], [data-prompt-entry], [data-prompt-block], .rgent-ask, .ask-entry, .prompt-entry, .prompt-hint')
+  return clean && chipButtons.every(text => text === '删标记') && extra.length === 0
+})()`
+
 /** 读一次底栏模式控件：按钮上的档位、菜单项、勾选与禁用态。 */
 async function scopeState(page) {
   return page.eval(`(() => {
@@ -127,18 +186,120 @@ async function taskStarted(page, timeout = 20000) {
   })()`, timeout)
 }
 
+/** 前后两版原文的公共前后缀之外的部分；用来证明快捷键只插了 marker，没有插 `/`。 */
+function insertedText(before, after) {
+  if (typeof before !== 'string' || typeof after !== 'string') return null
+  let from = 0
+  while (from < before.length && from < after.length && before[from] === after[from]) from += 1
+  let beforeEnd = before.length, afterEnd = after.length
+  while (beforeEnd > from && afterEnd > from && before[beforeEnd - 1] === after[afterEnd - 1]) { beforeEnd -= 1; afterEnd -= 1 }
+  return { removed: before.slice(from, beforeEnd), inserted: after.slice(from, afterEnd) }
+}
+
 /**
- * 口令提交即开工：按一次回车，断言任务直接开始且没有任何确认卡。
- * 不再有「先出卡再点发送」的两步，也不允许再出现 dialog[open]。
+ * 把一条提问写进草稿块。`/` 已退役：唯一创建入口是 `⌘⇧↵`／`Ctrl+Shift+Enter`。
+ * - 光标先落到文末：新块接在最后一段之后，末尾空行（空段）就复用那一行。
+ * - 只有在光标处还没有草稿块时才按键；已有空草稿块就复用它，不叠第二个。
+ * - 快捷键插入的只能是 marker（不含 `/`），正文才用真实输入送进块里。
+ * - 编辑器里没有按钮／图标／提示类提问入口。
+ * 返回 true 只代表草稿就绪；发送由 `submitDirect` 的真实 Enter 完成。
+ */
+async function ensurePrompt(page, prompt) {
+  if (!prompt || prompt.includes('/')) return false
+  await page.eval(`document.querySelector('.cm-content')?.focus()`)
+  await page.key(process.platform === 'darwin' ? 'ArrowDown' : 'End', process.platform === 'darwin' ? 'ArrowDown' : 'End', process.platform === 'darwin' ? 4 : 2, process.platform === 'darwin' ? 40 : 35)
+  const docText = `document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null`
+  const before = await page.eval(docText)
+  let state = await page.eval(PROMPT_STATE)
+  if (!state?.draft) {
+    const expectedDrafts = (state?.draftCount ?? 0) + 1
+    await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
+    const created = await waitFor(page, `(() => {
+      const state = ${PROMPT_STATE}
+      return !!state && state.draft && state.empty && state.draftCount === ${expectedDrafts} &&
+        document.querySelectorAll('.cm-content .cm-line.rgent-block-command').length >= 1
+    })()`, 8000)
+    if (!created) return false
+    const after = await page.eval(docText)
+    const change = insertedText(before, after)
+    // 快捷键只插 marker（和必要的空行），不能插 `/`；也只能多一个草稿块。
+    if (!change || !change.inserted.includes(DRAFT_MARKER_TEXT) || change.inserted.includes('/')) return false
+    state = await page.eval(PROMPT_STATE)
+  }
+  if (!state?.draft || !state.empty) return false
+  // CM 的事务选区要等一次 DOM 同步；这里等 DOM 光标确实落在空提问行再输入，免得字进错位置。
+  await waitFor(page, `(() => {
+    const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+    const selection = document.getSelection()
+    if (!view || !selection || selection.rangeCount === 0) return false
+    const node = selection.anchorNode
+    const element = node && node.nodeType === 3 ? node.parentElement : node
+    const line = element?.closest?.('.cm-line')
+    return !!line && line.classList.contains('rgent-block-command') && line.textContent === ''
+  })()`, 4000)
+  await page.call('Input.insertText', { text: prompt })
+  const typed = await waitFor(page, `(() => {
+    const state = ${PROMPT_STATE}
+    return !!state && state.draft && state.promptText === ${JSON.stringify(prompt)}
+  })()`, 5000)
+  if (!typed) return false
+  // 草稿行立刻就是 `.rgent-block-command.rgent-block-command-first`（`>`、紫色），且行内只有文字。
+  const rendered = await page.eval(`(() => {
+    const state = ${PROMPT_STATE}
+    if (!state || !state.draft || state.promptText !== ${JSON.stringify(prompt)}) return null
+    const chips = [...document.querySelectorAll('.cm-content .rgent-marker-command')]
+    const line = chips.at(-1)?.closest('.cm-line')?.nextElementSibling
+    if (!line) return null
+    return {
+      className: line.className,
+      text: line.textContent,
+      controls: line.querySelectorAll('button, [role="button"], img, svg, a[href]').length,
+      first: getComputedStyle(line, '::before').content,
+      color: getComputedStyle(line).color
+    }
+  })()`)
+  await waitFor(page, NO_ASK_ENTRY, 3000)
+  return !!rendered && rendered.text === prompt.split('\n')[0] && rendered.controls === 0 && rendered.className.includes('rgent-block-command') && rendered.className.includes('rgent-block-command-first')
+}
+
+/**
+ * 提问块提交：草稿里已有正文时按一次真实回车就开工；空块不发送。
+ * 传 prompt 时先由 `ensurePrompt` 建块并把正文放进去。
+ * 按完回车同时断言：零确认面；本篇本次只出现一个 running 任务（同一个按键不能双发）；
+ * 草稿 marker 已升级（块被复用，没有复制出第二个）。
  */
 async function submitDirect(page, prompt = null) {
-  if (prompt !== null) {
-    await page.eval(`document.querySelector('.cm-content')?.focus()`)
-    await page.call('Input.insertText', { text: `/${prompt}` })
+  /** 失败时把窗口里的现场留下，专项打印它，不用靠猜。 */
+  const remember = async (stage, extra = {}) => {
+    await page.eval(`(() => {
+      const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+      window.__r5aSubmitFailure = {
+        stage: ${JSON.stringify(stage)},
+        extra: ${JSON.stringify(extra)},
+        doc: view?.state.doc.toString().slice(-400) ?? null,
+        status: document.querySelector('.status')?.innerText?.slice(0, 400) ?? null,
+        notices: [...document.querySelectorAll('.notice')].map(node => node.innerText).join(' | '),
+        dialogs: [...document.querySelectorAll('dialog[open]')].map(node => node.className)
+      }
+      return true
+    })()`)
   }
+  if (prompt !== null) {
+    if (!await ensurePrompt(page, prompt)) {
+      await remember('ensure-prompt', { prompt })
+      return false
+    }
+  }
+  const state = await page.eval(PROMPT_STATE)
+  if (!state?.draft || state.empty) {
+    await remember('not-ready', { hasDraft: !!state?.draft, empty: state?.empty ?? null, promptText: state?.promptText ?? null })
+    return false
+  }
+  const relPath = await page.eval(`document.querySelector('.tab[aria-selected=true]')?.dataset.rel ?? null`)
   // 记录 AgentEvent：任务可能在 250ms 内收尾，单看浮层会漏掉「真的开始过」。
   await page.eval(`(() => {
     window.__r5aTaskEvents = []
+    window.__r5aSubmitFailure = null
     window.__r5aTaskOff?.()
     window.__r5aTaskOff = window.rgent.onAgentEvent(event => {
       if (event?.id) window.__r5aTaskEvents.push({ id: event.id, status: event.status, relPath: event.relPath, reason: event.reason ?? null, activity: event.activity ?? null })
@@ -147,36 +308,26 @@ async function submitDirect(page, prompt = null) {
   })()`)
   await page.key('Enter', 'Enter', 0, 13)
   const started = await waitFor(page, `(window.__r5aTaskEvents?.length ?? 0) > 0 || document.querySelector('.task-dock')?.dataset.kind === 'generating' || (async () => (await window.rgent.agentTasks()).length > 0)()`, 20000)
-  if (started) await page.eval(`window.__r5aLastTaskId = window.__r5aTaskEvents?.[0]?.id ?? null`)
-  const noCard = await page.eval(NO_CONFIRM_SURFACE)
-  return started && noCard
-}
-
-
-/** 在正文末尾插一条 `/口令`。任务收尾后宿主正文回写可能迟到，冲掉刚插的口令就重插。 */
-async function ensureSlash(page, prompt) {
-  const marker = `/${prompt}`
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    await sleep(attempt === 0 ? 900 : 600)
-    await page.eval(`(() => {
-      const view = document.querySelector('.cm-content')?.cmTile?.root?.view
-      if (!view) return false
-      const at = view.state.doc.length, insert = '\\n' + ${JSON.stringify(marker)}
-      view.dispatch({ changes: { from: at, insert }, selection: { anchor: at + insert.length }, userEvent: 'input.type' })
-      view.focus()
-      return true
-    })()`)
-    if (await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').endsWith(${JSON.stringify(marker)})`, 2500)) return true
-    // 被迟到同步冲掉：先把残留的旧口令删掉，下一轮再插，避免同一条口令出现两次。
-    await page.eval(`(() => {
-      const view = document.querySelector('.cm-content')?.cmTile?.root?.view
-      if (!view) return false
-      const text = view.state.doc.toString(), at = text.lastIndexOf(${JSON.stringify(marker)})
-      if (at >= 0) view.dispatch({ changes: { from: at, to: at + ${marker.length} } })
-      return true
-    })()`)
+  if (!started) {
+    await remember('not-started', { relPath, promptText: state.promptText })
+    return false
   }
-  return false
+  await waitFor(page, `(window.__r5aTaskEvents ?? []).some(event => event.status === 'running' && event.relPath === ${JSON.stringify(relPath)})`, 5000)
+  // 同一篇里本次只该有一个 running id：双发会多出第二个任务，块也会被复制。
+  const single = await page.eval(`(() => {
+    const ids = [...new Set((window.__r5aTaskEvents ?? []).filter(event => event.status === 'running' && event.relPath === ${JSON.stringify(relPath)}).map(event => event.id))]
+    window.__r5aLastTaskId = ids[0] ?? null
+    return { ids }
+  })()`)
+  // 宿主把草稿 marker 升级成带 task-id 的已发送 marker；窗口同步可能晚一帧。
+  const upgraded = await waitFor(page, `(() => {
+    const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+    return !!view && !view.state.doc.toString().includes(${JSON.stringify(DRAFT_MARKER_TEXT)})
+  })()`, 8000)
+  const noCard = await page.eval(NO_CONFIRM_SURFACE)
+  const ok = started && noCard && single.ids.length === 1 && upgraded
+  if (!ok) await remember('after-enter', { relPath, ids: single.ids, upgraded, noCard, promptText: state.promptText })
+  return ok
 }
 
 /** 等最近一次由 `submitDirect` 启动的任务真正收尾（含 cancelled／failed，结构操作会走 cancelled）。 */
@@ -461,13 +612,11 @@ async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) 
     await page.eval(`document.querySelector('.cm-content').focus()`)
   }
   await createAndOpen('记忆长期.md')
-  await page.call('Input.insertText',{text:'/长期记住：后续回答请用中文简短表达（记忆验收）。'})
-  check('零确认下记忆场直接开工、没有授权卡', await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
+  check('零确认下记忆场直接开工、没有授权卡', await submitDirect(page, '长期记住：后续回答请用中文简短表达（记忆验收）。'), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
   check('回答和本篇账本成功保存后后台整理完成', await waitFor(page, `(async()=>{const state=await window.rgent.vaultGet();const memory=await window.rgent.memoryGet({sessionId:state.sessionId});const note=await window.rgent.noteRead('记忆长期.md');return memory.ok&&memory.value.entries.some(e=>e.content==='后续回答请用中文简短表达（记忆验收）。'&&e.layer==='core')&&memory.value.jobs.some(j=>j.outcome==='applied')&&!note.content.includes('rgent:ledger:v1')&&(await window.rgent.ledgerGet({sessionId:note.sessionId,objectVersion:note.objectVersion,relPath:'记忆长期.md'})).value?.records.some(r=>r.state==='saved'&&r.chapter?.prompt.includes('长期记住'))&&(await window.rgent.agentTasks()).length===0})()`,15000))
   check('独立后台仅发送获准材料、不把回答当事实且工具为零', requests.some(r=>{if(r.model!=='memory-ui-fixture'||r.tools?.length)return false;const input=JSON.parse(r.messages.find(m=>m.role==='user').content);return input.sources?.some(s=>s.classification==='command'&&s.text.includes('长期记住'))&&!input.sources.some(s=>s.classification==='ai')&&!JSON.stringify(r).includes('隐藏工具推理')}))
   await createAndOpen('记忆后续.md')
-  await page.call('Input.insertText',{text:'/记忆后续第一次'})
-  check('零确认下下一场直接开工、没有授权卡', await submitDirect(page))
+  check('零确认下下一场直接开工、没有授权卡', await submitDirect(page, '记忆后续第一次'))
   check('下一场自动带入核心记忆并保存实际使用依赖', await waitFor(page, `(async()=>{const note=await window.rgent.noteRead('记忆后续.md');return note.content.includes('记忆验收旧回答')&&(await window.rgent.ledgerGet({sessionId:note.sessionId,objectVersion:note.objectVersion,relPath:'记忆后续.md'})).value?.records.some(r=>r.state==='saved'&&r.chapter?.provenance?.version===2&&r.chapter.provenance.memoryDeps.length>0)&&(await window.rgent.agentTasks()).length===0})()`))
   const nextRequests=requests.filter(r=>r.model!=='memory-ui-fixture'&&JSON.stringify(r).includes('记忆后续第一次'))
   check('实际回答模型收到低信任核心记忆', nextRequests.some(r=>JSON.stringify(r).includes('后续回答请用中文简短表达（记忆验收）。')))
@@ -651,11 +800,7 @@ async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) 
   await shot(page,'memory-forgotten-receipt')
   await page.key('Escape','Escape',0,27)
   await page.eval(`document.querySelector('.cm-content').focus()`)
-  await page.key(process.platform === 'darwin' ? 'ArrowDown' : 'End', process.platform === 'darwin' ? 'ArrowDown' : 'End', process.platform === 'darwin' ? 4 : 2, process.platform === 'darwin' ? 40 : 35)
-  await page.key('Enter','Enter',0,13)
-  await page.key('Enter','Enter',0,13)
-  await page.call('Input.insertText',{text:'/记忆后续遗忘核验'})
-  check('遗忘后的新口令进入人写段落',await waitFor(page,`document.querySelector('.cm-content')?.textContent.includes('/记忆后续遗忘核验')`))
+  check('遗忘后的新提问进入草稿块（无 `/`、无入口）', await ensurePrompt(page, '记忆后续遗忘核验') && await waitFor(page, `document.querySelector('.cm-content')?.textContent.includes('记忆后续遗忘核验') && ${NO_ASK_ENTRY}`), await page.eval(`JSON.stringify({ draft: ${PROMPT_STATE} })`))
   check('零确认下遗忘后的新场直接开工', await submitDirect(page))
   check('遗忘后新任务仍正常回答保存',await waitFor(page, `(async()=>{const note=await window.rgent.noteRead('记忆后续.md');return note.content.includes('记忆后续遗忘核验')&&(await window.rgent.agentTasks()).length===0})()`))
   const after=requests.filter(r=>r.model!=='memory-ui-fixture'&&JSON.stringify(r).includes('记忆后续遗忘核验'))
@@ -693,7 +838,7 @@ async function verifyScopedHost(page, vault, shot, requests, allRequests = []) {
     initial.options.filter(option => option.checked).length === 1 && initial.options.find(option => option.checked)?.scope === 'note' &&
     initial.options.every(option => !option.disabled), JSON.stringify(initial))
   await shot(page, 'scope-note-1200')
-  const ask = async (prompt) => await ensureSlash(page, prompt) && submitDirect(page)
+  const ask = async (prompt) => await submitDirect(page, prompt)
   const noConfirm = () => page.eval(NO_CONFIRM_SURFACE)
 
   // 一、本篇：读/搜/建/结构/删除都不宣告；回答与补写照常。
@@ -774,7 +919,7 @@ async function verifyWriteTools(page, vault, shot, requests) {
     await page.eval(`document.querySelector('.cm-content')?.focus()`)
     return true
   }
-  const ask = async (prompt) => await ensureSlash(page, prompt) && submitDirect(page)
+  const ask = async (prompt) => await submitDirect(page, prompt)
   const settle = () => waitLastTaskDone(page)
   const toolsOf = request => (request.tools ?? []).map(tool => tool.function?.name)
   const noConfirm = () => page.eval(NO_CONFIRM_SURFACE)
@@ -1011,9 +1156,7 @@ async function verifyNetworkOnly(page, vault, shot, requests, gate) {
   // 联网与档位正交：切到整库不改变小球，也不把联网变成按档授权。
   check('联网与档位正交：切整库后小球仍开、没有确认卡', await selectScope(page, 'vault') && (await scopeState(page)).value === 'vault' &&
     await page.eval(`document.querySelector('.status-dot')?.dataset.state === 'online' && ${NO_CONFIRM_SURFACE}`), await page.eval(`JSON.stringify({ dot: document.querySelector('.status-dot')?.dataset.state, scope: document.querySelector('.status-scope-button')?.dataset.scope })`))
-  await page.eval(`document.querySelector('.cm-content')?.focus()`)
-  await page.call('Input.insertText', { text: '/联网抓页专项' })
-  check('零确认口令一次回车直接开工且没有授权卡', await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
+  check('零确认口令一次回车直接开工且没有授权卡', await submitDirect(page, '联网抓页专项'), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
   await shot(page, 'network-scope-vault-1200')
   check('整库档位下联网工具仍照常宣告', requests.length > 0 && (requests[0].tools ?? []).some(tool => tool.function?.name === 'fetch_url'), JSON.stringify((requests[0]?.tools ?? []).map(tool => tool.function?.name)))
 
@@ -1259,8 +1402,7 @@ async function verifyMcpOnly(page, vault, profile, shot, requests) {
   const offScope = await scopeState(page)
   check('MCP 专项：三档模式可直接选、默认本篇且没有授权卡', !!offScope && offScope.value === 'note' && offScope.text === '本篇 ▾' &&
     JSON.stringify(offScope.options.map(option => option.label)) === JSON.stringify(['本篇', '同册', '整库']) && await page.eval(NO_CONFIRM_SURFACE), JSON.stringify(offScope))
-  await page.call('Input.insertText', { text: '/mcp 关闸门控' })
-  check('MCP 专项：零确认口令一次回车直接开工', await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
+  check('MCP 专项：零确认口令一次回车直接开工', await submitDirect(page, 'mcp 关闸门控'), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
   await shot(page, 'mcp-scope-note-1200')
   check('MCP 专项：关闸任务正常结束并保存回答', await waitFor(page, `(async()=>{ if((await window.rgent.agentTasks()).length) return false; const note=await window.rgent.noteRead('MCP 门控专项.md'); return note.content.includes('受控回答第一句。') })()`, 60000))
   const offRequests = requests.slice(offBase).filter(request => JSON.stringify(request).includes('mcp 关闸门控'))
@@ -1274,8 +1416,7 @@ async function verifyMcpOnly(page, vault, profile, shot, requests) {
   check('MCP 专项：整库档位下 MCP 与联网仍正交', await selectScope(page, 'vault') && (await scopeState(page)).value === 'vault' &&
     await page.eval(`document.querySelector('.status-dot')?.dataset.state === 'online' && ${NO_CONFIRM_SURFACE}`))
   const onBase = requests.length
-  await page.call('Input.insertText', { text: '/mcp 开闸门控' })
-  check('MCP 专项：开闸后仍一次回车直接开工、没有授权卡', await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, scope: document.querySelector('.status-scope-button')?.dataset.scope ?? null })`))
+  check('MCP 专项：开闸后仍一次回车直接开工、没有授权卡', await submitDirect(page, 'mcp 开闸门控'), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, scope: document.querySelector('.status-scope-button')?.dataset.scope ?? null })`))
   check('MCP 专项：开闸任务正常结束并保存回答', await waitFor(page, `(async()=>{ if((await window.rgent.agentTasks()).length) return false; const note=await window.rgent.noteRead('MCP 门控专项二.md'); return note.content.includes('受控回答第一句。') })()`, 60000))
   const onRequests = requests.slice(onBase).filter(request => JSON.stringify(request).includes('mcp 开闸门控'))
   const onAnnouncements = onRequests.map(request => ({ tools: toolNamesOf(request), search: JSON.stringify(request).includes('窗口专项搜索') && JSON.stringify(request).includes('search_web'), plain: JSON.stringify(request).includes('窗口专项非搜索') && JSON.stringify(request).includes('read_doc') }))
@@ -1363,17 +1504,10 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
     if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(node => node.dataset.path === ${JSON.stringify(name)})`)) return `目录里没有 ${name}`
     await page.eval(`[...document.querySelectorAll('.tree-note')].find(node => node.dataset.path === ${JSON.stringify(name)}).click()`)
     if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(name)}`)) return `tab 没打开 ${name}`
-    // 口令段落要用编辑器事务写进去：库里的原文以换行结尾时，`Input.insertText` 会把结尾那个
-    // 换行替换掉（CDP/DOM 选区映射），口令就不再是空段落开头的口令。事务走的是同一条编辑路径，
-    // 回车仍然是真实按键。
-    await page.eval(`(() => {
-      const view = document.querySelector('.cm-content').cmTile.root.view
-      const at = view.state.doc.length, insert = '\\n/' + ${JSON.stringify(prompt)}
-      view.dispatch({ changes: { from: at, insert }, selection: { anchor: at + insert.length }, userEvent: 'input.type' })
-      view.focus()
-      return true
-    })()`)
-    await sleep(300)
+    // 提问块由快捷键建（`/` 已退役），正文用真实输入进块；末尾换行与空段都由产品自己处理。
+    if (!await ensurePrompt(page, prompt)) {
+      return `提问块没有就绪（${name}）` + await page.eval(`JSON.stringify({ editor: document.querySelector('.cm-content')?.innerText?.slice(0, 80), dialog: document.querySelector('dialog[open]')?.className ?? null, status: document.querySelector('.status')?.textContent?.slice(0, 160) })`)
+    }
     if (!await submitDirect(page)) {
       return `任务没有直接开始（${name}）` + await page.eval(`JSON.stringify({ editor: document.querySelector('.cm-content')?.innerText?.slice(0, 80), dialog: document.querySelector('dialog[open]')?.className ?? null, status: document.querySelector('.status')?.textContent?.slice(0, 160) })`)
     }
@@ -1788,12 +1922,9 @@ async function verifyJourney(page, vault, shot) {
     const readBack = saved ? await noteText(journeyPath) : null
     check('旅程：中文正文保存后 noteRead 与磁盘都含该段', saved && onDisk && String(readBack).includes(bodyText), JSON.stringify({ saved, onDisk, read: String(readBack ?? '').slice(0, 120) }))
 
-    // 三、补：受控模型按口令追加一句；正文与账本各留证据。
-    // 补写任何档位都可用；口令必须是空段落开头，否则 `/` 只是普通字符。
-    await page.key('Enter', 'Enter', 0, 13)
-    await page.key('Enter', 'Enter', 0, 13)
-    await page.call('Input.insertText', { text: `/${prompt}` })
-    check('旅程：本篇档一次回车直接开工、没有授权卡', await selectScope(page, 'note') && await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
+    // 三、补：受控模型按提问追加一句；正文与账本各留证据。
+    // 提问块只用快捷键唤起；`/` 现在只是普通字符，不再进脚本。
+    check('旅程：本篇档一次回车直接开工、没有授权卡', await selectScope(page, 'note') && await submitDirect(page, prompt), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
     const confirmed = true
     const finished = confirmed && await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead(${JSON.stringify(journeyPath)})
@@ -2027,10 +2158,8 @@ async function verifyUx(page, vault, shot) {
   check('UX：Esc 关闭模式菜单并回到按钮', await waitFor(page, `document.querySelector('.status-scope-menu')?.hidden === true && document.activeElement?.classList?.contains('status-scope-button')`))
   await setEditorText('')
 
-  // 二、零确认：口令一次回车直接开工，没有授权卡／写确认卡。
-  await page.eval(`document.querySelector('.cm-content')?.focus()`)
-  await page.call('Input.insertText', { text: '/请写一句话' })
-  const directStarted = await submitDirect(page)
+  // 二、零确认：提问块一次回车直接开工，没有授权卡／写确认卡。
+  const directStarted = await submitDirect(page, '请写一句话')
   check('UX：口令一次回车直接开工且没有任何确认卡', directStarted && await page.eval(NO_CONFIRM_SURFACE), JSON.stringify({ directStarted }))
   const answered = await waitFor(page, `(async () => { const note = await window.rgent.noteRead('UX 授权.md'); return note.content.includes('受控回答第一句。') && (await window.rgent.agentTasks()).length === 0 })()`, 60000)
   check('UX：直接开工后回答正常落盘、仍无确认卡', answered && await page.eval(NO_CONFIRM_SURFACE), JSON.stringify({ answered }))
@@ -2038,9 +2167,7 @@ async function verifyUx(page, vault, shot) {
   // 三、同册零确认建：切到同册后模型提议新建，文件直接落盘，只留「已新建」通知。
   const openedAllow = await openNote('UX 同册/UX 写许可.md')
   const scopeReady = openedAllow && await selectScope(page, 'folder') && (await scopeState(page)).text === '同册 ▾'
-  await page.eval(`document.querySelector('.cm-content')?.focus()`)
-  await page.call('Input.insertText', { text: '/UX建许可' })
-  const allowStarted = scopeReady && await submitDirect(page)
+  const allowStarted = scopeReady && await submitDirect(page, 'UX建许可')
   const allowNotice = allowStarted && await waitFor(page, `(() => { const card=[...document.querySelectorAll('.notice')].find(node => (node.querySelector('.notice-title')?.textContent||'').includes('已新建')); return !!card && [...card.querySelectorAll('button')].some(button => button.textContent.trim() === '打开') })()`, 60000)
   const created = await waitFile(at('UX 同册/UX确认样张.md'))
   const createdBody = created ? readFileSync(at('UX 同册/UX确认样张.md'), 'utf8') : ''
@@ -2173,6 +2300,177 @@ async function verifyUx(page, vault, shot) {
   check('UX：搜索过 700 无硬折位移', !!search690 && !!search710 && search690.transform === search710.transform && Math.abs(search690.top - search710.top) <= 12, JSON.stringify({ search690, search710 }))
   check('UX：编辑器过 820 顶垫连续', typeof pad810 === 'string' && pad810 === pad830 && pad810.includes('clamp'), JSON.stringify({ pad810, pad830 }))
   check('UX：夜间冷启动用 prefers-color-scheme，无内联主题脚本', nightRule === true && inlineThemeBoot === false, JSON.stringify({ nightRule, inlineThemeBoot }))
+  return nativeDialogs
+}
+
+/**
+ * 提问块专项（RGENT_UI_UX_ONLY=1 里接着跑）：`⌘⇧↵`／`Ctrl+Shift+Enter` 建块、`/` 只是普通文本、
+ * 空段立刻紫色、非空段后插、Shift+Enter 换行、空块 Esc 删除、发送前后样式不变、
+ * 菜单与快捷键各只建一个块（无双发）。受控主机的回答固定，零真实模型与外网。
+ */
+async function verifyPromptBlock(page, vault, shot, nativePage, nativeDialogs = []) {
+  process.stdout.write('\n提问块（快捷键、空段、换行、Esc 与无双发）\n')
+  const viewText = () => page.eval(`document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? ''`)
+  const draftCount = () => page.eval(`(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').split(${JSON.stringify(DRAFT_MARKER_TEXT)}).length - 1`)
+  const openNote = async (name) => {
+    await page.eval(`(() => { const button = document.querySelector('.tree-toggle'); if (button.getAttribute('aria-expanded') !== 'true') button.click(); return true })()`)
+    await selectBrowserFolder(page, '')
+    if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((node) => node.dataset.path === ${JSON.stringify(name)})`, 15000)) return false
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find((node) => node.dataset.path === ${JSON.stringify(name)})?.click()`)
+    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(name)}`, 10000)) return false
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    return true
+  }
+  const styleOf = (text) => page.eval(`(() => {
+    const line = [...document.querySelectorAll('.cm-content .cm-line.rgent-block-command')].find(node => node.textContent === ${JSON.stringify(text)})
+    if (!line) return null
+    const style = getComputedStyle(line), before = getComputedStyle(line, '::before')
+    return { className: line.className, text: line.textContent, color: style.color, weight: style.fontWeight, size: style.fontSize, before: before.content, padding: style.paddingLeft, controls: line.querySelectorAll('button, [role="button"], img, svg, a').length }
+  })()`)
+  const menuItem = (call) => nativePage.eval(`(() => {
+    const electron = process.getBuiltinModule('module').createRequire(process.cwd() + '/package.json')('electron')
+    const item = (electron.Menu.getApplicationMenu()?.items ?? []).flatMap((top) => top.submenu?.items ?? []).find((entry) => entry.label === '问 AI')
+    if (!item) return null
+    ${call ? "if (typeof item.click !== 'function') return null; item.click(); return true" : "return { label: item.label, accelerator: item.accelerator ?? null, registerAccelerator: item.registerAccelerator ?? null }"}
+  })()`)
+  /**
+   * 上一段（交互减负）故意留了一份「窗口稿 vs 磁盘」不一致的 tab：提交任何新任务前
+   * `flushSave` 会全局保存，被它拦住就开不了场。这里先在真实冲突横幅里选「听磁盘」落定，
+   * 不是本专项的断言，只是让后面的提交从干净状态开始。
+   */
+  const settleLeftover = async () => {
+    const saveOnce = async () => {
+      await page.eval(`document.querySelector('.cm-content')?.focus()`)
+      await page.key('s', 'KeyS', process.platform === 'darwin' ? 4 : 2, 83)
+      await sleep(400)
+    }
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (await page.eval(`document.querySelectorAll('.tab-dirty').length === 0`)) return true
+      await saveOnce()
+      const conflictShown = await waitFor(page, `[...document.querySelectorAll('.notice')].some(node => (node.innerText || '').includes('和磁盘不一致'))`, 6000)
+      if (!conflictShown) continue
+      await page.eval(`[...document.querySelectorAll('.notice')].find(node => (node.innerText || '').includes('和磁盘不一致'))?.querySelector('.notice-action')?.click()`)
+      if (!await waitFor(page, `!!document.querySelector('dialog[open].conflict')`, 8000)) return false
+      await page.eval(`document.querySelector('dialog[open].conflict [data-action="disk"]')?.click()`)
+      if (!await waitFor(page, `!document.querySelector('dialog[open]') && ![...document.querySelectorAll('.notice')].some(node => (node.innerText || '').includes('和磁盘不一致'))`, 15000)) return false
+    }
+    return waitFor(page, `document.querySelectorAll('.tab-dirty').length === 0`, 10000)
+  }
+  check('提问块：先落定上一段留下的冲突稿（提交的全局保存才不会被拦住）', await settleLeftover())
+  const fixtures = { '提问块空.md': '', '提问块非空.md': '原有正文第一段。\n', '提问块复用.md': '原有正文。\n\n' }
+  for (const [name, body] of Object.entries(fixtures)) writeFileSync(path.join(vault, name), body)
+  const ready = await waitFor(page, `['提问块空.md','提问块非空.md','提问块复用.md'].every(name => [...document.querySelectorAll('.tree-note')].some((node) => node.dataset.path === name))`, 15000)
+  check('提问块：三个夹具进入目录', ready)
+  if (!ready) return
+
+  // 一、空段立刻就是 `>`＋紫色提问行；不输入 `/`；快捷键只建一个块。
+  check('提问块：打开空段夹具', await openNote('提问块空.md'))
+  const emptyBefore = await viewText()
+  await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
+  const emptyCreated = await waitFor(page, `(() => {
+    const state = ${PROMPT_STATE}
+    return !!state && state.draft && state.empty && state.draftCount === 1 && !!document.querySelector('.cm-content .cm-line.rgent-block-command.rgent-block-command-first')
+  })()`, 8000)
+  const emptyAfter = await viewText()
+  const emptyStyle = await page.eval(`(() => {
+    const chips = [...document.querySelectorAll('.cm-content .rgent-marker-command')]
+    const line = chips.at(-1)?.closest('.cm-line')?.nextElementSibling
+    if (!line) return null
+    const probe = document.createElement('span'); probe.style.color = 'var(--ai-prompt)'; document.body.append(probe)
+    const expected = getComputedStyle(probe).color; probe.remove()
+    const style = getComputedStyle(line), before = getComputedStyle(line, '::before')
+    return { className: line.className, text: line.textContent, before: before.content, color: style.color, expected, weight: Number(style.fontWeight), controls: line.querySelectorAll('button, [role="button"], img, svg, a').length }
+  })()`)
+  check('提问块：空段立刻 `>`＋紫色，正文里没有 `/`', emptyCreated && emptyAfter === emptyBefore + DRAFT_MARKER_TEXT + '\n' && !emptyAfter.includes('/') &&
+    emptyStyle?.text === '' && emptyStyle.className.includes('rgent-block-command') && emptyStyle.className.includes('rgent-block-command-first') &&
+    emptyStyle.before === '">"' && emptyStyle.color === emptyStyle.expected && emptyStyle.weight >= 600 && emptyStyle.controls === 0,
+  JSON.stringify({ emptyCreated, emptyAfter, emptyStyle }))
+  check('提问块：编辑器里没有按钮／图标／提示类提问入口', await page.eval(NO_ASK_ENTRY) === true)
+  await shot(page, 'prompt-block-empty-1200')
+  await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
+  await sleep(300)
+  const repeated = await page.eval(`(() => ({ drafts: (document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').split(${JSON.stringify(DRAFT_MARKER_TEXT)}).length - 1, lines: document.querySelectorAll('.cm-content .cm-line.rgent-block-command').length }))()`)
+  check('提问块：再按一次快捷键只聚焦同一个草稿，不叠第二个块', repeated.drafts === 1 && repeated.lines === 1, JSON.stringify(repeated))
+  await page.key('Enter', 'Enter', 0, 13)
+  await sleep(800)
+  const emptyEnter = await page.eval(`(async () => ({ tasks: (await window.rgent.agentTasks()).length, drafts: (document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').split(${JSON.stringify(DRAFT_MARKER_TEXT)}).length - 1, dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialogs: document.querySelectorAll('dialog[open]').length }))()`)
+  check('提问块：空块回车不发送、也不删除、没有确认卡', emptyEnter.tasks === 0 && emptyEnter.drafts === 1 && emptyEnter.dock !== 'generating' && emptyEnter.dialogs === 0, JSON.stringify(emptyEnter))
+  await page.key('Escape', 'Escape', 0, 27)
+  check('提问块：空块 Esc 删除，原文逐字节恢复', await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null) === ${JSON.stringify(emptyBefore)}`, 5000) && await draftCount() === 0)
+
+  // 二、非空段唤起：原文不动，新块在整段之后（光标在段落中间也一样）。
+  check('提问块：打开非空段夹具', await openNote('提问块非空.md'))
+  const nonEmptyBefore = await viewText()
+  await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ selection: { anchor: 2 } }); view.focus(); return true })()`)
+  await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
+  await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').includes(${JSON.stringify(DRAFT_MARKER_TEXT)})`, 8000)
+  const nonEmptyAfter = await viewText()
+  check('提问块：非空段唤起后原文不动、新块在其后', nonEmptyAfter === nonEmptyBefore + '\n' + DRAFT_MARKER_TEXT + '\n' && nonEmptyAfter.indexOf(DRAFT_MARKER_TEXT) > nonEmptyAfter.indexOf('原有正文第一段。'), JSON.stringify({ nonEmptyBefore, nonEmptyAfter }))
+  await shot(page, 'prompt-block-after-nonempty-1200')
+  const nonEmptySent = await ensurePrompt(page, '非空段后的提问') && await submitDirect(page)
+  check('提问块：非空段后的块一次回车开工，原文仍在', nonEmptySent && await waitFor(page, `(async () => { const note = await window.rgent.noteRead('提问块非空.md'); return note.content.includes('原有正文第一段。') && note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 })()`, 30000), JSON.stringify({ submit: await page.eval('window.__r5aSubmitFailure ?? null') }))
+
+  // 三、末尾空段复用：只多 marker，不另加空行。
+  check('提问块：打开末尾空段夹具', await openNote('提问块复用.md'))
+  const reuseBefore = await viewText()
+  // 「空段复用」要求光标就在那一行空行上：先把光标落到文末（与 ⌘⇧↵ 前台人手的位置一致）。
+  await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ selection: { anchor: view.state.doc.length } }); view.focus(); return true })()`)
+  await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
+  await waitFor(page, `(() => { const state = ${PROMPT_STATE}; return !!state && state.draft && state.empty })()`, 8000)
+  const reuseAfter = await viewText()
+  check('提问块：末尾空段被复用（只多一枚 marker）', reuseAfter === reuseBefore + DRAFT_MARKER_TEXT + '\n', JSON.stringify({ reuseBefore, reuseAfter }))
+  await page.key('Escape', 'Escape', 0, 27)
+  check('提问块：复用出来的空块 Esc 后夹具复原', await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null) === ${JSON.stringify(reuseBefore)}`, 5000))
+
+  // 四、Shift+Enter 在块内换行，不发送；多行块一次回车只开一场。
+  check('提问块：打开发送夹具', await openNote('提问块空.md'))
+  const linesReady = await ensurePrompt(page, '第一行')
+  await page.key('Enter', 'Enter', 8, 13)
+  await page.call('Input.insertText', { text: '第二行' })
+  const wrapped = await waitFor(page, `(() => (document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').includes(${JSON.stringify(DRAFT_MARKER_TEXT + '\n第一行\n第二行')}))()`, 5000)
+  const wrappedState = await page.eval(`(async () => ({ drafts: (document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').split(${JSON.stringify(DRAFT_MARKER_TEXT)}).length - 1, lines: [...document.querySelectorAll('.cm-content .cm-line.rgent-block-command')].map(line => line.textContent), tasks: (await window.rgent.agentTasks()).length }))()`)
+  check('提问块：Shift+Enter 在块内换行、不发送', linesReady && wrapped && wrappedState.drafts === 1 && wrappedState.lines.includes('第一行') && wrappedState.lines.includes('第二行') && wrappedState.tasks === 0, JSON.stringify(wrappedState))
+  check('提问块：多行块一次回车只开一场、没有确认卡', await submitDirect(page) && await page.eval(NO_CONFIRM_SURFACE) && await waitFor(page, `(async () => (await window.rgent.agentTasks()).length === 0)()`, 30000), JSON.stringify({ submit: await page.eval('window.__r5aSubmitFailure ?? null') }))
+
+  // 五、发送只升级 marker：行类与文本样式前后不变。
+  const styleReady = await ensurePrompt(page, '样式哨兵')
+  const beforeSend = await styleOf('样式哨兵')
+  const styleSent = await submitDirect(page)
+  const afterSend = styleSent ? await styleOf('样式哨兵') : null
+  check('提问块：发送只升级 marker，行类与文本样式不变', styleReady && styleSent && !!beforeSend && !!afterSend &&
+    JSON.stringify(beforeSend) === JSON.stringify(afterSend) && afterSend.className.includes('rgent-block-command-first') && beforeSend.controls === 0,
+  JSON.stringify({ styleReady, styleSent, beforeSend, afterSend, submit: await page.eval('window.__r5aSubmitFailure ?? null') }))
+  await shot(page, 'prompt-block-sent-style-1200')
+  await waitFor(page, `(async () => (await window.rgent.agentTasks()).length === 0)()`, 30000)
+
+  // 六、菜单「问 AI」：显示快捷键、不再注册原生 accelerator；点菜单也只建一个块。
+  const menuInfo = await menuItem(false)
+  const acceleratorShown = typeof menuInfo?.accelerator === 'string' && /shift/i.test(menuInfo.accelerator) && /enter/i.test(menuInfo.accelerator) &&
+    (process.platform === 'darwin' ? /cmd|command|⌘/i : /ctrl|control|cmdorctrl/i).test(menuInfo.accelerator)
+  check('提问块：菜单「问 AI」显示快捷键且未注册原生 accelerator（不会双发）', !!menuInfo && acceleratorShown && menuInfo.registerAccelerator === false, JSON.stringify(menuInfo))
+  await page.eval(`document.querySelector('.cm-content')?.focus()`)
+  await page.key(process.platform === 'darwin' ? 'ArrowDown' : 'End', process.platform === 'darwin' ? 'ArrowDown' : 'End', process.platform === 'darwin' ? 4 : 2, process.platform === 'darwin' ? 40 : 35)
+  const menuBefore = await draftCount()
+  const menuCreated = await menuItem(true) && await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').split(${JSON.stringify(DRAFT_MARKER_TEXT)}).length - 1 === ${menuBefore + 1}`, 8000)
+  await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
+  await sleep(300)
+  const menuCount = await draftCount()
+  check('提问块：菜单只建一个块，再按快捷键不复制', menuCreated === true && menuCount === menuBefore + 1, JSON.stringify({ menuBefore, menuCreated, menuCount }))
+  await page.key('Escape', 'Escape', 0, 27)
+  await sleep(300)
+  check('提问块：菜单建出的空块 Esc 删除', await draftCount() === menuBefore)
+
+  // 七、旧 `/` 普通文本回归：输入 `/路径/日期` 回车只换行，不建任务、不出现草稿块。
+  await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ selection: { anchor: view.state.doc.length } }); view.focus(); return true })()`)
+  await page.call('Input.insertText', { text: '/路径/日期' })
+  const slashTyped = await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').endsWith('/路径/日期')`, 5000)
+  await page.key('Enter', 'Enter', 0, 13)
+  await sleep(600)
+  const slashState = await page.eval(`(async () => { const doc = document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? ''; return { endsWithNewline: doc.endsWith('/路径/日期\\n'), draftCount: doc.split(${JSON.stringify(DRAFT_MARKER_TEXT)}).length - 1, tasks: (await window.rgent.agentTasks()).length, dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialogs: document.querySelectorAll('dialog[open]').length } })()`)
+  check('提问块：旧 `/` 只是普通文本——回车只换行、不建任务', slashTyped && slashState.endsWithNewline && slashState.draftCount === 0 && slashState.tasks === 0 && slashState.dock !== 'generating' && slashState.dialogs === 0, JSON.stringify(slashState))
+
+  check('提问块：全程零原生 alert／confirm', nativeDialogs.length === 0, JSON.stringify({ dialogs: nativeDialogs.slice(0, 3) }))
+  check('提问块：专项没有未捕获异常', page.errors.length === 0, page.errors.slice(0, 1).join(''))
 }
 
 async function availablePort() {
@@ -2242,7 +2540,7 @@ async function verifyComposition(page, vault, shot) {
     ['输入法快速.md', ''],
     ['输入法普通.md', '前文 '],
     ['输入法混合换行.md', '\ufeff开头\r\n\r\n'],
-    ['输入法口令.md', '/'],
+    ['输入法斜杠.md', '/'],
     ['输入法标题.md', '# '],
     ['输入法列表.md', '- '],
     ['输入法AI后.md', '<!-- rgent:ai:v1 -->\n回答\n']
@@ -2280,10 +2578,10 @@ async function verifyComposition(page, vault, shot) {
       const current = await text()
       check(`${name} 拼音预编辑 ${syllable} 不丢字`, current.text === source.replace(/\r\n?|\n/g, '\n') + (name === '输入法AI后.md' ? '\n' : '') + syllable && current.composing, JSON.stringify(current))
     }
-    if (name === '输入法口令.md') {
+    if (name === '输入法斜杠.md') {
       await page.eval(`document.querySelector('.cm-content').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 229, bubbles: true, cancelable: true }))`)
       await sleep(1000)
-      check('组合输入的选词回车不启动任务、也没有确认卡', await page.eval(`(async () => (await window.rgent.agentTasks()).length === 0 && ${NO_CONFIRM_SURFACE})()`) === true)
+      check('斜杠旁组合输入的选词回车不启动任务、也没有确认卡', await page.eval(`(async () => (await window.rgent.agentTasks()).length === 0 && ${NO_CONFIRM_SURFACE})()`) === true)
     }
     await shot(page, `ime-${name.slice(0, -3)}-preedit`)
     await page.call('Input.insertText', { text: '你好' })
@@ -2793,11 +3091,11 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
   await page.key('z', 'KeyZ', modifier, 90)
   await page.key('s', 'KeyS', modifier, 83)
   await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(body)})()`)
-  await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; const at = view.state.doc.toString().indexOf('/快速完成') + '/快速完成'.length; view.dispatch({ selection: { anchor: at } }); view.focus() })()`)
-  const slashStarted = await submitDirect(page)
-  check('混合换行口令一次回车直接开工且没有确认卡', slashStarted && await page.eval(NO_CONFIRM_SURFACE))
+  // 旧 `/快速完成` 段落留在原文里当普通字符；新的提问块由快捷键接在它后面。
+  const asked = await submitDirect(page, '快速完成')
+  check('混合换行提问块一次回车直接开工且没有确认卡', asked && await page.eval(NO_CONFIRM_SURFACE))
   const completed = await waitFor(page, `(async () => { const note = await window.rgent.noteRead(${JSON.stringify(name)}); return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 })()`)
-  check('混合换行口令按原文落点生成且旧账本保留', completed && await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(name)});const h=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(name)}});return h.ok&&h.value.records.some(r=>r.legacyRaw?.includes('不改历史。'))&&!n.content.includes('rgent:ledger:v1')})()`))
+  check('混合换行提问块按原文落点生成且旧账本保留', completed && await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(name)});const h=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(name)}});return h.ok&&h.value.records.some(r=>r.legacyRaw?.includes('不改历史。'))&&!n.content.includes('rgent:ledger:v1')})()`))
   const beforeMove = readFileSync(path.join(vault, name), 'utf8')
   const moved = await page.eval(`(async () => { const preview = await window.rgent.relocationPreview({ kind: 'note', source: ${JSON.stringify(name)}, target: ${JSON.stringify(movedName)} }); return preview.ok ? window.rgent.relocationCommit({ id: preview.preview.id, repairLinks: false }) : preview })()`)
   check('生成后结构移动延续原文字节与tab绑定', moved.ok && await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(movedName)}`) && readFileSync(path.join(vault, movedName), 'utf8') === beforeMove)
@@ -3513,8 +3811,8 @@ async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
     const models=c.config.models,base=models.find(m=>m.modelId==='v4-backup-default').id,temporary=models.find(m=>m.modelId==='v4-backup-temporary').id,memory=models.find(m=>m.modelId==='v4-backup-memory').id;
     if(!(await window.rgent.modelDefaultSet({modelId:base})).ok)throw Error('旧默认模型设置失败');
     const state=await window.rgent.vaultGet();for(const request of [{target:'default',modelId:memory},{target:'vault',vault:{enabled:true,override:{mode:'inherit'}}}]){const r=await window.rgent.memoryConfigSave({...request,sessionId:state.sessionId});if(!r.ok)throw Error(r.error)}
-    const n=await window.rgent.noteRead(${JSON.stringify(names[2])}),w=await window.rgent.noteWrite({relPath:n.relPath??${JSON.stringify(names[2])},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,content:n.content+'\\n/旧授权任务\\n'});if(!w.ok)throw Error(w.error);
-    const saved=await window.rgent.noteRead(${JSON.stringify(names[2])}),start=saved.content.indexOf('/旧授权任务'),request={relPath:${JSON.stringify(names[2])},sessionId:saved.sessionId,objectVersion:saved.objectVersion,expectedRevision:saved.revision,range:{start,end:start+6},expectedText:'/旧授权任务',promptText:'旧授权任务',modelRecordId:temporary,scope:'note'};
+    const n=await window.rgent.noteRead(${JSON.stringify(names[2])}),w=await window.rgent.noteWrite({relPath:n.relPath??${JSON.stringify(names[2])},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,content:n.content+'\\n<!-- rgent:prompt:v1 state="draft" -->\\n旧授权任务\\n'});if(!w.ok)throw Error(w.error);
+    const saved=await window.rgent.noteRead(${JSON.stringify(names[2])}),start=saved.content.lastIndexOf('旧授权任务'),request={relPath:${JSON.stringify(names[2])},sessionId:saved.sessionId,objectVersion:saved.objectVersion,expectedRevision:saved.revision,range:{start,end:start+5},expectedText:'旧授权任务',promptText:'旧授权任务',modelRecordId:temporary,scope:'note'};
     const preview=await window.rgent.agentAuthorizationPreview(request);if(!preview.ok)throw Error(preview.error);const task=await window.rgent.agentStart({...request,previewId:preview.preview.id});if(!task.ok)throw Error(task.error);return {base,temporary,memory,consumed:{...request,previewId:preview.preview.id},taskId:task.id}
   })()`)
   if(!await v4TaskDone(page,names[2],oldState.taskId))throw Error('旧真实授权任务未完成')
@@ -3523,7 +3821,7 @@ async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
   // refresh callback; reload through the real startup/workspace path first.
   await page.call('Page.reload')
   if(!await waitFor(page,`document.querySelector('#app')?.inert===false && [...document.querySelectorAll('.status-model option')].some(o=>o.value===${JSON.stringify(oldState.temporary)})`))throw Error('旧库模型模块未实际刷新')
-  const unused=await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(names[3])}),content=n.content+'\\n/旧未用授权\\n',w=await window.rgent.noteWrite({relPath:${JSON.stringify(names[3])},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,content});if(!w.ok)throw Error(w.error);const saved=await window.rgent.noteRead(${JSON.stringify(names[3])}),start=saved.content.indexOf('/旧未用授权'),r={relPath:${JSON.stringify(names[3])},sessionId:saved.sessionId,objectVersion:saved.objectVersion,expectedRevision:saved.revision,range:{start,end:start+6},expectedText:'/旧未用授权',promptText:'旧未用授权',modelRecordId:${JSON.stringify(oldState.temporary)},scope:'note'},p=await window.rgent.agentAuthorizationPreview(r);if(!p.ok)throw Error(p.error);return {...r,previewId:p.preview.id}})()`)
+  const unused=await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(names[3])}),content=n.content+'\\n<!-- rgent:prompt:v1 state="draft" -->\\n旧未用授权\\n',w=await window.rgent.noteWrite({relPath:${JSON.stringify(names[3])},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,content});if(!w.ok)throw Error(w.error);const saved=await window.rgent.noteRead(${JSON.stringify(names[3])}),start=saved.content.lastIndexOf('旧未用授权'),r={relPath:${JSON.stringify(names[3])},sessionId:saved.sessionId,objectVersion:saved.objectVersion,expectedRevision:saved.revision,range:{start,end:start+5},expectedText:'旧未用授权',promptText:'旧未用授权',modelRecordId:${JSON.stringify(oldState.temporary)},scope:'note'},p=await window.rgent.agentAuthorizationPreview(r);if(!p.ok)throw Error(p.error);return {...r,previewId:p.preview.id}})()`)
   check('复制前实际学习开启、旧授权已消费并有未用旧许可',oldCalls>=2&&oldState.consumed.previewId!==unused.previewId&&await page.eval(`window.rgent.memoryGet({sessionId:${JSON.stringify(seeded.state.sessionId)}}).then(m=>m.ok&&m.value.config.vault.enabled)`))
   // Persist insufficient historical evidence on one descriptor in the original disposable vault.
   // Copy then changes every native object; no production in-memory state is substituted.
@@ -3616,9 +3914,12 @@ function parseV5Memory(raw) { return workingMemoryFixtureCodec().parse(raw) }
 
 const v4Hash = text => createHash('sha256').update(text).digest('hex')
 async function v4Task(page, vault, relPath, prompt, modelRecordId) {
-  writeFileSync(path.join(vault,relPath),'/'+prompt+'\n')
+  // 提问块是一等块：草稿 marker 紧贴正文；expectedText 与 promptText 逐字一致（`/` 不再是前缀）。
+  const marker = '<!-- rgent:prompt:v1 state="draft" -->'
+  writeFileSync(path.join(vault,relPath),marker+'\n'+prompt+'\n')
+  const at = marker.length + 1
   const result=await page.eval(`(async()=>{
-    const n=await window.rgent.noteRead(${JSON.stringify(relPath)}),r={relPath:${JSON.stringify(relPath)},range:{start:0,end:${prompt.length+1}},expectedText:${JSON.stringify('/'+prompt)},promptText:${JSON.stringify(prompt)},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,modelRecordId:${JSON.stringify(modelRecordId)},scope:${JSON.stringify(prompt === 'V4真实往返' ? 'vault' : 'note')}};
+    const n=await window.rgent.noteRead(${JSON.stringify(relPath)}),r={relPath:${JSON.stringify(relPath)},range:{start:${at},end:${at+prompt.length}},expectedText:${JSON.stringify(prompt)},promptText:${JSON.stringify(prompt)},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,modelRecordId:${JSON.stringify(modelRecordId)},scope:${JSON.stringify(prompt === 'V4真实往返' ? 'vault' : 'note')}};
     const p=await window.rgent.agentAuthorizationPreview(r);if(!p.ok)throw Error('任务预览：'+p.error);return window.rgent.agentStart({...r,previewId:p.preview.id})
   })()`)
   if(!result.ok)throw Error('任务启动：'+result.error)
@@ -3660,8 +3961,7 @@ async function verifyV4MemoryTools(page,nativePage,vault,shot) {
     await page.eval(`(async()=>{const n=await window.rgent.noteRead('备份来源0.md'),p=await window.rgent.memoryManualPreview({sessionId:n.sessionId,relPath:'备份来源0.md',revision:n.revision,objectVersion:n.objectVersion,kind:'body',start:0,end:n.content.indexOf('\\n')});if(!p.ok)throw Error(p.error);const c=await window.rgent.memoryPreviewCommit({sessionId:n.sessionId,id:p.value.id,content:'备份记忆实际工具核心',layer:'core',scope:'虚构'});if(!c.ok)throw Error(c.error)})()`)
     writeFileSync(path.join(vault,'V4检索.md'),'')
     await v4OpenNote(page,'V4检索.md');await page.eval(`(()=>{const m=document.querySelector('.status-model');m.value=${JSON.stringify(modelId)};m.dispatchEvent(new Event('change'));document.querySelector('.cm-content').focus()})()`)
-    await page.call('Input.insertText',{text:'/V4记忆额度'})
-    check('单篇口令直接开工且没有授权卡',await submitDirect(page) && await page.eval(NO_CONFIRM_SURFACE))
+    check('单篇提问块直接开工且没有授权卡',await submitDirect(page, 'V4记忆额度') && await page.eval(NO_CONFIRM_SURFACE))
     await v4Shots(page,shot,'memory-only-scope','.status')
     const at=requests.length
     check('memory-only 六次请求只执行四次、第五及第六拒绝后仍能回答',await waitFor(page,`(async()=>{const n=await window.rgent.noteRead('V4检索.md');return n.content.includes('V4记忆工具回答保稿')&&!(await window.rgent.agentTasks()).length})()`))
@@ -3700,7 +4000,9 @@ async function verifyV4MemoryTools(page,nativePage,vault,shot) {
 async function verifyV4Summary(page,nativePage,vault,shot) {
   process.stdout.write('\nv4 C：实际摘要发送记录、部分复用和遗忘过滤\n')
   const rel='V4摘要.md',requests=[],summary=['主题目标','人的要求','已完成结论','未决与受阻','后续上下文','须查原文事项'].map(h=>h+'：V4摘要核对标识').join('\n')
-  writeFileSync(path.join(vault,rel),'摘要测试正文\n\n/V4摘要第一次\n')
+  // 提问块由草稿 marker 紧贴正文；`/` 不再当前缀。首场正文只是登记用，随后由 start() 重写。
+  const marker='<!-- rgent:prompt:v1 state="draft" -->',head='摘要测试正文\n\n'+marker+'\n'
+  writeFileSync(path.join(vault,rel),head+'V4摘要第一次\n')
   await page.eval(`(async()=>{const s=await window.rgent.vaultGet();let after=null;do{const r=await window.rgent.ledgerMigrate({sessionId:s.sessionId,after});if(!r.ok||r.value.failures.length)throw Error('摘要夹具迁移');after=r.value.after}while(after)})()`)
   const rp=path.join(vault,'.rgent','registry.json'),reg=JSON.parse(readFileSync(rp,'utf8')),owner=reg.owners.find(o=>o.relPath===rel),histories=[]
   // Valid persisted history fixture, read by the real LedgerStore and Host. Each has a
@@ -3721,7 +4023,7 @@ async function verifyV4Summary(page,nativePage,vault,shot) {
     const model=await page.eval(`(async()=>{const r=await window.rgent.modelProviderSave({provider:'custom',baseURL:'http://127.0.0.1:${server.address().port}/v1',modelId:'v4-summary',contextTokens:18000,newKey:'v4-summary-key'});if(!r.ok)throw Error(r.error);if(!r.config.models.some(m=>m.modelId==='v4-summary')){const added=await window.rgent.modelAdd({provider:'custom',modelId:'v4-summary',contextTokens:18000});if(!added.ok)throw Error(added.error);return added.config.models.find(m=>m.modelId==='v4-summary').id}return r.config.models.find(m=>m.modelId==='v4-summary').id})()`)
     // Keep the registered body identity by saving through the existing human channel.
     const start=async label=>{
-      const result=await page.eval(`(async()=>{let n=await window.rgent.noteRead(${JSON.stringify(rel)}),content=${JSON.stringify('摘要测试正文\n\n/'+label+'\n')};const w=await window.rgent.noteWrite({relPath:${JSON.stringify(rel)},content,expectedRevision:n.revision,objectVersion:n.objectVersion,sessionId:n.sessionId});if(!w.ok)throw Error(w.error);n=await window.rgent.noteRead(${JSON.stringify(rel)});const at=n.content.indexOf('/'),r={relPath:${JSON.stringify(rel)},range:{start:at,end:at+${label.length+1}},expectedText:${JSON.stringify('/'+label)},promptText:${JSON.stringify(label)},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,modelRecordId:${JSON.stringify(model)},scope:'note'};const p=await window.rgent.agentAuthorizationPreview(r);if(!p.ok)throw Error(p.error);return window.rgent.agentStart({...r,previewId:p.preview.id})})()`)
+      const result=await page.eval(`(async()=>{let n=await window.rgent.noteRead(${JSON.stringify(rel)}),content=${JSON.stringify(head+label+'\n')};const w=await window.rgent.noteWrite({relPath:${JSON.stringify(rel)},content,expectedRevision:n.revision,objectVersion:n.objectVersion,sessionId:n.sessionId});if(!w.ok)throw Error(w.error);n=await window.rgent.noteRead(${JSON.stringify(rel)});const at=${head.length},r={relPath:${JSON.stringify(rel)},range:{start:at,end:at+${label.length}},expectedText:${JSON.stringify(label)},promptText:${JSON.stringify(label)},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,modelRecordId:${JSON.stringify(model)},scope:'note'};const p=await window.rgent.agentAuthorizationPreview(r);if(!p.ok)throw Error(p.error);return window.rgent.agentStart({...r,previewId:p.preview.id})})()`)
       if(!result.ok)throw Error(result.error);if(!await v4TaskDone(page,rel,result.id))throw Error('摘要任务未完成');return result.id
     }
     const first=await start('V4摘要第一次'),getRecords=`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(rel)});return (await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(rel)}})).value.records})()`
@@ -4062,13 +4364,14 @@ async function verifyLedgerRecoveryHostPending(page,vault) {
   })
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve))
   try {
-    writeFileSync(path.join(vault,relPath),'/恢复回答\n')
+    const recoveryMarker='<!-- rgent:prompt:v1 state="draft" -->'
+    writeFileSync(path.join(vault,relPath),recoveryMarker+'\n恢复回答\n')
     const baseURL=`http://127.0.0.1:${server.address().port}/v1`
     const started=await page.eval(`(async()=>{
       const added=await window.rgent.modelProviderSave({provider:'custom',baseURL:${JSON.stringify(baseURL)},modelId:'recovery-ui',contextTokens:16000,newKey:'disposable-recovery-fixture'})
       if(!added.ok)throw Error('恢复模型夹具配置失败')
       const model=added.config.models.find(m=>m.provider==='custom'&&m.modelId==='recovery-ui')
-      const note=await window.rgent.noteRead(${JSON.stringify(relPath)}),request={relPath:${JSON.stringify(relPath)},range:{start:0,end:5},expectedText:'/恢复回答',promptText:'恢复回答',sessionId:note.sessionId,objectVersion:note.objectVersion,expectedRevision:note.revision,modelRecordId:model.id,scope:'note'}
+      const note=await window.rgent.noteRead(${JSON.stringify(relPath)}),request={relPath:${JSON.stringify(relPath)},range:{start:${recoveryMarker.length+1},end:${recoveryMarker.length+1+'恢复回答'.length}},expectedText:'恢复回答',promptText:'恢复回答',sessionId:note.sessionId,objectVersion:note.objectVersion,expectedRevision:note.revision,modelRecordId:model.id,scope:'note'}
       globalThis.__pendingRecoveryEvents=[];globalThis.__pendingRecoveryOff=window.rgent.onAgentEvent(e=>globalThis.__pendingRecoveryEvents.push(e))
       const preview=await window.rgent.agentAuthorizationPreview(request)
       if(!preview.ok)throw Error('恢复任务授权失败：'+preview.error)
@@ -4401,8 +4704,7 @@ async function verifySkillsLive(page, vault, profile, shot) {
     await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(rel)}).click()`)
     if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(rel)}`)) throw new Error(`夹具未打开：${rel}`)
     await page.eval(`document.querySelector('.cm-content').focus()`)
-    await page.call('Input.insertText', { text: `/${prompt}` })
-    if (!await submitDirect(page)) throw new Error('零确认口令没有直接开工')
+    if (!await submitDirect(page, prompt)) throw new Error('零确认提问块没有直接开工')
     const noCard = await page.eval(NO_CONFIRM_SURFACE)
     calls += 1
     const finished = await waitFor(page, `(async()=>{if((await window.rgent.agentTasks()).length>0)return false;const n=await window.rgent.noteRead(${JSON.stringify(rel)});const r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(rel)}});return r.ok&&r.value.records.some(rec=>String(rec.chapter?.answer??'').length>0)})()`, 180000)
@@ -4475,9 +4777,7 @@ async function verifySkills(page, vault, profile, shot) {
   check('技能确认夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(n=>n.innerText.includes('技能确认'))`))
   await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.innerText.includes('技能确认'))?.click()`)
   await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('技能确认')`)
-  await page.eval(`document.querySelector('.cm-content')?.focus()`)
-  await page.call('Input.insertText', { text: '/技能确认' })
-  check('技能场一次回车直接开工、没有发送确认卡', await submitDirect(page) && await page.eval(NO_CONFIRM_SURFACE))
+  check('技能场一次回车直接开工、没有发送确认卡', await submitDirect(page, '技能确认') && await page.eval(NO_CONFIRM_SURFACE))
   check('技能场正常收尾并回答落盘', await waitFor(page, `(async()=>{const n=await window.rgent.noteRead('技能确认.md');return n.content.includes('受控回答第一句。')&&(await window.rgent.agentTasks()).length===0})()`))
   check('账本只记技能名称与内容哈希、不含正文', await page.eval(`(async()=>{const n=await window.rgent.noteRead('技能确认.md'),r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:'技能确认.md'});const skills=r.ok?r.value.records.at(-1)?.chapter?.provenance?.skills??[]:[];return skills.length===1&&skills[0].name==='答案批改'&&/^[a-f0-9]{64}$/.test(skills[0].hash)&&!JSON.stringify(skills).includes('等价词典')})()`))
   await shot(page, 'skills-scope-1200')
@@ -4785,7 +5085,9 @@ async function main() {
       await new Promise(resolve=>hostServer.listen(0,'127.0.0.1',resolve))
       const configured=await configureControlledHost(page,`http://127.0.0.1:${hostServer.address().port}/v1`)
       if(!configured)throw Error('交互减负专项受控模型初始化失败')
-      try{await verifyUx(page,vault,shot)}catch(error){stageFailed('交互减负专项',error)}
+      let uxDialogs=[]
+      try{uxDialogs=await verifyUx(page,vault,shot)??[]}catch(error){stageFailed('交互减负专项',error)}
+      try{await verifyPromptBlock(page,vault,shot,nativePage,uxDialogs)}catch(error){stageFailed('提问块专项',error)}
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
       process.exitCode=failures===0?0:1
       return
@@ -5602,10 +5904,8 @@ async function main() {
     check('切到另一篇不继承临时模型', await waitFor(page, `document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test'`))
     await page.eval(`[...document.querySelectorAll('.tab')].find(row => row.dataset.rel === 'Host 环路.md').click()`)
     check('返回原篇保留临时模型', await waitFor(page, `document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test-override'`))
-    await page.eval(`document.querySelector('.cm-content')?.focus()`)
-    await page.call('Input.insertText', { text: '/请写两句话' })
-    check('空段内输入的口令留在编辑器', await waitFor(page, `document.querySelector('.cm-content')?.textContent.includes('/请写两句话')`))
-    check('空段口令一次回车直接开工且没有确认卡', await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
+    check('空段内输入的提问留在草稿块（无 `/`）', await ensurePrompt(page, '请写两句话') && await waitFor(page, `(() => { const doc = document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? ''; return doc.includes('请写两句话') && !doc.includes('/') && ${NO_ASK_ENTRY} })()`))
+    check('空段提问块一次回车直接开工且没有确认卡', await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
     check('启动成功后本篇仍显示刚用的临时模型', await waitFor(page, `document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test-override'`))
     // Windows CI 上任务启动与浮层重绘更慢：先等任务登记，再给中止入口更宽的等待。
     await waitFor(page, `(async () => (await window.rgent.agentTasks()).length > 0)()`, 15000)
@@ -5619,15 +5919,13 @@ async function main() {
     await waitFor(page, `!!document.querySelector('.ledger-body details')`)
     await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
     await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`)
-    check('同一 tab 的只读账本能回顾口令和回答', await waitFor(page, `document.querySelector('.ledger-body')?.textContent.includes('请写两句话') && document.querySelector('.ledger-body')?.textContent.includes('受控回答第一句。')`))
+    check('同一 tab 的只读账本能回顾提问和回答', await waitFor(page, `document.querySelector('.ledger-body')?.textContent.includes('请写两句话') && document.querySelector('.ledger-body')?.textContent.includes('受控回答第一句。')`))
     await page.eval(`document.querySelector('.ledger-close')?.click()`)
     writeFileSync(path.join(vault, 'Host 快速.md'), '')
     await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((note) => note.innerText.includes('Host 快速'))`)
     await page.eval(`[...document.querySelectorAll('.tree-note')].find((note) => note.innerText.includes('Host 快速'))?.click()`)
     await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('Host 快速')`)
-    await page.eval(`document.querySelector('.cm-content')?.focus()`)
-    await page.call('Input.insertText', { text: '/快速完成' })
-    check('快速口令一次回车直接开工', await submitDirect(page))
+    check('快速提问块一次回车直接开工', await submitDirect(page, '快速完成'))
     const quickFinished = await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead('Host 快速.md')
       return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 && document.querySelector('.task-dock')?.dataset.kind!=='generating'
@@ -5648,8 +5946,7 @@ async function main() {
     for (const [at, name] of ['Host A', 'Host B'].entries()) {
       await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('${name}'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
       await parallelCheck(`${name} 进入当前 tab`, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('${name}')`)
-      await page.call('Input.insertText', { text: '/多任务测试' })
-      if (!await submitDirect(page)) throw new Error(`${name} 的口令没有直接开工；停止并行依赖断言。`)
+      if (!await submitDirect(page, '多任务测试')) throw new Error(`${name} 的提问块没有直接开工；停止并行依赖断言。`)
       await parallelCheck(`${name} 启动后任务归属及数量正确`, `(async () => { const tasks=await window.rgent.agentTasks();return tasks.length===${at+1} && ${JSON.stringify(['Host A.md','Host B.md'].slice(0,at+1))}.every(path=>tasks.some(task=>task.relPath===path)) })()`)
     }
     await parallelCheck('异篇并行时当前篇浮层为生成中', `(async ()=>(await window.rgent.agentTasks()).length===2 && document.querySelector('.task-dock')?.dataset.kind==='generating')()`)
@@ -5748,8 +6045,7 @@ async function main() {
     await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((node) => node.textContent.includes('运行'))`)
     await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((node) => node.textContent.includes('运行'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
     await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '生命周期/运行.md'`)
-    await page.call('Input.insertText', { text: '/多任务停止' })
-    check('生命周期任务一次回车直接开工', await submitDirect(page))
+    check('生命周期任务一次回车直接开工', await submitDirect(page, '多任务停止'))
     const beforeMoveTask = await waitFor(page, `(async () => (await window.rgent.agentTasks()).some((item) => item.relPath === '生命周期/运行.md'))()`, 5000)
     writeFileSync(path.join(vault, '生命周期', '不相关.md'), '保持不动')
     const unrelatedMove = await page.eval(`(async () => {
@@ -5809,12 +6105,14 @@ async function main() {
       const journal = JSON.stringify({ version: 1, active: { kind: 'move',
         intent: { kind: 'note', source: moves[0].from, target: moves[0].to, moves },
         fingerprints: parts, permissionBefore: policy, permissionAfter: policy, linkRepairs: [], repairLinks: false } }) + '\n'
-      const unrelatedPrompt = '/多任务恢复'
-      writeFileSync(path.join(vault, '生命周期', '无关生成.md'), unrelatedPrompt)
+      // 提问块是一等块：草稿 marker 紧贴正文，`/` 不再是前缀。
+      const unrelatedPrompt = '多任务恢复', unrelatedMarker = '<!-- rgent:prompt:v1 state="draft" -->'
+      writeFileSync(path.join(vault, '生命周期', '无关生成.md'), unrelatedMarker + '\n' + unrelatedPrompt + '\n')
+      const unrelatedStart = unrelatedMarker.length + 1
       const unrelatedTask = await page.eval(`(async () => {
         const note = await window.rgent.noteRead('生命周期/无关生成.md')
         const request={ ...${JSON.stringify({ relPath: '生命周期/无关生成.md',
-          range: { start: 0, end: unrelatedPrompt.length }, expectedText: unrelatedPrompt, promptText: '多任务恢复' })},
+          range: { start: unrelatedStart, end: unrelatedStart + unrelatedPrompt.length }, expectedText: unrelatedPrompt, promptText: unrelatedPrompt })},
           expectedRevision: note.revision, sessionId: note.sessionId, objectVersion: note.objectVersion, scope: 'note' }
         const config = await window.rgent.modelConfigGet(); request.modelRecordId = config.config.defaultModelId
         const authorization=await window.rgent.agentAuthorizationPreview(request)

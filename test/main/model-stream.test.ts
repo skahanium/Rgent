@@ -1,4 +1,5 @@
 import {hostLedgerFixture} from './host-ledger-fixture.ts'
+import { draftBody, draftRequest, draftSource } from './draft-fixture.ts'
 import { createServer, type RequestListener, type Server } from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentHost } from '../../src/main/agent-host.ts'
@@ -187,7 +188,7 @@ it('exposes an unknown tool attempt for finite Host refusal without SDK auto rep
 it('runs a real approved three-note SSE search → read → answer loop with source provenance', async () => {
   const requests: Record<string, unknown>[] = []
   const source: Record<string, NoteSnapshot> = {
-    'dir/a.md': { content: '/查证 needle\n', revision: '1', sessionId: 'session', objectVersion: 'a' },
+    'dir/a.md': { content: draftSource('查证 needle').source, revision: '1', sessionId: 'session', objectVersion: 'a' },
     'dir/b.md': { content: '# 参考\n\nneedle：原文证据。', revision: 'b', sessionId: 'session', objectVersion: 'b' },
     'dir/c.md': { content: '无关内容。', revision: 'c', sessionId: 'session', objectVersion: 'c' },
     'other/outside.md': { content: 'needle：未经本场授权内容。', revision: 'out', sessionId: 'session', objectVersion: 'out' }
@@ -220,7 +221,7 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
     write: async (path, content, expected) => { if (expected !== source[path]!.revision) throw Error('CONFLICT'); source[path] = { ...source[path]!, content, revision: String(++revision) }; return { ...source[path]! } },
     credential: () => credential, limits: () => limits, stream: (input, signal) => streamModelText({ ...input, signal }), streamStep: (input, signal) => streamModelStep({ ...input, signal }), createReadOnlyTools: (grant, id) => createScopedAgentTools(grant, id, { read, tier, acceptsObject: () => false }), emit: () => {}
   })
-  const command = { modelRecordId: 'model-record', relPath: 'dir/a.md', sessionId: 'session', objectVersion: 'a', expectedRevision: '1', range: { start: 0, end: '/查证 needle'.length }, expectedText: '/查证 needle', scope:'folder' as const,promptText: '查证 needle' }
+  const command = { modelRecordId: 'model-record', relPath: 'dir/a.md', sessionId: 'session', objectVersion: 'a', expectedRevision: '1', ...draftRequest(source['dir/a.md']!.content, '查证 needle'), scope:'folder' as const }
   const preview = await registry.preview('owner', command)
   const task = await host.start({ ...command, previewId: preview.id })
   expect(await task.done).toEqual({ status: 'completed' })
@@ -241,9 +242,9 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
   }
   expect(host.supportsMemorySearch(credential)).toBe(true)
   expect(host.supportsMemorySearch({...credential,apiKey:'changed-secret'})).toBe(false)
-  source['dir/a.md']={...source['dir/a.md']!,content:source['dir/a.md']!.content+'\n/搜索火星\n',revision:String(++revision)}
-  const current=source['dir/a.md']!,start=current.content.indexOf('/搜索火星')
-  const memoryCommand={...command,scope:'note' as const,expectedRevision:current.revision,range:{start,end:start+'/搜索火星'.length},expectedText:'/搜索火星',promptText:'搜索火星'}
+  source['dir/a.md']={...source['dir/a.md']!,content:source['dir/a.md']!.content+'\n'+draftBody('搜索火星')+'\n',revision:String(++revision)}
+  const current=source['dir/a.md']!
+  const memoryCommand={...command,scope:'note' as const,expectedRevision:current.revision,...draftRequest(current.content,'搜索火星')}
   const memoryPreview=await registry.preview('owner',memoryCommand)
   const memoryTask=await host.start({...memoryCommand,previewId:memoryPreview.id,memorySearchAuthorized:true});expect(await memoryTask.done).toEqual({status:'completed'})
   expect(requests).toHaveLength(5)

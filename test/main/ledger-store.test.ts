@@ -8,6 +8,8 @@ import {appendLedgerChapter} from '../../src/main/host-source.ts'
 const roots:string[]=[]
 const fixture=()=>{const root=mkdtempSync(path.join(os.tmpdir(),'rgent-ledger-v2-'));roots.push(root);const fs=secureFsFor(root);return {root,fs,store:new LedgerStore(fs,()=>{})}}
 afterEach(()=>roots.splice(0).forEach(r=>{closeSecureFs(r);rmSync(r,{recursive:true,force:true})}))
+const helloDraft=draftSource('你好')
+const markHello=()=>markPrompt(helloDraft.source,{taskId:task.taskId,...helloDraft,expectedText:'你好',promptText:'你好'})
 const task={taskId:'task-1',startedAt:'2026-10-03T00:00:00.000Z',status:'completed' as const,prompt:'你好',answer:'回答',provenance:{version:1 as const,model:{provider:'custom',modelId:'fixture',endpointHost:'localhost'},scope:['a.md'],sources:[],tools:[]}}
 it('does not treat missing material registry as sequence zero when history exists',()=>{
  const {root,fs,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');store.prepare('a.md',task)
@@ -56,8 +58,9 @@ it('bad registry stays diagnostic rather than empty and can rebuild descriptors 
  store.rebuildRegistry();expect(store.owner('a.md').noteId).toBe(id)
 })
 import {markPrompt,upsertAiAnswer} from '../../src/main/host-source.ts'
+import {draftSource} from './draft-fixture.ts'
 it('completes only after the matching body receipt and keeps historical answer after a human delete',()=>{
- const {root,fs,store}=fixture(),marked=markPrompt('/你好',{taskId:task.taskId,range:{start:0,end:3},expectedText:'/你好',promptText:'你好'})
+ const {root,fs,store}=fixture(),marked=markHello()
  writeFileSync(path.join(root,'a.md'),marked);store.prepare('a.md',task)
  const before=fs.readSnapshot('a.md'),body=upsertAiAnswer(marked,{taskId:task.taskId,answer:task.answer}),after=fs.replace('a.md',marked,body,before.objectVersion);store.onWrite('a.md',before.objectVersion,after,body)
  const revision=(awaitHash(body));expect(store.complete('a.md',task.taskId,revision).state).toBe('saved')
@@ -77,7 +80,7 @@ it('paginates a fixed history horizon while new tasks arrive and continues long 
  expect(JSON.parse(Buffer.concat(parts).toString()).chapter.answer).toBe('长'.repeat(120000))
 })
 it('compresses in place only after roundtrip and net-saving checks, and clears without touching the body',()=>{
- const {root,fs,store}=fixture();const marked=markPrompt('/你好',{taskId:task.taskId,range:{start:0,end:3},expectedText:'/你好',promptText:'你好'}),answer='较旧完整回答'.repeat(1000)
+ const {root,fs,store}=fixture();const marked=markHello(),answer='较旧完整回答'.repeat(1000)
  writeFileSync(path.join(root,'a.md'),marked);store.prepare('a.md',{...task,startedAt:'2020-01-01T00:00:00Z',answer})
  const body=upsertAiAnswer(marked,{taskId:task.taskId,answer}),old=fs.readSnapshot('a.md'),next=fs.replace('a.md',marked,body,old.objectVersion);store.onWrite('a.md',old.objectVersion,next,body);store.complete('a.md',task.taskId,awaitHash(body))
  const preview=store.maintenancePreview('a.md','compress');expect(preview.records).toHaveLength(1)
@@ -253,7 +256,7 @@ it.each(['valid','ambiguous','wrong-text'] as const)('proves the original task o
 })
 
 it.each(['prepare','complete','clear'] as const)('preserves a legal terminal task revision when %s needs another version',action=>{
- const {root,fs,store}=fixture(),marked=markPrompt('/你好',{taskId:task.taskId,range:{start:0,end:3},expectedText:'/你好',promptText:'你好'}),body=upsertAiAnswer(marked,{taskId:task.taskId,answer:task.answer})
+ const {root,fs,store}=fixture(),marked=markHello(),body=upsertAiAnswer(marked,{taskId:task.taskId,answer:task.answer})
  writeFileSync(path.join(root,'a.md'),body);const original=store.prepare('a.md',task),file=`.rgent/ledgers/${original.noteId}/${task.taskId}.json`,disk=fs.readSnapshot(file)
  const terminal={...original,...(action==='clear'?{state:'legacy' as const}:{}),revision:Number.MAX_SAFE_INTEGER};fs.replace(file,disk.bytes.toString(),JSON.stringify(terminal),disk.objectVersion)
  const before=fs.readSnapshot(file)

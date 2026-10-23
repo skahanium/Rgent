@@ -12,6 +12,7 @@ import { fetchText } from '../../src/main/text-fetch.ts'
 import type { TaskGrant } from '../../src/main/task-authorization.ts'
 import { AgentHost, type HostDependencies } from '../../src/main/agent-host.ts'
 import { partitionSource } from '../../src/markdown/partition.ts'
+import { draftBody, draftRequest } from './draft-fixture.ts'
 
 type NetResult = { text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true }
 type NetSearchResult = { provider: 'brave' | 'tavily'; host: string; results: { title: string; url: string; snippet: string }[]; truncated?: boolean }
@@ -35,7 +36,7 @@ function networkHarness(options: {
   /** 参考篇 b.md 的正文：用来证明词片集确实来自本场授权来源。 */
   extraText?: string
 } = {}) {
-  let content = '人写的段落。\n\n/问\n'
+  let content = '人写的段落。\n\n' + draftBody('问') + '\n'
   let revision = 1
   let networkLive = options.authorized !== false
   const history = hostLedgerFixture()
@@ -128,7 +129,7 @@ function networkHarness(options: {
   })
   const run = () => host.start({
     relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: '1',
-    range: { start: content.indexOf('/问'), end: content.indexOf('/问') + 2 }, expectedText: '/问', promptText: '问'
+    ...draftRequest(content, '问')
   })
   return { host, history, requests, events, fetched, searched, run, content: () => content }
 }
@@ -592,8 +593,8 @@ describe('revokeNetworkForAll（配置变更撤网）', () => {
   function twoTaskHarness() {
     const history = hostLedgerFixture()
     const notes = new Map<string, { content: string; revision: number; objectVersion: string }>([
-      ['a.md', { content: '人写的段落。\n\n/问\n', revision: 1, objectVersion: 'oa' }],
-      ['c.md', { content: '人写的段落。\n\n/问\n', revision: 1, objectVersion: 'oc' }]
+      ['a.md', { content: '人写的段落。\n\n' + draftBody('问') + '\n', revision: 1, objectVersion: 'oa' }],
+      ['c.md', { content: '人写的段落。\n\n' + draftBody('问') + '\n', revision: 1, objectVersion: 'oc' }]
     ])
     const live = new Map([['a.md', true], ['c.md', true]])
     const fetches: { url: string; aborted: boolean }[] = []
@@ -683,7 +684,7 @@ describe('revokeNetworkForAll（配置变更撤网）', () => {
       const note = notes.get(relPath)!
       return host.start({
         relPath, sessionId: 's', objectVersion: note.objectVersion, expectedRevision: String(note.revision),
-        range: { start: note.content.indexOf('/问'), end: note.content.indexOf('/问') + 2 }, expectedText: '/问', promptText: '问'
+        ...draftRequest(note.content, '问')
       })
     }
     return { host, history, notes, fetched: fetches, events, run }

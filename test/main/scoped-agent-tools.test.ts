@@ -4,11 +4,12 @@ import { createScopedAgentTools, wrappedExternalContent, wrappedSearchContent } 
 import { appendLedgerChapter } from '../../src/main/host-source.ts'
 import { bodyFingerprint } from '../../src/main/ledger-provenance.ts'
 import type { AgentScopeLevel } from '../../src/shared/ipc.ts'
+import { draftRequest, draftSource } from './draft-fixture.ts'
 
 type Snapshot = { content: string; revision: string; sessionId: string; objectVersion: string }
 async function fixture(content = '# B\n\nneedle 正文\n', options: { scope?: AgentScopeLevel; extraNotes?: Record<string, string>; indexSearch?: (query: string) => Promise<readonly { relPath: string; title: string; folder: string }[]> } = {}) {
   const records = new Map<string, Snapshot>([
-    ['dir/a.md', { content: '/问\n', revision: 'ra', sessionId: 's', objectVersion: 'oa' }],
+    ['dir/a.md', { content: draftSource('问').source, revision: 'ra', sessionId: 's', objectVersion: 'oa' }],
     ['dir/b.md', { content, revision: 'rb', sessionId: 's', objectVersion: 'ob' }],
     ['other/outside.md', { content: 'needle OUTSIDE_SECRET', revision: 'rc', sessionId: 's', objectVersion: 'oc' }]
   ])
@@ -20,7 +21,7 @@ async function fixture(content = '# B\n\nneedle 正文\n', options: { scope?: Ag
   const tree = async () => buildTree([...records.keys()])
   const registry = new TaskAuthorizationRegistry({ root: () => '/v', session: () => 's', read, tier, acceptsObject, tree,
     configuration: () => ({ credential: { provider: 'custom', baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 16000, apiKey: 'secret' }, limits: { seconds: 300, steps: 12, tools: 24 } }) })
-  const request = { modelRecordId: 'model-record', relPath: 'dir/a.md', sessionId: 's', objectVersion: 'oa', expectedRevision: 'ra', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', scope: options.scope ?? 'folder' as AgentScopeLevel }
+  const request = { modelRecordId: 'model-record', relPath: 'dir/a.md', sessionId: 's', objectVersion: 'oa', expectedRevision: 'ra', ...draftRequest(records.get('dir/a.md')!.content, '问'), scope: options.scope ?? 'folder' as AgentScopeLevel }
   const p = await registry.preview('owner', request); const grant = await registry.consume('owner', { ...request, previewId: p.id }); reads.length = 0
   const deps = { read, tier, acceptsObject, ...(options.indexSearch ? { indexSearch: options.indexSearch } : {}) }
   return {

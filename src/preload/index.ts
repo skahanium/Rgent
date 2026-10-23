@@ -91,7 +91,7 @@ async function invoke(channel: string, ...args: unknown[]): Promise<any> {
   return result
 }
 
-const menuChannels = [IPC.menuOpenVault, IPC.menuNewNote, IPC.menuSave, IPC.menuFetchWeb] as const
+const menuChannels = [IPC.menuOpenVault, IPC.menuNewNote, IPC.menuSave, IPC.menuFetchWeb, IPC.menuAsk] as const
 
 const api = {
   ledgerRepair:(request:import('../shared/ledger.ts').LedgerRepairRequest):Promise<import('../shared/ledger.ts').LedgerRepairResult>=>invoke(IPC.ledgerRepair,request),

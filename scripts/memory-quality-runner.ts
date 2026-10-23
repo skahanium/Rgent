@@ -10,6 +10,7 @@ import {WorkingMemoryConsolidation,parseContinuitySuggestions,parseMemorySuggest
 import {TaskMaterialTracker} from '../src/main/host-material.ts'
 import {serializeStoredVault} from '../src/main/notes-fs.ts'
 import {markPrompt,upsertAiAnswer} from '../src/main/host-source.ts'
+
 import {createMemoryUsePermit,memorySection} from '../src/main/memory-use.ts'
 import {buildHostContext} from '../src/main/host-context.ts'
 import {AgentHost} from '../src/main/agent-host.ts'
@@ -22,6 +23,21 @@ import type {ModelStepInput,ModelStepEvent} from '../src/main/model-stream.ts'
 import {createMemoryIpc} from '../src/main/memory-ipc.ts'
 import type {WorkingSource} from '../src/main/working-memory-store.ts'
 import type {SavedTaskMaterial} from '../src/main/host-material.ts'
+
+/** 质量脚本夹具：草稿 marker 紧贴正文；`/` 只是普通正文，不再当触发符。 */
+const PROMPT_DRAFT_MARKER = '<!-- rgent:prompt:v1 state="draft" -->'
+
+function draftPromptSource(prompt: string): { source: string; range: { start: number; end: number } } {
+  const source = `${PROMPT_DRAFT_MARKER}\n${prompt}\n`
+  const start = PROMPT_DRAFT_MARKER.length + 1
+  return { source, range: { start, end: start + prompt.length } }
+}
+
+function draftPromptRange(source: string, prompt: string): { start: number; end: number } {
+  const start = source.lastIndexOf(prompt)
+  if (start < 0) throw Error('EVALUATION_PROMPT_FIXTURE_INVALID')
+  return { start, end: start + prompt.length }
+}
 import {fingerprint,v4TerminalCategory,V6_PIPELINE,type V4Category} from './memory-quality-support.ts'
 import type {MemoryQualityCase} from '../test/fixtures/memory-quality.ts'
 
@@ -104,11 +120,11 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
  try{
   await mkdir(root,{recursive:true});if(options?.retainArtifact){base=await realpath(base);root=path.join(base,'vault')}if(options?.retainArtifact){if(!options.base)throw Error('EVALUATION_ARTIFACT_BASE_REQUIRED');await markUtilityRoot(base,options.retainArtifact)};await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
   if(options?.retainArtifact)await mkdir(path.dirname(path.join(root,qualityNote)),{recursive:true})
-  let taskId='quality-'+spec.id;const rawPrompt='/'+spec.prompt
-  const source=spec.body+'\n\n'+markPrompt(rawPrompt,{taskId,range:{start:0,end:rawPrompt.length},expectedText:rawPrompt,promptText:spec.prompt})
+  let taskId='quality-'+spec.id;const draftPrompt=draftPromptSource(spec.prompt)
+  const source=spec.body+'\n\n'+markPrompt(draftPrompt.source,{taskId,range:draftPrompt.range,expectedText:spec.prompt,promptText:spec.prompt})
   const prior=options?.base?await import('node:fs/promises').then(fs=>fs.readFile(path.join(root,qualityNote),'utf8').catch(()=>'')):''
-  await writeFile(path.join(root,qualityNote),prior+'\n\n'+(hostBeforeConsolidation?spec.body+'\n\n'+rawPrompt+'\n':source))
-  if(spec.seed){const initialRaw='/'+spec.seed.content;await writeFile(path.join(root,'baseline.md'),spec.seed.content+'\n\n'+markPrompt(initialRaw,{taskId:'initial-'+spec.id,range:{start:0,end:initialRaw.length},expectedText:initialRaw,promptText:spec.seed.content}))}
+  await writeFile(path.join(root,qualityNote),prior+'\n\n'+(hostBeforeConsolidation?spec.body+'\n\n'+draftPrompt.source:source))
+  if(spec.seed){const seedDraft=draftPromptSource(spec.seed.content);await writeFile(path.join(root,'baseline.md'),spec.seed.content+'\n\n'+markPrompt(seedDraft.source,{taskId:'initial-'+spec.id,range:seedDraft.range,expectedText:spec.seed.content,promptText:spec.seed.content}))}
   vault=new VaultSession(base,()=>{});vault.restore()
   const session=vault,service=new WorkingMemoryService(session,()=>null)
   const sourceProofs=new Map<string,WorkingSource>(),sentSourceIds=new Set<string>(),paidCalls:PaidCall[]=[]
@@ -244,13 +260,13 @@ export async function runMemoryQualityCase(spec:MemoryQualityCase,credential:Mod
    // This follow-up is an actual Host task with a controlled stream, never a paid quality sample.
    let followup:{mode:'controlled-production-host';inputBudgetTokens:number;sent:{system:string;prompt:string}[];ledger:LedgerRecord}|null=null
    if(!signal.aborted){
-    const relPath='followup.md',prompt=spec.prompt,raw='/'+prompt
-    await writeFile(path.join(root,relPath),spec.body+'\n\n'+raw+'\n')
+    const relPath='followup.md',prompt=spec.prompt,draft=draftPromptSource(prompt)
+    await writeFile(path.join(root,relPath),spec.body+'\n\n'+draft.source)
     const sent:{system:string;prompt:string}[]=[],probeBudget={inputBudgetTokens:0}
     const authorization=new TaskAuthorizationRegistry({root:()=>root,session:()=>session.sessionId(),tree:()=>session.tree(),read:rel=>session.readOpened(rel),tier:modelTierFor,
      acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),configuration:()=>({credential,limits:{seconds:120,steps:1,tools:0}})})
-    const next=await session.readOpened(relPath),start=next.content.lastIndexOf(raw)
-    const command={...next,scope:'note' as const,modelRecordId:'quality-controlled',expectedRevision:next.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:prompt}
+    const next=await session.readOpened(relPath),range=draftPromptRange(next.content,prompt)
+    const command={...next,scope:'note' as const,modelRecordId:'quality-controlled',expectedRevision:next.revision,relPath,range,expectedText:prompt,promptText:prompt}
     const preview=await authorization.preview('quality-evaluator',{...command})
     const host=new AgentHost({root:()=>root,session:()=>session.sessionId(),
      acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),
@@ -390,11 +406,11 @@ export function v4StrategyStream(arm:'baseline'|'review',stream:(input:ModelStep
 /** Real foreground saving and memory provenance; its stream is controlled and never billed. */
 export async function runControlledQualityHost(session:VaultSession,service:WorkingMemoryService,credential:ModelCredential,relPath:string,prompt:string,answer:string,signal:AbortSignal,onStarted:(id:string)=>void,onSaved:(material:SavedTaskMaterial)=>Promise<void>){
  let inputBudgetTokens=0
- const root=session.requireUsableRoot(),raw='/'+prompt,sent:{system:string;prompt:string}[]=[]
+ const root=session.requireUsableRoot(),sent:{system:string;prompt:string}[]=[]
  const port={context:()=>service.context(),config:()=>({enabled:true,revision:1}),entries:(ids?:readonly string[])=>service.entries(ids)}
  const authorization=new TaskAuthorizationRegistry({root:()=>root,session:()=>session.sessionId(),tree:()=>session.tree(),read:rel=>session.readOpened(rel),tier:modelTierFor,acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),configuration:()=>({credential,limits:{seconds:120,steps:1,tools:0}})})
- const note=await session.readOpened(relPath),start=note.content.lastIndexOf(raw)
- const command={...note,scope:'note' as const,modelRecordId:'quality-controlled',expectedRevision:note.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:prompt}
+ const note=await session.readOpened(relPath),range=draftPromptRange(note.content,prompt)
+ const command={...note,scope:'note' as const,modelRecordId:'quality-controlled',expectedRevision:note.revision,relPath,range,expectedText:prompt,promptText:prompt}
  const preview=await authorization.preview('quality-evaluator',{...command})
  let saved:SavedTaskMaterial|null=null
  const host=new AgentHost({root:()=>root,session:()=>session.sessionId(),acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),read:rel=>session.readOpened(rel),write:(rel,text,revision,binding)=>{if(!binding)throw Error('NOTE_REPLACED');return session.write(rel,text,revision,binding)},authorize:()=>authorization.consume('quality-evaluator',{...command,previewId:preview.id}),tier:modelTierFor,credential:()=>credential,limits:()=>({seconds:120,steps:1,tools:0}),memory:port,

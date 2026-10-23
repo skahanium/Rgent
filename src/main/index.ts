@@ -779,6 +779,13 @@ function buildMenu(): void {
           accelerator: 'CmdOrCtrl+Shift+U',
           click: () => send(IPC.menuFetchWeb)
         },
+        {
+          label: '问 AI',
+          accelerator: 'CmdOrCtrl+Shift+Enter',
+          // 键盘由渲染层统一处理：这里只显示快捷键，不再注册一次原生 accelerator，避免双发。
+          registerAccelerator: false,
+          click: () => send(IPC.menuAsk)
+        },
         { type: 'separator' },
         process.platform === 'darwin' ? { role: 'close' } : { role: 'quit' }
       ]

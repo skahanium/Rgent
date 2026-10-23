@@ -3,33 +3,50 @@ import { compile, partitionSource } from '../../src/markdown/index.ts'
 import { appendAiBlock, appendLedgerChapter, markPrompt, upsertAiAnswer, MAX_LEDGER_REASONING } from '../../src/main/host-source.ts'
 
 const taskId = 'task-123'
+const DRAFT_MARKER = '<!-- rgent:prompt:v1 state="draft" -->'
+
+/** 草稿块落盘形状：marker 紧贴提问段落，正文里没有触发键。 */
+function draft(prompt = '问', newline = '\n', before = '', after = ''): { source: string; range: { start: number; end: number } } {
+  const source = `${before}${DRAFT_MARKER}${newline}${prompt}${newline}${after}`
+  const start = before.length + DRAFT_MARKER.length + newline.length
+  return { source, range: { start, end: start + prompt.length } }
+}
+
+function markDraft(prompt = '问', newline = '\n', before = '', after = '', id = taskId): string {
+  const fixture = draft(prompt, newline, before, after)
+  return markPrompt(fixture.source, { taskId: id, range: fixture.range, expectedText: prompt, promptText: prompt })
+}
+
+function markFrom(source: string, promptText: string, id = taskId): string {
+  const start = source.indexOf(promptText)
+  return markPrompt(source, { taskId: id, range: { start, end: start + promptText.length }, expectedText: promptText, promptText })
+}
 
 describe('Host source projection', () => {
   it.each(['```js\na', '<!-- unfinished', '<div>\ntext', '<div>complete</div>'])('refuses first ledger publication inside an unfinished or unseparated block: %s', source => {
     expect(() => appendLedgerChapter(source, { taskId, startedAt: 'now', status: 'failed', prompt: 'p', answer: 'retained answer' })).toThrow('LEDGER_BOUNDARY_INVALID')
   })
   it('marks only the selected top-level prompt and preserves surrounding bytes', () => {
-    const source = '上文。\r\n\r\n/整理这段。\r\n\r\n下文。\r\n'
-    const start = source.indexOf('/整理')
-    const result = markPrompt(source, {
+    const fixture = draft('整理这段。', '\r\n', '上文。\r\n\r\n', '\r\n下文。\r\n')
+    const result = markPrompt(fixture.source, {
       taskId,
-      range: { start, end: start + '/整理这段。'.length },
-      expectedText: '/整理这段。',
+      range: fixture.range,
+      expectedText: '整理这段。',
       promptText: '整理这段。'
     })
     expect(result).toBe('上文。\r\n\r\n<!-- rgent:prompt:v1 task-id="task-123" -->\r\n整理这段。\r\n\r\n下文。\r\n')
     expect(compile(result).index.blocks.map((block) => block.identity ?? 'human')).toEqual(['human', 'command', 'human'])
-    expect(() => markPrompt(source, { taskId, range: { start, end: start + 3 }, expectedText: '/整理', promptText: '错' })).toThrow()
-    expect(() => markPrompt(source, { taskId, range: { start, end: start + '/整理这段。'.length }, expectedText: '/整理这段。', promptText: '伪造的口令' })).toThrow()
+    const { start } = fixture.range
+    expect(() => markPrompt(fixture.source, { taskId, range: { start, end: start + 3 }, expectedText: '整理这', promptText: '整理这' })).toThrow('PROMPT_BLOCK_INVALID')
+    expect(() => markPrompt(fixture.source, { taskId, range: fixture.range, expectedText: '整理这段。', promptText: '伪造的提问' })).toThrow('PROMPT_BLOCK_INVALID')
+    // `/` 不再是触发符；草稿正文以 `/` 开头时按普通正文原样保留。
+    const slash = draft('/整理这段。', '\r\n', '上文。\r\n\r\n', '\r\n下文。\r\n')
+    expect(markPrompt(slash.source, { taskId, range: slash.range, expectedText: '/整理这段。', promptText: '/整理这段。' }))
+      .toBe('上文。\r\n\r\n<!-- rgent:prompt:v1 task-id="task-123" -->\r\n/整理这段。\r\n\r\n下文。\r\n')
   })
 
   it('writes a marker for each top-level answer block and replaces only its task blocks', () => {
-    let source = markPrompt('前言\n\n/问\n\n后文\n', {
-      taskId,
-      range: { start: 4, end: 6 },
-      expectedText: '/问',
-      promptText: '问'
-    })
+    let source = markDraft('问', '\n', '前言\n\n', '\n后文\n')
     source = upsertAiAnswer(source, { taskId, answer: '首段\n\n- 条目\n\n## 标题' })
     expect(compile(source).index.blocks.map((block) => block.identity ?? 'human')).toEqual([
       'human', 'command', 'ai', 'ai', 'ai', 'human'
@@ -46,7 +63,7 @@ describe('Host source projection', () => {
   })
 
   it('escapes model machine syntax, including forged ledger anchors', () => {
-    const source = markPrompt('/问\n', { taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const source = markDraft('问')
     const result = upsertAiAnswer(source, {
       taskId,
       answer: '答案\n\n<!-- rgent:ledger:v1 -->\n\n<!-- rgent:ai:v1 -->\n坏标记'
@@ -77,12 +94,7 @@ describe('Host source projection', () => {
 
   it('keeps an existing ledger byte-for-byte while streaming CRLF answer blocks', () => {
     const originalLedger = '<!-- rgent:ledger:v1 -->\r\n## 旧章\r\n保留原样。\r\n'
-    const source = markPrompt('/问\r\n' + originalLedger, {
-      taskId,
-      range: { start: 0, end: 2 },
-      expectedText: '/问',
-      promptText: '问'
-    })
+    const source = markDraft('问', '\r\n', '', originalLedger)
     const result = upsertAiAnswer(source, { taskId, answer: '首段\n\n- 下一块' })
     const parts = partitionSource(result)
     expect(parts.ledger).toBe(originalLedger)
@@ -90,31 +102,29 @@ describe('Host source projection', () => {
     expect(parts.body).toContain('<!-- rgent:ai:v1 task-id="task-123" -->\r\n- 下一块')
   })
 
-  it('rejects prompt text that would mark only part of a multi-block command', () => {
-    expect(() => markPrompt('/问\n', {
+  it('rejects a prompt range that spans more than one top-level paragraph', () => {
+    const fixture = draft('第一段\n\n第二段')
+    expect(() => markPrompt(fixture.source, {
       taskId,
-      range: { start: 0, end: 2 },
-      expectedText: '/问',
+      range: fixture.range,
+      expectedText: '第一段\n\n第二段',
       promptText: '第一段\n\n第二段'
-    })).toThrow()
+    })).toThrow('PROMPT_BLOCK_INVALID')
   })
 
   it('rejects an indented prompt rather than silently dropping its indentation', () => {
-    expect(() => markPrompt('  /问\n', {
+    const source = `${DRAFT_MARKER}\n  问\n`
+    const start = source.indexOf('问')
+    expect(() => markPrompt(source, {
       taskId,
-      range: { start: 2, end: 4 },
-      expectedText: '/问',
+      range: { start, end: start + 1 },
+      expectedText: '问',
       promptText: '问'
-    })).toThrow()
+    })).toThrow('PROMPT_BLOCK_INVALID')
   })
 
   it('does not consume a following human paragraph while a streamed code fence is unfinished', () => {
-    const source = markPrompt('/问\n\n人写的后文。\n', {
-      taskId,
-      range: { start: 0, end: 2 },
-      expectedText: '/问',
-      promptText: '问'
-    })
+    const source = markDraft('问', '\n', '', '\n人写的后文。\n')
     const partial = upsertAiAnswer(source, { taskId, answer: '```ts\nconst x = 1' })
     expect(compile(partial).index.blocks.at(-1)?.identity).toBeUndefined()
     const updated = upsertAiAnswer(partial, { taskId, answer: '完成。' })
@@ -122,11 +132,109 @@ describe('Host source projection', () => {
   })
 })
 
+describe('draft prompt blocks', () => {
+  const UPGRADED = '<!-- rgent:prompt:v1 task-id="task-123" -->'
+
+  it('upgrades only the draft marker and preserves CRLF, body bytes and surrounding blank lines', () => {
+    const body = '第一行\r\n第二行  '
+    const source = '\ufeff前文。\r\n\r\n' + DRAFT_MARKER + '\r\n' + body + '\r\n\r\n后文。\r\n'
+    const start = source.indexOf('第一行')
+    const result = markPrompt(source, { taskId, range: { start, end: start + body.length }, expectedText: body, promptText: body })
+    expect(result).toBe(source.replace(DRAFT_MARKER, UPGRADED))
+    expect(result).not.toContain('state="draft"')
+    expect(result).not.toContain('\n\n\n')
+    expect(partitionSource(result).body).toBe(source.replace(DRAFT_MARKER, UPGRADED))
+    // 只换 marker 行：正文行与换行风格逐字保持（marker 变长，正文起点随之后移）。
+    const bodyAt = result.indexOf(body)
+    expect(result.slice(0, bodyAt)).toBe(source.slice(0, start).replace(DRAFT_MARKER, UPGRADED))
+    expect(result.slice(bodyAt)).toBe(source.slice(start))
+  })
+
+  it('keeps a leading slash as ordinary prompt text instead of the retired trigger', () => {
+    const body = '/usr/local/bin 是什么'
+    const fixture = draft(body)
+    const marked = markPrompt(fixture.source, { taskId, range: fixture.range, expectedText: body, promptText: body })
+    expect(marked).toContain(`task-id="task-123" -->\n${body}\n`)
+    expect(marked).not.toContain('state="draft"')
+    expect(compile(marked).index.blocks[0]).toMatchObject({ type: 'paragraph', identity: 'command' })
+  })
+
+  it('leaves a rejected draft byte-for-byte untouched so a later valid send still works', () => {
+    const fixture = draft('问题')
+    const before = fixture.source
+    expect(() => markPrompt(fixture.source, {
+      taskId,
+      range: fixture.range,
+      expectedText: '问题',
+      promptText: '另一个问题'
+    })).toThrow('PROMPT_BLOCK_INVALID')
+    expect(fixture.source).toBe(before)
+    expect(markPrompt(fixture.source, {
+      taskId,
+      range: fixture.range,
+      expectedText: '问题',
+      promptText: '问题'
+    })).toContain(UPGRADED)
+  })
+
+  it.each([
+    ['missing marker', '这是问题\n', '这是问题'],
+    ['blank line below the marker', `${DRAFT_MARKER}\n\n这是问题\n`, '这是问题'],
+    ['marker without state', '<!-- rgent:prompt:v1 -->\n这是问题\n', '这是问题'],
+    ['marker with a wrong state', '<!-- rgent:prompt:v1 state="sent" -->\n这是问题\n', '这是问题'],
+    ['already sent marker', '<!-- rgent:prompt:v1 task-id="old" -->\n这是问题\n', '这是问题'],
+    ['draft marker that also carries a task id', '<!-- rgent:prompt:v1 state="draft" task-id="old" -->\n这是问题\n', '这是问题'],
+    ['ai marker pretending to be a draft', '<!-- rgent:ai:v1 state="draft" -->\n这是问题\n', '这是问题'],
+    ['a list instead of a paragraph', `${DRAFT_MARKER}\n- 条目\n`, '- 条目'],
+    ['a block quote instead of a paragraph', `${DRAFT_MARKER}\n> 引用\n`, '> 引用'],
+    ['a heading instead of a paragraph', `${DRAFT_MARKER}\n## 标题\n`, '## 标题'],
+    ['a code block instead of a paragraph', `${DRAFT_MARKER}\n\`\`\`\ncode\n\`\`\`\n`, '\`\`\`\ncode\n\`\`\`'],
+    ['a marker not adjacent to the paragraph', `${DRAFT_MARKER}\n\n\n这是问题\n`, '这是问题']
+  ])('rejects %s', (_, source, text) => {
+    expect(() => markFrom(source, text)).toThrow('PROMPT_BLOCK_INVALID')
+  })
+
+  it.each(['这是 <!-- 注释', '这是 --> 结束'])('rejects comment delimiters in the prompt body: %s', (body) => {
+    expect(() => markFrom(`${DRAFT_MARKER}\n${body}\n`, body)).toThrow('PROMPT_UNSAFE')
+  })
+
+  it('rejects an empty or whitespace-only prompt', () => {
+    expect(() => markPrompt(`${DRAFT_MARKER}\n\n`, { taskId, range: { start: 0, end: 0 }, expectedText: '', promptText: '' })).toThrow('PROMPT_BLOCK_INVALID')
+    expect(() => markPrompt(`${DRAFT_MARKER}\n   \n`, { taskId, range: { start: DRAFT_MARKER.length + 1, end: DRAFT_MARKER.length + 4 }, expectedText: '   ', promptText: '   ' })).toThrow('PROMPT_BLOCK_INVALID')
+  })
+
+  it('rejects reusing a task id that already marks a block', () => {
+    const first = markDraft('第一问', '\n', '', '', 'task-live')
+    const second = draft('第二问', '\n', `${first}\n`)
+    expect(() => markPrompt(second.source, {
+      taskId: 'task-live',
+      range: second.range,
+      expectedText: '第二问',
+      promptText: '第二问'
+    })).toThrow('PROMPT_BLOCK_INVALID')
+  })
+
+  it.each(['\n', '\r\n'])('keeps legacy sent command blocks readable and replaceable: %j', (newline) => {
+    const legacy = `<!-- rgent:prompt:v1 task-id="old-task" -->${newline}旧的提问${newline}`
+    const compiled = compile(legacy)
+    expect(compiled.index.markers).toHaveLength(1)
+    expect(compiled.index.blocks).toHaveLength(1)
+    expect(compiled.index.blocks[0]).toMatchObject({ type: 'paragraph', identity: 'command' })
+    const answered = upsertAiAnswer(legacy, { taskId: 'old-task', answer: '旧回答' })
+    expect(answered).toContain('<!-- rgent:ai:v1 task-id="old-task" -->')
+    const updated = upsertAiAnswer(answered, { taskId: 'old-task', answer: '新回答', expectedPreviousAnswer: '旧回答' })
+    expect(updated).toContain('新回答')
+    expect(updated).not.toContain('旧回答')
+    // 已发送块没有 draft state，不能被 markPrompt 再升级一次。
+    expect(() => markFrom(legacy, '旧的提问', 'new-task')).toThrow('PROMPT_BLOCK_INVALID')
+  })
+})
+
 describe('HTML answer blocks never swallow the ledger boundary', () => {
   // 真实稳态的落盘形状：AI 块与账本锚点之间只有一个换行（appendLedgerChapter 的 prelude）。
   // 这正是 HTML 块吞掉锚点的输入；空行版本测不出这个问题。
   const steadyState = (newline: string): string => {
-    const marked = markPrompt(`/问${newline}`, { taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const marked = markDraft('问', newline)
     const answered = upsertAiAnswer(marked, { taskId, answer: '旧回答' })
     return appendLedgerChapter(answered, { taskId, startedAt: 'prev', status: 'completed', prompt: '问', answer: '旧回答' })
   }
@@ -147,7 +255,7 @@ describe('HTML answer blocks never swallow the ledger boundary', () => {
   })
 
   it.each(answers)('keeps a following human paragraph out of the AI block: %s', (answer) => {
-    const source = markPrompt('/问\n\n人写的后文。\n', { taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const source = markDraft('问', '\n', '', '\n人写的后文。\n')
     const partial = upsertAiAnswer(source, { taskId, answer })
     expect(compile(partial).index.blocks.at(-1)?.identity).toBeUndefined()
     expect(partitionSource(partial).body).toContain('人写的后文。')
@@ -155,7 +263,7 @@ describe('HTML answer blocks never swallow the ledger boundary', () => {
 
   it('publishes the first ledger chapter after an HTML answer instead of refusing the write', () => {
     const answer = '正文\n\n<div>\n未闭合'
-    const marked = markPrompt('/问\n', { taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const marked = markDraft('问')
     const answered = upsertAiAnswer(marked, { taskId, answer })
     const final = appendLedgerChapter(answered, { taskId, startedAt: 'now', status: 'completed', prompt: '问', answer })
     expect(partitionSource(final).ledger).not.toBeNull()
@@ -177,7 +285,7 @@ describe('HTML answer blocks never swallow the ledger boundary', () => {
 
 describe('untrusted machine comments', () => {
   it.each(['<!--\nrgent:ai:v1\n-->', '<!-- rgent:prompt:v1', '<!--', '<!-- rgent:', '<!-- rgent:ledger:v1 -->'])('neutralizes complete and partial machine comment %s', (answer) => {
-    const source = markPrompt('/问\n\n人的后文\n', { taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const source = markDraft('问', '\n', '', '\n人的后文\n')
     const partial = upsertAiAnswer(source, { taskId, answer })
     expect(partitionSource(partial).ledger).toBeNull()
     expect(compile(partial).index.blocks.at(-1)?.identity).toBeUndefined()
@@ -194,9 +302,9 @@ describe('untrusted machine comments', () => {
 })
 
 it('writes a prompt after CR-only source lines without changing their separators', () => {
-  const source = '前文\r\r/问\r\r后文\r'
-  const start = source.indexOf('/问')
-  const marked = markPrompt(source, { taskId, range: { start, end: start + 2 }, expectedText: '/问', promptText: '问' })
+  const source = '前文\r\r' + DRAFT_MARKER + '\r问\r\r后文\r'
+  const start = source.indexOf('问')
+  const marked = markPrompt(source, { taskId, range: { start, end: start + 1 }, expectedText: '问', promptText: '问' })
   expect(marked).toBe('前文\r\r<!-- rgent:prompt:v1 task-id="task-123" -->\r问\r\r后文\r')
   const answered = upsertAiAnswer(marked, { taskId, answer: '第一行\r\n第二行' })
   expect(answered).not.toContain('\n')
@@ -205,15 +313,16 @@ it('writes a prompt after CR-only source lines without changing their separators
 
 
 it('keeps the document BOM when marking a first-line prompt', () => {
-  const source = '\ufeff/问\r\n'
-  const marked = markPrompt(source, { taskId, range: { start: 1, end: 3 }, expectedText: '/问', promptText: '问' })
+  const source = '\ufeff' + DRAFT_MARKER + '\r\n问\r\n'
+  const start = source.indexOf('问')
+  const marked = markPrompt(source, { taskId, range: { start, end: start + 1 }, expectedText: '问', promptText: '问' })
   expect(marked).toBe('\ufeff<!-- rgent:prompt:v1 task-id="task-123" -->\r\n问\r\n')
   expect(upsertAiAnswer(marked, { taskId, answer: '回答' }).startsWith('\ufeff<!-- rgent:prompt')).toBe(true)
 })
 
 describe('ledger records reasoning and process without touching the body', () => {
   it('writes 过程 and 推理 sections and keeps them out of the answer blocks', () => {
-    const source = markPrompt('/问\n', { taskId, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const source = markDraft('问')
     const answered = upsertAiAnswer(source, { taskId, answer: '公开回答' })
     const final = appendLedgerChapter(answered, {
       taskId, startedAt: 'now', status: 'completed', prompt: '问', answer: '公开回答',
@@ -241,8 +350,9 @@ describe('ledger records reasoning and process without touching the body', () =>
 })
 
 it('leaves an editable human paragraph after a streamed answer at EOF without changing earlier bytes',()=>{
- const source=markPrompt('/继续',{taskId,range:{start:0,end:3},expectedText:'/继续',promptText:'继续'})
- const answer=upsertAiAnswer(source,{taskId,answer:'回答'})
+ const source=`${DRAFT_MARKER}\n继续`,start=DRAFT_MARKER.length+1
+ const source2=markPrompt(source,{taskId,range:{start,end:start+2},expectedText:'继续',promptText:'继续'})
+ const answer=upsertAiAnswer(source2,{taskId,answer:'回答'})
  expect(answer.endsWith('回答\n\n')).toBe(true)
  expect(upsertAiAnswer(answer,{taskId,answer:'回答更多',expectedPreviousAnswer:'回答'}).endsWith('回答更多\n\n')).toBe(true)
 })

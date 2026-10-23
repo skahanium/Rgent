@@ -28,7 +28,6 @@ import { modelModuleGroups, renderStatusbar, statusModel, wordsOf, type StatusMo
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
 import { hostErrorMessage, hostErrorText } from './host-errors.ts'
-import { pendingSlash } from './slash.ts'
 import { createFileBrowser, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
 import { createSidebarSizer } from './sidebar.ts'
 import { applyResolvedTheme, type Theme } from './theme.ts'
@@ -480,6 +479,18 @@ export async function start(root: HTMLElement): Promise<void> {
     if (!tab.availability) scheduleSave()
   })
 
+  /**
+   * 提问块由编辑器（P2）负责定位、创建与草稿 marker；壳只决定「什么时候允许」并把
+   * Enter 变成一次发送。API 尚未合并时按结构类型接入，合并后形状必须与这里一致。
+   */
+  type PromptBlockSnapshot = { range: { start: number; end: number }; prompt: string; empty: boolean }
+  type PromptBlockEditor = {
+    createPromptBlock: (options?: { at?: 'caret' | 'end'; text?: string }) => 'created' | 'focused' | 'refused'
+    promptBlockAtCaret: () => PromptBlockSnapshot | null
+    removeEmptyPromptBlockAtCaret?: () => boolean
+  }
+  const promptEditor = editor as EditorHost & Partial<PromptBlockEditor>
+
   /** 菜单「抓取网页…」与 ⌘⇧U／Ctrl+Shift+U 共用这一个入口：只开对话框，不代替人提交。
    *  人点「抓取／搜索」才是授权；库交接与已有模态期间不开，避免把当前浮层顶掉。 */
   function openHumanNetworkDialog(): void {
@@ -498,10 +509,40 @@ export async function start(root: HTMLElement): Promise<void> {
     })
   }
 
+  /** 创建提问块的唯一前端入口：快捷键与菜单都到这里；编辑器内没有按钮、图标或提示。
+   *  只在可编辑的活动笔记、没有同篇任务、没有设置／搜索／冲突／对话框／恢复浮层时创建。 */
+  function canCreatePromptBlock(): boolean {
+    const tab = current()
+    return !!tab && !tab.availability && !editor.view.state.readOnly &&
+      !bodyWritesPaused() &&
+      ![...activeTasks.values()].some(task => task.relPath === tab.relPath) &&
+      !vaultBusy() && !conflictDecisionOpen &&
+      !settingsOverlay.isOpen() && !searchOverlay.isOpen() &&
+      !recoveryOverlay?.isOpen() && !modalOpen()
+  }
+
+  function askAI(fromMenu: boolean): void {
+    // 快捷键要求编辑器焦点；菜单点击先把焦点送进编辑器，再在光标处创建。
+    if (!fromMenu && !editor.view.hasFocus) return
+    if (!canCreatePromptBlock()) return
+    if (fromMenu) editor.focus()
+    const result = promptEditor.createPromptBlock?.() ?? 'refused'
+    if (result === 'refused') {
+      pushNotice({
+        title: '没有创建提问块',
+        detail: '这篇笔记现在不能编辑，或当前位置放不下提问块。',
+        tone: 'warning'
+      })
+      return
+    }
+    editor.focus()
+  }
+
   installShortcuts({
     onSearch: () => { if (!restoringWorkspace && !transitionBusy && !settingsOverlay.isBusy() && !conflictDecisionOpen) searchOverlay.open() },
     onSave: () => { if (!restoringWorkspace && !transitionBusy && !settingsOverlay.isBusy()) void flushSave() },
-    onFetchWeb: () => { openHumanNetworkDialog() }
+    onFetchWeb: () => { openHumanNetworkDialog() },
+    onAsk: () => { askAI(false) }
   })
   shortcutHint.textContent = shortcutLabel('k')
   searchOpen.addEventListener('click', () => { if (!conflictDecisionOpen && !settingsOverlay.isBusy()) searchOverlay.open() })
@@ -529,16 +570,22 @@ export async function start(root: HTMLElement): Promise<void> {
   editor.setTheme(document.documentElement.dataset.theme === 'night')
 
   editor.view.dom.addEventListener('keydown', (event) => {
+    // 提问块内 Enter 发送、Shift+Enter 走默认换行；输入法组合中的 Enter 不发送。
     if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229 || editor.view.compositionStarted) return
-    const selection = editor.selectionRange()
-    if (selection.anchor !== selection.head) return
-    const submission = pendingSlash(editor.getText(), selection.head, editor.slashCommandStart())
-    if (!submission || conflictDecisionOpen || modalOpen()) return
+    const block = promptEditor.promptBlockAtCaret?.() ?? null
+    if (!block) return
+    if (conflictDecisionOpen || modalOpen()) return
+    // 空草稿的 Enter 不换行、不发送，光标留在提问行。
     event.preventDefault()
-    void submitSlash(submission)
+    if (!block.empty) void submitPrompt(block)
   }, { capture: true })
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229 || editor.view.compositionStarted || modalOpen()) return
+    const emptyPrompt = promptEditor.promptBlockAtCaret?.()
+    if (emptyPrompt?.empty && promptEditor.removeEmptyPromptBlockAtCaret?.()) {
+      event.preventDefault()
+      return
+    }
     const tab = current()
     const task = tab && [...activeTasks.values()].find((item) => item.relPath === tab.relPath)
     if (task) {
@@ -582,6 +629,8 @@ export async function start(root: HTMLElement): Promise<void> {
   })
   // 人发起抓页／搜索：菜单快捷键只负责开对话框；人点「抓取／搜索」即授权，不再二次确认。
   window.rgent.onMenu(IPC.menuFetchWeb, () => { openHumanNetworkDialog() })
+  // 应用菜单「问 AI」与 ⌘⇧↵ 共用同一个创建入口；菜单点击先把焦点送进编辑器。
+  window.rgent.onMenu(IPC.menuAsk, () => { askAI(true) })
   window.rgent.onTreeChanged(() => {
     void refreshLifecycle().then(() => refreshTree()).then(() => checkOpenNotes())
   })
@@ -706,13 +755,18 @@ export async function start(root: HTMLElement): Promise<void> {
   }).catch(() => {})
 
   /**
-   * 口令提交：零确认。校验→保存→预览→启动直连，不弹卡；失败只走状态栏通知。
+   * 提问块提交：零确认。校验→保存→预览→启动直连，不弹卡；失败只走状态栏通知，草稿保留。
+   * 请求里的 range／expectedText／promptText 都是提问正文，不带 `/` 前缀。
    * 范围来自这个 tab 的记忆（默认本篇），任务运行中改档只影响下一场。
    */
-  async function submitSlash(submission: { range: { start: number; end: number }; prompt: string }): Promise<void> {
+  async function submitPrompt(block: PromptBlockSnapshot): Promise<void> {
     const tab = current()
-    if (!tab || conflictDecisionOpen) return
+    if (!tab || block.empty || conflictDecisionOpen) return
     if (tab.availability || !tab.sessionId || !tab.objectVersion) return
+    const promptText = block.prompt
+    if (!promptText.trim()) return
+    const { start, end } = block.range
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > editor.getText().length || start >= end) return
     const selectedModelId = taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null)
     if (!selectedModelId || !modelConfigSnapshot || !modelModuleGroups(modelConfigSnapshot).some(group => group.items.some(item => item.id === selectedModelId))) {
       hostNotice = '请选择可用模型；设备默认可在设置的「助手」页保存。'; updateStatus(); return
@@ -721,7 +775,8 @@ export async function start(root: HTMLElement): Promise<void> {
     if (!await flushSave()) { hostNotice = hostErrorText('UNSAVED_DRAFT'); updateStatus(); return }
     if (current() !== tab || !tabs.includes(tab)) return
     const draft = editor.getText()
-    if (draft.slice(submission.range.start, submission.range.end) !== `/${submission.prompt}`) return
+    // 草稿在保存/排队期间被改过：不拿旧 range 去猜正文，保留草稿让下次 Enter 重来。
+    if (draft.slice(start, end) !== promptText) return
     const scope = scopeOf(tab)
     // 防御：界面已把根目录的「同册」标灰并回落本篇；任何路径也不把非法 folder 交给主进程。
     if (scope === 'folder' && isRootNote(tab.relPath)) {
@@ -730,9 +785,9 @@ export async function start(root: HTMLElement): Promise<void> {
     const request = {
       modelRecordId: selectedModelId,
       relPath: tab.relPath,
-      range: submission.range,
-      expectedText: draft.slice(submission.range.start, submission.range.end),
-      promptText: submission.prompt,
+      range: block.range,
+      expectedText: promptText,
+      promptText,
       sessionId: tab.sessionId!, objectVersion: tab.objectVersion!, expectedRevision: tab.revision,
       scope
     }
@@ -1832,7 +1887,7 @@ export async function start(root: HTMLElement): Promise<void> {
     updateStatus()
   }
 
-  /** 今天：插口令＋沿用暂停时的范围。真断点接续未开，以后只换这个函数。 */
+  /** 今天：在篇尾新建一枚提问草稿块＋沿用暂停时的范围。真断点接续未开，以后只换这个函数。 */
   async function resumeOrRestart(): Promise<void> {
     const tab = current()
     if (!tab?.pausedRestart || conflictDecisionOpen) return
@@ -1841,26 +1896,19 @@ export async function start(root: HTMLElement): Promise<void> {
     if (modelRecordId) tab.temporaryModelId = modelRecordId
     // 暂停时用的是哪一档，重发就用哪一档；当前篇换到库根时仍走本篇回落。
     tabScopes.set(tab.relPath, scope)
-    const marker = `/${promptText}`
-    let text = editor.getText()
-    let start = text.endsWith(marker) ? text.length - marker.length : -1
-    if (start < 0) {
-      const pad = text.length === 0 ? '' : /(?:\r?\n){2}$/.test(text) ? '' : text.endsWith('\n') ? '\n' : '\n\n'
-      editor.view.dispatch({ selection: { anchor: editor.view.state.doc.length }, scrollIntoView: true })
-      if (!editor.insertAtSelection(`${pad}${marker}`)) {
-        hostNotice = '无法插入口令（这篇可能正被生成占用）。'
-        updateStatus()
-        return
-      }
-      text = editor.getText()
-      start = text.endsWith(marker) ? text.length - marker.length : text.lastIndexOf(marker)
-      if (start < 0 || text.slice(start, start + marker.length) !== marker) {
-        hostNotice = '插入的口令与记忆不一致，请手打后再发。'
-        updateStatus()
-        return
-      }
+    const created = promptEditor.createPromptBlock?.({ at: 'end', text: promptText }) ?? 'refused'
+    if (created === 'refused') {
+      hostNotice = '无法创建提问块（这篇可能正被生成占用）。'
+      updateStatus()
+      return
     }
-    await submitSlash({ range: { start, end: start + marker.length }, prompt: promptText })
+    const block = promptEditor.promptBlockAtCaret?.() ?? null
+    if (!block || block.empty || block.prompt !== promptText) {
+      hostNotice = '新建的提问块与暂停内容不一致，请手动输入后再发。'
+      updateStatus()
+      return
+    }
+    await submitPrompt(block)
   }
 
   /** 底栏：行列、字数、总闸。字数只算正文，标记行不算。库名只写在 #app[data-vault]。 */

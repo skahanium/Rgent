@@ -1,17 +1,26 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { start } from '../../src/renderer/src/shell.ts'
-import type { AgentAuthorizationPreview, AgentAuthorizationRequest, AgentStartRequest, NoteSnapshot } from '../../src/shared/ipc.ts'
+import { IPC, type AgentAuthorizationPreview, type AgentAuthorizationRequest, type AgentStartRequest, type NoteSnapshot } from '../../src/shared/ipc.ts'
 
 /**
- * 真实外壳 + 假 editor/API：三档作业范围的静默提交、按 tab 记忆、零确认新建通知、
- * 库内删除与 note:deleted。授权卡／写确认卡／删除确认卡已移除，这里同时钉住「没有浮层」。
+ * 真实外壳 + 假 editor/API：提问块创建与 Enter 发送、三档作业范围的静默提交、
+ * 按 tab 记忆、零确认新建通知、库内删除与 note:deleted。
+ * 授权卡／写确认卡／删除确认卡已移除，这里同时钉住「没有浮层」。
  */
+type PromptBlockSnapshot = { range: { start: number; end: number }; prompt: string; empty: boolean }
+
 const editorHarness = vi.hoisted(() => ({
   text: '',
   change: null as ((text: string) => void) | null,
   dom: null as unknown as HTMLElement,
-  focus: vi.fn()
+  focus: vi.fn(),
+  hasFocus: true,
+  readOnly: false,
+  block: null as PromptBlockSnapshot | null,
+  createResult: 'created' as 'created' | 'focused' | 'refused',
+  createCall: vi.fn(),
+  createCalls: [] as ({ at?: 'caret' | 'end'; text?: string } | undefined)[]
 }))
 vi.mock('../../src/renderer/src/view/editor.ts', () => ({
   mountEditor: (_root: HTMLElement, change: (text: string) => void) => {
@@ -19,13 +28,32 @@ vi.mock('../../src/renderer/src/view/editor.ts', () => ({
     editorHarness.dom = document.createElement('div')
     const dom = editorHarness.dom, scrollDOM = document.createElement('div')
     return {
-      view: { dom, contentDOM: dom, scrollDOM, compositionStarted: false, dispatch: () => {}, state: { doc: { length: 0 }, selection: { main: { head: 0 } } }, coordsAtPos: () => null },
+      view: {
+        dom, contentDOM: dom, scrollDOM, compositionStarted: false, dispatch: () => {}, coordsAtPos: () => null,
+        get hasFocus() { return editorHarness.hasFocus },
+        state: { doc: { length: 0 }, selection: { main: { head: 0 } }, get readOnly() { return editorHarness.readOnly } }
+      },
       getText: () => editorHarness.text,
       setText: (value: string) => { editorHarness.text = value },
       insertAtSelection: () => false,
       applyExternalText: () => {},
-      // 口令在空段首：Enter 时把它当成一条待发送的 `/` 命令。
-      slashCommandStart: () => editorHarness.text.startsWith('/') ? 0 : null,
+      // P2 的编辑器 API：位置与草稿 marker 由编辑器负责，壳只在测试里断言调用与参数。
+      createPromptBlock: (options?: { at?: 'caret' | 'end'; text?: string }) => {
+        editorHarness.createCall(options)
+        editorHarness.createCalls.push(options)
+        if (editorHarness.createResult === 'refused') return 'refused'
+        if (options?.text !== undefined) {
+          const prompt = options.text
+          const base = editorHarness.text
+          const pad = base.length === 0 ? '' : /(?:\r\n|\r|\n){2}$/.test(base) ? '' : base.endsWith('\n') ? '\n' : '\n\n'
+          const start = base.length + pad.length
+          editorHarness.text = `${base}${pad}${prompt}`
+          editorHarness.block = { range: { start, end: start + prompt.length }, prompt, empty: prompt.length === 0 }
+          editorHarness.change?.(editorHarness.text)
+        }
+        return editorHarness.createResult
+      },
+      promptBlockAtCaret: () => editorHarness.block,
       setReadOnly: () => {}, setTheme: () => {}, setActiveTaskIds: () => {}, setNoteHost: () => {},
       onStateChange: () => {}, onViewportChange: () => {}, focus: editorHarness.focus,
       selectionRange: () => ({ anchor: editorHarness.text.length, head: editorHarness.text.length }),
@@ -60,13 +88,25 @@ const previewFor = (request: AgentAuthorizationRequest, id: string): AgentAuthor
   canCreate: true, canStructure: true, canDelete: true
 })
 
+let windowKeydowns: EventListenerOrEventListenerObject[] = []
+const addWindowListener = window.addEventListener.bind(window)
+
 beforeEach(() => {
   handlers = {}; revisionSerial = 100; started = 0
+  windowKeydowns = []
+  vi.spyOn(window, 'addEventListener').mockImplementation((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+    if (type === 'keydown') windowKeydowns.push(listener)
+    addWindowListener(type, listener, options)
+  })
   files = new Map([
     ['甲.md', { content: '', revision: 'r0', objectVersion: 'o0' }],
     ['资料/乙.md', { content: '', revision: 'r1', objectVersion: 'o1' }]
   ])
   editorHarness.text = ''; editorHarness.change = null
+  editorHarness.hasFocus = true; editorHarness.readOnly = false
+  editorHarness.block = null; editorHarness.createResult = 'created'; editorHarness.createCalls = []
+  editorHarness.createCall.mockClear()
+  editorHarness.focus.mockClear()
   localStorage.clear()
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
   Object.defineProperty(HTMLDialogElement.prototype, 'show', { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute('open', '') } })
@@ -119,17 +159,39 @@ beforeEach(() => {
   window.rgent = api
   root = document.createElement('main'); document.body.append(root)
 })
-afterEach(() => { document.body.replaceChildren(); vi.unstubAllGlobals(); vi.clearAllTimers() })
+afterEach(() => {
+  // start() 每轮都会装一份 window 快捷键；测试文档共享同一个 window，必须卸掉。
+  for (const listener of windowKeydowns) window.removeEventListener('keydown', listener)
+  windowKeydowns = []
+  document.body.replaceChildren()
+  vi.unstubAllGlobals()
+  vi.clearAllTimers()
+  vi.restoreAllMocks()
+})
 
 const waitForNote = async (relPath = '甲.md'): Promise<void> => {
   await start(root)
   await vi.waitFor(() => expect(root.querySelector('.tab')?.getAttribute('data-rel')).toBe(relPath))
   await vi.waitFor(() => expect(root.querySelector('.status-dot')).not.toBeNull())
 }
-const typeSlash = (prompt: string): void => {
-  editorHarness.text = `/${prompt}`
+/** 模拟 P2 已把光标放进一枚提问块：Enter 由壳转成一次发送。 */
+const setPrompt = (prompt: string): void => {
+  editorHarness.text = prompt
+  editorHarness.block = { range: { start: 0, end: prompt.length }, prompt, empty: prompt.length === 0 }
   editorHarness.change!(editorHarness.text)
-  editorHarness.dom.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+}
+const pressEnter = (init: KeyboardEventInit = {}): KeyboardEvent => {
+  const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init })
+  editorHarness.dom.dispatchEvent(event)
+  return event
+}
+const sendPrompt = (prompt: string): KeyboardEvent => { setPrompt(prompt); return pressEnter() }
+const pressAskShortcut = (): KeyboardEvent => {
+  const event = new KeyboardEvent('keydown', {
+    key: 'Enter', shiftKey: true, ctrlKey: true, metaKey: true, bubbles: true, cancelable: true
+  })
+  window.dispatchEvent(event)
+  return event
 }
 const chooseScope = async (scope: 'note' | 'folder' | 'vault'): Promise<void> => {
   root.querySelector<HTMLButtonElement>('.status-scope-button')!.click()
@@ -143,10 +205,17 @@ const endTask = (id = 'task-1'): void => { handlers.onAgentEvent({ id, relPath: 
 
 it('submits silently with the default note scope and never opens a card', async () => {
   await waitForNote()
-  typeSlash('问题一')
+  sendPrompt('问题一')
   await vi.waitFor(() => expect(api.agentAuthorizationPreview).toHaveBeenCalledTimes(1))
   const previewRequest = api.agentAuthorizationPreview.mock.calls[0]![0]
-  expect(previewRequest).toMatchObject({ scope: 'note' })
+  expect(previewRequest).toMatchObject({
+    scope: 'note',
+    range: { start: 0, end: '问题一'.length },
+    expectedText: '问题一',
+    promptText: '问题一'
+  })
+  expect(previewRequest.expectedText).not.toContain('/')
+  expect(previewRequest.promptText).not.toContain('/')
   expect(previewRequest).not.toHaveProperty('references')
   expect(previewRequest).not.toHaveProperty('level')
   expect(previewRequest).not.toHaveProperty('network')
@@ -157,18 +226,137 @@ it('submits silently with the default note scope and never opens a card', async 
 
   await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
   const startedRequest = api.agentStart.mock.calls[0]![0]
-  expect(startedRequest).toMatchObject({ previewId: 'p1', scope: 'note' })
+  expect(startedRequest).toMatchObject({ previewId: 'p1', scope: 'note', expectedText: '问题一', promptText: '问题一' })
+  expect(startedRequest.expectedText).not.toContain('/')
   expect(startedRequest).not.toHaveProperty('level')
   expect(startedRequest).not.toHaveProperty('references')
   expect(startedRequest).not.toHaveProperty('network')
   expect(startedRequest).not.toHaveProperty('mcp')
 })
 
+
+it('creates a prompt block from ⌘⇧↵ only while the editor has focus', async () => {
+  await waitForNote()
+  pressAskShortcut()
+  expect(editorHarness.createCalls).toEqual([undefined])
+  expect(editorHarness.focus).toHaveBeenCalled()
+  expect(document.querySelector('.notice')).toBeNull()
+
+  editorHarness.hasFocus = false
+  pressAskShortcut()
+  expect(editorHarness.createCalls).toHaveLength(1)
+
+  editorHarness.hasFocus = true
+  editorHarness.readOnly = true
+  pressAskShortcut()
+  expect(editorHarness.createCalls).toHaveLength(1)
+})
+
+it('leaves a non-empty paragraph to the editor API and only focuses the result', async () => {
+  await waitForNote()
+  editorHarness.createResult = 'focused'
+  editorHarness.text = '已有段落'
+  editorHarness.change!(editorHarness.text)
+  pressAskShortcut()
+  expect(editorHarness.createCalls).toEqual([undefined])
+  // 壳不自己插块、也不因段非空而拒绝；位置由编辑器决定。
+  expect(editorHarness.text).toBe('已有段落')
+  expect(editorHarness.focus).toHaveBeenCalled()
+  expect(document.querySelector('.notice')).toBeNull()
+})
+
+it('reports a refused prompt block with the existing notice', async () => {
+  await waitForNote()
+  editorHarness.createResult = 'refused'
+  pressAskShortcut()
+  await vi.waitFor(() => expect(document.querySelector('.notice-title')?.textContent).toBe('没有创建提问块'))
+  expect(editorHarness.createCalls).toHaveLength(1)
+})
+
+it('does not create a prompt block while this note has an active task', async () => {
+  await waitForNote()
+  handlers.onAgentEvent({ id: 'running-ask', relPath: '甲.md', status: 'running', sessionId: 's' })
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('generating'))
+  pressAskShortcut()
+  expect(editorHarness.createCalls).toHaveLength(0)
+})
+
+it('does not create a prompt block behind a modal overlay', async () => {
+  await waitForNote()
+  const dialog = document.createElement('dialog')
+  dialog.dataset.modal = 'true'
+  dialog.setAttribute('open', '')
+  document.body.append(dialog)
+  pressAskShortcut()
+  expect(editorHarness.createCalls).toHaveLength(0)
+  dialog.remove()
+})
+
+it('creates a prompt block from the 问 AI menu after focusing the editor', async () => {
+  await waitForNote()
+  editorHarness.hasFocus = false
+  handlers[IPC.menuAsk]()
+  expect(editorHarness.createCalls).toEqual([undefined])
+  expect(editorHarness.focus).toHaveBeenCalled()
+  const focusOrder = editorHarness.focus.mock.invocationCallOrder[0]!
+  const createOrder = editorHarness.createCall.mock.invocationCallOrder[0]!
+  // 菜单入口先 focus 再创建；这里用调用顺序钉住，不靠实现细节。
+  expect(focusOrder).toBeLessThan(createOrder)
+  expect(editorHarness.text).toBe('')
+})
+
+it('leaves Shift+Enter to the editor for a newline', async () => {
+  await waitForNote()
+  setPrompt('换行')
+  const event = pressEnter({ shiftKey: true })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(event.defaultPrevented).toBe(false)
+  expect(api.agentAuthorizationPreview).not.toHaveBeenCalled()
+  expect(editorHarness.text).toBe('换行')
+})
+
+it('ignores Enter in an empty prompt block and keeps editing', async () => {
+  await waitForNote()
+  setPrompt('')
+  const event = pressEnter()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(event.defaultPrevented).toBe(true)
+  expect(api.agentAuthorizationPreview).not.toHaveBeenCalled()
+  expect(editorHarness.text).toBe('')
+})
+
+it('does not send while the input method is composing', async () => {
+  await waitForNote()
+  setPrompt('输入法')
+  const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+  Object.defineProperty(event, 'isComposing', { value: true })
+  editorHarness.dom.dispatchEvent(event)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(event.defaultPrevented).toBe(false)
+  expect(api.agentAuthorizationPreview).not.toHaveBeenCalled()
+  expect(editorHarness.text).toBe('输入法')
+})
+
+it('shows a notice and keeps the draft when paused restart cannot create a block', async () => {
+  await waitForNote()
+  sendPrompt('暂停一场')
+  await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('generating'))
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  handlers.onAgentEvent({ id: 'task-1', relPath: '甲.md', status: 'cancelled', sessionId: 's' })
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('paused'))
+  editorHarness.createResult = 'refused'
+  root.querySelector<HTMLButtonElement>('.task-dock-resume')!.click()
+  await vi.waitFor(() => expect(root.querySelector('.status-host-notice')?.textContent).toContain('无法创建提问块'))
+  expect(api.agentAuthorizationPreview).toHaveBeenCalledTimes(1)
+  expect(editorHarness.text).toBe('暂停一场')
+})
+
 it('remembers the scope per tab and sends the chosen level', async () => {
   await waitForNote()
   await chooseScope('vault')
   expect(currentScope()).toBe('vault')
-  typeSlash('整库一场')
+  sendPrompt('整库一场')
   await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
   expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0].scope).toBe('vault')
   expect(api.agentStart.mock.calls.at(-1)![0].scope).toBe('vault')
@@ -179,7 +367,7 @@ it('remembers the scope per tab and sends the chosen level', async () => {
   root.querySelector<HTMLButtonElement>('.tab[data-rel="资料/乙.md"]')!.click()
   await vi.waitFor(() => expect(root.querySelector('.tab[aria-selected="true"]')?.getAttribute('data-rel')).toBe('资料/乙.md'))
   expect(currentScope()).toBe('note')
-  typeSlash('同册默认')
+  sendPrompt('同册默认')
   await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(2))
   expect(api.agentStart.mock.calls.at(-1)![0].scope).toBe('note')
 
@@ -202,7 +390,7 @@ it('lets a folder note use 同册 but disables it on a root note', async () => {
   root.querySelector<HTMLButtonElement>('.tab[data-rel="资料/乙.md"]')!.click()
   await vi.waitFor(() => expect(root.querySelector('.tab[aria-selected="true"]')?.getAttribute('data-rel')).toBe('资料/乙.md'))
   await chooseScope('folder')
-  typeSlash('同册一场')
+  sendPrompt('同册一场')
   await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
   expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0]).toMatchObject({ scope: 'folder', relPath: '资料/乙.md' })
   expect(api.agentStart.mock.calls.at(-1)![0]).toMatchObject({ scope: 'folder', relPath: '资料/乙.md' })
@@ -211,9 +399,12 @@ it('lets a folder note use 同册 but disables it on a root note', async () => {
 it('shows a plain notice and no card when previewing the scope fails', async () => {
   api.agentAuthorizationPreview.mockResolvedValueOnce({ ok: false, error: 'STALE_AUTHORIZATION' })
   await waitForNote()
-  typeSlash('失败一场')
+  sendPrompt('失败一场')
   await vi.waitFor(() => expect(root.querySelector('.status-host-notice')?.textContent).toContain('本场范围或对象在确认后发生变化'))
   expect(api.agentStart).not.toHaveBeenCalled()
+  // 发送失败不影响草稿：正文与块都还在原位。
+  expect(editorHarness.text).toBe('失败一场')
+  expect(editorHarness.block).toMatchObject({ prompt: '失败一场', empty: false })
   expect(document.querySelector('.overlay-authorization')).toBeNull()
   expect(document.querySelector('.write-confirm')).toBeNull()
 })
@@ -222,9 +413,9 @@ it('discards a preview and does not start when the draft changes while previewin
   let finish!: (value: unknown) => void
   api.agentAuthorizationPreview.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
   await waitForNote()
-  typeSlash('准备中')
+  sendPrompt('准备中')
   await vi.waitFor(() => expect(api.agentAuthorizationPreview).toHaveBeenCalledTimes(1))
-  editorHarness.text = '/准备中 又改了'
+  editorHarness.text = '准备中 又改了'
   editorHarness.change!(editorHarness.text)
   finish({ ok: true, preview: previewFor(api.agentAuthorizationPreview.mock.calls[0]![0], 'p-stale') })
   await vi.waitFor(() => expect(api.agentAuthorizationDiscard).toHaveBeenCalledWith('p-stale'))
@@ -301,7 +492,7 @@ it('ignores note:deleted from a foreign vault session', async () => {
 
 it('changes only the next session when the scope is switched during a running task', async () => {
   await waitForNote()
-  typeSlash('第一场')
+  sendPrompt('第一场')
   await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
   expect(api.agentStart.mock.calls.at(-1)![0].scope).toBe('note')
   await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('generating'))
@@ -309,7 +500,7 @@ it('changes only the next session when the scope is switched during a running ta
   expect(api.agentStart).toHaveBeenCalledTimes(1)
   endTask()
   await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('hidden'))
-  typeSlash('第二场')
+  sendPrompt('第二场')
   await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(2))
   expect(api.agentStart.mock.calls.at(-1)![0].scope).toBe('vault')
 })
@@ -329,7 +520,7 @@ it('falls back to 本篇 when a folder note moves to the vault root', async () =
   const folder = [...root.querySelectorAll<HTMLButtonElement>('.status-scope-option')].find(button => button.dataset.scopeOption === 'folder')!
   expect(folder.disabled).toBe(true)
   root.querySelector<HTMLButtonElement>('.status-scope-button')!.click()
-  typeSlash('根目录一场')
+  sendPrompt('根目录一场')
   await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
   expect(api.agentStart.mock.calls.at(-1)![0]).toMatchObject({ scope: 'note', relPath: '乙.md' })
 })
@@ -347,7 +538,7 @@ it('forgets the scope when its tab is closed and a fresh tab opens on the same p
 
 it('resumes with the scope captured when the task was paused', async () => {
   await waitForNote()
-  typeSlash('暂停一场')
+  sendPrompt('暂停一场')
   await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
   await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('generating'))
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
@@ -357,7 +548,11 @@ it('resumes with the scope captured when the task was paused', async () => {
   await chooseScope('vault')
   root.querySelector<HTMLButtonElement>('.task-dock-resume')!.click()
   await vi.waitFor(() => expect(api.agentAuthorizationPreview).toHaveBeenCalledTimes(2))
-  expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0].scope).toBe('note')
+  const resumeRequest = api.agentAuthorizationPreview.mock.calls.at(-1)![0]
+  expect(resumeRequest).toMatchObject({ scope: 'note', promptText: '暂停一场', expectedText: '暂停一场' })
+  expect(resumeRequest.expectedText).not.toContain('/')
+  // 重发走「篇尾新建提问草稿块」，不再插 `/…`。
+  expect(editorHarness.createCalls).toEqual([{ at: 'end', text: '暂停一场' }])
   await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(2))
   expect(api.agentStart.mock.calls.at(-1)![0].scope).toBe('note')
 })

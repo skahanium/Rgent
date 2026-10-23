@@ -10,6 +10,7 @@ import { SecureVaultFs, secureFsFor } from '../../src/main/secure-fs.ts'
 import { LedgerStore } from '../../src/main/ledger-store.ts'
 import { serializeStoredVault } from '../../src/main/notes-fs.ts'
 import { markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
+import { draftSource } from './draft-fixture.ts'
 import { vaultRootIdentity } from '../../src/main/watch.ts'
 import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../../src/shared/human-trash.ts'
 vi.mock('electron', () => ({ dialog: { showOpenDialog: vi.fn() } }))
@@ -49,7 +50,7 @@ async function registeredVault() {
   await writeFile(path.join(base, 'vault.json'), serializeStoredVault(root))
   await mkdir(path.join(root, 'a'))
   await writeFile(path.join(root, 'a', '附件.txt'), '附件正文')
-  const marked = markPrompt('/以后用中文', { taskId: 'task', range: { start: 0, end: 6 }, expectedText: '/以后用中文', promptText: '以后用中文' })
+  const marked = markPrompt(draftSource('以后用中文').source, { taskId: 'task', ...draftSource('以后用中文'), expectedText: '以后用中文', promptText: '以后用中文' })
   await writeFile(path.join(root, 'a.md'), marked)
   const vault = new VaultSession(base, vi.fn())
   vault.restore()
@@ -68,7 +69,7 @@ async function folderRegisteredVault() {
   await mkdir(root)
   await mkdir(path.join(root, 'box'))
   await writeFile(path.join(base, 'vault.json'), serializeStoredVault(root))
-  const marked = markPrompt('/问', { taskId: 'task', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+  const marked = markPrompt(draftSource('问').source, { taskId: 'task', ...draftSource('问'), expectedText: '问', promptText: '问' })
   await writeFile(path.join(root, 'box', 'b.md'), marked)
   const vault = new VaultSession(base, vi.fn())
   vault.restore()

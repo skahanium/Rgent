@@ -4,6 +4,7 @@ import path from 'node:path'
 import {afterEach,beforeEach,expect,it,vi} from 'vitest'
 import {IPC} from '../../src/shared/ipc.ts'
 import {VaultCatalog} from '../../src/main/vault-catalog.ts'
+import { draftRequest, draftSource } from './draft-fixture.ts'
 const state=vi.hoisted(()=>({heldObjects:[] as {relPath:string;objectVersion:string}[],pending:[] as any[],acknowledged:[] as any[],trusted:true,memoryOwnerCheck:undefined as undefined|(()=>void),data:'',handles:new Map<string,Function>(),events:new Map<string,Function>(),appEvents:new Map<string,Function>(),window:null as any,host:null as any,launch:Promise.resolve(),active:false,settled:0,stopped:0,watchFailure:'',open:vi.fn(),save:vi.fn(),confirm:vi.fn(),memoryResult:null as Promise<any>|null,rechecks:[] as string[],tasks:[] as {id:string;root:string;relPath:string}[],cancelled:[] as string[],retried:[] as string[]}))
 vi.mock('electron',()=>({
  app:{isPackaged:true,getPath:()=>state.data,requestSingleInstanceLock:()=>true,quit:vi.fn(),whenReady:()=>Promise.resolve(),on:(name:string,fn:Function)=>state.appEvents.set(name,fn)},
@@ -145,7 +146,7 @@ it('authorization preview cannot read B after the previous chapter read is delay
  vi.spyOn(TaskAuthorizationRegistry.prototype,'preview').mockResolvedValue({id:'preview',sources:[{relPath:'same.md'}]} as any)
  vi.spyOn(VaultSession.prototype,'ledgerContexts').mockImplementation(async()=>{entered();await gate;return []})
  vi.spyOn(VaultSession.prototype,'read').mockImplementation(async function(this:import('../../src/main/vault.ts').VaultSession){this.captureSession();roots.push(this.root);return {sessionId:session,content:'body',revision:'r',objectVersion:'o'}})
- const request={sessionId:session,relPath:'same.md',objectVersion:'old',expectedRevision:'a'.repeat(64),modelRecordId:'model',range:{start:0,end:3},expectedText:'/go',promptText:'go',references:[]}
+ const request={sessionId:session,relPath:'same.md',objectVersion:'old',expectedRevision:'a'.repeat(64),modelRecordId:'model',...draftRequest(draftSource('go').source,'go'),references:[]}
  const old=invoke(IPC.agentAuthorizationPreview,{session,args:[request]}).then(()=>null,(e:Error)=>e.message)
  await started;await invoke(IPC.vaultOpen,catalog.inspect(b).id!);release()
  try{expect(await old).toBe('VAULT_CHANGED');expect(roots).toEqual([])}finally{vi.restoreAllMocks()}

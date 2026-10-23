@@ -10,6 +10,7 @@ import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
 import { modelTierFor } from '../../src/main/permissions.ts'
 import { VaultSession } from '../../src/main/vault.ts'
 import { markPrompt,upsertAiAnswer } from '../../src/main/host-source.ts'
+import { draftRequest, draftSource } from './draft-fixture.ts'
 import { VaultLifecycle } from '../../src/main/vault-lifecycle.ts'
 import { vaultRootIdentity,watchVault } from '../../src/main/watch.ts'
 import * as notesFs from '../../src/main/notes-fs.ts'
@@ -162,7 +163,7 @@ describe('VaultSession isolation', () => {
     const {session,attach,first}=await setup()
     try{
       await attach(first)
-      const source=markPrompt('/问',{taskId:'old-task',range:{start:0,end:2},expectedText:'/问',promptText:'问'})
+      const draft=draftSource('问'),source=markPrompt(draft.source,{taskId:'old-task',...draft,expectedText:'问',promptText:'问'})
       const original=await session.readOpened('原篇.md');await session.write('原篇.md',source,original.revision,original)
       const note=await session.read('原篇.md'),answer='无损保留。'.repeat(1000)
       await session.ledgerPrepare('原篇.md',{taskId:'old-task',startedAt:new Date(Date.now()-8*86400000).toISOString(),status:'completed',prompt:'问',answer})
@@ -848,7 +849,7 @@ async function pendingHostRecoveryFixture(relPath = '原篇.md') {
   const { AgentHost } = await import('../../src/main/agent-host.ts')
   const { VaultStructureGate } = await import('../../src/main/vault-mutation-queue.ts')
   await mkdir(path.dirname(path.join(app.first, relPath)), { recursive: true })
-  await writeFile(path.join(app.first, relPath), '/问\n')
+  await writeFile(path.join(app.first, relPath), draftSource('问').source)
   await app.attach(app.first)
   const note = await app.session.read(relPath), grant = await migrationGrant(app.session, relPath)
   const fs = secureFsFor(app.first), replace = fs.replace.bind(fs), gate = new VaultStructureGate()
@@ -876,7 +877,7 @@ async function pendingHostRecoveryFixture(relPath = '原篇.md') {
     stream: async function* () { dispatch(); streamStarted(); await streamHold; fail = true; yield '完整待保存回答' },
     emit: event => { events.push(event) }
   })
-  const input = { ...note, relPath: relPath, expectedRevision: note.revision, range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' }
+  const input = { ...note, relPath: relPath, expectedRevision: note.revision, ...draftRequest(note.content, '问') }
   const task = await host.start(input)
   void task.done.catch(() => {})
   await started

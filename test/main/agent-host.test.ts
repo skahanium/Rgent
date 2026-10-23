@@ -13,6 +13,31 @@ import { assertLedgerPreserved, partitionSource } from '../../src/markdown/parti
 import { appendLedgerChapter, markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
 
 import type { NoteSnapshot } from '../../src/shared/ipc.ts'
+
+/** 草稿块：marker 紧贴提问段落；发送请求只覆盖正文，不再包含 `/`。 */
+const DRAFT = '<!-- rgent:prompt:v1 state="draft" -->'
+const ASK = '写个回答'
+
+function draftSource(prompt = ASK, newline = '\n'): { source: string; range: { start: number; end: number } } {
+  const source = `${DRAFT}${newline}${prompt}${newline}`
+  const start = DRAFT.length + newline.length
+  return { source, range: { start, end: start + prompt.length } }
+}
+
+/** HostStart 的提问夹具：范围与 expectedText 都只指向提问正文。 */
+function ask(source: string, prompt = ASK): { range: { start: number; end: number }; expectedText: string; promptText: string } {
+  const start = source.indexOf(prompt)
+  if (start < 0) throw new Error(`测试夹具找不到提问：${prompt}`)
+  return { range: { start, end: start + prompt.length }, expectedText: prompt, promptText: prompt }
+}
+
+/** 同一段提问正文出现多次时（先发后新草稿），定位最后一段新草稿。 */
+function askLast(source: string, prompt = ASK): { range: { start: number; end: number }; expectedText: string; promptText: string } {
+  const start = source.lastIndexOf(prompt)
+  if (start < 0) throw new Error(`测试夹具找不到提问：${prompt}`)
+  return { range: { start, end: start + prompt.length }, expectedText: prompt, promptText: prompt }
+}
+
 /** 测试用授权：范围语义与 LiveGrant 同形，读/结构/建都走同一套逐篇判据。 */
 function fakeGrant(options: {
   origin: string
@@ -118,19 +143,21 @@ function fakeGrant(options: {
 
 /** 稳态正文：已有一章账本，正文尾部留一个新口令段。与真实落盘形状一致。 */
 function withExistingLedger(): { source: string; range: { start: number; end: number } } {
-  let source = markPrompt('/写个回答\n', { taskId: 't0', range: { start: 0, end: 5 }, expectedText: '/写个回答', promptText: '写个回答' })
+  const seeded = draftSource('写个回答')
+  let source = markPrompt(seeded.source, { taskId: 't0', ...seeded, expectedText: '写个回答', promptText: '写个回答' })
   source = upsertAiAnswer(source, { taskId: 't0', answer: '旧回答' })
   source = appendLedgerChapter(source, { taskId: 't0', startedAt: 'prev', status: 'completed', prompt: '写个回答', answer: '旧回答' })
   const part = partitionSource(source)
   const prefix = part.body.endsWith('\n\n') ? part.body : part.body.endsWith('\n') ? `${part.body}\n` : `${part.body}\n\n`
-  const body = `${prefix}/写个回答\n`
-  const range = { start: prefix.length, end: prefix.length + '/写个回答'.length }
+  const prompt = draftSource('写个回答')
+  const body = `${prefix}${prompt.source}`
+  const range = { start: prefix.length + prompt.range.start, end: prefix.length + prompt.range.end }
   return { source: body + (part.ledger ?? ''), range }
 }
 
 function harness(
   stream: (signal: AbortSignal, prompt: string) => AsyncIterable<string>,
-  initial = '前言\n\n/写个回答\n\n后文\n',
+  initial = '前言\n\n' + DRAFT + '\n写个回答\n\n后文\n',
   assistant?: () => import('../../src/shared/assistant.ts').AssistantHabits,
   extra: Partial<import('../../src/main/agent-host.ts').HostDependencies> = {}
 ) {
@@ -178,8 +205,7 @@ describe('Host minimal loop', () => {
     })
     lock = () => app.setLifecycleLock(true)
     const source = app.source()
-    const start = source.indexOf('/')
-    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
     await expect(task.done).rejects.toThrow('LIFECYCLE_RECOVERY_REQUIRED')
     expect(app.host.pendingPaths('/vault')).toEqual(['a.md'])
     expect(app.host.pendingPaths('/other-vault')).toEqual([])
@@ -208,17 +234,47 @@ describe('Host minimal loop', () => {
   it('writes the prompt and streamed answer into the original note, then appends one ledger chapter', async () => {
     const app = harness(async function* () { yield '第一段。\n\n'; yield '## 第二段' })
     const source = app.source()
-    const start = source.indexOf('/')
-    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
     const result = await task.done
     expect(result.status).toBe('completed')
     const part = partitionSource(app.source())
     expect(part.body).toContain('<!-- rgent:prompt:v1 task-id="')
-    expect(part.body).not.toContain('/写个回答')
+    expect(part.body).not.toContain('state="draft"')
+    expect(part.body).toContain('写个回答')
     expect(part.body.match(/<!-- rgent:ai:v1 task-id=/g)).toHaveLength(2)
     expect(part.body).toContain('后文')
     expect(app.history.history()).toContain('第一段。');expect(part.ledger).toBeNull()
     expect(app.history.history()).toContain('写个回答')
+  })
+
+  it('sends a draft block by upgrading only its marker, leaving the body bytes alone', async () => {
+    const app = harness(async function* () { yield '回答' })
+    const source = app.source()
+    expect(source).toContain(`${DRAFT}\n写个回答`)
+    const before = partitionSource(source).body
+    const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
+    expect(await task.done).toEqual({ status: 'completed' })
+    const body = partitionSource(app.source()).body
+    expect(body).toContain('<!-- rgent:prompt:v1 task-id="')
+    expect(body).not.toContain('state="draft"')
+    // 只换 marker 行：把升级后的 marker 与新增 AI 块还原，正文应逐字节回到发送前。
+    const restored = body
+      .replace(/<!-- rgent:prompt:v1 task-id="[^"]+" -->/, DRAFT)
+      .replace(/<!-- rgent:ai:v1 task-id="[^"]+" -->\n回答\n\n/, '')
+    expect(restored).toBe(before)
+    expect(app.history.records().at(-1)?.prompt).toBe('写个回答')
+  })
+
+  it.each([
+    ['missing draft marker', '前言\n\n写个回答\n\n后文\n', '写个回答', 'PROMPT_BLOCK_INVALID'],
+    ['comment delimiters in the prompt', '前言\n\n' + DRAFT + '\n写个回答 <!--\n\n后文\n', '写个回答 <!--', 'PROMPT_UNSAFE']
+  ])('refuses %s before writing anything', async (_, initial, prompt, code) => {
+    const app = harness(async function* () { yield '不应发生' }, initial)
+    const before = app.source()
+    await expect(app.host.start({ relPath: 'a.md', ...ask(before, prompt) })).rejects.toThrow(code)
+    expect(app.source()).toBe(before)
+    expect(app.events).toEqual([])
+    expect(app.history.records()).toEqual([])
   })
 
   it('completes and appends the ledger when the model answer ends in an open HTML block', async () => {
@@ -226,7 +282,7 @@ describe('Host minimal loop', () => {
     const app = harness(async function* () { yield '表格：\n\n<table>\n<tr><td>被截断的行' }, seeded.source)
     const before = partitionSource(seeded.source).ledger
     expect(before).not.toBeNull()
-    const task = await app.host.start({ relPath: 'a.md', range: seeded.range, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', range: seeded.range, expectedText: '写个回答', promptText: '写个回答' })
     expect(await task.done).toEqual({ status: 'completed' })
     expect(app.host.hasPending('/vault')).toBe(false)
     const part = partitionSource(app.source())
@@ -241,8 +297,7 @@ describe('Host minimal loop', () => {
     const app = harness(async function* () { yield 'secret' })
     app.setPolicy('forbidden')
     const before = app.source()
-    const start = before.indexOf('/')
-    await expect(app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })).rejects.toThrow('FORBIDDEN')
+    await expect(app.host.start({ relPath: 'a.md', ...ask(before) })).rejects.toThrow('FORBIDDEN')
     expect(app.source()).toBe(before)
   })
 
@@ -255,15 +310,14 @@ describe('Host minimal loop', () => {
     })
     revoke = () => app.setPolicy('forbidden')
     const source = app.source()
-    const start = source.indexOf('/')
-    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
     await task.done.catch(() => {})
     expect(app.source()).not.toContain('不得再出现')
     expect(app.events.some((event) => JSON.stringify(event).includes('不得再出现'))).toBe(false)
   })
 
   it('does not send note text if permission changes while the model source is being read', async () => {
-    let content = '/问\n'
+    let content = DRAFT + '\n问\n'
     let revision = 1
     let allowed = true
     let sent = false
@@ -271,7 +325,7 @@ describe('Host minimal loop', () => {
     const host = new AgentHost({ledger:history.ledger,onReasoning:(_task,text)=>reasoning.push(text),
       root: () => '/vault',
       read: async () => {
-        if (content.includes('<!-- rgent:prompt:v1')) allowed = false
+        if (content.includes('<!-- rgent:prompt:v1 task-id=')) allowed = false
         return { content, revision: String(revision) }
       },
       write: async (_path, next, expected) => {
@@ -285,7 +339,7 @@ describe('Host minimal loop', () => {
       stream: async function* () { sent = true; yield '不应发送' },
       emit: () => {}
     })
-    const task = await host.start({ relPath: 'a.md', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const task = await host.start({ relPath: 'a.md', ...ask(content, '问') })
     await task.done.catch(() => {})
     expect(sent).toBe(false)
   })
@@ -302,8 +356,7 @@ describe('Host minimal loop', () => {
       yield '迟到内容'
     })
     const source = app.source()
-    const start = source.indexOf('/')
-    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
     await reachedNext
     const stop = app.host.cancel(task.id, 'user')
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -321,8 +374,7 @@ describe('Host minimal loop', () => {
     const app = harness(async function* () { yield '回答' })
     app.failLedgerOnce()
     const source = app.source()
-    const start = source.indexOf('/')
-    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
     await expect(task.done).rejects.toThrow('IO_ERROR')
     expect(app.host.hasPending()).toBe(true)
     await app.host.retryPending()
@@ -331,23 +383,20 @@ describe('Host minimal loop', () => {
   })
 
   it('does not start a later task in a note with an unsaved prior answer', async () => {
-    const app = harness(async function* () { yield '回答' }, '前言\n\n/写个回答\n\n/第二问\n')
+    const app = harness(async function* () { yield '回答' }, '前言\n\n' + DRAFT + '\n写个回答\n\n' + DRAFT + '\n第二问\n')
     app.failLedgerOnce()
     const source = app.source()
-    const first = source.indexOf('/写个回答')
-    const task = await app.host.start({ relPath: 'a.md', range: { start: first, end: first + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
     await expect(task.done).rejects.toThrow('IO_ERROR')
     expect(app.host.hasPending()).toBe(true)
     const secondSource = app.source()
-    const second = secondSource.indexOf('/第二问')
-    await expect(app.host.start({ relPath: 'a.md', range: { start: second, end: second + '/第二问'.length }, expectedText: '/第二问', promptText: '第二问' })).rejects.toThrow('PREVIOUS_TASK_UNSAVED')
+    await expect(app.host.start({ relPath: 'a.md', ...ask(secondSource, '第二问') })).rejects.toThrow('PREVIOUS_TASK_UNSAVED')
   })
 
   it('does not place provider error text containing a key into events or the ledger', async () => {
     const app = harness(async function* () { throw new Error('remote echoed secret in failure') })
     const source = app.source()
-    const start = source.indexOf('/')
-    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
     expect(await task.done).toEqual({ status: 'failed', reason: 'MODEL_REQUEST_FAILED' })
     expect(app.source()).not.toContain('remote echoed secret')
     expect(JSON.stringify(app.events)).not.toContain('remote echoed secret')
@@ -356,8 +405,7 @@ describe('Host minimal loop', () => {
   it('redacts an API key echoed across model stream chunks before display or write', async () => {
     const app = harness(async function* () { yield '前缀 sec'; yield 'ret 后缀' })
     const source = app.source()
-    const start = source.indexOf('/')
-    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
     expect(await task.done).toEqual({ status: 'completed' })
     expect(app.source()).not.toContain('secret')
     expect(JSON.stringify(app.events)).not.toContain('secret')
@@ -366,15 +414,14 @@ describe('Host minimal loop', () => {
 
   it('summarizes an oversized old ledger in bounded task-local calls before final generation', async () => {
     const prompts: string[] = []
-    const source = '前言\n\n/写个回答\n\n后文\n'
+    const source = '前言\n\n' + DRAFT + '\n写个回答\n\n后文\n'
     const app = harness(async function* (_signal, prompt) {
       prompts.push(prompt)
       yield prompt.startsWith('仅整理') ? SUMMARY_SECTIONS.map(h=>h+'\n旧章摘要。').join('\n\n') : '最终回答。'
     }, source)
     app.history.seed('a.md',{taskId:'old',startedAt:new Date().toISOString(),status:'completed',prompt:'旧任务',answer:'历史。'.repeat(300)})
     app.history.seed('a.md',{taskId:'recent',startedAt:new Date().toISOString(),status:'completed',prompt:'最近',answer:'最近。'})
-    const start = source.indexOf('/')
-    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
     expect(await task.done).toEqual({ status: 'completed' })
     expect(prompts.filter((prompt) => prompt.startsWith('仅整理')).length).toBeGreaterThan(0)
     expect(prompts.at(-1)).toContain('须查原文')
@@ -391,8 +438,7 @@ describe('Host minimal loop', () => {
     })
     edit = () => app.externalEdit((source) => source.replace('第一段', '外部修改'))
     const source = app.source()
-    const start = source.indexOf('/')
-    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
     await expect(task.done).rejects.toThrow('AI_BLOCK_CHANGED')
     expect(app.source()).toContain('外部修改')
     expect(app.source()).not.toContain('第二段')
@@ -424,7 +470,7 @@ describe('Host minimal loop', () => {
       },
       emit: () => {}
     })
-    const task = await host.start({ relPath: 'a.md', range: seeded.range, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await host.start({ relPath: 'a.md', range: seeded.range, expectedText: '写个回答', promptText: '写个回答' })
     expect(await task.done).toEqual({ status: 'completed' })
     const part = partitionSource(content)
     expect(part.body).toContain('公开回答。')
@@ -437,7 +483,7 @@ describe('Host minimal loop', () => {
   })
 
   it('retries every pending note even when one of them keeps failing', async () => {
-    const seed = '前言\n\n/写个回答\n\n后文\n'
+    const seed = '前言\n\n' + DRAFT + '\n写个回答\n\n后文\n'
     const notes = new Map<string, { content: string; revision: number }>([
       ['a.md', { content: seed, revision: 1 }],
       ['b.md', { content: seed, revision: 1 }]
@@ -467,8 +513,7 @@ describe('Host minimal loop', () => {
     })
     const startFor = async (relPath: string) => {
       const content = notes.get(relPath)!.content
-      const at = content.indexOf('/写个回答')
-      return host.start({ relPath, range: { start: at, end: at + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+      return host.start({ relPath, ...ask(content) })
     }
     failNextLedger = true
     await expect((await startFor('a.md')).done).rejects.toThrow('IO_ERROR')
@@ -495,7 +540,7 @@ describe('Host minimal loop', () => {
 describe('assistant habits in a run', () => {
   it('appends the habit block to the system prompt and records one summary line', async () => {
     const app = harness(async function* () { yield '回答' }, undefined, () => ({ address: '老陈', tone: 'concise', note: '先给结论' }))
-    const task = await app.host.start({ relPath: 'a.md', range: { start: 4, end: 9 }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(app.source()) })
     const full = await task.done
     expect(full.status).toBe('completed')
     expect(app.systems).toHaveLength(1)
@@ -506,7 +551,7 @@ describe('assistant habits in a run', () => {
 
   it('changes nothing for tasks when the habits are untouched', async () => {
     const app = harness(async function* () { yield '回答' }, undefined, () => ({ address: '', tone: 'plain', note: '' }))
-    const task = await app.host.start({ relPath: 'a.md', range: { start: 4, end: 9 }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(app.source()) })
     await task.done
     expect(app.systems[0]).not.toContain('助手习惯')
     expect(app.source()).not.toContain('助手习惯：已应用')
@@ -516,14 +561,14 @@ describe('assistant habits in a run', () => {
 import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
 it.each(['valid','revision','object','session'] as const)('continues only a verified migration receipt: %s',async changed=>{
  const hash=(text:string)=>createHash('sha256').update(text).digest('hex')
- let content='/问\n<!-- rgent:ledger:v1 -->\n旧历史',objectVersion='old',revision=hash(content)
+ let content=DRAFT+'\n问\n<!-- rgent:ledger:v1 -->\n旧历史',objectVersion='old',revision=hash(content)
  const credential={provider:'custom' as const,baseURL:'https://model.example/v1',modelId:'m',contextTokens:16000,apiKey:'fixture'},limits={seconds:30,steps:4,tools:0}
  const read=async()=>({content,revision,sessionId:'s',objectVersion})
  const registry=new TaskAuthorizationRegistry({root:()=>'/v',session:()=>'s',tree:async()=>[{kind:'note',relPath:'a.md',name:'a.md'}],read,tier:async()=> 'reference',acceptsObject:(_path,previous,next)=>previous==='old'&&next==='new',configuration:()=>({credential,limits})})
- const request={modelRecordId:'m',relPath:'a.md',sessionId:'s',objectVersion,expectedRevision:revision,range:{start:0,end:2},expectedText:'/问',scope:'note' as const,promptText:'问'}
+ const request={modelRecordId:'m',relPath:'a.md',sessionId:'s',objectVersion,expectedRevision:revision,...ask(content,'问'),scope:'note' as const}
  const preview=await registry.preview('owner',request);let writes=0,streams=0
  const host=new AgentHost({root:()=>'/v',session:()=>'s',acceptsObject:(_path,previous,next)=>previous==='old'&&next==='new',tier:async()=> 'reference',authorize:input=>registry.consume('owner',input as never),prepareSource:async()=>{
-  const previousRevision=revision;content='/问\n';revision=hash(content);objectVersion='new'
+  const previousRevision=revision;content=DRAFT+'\n问\n';revision=hash(content);objectVersion='new'
   return {previousRevision,revision:changed==='revision'?'wrong':revision,sessionId:changed==='session'?'other':'s',previousObjectVersion:'old',objectVersion:changed==='object'?'other':'new',migrated:true}
  },read,write:async(_path,next)=>{writes++;content=next;revision=hash(next);return {revision,sessionId:'s',objectVersion}},credential:()=>credential,limits:()=>limits,stream:async function*(){streams++;yield '回答'},emit:()=>{},ledger:hostLedgerFixture().ledger})
  if(changed==='valid'){const started=await host.start({...request,previewId:preview.id});await started.done;expect(writes).toBeGreaterThan(0);expect(streams).toBe(1)}
@@ -531,7 +576,7 @@ it.each(['valid','revision','object','session'] as const)('continues only a veri
 })
 
 it('cancelAll covers only running tasks and leaves a still-launching start intact', async () => {
-  let content = '前言\n\n/写个回答\n\n后文\n', revision = 1, reading = 0
+  let content = '前言\n\n' + DRAFT + '\n写个回答\n\n后文\n', revision = 1, reading = 0
   let releaseRead!: () => void
   const held = new Promise<void>(resolve => { releaseRead = resolve })
   const host = new AgentHost({
@@ -549,8 +594,7 @@ it('cancelAll covers only running tasks and leaves a still-launching start intac
     emit: () => {},
     ledger: hostLedgerFixture().ledger
   })
-  const start = content.indexOf('/')
-  const launching = host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+  const launching = host.start({ relPath: 'a.md', ...ask(content) })
   await vi.waitFor(() => expect(reading).toBe(1))
   await host.cancelAll('close')
   expect(host.active()).toEqual([])
@@ -564,7 +608,7 @@ it('cancelAll covers only running tasks and leaves a still-launching start intac
 
 it('waits for launching to settle, rejects the now-active task, and never queues a new launch during recovery', async () => {
   const app = harness(async function* (signal) { await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true })) })
-  const source = app.source(), start = source.indexOf('/'), input = { relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' }
+  const input = { relPath: 'a.md', ...ask(app.source()) }
   const launching = app.host.start(input)
   let ran = false
   const recovery = app.host.withLedgerRecovery('resume', async () => { ran = true })
@@ -579,7 +623,7 @@ it('waits for launching to settle, rejects the now-active task, and never queues
 })
 
 function memoryToolHarness(options:{calls?:{id:string;name:string;input:unknown}[];verified?:boolean;empty?:boolean;tools?:number;steps?:number;library?:boolean;proof?:()=>void|Promise<void>;change?:()=>void}={}){
- let content='单篇普通正文\n\n/问\n',revision=1,dispatches=0,proofReads=0,enabled=true,entriesVersion=1,paused=false
+ let content='单篇普通正文\n\n'+DRAFT+'\n问\n',revision=1,dispatches=0,proofReads=0,enabled=true,entriesVersion=1,paused=false
  const history=hostLedgerFixture(),requests:Parameters<NonNullable<import('../../src/main/agent-host.ts').HostDependencies['streamStep']>>[0][]=[]
  const credential={provider:'custom' as const,baseURL:'https://model.example/v1',modelId:'m',contextTokens:32000,apiKey:'fixture'}
  const source={id:'s',version:1,relPath:'outside.md',objectVersion:'outside',revision:'a'.repeat(64),permissionTier:'reference' as const,kind:'body' as const,taskId:null,taskMaterialHash:null,classification:'human' as const,start:0,end:2,text:'依据',hash:'b'.repeat(64),basisHash:'c'.repeat(64),sourceDeps:[],memoryDeps:[]}
@@ -589,7 +633,7 @@ function memoryToolHarness(options:{calls?:{id:string;name:string;input:unknown}
  const grant=fakeGrant({origin:'a.md',root:'/v',scope:options.library?'vault':'note',credential,limits:{seconds:30,steps:options.steps??12,tools:options.tools??20},read,tier:async()=> 'reference',sources:[originProof,...(options.library?[{sourceId:'external',relPath:'b.md',title:'b',sessionId:'s',objectVersion:'b',revision:'b',fingerprint:'b',tier:'reference' as const}]:[])]})
  const host=new AgentHost({ledger:history.ledger,...(options.library?{createReadOnlyTools:(grant:import('../../src/main/task-authorization.ts').TaskGrant,id:string)=>createScopedAgentTools(grant,id,{read,tier:async()=> 'reference',acceptsObject:()=>false})}:{}),root:()=>'/v',session:()=> 's',read,write:async(_path,next,expected)=>{if(expected!==String(revision))throw Error('CONFLICT');content=next;return String(++revision)},tier:async()=> 'reference',credential:()=>credential,limits:()=>grant.limits,authorize:async()=>grant,memory,stream:async function*(){throw Error('OLD_STREAM')},streamStep:async function*(input){requests.push(structuredClone(input));dispatches++;if(dispatches===1){for(const c of options.calls??[{id:'one',name:'search_memory',input:{query:'火星'}}])yield {type:'tool-call',...c};yield {type:'finish',reason:'tool-calls'}}else {options.change?.();yield {type:'text',text:'已答'};yield {type:'finish',reason:'stop'}}},emit:()=>{}})
  if(options.verified!==false)host.supportsMemorySearch=()=>true
- const run=()=>host.start({relPath:'a.md',sessionId:'s',objectVersion:'o',expectedRevision:'1',range:{start:content.indexOf('/问'),end:content.indexOf('/问')+2},expectedText:'/问',promptText:'问',memorySearchAuthorized:true})
+ const run=()=>host.start({relPath:'a.md',sessionId:'s',objectVersion:'o',expectedRevision:'1',...ask(content,'问'),memorySearchAuthorized:true})
  return {host,history,requests,run,proofReads:()=>proofReads,content:()=>content,off:()=>{enabled=false},forget:()=>{entriesVersion++},pause:()=>{paused=true}}
 }
 it('registers only search_memory for a verified note-only task and records real sent dependencies',async()=>{
@@ -661,7 +705,7 @@ it('reuses a valid partial cache in the production chapters path without another
  for(const id of ['cached','uncovered'])app.history.seed('a.md',{taskId:id,startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'旧',answer:'旧记录。'.repeat(300),provenance:{version:1,model:{provider:'custom',modelId:id,endpointHost:'localhost'},scope:['a.md'],sources:[],tools:[]}})
  const chapters=await app.history.ledger.contexts('a.md'),text=SUMMARY_SECTIONS.map(h=>h+'：已有').join('\n')
  cache.put(key,[chapters[0]!],text,{modelId:'cached-model',host:'cached.example',connection:'cached',time:'2026-01-01T00:00:00Z',format:1})
- const at=app.source().indexOf('/'),task=await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})
+ const task=await app.host.start({relPath:'a.md',...ask(app.source())})
  expect(await task.done).toEqual({status:'completed'})
  expect(prompts.filter(p=>p.startsWith('仅整理'))).toHaveLength(0)
  expect(prompts[0]).toContain(text.split('\n')[0])
@@ -672,7 +716,7 @@ it('reuses a valid partial cache in the production chapters path without another
 })
 it('saves a valid visible prefix when control characters exceed the JSON encoded answer allowance',async()=>{
  const app=harness(async function*(){yield '已有回答';yield '\u0000'.repeat(500000)})
- const at=app.source().indexOf('/'),task=await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})
+ const task=await app.host.start({relPath:'a.md',...ask(app.source())})
  expect(await task.done).toEqual({status:'failed',reason:'MODEL_OUTPUT_LIMIT'})
  const saved=app.history.records().at(-1)!
  expect(saved.answer.startsWith('已有回答')).toBe(true)
@@ -684,13 +728,13 @@ it('saves a valid visible prefix when control characters exceed the JSON encoded
 it('ends empty and invalid production summaries with one reserved answer call',async()=>{
  const prompts:string[]=[];const app=harness(async function*(_signal,prompt){prompts.push(prompt);yield prompt.startsWith('仅整理')?'无有效摘要':'保留回答'})
  app.history.seed('a.md',{taskId:'old',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'旧',answer:'历史。'.repeat(300)})
- const at=app.source().indexOf('/');expect(await (await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})).done).toEqual({status:'completed'})
+ expect(await (await app.host.start({relPath:'a.md',...ask(app.source())})).done).toEqual({status:'completed'})
  expect(prompts.filter(p=>p.startsWith('仅整理'))).toHaveLength(2);expect(prompts.filter(p=>!p.startsWith('仅整理'))).toHaveLength(1);expect(app.history.records().at(-1)!.answer).toBe('保留回答')
 })
 it('fits the serialized omission notice for many historical chapters and still reserves one answer',async()=>{
  let sends=0;const app=harness(async function*(_signal,prompt){sends++;yield prompt.startsWith('仅整理')?SUMMARY_SECTIONS.map(h=>h+'：概述').join('\n'):'回答完成'})
  for(let n=0;n<100;n++)app.history.seed('a.md',{taskId:'old-'+n+'-'.repeat(115),startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'旧',answer:'历史。'.repeat(300)})
- const at=app.source().indexOf('/'),task=await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})
+ const task=await app.host.start({relPath:'a.md',...ask(app.source())})
  expect(await task.done).toEqual({status:'completed'});expect(sends).toBeGreaterThanOrEqual(1);expect(app.history.records().at(-1)!.answer).toBe('回答完成')
 })
 it('omits a ledger answer derived from forgotten raw material even when original memoryDeps are empty',async()=>{
@@ -699,7 +743,7 @@ it('omits a ledger answer derived from forgotten raw material even when original
  const base={startedAt:'2026-01-01T00:00:00Z',status:'completed' as const,prompt:'原始要求',provenance:{version:2 as const,memoryDeps:[],model:{provider:'custom',modelId:'old',endpointHost:'localhost'},scope:['a.md'],sources:[],tools:[]}}
  app.history.seed('a.md',{...base,taskId:'original',answer:'原始历史仍可核对'})
  app.history.seed('a.md',{...base,taskId:'derived',answer:'FORGOTTEN_DERIVED_SNAPSHOT',sentSummaries:[{step:1,text:'已发送摘要副本',sourceChapterIds:['original'],generators:[],dependencies:[{sourceId:'original',hash:summaryHash('原始材料')}]}]})
- const at=app.source().indexOf('/');expect(await (await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})).done).toEqual({status:'completed'})
+ expect(await (await app.host.start({relPath:'a.md',...ask(app.source())})).done).toEqual({status:'completed'})
  expect(prompts.at(-1)).not.toContain('FORGOTTEN_DERIVED_SNAPSHOT');expect(prompts.at(-1)).toContain('原始历史仍可核对');expect(app.history.records().find(c=>c.taskId==='derived')!.answer).toBe('FORGOTTEN_DERIVED_SNAPSHOT')
 })
 it('checks forgetting before derived sends without creating any memory-use permit',async()=>{
@@ -709,7 +753,7 @@ it('checks forgetting before derived sends without creating any memory-use permi
  const app=harness(async function*(_signal,prompt){prompts.push(prompt);yield '新回答'},undefined,undefined,extra)
  app.history.seed('a.md',{taskId:'old',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'原依据',answer:'历史。'.repeat(300)})
  const chapters=await app.history.ledger.contexts('a.md'),text=SUMMARY_SECTIONS.map(h=>h+'：FORGOTTEN_WITHOUT_PERMIT').join('\n');cache.put(key,chapters,text,{modelId:'cache',host:'cache.test',connection:'cache',time:'2026-01-01T00:00:00Z',format:1})
- const at=app.source().indexOf('/');expect(await (await app.host.start({relPath:'a.md',range:{start:at,end:at+5},expectedText:'/写个回答',promptText:'写个回答'})).done).toEqual({status:'completed'})
+ expect(await (await app.host.start({relPath:'a.md',...ask(app.source())})).done).toEqual({status:'completed'})
  expect(prompts).toHaveLength(1);expect(prompts[0]).not.toContain('FORGOTTEN_WITHOUT_PERMIT');expect(app.history.records().at(-1)!.sentSummaries??[]).toEqual([])
  }finally{rmSync(directory,{recursive:true,force:true})}
 })
@@ -719,22 +763,22 @@ vi.mock('../../src/main/watch.ts',async importOriginal=>({...await importOrigina
 it.each(['missing-connection','extra-field','material-envelope'] as const)('saves actual Vault Host output at the %s production boundary',async boundary=>{
  const {mkdtemp,mkdir,writeFile,readFile,rm}=await import('node:fs/promises'),{tmpdir}=await import('node:os'),path=await import('node:path')
  const {VaultSession}=await import('../../src/main/vault.ts'),{serializeStoredVault}=await import('../../src/main/notes-fs.ts'),{TaskMaterialTracker}=await import('../../src/main/host-material.ts')
- const base=await mkdtemp(path.join(tmpdir(),'rgent-C-host-final-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'正文\n\n/写个回答')
+ const base=await mkdtemp(path.join(tmpdir(),'rgent-C-host-final-')),root=path.join(base,'vault');await mkdir(root);await writeFile(path.join(base,'vault.json'),serializeStoredVault(root));await writeFile(path.join(root,'a.md'),'正文\n\n'+DRAFT+'\n写个回答')
  const vault=new VaultSession(base,vi.fn());vault.restore();const cache=new SummaryCache(path.join(base,'cache')),key=summaryHash('real-note'),requests:string[]=[],events:unknown[]=[]
  try{
   if(boundary==='material-envelope'){
    const note=await vault.read('a.md'),probe=new TaskMaterialTracker(1024*1024),raw='x'.repeat(262000);probe.body(raw,{start:0,end:raw.length},{...note,relPath:'a.md'});probe.commit();const overhead=Buffer.byteLength(JSON.stringify(probe.snapshot().fragments[0]))-raw.length
-   const material='x'.repeat(262142-overhead);await vault.write('a.md',material+'\n\n/写个回答',note.revision,note)
+   const material='x'.repeat(262142-overhead);await vault.write('a.md',material+'\n\n'+DRAFT+'\n写个回答',note.revision,note)
   }else{
-   let note=await vault.read('a.md');const marked=markPrompt(note.content,{taskId:'old',range:{start:note.content.indexOf('/'),end:note.content.length},expectedText:'/写个回答',promptText:'写个回答'});await vault.write('a.md',marked,note.revision,note);note=await vault.read('a.md')
+   let note=await vault.read('a.md');const marked=markPrompt(note.content,{taskId:'old',...ask(note.content)});await vault.write('a.md',marked,note.revision,note);note=await vault.read('a.md')
    await vault.ledgerPrepare('a.md',{taskId:'old',startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt:'写个回答',answer:'旧记录。'.repeat(2000),provenance:{version:2,model:{provider:'custom',modelId:'test',endpointHost:'localhost'},scope:['a.md'],sources:[],tools:[],memoryDeps:[]}})
    const saved=await vault.write('a.md',upsertAiAnswer(note.content,{taskId:'old',answer:'旧记录。'.repeat(2000)}),note.revision,note);await vault.ledgerComplete('a.md','old',saved.revision)
-   note=await vault.read('a.md');await vault.write('a.md',note.content+'\n\n/写个回答',note.revision,note)
+   note=await vault.read('a.md');await vault.write('a.md',note.content+'\n\n'+DRAFT+'\n写个回答',note.revision,note)
    cache.put(key,await vault.ledgerContexts('a.md'),SUMMARY_SECTIONS.map(h=>h+'：缓存BAD').join('\n'),{modelId:'cached',connection:'cached',host:'cache.test',time:'2026-01-01T00:00:00Z',format:1})
    const file=path.join(base,'cache',key+'.json'),bad=JSON.parse(await readFile(file,'utf8'));if(boundary==='missing-connection')delete bad.blocks[0].generator.connection;else bad.blocks[0].generator.extra='unexpected';await writeFile(file,JSON.stringify(bad))
   }
   const host=new AgentHost({root:()=>root,session:()=>vault.sessionId(),acceptsObject:(p,b,a)=>vault.acceptsObject(p,b,a),read:p=>vault.read(p),write:(p,c,r,b)=>vault.write(p,c,r,b!),tier:async()=> 'reference',ledger:{prepare:(p,c,v,b)=>{expect(b).toBeDefined();return vault.ledgerPrepare(p,c,v,b)},complete:(p,id,r)=>vault.ledgerComplete(p,id,r),contexts:p=>vault.ledgerContexts(p)},summaries:{cache,key:async()=>key},credential:()=>({provider:'custom',baseURL:'http://127.0.0.1:1234/v1',modelId:'test',contextTokens:boundary==='material-envelope'?1000000:10000,apiKey:'fake'}),limits:()=>({seconds:30,steps:4,tools:0}),stream:async function*(input){requests.push(input.prompt);yield input.prompt.startsWith('仅整理')?SUMMARY_SECTIONS.map(h=>h+'：重建摘要').join('\n'):'完整保存回答'},emit:e=>events.push(e)})
-  const note=await vault.read('a.md'),start=note.content.lastIndexOf('/写个回答'),task=await host.start({...note,relPath:'a.md',expectedRevision:note.revision,range:{start,end:start+5},expectedText:'/写个回答',promptText:'写个回答'})
+  const note=await vault.read('a.md'),task=await host.start({...note,relPath:'a.md',expectedRevision:note.revision,...askLast(note.content)})
   expect(await task.done).toEqual({status:'completed'});expect(host.hasPending()).toBe(false);expect(requests.join('\n')).not.toContain('缓存BAD')
   const record=await vault.ledgerRecord('a.md',task.id);expect(record.state).toBe('saved');expect(record.chapter?.answer).toBe('完整保存回答');expect(Buffer.byteLength(JSON.stringify(record))).toBeLessThan(2*1024*1024)
   if(boundary==='material-envelope'){expect(record.chapter?.material?.truncated).toBe(true);expect(Buffer.byteLength(JSON.stringify(record.chapter?.material))).toBeLessThanOrEqual(256*1024)}
@@ -743,7 +787,7 @@ it.each(['missing-connection','extra-field','material-envelope'] as const)('save
 })
 
 function writeToolHarness(options: { text?: string; calls?: { id: string; name: string; input: unknown }[]; noCreate?: boolean; relocation?: boolean; trash?: boolean; scope?: import('../../src/shared/ipc.ts').AgentScopeLevel; extras?: { relPath: string; tier: 'reference' | 'follow' }[]; sourcesVanishAfterTrash?: boolean; recheckAfterTrash?: boolean; trashError?: string; createTargetDenied?: boolean; legacyConfirm?: (request: unknown) => Promise<boolean> } = {}) {
-  let content = '人写的段落。\n\n/问\n'
+  let content = '人写的段落。\n\n' + DRAFT + '\n问\n'
   let revision = 1
   const history = hostLedgerFixture()
   const requests: Parameters<NonNullable<import('../../src/main/agent-host.ts').HostDependencies['streamStep']>>[0][] = []
@@ -807,7 +851,7 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
       else { yield { type: 'text', text: '已答。' }; yield { type: 'finish', reason: 'stop' } }
     },
     emit: (event) => { events.push(event) } })
-  const run = () => host.start({ relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: '1', range: { start: content.indexOf('/问'), end: content.indexOf('/问') + 2 }, expectedText: '/问', promptText: '问' })
+  const run = () => host.start({ relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: '1', ...ask(content, '问') })
   return { host, history, requests, events, run, content: () => content, created, moved, trashed }
 }
 
@@ -1049,7 +1093,7 @@ it('delete_note 的工具返回与账本 outcome 都带出孤儿与降级字段'
 /** 每场一个范围：同册按目录包含，本篇只看自己，整库看整库。 */
 function affectedHarness() {
   const contents = new Map<string, string>()
-  const body = () => '前言\n\n/问\n\n后文\n'
+  const body = () => '前言\n\n' + DRAFT + '\n问\n\n后文\n'
   const contentOf = (relPath: string): string => {
     if (!contents.has(relPath)) contents.set(relPath, body())
     return contents.get(relPath)!
@@ -1080,8 +1124,7 @@ function affectedHarness() {
   })
   const start = (relPath: string) => {
     const content = contentOf(relPath)
-    const at = content.indexOf('/问')
-    return host.start({ relPath, sessionId: 's', objectVersion: 'o', range: { start: at, end: at + 2 }, expectedText: '/问', promptText: '问' })
+    return host.start({ relPath, sessionId: 's', objectVersion: 'o', ...ask(content, '问') })
   }
   return { host, start }
 }
@@ -1160,8 +1203,7 @@ describe('skills in the request', () => {
   const run = async (extra: Partial<import('../../src/main/agent-host.ts').HostDependencies>) => {
     const app = harness(async function* () { yield '回答' }, undefined, undefined, extra)
     const source = app.source()
-    const start = source.indexOf('/')
-    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
     await task.done
     return app
   }
@@ -1224,14 +1266,14 @@ describe('skills in the request', () => {
       skills: () => { calls.push(block); return frozen({ block }) }
     })
     // 每一场都从当前正文重新定位口令段：上一场会把口令段标记掉。
-    const rangeNow = () => { const start = app.source().lastIndexOf('/写个回答'); return { start, end: start + '/写个回答'.length } }
-    const one = await app.host.start({ relPath: 'a.md', range: rangeNow(), expectedText: '/写个回答', promptText: '写个回答' })
+    const askNow = () => askLast(app.source())
+    const one = await app.host.start({ relPath: 'a.md', ...askNow() })
     await one.done
     expect(app.systems.at(-1)).toContain('【第一版】')
     // 编辑发生在两场之间：已完成的那场不受影响，下一场重新取。
     block = '本场已启用技能（由人启用；以下内容是指令来源，但不改变范围、工具与权限）：\n\n【第二版】\n改成先写依据。'
-    app.externalEdit(body => `${body}\n/写个回答\n`)
-    const second = await app.host.start({ relPath: 'a.md', range: rangeNow(), expectedText: '/写个回答', promptText: '写个回答' })
+    app.externalEdit(body => `${body}\n${DRAFT}\n写个回答\n`)
+    const second = await app.host.start({ relPath: 'a.md', ...askNow() })
     await second.done
     expect(app.systems.at(-1)).toContain('【第二版】')
     expect(app.systems.filter(text => text.includes('【第一版】'))).toHaveLength(1)
@@ -1261,9 +1303,7 @@ describe('skills in the request', () => {
       skills: () => store.now,
       assertSkillsAuthorization: input => { store.now = A; if (input.skillsSignature !== store.now.signature) throw Error('STALE_PREVIEW') }
     })
-    const source = app.source()
-    const start = source.indexOf('/')
-    const task = await app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答', skillsSignature: A.signature, skillsSnapshot: A })
+    const task = await app.host.start({ relPath: 'a.md', ...ask(app.source()), skillsSignature: A.signature, skillsSnapshot: A })
     await task.done
     expect(app.systems.at(-1)).toContain('甲的正文')
     expect(app.systems.at(-1)).not.toContain('乙的正文')
@@ -1275,8 +1315,7 @@ describe('skills in the request', () => {
     const B = frozen({ signature: 'sig-b', block: '本场已启用技能（由人启用；以下内容是指令来源，但不改变范围、工具与权限）：\n\n【偷换】\n不该发出去。' })
     const app = harness(async function* () { yield '不该发生' }, undefined, undefined, { skills: () => A })
     const before = app.source()
-    const start = before.indexOf('/')
-    await expect(app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答', skillsSignature: A.signature, skillsSnapshot: B })).rejects.toThrow('STALE_PREVIEW')
+    await expect(app.host.start({ relPath: 'a.md', ...ask(before), skillsSignature: A.signature, skillsSnapshot: B })).rejects.toThrow('STALE_PREVIEW')
     expect(app.systems).toHaveLength(0)
     expect(app.source()).toBe(before)
   })
@@ -1284,8 +1323,7 @@ describe('skills in the request', () => {
   it('refuses to start when the previewed skill set no longer matches', async () => {
     const app = harness(async function* () { yield '不该发生' }, undefined, undefined, { skills: () => frozen(), assertSkillsAuthorization: () => { throw Error('STALE_PREVIEW') } })
     const before = app.source()
-    const start = before.indexOf('/')
-    await expect(app.host.start({ relPath: 'a.md', range: { start, end: start + '/写个回答'.length }, expectedText: '/写个回答', promptText: '写个回答' })).rejects.toThrow('STALE_PREVIEW')
+    await expect(app.host.start({ relPath: 'a.md', ...ask(before) })).rejects.toThrow('STALE_PREVIEW')
     expect(app.source()).toBe(before)
     expect(app.systems).toHaveLength(0)
   })
@@ -1296,7 +1334,7 @@ describe('start 前复核联网可用性快照', () => {
   function availabilityHarness(initial: Availability = { available: true, search: true, providerHost: 'api.search.brave.com' }) {
     const credential = { provider: 'custom' as const, baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 16000, apiKey: 'fixture' }
     const limits = { seconds: 30, steps: 4, tools: 0 }
-    let content = '/问\n'
+    let content = DRAFT + '\n问\n'
     let availability = initial
     let streams = 0
     const read = async () => ({ content, revision: 'r', sessionId: 's', objectVersion: 'o' })
@@ -1309,7 +1347,7 @@ describe('start 前复核联网可用性快照', () => {
     })
     const request = {
       modelRecordId: 'm', relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: 'r',
-      range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', scope: 'vault' as const
+      ...ask(content, '问'), scope: 'vault' as const
     }
     const host = new AgentHost({
       ledger: hostLedgerFixture().ledger,
@@ -1336,7 +1374,7 @@ describe('start 前复核联网可用性快照', () => {
     app.setAvailability({ available: true, search: true, providerHost: 'api.tavily.com' })
     await expect(app.host.start({ ...app.request, previewId: preview.id })).rejects.toThrow('INVALID_AUTHORIZATION')
     expect(app.streams()).toBe(0)
-    expect(app.content()).toBe('/问\n')
+    expect(app.content()).toBe(DRAFT + '\n问\n')
   })
 
   it('rejects start when the master switch was turned off after preview, before any model request', async () => {
@@ -1345,6 +1383,6 @@ describe('start 前复核联网可用性快照', () => {
     app.setAvailability({ available: false, search: false, providerHost: null, reason: 'off' })
     await expect(app.host.start({ ...app.request, previewId: preview.id })).rejects.toThrow('INVALID_AUTHORIZATION')
     expect(app.streams()).toBe(0)
-    expect(app.content()).toBe('/问\n')
+    expect(app.content()).toBe(DRAFT + '\n问\n')
   })
 })

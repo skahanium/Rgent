@@ -6,10 +6,11 @@ import { TaskAuthorizationRegistry, type TaskGrant } from '../../src/main/task-a
 import { createScopedAgentTools } from '../../src/main/scoped-agent-tools.ts'
 import { encodeLedgerProvenance, ledgerProvenance } from '../../src/main/ledger-provenance.ts'
 import type { AgentStartRequest } from '../../src/shared/ipc.ts'
+import { draftRequest, draftSource } from './draft-fixture.ts'
 
 function deferred<T = void>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => { resolve = r }); return { promise, resolve } }
 function appFor(steps: ModelStepEvent[][], options: { tools?: number; modelSteps?: number } = {}) {
-  let content = '/问\n'; let revision = 1; let live = true; let fault = ''; let calls = 0
+  let content = draftSource('问').source; let revision = 1; let live = true; let fault = ''; let calls = 0
   const messages: unknown[] = []; const executed: string[] = []; const events: unknown[] = []
   const credential = { provider: 'custom' as const, baseURL: 'http://127.0.0.1:1/v1', modelId: 'test', contextTokens: 20000, apiKey: 'secret' }
   const limits = { seconds: 30, steps: options.modelSteps ?? 8, tools: options.tools ?? 8 }
@@ -39,7 +40,7 @@ function appFor(steps: ModelStepEvent[][], options: { tools?: number; modelSteps
     emit: e => { events.push(e) }
   }
   const host = new AgentHost(deps)
-  return { host, deps, tools, history, content: () => content, messages, executed, events, calls: () => calls, setFault: (value: string) => { fault = value }, start: () => host.start({ relPath: 'a.md', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' }) }
+  return { host, deps, tools, history, content: () => content, messages, executed, events, calls: () => calls, setFault: (value: string) => { fault = value }, start: () => host.start({ relPath: 'a.md', ...draftRequest(content, '问') }) }
 }
 const call = (id: string, name = 'search_library', input: unknown = { query: 'needle' }): ModelStepEvent => ({ type: 'tool-call', id, name, input })
 const finish = (reason = 'tool-calls'): ModelStepEvent => ({ type: 'finish', reason })
@@ -47,7 +48,7 @@ const finish = (reason = 'tool-calls'): ModelStepEvent => ({ type: 'finish', rea
 describe('Host loop over the real grant and tools', () => {
   it('never lets an out-of-scope note reach the model', async () => {
     const records = new Map<string, { content: string; revision: string; sessionId: string; objectVersion: string }>([
-      ['a.md', { content: '/问\n', revision: 'ra', sessionId: 's', objectVersion: 'oa' }],
+      ['a.md', { content: draftSource('问').source, revision: 'ra', sessionId: 's', objectVersion: 'oa' }],
       ['b.md', { content: '# 参考\n\nneedle 正文\n', revision: 'rb', sessionId: 's', objectVersion: 'ob' }],
       ['outside.md', { content: 'needle OUTSIDE_SECRET\n', revision: 'rc', sessionId: 's', objectVersion: 'oc' }]
     ])
@@ -59,7 +60,7 @@ describe('Host loop over the real grant and tools', () => {
       read: readNote, tier, acceptsObject: () => false,
       configuration: () => ({ credential: { provider: 'custom', baseURL: 'http://127.0.0.1:1/v1', modelId: 'm', contextTokens: 20000, apiKey: 'k' }, limits: { seconds: 30, steps: 4, tools: 6 } })
     })
-    const request = { modelRecordId: 'model-record', relPath: 'a.md', sessionId: 's', objectVersion: 'oa', expectedRevision: 'ra', range: { start: 0, end: 2 }, expectedText: '/问', scope:'vault' as const, promptText: '问' }
+    const request = { modelRecordId: 'model-record', relPath: 'a.md', sessionId: 's', objectVersion: 'oa', expectedRevision: 'ra', ...draftRequest(records.get('a.md')!.content, '问'), scope:'vault' as const }
     const preview = await registry.preview('owner', request)
     let revision = 1
     const sent: unknown[][] = []
@@ -146,7 +147,7 @@ describe('Host manual read-only loop', () => {
     const streaming = deferred(); const yieldText = deferred(); const checking = deferred(); const releaseCheck = deferred(); const blockedWrite = deferred(); const releaseWrite = deferred()
     let watchStarted = false; let writeStarted = false
     app.deps.streamStep = async function* () { streaming.resolve(); await yieldText.promise; yield { type: 'text', text: '自身保存' }; yield finish('stop') }
-    const grant = await app.deps.authorize!({ relPath: 'a.md', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const grant = await app.deps.authorize!({ relPath: 'a.md', ...draftRequest(app.content(), '问') })
     const validate = grant.validateSources
     grant.validateSources = async () => { if (watchStarted) { checking.resolve(); await releaseCheck.promise; if (writeStarted) throw Error('SOURCE_CHANGED') }; await validate() }
     const originalWrite = app.deps.write
@@ -175,7 +176,7 @@ describe('Host manual read-only loop', () => {
       writing = true; reached.resolve(); await release.promise
       const result = await write(...args); writing = false; return result
     }
-    const grant = await app.deps.authorize!({ relPath: 'a.md', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const grant = await app.deps.authorize!({ relPath: 'a.md', ...draftRequest(app.content(), '问') })
     grant.validateSources = async () => { checks++; if (writing) throw Error('SOURCE_CHANGED') }
     const task = await app.start(); await reached.promise
     const recheck = app.host.recheckSources('/vault', 's')
@@ -243,7 +244,7 @@ describe('Host manual read-only loop', () => {
   it('cancels without waiting for a stalled watcher that a pending checkpoint is queued behind', async () => {
     const app = appFor([]); const streaming = deferred(); const emitText = deferred(); const checking = deferred(); const release = deferred()
     app.deps.streamStep = async function* () { streaming.resolve(); await emitText.promise; yield { type: 'text', text: '等待保存的回答' }; yield finish('stop') }
-    const grant = await app.deps.authorize!({ relPath: 'a.md', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问' })
+    const grant = await app.deps.authorize!({ relPath: 'a.md', ...draftRequest(app.content(), '问') })
     const task = await app.start(); await streaming.promise
     grant.validateSources = async () => { checking.resolve(); await release.promise }
     const watcher = app.host.recheckSources('/vault', 's'); await checking.promise

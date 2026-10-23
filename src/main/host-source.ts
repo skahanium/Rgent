@@ -1,8 +1,9 @@
 import { encodeLedgerProvenance, type LedgerProvenance } from './ledger-provenance.ts'
 import { compile, compileFragment, composeSource, markerLine, parseMarker, partitionSource } from '../markdown/index.ts'
-import type { SourceRange } from '../markdown/types.ts'
+import type { CompileResult, SourceRange } from '../markdown/types.ts'
 import { assertLedgerPreserved, LEDGER_ANCHOR } from '../markdown/partition.ts'
 
+/** 草稿块升级：`range`、`expectedText`、`promptText` 都只指提问正文，不含 marker；`/` 只是普通正文。 */
 export interface PromptWrite {
   taskId: string
   range: SourceRange
@@ -106,29 +107,52 @@ function escapedModelText(text: string): string {
   return text.replaceAll('<!--', '&lt;!--').replaceAll('-->', '--&gt;')
 }
 
-/** Mark one existing top-level prompt paragraph. The editor's trigger slash is removed here. */
+/**
+ * 提问块的两种拒绝：结构不对（不是带草稿 marker 的单个顶层段落）与正文不安全
+ * （含注释定界符）。都必须在写盘前整件拒绝，不能留下半截 marker。
+ */
+const PROMPT_BLOCK_INVALID = 'PROMPT_BLOCK_INVALID'
+const PROMPT_UNSAFE = 'PROMPT_UNSAFE'
+
+/** 草稿 marker 与正文之间只允许一个换行：空行属于空草稿，不是可发送的提问。 */
+function adjacentDraftMarker(source: string, compiled: CompileResult, start: number): SourceRange | null {
+  const marker = compiled.index.markers.find((item) =>
+    item.identity === 'command' &&
+    item.range.end < start &&
+    /^(?:\r\n|\r|\n)$/.test(source.slice(item.range.end, start)))
+  if (!marker) return null
+  const parsed = parseMarker(source.slice(marker.range.start, marker.range.end))
+  if (!parsed || parsed.identity !== 'command') return null
+  if (parsed.attrs.state !== 'draft' || 'task-id' in parsed.attrs) return null
+  return marker.range
+}
+
+/**
+ * 把草稿块升级成已发送的口令块：只换 marker 行，正文、空白与换行风格逐字保留。
+ * 旧 `/…` 触发路径已退役；`/` 开头的正文不再被当成口令。
+ */
 export function markPrompt(source: string, write: PromptWrite): string {
   const taskId = taskKey(write.taskId)
   const part = partitionSource(source)
   const { start, end } = write.range
-  if (start < 0 || end > part.body.length || end < start || source.slice(start, end) !== write.expectedText) {
-    throw new Error('口令原文已变化')
+  if (start < 0 || end > part.body.length || end <= start || source.slice(start, end) !== write.expectedText) {
+    throw new Error(PROMPT_BLOCK_INVALID)
   }
-  if (start !== lineStart(source, start)) throw new Error('口令必须从空段段首开始')
-  if (!write.expectedText.startsWith('/') || !write.promptText.trim() || write.promptText !== write.expectedText.slice(1)) throw new Error('口令无效')
+  if (write.expectedText !== write.promptText) throw new Error(PROMPT_BLOCK_INVALID)
+  if (!write.promptText.trim()) throw new Error(PROMPT_BLOCK_INVALID)
+  if (write.promptText.includes('<!--') || write.promptText.includes('-->')) throw new Error(PROMPT_UNSAFE)
+  if (start !== lineStart(source, start)) throw new Error(PROMPT_BLOCK_INVALID)
   const compiled = compile(source)
-  if (compiled.stale) throw new Error('无法解析笔记')
+  if (compiled.stale) throw new Error(PROMPT_BLOCK_INVALID)
   const block = compiled.index.blocks.find((item) => item.range.start === start && item.range.end === end)
-  if (!block || block.type !== 'paragraph' || block.identity) throw new Error('口令必须位于独立顶层段落')
-  if (compiled.index.markers.some((item) => markerTaskId(source, item.range) === taskId)) throw new Error('任务 ID 已存在')
-  const cleaned = escapedModelText(write.promptText)
-  const promptFragment = compileFragment(cleaned)
-  if (promptFragment.stale || promptFragment.index.blocks.length !== 1 || promptFragment.index.blocks[0]?.type !== 'paragraph') {
-    throw new Error('一场口令只能占一个顶层段落')
-  }
-  const newline = lineEnding(source)
+  // 身份必须是 command，且来自紧邻上方的草稿 marker；普通段落、标题、列表、引用都不行。
+  if (!block || block.type !== 'paragraph' || block.identity !== 'command') throw new Error(PROMPT_BLOCK_INVALID)
+  const markerRange = adjacentDraftMarker(source, compiled, start)
+  if (!markerRange) throw new Error(PROMPT_BLOCK_INVALID)
+  if (compiled.index.markers.some((item) => markerTaskId(source, item.range) === taskId)) throw new Error(PROMPT_BLOCK_INVALID)
   const marker = markerLine('command', { 'task-id': taskId })
-  return source.slice(0, lineStart(source, start)) + marker + newline + cleaned + source.slice(end)
+  // 纯字符串替换：marker 行以外一个字节都不动，换行风格也不改写。
+  return source.slice(0, markerRange.start) + marker + source.slice(markerRange.end)
 }
 
 /** 尾部 HTML 块与后文之间只能由空行分隔；这段空白属于本任务的答案范围。 */

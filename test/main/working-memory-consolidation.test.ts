@@ -11,6 +11,7 @@ import type {WorkingSource} from '../../src/main/working-memory-store.ts'
 import {createHash} from 'node:crypto'
 import {serializeStoredVault} from '../../src/main/notes-fs.ts'
 import {markPrompt,upsertAiAnswer} from '../../src/main/host-source.ts'
+import {appendDraft,draftBody,draftRequest,draftSource} from './draft-fixture.ts'
 import type {ModelStepInput,ModelStepEvent} from '../../src/main/model-stream.ts'
 vi.mock('electron',()=>({dialog:{showOpenDialog:vi.fn()}}))
 vi.mock('../../src/main/watch.ts',async original=>({...await original<typeof import('../../src/main/watch.ts')>(),watchVault:()=>()=>{}}))
@@ -19,7 +20,7 @@ afterEach(async()=>{for(const clean of cleanups.splice(0))await clean()})
 async function fixture(stream:(input:ModelStepInput)=>AsyncIterable<ModelStepEvent>,prompt='以后用中文',strategy?:'continuity',history=false,observeRequest?:import('../../src/main/working-memory-consolidation.ts').ConsolidationPorts['observeRequest'],calls=2){
  const base=await mkdtemp(path.join(os.tmpdir(),'rgent-consolidate-')),root=path.join(base,'vault');await mkdir(root)
  await writeFile(path.join(base,'vault.json'),serializeStoredVault(root))
- const marked=markPrompt('/'+prompt,{taskId:'task',range:{start:0,end:prompt.length+1},expectedText:'/'+prompt,promptText:prompt})
+ const draft=draftSource(prompt),marked=markPrompt(draft.source,{taskId:'task',...draft,expectedText:prompt,promptText:prompt})
  await writeFile(path.join(root,'a.md'),marked)
  const vault=new VaultSession(base,vi.fn());vault.restore()
  const service=new WorkingMemoryService(vault,()=>null);await service.initialize()
@@ -189,9 +190,9 @@ it('unknown saved evidence produces a bounded non-retryable current-session resu
 })
 it('real Host post-save evidence failure reaches the production engine result handler without blocking saved output',async()=>{
  const {AgentHost}=await import('../../src/main/agent-host.ts'),f=await fixture(async function*(){yield {type:'text',text:'{"recent":null,"proposals":[]}'};yield {type:'finish',reason:'stop'}})
- let note=await f.vault.read('a.md');await f.vault.write('a.md',note.content+'\n\n/继续回答',note.revision,note);note=await f.vault.read('a.md');let completed=false,resultWork=Promise.resolve();const root=f.vault.requireUsableRoot(),engine=f.engine as WorkingMemoryConsolidation & {materialResult:(result:{sessionId?:string;taskId:string;status:'handed-off'|'unavailable'|'failed';reason?:string})=>Promise<void>}
+ let note=await f.vault.read('a.md');const nextDraft=appendDraft(note.content,'继续回答');await f.vault.write('a.md',nextDraft.source,note.revision,note);note=await f.vault.read('a.md');let completed=false,resultWork=Promise.resolve();const root=f.vault.requireUsableRoot(),engine=f.engine as WorkingMemoryConsolidation & {materialResult:(result:{sessionId?:string;taskId:string;status:'handed-off'|'unavailable'|'failed';reason?:string})=>Promise<void>}
  const host=new AgentHost({root:()=>root,session:()=>f.vault.sessionId(),acceptsObject:(p,b,a)=>f.vault.acceptsObject(p,b,a),read:p=>f.vault.read(p),write:(p,c,r,b)=>f.vault.write(p,c,r,b!),tier:async()=> 'reference',ledger:{prepare:(p,c,v,b)=>f.vault.ledgerPrepare(p,c,v,b),complete:async(p,id,r)=>{const saved=await f.vault.ledgerComplete(p,id,r);completed=true;return saved},contexts:p=>completed?Promise.resolve([]):f.vault.ledgerContexts(p)},onTaskStarted:id=>f.engine.capture(id),onTaskMaterialSaved:m=>f.engine.handoff(m),onTaskMaterialResult:r=>{resultWork=engine.materialResult(r)},credential:()=>({provider:'custom',baseURL:'https://example.test/v1',modelId:'answer',contextTokens:32768,apiKey:'test'}),limits:()=>({seconds:30,steps:4,tools:0}),stream:async function*(){yield '已保存的前台回答'},emit:vi.fn()})
- const start=note.content.lastIndexOf('/继续回答'),task=await host.start({relPath:'a.md',sessionId:note.sessionId,objectVersion:note.objectVersion,expectedRevision:note.revision,range:{start,end:start+5},expectedText:'/继续回答',promptText:'继续回答'});expect((await task.done).status).toBe('completed');await resultWork
+ const task=await host.start({relPath:'a.md',sessionId:note.sessionId,objectVersion:note.objectVersion,expectedRevision:note.revision,...draftRequest(note.content,'继续回答')});expect((await task.done).status).toBe('completed');await resultWork
  expect((await f.vault.read('a.md')).content).toContain('已保存的前台回答');expect(host.hasPending()).toBe(false);expect(f.service.snapshot().record.jobs.find(j=>j.taskId===task.id)).toMatchObject({outcome:'rejected'});expect(f.engine.state().permits).toBe(1)
 })
 it.each(['no-intent','late-session','closed'] as const)('material failure cannot invent or revive learning authority: %s',async mode=>{
@@ -225,7 +226,7 @@ it.each(['token','bytes'] as const)('real consolidation output %s boundary repor
 })
 it('the real sixteen-item pending queue refusal uses a queue cause while preserving ordinary saved answers',async()=>{
  const {memoryErrorText}=await import('../../src/shared/memory-errors.ts');let release!:()=>void,entered!:()=>void;const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r);const f=await fixture(async function*(){entered();await gate;yield {type:'text',text:'{"recent":null,"proposals":[]}'};yield {type:'finish',reason:'stop'}});await f.engine.handoff(f.material);await started
- try{for(let i=0;i<17;i++){const taskId='queue-'+i,prompt='排队口令'+i;let note=await f.vault.read('a.md');const start=note.content.length+1,marked=markPrompt(note.content+'\n/'+prompt,{taskId,range:{start,end:start+prompt.length+1},expectedText:'/'+prompt,promptText:prompt});await f.vault.write('a.md',marked,note.revision,note);note=await f.vault.read('a.md');f.engine.capture(taskId);await f.vault.ledgerPrepare('a.md',{taskId,startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt,answer:'已保存回答'});const saved=await f.vault.write('a.md',upsertAiAnswer(note.content,{taskId,answer:'已保存回答'}),note.revision,note);await f.vault.ledgerComplete('a.md',taskId,saved.revision);await f.engine.handoff(await f.service.savedMaterial('a.md',taskId))}
+ try{for(let i=0;i<17;i++){const taskId='queue-'+i,prompt='排队口令'+i;let note=await f.vault.read('a.md');const appended=appendDraft(note.content,prompt),marked=markPrompt(appended.source,{taskId,...appended,expectedText:prompt,promptText:prompt});await f.vault.write('a.md',marked,note.revision,note);note=await f.vault.read('a.md');f.engine.capture(taskId);await f.vault.ledgerPrepare('a.md',{taskId,startedAt:'2026-01-01T00:00:00Z',status:'completed',prompt,answer:'已保存回答'});const saved=await f.vault.write('a.md',upsertAiAnswer(note.content,{taskId,answer:'已保存回答'}),note.revision,note);await f.vault.ledgerComplete('a.md',taskId,saved.revision);await f.engine.handoff(await f.service.savedMaterial('a.md',taskId))}
   const reason=f.service.snapshot().record.jobs.find(j=>j.taskId==='queue-16')?.reason;expect(reason).toBe('MEMORY_QUEUE_FULL');expect(memoryErrorText(reason!)).toContain('队列');expect(memoryErrorText(reason!)).not.toMatch(/遗忘空间|修订计数|普通修改已暂停/);expect((await f.vault.read('a.md')).content).toContain('已保存回答')
  }finally{f.engine.cancel();release();await f.engine.idle()}
 })
@@ -486,7 +487,7 @@ it.each(['exact','paraphrase','own-edge','historical'] as const)('proves command
  vi.spyOn(f.service,'savedMaterial').mockResolvedValue(f.material)
  if(mode==='own-edge')vi.spyOn(f.service,'sourceForPrompt').mockResolvedValue({...source,memoryDeps:[{id:parent.id,version:1}]})
  if(mode==='historical'){
-  const note=await f.vault.read('a.md'),marked=markPrompt('/独立的新项目事实',{taskId:'old-task',range:{start:0,end:9},expectedText:'/独立的新项目事实',promptText:'独立的新项目事实'})
+  const note=await f.vault.read('a.md'),oldDraft=draftSource('独立的新项目事实'),marked=markPrompt(oldDraft.source,{taskId:'old-task',...oldDraft,expectedText:'独立的新项目事实',promptText:'独立的新项目事实'})
   await f.vault.ledgerPrepare('a.md',{taskId:'old-task',startedAt:new Date().toISOString(),status:'completed',prompt:'独立的新项目事实',answer:'旧草稿'})
   const written=await f.vault.write('a.md',note.content+'\n'+upsertAiAnswer(marked,{taskId:'old-task',answer:'旧草稿'}),note.revision,note);await f.vault.ledgerComplete('a.md','old-task',written.revision)
   const historical=await f.service.sourceForPrompt('a.md','old-task');vi.spyOn(f.service,'sourceForPrompt').mockResolvedValue(historical)
@@ -584,7 +585,7 @@ it('runs total 25 actual Host sessions across two stable libraries with five cor
    const deniedStep=permissionAt.get(step);if(deniedStep){const item=aux.get(deniedStep)!;await writeFile(path.join(root,'.rgent-permissions'),JSON.stringify({[item.relPath]:'forbidden'}));tightenings++;expect((await service.entries()).find(e=>e.id===item.id)?.status).toBe('paused');expect(await readFile(path.join(root,item.relPath),'utf8')).toContain(item.content)}
    const initial=step<=2,correct=step>=17&&step<=21,addAux=[3,4,9,10,15].includes(step),queryAux=queryAt.get(step),version=(main[lib]?.version??0)+1
    const prompt=initial?`${name}项目版本为甲`:correct?`${name}项目版本明确更正为第${version}版`:addAux?`${name}敏感便签暗河编号为秘钥${step}`:queryAux?`继续核对${aux.get(queryAux)!.content}`:`继续核对${name}项目版本`
-   await writeFile(path.join(root,relPath),'/'+prompt+'\n');let issued=0
+   await writeFile(path.join(root,relPath),draftBody(prompt)+'\n');let issued=0
    engine=new WorkingMemoryConsolidation({service:()=>service,configuration:()=>({enabled:true,signature:'continuous-25',credential,limits:{seconds:120,calls:2,tools:0}}),changed:()=>{},stream:async function*(input){issued++;const p=JSON.parse(String(input.messages[0]!.content));if(!p.memory){yield {type:'text',text:'{"recent":null}'};yield {type:'finish',reason:'stop'};return}const source=p.sources.find((s:any)=>s.kind==='ledger'&&s.classification==='command'),old=main[lib]
     const proposals=initial||addAux||correct?[{action:correct?'correct':'add',...(correct?{target:p.memory.find((e:any)=>e.content===old!.content).id}:{}),content:prompt,scope:relPath,sourceIds:[source.id],semantic:'fact',attribution:'人的本场口令',reviewAt:null}]:[]
     yield {type:'text',text:JSON.stringify({proposals,recent:{goal:queryAux?aux.get(queryAux)!.content:`继续${name}工作`,completed:'回答已保存',blocked:'',next:`核对${name}版本`,sourceIds:[source.id],assistantDraft:false}})};yield {type:'finish',reason:'stop'}
@@ -1774,7 +1775,7 @@ it('一次更正连带暂停声明了它的依赖簇，未声明该依赖的已�
  // 第 2 场：只更正 parent。
  const taskId='task-correct',prompt='青灯项目版本明确更正为乙'
  let note=await f.vault.read('a.md')
- const start=note.content.length+1,marked=markPrompt(note.content+'\n/'+prompt,{taskId,range:{start,end:start+prompt.length+1},expectedText:'/'+prompt,promptText:prompt})
+ const appended=appendDraft(note.content,prompt),marked=markPrompt(appended.source,{taskId,...appended,expectedText:prompt,promptText:prompt})
  await f.vault.write('a.md',marked,note.revision,note);note=await f.vault.read('a.md')
  f.engine.capture(taskId)
  await f.vault.ledgerPrepare('a.md',{taskId,startedAt:new Date().toISOString(),status:'completed',prompt,answer:'好的'})

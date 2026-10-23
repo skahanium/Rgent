@@ -7,6 +7,7 @@ import type { ModelCredential } from '../../src/main/model-config.ts'
 import { createScopedAgentTools } from '../../src/main/scoped-agent-tools.ts'
 import type { TaskGrant } from '../../src/main/task-authorization.ts'
 import { hostLedgerFixture } from './host-ledger-fixture.ts'
+import { draftBody, draftRequest } from './draft-fixture.ts'
 
 afterEach(() => { vi.restoreAllMocks() })
 
@@ -303,7 +304,7 @@ describe('AgentHost 选择模型自带联网', () => {
   })
 
   function nativeHarness(options: { native?: boolean; modelId?: string } = {}) {
-    let content = '人写的段落。\n\n/问\n'
+    let content = '人写的段落。\n\n' + draftBody('问') + '\n'
     let revision = 1
     const history = hostLedgerFixture()
     const nativeRequests: Parameters<NonNullable<import('../../src/main/agent-host.ts').HostDependencies['nativeStreamStep']>>[0][] = []
@@ -360,7 +361,7 @@ describe('AgentHost 选择模型自带联网', () => {
     })
     const start = () => host.start({
       relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: '1',
-      range: { start: content.indexOf('/问'), end: content.indexOf('/问') + 2 }, expectedText: '/问', promptText: '问'
+      ...draftRequest(content, '问')
     })
     return { history, start, nativeRequests, streamRequests }
   }

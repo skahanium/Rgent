@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
 import type { AgentScopeLevel, NoteSnapshot, TreeEntry } from '../../src/shared/ipc.ts'
+import { draftBody, draftRequest, draftSource } from './draft-fixture.ts'
 
 type Snapshot = { content: string; revision: string; sessionId: string; objectVersion: string }
 
@@ -33,8 +34,8 @@ function setup() {
   let session = 'session-a'; let model = 'm'; let key = 'private'; let denied = ''
   let follow = new Set<string>()
   const records = new Map<string, Snapshot>([
-    ['root.md', { content: '/问\n', revision: 'r-root', sessionId: session, objectVersion: 'o-root' }],
-    ['dir/a.md', { content: '/问\n', revision: 'r-a', sessionId: session, objectVersion: 'o-a' }],
+    ['root.md', { content: draftSource('问').source, revision: 'r-root', sessionId: session, objectVersion: 'o-root' }],
+    ['dir/a.md', { content: draftSource('问').source, revision: 'r-a', sessionId: session, objectVersion: 'o-a' }],
     ['dir/b.md', { content: '# B\n正文', revision: 'r-b', sessionId: session, objectVersion: 'o-b' }],
     ['dir/sub/d.md', { content: '# D\n正文', revision: 'r-d', sessionId: session, objectVersion: 'o-d' }],
     ['dir/Note/image.md', { content: '附件的 Markdown', revision: 'r-image', sessionId: session, objectVersion: 'o-image' }],
@@ -54,7 +55,7 @@ function setup() {
     }
   }
   const registry = new TaskAuthorizationRegistry(deps)
-  const request = { relPath: 'dir/a.md', sessionId: session, objectVersion: 'o-a', expectedRevision: 'r-a', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', modelRecordId: 'model-record', scope: 'folder' as AgentScopeLevel }
+  const request = { relPath: 'dir/a.md', sessionId: session, objectVersion: 'o-a', expectedRevision: 'r-a', ...draftRequest(records.get('dir/a.md')!.content, '问'), modelRecordId: 'model-record', scope: 'folder' as AgentScopeLevel }
   return {
     registry, deps, request, records, tree: () => tree, configurationCalls,
     setTree: (next: TreeEntry[]) => { tree = next },
@@ -266,13 +267,13 @@ describe('三档范围与惰性授权', () => {
     const app = setup()
     const preview = await app.registry.preview('a', app.request)
     const grant = await app.registry.consume('a', { ...app.request, previewId: preview.id })
-    app.records.set('dir/a.md', { content: '/问\n\n人改了', revision: 'changed', sessionId: 'session-a', objectVersion: 'o-a' })
+    app.records.set('dir/a.md', { content: draftBody('问') + '\n\n人改了', revision: 'changed', sessionId: 'session-a', objectVersion: 'o-a' })
     await expect(grant.assertLive('model')).rejects.toThrow('SOURCE_CHANGED')
     // 人改之后重新预览（新修订与正文段），再证明只有受控收据会推进基准。
     const app2 = setup()
     const p2 = await app2.registry.preview('a', app2.request)
     const grant2 = await app2.registry.consume('a', { ...app2.request, previewId: p2.id })
-    const updated = { content: '/问\n\n受控追加回答', revision: 'own-next', sessionId: 'session-a', objectVersion: 'o-a' }
+    const updated = { content: draftBody('问') + '\n\n受控追加回答', revision: 'own-next', sessionId: 'session-a', objectVersion: 'o-a' }
     app2.records.set('dir/a.md', updated)
     grant2.acknowledgeOrigin(updated)
     await expect(grant2.assertLive('model')).resolves.toBeUndefined()
@@ -284,7 +285,7 @@ describe('三档范围与惰性授权', () => {
     const app = setup()
     const preview = await app.registry.preview('a', app.request)
     const grant = await app.registry.consume('a', { ...app.request, previewId: preview.id })
-    app.records.set('dir/a.md', { content: '/问\n', revision: 'r-a', sessionId: 'session-a', objectVersion: 'foreign' })
+    app.records.set('dir/a.md', { content: draftSource('问').source, revision: 'r-a', sessionId: 'session-a', objectVersion: 'foreign' })
     await expect(grant.assertLive('model')).rejects.toThrow('SOURCE_REPLACED')
   })
 

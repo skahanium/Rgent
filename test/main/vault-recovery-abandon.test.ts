@@ -8,6 +8,7 @@ import { VaultSession } from '../../src/main/vault.ts'
 import { LedgerStore } from '../../src/main/ledger-store.ts'
 import { serializeStoredVault } from '../../src/main/notes-fs.ts'
 import { markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
+import { draftSource } from './draft-fixture.ts'
 import { vaultRootIdentity } from '../../src/main/watch.ts'
 vi.mock('electron', () => ({ dialog: { showOpenDialog: vi.fn() } }))
 vi.mock('../../src/main/watch.ts', async importOriginal => ({ ...await importOriginal<typeof import('../../src/main/watch.ts')>(), watchVault: () => () => {} }))
@@ -23,7 +24,7 @@ async function fixture() {
   const root = path.join(base, 'vault')
   await mkdir(root)
   await writeFile(path.join(base, 'vault.json'), serializeStoredVault(root))
-  const marked = markPrompt('/以后用中文', { taskId: 'task', range: { start: 0, end: 6 }, expectedText: '/以后用中文', promptText: '以后用中文' })
+  const marked = markPrompt(draftSource('以后用中文').source, { taskId: 'task', ...draftSource('以后用中文'), expectedText: '以后用中文', promptText: '以后用中文' })
   await writeFile(path.join(root, 'a.md'), marked)
   const vault = new VaultSession(base, vi.fn())
   vault.restore()

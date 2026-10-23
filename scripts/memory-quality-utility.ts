@@ -14,6 +14,7 @@ import {TaskAuthorizationRegistry} from '../src/main/task-authorization.ts'
 import {modelTierFor} from '../src/main/permissions.ts'
 import {memorySection} from '../src/main/memory-use.ts'
 import {fingerprint,collaborationKeyParts,collaborationRecoveryWindow,v6RecoveryDecision} from './memory-quality-support.ts'
+import {markerLine} from '../src/markdown/identity.ts'
 
 export const UTILITY_TASKS=[
  {id:'standing',source:'v6-standing-01',body:'工作计划',prompt:'解释为什么工作计划需要明确验收标准。',required:['先结论','一个具体例子'],forbidden:['无依据事实'],intervention:'none'},
@@ -92,12 +93,12 @@ async function utilityHost(artifact:UtilityArtifact,task:typeof UTILITY_TASKS[nu
  const session=new VaultSession(artifact.base,()=>{});session.restore();const service=new WorkingMemoryService(session,()=>null)
  let host:AgentHost|undefined
  try{
-  await service.initialize();const root=session.requireUsableRoot(),relPath=randomUUID()+'.md',raw='/'+task.prompt,body=task.body+'\n\n'+raw+'\n'
+  await service.initialize();const root=session.requireUsableRoot(),relPath=randomUUID()+'.md',prompt=task.prompt,marker=markerLine('command',{state:'draft'}),body=task.body+'\n\n'+marker+'\n'+prompt+'\n'
   await writeFile(path.join(root,relPath),body,{flag:'wx',mode:0o600})
   const history=await session.ledgerContexts(relPath);if(history.length)throw Error('EVALUATION_UTILITY_HISTORY')
   const entries=await service.entries(),port={context:()=>service.context(),config:()=>({enabled,revision:1}),entries:(ids?:readonly string[])=>service.entries(ids)}
   const authorization=new TaskAuthorizationRegistry({root:()=>root,session:()=>session.sessionId(),tree:()=>session.tree(),read:rel=>session.readOpened(rel),tier:modelTierFor,acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),configuration:()=>({credential,limits:{seconds:120,steps:1,tools:0}})})
-  const note=await session.readOpened(relPath),start=note.content.lastIndexOf(raw),command={...note,scope:'note' as const,modelRecordId:'utility',expectedRevision:note.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:task.prompt}
+  const note=await session.readOpened(relPath),start=note.content.length-prompt.length-1,command={...note,scope:'note' as const,modelRecordId:'utility',expectedRevision:note.revision,relPath,range:{start,end:start+prompt.length},expectedText:prompt,promptText:prompt}
   const preview=await authorization.preview('utility',{...command})
   let observed:ReturnType<typeof publicInput>|null=null,bodyOutput='',finishReason:string|null=null,usage:unknown=null,streamError:string|null=null,gateError:unknown=null,calls=0
   const started=performance.now()

@@ -17,7 +17,7 @@ import {
   type EditChange
 } from '@markdown'
 import { defaultKeymap, history, historyKeymap, isolateHistory } from '@codemirror/commands'
-import { Compartment, EditorState, Facet, StateEffect, StateField, Transaction, type Range } from '@codemirror/state'
+import { Compartment, EditorState, Facet, StateField, Transaction, type Range } from '@codemirror/state'
 import {
   Decoration,
   type DecorationSet,
@@ -25,14 +25,21 @@ import {
   keymap,
   WidgetType
 } from '@codemirror/view'
-import { SourceProjection, normalizeSource, sourceOf, rawSourceField, rawSourceHistory, setRawSource } from './source.ts'
+import { SourceProjection, normalizeSource, rawEditSpec, sourceOf, rawSourceField, rawSourceHistory, setRawSource } from './source.ts'
 import { emptyNoteHost, type NoteHost } from './host.ts'
 import { decorationForWidget } from './widgets/decorate.ts'
 import { attachRevealSource } from './widgets/reveal.ts'
 import { renderSafeHtmlFragment } from './safe-html.ts'
 import { renderReadOnlyNode } from './read-only.ts'
 import { joinVaultRel } from '../../../shared/vault-rel.ts'
-import { canStartSlash, slashCommandStarts, slashParagraphOrigin } from '../slash.ts'
+import {
+  locatePromptBlock,
+  planEmptyPromptRemoval,
+  planPromptInsertion,
+  promptDraftChrome,
+  type PromptBlockAtCaret,
+  type PromptBlockOptions
+} from '../prompt-block.ts'
 import { handleEditorPaste } from './paste.ts'
 import type { Root } from 'mdast'
 import type { PresentationBlock, PresentationSyntax } from '../../../markdown/presentation.ts'
@@ -274,9 +281,12 @@ function decorationsFor(
   for (const line of presentation.lines) addLine(line.at, line.className)
 
   // 两种样子：人写的没有任何装饰；未采纳的 AI 块与口令各挂一种行样式。
+  const promptDraft = promptDraftChrome(source, result.index)
   for (const block of result.index.blocks) {
     if (!block.identity) continue
     if (block.range.start < 0 || block.range.start >= docLen) continue
+    // 草稿 marker 与后一个块之间隔着空行时，身份管线仍会就近标过去；那不是提问正文。
+    if (block.identity === 'command' && promptDraft.gapBlocks.has(block.range.start)) continue
     const className = block.identity === 'ai' ? 'rgent-block-ai' : 'rgent-block-command'
     let line = lineStartOf(source, block.range.start)
     if (block.identity === 'command') addLine(line, 'rgent-block-command-first')
@@ -289,6 +299,13 @@ function decorationsFor(
       if (after > block.range.end) break
       line = after
     }
+  }
+
+  // 空草稿还没有 Markdown 块：行类由这里补上，插入后立刻就有 `>`、缩进与紫色。
+  // 顺序与 identity 在同一行上的写法一致，发送前后 DOM 的 className 不变。
+  for (const line of promptDraft.pendingLines) {
+    addLine(line, 'rgent-block-command-first')
+    addLine(line, 'rgent-block-command')
   }
 
   for (const [pos, classes] of lineClasses) {
@@ -433,58 +450,17 @@ const theme = EditorView.theme({
   }
 })
 
-const markSlashStart = StateEffect.define<number>()
-
-function slashStartFromInsert(tr: Transaction): number | null {
-  if (!tr.docChanged) return null
-  const projection = sourceOf(tr.startState)
-  let started: number | null = null
-  tr.changes.iterChanges((from, to, fromB, _toB, inserted) => {
-    if (started != null || from !== to) return
-    const text = inserted.toString()
-    const at = text.search(/(?<=^|[\r\n])\//)
-    if (at < 0) return
-    const before = text.slice(0, at)
-    const rawFrom = projection.toRaw(from)
-    const simulated = before.length === 0 ? projection.raw : projection.raw.slice(0, rawFrom) + projection.inserted(before, from)
-    if (!canStartSlash(simulated, before.length === 0 ? rawFrom : simulated.length)) return
-    started = fromB + at
-  })
-  return started
-}
-
-function seedSlashStarts(raw: string): number[] {
-  const projection = new SourceProjection(raw)
-  return slashCommandStarts(projection.raw).map((at) => projection.toView(at))
-}
-
-const slashStartField = StateField.define<readonly number[]>({
-  create: () => [],
-  update: (value, tr) => {
-    const marked = tr.effects.find((effect) => effect.is(markSlashStart))
-    const explicit = tr.effects.find((effect) => effect.is(setRawSource))
-    const next = new Set(explicit ? seedSlashStarts(explicit.value) : value)
-    if (explicit == null) {
-      if (tr.docChanged) {
-        next.clear()
-        for (const at of value) {
-          const mapped = tr.changes.mapPos(at, 1)
-          if (tr.state.doc.sliceString(mapped, mapped + 1) === '/') next.add(mapped)
-        }
-      }
-      const started = slashStartFromInsert(tr)
-      if (started != null) next.add(started)
-    }
-    if (marked) next.add(marked.value)
-    return [...next]
-  }
-})
-
 export type EditorHost = {
   view: EditorView
   getText: () => string
-  /** 空段段首按 `/` 留下的命令起点（原文偏移）；打开已有空段口令也算；未发起则为 null。 */
-  slashCommandStart: () => number | null
+  /**
+   * 创建一等提问块：光标已在草稿里则只聚焦（'focused'），否则插入草稿 marker
+   * 与提问行（'created'）；只读时 'refused'。
+   */
+  createPromptBlock: (options?: PromptBlockOptions) => 'created' | 'focused' | 'refused'
+  /** 光标所在草稿提问块的原文范围与正文；已发送、人的块或光标不在提问行上时为 null。 */
+  promptBlockAtCaret: () => PromptBlockAtCaret | null
+  removeEmptyPromptBlockAtCaret: () => boolean
   setText: (text: string, host?: NoteHost, selection?: { anchor: number; head: number }) => void
   /** 在光标处插入、有选区时替换选区；只读／被身份锁拦下时返回 false。保留撤销。 */
   insertAtSelection: (text: string) => boolean
@@ -562,25 +538,7 @@ export function mountEditor(
       hostCompartment.of(noteHostFacet.of(emptyNoteHost)),
       markdownField,
       identityLock,
-      slashStartField,
       EditorView.domEventHandlers({
-        keydown: (event, view) => {
-          if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229) return false
-          if (view.state.readOnly) return false
-          const selection = view.state.selection.main
-          const projection = sourceOf(view.state)
-          const start = selection.empty && canStartSlash(projection.raw, projection.toRaw(selection.head))
-          view.dispatch({
-            changes: { from: selection.from, to: selection.to, insert: '/' },
-            selection: { anchor: selection.from + 1 },
-            userEvent: 'input.type'
-          })
-          if (start) {
-            const at = view.state.selection.main.head - 1
-            if (view.state.doc.sliceString(at, at + 1) === '/') view.dispatch({ effects: markSlashStart.of(at) })
-          }
-          return true
-        },
         compositionstart: (_event, view) => {
           compositionBoundary = null
           const selection = view.state.selection.main
@@ -643,11 +601,55 @@ export function mountEditor(
   return {
     view,
     getText: () => sourceOf(view.state).raw,
-    slashCommandStart: () => {
+    createPromptBlock: (options) => {
+      if (readOnly || view.state.readOnly) return 'refused'
       const projection = sourceOf(view.state)
-      const origin = slashParagraphOrigin(projection.raw, projection.toRaw(view.state.selection.main.head))
-      if (origin == null) return null
-      return view.state.field(slashStartField).some((at) => projection.toRaw(at) === origin) ? origin : null
+      const caret = projection.toRaw(view.state.selection.main.head)
+      const result = view.state.field(markdownField).result
+      // 显式的「文末 + 正文」是暂停重发，不能因为光标恰好在别的草稿里就改成聚焦。
+      const explicit = options?.at === 'end' || (options?.text != null && options.text.length > 0)
+      if (!explicit && locatePromptBlock(projection.raw, result.index, caret)) {
+        view.focus()
+        return 'focused'
+      }
+      const plan = planPromptInsertion(projection.raw, result.index, caret, options)
+      const from = projection.toView(plan.edit.from)
+      const insertedLength = Math.max(0, Math.min(plan.edit.insert.length, plan.caret - plan.edit.from))
+      // 光标落在新提问行上：插入内容的 raw 前缀换成视图投影后算长度。
+      const caretAt = from + normalizeSource(plan.edit.insert.slice(0, insertedLength)).length
+      view.dispatch({
+        ...rawEditSpec(view.state, plan.edit),
+        selection: { anchor: caretAt },
+        scrollIntoView: true,
+        userEvent: 'rgent.promptBlock'
+      })
+      view.focus()
+      return 'created'
+    },
+    promptBlockAtCaret: () => {
+      const projection = sourceOf(view.state)
+      const found = locatePromptBlock(
+        projection.raw,
+        view.state.field(markdownField).result.index,
+        projection.toRaw(view.state.selection.main.head)
+      )
+      return found ? { range: found.range, prompt: found.prompt, empty: found.empty } : null
+    },
+    removeEmptyPromptBlockAtCaret: () => {
+      if (readOnly || view.state.readOnly) return false
+      const projection = sourceOf(view.state)
+      const plan = planEmptyPromptRemoval(
+        projection.raw,
+        view.state.field(markdownField).result.index,
+        projection.toRaw(view.state.selection.main.head)
+      )
+      if (!plan) return false
+      view.dispatch({
+        ...rawEditSpec(view.state, plan),
+        userEvent: 'rgent.promptBlock'
+      })
+      view.focus()
+      return true
     },
     setText: (text, host, selection) => {
       documentGeneration += 1

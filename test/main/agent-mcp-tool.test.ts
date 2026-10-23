@@ -11,6 +11,7 @@ import { createScopedAgentTools, mcpToolCatalog, wrappedMcpContent, MCP_CATALOG_
 import type { TaskGrant } from '../../src/main/task-authorization.ts'
 import { AgentHost, type HostDependencies } from '../../src/main/agent-host.ts'
 import { partitionSource } from '../../src/markdown/partition.ts'
+import { draftBody, draftRequest } from './draft-fixture.ts'
 
 type McpResult = { text: string; bytes: number; isError: boolean; truncated?: boolean }
 type McpInput = Parameters<NonNullable<HostDependencies['mcp']>['call']>[0]
@@ -47,7 +48,7 @@ function mcpHarness(options: {
   /** 参考篇 b.md 的正文：证明 echo 词片确实来自本场授权来源。 */
   extraText?: string
 } = {}) {
-  let content = '人写的段落。\n\n/问\n'
+  let content = '人写的段落。\n\n' + draftBody('问') + '\n'
   let revision = 1
   let mcpLive = options.authorized !== false
   const servers = options.servers ?? SERVERS
@@ -137,7 +138,7 @@ function mcpHarness(options: {
   })
   const run = () => host.start({
     relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: '1',
-    range: { start: content.indexOf('/问'), end: content.indexOf('/问') + 2 }, expectedText: '/问', promptText: '问'
+    ...draftRequest(content, '问')
   })
   return { host, history, requests, events, calls, closed, run, content: () => content, live: () => mcpLive }
 }
@@ -529,8 +530,8 @@ describe('账本 network[] 的 MCP 形状', () => {
 function mcpPairHarness() {
   const history = hostLedgerFixture()
   const notes = new Map<string, { content: string; revision: number; objectVersion: string }>([
-    ['a.md', { content: '人写的段落。\n\n/问\n', revision: 1, objectVersion: 'oa' }],
-    ['c.md', { content: '人写的段落。\n\n/问\n', revision: 1, objectVersion: 'oc' }]
+    ['a.md', { content: '人写的段落。\n\n' + draftBody('问') + '\n', revision: 1, objectVersion: 'oa' }],
+    ['c.md', { content: '人写的段落。\n\n' + draftBody('问') + '\n', revision: 1, objectVersion: 'oc' }]
   ])
   const live = new Map([['a.md', true], ['c.md', true]])
   const calls: { server: string; tool: string; aborted: boolean }[] = []
@@ -620,7 +621,7 @@ function mcpPairHarness() {
     const note = notes.get(relPath)!
     return host.start({
       relPath, sessionId: 's', objectVersion: note.objectVersion, expectedRevision: String(note.revision),
-      range: { start: note.content.indexOf('/问'), end: note.content.indexOf('/问') + 2 }, expectedText: '/问', promptText: '问'
+      ...draftRequest(note.content, '问')
     })
   }
   return { host, history, notes, calls, gates, run }

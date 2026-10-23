@@ -4,9 +4,11 @@ import { createScopedAgentTools } from '../../src/main/scoped-agent-tools.ts'
 import { AgentHost } from '../../src/main/agent-host.ts'
 import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
 import type { AgentStartRequest, NoteSnapshot } from '../../src/shared/ipc.ts'
+import { DRAFT, draftRequest, draftSource } from './draft-fixture.ts'
 
 function fixture(stream:(signal:AbortSignal)=>AsyncIterable<string>) {
-  const source:Record<string,NoteSnapshot>={'a.md':{content:'/问\n',revision:'1',sessionId:'session',objectVersion:'a'},'b.md':{content:'外篇参考',revision:'b',sessionId:'session',objectVersion:'b'}}
+  const origin=draftSource('问')
+  const source:Record<string,NoteSnapshot>={'a.md':{content:origin.source,revision:'1',sessionId:'session',objectVersion:'a'},'b.md':{content:'外篇参考',revision:'b',sessionId:'session',objectVersion:'b'}}
   let calls=0;let revision=1;let denied=''
   const tier=async(_root:string,path:string)=>{if(path===denied)throw Error('FORBIDDEN');return 'reference' as const}
   const registry=new TaskAuthorizationRegistry({root:()=>'/vault',session:()=> 'session',tree:async()=>Object.keys(source).map(relPath=>({name:relPath,relPath,kind:'note' as const})),
@@ -18,13 +20,13 @@ function fixture(stream:(signal:AbortSignal)=>AsyncIterable<string>) {
     stream:(_input,signal)=>{calls++;return stream(signal)},
     streamStep:async function*(_input,signal){calls++;for await(const text of stream(signal))yield {type:'text',text};yield {type:'finish',reason:'stop'}},
     createReadOnlyTools:(grant,id)=>createScopedAgentTools(grant,id,{read:async p=>({...source[p]!}),tier,acceptsObject:()=>false}),emit:()=>{}})
-  const request={modelRecordId:'model-record',relPath:'a.md',sessionId:'session',objectVersion:'a',expectedRevision:'1',range:{start:0,end:2},expectedText:'/问',scope:'vault' as const,promptText:'问'}
+  const request={modelRecordId:'model-record',relPath:'a.md',sessionId:'session',objectVersion:'a',expectedRevision:'1',...draftRequest(origin.source,'问'),scope:'vault' as const}
   return {host,history,registry,request,source,calls:()=>calls,deny:(p:string)=>{denied=p}}
 }
 it('requires one-use authorization before changing the note and uses its fixed credential',async()=>{
   const app=fixture(async function*(){yield '回答'})
   await expect(app.host.start({...app.request,authorizationOwner:'owner'})).rejects.toThrow('INVALID_AUTHORIZATION')
-  expect(app.source['a.md']!.content).toBe('/问\n')
+  expect(app.source['a.md']!.content).toBe(DRAFT + '\n问\n')
   const preview=await app.registry.preview('owner',app.request)
   const task=await app.host.start({...app.request,previewId:preview.id,authorizationOwner:'owner'})
   await expect(task.done).resolves.toMatchObject({status:'completed'})
@@ -65,7 +67,8 @@ it('source invalidation aborts the provider and closes its iterator without chan
 })
 
 it('binds a task to the explicit model record instead of a device default', async () => {
-  const snapshot = { content: '/问\n', revision: 'r', sessionId: 's', objectVersion: 'o' }
+  const draft = draftSource('问')
+  const snapshot = { content: draft.source, revision: 'r', sessionId: 's', objectVersion: 'o' }
   const chosen: string[] = []
   const registry = new TaskAuthorizationRegistry({ root: () => '/vault', session: () => 's',
     tree: async () => [{ name: 'a.md', relPath: 'a.md', kind: 'note' }], read: async () => snapshot,
@@ -75,7 +78,7 @@ it('binds a task to the explicit model record instead of a device default', asyn
       if (modelRecordId !== 'second') throw Error('MODEL_NOT_FOUND')
       return { credential: { provider: 'minimax', baseURL: 'https://api.minimax.io/v1', modelId: 'M', contextTokens: 16000, apiKey: 'second-secret' }, limits: { seconds: 180, steps: 4, tools: 0 } }
     } })
-  const request = { relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: 'r', range: { start: 0, end: 2 }, expectedText: '/问', scope:'note' as const,promptText: '问', modelRecordId: 'second' }
+  const request = { relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: 'r', ...draftRequest(draft.source, '问'), scope:'note' as const, modelRecordId: 'second' }
   const preview = await registry.preview('owner', request)
   expect(preview.recipient).toEqual({ provider: 'minimax', modelId: 'M', host: 'api.minimax.io' })
   expect(JSON.stringify(preview)).not.toContain('second-secret')

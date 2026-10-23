@@ -5,10 +5,11 @@ import { createModelConfigStore, memoryAuthorizationState } from '../../src/main
 import { mkdtempSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { draftRequest, draftSource } from './draft-fixture.ts'
 
 function boundHost(memoryState?: () => { signature: string }) {
   const approvedMemorySignature = memoryState?.().signature ?? 'approved'
-  const state = { content: '/问\n', revision: 1, objectVersion: 'original', sessionId: 'session-1', allowed: true,
+  const state = { content: draftSource('问').source, revision: 1, objectVersion: 'original', sessionId: 'session-1', allowed: true,
     reads: 0, writes: 0, network: 0, failLedger: false, afterRead: () => {}, afterTier: () => {}, memorySignature: 'approved', changeWhileRecalling: false }
   const events: HostEvent[] = []
   const successors = new Map<string, string>()
@@ -41,7 +42,7 @@ function boundHost(memoryState?: () => { signature: string }) {
     limits: () => ({ seconds: 30, steps: 4, tools: 0 }),
     stream: async function* () { state.network++; yield* generate() }, emit: event => events.push(event)
   })
-  const start = () => host.start({ relPath: 'a.md', range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问',
+  const start = () => host.start({ relPath: 'a.md', ...draftRequest(state.content, '问'),
     memoryAuthorizationSignature: approvedMemorySignature, expectedRevision: String(state.revision), sessionId: state.sessionId, objectVersion: state.objectVersion })
   return { host, state, events, start, stream: (next: typeof generate) => { generate = next } }
 }
@@ -49,7 +50,7 @@ function boundHost(memoryState?: () => { signature: string }) {
 it('allows a new bound task after a completed task and same-root reattachment', async () => {
   const app = boundHost()
   await (await app.start()).done
-  app.state.sessionId = 'session-2'; app.state.content = '/问\n'; app.state.objectVersion = 'reopened'; app.state.revision++
+  app.state.sessionId = 'session-2'; app.state.content = draftSource('问').source; app.state.objectVersion = 'reopened'; app.state.revision++
   await expect((await app.start()).done).resolves.toMatchObject({ status: 'completed' })
   expect(app.events.at(-1)).toMatchObject({ sessionId: 'session-2', persisted: true })
 })

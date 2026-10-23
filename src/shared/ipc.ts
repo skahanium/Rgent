@@ -40,6 +40,7 @@ export const IPC = {
   menuNewNote: 'menu:new-note',
   menuSave: 'menu:save',
   menuFetchWeb: 'menu:fetch-web',
+  menuAsk: 'menu:ask',
   flushRequest: 'app:flush-request',
   flushDone: 'app:flush-done',
   backlinks: 'note:backlinks',

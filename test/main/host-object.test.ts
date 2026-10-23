@@ -1,9 +1,10 @@
 import {hostLedgerFixture} from './host-ledger-fixture.ts'
 import { describe, it, expect } from 'vitest'
 import { AgentHost } from '../../src/main/agent-host.ts'
+import { draftRequest, draftSource } from './draft-fixture.ts'
 
 function app() {
-  let content = '/问\n', revision = 'r0', objectVersion = 'o0', sessionId = 's0'
+  let content = draftSource('问').source, revision = 'r0', objectVersion = 'o0', sessionId = 's0'
   const events: unknown[] = []
   let onChunk = () => {}
   const host = new AgentHost({ledger:hostLedgerFixture().ledger,
@@ -22,7 +23,7 @@ function app() {
   })
   return { host, events, source: () => content, replace: () => { objectVersion = 'foreign'; content = '替身\n'; revision = 'foreign' }, remount: () => { sessionId = 's1' }, onChunk: (f:()=>void) => { onChunk=f } }
 }
-const input = { relPath: 'a.md', range: {start:0,end:2}, expectedText:'/问', promptText:'问', sessionId:'s0', objectVersion:'o0', expectedRevision:'r0' }
+const input = { relPath: 'a.md', ...draftRequest(draftSource('问').source, '问'), sessionId:'s0', objectVersion:'o0', expectedRevision:'r0' }
 describe('Host object ownership', () => {
   it('refuses a stale launch before modifying a same-byte replacement', async () => {
     const a=app(); a.replace()

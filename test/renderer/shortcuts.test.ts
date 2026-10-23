@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { installShortcuts, shortcutFor, type ShortcutHandlers } from '../../src/renderer/src/shortcuts.ts'
+import { askShortcutLabel, installShortcuts, shortcutFor, type ShortcutHandlers } from '../../src/renderer/src/shortcuts.ts'
 
 /** 窗口级快捷键：抓页／搜索对话框与应用菜单共用 ⌘⇧U／Ctrl+Shift+U。 */
 
@@ -14,7 +14,7 @@ function bothModifiers(init: KeyboardEventInit & { key: string }): KeyboardEvent
 }
 
 function handlers(): ShortcutHandlers {
-  return { onSearch: vi.fn(), onSave: vi.fn(), onFetchWeb: vi.fn() }
+  return { onSearch: vi.fn(), onSave: vi.fn(), onFetchWeb: vi.fn(), onAsk: vi.fn() }
 }
 
 describe('抓页／搜索快捷键', () => {
@@ -64,5 +64,50 @@ describe('抓页／搜索快捷键', () => {
     window.dispatchEvent(bothModifiers({ key: 'u' }))
     expect(calls.onFetchWeb).not.toHaveBeenCalled()
     uninstall()
+  })
+})
+
+describe('提问块快捷键', () => {
+  it('⌘⇧↵ 与 Ctrl+Shift+Enter 都命中 ask', () => {
+    expect(shortcutFor(key({ key: 'Enter', metaKey: true, shiftKey: true }), true)).toBe('ask')
+    expect(shortcutFor(key({ key: 'Enter', ctrlKey: true, shiftKey: true }), false)).toBe('ask')
+  })
+
+  it('没有 Shift 的 Mod+Enter、普通 Enter 与带 Alt 都不命中', () => {
+    expect(shortcutFor(key({ key: 'Enter', metaKey: true }), true)).toBeNull()
+    expect(shortcutFor(key({ key: 'Enter', shiftKey: true }), true)).toBeNull()
+    expect(shortcutFor(key({ key: 'Enter', metaKey: true, shiftKey: true, altKey: true }), true)).toBeNull()
+  })
+
+  it('输入法组合中的 Enter（isComposing 或 229）不命中', () => {
+    const composing = key({ key: 'Enter', metaKey: true, shiftKey: true })
+    Object.defineProperty(composing, 'isComposing', { value: true })
+    expect(shortcutFor(composing, true)).toBeNull()
+    expect(shortcutFor(key({ key: 'Enter', metaKey: true, shiftKey: true, keyCode: 229 }), true)).toBeNull()
+  })
+
+  it('标签按平台给 ⌘⇧↵ 或 Ctrl+Shift+Enter', () => {
+    expect(askShortcutLabel(true)).toBe('⌘⇧↵')
+    expect(askShortcutLabel(false)).toBe('Ctrl+Shift+Enter')
+  })
+
+  it('installShortcuts 触发 onAsk，卸载后不再触发', () => {
+    const calls = handlers()
+    const uninstall = installShortcuts(calls)
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter', shiftKey: true, ctrlKey: true, metaKey: true, cancelable: true
+    })
+    window.dispatchEvent(event)
+    expect(calls.onAsk).toHaveBeenCalledTimes(1)
+    expect(calls.onSearch).not.toHaveBeenCalled()
+    expect(calls.onSave).not.toHaveBeenCalled()
+    expect(calls.onFetchWeb).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(true)
+
+    uninstall()
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter', shiftKey: true, ctrlKey: true, metaKey: true, cancelable: true
+    }))
+    expect(calls.onAsk).toHaveBeenCalledTimes(1)
   })
 })
