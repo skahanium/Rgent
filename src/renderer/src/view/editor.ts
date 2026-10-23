@@ -33,6 +33,7 @@ import { renderSafeHtmlFragment } from './safe-html.ts'
 import { renderReadOnlyNode } from './read-only.ts'
 import { joinVaultRel } from '../../../shared/vault-rel.ts'
 import { canStartSlash, slashCommandStarts, slashParagraphOrigin } from '../slash.ts'
+import { handleEditorPaste } from './paste.ts'
 import type { Root } from 'mdast'
 import type { PresentationBlock, PresentationSyntax } from '../../../markdown/presentation.ts'
 
@@ -603,6 +604,7 @@ export function mountEditor(
           })
           return false
         },
+        paste: (event, view) => handleEditorPaste(event, view, view.state.field(markdownField).presentation),
         click: (event, view) => {
           if (!event.metaKey && !event.ctrlKey) return false
           const target = event.target instanceof Element ? event.target.closest<HTMLElement>('.md-link[data-md-url]') : null

@@ -35,7 +35,7 @@ describe('text fetch', () => {
     const result = await run('https://example.com/page', reply(html, { 'content-type': 'text/html; charset=utf-8' }))
     expect(result.title).toBe('示例 & 页面')
     expect(result.text).toContain('# 标题')
-    expect(result.text).toContain('正文 链接 (https://example.com/rel?x=1) & 实体 空白')
+    expect(result.text).toContain('正文 [链接](https://example.com/rel?x=1) & 实体空白')
     expect(result.text).toContain('- 第一\n- 第二')
     expect(result.text).toContain('> 引用一句')
     expect(result.text).toContain('```\nconst a = 1\n```')

@@ -5,7 +5,7 @@ import { extractReadable, type ReadableMethod } from './readable.ts'
 /**
  * 抓页：唯一出口仍是 `EgressClient`（remote-image 的硬化核心）。本模块只做
  * 「策略收窄 + 类型／字符集判定 + 卫生 + 把 HTML 交给 readable」，不另写 HTTP 客户端；
- * 手写 HTML→Markdown 等纯函数在 `html-text.ts`。
+ * 手写 HTML→Markdown 等纯函数在 `html-text.ts`（实现在 `shared/html-markdown.ts`）。
  *
  * 明文 HTTP 一律拒绝（v1 合同）；端口只允许 443；主机是否公网由 `EgressClient` 的
  * 解析与钉地址负责，这里不复制地址判断。
