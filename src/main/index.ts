@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { LifecycleFlushPhase, RecoveryFlushContext } from '../shared/flush.ts'
 import { parseLedgerRepairRequest } from '../shared/ledger.ts'
 import { listVaultTree, parseStoredVault } from './notes-fs.ts'
+import { partitionSource } from '../markdown/partition.ts'
 import { boundArguments, isVaultChannel, isVaultEvent } from '../shared/vault-binding.ts'
 import { VaultCatalog, sameRootInode } from './vault-catalog.ts'
 import { VaultSwitch } from './vault-switch.ts'
@@ -986,7 +987,10 @@ function registerIpc(): void {
       // 与人删除共用同一条协调：停受影响任务、排空窗口稿，再进库内已删除。
       const preview = await trashPreviewShared(relPath)
       const result = await trashCommitShared(preview.id, true, undefined, { taskId: 'human', prompt: '人删除，移入库内已删除', source: 'human' })
-      if (!result.ok || result.cancelled) return { ok: false, error: 'TRASH_CANCELLED' }
+      if (!result.ok || result.cancelled) {
+        try { await vault?.commitTrash(preview.id, false) } catch { /* 预览清理失败不改变拒绝结果 */ }
+        return { ok: false, error: 'TRASH_CANCELLED' }
+      }
       try { await vault?.commitTrash(preview.id, false) } catch { /* 旧预览清理失败不影响已完成的删除 */ }
       return { ok: true, relPath: result.relPath, trashId: '' }
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
@@ -1039,7 +1043,7 @@ function registerIpc(): void {
       const policy=await historicalContextPolicy(note.content,async dep=>{
         if(!inScope(dep.relPath))return false
         try{await modelTierFor(vault!.root!,dep.relPath)}catch{return false}
-        try{const current=await vault!.read(dep.relPath);return current.objectVersion===dep.objectVersion&&createHash('sha256').update(current.content).digest('hex')===dep.bodyHash}catch{return false}
+        try{const current=await vault!.read(dep.relPath);return current.objectVersion===dep.objectVersion&&createHash('sha256').update(partitionSource(current.content).body).digest('hex')===dep.bodyHash}catch{return false}
       },undefined,chapters,async dep=>validMemories.some(e=>e.status==='active'&&sameMemoryDependency(dep,memoryDependency(e))))
       const generators=summaryCache?.valid(summaryHash(await vault!.ledgerKey(request.relPath)),chapters.filter(c=>policy.allowedLedgerChapterIds.includes(c.sourceId))).map(b=>({modelId:b.generator.modelId,host:b.generator.host,time:b.generator.time}))??[]
       vault!.assertSession(request.sessionId)

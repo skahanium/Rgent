@@ -537,11 +537,15 @@ export class AgentHost {
   private async networkEchoSet(grant: TaskGrant, originText: string): Promise<Set<string>> {
     const texts = [originText.slice(0, NETWORK_ECHO_TEXT_CHARS)]
     let bytes = Buffer.byteLength(texts[0]!, 'utf8')
-    for (const source of grant.sources) {
-      if (source.relPath === grant.origin) continue
+    // 惰性范围没有全量 sources；任务中实际读过的笔记也必须进偷渡词片集，
+    // 否则模型读到外篇后再把内容写进搜索词，重叠检测会漏。
+    const paths = new Set(grant.sources.map(source => source.relPath))
+    try { for (const proof of grant.actualSources()) paths.add(proof.relPath) } catch { /* 已撤权：只用手上的 */ }
+    for (const relPath of paths) {
+      if (relPath === grant.origin) continue
       if (texts.length >= NETWORK_ECHO_SOURCES || bytes >= NETWORK_ECHO_BYTES) break
       try {
-        const snapshot = await this.deps.read(source.relPath)
+        const snapshot = await this.deps.read(relPath)
         const text = snapshot.content.slice(0, NETWORK_ECHO_TEXT_CHARS)
         texts.push(text)
         bytes += Buffer.byteLength(text, 'utf8')
@@ -681,6 +685,8 @@ export class AgentHost {
       // 偷渡词片：联网与 MCP 用同一份本场授权来源词片集。任一项启用就要建。
       const networkEcho = new Set<string>(networkEnabled || mcpEnabled ? this.deps.network?.echoShingles ?? [] : [])
       if ((networkEnabled || mcpEnabled) && grant) for (const shingle of await this.networkEchoSet(grant, original.content)) networkEcho.add(shingle)
+      /** 网络/MCP 调用前刷新实际读过的来源；读到新外篇后不能只靠启动时的词片。 */
+      const refreshEcho = async ():Promise<void> => { if(grant&&(networkEnabled||mcpEnabled)) for(const shingle of await this.networkEchoSet(grant, original.content)) networkEcho.add(shingle) }
       const networkLog: LedgerNetworkEntry[] = []
       const networkPreviews = new Map<string, NetworkPreviewEntry>()
       // 同任务成功抓取的结果（键 `new URL(url).href`）：再次请求同 URL 直接复用，不再外发。
@@ -761,6 +767,7 @@ export class AgentHost {
           signal.addEventListener('abort', abort, { once: true })
           networkAborts.add(controller)
           try {
+            await refreshEcho()
             const result = await this.deps.network!.fetch(url, controller.signal)
             if (controller.signal.aborted) throw Error('EGRESS_ABORTED')
             // 同源重定向后以最终地址为准；账本与状态行都只记 host + pathname。
@@ -810,6 +817,7 @@ export class AgentHost {
             signal.addEventListener('abort', abort, { once: true })
             networkAborts.add(controller)
             try {
+              await refreshEcho()
               const result = await searchTool(query, maxResults, controller.signal)
               if (controller.signal.aborted) throw Error('EGRESS_ABORTED')
               const finalHost = result.host || searchHost
@@ -872,6 +880,7 @@ export class AgentHost {
           request.signal.addEventListener('abort', abort, { once: true })
           networkAborts.add(controller)
           try {
+            await refreshEcho()
             const result = await this.deps.mcp!.call({ taskId: id, server: request.server, tool: request.tool, arguments: request.arguments, signal: controller.signal })
             // 调用成功（含工具级 isError 结果）就把**包裹前**原文存进与抓页同一套预览缓存；
             // 抛出的失败（超时／取消／协议错误）不缓存，失败本来也不该被当成结果给人看。

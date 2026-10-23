@@ -203,11 +203,6 @@ export type AgentAuthorizationPreview = {
 }
 /** 写类工具的人确认：主进程发起请求，渲染层只回一个是否同意。
  *  建给「落点＋正文」；改名／挪给「旧路径 → 新路径＋影响面（引用与权限条数）」；删给路径。 */
-export type AgentWritePreview =
-  | { requestId: string; kind: 'create'; relPath: string; body: string }
-  | { requestId: string; kind: 'rename' | 'move'; source: string; target: string; moves: number; linkChanges: number; permissionChanges: number }
-  | { requestId: string; kind: 'delete'; relPath: string; hasAttachments: boolean }
-export type AgentWriteDecision = { requestId: string; approved: boolean }
 
 export type AgentAuthorizationResult = { ok: true; preview: AgentAuthorizationPreview } | { ok: false; error: string }
 export type AgentStartRequest = AgentCommandRequest & { previewId: string; scope: AgentScopeLevel }
