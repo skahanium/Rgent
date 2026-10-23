@@ -3,8 +3,9 @@ import type { PublicModelConfig } from '@shared'
 import { PROVIDER_LABELS } from '../../shared/model-endpoints.ts'
 
 /**
- * 底栏。围栏 docs/frontend.md §编辑画布与辅助信息：
- * 与上方用一条细线分开：左侧行列与字数，中间是模型模块，右侧联网圆点与库名。
+ * 底栏。围栏 docs/frontend.md §编辑画布与辅助信息、
+ * docs/decisions.md §2026-10-23 底栏减负与任务浮层：
+ * 与上方用一条细线分开：左侧行列与字数，中间是模型模块，右侧只有联网总闸小球。
  *
  * 默认模型在助手设置保存；此处只为当前笔记的下一场任务临时选择，不写设备配置。
  * 无活动笔记时提供配置引导，失效选择不自动改用其他模型。
@@ -17,7 +18,6 @@ export type StatusInput = {
   line: number
   column: number
   words: number
-  vaultName: string | null
   noteOpen: boolean
 }
 
@@ -34,11 +34,15 @@ export type StatusModelModule = {
   onConfigure: () => void
 }
 
+export type StatusNetwork = {
+  enabled: boolean
+  onToggle: () => void
+}
+
 export type StatusModel = {
   position: string | null
   words: string | null
-  vault: string
-  network: 'offline'
+  network: StatusNetwork
   model?: StatusModelModule
 }
 
@@ -55,12 +59,11 @@ export function modelModuleGroups(config: PublicModelConfig): StatusModelGroup[]
     }))
 }
 
-export function statusModel(input: StatusInput, model?: StatusModelModule): StatusModel {
+export function statusModel(input: StatusInput, network: StatusNetwork, model?: StatusModelModule): StatusModel {
   return {
     position: input.noteOpen ? `第 ${input.line} 行, 第 ${input.column} 列` : null,
     words: input.noteOpen ? `字数 ${input.words}` : null,
-    vault: input.vaultName ?? '未选库',
-    network: 'offline',
+    network,
     ...(model ? { model } : {})
   }
 }
@@ -153,11 +156,32 @@ function renderModelModule(center: HTMLElement, module: StatusModelModule | unde
     }
     if (module.value === null || !module.groups.some(group => group.items.some(item => item.id === module.value))) {
       const placeholder = document.createElement('option')
-      placeholder.value = ''; placeholder.textContent = module.unavailableLabel ?? '未选择模型'; placeholder.disabled = true
+      placeholder.value = ''; placeholder.textContent = module.unavailableLabel ?? '未选'; placeholder.disabled = true
       select.prepend(placeholder)
       select.value = ''
     } else select.value = module.value
   }
+}
+
+function renderNetworkDot(right: HTMLElement, network: StatusNetwork): void {
+  let button = right.querySelector<HTMLButtonElement>('.status-dot')
+  if (!button) {
+    button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'status-dot'
+    const core = document.createElement('span')
+    core.className = 'status-dot-core'
+    core.setAttribute('aria-hidden', 'true')
+    button.append(core)
+    right.append(button)
+  }
+  const enabled = network.enabled
+  button.dataset.state = enabled ? 'online' : 'offline'
+  button.setAttribute('aria-pressed', enabled ? 'true' : 'false')
+  const label = enabled ? '联网只读已开' : '联网只读已关'
+  button.setAttribute('aria-label', label)
+  button.title = label
+  button.onclick = network.onToggle
 }
 
 export function renderStatusbar(host: HTMLElement, model: StatusModel): void {
@@ -181,20 +205,8 @@ export function renderStatusbar(host: HTMLElement, model: StatusModel): void {
 
   const center = container(host, 'status-center')
   const right = container(host, 'status-right')
-
-  const dot = right.querySelector<HTMLElement>('.status-dot') ?? document.createElement('span')
-  dot.className = 'status-dot'
-  dot.dataset.state = model.network
-  dot.setAttribute('role', 'img')
-  dot.setAttribute('aria-label', '联网状态：离线')
-  dot.title = '离线'
-  const vault = right.querySelector<HTMLSpanElement>('.status-vault') ?? document.createElement('span')
-  vault.className = 'status-item status-vault'
-  vault.textContent = model.vault
-  vault.title = model.vault
-  if (!dot.parentElement) right.append(dot)
-  if (!vault.parentElement) right.append(vault)
-
+  right.querySelector('.status-vault')?.remove()
+  renderNetworkDot(right, model.network)
   renderModelModule(center, model.model)
   // 只在顺序不对时重排；常规重绘不移动节点，保住下拉与焦点。
   if (host.children.length !== 4 || host.children[0] !== lead || host.children[1] !== left ||

@@ -329,6 +329,24 @@ it('offers the MCP checkbox unchecked by default, names the servers and tool cou
   popup.close()
 })
 
+it('prechecks network and mcp when the caller supplies last-session flags', async () => {
+  const load = vi.fn(async (_references: string[], _network: boolean, _mcp: boolean) => ({ ok: true as const, preview: withBoth }))
+  const popup = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'a.md',
+    entries: [],
+    initialNetwork: true,
+    initialMcp: true,
+    preview: load,
+    send: async () => ({ ok: true as const, id: 'task' })
+  })
+  await vi.waitFor(() => expect(popup.root.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
+  expect(popup.root.querySelector<HTMLInputElement>('.authorization-network input')!.checked).toBe(true)
+  expect(popup.root.querySelector<HTMLInputElement>('.authorization-mcp input')!.checked).toBe(true)
+  expect(load).toHaveBeenLastCalledWith([], true, true)
+  popup.close()
+})
+
 it('keeps the network and MCP checkboxes independent', async () => {
   const load = vi.fn(async (_references: string[], _network: boolean, _mcp: boolean) => ({ ok: true as const, preview: withBoth }))
   const send = vi.fn(async (_preview: import('../../src/shared/ipc.ts').AgentAuthorizationPreview, _network: boolean, _mcp: boolean) => ({ ok: true as const, id: 'task' }))

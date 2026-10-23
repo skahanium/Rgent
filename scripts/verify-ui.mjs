@@ -579,7 +579,7 @@ async function verifyScopedHost(page, vault, shot, requests) {
   const choose = async () => {
     await page.key('Enter', 'Enter', 0, 13)
     if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)) {
-      process.stdout.write('DEBUG_START popover ' + await page.eval(`JSON.stringify({ editor: document.querySelector('.cm-content')?.innerText, popover: !!document.querySelector('.overlay-authorization'), send: document.querySelector('.authorization-send')?.disabled ?? null, status: document.querySelector('.status-task')?.textContent ?? null })`) + '\n')
+      process.stdout.write('DEBUG_START popover ' + await page.eval(`JSON.stringify({ editor: document.querySelector('.cm-content')?.innerText, popover: !!document.querySelector('.overlay-authorization'), send: document.querySelector('.authorization-send')?.disabled ?? null, status: document.querySelector('.task-dock')?.dataset.kind ?? null })`) + '\n')
       return false
     }
     // 授权范围在同一会话内记忆：每次准备都用「只读本笔记」预设清回发起篇，再按本场需要选参考。
@@ -615,7 +615,7 @@ async function verifyScopedHost(page, vault, shot, requests) {
   check('参考原文变化后重新展示清单，第一次确认未发模型请求', refreshed && requests.length === 0 && await page.eval(`(async ()=>(await window.rgent.agentTasks()).length===0)()`), await page.eval(`(async ()=>JSON.stringify({status:document.querySelector('.authorization-status')?.textContent,focus:document.activeElement?.outerHTML.slice(0,150),tasks:await window.rgent.agentTasks()}))()`))
   if (!refreshed) throw Error('授权刷新后未恢复可确认焦点；停止依赖链验收。')
   await page.key('Enter', 'Enter', 0, 13)
-  check('工具链运行底栏显示实际模型步且保留停止入口', await waitFor(page, `document.querySelector('.status-task')?.textContent.includes('模型第 3 步') && !!document.querySelector('.status-task-stop')`), await page.eval(`JSON.stringify({status:document.querySelector('.status')?.textContent?.slice(0,180)??null,popover:!!document.querySelector('.overlay-authorization'),card:!!document.querySelector('.overlay-write-confirm'),body:document.querySelector('.cm-content')?.innerText?.slice(0,60)??null})`))
+  check('工具链运行时栏上浮层为生成中并有中止入口', await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind==='generating' && !!document.querySelector('.task-dock-abort')`), await page.eval(`JSON.stringify({status:document.querySelector('.status')?.textContent?.slice(0,180)??null,dock:document.querySelector('.task-dock')?.dataset.kind??null,popover:!!document.querySelector('.overlay-authorization'),card:!!document.querySelector('.overlay-write-confirm'),body:document.querySelector('.cm-content')?.innerText?.slice(0,60)??null})`))
   const done = await waitFor(page, `(async () => {const note=await window.rgent.noteRead('工具发起.md');return note.content.includes('工具查证完成：已核对参考原文。') && (await window.rgent.agentTasks()).length===0})()`)
   // 有工具档的场里，模型同时看到读、搜、补、建四个工具：写工具不再需要额外授权步骤。
   const toolNames = request => (request.tools ?? []).map(tool => tool.function?.name)
@@ -698,12 +698,12 @@ async function verifyWriteTools(page, vault, shot, requests) {
     await page.key('Enter', 'Enter', 0, 13)
     return true
   }
-  const settle = () => waitFor(page, `!document.querySelector('.status-task')`)
+  const settle = () => waitFor(page, `document.querySelector('.task-dock')?.dataset.kind!=='generating'`)
 
   // 一、建·同意：卡片出现 -> 点「建」-> 真的落盘。
   const started = await start('写作建一.md', '建样张一')
   check('打开建样张发起篇并带着额外参考开工', started === true, started === true ? '' : String(started))
-  check('任务真的开始跑了', await waitFor(page, `!!document.querySelector('.status-task')`, 20000), await page.eval(`document.querySelector('.status')?.textContent?.slice(0,120)??null`))
+  check('任务真的开始跑了', await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind==='generating'`, 20000), await page.eval(`document.querySelector('.task-dock')?.dataset.kind??null`))
   check('模型提议新建时弹出确认卡', await waitFor(page, `!!document.querySelector('.overlay-write-confirm[open]')`, 30000), await page.eval(`JSON.stringify({status:document.querySelector('.status')?.textContent?.slice(0,160)??null,editor:document.querySelector('.cm-content')?.innerText?.slice(0,80)})`))
   check('卡片摆出落点与正文，且没有改路径的入口', await page.eval(`(() => { const text=document.querySelector('.overlay-write-confirm')?.textContent||''; return text.includes('将新建：写工具样张.md') && text.includes('写工具样张') })()`))
   await shot(page, 'write-confirm-1200')
@@ -736,18 +736,18 @@ async function verifyWriteTools(page, vault, shot, requests) {
   check('打开改名发起篇并授权参考篇', await start('写作改名.md', '改名样张'))
   check('改名卡片摆出旧路径 → 新路径与影响面', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将改名：写作参考.md → 写作参考改.md') && text.includes('处引用')})()`))
   await shot(page, 'write-rename-1200')
-  check('点「改名」后文件真的换了名字', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `!document.querySelector('.status-task')`, 30000) && existsSync(path.join(vault, '写作参考改.md')) && !existsSync(path.join(vault, '写作参考.md')))
+  check('点「改名」后文件真的换了名字', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind!=='generating'`, 30000) && existsSync(path.join(vault, '写作参考改.md')) && !existsSync(path.join(vault, '写作参考.md')))
 
   check('打开挪动发起篇并授权另一篇参考', await start('写作挪.md', '挪样张', '写作挪参考.md'))
   check('挪动卡片摆出旧路径 → 新路径', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将移动：写作挪参考.md → 归档/写作挪参考.md')})()`))
-  check('点「移动」后文件真的挪进目标目录', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `!document.querySelector('.status-task')`, 30000) && existsSync(path.join(vault, '归档', '写作挪参考.md')) && !existsSync(path.join(vault, '写作挪参考.md')))
+  check('点「移动」后文件真的挪进目标目录', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind!=='generating'`, 30000) && existsSync(path.join(vault, '归档', '写作挪参考.md')) && !existsSync(path.join(vault, '写作挪参考.md')))
 
   if (process.platform === 'darwin') {
     check('先打开要删的参考篇', await page.eval(`(() => { const n=[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path==='写作删参考.md'); if (!n) return false; n.click(); return true })()`) && await waitFor(page, `!!document.querySelector('.tab[data-rel="写作删参考.md"]')`))
     check('打开删除发起篇并授权参考篇', await start('写作删.md', '删样张', '写作删参考.md'))
     check('删除卡片写明送篓且不代改引用', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将删除：写作删参考.md') && text.includes('链接会失效') && text.includes('移入废纸篓')})()`))
     await shot(page, 'write-delete-1200')
-    check('点「移入废纸篓」后面从库里消失且标签关掉', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `!document.querySelector('.status-task')`, 30000) && !existsSync(path.join(vault, '写作删参考.md')) && await page.eval(`![...document.querySelectorAll('.tab')].some(t => t.dataset.rel === '写作删参考.md')`))
+    check('点「移入废纸篓」后面从库里消失且标签关掉', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind!=='generating'`, 30000) && !existsSync(path.join(vault, '写作删参考.md')) && await page.eval(`![...document.querySelectorAll('.tab')].some(t => t.dataset.rel === '写作删参考.md')`))
     check('删除账本留痕看得见', await ledgerPanel('写作删.md', `text.includes('delete_note') && text.includes('ok:写作删参考.md') && text.includes('vault-change') && !text.includes('ENOENT')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,240)??'(无)'`))
 
     check('打开不删发起篇', await start('写作不删.md', '不删样张', '写作不删参考.md'))
@@ -778,7 +778,7 @@ async function verifyWriteTools(page, vault, shot, requests) {
 
 /** 联网只读专项（RGENT_UI_NETWORK_ONLY=1）：只证门控、拒绝与账本，零真实外网。
  *  受控模型按「联网抓页专项」标记脚本化两次 fetch_url：第一次回环地址被出口核心拒，
- *  第二次要等人在状态行点「停止联网」后才放行，回给模型 NETWORK_NOT_AUTHORIZED。 */
+ *  第二次要等人关掉底栏总闸后才放行，回给模型 NETWORK_NOT_AUTHORIZED。 */
 function createNetworkOnlyHostServer(requests, gate) {
   const server = createHttpServer((request, response) => {
     let body = ''
@@ -805,7 +805,7 @@ function createNetworkOnlyHostServer(requests, gate) {
         return
       }
       if (results.length === 1) {
-        // 第二次抓取不能自动发生：等界面上的「停止联网」落定后再回模型。
+        // 第二次抓取不能自动发生：等总闸关闸落定后再回模型。
         gate.reached = true
         gate.abort = () => { if (!response.destroyed) response.destroy() }
         gate.release = () => {
@@ -816,7 +816,7 @@ function createNetworkOnlyHostServer(requests, gate) {
         }
         return
       }
-      // 留出窗口让人真的看见状态行按「第二次被拒」更新，再收尾。
+      // 留出窗口让关闸后的第二次拒绝进账本，再收尾。
       const finalTimer = setTimeout(() => {
         if (response.destroyed) return
         emit({ content: '联网专项核验完成。' })
@@ -830,7 +830,7 @@ function createNetworkOnlyHostServer(requests, gate) {
 }
 
 /** 联网只读专项：① 总开关默认关 ② 勾选默认不勾且写明抓网页 ③ 回环抓页被拒并进账本
- *  ④ 停止联网后第二次抓取被拒 ⑤ 任务进行中状态行出现「联网：」提示。 */
+ *  ④ 关总闸后第二次抓取被拒 ⑤ 任务进行中栏上浮层为生成中。 */
 async function verifyNetworkOnly(page, vault, shot, requests, gate) {
   process.stdout.write('\n联网只读专项\n')
   await waitFor(page, `document.querySelector('#app')?.inert===false && !!document.querySelector('.settings-open')`)
@@ -871,22 +871,22 @@ async function verifyNetworkOnly(page, vault, shot, requests, gate) {
   await shot(page, 'network-authorization-1200')
   if (!await clickSelector('.authorization-send')) throw Error('找不到确认发送按钮')
 
-  // ⑤ 任务进行中抓一次 DOM：状态行必须出现「联网：」，而不是等任务结束后补记。
-  check('任务进行中状态行出现联网提示', await waitFor(page, `(() => { const hint=document.querySelector('.status-task-network'); return !!hint && hint.textContent.includes('联网：') && !!document.querySelector('.status-task') })()`, 30000), await page.eval(`document.querySelector('.status')?.textContent?.slice(0,220)??'(无状态行)'`))
+  // ⑤ 任务进行中浮层是生成中；主机名不进底栏。
+  check('任务进行中栏上浮层为生成中且底栏无联网摘要', await waitFor(page, `(() => { const dock=document.querySelector('.task-dock'); return dock?.dataset.kind==='generating' && !document.querySelector('.status-task-network') })()`, 30000), await page.eval(`document.querySelector('.task-dock')?.dataset.kind??'(无浮层)'`))
 
   // ③ 第一个 fetch_url 是回环地址：出口核心拒绝，模型收到 EGRESS_INVALID_URL，任务继续。
   for (let index = 0; index < 200 && !gate.reached; index += 1) await sleep(100)
   check('第一次抓页被拒后模型继续走下一步', gate.reached)
   check('回给模型的是 EGRESS_INVALID_URL', toolMessages().some(text => text.includes('EGRESS_INVALID_URL')), JSON.stringify(toolMessages().slice(-2)))
-  check('状态行按真实拒绝事件显示主机与结果码', await waitFor(page, `(() => { const hint=document.querySelector('.status-task-network'); return !!hint && hint.textContent.includes('127.0.0.1') && hint.textContent.includes('未执行：EGRESS_INVALID_URL') })()`, 10000), await page.eval(`document.querySelector('.status-task-network')?.textContent??''`))
+  check('底栏仍不铺拒绝主机名', await page.eval(`!document.querySelector('.status-task-network') && document.querySelector('.task-dock')?.dataset.kind==='generating'`))
 
-  // ④ 第二次抓取前点「停止联网」，再放行；停止必须先于请求。
-  check('任务进行中可见「停止联网」', await waitFor(page, `!!document.querySelector('.status-task-network-stop:not(:disabled)')`, 10000))
-  if (!await page.eval(`(() => { const b=document.querySelector('.status-task-network-stop'); if(!b)return false; b.click(); return true })()`)) throw Error('找不到停止联网按钮')
-  check('停止联网后按钮消失且状态行仍有联网提示', await waitFor(page, `(() => { const hint=document.querySelector('.status-task-network'); return !!hint && hint.textContent.includes('联网：') && !document.querySelector('.status-task-network-stop') })()`, 15000), await page.eval(`document.querySelector('.status')?.textContent?.slice(0,220)??''`))
+  // ④ 第二次抓取前关总闸，再放行；关闸必须先于请求。
+  check('任务进行中总闸小球为开', await waitFor(page, `document.querySelector('.status-dot')?.dataset.state==='online'`, 10000))
+  if (!await page.eval(`(() => { const b=document.querySelector('.status-dot'); if(!b)return false; b.click(); return true })()`)) throw Error('找不到联网总闸小球')
+  check('关总闸后小球变灰且底栏仍无联网摘要', await waitFor(page, `document.querySelector('.status-dot')?.dataset.state==='offline' && !document.querySelector('.status-task-network')`, 15000), await page.eval(`document.querySelector('.status-dot')?.dataset.state??''`))
   check('停止生效前第二次抓取尚未发出', !toolMessages().some(text => text.includes('NETWORK_NOT_AUTHORIZED')))
   gate.release?.()
-  check('状态行按第二次拒绝事件显示尝试主机与结果码', await waitFor(page, `(() => { const hint=document.querySelector('.status-task-network'); return !!hint && hint.textContent.includes('127.0.0.1') && hint.textContent.includes('未执行：NETWORK_NOT_AUTHORIZED') })()`, 10000), await page.eval(`document.querySelector('.status-task-network')?.textContent??''`))
+  check('关闸后任务仍在跑', await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind==='generating'`, 10000))
 
   check('两次拒绝后任务仍正常完成', await waitFor(page, `(async()=>{ if((await window.rgent.agentTasks()).length) return false; return (await window.rgent.noteRead('联网抓页专项.md')).content.includes('联网专项核验完成。') })()`, 60000))
   check('第二次抓取回给模型 NETWORK_NOT_AUTHORIZED', toolMessages().some(text => text.includes('NETWORK_NOT_AUTHORIZED')), JSON.stringify(toolMessages().slice(-2)))
@@ -1200,7 +1200,7 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
     // 非模态卡不抢焦点：发送前把焦点放到发送键。
     await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
     await page.key('Enter', 'Enter', 0, 13)
-    if (!await waitFor(page, `!document.querySelector('.status-task')`, 60000)) return `任务没有收尾（${name}）`
+    if (!await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind!=='generating'`, 60000)) return `任务没有收尾（${name}）`
     if (!await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content.includes('受控回答第一句。'))()`, 30000)) return `回答没有落盘（${name}）`
     return true
   }
@@ -1708,7 +1708,7 @@ async function verifyJourney(page, vault, shot) {
     // 八、收尾：没有残留浮层或任务；一次性库里只剩旅程笔记，删除样张已不在。
     const endState = await page.eval(`(async () => ({
       tasks: (await window.rgent.agentTasks()).length,
-      statusTask: !!document.querySelector('.status-task'),
+      statusTask: document.querySelector('.task-dock')?.dataset.kind==='generating',
       overlays: document.querySelectorAll('dialog[open], .overlay-write-confirm[open], .tier-menu').length
     }))()`)
     const rootNames = readdirSync(vault).filter(name => !name.startsWith('.')).sort()
@@ -2015,7 +2015,7 @@ async function verifyUx(page, vault, shot) {
   // 八、收尾：横幅与模态都已清掉、任务清空，正文两侧都没被这次冲突破坏。
   const endState = await page.eval(`(async () => ({
     tasks: (await window.rgent.agentTasks()).length,
-    taskBar: !!document.querySelector('.status-task'),
+    taskBar: document.querySelector('.task-dock')?.dataset.kind==='generating',
     notices: document.querySelectorAll('.notice').length,
     dialogs: document.querySelectorAll('dialog[open]').length,
     editor: document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null
@@ -2845,12 +2845,12 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
     await openLibrarySettings()
     await waitFor(page,`!!document.querySelector('.vault-settings [data-vault-open="${id}"]:not(:disabled)')`)
     await page.eval(`document.querySelector('.vault-settings [data-vault-open="${id}"]').click()`)
-    const ok = await waitFor(page,`document.querySelector('.status-vault')?.textContent===${JSON.stringify(label)} && !document.querySelector('.vault-settings')`)
-    if (!ok) throw new Error('切换未完成：'+await page.eval(`JSON.stringify({vault:document.querySelector('.status-vault')?.textContent,status:document.querySelector('.vault-settings-status')?.textContent,inert:document.querySelector('#app').inert,unavailable:document.querySelector('.note-unavailable')?.textContent,notice:document.querySelector('.status-host-notice')?.textContent})`))
+    const ok = await waitFor(page,`document.querySelector('#app')?.dataset.vault===${JSON.stringify(label)} && !document.querySelector('.vault-settings')`)
+    if (!ok) throw new Error('切换未完成：'+await page.eval(`JSON.stringify({vault:document.querySelector('#app')?.dataset.vault,status:document.querySelector('.vault-settings-status')?.textContent,inert:document.querySelector('#app').inert,unavailable:document.querySelector('.note-unavailable')?.textContent,notice:document.querySelector('.status-host-notice')?.textContent})`))
     return ok
   }
-  check('启动恢复最后使用库 A',await waitFor(page,`document.querySelector('.status-vault')?.textContent==='研究库 A'`))
-  check('右下角库名仅为只读状态',await page.eval(`(()=>{const n=document.querySelector('.status-vault');return n.tagName==='SPAN' && n.tabIndex<0 && !n.onclick && !n.hasAttribute('role')})()`))
+  check('启动恢复最后使用库 A',await waitFor(page,`document.querySelector('#app')?.dataset.vault==='研究库 A'`))
+  check('底栏无库名，库名只在 data-vault',await page.eval(`!document.querySelector('.status-vault') && document.querySelector('#app')?.dataset.vault==='研究库 A'`))
   await page.eval(`document.querySelector('.settings-open').click()`)
   check('普通设置默认界面且七页顺序正确',await waitFor(page,`document.querySelector('.settings-page-title')?.textContent==='界面' && JSON.stringify([...document.querySelectorAll('.settings-nav button')].map(n=>n.textContent))===JSON.stringify(['笔记库','界面','助手','记忆','技能','模型','运行'])`))
   await page.eval(`globalThis.__originalSettings=document.querySelector('.overlay-settings')`)
@@ -2969,7 +2969,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
     await page.call('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27})
     await page.call('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27})
     check('切库忙时Esc不能关闭设置',await page.eval(`!!document.querySelector('.overlay-settings')`))
-    check('主进程release后ready未到仍冻结旧库正文',await page.eval(`document.querySelector('#app').inert===true && document.querySelector('.status-vault')?.textContent==='研究库 A'`))
+    check('主进程release后ready未到仍冻结旧库正文',await page.eval(`document.querySelector('#app').inert===true && document.querySelector('#app')?.dataset.vault==='研究库 A'`))
     const before=await page.eval(`document.querySelector('.cm-content').textContent`)
     await page.eval(`document.querySelector('.cm-content').focus()`)
     await page.call('Input.insertText',{text:'release-gap-input'})
@@ -2978,7 +2978,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
     await releaseReceipt()
     await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showOpenDialog=globalThis.__oldOpenDialog;true`)
   }
-  check('应用内切换至库 B',await waitFor(page,`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelector('#app').inert===false`))
+  check('应用内切换至库 B',await waitFor(page,`document.querySelector('#app')?.dataset.vault==='写作库 B' && document.querySelector('#app').inert===false`))
   check('新库使用空工作区及默认收起状态',await page.eval(`document.querySelectorAll('.tab').length===0 && document.querySelector('.tree-panel')?.classList.contains('is-collapsed')`))
   await page.eval(`document.querySelector('.tree-toggle').click()`)
   await openNote('同名.md')
@@ -3022,13 +3022,13 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   check('有未保存输入时切换 B 成功',await switchTo('vault-b','写作库 B'))
   check('切换前新输入已保存在 A，不写入 B',readFileSync(path.join(vault,'同名.md'),'utf8').startsWith('切换前的新输入')&&!readFileSync(path.join(sibling,'同名.md'),'utf8').includes('切换前的新输入'))
   await sleep(700)
-  await page.call('Page.reload');check('页面重载恢复 B 当前工作区',await waitFor(page,`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelectorAll('.tab').length===1 && document.querySelector('.cm-content')?.textContent.includes('只属于 B')`))
+  await page.call('Page.reload');check('页面重载恢复 B 当前工作区',await waitFor(page,`document.querySelector('#app')?.dataset.vault==='写作库 B' && document.querySelectorAll('.tab').length===1 && document.querySelector('.cm-content')?.textContent.includes('只属于 B')`))
   check('最后使用库持久化为 B',JSON.parse(readFileSync(path.join(profile,'vault-catalog.json'),'utf8')).lastVaultId==='vault-b')
   const created=path.join(path.dirname(sibling),'新建空库'),relocated=path.join(path.dirname(sibling),'已移动的空库')
   await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;globalThis.__oldSaveDialog=d.showSaveDialog;d.showSaveDialog=async()=>({canceled:false,filePath:${JSON.stringify(created)}})})()`)
   await openLibrarySettings();await waitFor(page,`!!document.querySelector('[data-vault-action="create"]')`)
   await page.eval(`document.querySelector('[data-vault-action="create"]').click()`)
-  check('创建空库通过同一切换管线打开',await waitFor(page,`document.querySelector('.status-vault')?.textContent==='新建空库' && !document.querySelector('.vault-settings')`) && existsSync(created))
+  check('创建空库通过同一切换管线打开',await waitFor(page,`document.querySelector('#app')?.dataset.vault==='新建空库' && !document.querySelector('.vault-settings')`) && existsSync(created))
   const createdId=await page.eval(`(async()=>{const c=await window.rgent.vaultCatalog();return c.entries.find(e=>e.label==='新建空库').id})()`)
   check('新空库不恢复旧库笔记',await page.eval(`document.querySelectorAll('.tab').length===0`))
   await switchTo('vault-b','写作库 B')
@@ -3056,7 +3056,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
     await openLibrarySettings();await waitFor(page,`!!document.querySelector('[data-vault-open="vault-a"]')`)
     await page.eval(`document.querySelector('[data-vault-open="vault-a"]').click()`)
     await waitFor(page,`document.querySelector('.vault-settings')?.getAttribute('aria-busy')==='false' && document.querySelector('.vault-settings-status')?.textContent.includes('尚未保存')`)
-    check('正文保存失败留在原库并保留草稿',await page.eval(`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelector('.cm-content')?.textContent.includes('必须保留的草稿') && document.querySelector('#app').inert===false`) && !readFileSync(path.join(sibling,'同名.md'),'utf8').includes('必须保留的草稿'))
+    check('正文保存失败留在原库并保留草稿',await page.eval(`document.querySelector('#app')?.dataset.vault==='写作库 B' && document.querySelector('.cm-content')?.textContent.includes('必须保留的草稿') && document.querySelector('#app').inert===false`) && !readFileSync(path.join(sibling,'同名.md'),'utf8').includes('必须保留的草稿'))
     for(const theme of ['day','night']) {
       await page.eval(`window.rgent.themeSet('${theme}')`)
       await page.call('Emulation.setDeviceMetricsOverride',{width:1200,height:800,deviceScaleFactor:1,mobile:false})
@@ -3079,7 +3079,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   await waitFor(page,`!!document.querySelector('.conflict') || document.querySelector('.vault-settings')?.getAttribute('aria-busy')==='false' && !!document.querySelector('.vault-settings-status')?.textContent`)
   // 冲突处理后的焦点同样是异步落位的：这一段改用等待，其余断言逐字保持原样。
   check('切库正文冲突不替换设置且保留名称、展开与焦点',await waitFor(page,`document.querySelector('.overlay-settings')===globalThis.__conflictSettings && !document.querySelector('.conflict') && document.querySelector('[data-vault-id="vault-a"] input')?.value==='保存冲突前的名称草稿' && document.querySelector('[data-vault-id="vault-a"] .vault-settings-path')?.open===true && document.activeElement?.dataset.vaultOpen==='vault-a'`))
-  check('切库正文冲突明确要求先处理保存而两份稿都保留',await page.eval(`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelector('.cm-content')?.textContent.includes('窗口冲突改动') && document.querySelector('.vault-settings-status')?.textContent.includes('冲突')`) && readFileSync(path.join(sibling,'同名.md'),'utf8').startsWith('磁盘冲突改动'))
+  check('切库正文冲突明确要求先处理保存而两份稿都保留',await page.eval(`document.querySelector('#app')?.dataset.vault==='写作库 B' && document.querySelector('.cm-content')?.textContent.includes('窗口冲突改动') && document.querySelector('.vault-settings-status')?.textContent.includes('冲突')`) && readFileSync(path.join(sibling,'同名.md'),'utf8').startsWith('磁盘冲突改动'))
   if(await page.eval(`!!document.querySelector('.vault-settings')`))for(const theme of ['day','night']) {
     await page.eval(`window.rgent.themeSet('${theme}')`)
     await shot(page,'vault-settings-conflict-'+theme)
@@ -3145,11 +3145,11 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
     }finally{restoredPage?.close();processRun.kill('SIGKILL');await new Promise((resolve,reject)=>{if(processRun.exitCode!==null||processRun.signalCode!==null)return resolve();const t=setTimeout(()=>reject(new Error('重启夹具进程清理超时')),6000);processRun.once('exit',()=>{clearTimeout(t);resolve()})})}
   }
   await restart(async restoredPage=>{
-    check('实际进程重启恢复最后使用库及工作区',await waitFor(restoredPage,`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelectorAll('.tab').length===1 && document.querySelector('.cm-content')?.textContent.includes('必须保留的草稿')`))
+    check('实际进程重启恢复最后使用库及工作区',await waitFor(restoredPage,`document.querySelector('#app')?.dataset.vault==='写作库 B' && document.querySelectorAll('.tab').length===1 && document.querySelector('.cm-content')?.textContent.includes('必须保留的草稿')`))
   })
   renameSync(path.join(sibling,'同名.md'),path.join(sibling,'临时移走.md'))
   await restart(async restoredPage=>{
-    check('重启时缺失笔记保留提示且不重建文件',await waitFor(restoredPage,`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelectorAll('.tab').length===1 && document.querySelector('.tab')?.textContent.includes('同名') && document.querySelector('.note-unavailable')?.hidden===false`) && !existsSync(path.join(sibling,'同名.md')))
+    check('重启时缺失笔记保留提示且不重建文件',await waitFor(restoredPage,`document.querySelector('#app')?.dataset.vault==='写作库 B' && document.querySelectorAll('.tab').length===1 && document.querySelector('.tab')?.textContent.includes('同名') && document.querySelector('.note-unavailable')?.hidden===false`) && !existsSync(path.join(sibling,'同名.md')))
   })
   const catalogBefore=readFileSync(path.join(profile,'vault-catalog.json'),'utf8')
   renameSync(sibling,sibling+'-原对象');mkdirSync(sibling)
@@ -3186,7 +3186,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
       check('先展示根对象与工作区恢复预览',await waitFor(restoredPage,`[...document.querySelectorAll('[data-vault-id="${remountEntry.id}"] button')].some(n=>n.textContent==='确认建立新关联')`))
       await rootRecoveryShots(restoredPage,shot,'remount-preview',remountEntry.id)
       await restoredPage.eval(`[...document.querySelectorAll('[data-vault-id="${remountEntry.id}"] button')].find(n=>n.textContent==='确认建立新关联').click()`)
-      check('确认切换后打开同一个库并恢复工作区',await waitFor(restoredPage,`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelector('.tab')?.textContent.includes('同名') && document.querySelector('.cm-content')?.textContent.includes('必须保留的草稿')`))
+      check('确认切换后打开同一个库并恢复工作区',await waitFor(restoredPage,`document.querySelector('#app')?.dataset.vault==='写作库 B' && document.querySelector('.tab')?.textContent.includes('同名') && document.querySelector('.cm-content')?.textContent.includes('必须保留的草稿')`))
     })
     const confirmed=JSON.parse(readFileSync(catalogFile,'utf8')).entries.find(entry=>entry.id===remountEntry.id)
     check('明确确认只更新根关联，稳定ID工作区原字节不换根',confirmed.rootIdentity===realIdentity&&JSON.parse(readFileSync(workspaceFile,'utf8')).entries.every(item=>item.path!==remountEntry.path||item.rootIdentity===staleIdentity))
@@ -3198,7 +3198,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
     writeFileSync(path.join(sibling,'根保稿.md'),'第二篇原正文')
     let restoreHeldWrites=()=>{}
     try{await restart(async restoredPage=>{
-      if(!await waitFor(restoredPage,`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelector('#app').inert===false`))throw Error('根保稿夹具未就绪')
+      if(!await waitFor(restoredPage,`document.querySelector('#app')?.dataset.vault==='写作库 B' && document.querySelector('#app').inert===false`))throw Error('根保稿夹具未就绪')
       restoreHeldWrites=denyDirectoryWrites(sibling)
       await restoredPage.eval(`document.querySelector('.cm-content').cmTile.root.view.dispatch({changes:{from:0,to:document.querySelector('.cm-content').cmTile.root.view.state.doc.length,insert:'根窗口稿一'}})`)
       await waitFor(restoredPage,`[...document.querySelectorAll('.tree-note')].some(n=>n.dataset.path==='根保稿.md')`)
@@ -3227,7 +3227,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   singleCatalog.entries=singleCatalog.entries.filter(entry=>entry.id==='vault-b')
   writeFileSync(path.join(profile,'vault-catalog.json'),JSON.stringify(singleCatalog))
   await restart(async restoredPage=>{
-    await waitFor(restoredPage,`document.querySelector('#app').inert===false && document.querySelector('.status-vault')?.textContent==='写作库 B'`)
+    await waitFor(restoredPage,`document.querySelector('#app').inert===false && document.querySelector('#app')?.dataset.vault==='写作库 B'`)
     for(const theme of ['day','night']) {
       await restoredPage.eval(`window.rgent.themeSet('${theme}')`)
       await restoredPage.call('Emulation.setDeviceMetricsOverride',{width:1200,height:800,deviceScaleFactor:1,mobile:false})
@@ -3846,7 +3846,7 @@ async function verifyV4NativeRestoreProducer(page,nativePage,switchTo,profile,va
     check('原生 preparing 关闭登记真实取消且已有 dirty 稿不并发普通flush',await page.eval(`globalThis.__preparingCloseEvents.some(e=>e.phase==='preparing'&&e.closePending)&&globalThis.__preparingCloseFlushes===0&&!!document.querySelector('.tab-dirty')`))
     await releaseV4Receipt(nativePage)
     for(let n=0;n<100&&!await nativePage.eval('globalThis.__preparingClose.dialogs.length===1');n++)await sleep(100)
-    check('真实拒写后继续编辑取消原生关闭、原库和 dirty 稿完整保留',await nativePage.eval(`globalThis.__preparingClose.dialogs.length===1&&!globalThis.__rgentTestWindow.isDestroyed()`)&&await waitFor(page,`document.querySelector('#app').inert===false&&document.querySelector('.status-vault').textContent==='研究库 A'&&document.querySelector('.cm-content').textContent.includes('原生准备期保留稿')&&!!document.querySelector('.tab-dirty')`)&&readFileSync(path.join(vault,'同名.md')).equals(before))
+    check('真实拒写后继续编辑取消原生关闭、原库和 dirty 稿完整保留',await nativePage.eval(`globalThis.__preparingClose.dialogs.length===1&&!globalThis.__rgentTestWindow.isDestroyed()`)&&await waitFor(page,`document.querySelector('#app').inert===false&&document.querySelector('#app').dataset.vault==='研究库 A'&&document.querySelector('.cm-content').textContent.includes('原生准备期保留稿')&&!!document.querySelector('.tab-dirty')`)&&readFileSync(path.join(vault,'同名.md')).equals(before))
   }finally{
     restorePreparingWrites();await releaseV4Receipt(nativePage)
     await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showMessageBox=globalThis.__preparingClose.oldDialog;true`)
@@ -4783,7 +4783,7 @@ async function main() {
       return { ok: Math.abs(state.offset) <= 1.5 && Math.abs(state.toggleOffset - state.offset) <= 1.5 && state.height <= 54, detail: JSON.stringify(state) }
     })
     await verifySidebarWidth(page, shot)
-    check('底栏有行列、字数与库名', (await page.eval(`!!document.querySelector('.status-left')?.innerText && !!document.querySelector('.status-vault')?.innerText`)) === true)
+    check('底栏有行列、字数，无库名', (await page.eval(`!!document.querySelector('.status-left')?.innerText && !document.querySelector('.status-vault') && !!document.querySelector('#app')?.dataset.vault`)) === true)
     await probe('底栏最左的设置入口在边栏收起与展开时都在位', async () => {
       const state = JSON.parse(await page.eval(`(() => {
         const button = document.querySelector('.status .settings-open')
@@ -5449,7 +5449,7 @@ async function main() {
     })()`)
     check('助手习惯保存后只改变设备级偏好', habitsSaved === true)
     await page.eval(`(() => { [...document.querySelectorAll('.settings-nav button')].find((b) => b.textContent === '运行')?.click() })()`)
-    check('运行设置页提供三档有限上限', await waitFor(page, `document.querySelectorAll('.settings-limit-group').length === 3`))
+    check('运行设置页提供三档有限上限', await waitFor(page, `['无工具','本地工具','联网或 MCP'].every((label) => [...document.querySelectorAll('.settings-limit-group legend')].some((node) => node.textContent === label))`))
     await page.eval(`document.querySelector('.overlay-settings')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`)
     // dialog.close() 先取消 open，close 事件下一帧才移除节点并归还焦点；先完成关闭再测底栏。
     if (!await waitFor(page, `!document.querySelector('.overlay-settings')`)) throw new Error('底栏验证前设置未完成关闭')
@@ -5491,11 +5491,11 @@ async function main() {
     await page.call('Input.insertText', { text: '/请写两句话' })
     check('空段内输入的口令留在编辑器', await waitFor(page, `document.querySelector('.cm-content')?.textContent.includes('/请写两句话')`))
     await confirmSlashAuthorization(page, true)
-    check('启动成功后本篇临时选择复位到设备默认', await waitFor(page, `document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test'`))
-    // Windows CI 上任务启动与底栏重绘更慢：先等任务登记，再给停止入口更宽的等待（断言不变）。
+    check('启动成功后本篇仍显示刚用的临时模型', await waitFor(page, `document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test-override'`))
+    // Windows CI 上任务启动与浮层重绘更慢：先等任务登记，再给中止入口更宽的等待。
     await waitFor(page, `(async () => (await window.rgent.agentTasks()).length > 0)()`, 15000)
-    const running = await waitFor(page, `!!document.querySelector('.status-task-stop')`, 15000)
-    check('回车后底栏出现当前篇停止入口', running, running ? '' : await page.eval(`(async () => JSON.stringify({ status: document.querySelector('.status-left')?.innerText, note: (await window.rgent.noteRead('Host 环路.md')).content, editor: document.querySelector('.cm-content')?.textContent }))()`))
+    const running = await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind==='generating' && !!document.querySelector('.task-dock-abort')`, 15000)
+    check('回车后栏上浮层出现生成中与中止入口', running, running ? '' : await page.eval(`(async () => JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind, note: (await window.rgent.noteRead('Host 环路.md')).content, editor: document.querySelector('.cm-content')?.textContent }))()`))
     check('回答写回正文，原始任务写入独立账本', await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead('Host 环路.md')
       const history=await window.rgent.ledgerGet({sessionId:note.sessionId,objectVersion:note.objectVersion,relPath:'Host 环路.md'});return note.content.includes('受控回答第一句。第二句。')&&note.content.includes('<!-- rgent:ai:v1 task-id=')&&!note.content.includes('<!-- rgent:ledger:v1 -->')&&history.ok&&history.value.records.some(r=>r.state==='saved'&&r.chapter?.answer.includes('受控回答第一句。第二句。')&&r.chapter.assistant?.includes('试跑者')&&r.chapter.provenance?.model.modelId==='test-override')
@@ -5515,7 +5515,7 @@ async function main() {
     await confirmSlashAuthorization(page)
     const quickFinished = await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead('Host 快速.md')
-      return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 && !document.querySelector('.status-task-stop')
+      return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 && document.querySelector('.task-dock')?.dataset.kind!=='generating'
     })()`, 8000)
     check('快速流结束后底栏不残留运行任务', quickFinished, quickFinished ? '' : await page.eval(`(async () => JSON.stringify({ note: (await window.rgent.noteRead('Host 快速.md')).content, tasks: await window.rgent.agentTasks(), status: document.querySelector('.status-left')?.innerText }))()`))
     await verifyScopedHost(page, vault, shot, toolLoopRequests)
@@ -5537,7 +5537,7 @@ async function main() {
       if (!await confirmSlashAuthorization(page)) throw new Error(`${name} 的本场授权准备失败；停止并行依赖断言。`)
       await parallelCheck(`${name} 启动后任务归属及数量正确`, `(async () => { const tasks=await window.rgent.agentTasks();return tasks.length===${at+1} && ${JSON.stringify(['Host A.md','Host B.md'].slice(0,at+1))}.every(path=>tasks.some(task=>task.relPath===path)) })()`)
     }
-    await parallelCheck('异篇并行时底栏显示任务数量', `(async ()=>(await window.rgent.agentTasks()).length===2 && document.querySelector('.status-task-more')?.textContent.includes('2 项'))()`)
+    await parallelCheck('异篇并行时当前篇浮层为生成中', `(async ()=>(await window.rgent.agentTasks()).length===2 && document.querySelector('.task-dock')?.dataset.kind==='generating')()`)
     await page.eval(`(() => { [...document.querySelectorAll('.tab-wrap')].find((tab) => tab.textContent.includes('Host A'))?.querySelector('.tab-close')?.click() })()`)
     await parallelCheck('关闭 A 的 tab 不取消其生成', `(async () =>
       ![...document.querySelectorAll('.tab-wrap')].some((tab) => tab.textContent.includes('Host A')) &&
@@ -5546,10 +5546,13 @@ async function main() {
     await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((note) => note.innerText.includes('Host A'))?.click() })()`)
     await parallelCheck('重开 A 可回到正在生成的原篇', `(async () => document.querySelector('.tab[aria-selected=true]')?.innerText.includes('Host A') && (await window.rgent.agentTasks()).length === 2)()`)
     await page.eval(`(() => { [...document.querySelectorAll('.tab-wrap')].find((tab) => tab.textContent.includes('Host B'))?.querySelector('.tab')?.click() })()`)
-    await page.eval(`document.querySelector('.status-task-more')?.click()`)
+    await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((note) => note.innerText.includes('Host 快速'))?.click() })()`)
+    await parallelCheck('切到空闲篇显示另有两项', `(async ()=>(await window.rgent.agentTasks()).length===2 && document.querySelector('.task-dock-others')?.textContent.includes('2 项'))()`)
+    await page.eval(`document.querySelector('.task-dock-others')?.click()`)
     await parallelCheck('任务浮层逐篇给出停止按钮', `document.querySelectorAll('.overlay-tasks .task-row').length === 2`)
     await page.eval(`(() => { [...document.querySelectorAll('.overlay-tasks .task-row')].find((n) => n.textContent.includes('Host A'))?.querySelector('button')?.click() })()`)
-    await parallelCheck('停止 A 后 B 仍可继续运行', `(async () => {const tasks=await window.rgent.agentTasks();return tasks.length===1 && tasks[0].relPath==='Host B.md' && document.querySelector('.status-task')?.textContent.includes('Host B')})()`)
+    await page.eval(`(() => { [...document.querySelectorAll('.tab-wrap')].find((tab) => tab.textContent.includes('Host B'))?.querySelector('.tab')?.click() })()`)
+    await parallelCheck('停止 A 后 B 仍可继续运行', `(async () => {const tasks=await window.rgent.agentTasks();return tasks.length===1 && tasks[0].relPath==='Host B.md' && document.querySelector('.task-dock')?.dataset.kind==='generating'})()`)
     await page.key('Escape', 'Escape', 0, 27)
     await page.eval(`document.querySelector('.cm-content')?.focus()`)
     await page.eval(`(() => { const content = document.querySelector('.cm-content'); content.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })); content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true, cancelable: true })); })()`)

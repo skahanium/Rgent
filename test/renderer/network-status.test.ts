@@ -2,18 +2,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { start } from '../../src/renderer/src/shell.ts'
 
-/** 真实外壳 + 假 editor/API：验证状态行的「查看」只跟最近一次成功抓页的预览走，
- *  后续拒绝事件只改提示文本，不会把预览入口冲掉。 */
+/** 真实外壳 + 假 editor/API：抓页事件不再进底栏，总闸小球可点。 */
 const editorHarness = vi.hoisted(() => ({ text: '', change: null as ((text: string) => void) | null, focus: vi.fn() }))
 vi.mock('../../src/renderer/src/view/editor.ts', () => ({
   mountEditor: (_root: HTMLElement, change: (text: string) => void) => {
     editorHarness.change = change
     const dom = document.createElement('div'), scrollDOM = document.createElement('div')
-    let text = ''
     return {
-      view: { dom, contentDOM: dom, scrollDOM, compositionStarted: false },
+      view: { dom, contentDOM: dom, scrollDOM, compositionStarted: false, dispatch: () => {}, state: { doc: { length: 0 } } },
       getText: () => editorHarness.text,
-      setText: (value: string) => { text = value; editorHarness.text = value },
+      setText: (value: string) => { editorHarness.text = value },
+      insertAtSelection: () => false,
+      applyExternalText: () => {},
+      slashCommandStart: () => null,
       setReadOnly: () => {}, setTheme: () => {}, setActiveTaskIds: () => {}, setNoteHost: () => {},
       onStateChange: () => {}, onViewportChange: () => {}, focus: editorHarness.focus,
       selectionRange: () => ({ anchor: 0, head: 0 }),
@@ -25,9 +26,11 @@ vi.mock('../../src/renderer/src/view/editor.ts', () => ({
 vi.mock('../../src/renderer/src/view/read-only.ts', () => ({ renderReadOnlyMarkdown: vi.fn(), disposeReadOnlyImages: () => {} }))
 
 let handlers: Record<string, Function>, api: any, root: HTMLElement
+let networkEnabled = false
 
 beforeEach(() => {
   handlers = {}
+  networkEnabled = false
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute('open', '') } })
   Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute('open'); this.dispatchEvent(new Event('close')) } })
@@ -43,6 +46,10 @@ beforeEach(() => {
     modelConfigGet: async () => ({ ok: false }),
     memoryGet: async () => ({ ok: false }),
     agentTasks: async () => [],
+    networkConfig: vi.fn(async (value?: { enabled?: boolean }) => {
+      if (value && typeof value.enabled === 'boolean') networkEnabled = value.enabled
+      return { ok: true, config: { enabled: networkEnabled, provider: null, hasKey: false } }
+    }),
     networkPreview: vi.fn(async () => ({
       ok: true,
       preview: { id: 'preview-1', url: 'https://example.com/page', host: 'example.com', text: '外部正文', bytes: 1234, truncated: false, fetchedAt: '2026-10-20T00:00:00.000Z', lowTrust: true }
@@ -60,34 +67,24 @@ const emitNetwork = (network: unknown): void => {
   handlers.onAgentEvent({ id: 'task-1', relPath: 'a.md', status: 'running', sessionId: 's', network })
 }
 
-describe('network status row', () => {
-  it('keeps the last successful fetch preview clickable after a later refused event', async () => {
+describe('network chrome after status-bar strip', () => {
+  it('does not dump fetch summaries into the bar', async () => {
     await start(root)
     emitNetwork({ taskId: 'task-1', id: 'preview-1', kind: 'fetch', host: 'example.com', path: '/page', bytes: 1234, truncated: false, outcome: 'ok', at: '2026-10-20T00:00:00.000Z' })
-    expect(root.querySelector('.status-task-network')?.textContent).toBe('联网：example.com（1.2 KB，低信任）')
-    const first = root.querySelector<HTMLButtonElement>('.status-task-network-view')
-    expect(first).not.toBeNull()
-    expect(first!.getAttribute('aria-label')).toContain('example.com')
-
-    emitNetwork({ taskId: 'task-1', kind: 'fetch', host: 'bad.example', path: '/bad', outcome: 'refused', code: 'EGRESS_TIMEOUT', at: '2026-10-20T00:00:01.000Z' })
-    expect(root.querySelector('.status-task-network')?.textContent).toBe('联网：bad.example（未执行：EGRESS_TIMEOUT）')
-    const still = root.querySelector<HTMLButtonElement>('.status-task-network-view')
-    expect(still).not.toBeNull()
-    expect(still!.disabled).toBe(false)
-    // 按钮仍指向成功那次抓页的主机，而不是最近拒绝事件的主机。
-    expect(still!.getAttribute('aria-label')).toContain('example.com')
-    expect(still!.getAttribute('aria-label')).not.toContain('bad.example')
-
-    still!.click()
-    await vi.waitFor(() => expect(api.networkPreview).toHaveBeenCalledWith({ taskId: 'task-1', id: 'preview-1' }))
-    await vi.waitFor(() => expect(document.querySelector('.overlay-network-preview')).not.toBeNull())
+    expect(root.querySelector('.status-task-network')).toBeNull()
+    expect(root.querySelector('.status-task-network-view')).toBeNull()
+    expect(root.querySelector('.status-vault')).toBeNull()
+    expect(document.querySelector<HTMLElement>('.task-dock')?.dataset.kind).toBe('others')
   })
-})
 
-describe('reused fetch status', () => {
-  it('says a reused fetch came from this task instead of pretending a fresh fetch', async () => {
+  it('toggles the device gate from the right-side ball', async () => {
     await start(root)
-    emitNetwork({ taskId: 'task-1', kind: 'fetch', host: 'example.com', path: '/p', outcome: 'ok', bytes: 1234, reused: true, at: new Date().toISOString() })
-    expect(root.querySelector('.status-task-network')?.textContent ?? '').toContain('未再次外发')
+    await vi.waitFor(() => expect(root.querySelector('.status-dot')).not.toBeNull())
+    const button = root.querySelector<HTMLButtonElement>('.status-dot')!
+    expect(button.dataset.state).toBe('offline')
+    button.click()
+    await vi.waitFor(() => expect(api.networkConfig).toHaveBeenCalledWith({ enabled: true }))
+    await vi.waitFor(() => expect(button.dataset.state).toBe('online'))
+    expect(button.getAttribute('aria-pressed')).toBe('true')
   })
 })

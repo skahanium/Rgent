@@ -14,7 +14,7 @@ import { openFetchDialog } from './fetch-dialog.ts'
 import { promptConflict } from './conflict.ts'
 import { modalOpen, openOverlay } from './overlay.ts'
 import { clearNotices, pushNotice } from './notice.ts'
-import { openNetworkPreview } from './preview-overlay.ts'
+import { renderTaskDock } from './task-dock.ts'
 import { createSearchOverlay } from './search-overlay.ts'
 import { createSettingsOverlay } from './settings.ts'
 import { applySaved, pendingWrites, hasUnavailableDraft, taskModelId, type Tab } from './tabs.ts'
@@ -292,6 +292,7 @@ export async function start(root: HTMLElement): Promise<void> {
   let deferredVaultBodyConflict = false
   let permissionState: PermissionState = { status: 'ready', entries: [] }
   let vaultNameText: string | null = null
+  let networkEnabled = false
   // 声明放在状态区：applyState 会在定义点之前调用 closeVaultPicker，
   // 用 let 声明在后面会撞 TDZ（实测 ReferenceError）。
   let vaultPicker: ReturnType<typeof openOverlay> | null = null
@@ -360,7 +361,11 @@ export async function start(root: HTMLElement): Promise<void> {
     // 联网只读卡片挂在「模型」页：总开关保存即生效，密钥保存后不显示。
     network: () => ({
       get: () => window.rgent.networkConfig(),
-      setEnabled: enabled => window.rgent.networkConfig({ enabled }),
+      setEnabled: async enabled => {
+        const result = await window.rgent.networkConfig({ enabled })
+        if (result.ok) { networkEnabled = result.config.enabled; updateStatus() }
+        return result
+      },
       saveProvider: request => window.rgent.networkProviderSave(request),
       clearProvider: () => window.rgent.networkProviderClear(),
       stats: () => window.rgent.networkStats(),
@@ -445,7 +450,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const groups = modelModuleGroups(config)
     const value = taskModelId(tab, config.defaultModelId)
     const invalid = value !== null && !groups.some(group => group.items.some(item => item.id === value))
-    const unavailableLabel = !tab ? '打开笔记后选择' : invalid ? '模型不可用，请重新选择' : undefined
+    const unavailableLabel = !tab ? '打开笔记后选择' : invalid ? '模型不可用，请重新选择' : groups.length === 0 ? undefined : value === null ? '未选' : undefined
     return {
       groups, value, disabled: !tab, unavailableLabel,
       signature: JSON.stringify({ groups, value, disabled: !tab, unavailableLabel }),
@@ -470,17 +475,6 @@ export async function start(root: HTMLElement): Promise<void> {
   let countedWords = 0
   const activeTasks = new Map<string, AgentTaskView>()
   const endedTaskIds = new Set<string>()
-  // 最近一次联网事件（成功与被拒都更新，只用于提示文本）；只活到任务结束。
-  // MCP 事件也是联网活动：另存 kind／server／tool，状态行按 `MCP <server>/<tool>` 显示。
-  type NetworkTaskState = { host: string; kind: 'fetch' | 'search' | 'mcp'; server?: string; tool?: string; toolError?: boolean; bytes?: number; truncated?: boolean; reused?: boolean; at: string; outcome?: 'ok' | 'refused'; code?: string }
-  const networkTasks = new Map<string, NetworkTaskState>()
-  // 最近一次成功抓页／MCP 调用的预览 id；拒绝/搜索事件只改提示，不动它。
-  // 记录 kind 是为了只在状态行与预览同源时才挂「查看」，避免把上一次抓页内容错配给这次 MCP 调用。
-  const networkPreviews = new Map<string, { id: string; host: string; kind: 'fetch' | 'mcp' }>()
-  // 失败／被拒的联网调用不产生 network 事件（主进程只在成功时发）；活动行「抓网页」
-  // 是渲染层还能拿到的唯一信号：先亮联网提示与「停止联网」，免得失败后无入口可停。
-  const networkAttempts = new Map<string, 'fetch' | 'search'>()
-  const stoppedNetworkTasks = new Set<string>()
   const hostRevisions = new Map<string, string>()
   let taskOverlay: ReturnType<typeof openOverlay> | null = null
   let hostNotice = ''
@@ -525,6 +519,7 @@ export async function start(root: HTMLElement): Promise<void> {
   settingsOpen.addEventListener('click', () => { if (!conflictDecisionOpen) settingsOverlay.open() })
   // 底栏模型模块首次取一次配置；之后由设置页写入与面板关闭时刷新。
   void refreshModelModule()
+  void refreshNetworkGate()
   lifecycleWarning.addEventListener('click', () => { if (!conflictDecisionOpen) void showRecoveryStatus() })
 
   memorySelection.addEventListener('mousedown', event => event.preventDefault())
@@ -553,11 +548,20 @@ export async function start(root: HTMLElement): Promise<void> {
     void submitSlash(submission)
   }, { capture: true })
   document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229 || editor.view.compositionStarted || !active || modalOpen()) return
-    const task = [...activeTasks.values()].find((item) => item.relPath === active)
-    if (!task) return
-    event.preventDefault()
-    void window.rgent.agentCancel(task.id)
+    if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229 || editor.view.compositionStarted || modalOpen()) return
+    // 授权卡是非模态：modalOpen() 看不见它。卡开着时 Esc 归卡片／取消，不能顺便清掉「暂停中」。
+    if (authorizationPopover) return
+    const tab = current()
+    const task = tab && [...activeTasks.values()].find((item) => item.relPath === tab.relPath)
+    if (task) {
+      event.preventDefault()
+      void abortCurrent()
+      return
+    }
+    if (tab?.pausedByUser && tab.pausedRestart) {
+      event.preventDefault()
+      endPaused()
+    }
   }, true)
 
   treeToggle.addEventListener('click', () => {
@@ -724,7 +728,7 @@ export async function start(root: HTMLElement): Promise<void> {
     updateStatus()
   }).catch(() => {})
 
-  async function submitSlash(submission: { range: { start: number; end: number }; prompt: string }): Promise<void> {
+  async function submitSlash(submission: { range: { start: number; end: number }; prompt: string }, initials?: { initialNetwork?: boolean; initialMcp?: boolean }): Promise<void> {
     const tab=current();if(!tab || authorizationPopover || conflictDecisionOpen)return
     if(tab.availability || !tab.sessionId || !tab.objectVersion)return
     const selectedModelId = taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null)
@@ -743,6 +747,8 @@ export async function start(root: HTMLElement): Promise<void> {
     authorizationPopover=openAuthorizationPopover({discard:id=>window.rgent.agentAuthorizationDiscard(id),origin:tab.relPath,entries:tree,anchor:coords,
       returnFocus:()=>editor.view.contentDOM,
       onClose:()=>{authorizationPopover=null},
+      ...(initials?.initialNetwork?{initialNetwork:true}:{}),
+      ...(initials?.initialMcp?{initialMcp:true}:{}),
       preview:async (references,network,mcp)=>{
         if(current()!==tab || !tabs.includes(tab) || editor.getText()!==draft)return {ok:false,error:'STALE_AUTHORIZATION'}
         if(!await flushSave())return {ok:false,error:'UNSAVED_DRAFT'}
@@ -754,7 +760,8 @@ export async function start(root: HTMLElement): Promise<void> {
         if(!await flushSave())return {ok:false,error:'UNSAVED_DRAFT'}
         const result=await window.rgent.agentStart({...displayedRequest,previewId:preview.id,...(network?{network:true}:{}),...(mcp?{mcp:true}:{})})
         if(!result.ok)return result
-        delete tab.temporaryModelId
+        tab.pausedRestart={promptText:displayedRequest.promptText,modelRecordId:displayedRequest.modelRecordId,...(network?{network:true}:{}),...(mcp?{mcp:true}:{})}
+        tab.pausedByUser=false
         if(!endedTaskIds.has(result.id))activeTasks.set(result.id,{id:result.id,relPath:tab.relPath,startedAt:Date.now()})
         hostNotice='';syncActiveLocks();updateStatus()
         void runExclusiveConflict(()=>syncHostTab(tab,vaultEpoch))
@@ -768,41 +775,17 @@ export async function start(root: HTMLElement): Promise<void> {
     if (event.persisted && event.revision) hostRevisions.set(event.relPath, event.revision)
     if (event.status === 'running') {
       if (!endedTaskIds.has(event.id)) activeTasks.set(event.id, { id: event.id, relPath: event.relPath, startedAt: activeTasks.get(event.id)?.startedAt ?? Date.now(), activity: event.activity })
-      // 成功与被拒都会发 network 事件；成功抓页的预览 id 单独存，拒绝事件不清它。
-      if (event.network) {
-        const network = event.network
-        networkAttempts.delete(network.taskId)
-        networkTasks.set(network.taskId, {
-          host: network.host,
-          kind: network.kind,
-          ...(network.server !== undefined ? { server: network.server } : {}),
-          ...(network.toolError === true ? { toolError: true } : {}),
-          ...(network.tool !== undefined ? { tool: network.tool } : {}),
-          ...(typeof network.bytes === 'number' ? { bytes: network.bytes } : {}),
-          ...(network.truncated ? { truncated: true } : {}),
-          ...(network.reused ? { reused: true } : {}),
-          at: network.at,
-          ...(network.outcome ? { outcome: network.outcome } : {}),
-          ...(network.code ? { code: network.code } : {})
-        })
-        if ((network.kind === 'fetch' || network.kind === 'mcp') && network.outcome !== 'refused') {
-          // 成功事件带 id 才可查看；没有 id（未缓存）就撤掉旧入口，免得指错内容。
-          if (network.id) networkPreviews.set(network.taskId, { id: network.id, host: network.host, kind: network.kind })
-          else networkPreviews.delete(network.taskId)
-        }
-      } else if (event.activity === '抓网页' || event.activity === '搜索网页') {
-        // 旧版主进程只在成功时发事件；活动行兜底，保证进行中的联网仍有停止入口。
-        if (!networkTasks.has(event.id)) networkAttempts.set(event.id, event.activity === '搜索网页' ? 'search' : 'fetch')
-      }
     } else {
       endedTaskIds.add(event.id)
       activeTasks.delete(event.id)
-      networkTasks.delete(event.id)
-      networkPreviews.delete(event.id)
-      networkAttempts.delete(event.id)
-      stoppedNetworkTasks.delete(event.id)
-      if (event.status === 'failed') hostNotice = `生成失败：${hostErrorText(event.reason ?? '未知错误')}`
-      else if (event.status === 'cancelled') hostNotice = `已停止：${event.relPath}`
+      const owner = tabs.find((item) => item.relPath === event.relPath)
+      if (event.status === 'cancelled' && owner?.pausedByUser && owner.pausedRestart) {
+        hostNotice = `已停止：${event.relPath}`
+      } else {
+        if (owner) { delete owner.pausedRestart; owner.pausedByUser = false }
+        if (event.status === 'failed') hostNotice = `生成失败：${hostErrorText(event.reason ?? '未知错误')}`
+        else if (event.status === 'cancelled') hostNotice = `已停止：${event.relPath}`
+      }
     }
     syncActiveLocks()
     updateStatus()
@@ -1153,15 +1136,12 @@ export async function start(root: HTMLElement): Promise<void> {
     syncRecoveryInput()
     recoveryOverlay?.close(); recoveryOverlay = null
     lifecycleWarning.hidden = true
+    renderTaskDock({ kind: 'hidden' })
     // 底栏跟着库与 tab 走，重置之后统一刷一次。
     queueMicrotask(() => updateStatus())
     tabs.length = 0
     activeTasks.clear()
     endedTaskIds.clear()
-    networkTasks.clear()
-    networkPreviews.clear()
-    networkAttempts.clear()
-    stoppedNetworkTasks.clear()
     hostRevisions.clear()
     syncActiveLocks()
     active = null
@@ -1243,6 +1223,7 @@ export async function start(root: HTMLElement): Promise<void> {
     if (vaultPicker?.isOpen()) return
     const overlay = openOverlay({
       label: '选择笔记库',
+      className: 'overlay-picker',
       dismissable: false,
       initialFocus: () => overlay.root.querySelector<HTMLElement>('.pick-btn')
     })
@@ -1813,75 +1794,69 @@ export async function start(root: HTMLElement): Promise<void> {
     }
   }
 
-  /** 状态行的联网摘要：成功只写主机、体积、低信任与截断；拒绝写尝试主机与结果码，
-   *  不写抓取正文，也不写查询串。复用事件（没有再次外发）如实说明；
-   *  MCP 事件按服务器／工具显示，带预览 id 时才有「查看」。 */
-  function networkStatusText(network: NetworkTaskState): string {
-    if (network.kind === 'mcp') {
-      const target = `${network.server ?? '未知服务器'}/${network.tool ?? '未知工具'}`
-      if (network.outcome === 'refused') return `MCP ${target}：未执行（${network.code ?? 'UNKNOWN'}）`
-      const size = typeof network.bytes === 'number' ? `${(network.bytes / 1024).toFixed(1)} KB，` : ''
-      return `MCP ${target}：已执行（${network.toolError ? '工具报错，' : ''}${size}低信任${network.truncated ? '，已截断' : ''}）`
-    }
-    if (network.outcome === 'refused') {
-      return `联网：${network.host || '未授权'}（未执行：${network.code ?? 'UNKNOWN'}）`
-    }
-    if (network.reused) return `联网：${network.host}（本任务已有结果，未再次外发）`
-    const size = typeof network.bytes === 'number' ? `${(network.bytes / 1024).toFixed(1)} KB，` : ''
-    return `联网：${network.host}（${size}低信任${network.truncated ? '，已截断' : ''}）`
-  }
-
-  /** 与既有「停止」按钮同一尺寸；本轮不改 styles.css，所以只在代码里补基础样式。 */
-  function styleStatusNetworkButton(button: HTMLButtonElement): void {
-    button.style.minHeight = '22px'
-    button.style.padding = '1px 7px'
-    button.style.border = '1px solid var(--border-strong)'
-    button.style.borderRadius = 'var(--radius-sm)'
-    button.style.color = 'var(--text-body)'
-    button.style.font = 'inherit'
-    button.style.cursor = 'pointer'
-  }
-
-  async function stopTaskNetwork(taskId: string, button: HTMLButtonElement): Promise<void> {
-    if (button.disabled) return
-    button.disabled = true
-    let stopped = false
-    try { stopped = await window.rgent.networkStop(taskId) } catch { stopped = false }
-    if (stopped) {
-      stoppedNetworkTasks.add(taskId)
-      hostNotice = ''
-    } else {
-      hostNotice = '停止联网未生效（任务可能已经结束）。'
-    }
+  async function refreshNetworkGate(): Promise<void> {
+    const result = await window.rgent.networkConfig().catch(() => null)
+    if (result?.ok) networkEnabled = result.config.enabled === true
     updateStatus()
   }
 
-  async function showTaskNetworkPreview(taskId: string, id: string, button: HTMLButtonElement): Promise<void> {
-    if (button.disabled) return
-    button.disabled = true
-    let opened = false
-    try {
-      const result = await window.rgent.networkPreview({ taskId, id })
-      if (result.ok) {
-        opened = true
-        openNetworkPreview(result.preview)
-      }
-    } catch { /* 任务结束、预览已清空或 IPC 失败：按「内容已不在」提示。 */ }
-    if (!opened) {
-      hostNotice = '内容已不在（任务结束后只保留账本记录）。'
-      updateStatus()
-    }
-    if (button.isConnected) button.disabled = false
+  function toggleNetworkGate(): void {
+    void window.rgent.networkConfig({ enabled: !networkEnabled }).then((result) => {
+      if (result.ok) { networkEnabled = result.config.enabled; updateStatus() }
+      else { hostNotice = '联网总闸没有改成。'; updateStatus() }
+    }).catch(() => { hostNotice = '联网总闸没有改成。'; updateStatus() })
   }
 
-  /** 底栏：行列、字数、库名。字数只算正文，标记行不算。 */
+  function abortCurrent(): void {
+    const tab = current()
+    const task = tab && [...activeTasks.values()].find((item) => item.relPath === tab.relPath)
+    if (!task) return
+    if (tab) tab.pausedByUser = true
+    void window.rgent.agentCancel(task.id)
+  }
+
+  function endPaused(): void {
+    const tab = current()
+    if (!tab) return
+    delete tab.pausedRestart
+    tab.pausedByUser = false
+    updateStatus()
+  }
+
+  /** 今天：插口令＋授权卡。真断点接续未开，以后只换这个函数。 */
+  async function resumeOrRestart(): Promise<void> {
+    const tab = current()
+    if (!tab?.pausedRestart || authorizationPopover || conflictDecisionOpen) return
+    if ([...activeTasks.values()].some((task) => task.relPath === tab.relPath)) return
+    const { promptText, modelRecordId, network, mcp } = tab.pausedRestart
+    if (modelRecordId) tab.temporaryModelId = modelRecordId
+    const marker = `/${promptText}`
+    let text = editor.getText()
+    let start = text.endsWith(marker) ? text.length - marker.length : -1
+    if (start < 0) {
+      const pad = text.length === 0 ? '' : /(?:\r?\n){2}$/.test(text) ? '' : text.endsWith('\n') ? '\n' : '\n\n'
+      editor.view.dispatch({ selection: { anchor: editor.view.state.doc.length }, scrollIntoView: true })
+      if (!editor.insertAtSelection(`${pad}${marker}`)) {
+        hostNotice = '无法插入口令（这篇可能正被生成占用）。'
+        updateStatus()
+        return
+      }
+      text = editor.getText()
+      start = text.endsWith(marker) ? text.length - marker.length : text.lastIndexOf(marker)
+      if (start < 0 || text.slice(start, start + marker.length) !== marker) {
+        hostNotice = '插入的口令与记忆不一致，请手打后再发。'
+        updateStatus()
+        return
+      }
+    }
+    await submitSlash({ range: { start, end: start + marker.length }, prompt: promptText }, { initialNetwork: network, initialMcp: mcp })
+  }
+
+  /** 底栏：行列、字数、总闸。字数只算正文，标记行不算。库名只写在 #app[data-vault]。 */
   function updateStatus(): void {
     paintUnavailable()
-    // 任务行都不在了（结束、换库、意外消失）就不该留下联网按钮或旧主机名。
-    for (const taskId of [...networkTasks.keys()]) if (!activeTasks.has(taskId)) networkTasks.delete(taskId)
-    for (const taskId of [...networkPreviews.keys()]) if (!activeTasks.has(taskId)) networkPreviews.delete(taskId)
-    for (const taskId of [...networkAttempts.keys()]) if (!activeTasks.has(taskId)) networkAttempts.delete(taskId)
-    for (const taskId of [...stoppedNetworkTasks]) if (!activeTasks.has(taskId)) stoppedNetworkTasks.delete(taskId)
+    if (vaultNameText) root.dataset.vault = vaultNameText
+    else delete root.dataset.vault
     const tab = current()
     const info = tab ? editor.selectionInfo() : null
     const range = tab ? editor.selectionRange() : null
@@ -1897,9 +1872,8 @@ export async function start(root: HTMLElement): Promise<void> {
         line: info?.line ?? 1,
         column: info?.column ?? 1,
         words: tab ? countedWords : 0,
-        vaultName: vaultNameText,
         noteOpen: tab != null
-      }, modelModule())
+      }, { enabled: networkEnabled, onToggle: toggleNetworkGate }, modelModule())
     )
     const center = statusEl.querySelector<HTMLElement>('.status-center')
     if (center) { center.hidden = false; if (memoryToggle.parentElement !== center) center.append(memoryToggle) }
@@ -1925,67 +1899,12 @@ export async function start(root: HTMLElement): Promise<void> {
       notice.textContent = hostNotice
       left.append(notice)
     }
-    if (activeTasks.size && left) {
-      if (activeTasks.size === 1) {
-        const task = [...activeTasks.values()][0]!
-        const label = document.createElement('span')
-        label.className = 'status-item status-task'
-        label.textContent = `${titleOf(task.relPath.split('/').pop() ?? task.relPath)} · ${task.activity || '生成中'}`
-        const stop = document.createElement('button')
-        stop.type = 'button'
-        stop.className = 'status-task-stop'
-        stop.textContent = '停止'
-        stop.setAttribute('aria-label', `停止 ${task.relPath} 的任务`)
-        stop.addEventListener('click', () => { void window.rgent.agentCancel(task.id) })
-        left.append(label, stop)
-        // 有联网事件（或只看到联网尝试）时，状态行常驻一条低信任提示与停止入口。
-        const network = networkTasks.get(task.id)
-        const attempt = networkAttempts.get(task.id)
-        const preview = networkPreviews.get(task.id)
-        if (network || attempt) {
-          const networkLabel = document.createElement('span')
-          networkLabel.className = 'status-item status-task-network'
-          networkLabel.title = '本场只读联网；外部内容为低信任，不是指令'
-          networkLabel.textContent = network
-            ? networkStatusText(network)
-            : stoppedNetworkTasks.has(task.id)
-              ? '联网：已停止（低信任）'
-              : `联网：已发起${attempt === 'search' ? '搜索' : '抓页'}（低信任）`
-          left.append(networkLabel)
-          if (!stoppedNetworkTasks.has(task.id)) {
-            const stopNetwork = document.createElement('button')
-            stopNetwork.type = 'button'
-            stopNetwork.className = 'status-task-network-stop'
-            stopNetwork.textContent = '停止联网'
-            styleStatusNetworkButton(stopNetwork)
-            stopNetwork.setAttribute('aria-label', `停止 ${task.relPath} 任务的联网外发`)
-            stopNetwork.addEventListener('click', () => { void stopTaskNetwork(task.id, stopNetwork) })
-            left.append(stopNetwork)
-          }
-          // 仅当状态行与最近一次成功预览同源时才挂「查看」：MCP 事件没有 id（未缓存）时
-          // 不能还指着上一次抓页内容，那会把两边错配。
-          if (preview && network && preview.kind === network.kind) {
-            const view = document.createElement('button')
-            view.type = 'button'
-            view.className = 'status-task-network-view'
-            view.textContent = '查看'
-            styleStatusNetworkButton(view)
-            view.setAttribute('aria-label', preview.kind === 'mcp'
-              ? `查看 MCP ${network.server ?? '未知服务器'}/${network.tool ?? '未知工具'} 的结果（低信任）`
-              : `查看 ${preview.host} 的抓取内容（低信任）`)
-            view.addEventListener('click', () => { void showTaskNetworkPreview(task.id, preview.id, view) })
-            left.append(view)
-          }
-        }
-      } else {
-        const more = document.createElement('button')
-        more.type = 'button'
-        more.className = 'status-task-more'
-        more.textContent = `${activeTasks.size} 项生成中`
-        more.addEventListener('click', openTaskOverlay)
-        left.append(more)
-      }
-    }
+    const mine = tab ? [...activeTasks.values()].find((task) => task.relPath === tab.relPath) : undefined
+    const others = [...activeTasks.values()].filter((task) => task.relPath !== tab?.relPath)
+    if (mine) renderTaskDock({ kind: 'generating', onAbort: abortCurrent })
+    else if (tab?.pausedByUser && tab.pausedRestart) renderTaskDock({ kind: 'paused', onResume: () => { void resumeOrRestart() }, onEnd: endPaused })
+    else if (others.length) renderTaskDock({ kind: 'others', count: others.length, onOpen: openTaskOverlay })
+    else renderTaskDock({ kind: 'hidden' })
   }
 
   function openTaskOverlay(): void {
@@ -2010,7 +1929,11 @@ export async function start(root: HTMLElement): Promise<void> {
       stop.type = 'button'
       stop.textContent = '停止'
       stop.setAttribute('aria-label', `停止 ${task.relPath} 的任务`)
-      stop.addEventListener('click', () => { void window.rgent.agentCancel(task.id) })
+      stop.addEventListener('click', () => {
+        const owner = tabs.find((item) => item.relPath === task.relPath)
+        if (owner) owner.pausedByUser = true
+        void window.rgent.agentCancel(task.id)
+      })
       row.append(name, stop)
       taskOverlay.root.append(row)
     }
@@ -2340,7 +2263,7 @@ export async function start(root: HTMLElement): Promise<void> {
       applySource(destination,saved.snapshot);destination.relPath=saved.relPath
       if(held){tabs.push(destination);hostNotice='正文副本已保存；原窗口稿和旧待保存回答仍保留，可返回原 tab 明确舍弃。'}
       hostRevisions.delete(source)
-      for(const id of saved.taskIds) { activeTasks.delete(id); networkTasks.delete(id); networkPreviews.delete(id); networkAttempts.delete(id); stoppedNetworkTasks.delete(id); endedTaskIds.add(id) }
+      for(const id of saved.taskIds) { activeTasks.delete(id); endedTaskIds.add(id) }
       if(active===source) { active=saved.relPath; editor.setText(destination.content,noteHost(),selection) }
       closeLedger(); syncActiveLocks(); renderTabs(); updateStatus(); await refreshTree()
     } catch(error) { if(epoch===vaultEpoch) pushNotice({ title:'另存没有完成', detail:lifecycleErrorText(error), tone:'error' }) }

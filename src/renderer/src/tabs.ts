@@ -4,6 +4,10 @@ export type Tab = {
   relPath: string
   /** 下一场模型覆盖：只活在这个已核验对象的 tab 内，不写设备配置。 */
   temporaryModelId?: string
+  /** 人中止后可再开：只记口令与本场勾选，内存、不落盘。 */
+  pausedRestart?: { promptText: string; modelRecordId: string; network?: boolean; mcp?: boolean }
+  /** 只有人点中止／Esc 才进入「暂停中」；任务自己结束或被换库取消不算。 */
+  pausedByUser?: boolean
   /** 正文。只进画布。 */
   content: string
   /** 旁路账本，画布不碰。没有锚点时为 null。 */

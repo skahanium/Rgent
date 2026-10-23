@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { modalOpen, openOverlay } from '../../src/renderer/src/overlay.ts'
+
+const STYLES = readFileSync('src/renderer/src/styles.css', 'utf8')
+const overlayPickerRule = (): string => {
+  const match = /(?:^|\n)\.overlay-picker \{([^}]*)\}/u.exec(STYLES)
+  if (!match) throw new Error('styles.css 里找不到 .overlay-picker 规则')
+  return match[1]!
+}
 
 /** jsdom 没有实现 dialog 的 show/showModal；这里只补最小行为，断言的是我们自己的分派。 */
 beforeEach(() => {
@@ -58,6 +66,17 @@ describe('overlay modality', () => {
     const handled = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
     document.dispatchEvent(handled)
     expect(overlay.isOpen()).toBe(false)
+  })
+
+  it('lets the vault picker be a host, not a second card', () => {
+    const overlay = openOverlay({ label: '选择笔记库', className: 'overlay-picker' })
+    expect(overlay.root.className.split(/\s+/)).toEqual(expect.arrayContaining(['overlay', 'overlay-picker']))
+    overlay.close()
+    const rule = overlayPickerRule()
+    expect(rule).toMatch(/background:\s*transparent/)
+    expect(rule).toMatch(/border:\s*none/)
+    expect(rule).toMatch(/box-shadow:\s*none/)
+    expect(rule).toMatch(/place-items:\s*center/)
   })
 
   it('writes className before show so the first frame is the final state', () => {

@@ -1140,7 +1140,7 @@ a[href]:focus-visible,
   min-width: 0;
 }
 .status-lead { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; }
-.status-left { grid-column: 1; justify-self: start; }
+.status-left { grid-column: 1; justify-self: start; overflow: hidden; }
 .status-center { grid-column: 2; justify-self: center; gap: 6px; }
 .status-right { grid-column: 3; justify-self: end; }
 .status-model-label { color: var(--text-muted); font-size: 0.7rem; }
@@ -1177,22 +1177,19 @@ a[href]:focus-visible,
 .status-model-empty { color: var(--text-muted); }
 
 .status-item {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.status-vault { max-width: 22ch; min-width: 0; min-height: 22px; padding: 1px 6px; font: inherit; color: inherit; }
-.status-task, .status-host-notice { color: var(--accent-primary); max-width: 36ch; }
-.status-task-stop, .status-task-more { min-height: 22px; padding: 1px 7px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-body); cursor: pointer; font: inherit; }
-.status-task-stop:hover, .status-task-more:hover { border-color: var(--focus-ring); color: var(--accent-primary); }
-.status-task-stop:focus-visible, .status-task-more:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.status-host-notice { color: var(--accent-primary); max-width: 36ch; }
 .overlay-tasks { width: min(420px, calc(100vw - 40px)); }
 
 /*
  * 状态栏通知（2026-10-23 交互减负）：正常路径的原生弹窗改到这里。
  * 非模态：不遮编辑器、不抢焦点；最多 3 条，超出的合并在「另有多条提示」里（notice.ts）。
- * 挂在状态栏上方、左下角，避开右下角的写确认卡与状态栏右侧的库名。
+ * 挂在状态栏上方、左下角，避开右下角的写确认卡、居中的任务浮层与最右总闸小球。
  */
 .notice-stack {
   position: fixed;
@@ -1282,16 +1279,106 @@ a[href]:focus-visible,
 .task-row button { padding: 4px 9px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-heading); cursor: pointer; }
 
 .status-dot {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+.status-dot-core {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--status-offline);
 }
-
-.status-dot[data-state='offline'] { background: var(--status-offline); }
-.status-dot[data-state='online'] {
+.status-dot[data-state='offline'] .status-dot-core { background: var(--status-offline); }
+.status-dot[data-state='online'] .status-dot-core {
   background: var(--status-online);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-online) 25%, transparent);
+}
+.status-dot:focus,
+.status-dot:focus-visible {
+  outline: none;
+  background: var(--state-hover);
+  border: 1px solid var(--border-strong);
+}
+
+.task-dock {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 48px;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-overlay);
+  color: var(--text-body);
+  font-family: var(--font-ui);
+  font-size: 0.74rem;
+  max-width: min(92vw, 28rem);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--text-heading) 8%, transparent);
+}
+@media (max-width: 900px) {
+  .task-dock {
+    max-width: min(42vw, 14rem);
+  }
+}
+.task-dock[hidden] { display: none; }
+.task-dock-label { color: var(--accent-primary); white-space: nowrap; }
+.task-dock-abort,
+.task-dock-resume,
+.task-dock-end,
+.task-dock-others {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-body);
+  cursor: pointer;
+  font: inherit;
+}
+.task-dock-abort {
+  width: 22px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--text-body);
+}
+.task-dock-resume {
+  width: 22px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.task-dock-resume::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 5px 0 5px 8px;
+  border-color: transparent transparent transparent currentColor;
+}
+.task-dock-abort:hover,
+.task-dock-resume:hover { opacity: 0.75; }
+.task-dock-end:hover,
+.task-dock-others:hover { border-color: var(--focus-ring); color: var(--accent-primary); }
+.task-dock-abort:focus-visible,
+.task-dock-resume:focus-visible,
+.task-dock-end:focus-visible,
+.task-dock-others:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .editor-host {
@@ -1372,16 +1459,21 @@ a[href]:focus-visible,
   background: var(--paper);
 }
 
-.picker {
-  position: fixed;
-  inset: 0;
+/* 选库浮层本身不再画第二张卡：铺满视口，只居中里面那一张 .picker-card。 */
+.overlay-picker {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
   display: grid;
   place-items: center;
-  background: var(--bg);
-  z-index: 20;
+  overflow: auto;
 }
-
-.picker[hidden] { display: none; }
 
 .picker-card {
   width: min(28rem, calc(100% - 32px));
@@ -1913,8 +2005,7 @@ a[href]:focus-visible,
   .cm-content { padding-left: 4px !important; padding-right: 4px !important; }
 }
 
-/* 状态点要能被键盘用户感知到：它现在只是状态显示，用 title + aria-label 说明。 */
-.status-dot[data-state='offline'] { outline: none; }
+/* 总闸小球：中性焦点，不用强调色光环。 */
 
 /*
  * 账本只读回顾：临时面板，关掉就走，不占右侧反链（围栏 §账本）。

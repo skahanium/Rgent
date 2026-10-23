@@ -12,6 +12,9 @@ export type AuthorizationPopoverOptions = {
   discard?:(id:string)=>Promise<void>
   onClose?:()=>void
   returnFocus?:()=>HTMLElement|null
+  /** 同口令再开时预勾上次的联网／MCP；总闸已关则 refresh 会把联网勾清掉。 */
+  initialNetwork?:boolean
+  initialMcp?:boolean
 }
 export type AuthorizationPopover = Overlay & { setStale:()=>void }
 
@@ -60,8 +63,8 @@ function sessionToolLabels(origin:string, sources:readonly {relPath:string;tier:
 export function openAuthorizationPopover(options:AuthorizationPopoverOptions):AuthorizationPopover {
   const selected=new Set<string>(rememberedScope);let prepared:AgentAuthorizationPreview|null=null;let generation=0;let submitting=false
   // 联网与 MCP 两个勾选默认都不勾、互不影响；只有主进程说可用时才出现，切换会重新核对预览（防重放）。
-  let networkSelected=false
-  let mcpSelected=false
+  let networkSelected=options.initialNetwork===true
+  let mcpSelected=options.initialMcp===true
   // 非模态：不抢编辑器焦点、不拦快捷键；Esc 由 overlay 在焦点进入卡片时接管。
   let panel: Overlay
   const placeCard=():void=>{

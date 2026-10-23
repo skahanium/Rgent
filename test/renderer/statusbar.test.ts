@@ -34,12 +34,13 @@ describe('status bar model module', () => {
     const merged = { ...base, ...overrides } as typeof base
     return { ...merged, signature: JSON.stringify({ groups: merged.groups, value: merged.value }) }
   }
-  const input = { line: 1, column: 1, words: 0, vaultName: '库', noteOpen: true }
+  const input = { line: 1, column: 1, words: 0, noteOpen: true }
+  const network = (overrides: Record<string, unknown> = {}) => ({ enabled: false, onToggle: () => {}, ...overrides })
 
   const config = (overrides: Record<string, unknown> = {}) => ({
     providers: [
       { provider: 'deepseek' as const, configured: true, baseURL: 'https://api.deepseek.com', hasKey: true, modelCount: 2 },
-      { provider: 'minimax' as const, configured: true, baseURL: 'https://api.minimaxi.com/v1', hasKey: false, modelCount: 1 },
+      { provider: 'minimax' as const, configured: true, baseURL: 'https://api.minimax.com/v1', hasKey: false, modelCount: 1 },
       { provider: 'custom' as const, configured: false, baseURL: '', hasKey: false, modelCount: 0 }
     ],
     models: [
@@ -62,7 +63,7 @@ describe('status bar model module', () => {
 
   it('groups configured models by provider and marks the current one', () => {
     const host = document.createElement('div')
-    renderStatusbar(host, statusModel(input, module() as never))
+    renderStatusbar(host, statusModel(input, network(), module() as never))
     const select = host.querySelector<HTMLSelectElement>('.status-model')!
     expect([...select.querySelectorAll('optgroup')].map((group) => group.label)).toEqual(['DeepSeek', 'MiniMax'])
     expect([...select.options].map((option) => option.value)).toEqual(['m1', 'm2', 'm3'])
@@ -72,25 +73,35 @@ describe('status bar model module', () => {
   it('keeps the same select node and values across status re-renders', () => {
     const host = document.createElement('div')
     document.body.append(host)
-    renderStatusbar(host, statusModel(input, module() as never))
+    renderStatusbar(host, statusModel(input, network(), module() as never))
     const first = host.querySelector<HTMLSelectElement>('.status-model')!
     first.focus()
-    renderStatusbar(host, statusModel({ ...input, line: 2 }, module() as never))
+    renderStatusbar(host, statusModel({ ...input, line: 2 }, network(), module() as never))
     const second = host.querySelector('.status-model')
     expect(second).toBe(first)
     expect(document.activeElement).toBe(first)
     expect((second as HTMLSelectElement).value).toBe('m3')
-    renderStatusbar(host, statusModel({ ...input, line: 3 }, module({ value: 'm1' }) as never))
+    renderStatusbar(host, statusModel({ ...input, line: 3 }, network(), module({ value: 'm1' }) as never))
     expect((host.querySelector('.status-model') as HTMLSelectElement).value).toBe('m1')
     expect(host.querySelector('.status-model')).toBe(first)
     expect(document.activeElement).toBe(first)
     host.remove()
   })
 
+  it('uses a short 未选 placeholder when a note is open but no model is chosen', () => {
+    const host = document.createElement('div')
+    renderStatusbar(host, statusModel(input, network(), module({ value: null, unavailableLabel: '未选' }) as never))
+    const select = host.querySelector<HTMLSelectElement>('.status-model')!
+    expect(select.value).toBe('')
+    expect(select.options[0]?.textContent).toBe('未选')
+    expect(host.textContent).not.toContain('未选择模型')
+    host.remove()
+  })
+
   it('offers a way to open settings instead of a dead control when nothing is configured', () => {
     const host = document.createElement('div')
     let configured = 0
-    renderStatusbar(host, statusModel(input, module({ groups: [], value: null, onConfigure: () => { configured += 1 } }) as never))
+    renderStatusbar(host, statusModel(input, network(), module({ groups: [], value: null, onConfigure: () => { configured += 1 } }) as never))
     expect(host.querySelector('.status-model')).toBeNull()
     expect(host.querySelector('.status-model-empty')?.textContent).toBe('未配置模型')
     host.querySelector<HTMLButtonElement>('.status-model-config')!.click()
@@ -100,7 +111,7 @@ describe('status bar model module', () => {
   it('reports the chosen model through the change handler', () => {
     const host = document.createElement('div')
     const picked: string[] = []
-    renderStatusbar(host, statusModel(input, module({ onChange: (id: string) => picked.push(id) }) as never))
+    renderStatusbar(host, statusModel(input, network(), module({ onChange: (id: string) => picked.push(id) }) as never))
     const select = host.querySelector<HTMLSelectElement>('.status-model')!
     select.value = 'm1'
     select.dispatchEvent(new Event('change'))
@@ -110,23 +121,34 @@ describe('status bar model module', () => {
 
 it('updates the active note change callback even when model options are unchanged', () => {
   const host = document.createElement('div'), selected: string[] = []
+  const network = { enabled: false, onToggle: () => {} }
   const base = { groups: [{ label: '供应商', items: [{ id: 'm', label: 'model' }] }], value: 'm', signature: 'same', onConfigure: () => {} }
-  renderStatusbar(host, statusModel({ line: 1, column: 1, words: 0, vaultName: '库', noteOpen: true }, { ...base, onChange: () => selected.push('A') }))
+  renderStatusbar(host, statusModel({ line: 1, column: 1, words: 0, noteOpen: true }, network, { ...base, onChange: () => selected.push('A') }))
   const select = host.querySelector<HTMLSelectElement>('.status-model')!
-  renderStatusbar(host, statusModel({ line: 1, column: 1, words: 0, vaultName: '库', noteOpen: true }, { ...base, onChange: () => selected.push('B') }))
+  renderStatusbar(host, statusModel({ line: 1, column: 1, words: 0, noteOpen: true }, network, { ...base, onChange: () => selected.push('B') }))
   select.dispatchEvent(new Event('change'))
   expect(selected).toEqual(['B'])
 })
 
-describe('passive vault status',()=>{
- it('retains a noninteractive library label when position updates',()=>{
-   const host=document.createElement('div');document.body.append(host)
-   renderStatusbar(host,statusModel({line:1,column:1,words:0,vaultName:'工作库',noteOpen:true}))
-   const label=host.querySelector<HTMLElement>('.status-vault')!
-   expect(label.tagName).toBe('SPAN'); expect(label.hasAttribute('tabindex')).toBe(false)
-   expect(label.hasAttribute('aria-label')).toBe(false); expect(label.onclick).toBeNull()
-   renderStatusbar(host,statusModel({line:2,column:1,words:0,vaultName:'工作库',noteOpen:true}))
-   expect(host.querySelector('.status-vault')).toBe(label)
-   host.remove()
- })
+describe('network gate button', () => {
+  it('renders a clickable gate and no vault name', () => {
+    const host = document.createElement('div')
+    document.body.append(host)
+    let toggled = 0
+    renderStatusbar(host, statusModel({ line: 1, column: 1, words: 0, noteOpen: true }, { enabled: false, onToggle: () => { toggled += 1 } }))
+    expect(host.querySelector('.status-vault')).toBeNull()
+    const button = host.querySelector<HTMLButtonElement>('.status-dot')!
+    expect(button.tagName).toBe('BUTTON')
+    expect(button.dataset.state).toBe('offline')
+    expect(button.getAttribute('aria-pressed')).toBe('false')
+    expect(button.getAttribute('aria-label')).toBe('联网只读已关')
+    button.click()
+    expect(toggled).toBe(1)
+    renderStatusbar(host, statusModel({ line: 2, column: 1, words: 0, noteOpen: true }, { enabled: true, onToggle: () => { toggled += 1 } }))
+    expect(host.querySelector('.status-dot')).toBe(button)
+    expect(button.dataset.state).toBe('online')
+    expect(button.getAttribute('aria-pressed')).toBe('true')
+    expect(button.getAttribute('aria-label')).toBe('联网只读已开')
+    host.remove()
+  })
 })

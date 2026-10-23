@@ -2,9 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { start } from '../../src/renderer/src/shell.ts'
 
-/** 真实外壳 + 假 editor/API：MCP 事件也算联网活动，但状态行是 `MCP <server>/<tool>：…`；
- *  只有成功且带预览 id（宿主确实缓存了结果）的事件才出现「查看」，「停止联网」照常出现；
- *  任务结束清理。 */
+/** 真实外壳 + 假 editor/API：MCP／联网事件不再进底栏；无当前篇时浮层写「另有 N 项」。 */
 const editorHarness = vi.hoisted(() => ({ text: '', change: null as ((text: string) => void) | null, focus: vi.fn() }))
 vi.mock('../../src/renderer/src/view/editor.ts', () => ({
   mountEditor: (_root: HTMLElement, change: (text: string) => void) => {
@@ -12,9 +10,12 @@ vi.mock('../../src/renderer/src/view/editor.ts', () => ({
     const dom = document.createElement('div'), scrollDOM = document.createElement('div')
     let text = ''
     return {
-      view: { dom, contentDOM: dom, scrollDOM, compositionStarted: false },
+      view: { dom, contentDOM: dom, scrollDOM, compositionStarted: false, dispatch: () => {}, state: { doc: { length: 0 } } },
       getText: () => editorHarness.text,
       setText: (value: string) => { text = value; editorHarness.text = value },
+      insertAtSelection: () => false,
+      applyExternalText: () => {},
+      slashCommandStart: () => null,
       setReadOnly: () => {}, setTheme: () => {}, setActiveTaskIds: () => {}, setNoteHost: () => {},
       onStateChange: () => {}, onViewportChange: () => {}, focus: editorHarness.focus,
       selectionRange: () => ({ anchor: 0, head: 0 }),
@@ -44,6 +45,7 @@ beforeEach(() => {
     modelConfigGet: async () => ({ ok: false }),
     memoryGet: async () => ({ ok: false }),
     agentTasks: async () => [],
+    networkConfig: async () => ({ ok: true, config: { enabled: false, provider: null, hasKey: false } }),
     networkPreview: vi.fn(async () => ({ ok: false })),
     networkStop: vi.fn(async () => true),
     flushDone: vi.fn(), lifecycleFlushDone: vi.fn(), vaultTransitionDone: vi.fn(async () => true)
@@ -70,96 +72,25 @@ const mcpEvent = (over: Record<string, unknown> = {}): Record<string, unknown> =
   ...over
 })
 
-const statusText = (): string | null => root.querySelector('.status-task-network')?.textContent ?? null
-
-describe('MCP status row', () => {
-  it('shows the server/tool, size and low-trust mark on success; without a preview id there is no view button', async () => {
+describe('MCP chrome after status-bar strip', () => {
+  it('keeps MCP host text out of the bar and shows the dock for other notes', async () => {
     await start(root)
     emit({ network: mcpEvent({ bytes: 1234 }) })
-    expect(statusText()).toBe('MCP 示例服务器/read_page：已执行（1.2 KB，低信任）')
-    // 这条事件没有预览 id（结果未缓存）：不能出现「查看」。
-    expect(root.querySelector('.status-task-network-view')).toBeNull()
-    // 停止联网仍按网络事件逻辑出现（MCP 事件也算联网活动）。
-    expect(root.querySelector<HTMLButtonElement>('.status-task-network-stop')).not.toBeNull()
-  })
-
-  it('marks truncation and omits the size when the event has no bytes', async () => {
-    await start(root)
-    emit({ network: mcpEvent({ bytes: 2048, truncated: true }) })
-    expect(statusText()).toBe('MCP 示例服务器/read_page：已执行（2.0 KB，低信任，已截断）')
-    emit({ network: mcpEvent({ outcome: 'ok', at: '2026-10-21T00:00:01.000Z' }) })
-    expect(statusText()).toBe('MCP 示例服务器/read_page：已执行（低信任）')
-  })
-
-  it('shows a refusal with the fixed code and still offers stop, not view', async () => {
-    await start(root)
-    emit({ network: mcpEvent({ outcome: 'refused', code: 'MCP_TIMEOUT' }) })
-    expect(statusText()).toBe('MCP 示例服务器/read_page：未执行（MCP_TIMEOUT）')
-    expect(root.querySelector('.status-task-network-view')).toBeNull()
-    expect(root.querySelector<HTMLButtonElement>('.status-task-network-stop')).not.toBeNull()
-  })
-
-  it('hides the fetch preview button once the latest network event is MCP', async () => {
-    await start(root)
-    emit({ network: { taskId: 'task-1', id: 'preview-1', kind: 'fetch', host: 'example.com', path: '/page', bytes: 1234, outcome: 'ok', at: '2026-10-21T00:00:00.000Z' } })
-    expect(root.querySelector('.status-task-network-view')).not.toBeNull()
-    emit({ network: mcpEvent() })
-    expect(statusText()).toContain('MCP 示例服务器/read_page：已执行')
-    // 这次 MCP 事件没有预览 id：不能把上一次抓页的「查看」错配到这次调用。
-    expect(root.querySelector('.status-task-network-view')).toBeNull()
-  })
-
-  it('opens the MCP preview overlay from 查看 and shows MCP server/tool with the notice', async () => {
-    await start(root)
-    api.networkPreview.mockResolvedValue({
-      ok: true,
-      preview: {
-        id: 'mcp-preview-1',
-        kind: 'mcp',
-        url: 'mcp:示例服务器/read_page',
-        host: 'mcp.example.com',
-        title: '示例服务器/read_page',
-        server: '示例服务器',
-        tool: 'read_page',
-        text: '外部结果正文。',
-        bytes: 1234,
-        truncated: false,
-        fetchedAt: '2026-10-21T00:00:00.000Z',
-        lowTrust: true
-      }
-    })
-    emit({ network: mcpEvent({ id: 'mcp-preview-1', bytes: 1234 }) })
-    const view = root.querySelector<HTMLButtonElement>('.status-task-network-view')
-    expect(view).not.toBeNull()
-    expect(view!.getAttribute('aria-label')).toContain('MCP 示例服务器/read_page')
-    view!.click()
-    await vi.waitFor(() => expect(api.networkPreview).toHaveBeenCalledWith({ taskId: 'task-1', id: 'mcp-preview-1' }))
-    const overlay = await vi.waitFor(() => {
-      const element = document.querySelector<HTMLElement>('.overlay-network-preview')
-      if (!element) throw new Error('MCP preview overlay not open')
-      return element
-    })
-    expect(overlay.querySelector('h2')!.textContent).toBe('MCP 示例服务器/read_page')
-    expect(overlay.querySelector('.network-preview-text')!.textContent).toBe('外部结果正文。')
-    expect(overlay.querySelector('.network-preview-notice')!.textContent).toBe('外部只读内容，低信任，未核对；账本只记调用不记正文；预览最多显示 32 KiB')
-  })
-
-  it('clears the MCP status row and its stop button when the task ends', async () => {
-    await start(root)
-    emit({ network: mcpEvent() })
-    expect(statusText()).not.toBeNull()
-    expect(root.querySelector('.status-task-network-stop')).not.toBeNull()
-    emit({ status: 'completed' })
-    expect(statusText()).toBeNull()
+    expect(root.querySelector('.status-task-network')).toBeNull()
     expect(root.querySelector('.status-task-network-stop')).toBeNull()
-    expect(root.querySelector('.status-task')).toBeNull()
+    expect(root.querySelector('.status-task-network-view')).toBeNull()
+    expect(root.querySelector('.status-vault')).toBeNull()
+    expect(root.dataset.vault).toBe('notes')
+    expect(document.querySelector<HTMLElement>('.task-dock')?.dataset.kind).toBe('others')
+    expect(document.querySelector('.task-dock-others')?.textContent).toBe('另有 1 项')
   })
-})
 
-describe('mcp status tool errors', () => {
-  it('marks a tool-level error result instead of claiming a clean execution', async () => {
+  it('hides the dock when the task ends', async () => {
     await start(root)
-    emit({ network: { taskId: 'task-1', kind: 'mcp', host: 'mcp.example', path: '', server: 'deepwiki', tool: 'read', outcome: 'ok', bytes: 100, toolError: true, at: new Date().toISOString() } })
-    expect(statusText()).toContain('工具报错')
+    emit({ network: mcpEvent() })
+    expect(document.querySelector<HTMLElement>('.task-dock')?.hidden).toBe(false)
+    emit({ status: 'completed' })
+    expect(document.querySelector<HTMLElement>('.task-dock')?.hidden).toBe(true)
+    expect(root.querySelector('.status-task')).toBeNull()
   })
 })
