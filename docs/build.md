@@ -166,7 +166,7 @@ flowchart TD
 | 门禁 | `src/main/permissions.ts`、IPC、树 | **已交** | 三档名单、树徽章与右键改档；`test/main/permissions.test.ts`。 |
 | 身份标记 | `src/markdown/identity*.ts`、`src/markdown/syntax/identity.ts`、`src/renderer/src/view/*` | **已交** | 标记进管线、未采纳块受锁、账本只读；`test/renderer/identity-guard.test.ts`。 |
 | 界面改造 | `src/renderer/**`、`src/renderer/src/styles.css` | **已交** | 功能已交；用户已于 2026-09-30 核对两平台样张并确认可接受，前端冻结解除。未逐张复核的画面按未复核记录；图片与外链细节留待按需回访，不据本次确认声称全量视觉验收通过。 |
-| 一场 `/` | `src/main/**` 的 `AgentHost`、模型配置、IPC 与画布 | **已交** | 无工具最小环及读库／搜库已交；补／建／改名／挪／macOS 删除见[库内 AI 工具](#库内-ai-工具)。MiniMax 的具体现场范围见工具记录，其他厂商未据此通过。 |
+| 一场提问 | `src/main/**` 的 `AgentHost`、模型配置、IPC 与画布 | **已交** | 无工具最小环及读库／搜库已交；补／建／改名／挪／macOS 删除见[库内 AI 工具](#库内-ai-工具)。提问块入口见[提问块](decisions.md#2026-10-23-提问块与快捷键)。 |
 | 任务授权与资源代理 | Host、库会话、IPC 与安全 IO | **已交** | 现有 Host 固定范围、一次性预览、模型接收方及撤销已验；通用网络与第三方执行仍未开。 |
 | 库内 AI 工具 | 单场授权与对应人用文件基础 | **已交** | 读工具已交付并留证；**写工具已交付：补任务发起篇＋建**（限额见合同）；**改名／挪已交付**；**人删除在 macOS 已开放**；**AI 删除在 macOS 已交**（写工具专项 **41／0**，完整窗口 **380／0**）；Windows 入口仍关。 |
 | 第三方执行隔离 | 尚未；平台机制与最小适配待验证 | **未开** | 双平台机制及恶意组件实测是接入门；普通子进程不是完成证据。 |
@@ -532,7 +532,7 @@ flowchart TD
 
 **Windows 读法**（拿到 CI 日志后逐条对）：代码腿跑的是 build → 原生装载 `scripts/check-native.mjs` → `pnpm test` → `pnpm ui:check`（CI 里超时 5 分钟）。**废纸篓探针不在这条腿里**：它是 `.github/workflows/verify.yml:138` 的**独立 job**（`node scripts/probe-trash.mjs`，macOS／Windows 两平台矩阵，超时 8 分钟，不依赖产品构建或测试结果），`pnpm ui:check` **不含**它——按分类 `trash` 决定跑不跑，要看 CI 日志就分别看这两个 job，别把代码腿的绿灯读成探针也跑了。附件没有独立探针，走的是 `pnpm test` 里的单元门。**2026-10-23 本机**：`verifyV4ReadOnly` 权限拒写、`verifyV4Retirement` 退休拒写、`verifyV4NativeRestoreProducer` preparing 拒写、`verifyLedgerRecoveryHostPending` Host 发布中断，以及 MULTI 两处 sibling／held-root，都走 `denyDirectoryWrites` 真拒写（Windows 对当前用户 SID 加 Deny `(WD,DC)`，POSIX 仍 chmod）；V4／MULTI 专项日志不再打印「未记通过」。不要再把那四处当未验。默认 `pnpm ui:check` 与 CI 代码腿**不含** `RGENT_UI_V4_ONLY`／`RGENT_UI_MULTI_VAULT_ONLY`，完整窗口绿灯不代称这四段已跑。单元里 `it.skipIf(win32)` 的符号链接／冒号 POSIX 例仍跳过（能力不存在）。超时口径：CI 给默认 `ui:check` **5 分钟**；本机 Windows 上 V4 专项约 196 秒、MULTI 专项约 156 秒（含两次 30 秒 watchdog），默认完整窗口 **385／1**、墙钟 **191 秒**（低于 CI 5 分钟，未改超时）。专项未纳入 CI，不把超时改到能串跑 V4＋MULTI。
 
-**macOS 拼音候选窗人工清单**（原生输入法，机器不能代证）：① 在正文里输入 `/` 后开始拼音组字，确认候选窗贴着光标出现且不遮挡该行；② 组字过程中按回车，确认**不会**启动任务（组合中的回车不属于提交）；③ 用数字键或空格选词，确认落的是汉字而不是拼音串；④ 选词后立刻按回车，确认这次**应当**启动任务；⑤ 组字中途按 Esc，确认只取消组字、不关窗、不提交；⑥ 中文与英文混排一次（如「以后用中文」后紧跟 `API`），确认光标与提交行为正常。记录格式：一条 JSON 或直接在债务行后追加一行「时间／版本／结果／异常现象」。
+**macOS 拼音候选窗人工清单**（原生输入法，机器不能代证）：① 在正文里开始拼音组字，确认候选窗贴着光标出现且不遮挡该行；② 组字过程中按回车，确认**不会**启动任务（组合中的回车不属于提交）；③ 用数字键或空格选词，确认落的是汉字而不是拼音串；④ 选词后立刻按回车，确认这次按普通换行处理，不误发任务；⑤ 组字中途按 Esc，确认只取消组字、不关窗、不提交；⑥ 中文与英文混排一次（如「以后用中文」后紧跟 `API`），确认光标与提交行为正常。记录格式：一条 JSON 或直接在债务行后追加一行「时间／版本／结果／异常现象」。
 
 **Windows 原生输入法人工清单**：同①—⑥ 在 Windows 原生输入法下重做一遍（尤其①候选窗位置与③选词），另加一项：⑦ 任务运行中继续用输入法打字，确认不会把未提交的组字送进模型。
 
