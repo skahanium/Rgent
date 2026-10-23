@@ -2269,3 +2269,31 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 4. 随包装简体子集不含 Ext B；生僻字仍可能落到本机 generic serif，不为此再扩包。
 
 **受验提交**：本机已交、未推送。
+
+## 2026-10-23 Windows 平台债务本机收口（本机已交）
+
+**口径**：[2026-10-23 Windows 平台债务本机收口](decisions.md#2026-10-23-Windows-平台债务本机收口)。收口后证据轮，不换阶段名、不新开口子、不改授权语义、不打开 Windows 删除。
+
+**实现**
+
+- **W0 围栏**：合同六条、施工图包表、`AGENTS.md` 一句；阶段名仍是「远端 MCP 与联网」。
+- **W1 拒写助手**：`scripts/fs-deny-write.mjs` 导出 `denyDirectoryWrites(dir) → restore()`。POSIX：保存 mode，chmod `0o500`（Host 发布保持 `0o555`）。Windows：`whoami /user` 取 SID，`icacls /deny *SID:(WD,DC)`（添文件＋删子项，不挡 readdir）；restore 优先 `/remove:d`，失败再 `/restore`，恢复后必须再探测可写。生效后必须 `writeFileSync` 探测失败，否则抛错。单元 4／0。
+- **W2 接线**：`verify-ui.mjs` 去掉四处 `win32` 早退；MULTI 两处 sibling／held-root 的假 `chmod 0o500` 换成助手。复制库夹具目的地改为 ASCII `vault-copy`／`vault-park`：本机 GBK 代码页上 `fs.cpSync` 会把非 ASCII 目标名写成 UTF-8 当 cp936 的乱码，对话框 mock 路径与实盘文件夹对不上。自查撤回误折进本轮的选库去双框断言。
+- **W3 探针**：本机 `node scripts/probe-trash.mjs`（默认 `file-operation` 14 场）→ `artifacts/trash/windows-local-2026-10-23.json`（不入库）。`status: evidence-collected`，`productionGateOpen: false`，`systemPutBackVerified: false`，14／14 `ok`。与 2026-10-15 CI Windows 腿同向。未改 `native/vault_win.cc` 产品删除、菜单或工具表。
+- **W4 输入法**：清单 ①–⑦ 仍须人按键；本轮未做，第 3 条保持待核。CDP 组合事件不准写进通过。
+
+**门（本机 Windows 2026-10-23）**：单元 **161 文件 2773 通过／17 跳过**；文档 14 篇；构建通过。四处拒写只在 V4／MULTI 专项里跑：权限拒写、Host 发布、退休拒写、sibling／preparing／held-root 均通过，专项日志无「未记通过」。Host 材料交接 CDP 断点仍偶发未命中（3 条，与拒写夹具无关）。MULTI 专项 **132／2**：失败 2 条是切库冲突文案（交互减负后不再走 `vault-settings-status` 含「冲突」），不是拒写夹具。默认完整窗口 **385／1**（191 秒，不含 V4／MULTI）：唯一失败是围栏已登记的账本来源顺序（仪器要 `工具其他.md、工具参考.md`，本机 Windows 稳定为反序）。CI 代码腿只跑默认 `pnpm ui:check`，不代称专项已跑。低于 CI 5 分钟，未改超时。
+
+**销账对照**
+
+- 第 2 条（POSIX 夹具＋两处跳过）：**销。**
+- 第 1 条：本机已复测，**门仍关**。
+- 第 3 条：人未按键，**仍待核。**
+
+**边界**
+
+1. 不打开 Windows 删除入口，不宣告 `delete_note`。
+2. 单元 `it.skipIf(win32)` 的符号链接／冒号 POSIX 例仍跳过。
+3. 不把未提交的选库去双框、`build-native.mjs` Python 查找折进本轮。
+
+**受验提交**：本机已交、未推送。

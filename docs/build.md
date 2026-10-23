@@ -22,6 +22,8 @@
 
 **阅读字体随包装（2026-10-23 批准）**：收口后呈现轮，不换阶段名。合同见[口径](decisions.md#2026-10-23-阅读字体随包装)；包表见[阅读字体随包装（本轮）](#阅读字体随包装本轮)。**本机已交（未推送）**：单元 **159 文件 2766 通过／17 跳过**、文档 14 篇、构建通过、完整窗口 **383／1**（仅围栏登记的账本来源顺序）。默认正文／标题用安装包内开源阅读字体，界面控件仍用系统字。
 
+**Windows 平台债务本机收口（2026-10-23 批准）**：收口后证据轮，不换阶段名。合同见[口径](decisions.md#2026-10-23-Windows-平台债务本机收口)；包表见[Windows 平台债务本机收口（本轮）](#windows-平台债务本机收口本轮)。**本机已交（未推送）**：单元 **161 文件 2773 通过／17 跳过**、文档 14 篇、构建通过；V4／MULTI 专项消掉四处「未记通过」；默认完整窗口 **385／1**（仅围栏登记的账本来源顺序，191 秒）；废纸篓探针 14 场复测、门仍关；输入法清单仍待人按键。
+
 前一阶段「技能」已交付：设备级技能库（结构校验与语义校验分离、字节哈希乐观并发、损坏＝诊断不覆盖）、本场冻结（系统提示块＋账本 `{id,name,hash}`＋预览签名比对）、第七页与三个 IPC 通道、边界反例与窗口专项 15 条、**真机取证 2／4 次调用**证明技能正文确实进入模型；技能页视觉用户暂接受现状；Windows 窗口证据并入记忆阶段同一笔债务。完整门见[技能](#技能)。
 
 ## 依赖顺序
@@ -312,8 +314,8 @@ flowchart TD
 
 | # | 项 | 现状 | 不可代证 |
 | --- | --- | --- | --- |
-| 1 | 删除在 Windows 上的原生废纸篓与入口 | 菜单无删除；原生 `Trash` 报 `PLATFORM_UNPROVEN`，不调用未证明的回收站 API。**AI 删除与人删除同一道原生门**：未证明前不宣告 `delete_note`、不测回收站 | macOS 送篓成功不代称 Windows 回收站已证 |
-| 2 | POSIX 专属夹具、两处 Windows 跳过点 | 见[债务移交](#记忆阶段收口与债务移交2026-10-12)「Windows 读法」 | Windows `pnpm test` 绿灯不含这些夹具 |
+| 1 | 删除在 Windows 上的原生废纸篓与入口 | **本机已复测、门仍关**（2026-10-23）：`node scripts/probe-trash.mjs` 默认 `file-operation` 14 场 `evidence-collected`，`productionGateOpen:false`，`systemPutBackVerified:false`；与 2026-10-15 CI 同向。菜单仍无删除；原生 `Trash` 仍报 `PLATFORM_UNPROVEN`。不宣告 `delete_note` | macOS 送篓成功与本机复测都不代称入口已开 |
+| 2 | POSIX 专属夹具、两处 Windows 跳过点 | **销**（2026-10-23）：本机窗口夹具改走 `denyDirectoryWrites`（Windows ACL Deny `(WD,DC)`／POSIX chmod）。V4／MULTI 专项里权限拒写、Host 发布中断、退休拒写与 sibling／preparing／held-root 均记通过，不再打印「未记通过」。默认 `pnpm ui:check`／CI 代码腿不含这四段。单元里 `it.skipIf(win32)` 的符号链接／冒号 POSIX 例仍跳过（能力不存在，不是缺机器） | 本机绿灯不把符号链接／冒号 POSIX 例伪装成已过；默认完整窗口绿灯不代称 V4／MULTI 专项已跑 |
 | 3 | Windows 原生输入法 | 清单 ①–⑦ 未测 | CDP 组合事件与 macOS 拼音不能代证 |
 
 ## 远端 MCP 与联网
@@ -395,6 +397,19 @@ flowchart TD
 | F4 | 门 | test／docs:check／build+ui:check | F3 | **本机已交**：单元 **159 文件 2766／17 跳过**；文档 14 篇；构建通过；完整窗口 **383／1**（围栏账本顺序）；计算字体 `Rgent Serif`／`Rgent Sans`，h1 26.35px／600 |
 | F5 | 记录 | 包表与施工历史留证；不自行 push | F4 | **本机已交**：施工历史已记；未推送 |
 
+### Windows 平台债务本机收口（本轮）
+
+**合同**：[2026-10-23 Windows 平台债务本机收口](decisions.md#2026-10-23-Windows-平台债务本机收口)。收口后证据轮：Windows 窗口拒写夹具替换「未记通过」；本机复测废纸篓探针但入口继续关；输入法须人按键。不新开口子，不改授权语义，不换阶段名。
+
+| # | 包 | 内容 | 依赖 | 验收 |
+|---|---|---|---|---|
+| W0 | 围栏与口径 | 合同、包表、AGENTS 一句 | 所有者批准 | **本机已交**：合同节、包表与 AGENTS 已写；阶段名未改 |
+| W1 | 拒写助手 | `denyDirectoryWrites`；POSIX chmod／Windows ACL | W0 | **本机已交**：`scripts/fs-deny-write.mjs`；单元 4／0（Windows ACL 与 POSIX chmod 都跑；恢复后须再探测可写） |
+| W2 | 接线夹具 | 四段跳过 + MULTI 两处 sibling | W1 | **本机已交**：V4／MULTI 专项日志无「未记通过」；权限拒写／Host 发布／退休／sibling／preparing／held-root 通过 |
+| W3 | 废纸篓探针 | 本机 `probe-trash`，只留证 | W0 | **本机已交**：14 场 `file-operation` `evidence-collected`，`productionGateOpen:false`；产物不入库 |
+| W4 | 原生输入法 | 清单 ①–⑦ 由人按键 | W0 | **待核**：CDP 不能代证；本轮人未按键，第 3 条不销 |
+| W5 | 门与记录 | test／docs:check／build+ui:check；债务表与施工历史 | W2 | **本机已交**：单元 **161 文件 2773 通过／17 跳过**；文档 14 篇；构建通过；默认完整窗口 **385／1**（仅围栏登记的账本来源顺序，191 秒）；四处拒写在 V4／MULTI 专项记通过 |
+
 ## 库内 AI 工具
 
 **已交。** 读库／搜库、补任务发起篇、建、改名／挪、人删除（macOS）、AI 删除（macOS）均已交付。Windows 入口仍关。见[人删除（macOS 入口）](#人删除macos-入口本轮)与[AI 删除（macOS）](#ai-删除macos本轮)。
@@ -474,7 +489,7 @@ flowchart TD
 
 | # | 债务 | 现状（2026-10-17） | 触发条件 | 不可代证 |
 |---|------|--------------------|----------|----------|
-| 1 | Windows 平台证据（构建窗口＋双平台 CI 腿；技能专项一并算这一笔） | **代码腿已绿**（2026-10-16）：`82d602c` 的 [run 38916112341](https://github.com/skahanium/Rgent/actions/runs/38916112341) 上 macOS 与 Windows 的 `pnpm test`、两端 `ui:check` 与 `CI gate` 均通过。此前 PR #11 合并的那次 run（原 run 已删除）Windows 红在夹具，夹具已修。废纸篓独立 job 的那次 run（原 run 已删除；结论与场景数见[本轮实测的范围与边界](#本轮实测的范围与边界2026-10-15)）两平台 `evidence-collected`，**不**等于删除门开。POSIX 专属夹具与两处 Windows 跳过点仍未验 | — | Windows 绿灯**不覆盖**下节列出的 POSIX 专属夹具与两处 Windows 跳过点；废纸篓探针不代称删除入口 |
+| 1 | Windows 平台证据（构建窗口＋双平台 CI 腿；技能专项一并算这一笔） | **代码腿已绿**（2026-10-16）：`82d602c` 的 [run 38916112341](https://github.com/skahanium/Rgent/actions/runs/38916112341) 上 macOS 与 Windows 的 `pnpm test`、两端 `ui:check` 与 `CI gate` 均通过。此前 PR #11 合并的那次 run（原 run 已删除）Windows 红在夹具，夹具已修。废纸篓独立 job 的那次 run（原 run 已删除；结论与场景数见[本轮实测的范围与边界](#本轮实测的范围与边界2026-10-15)）两平台 `evidence-collected`，**不**等于删除门开。**2026-10-23**：窗口拒写四处跳过已用本机真夹具销；废纸篓本机复测门仍关 | — | Windows 绿灯**不覆盖**删除入口与原生输入法；废纸篓探针不代称删除入口 |
 | 2 | 原生输入法人工操作（macOS 拼音候选窗、Windows 原生输入法） | **macOS 所有者 2026-10-17 自测接受**（原话：「中文输入我自己测了一下没什么问题」）。清单 ①–⑥ 未逐条填表，按所有者结论销「等人操作」。**Windows 原生输入法未另测**，不声称双平台人工都过 | Windows 上有窗口时按清单另测 | CDP 组合事件不能代证；未测平台不销 |
 | 2b | 测试稳定性观察：`ledger-forget` 参数在 2026-10-12 一次全量门里失败过一次 | **仍未复现，但边界量清了**：隔离重跑 **50／50 通过**（各约 1.0s）、加载重跑 **30 次里 27 过／3 失败**；3 次失败经原文查明**不是断言失败**，而是 `Cannot find module 'build/Release/rgent_fs.node'`——`pnpm test`／`pnpm build` 都会重建该原生模块，与并行的测试抢文件（详见下节与守则新规）。**原断言失败本身在两轮共 80 次里 0 次出现** | 再复现即按真实缺陷查；已加"禁止并发重建与测试"的守则 | 一次通过不代表已修；`--repeat` 结果不能代称全量门 |
 | 2c | 窗口门三处各失败一次（2026-10-13 记录） | **已定位并修掉其中构造性竞态**：「成功重试后焦点转到浮层关闭按钮」原本紧跟异步焦点**直接断言、毫无等待**（同类的还有 4 处：失败重试焦点、取消遗忘回焦、取消选库回焦、切库冲突回焦），现全部改为等待。修完重跑：恢复专项 **12＋8 次零失败**、完整窗口 **379／0（两次）** | — | 本次未复现原失败；这是"构造上就该等"的修正，按修正记录，不按"已复现并修好"记录 |
@@ -484,7 +499,7 @@ flowchart TD
 
 **平台与人工验收清单（2026-10-13 备好；2026-10-17 所有者已确认其中 macOS 中文输入、当前画面，以及 61 行整卷已做过）**：
 
-**Windows 读法**（拿到 CI 日志后逐条对）：代码腿跑的是 build → 原生装载 `scripts/check-native.mjs` → `pnpm test` → `pnpm ui:check`（CI 里超时 5 分钟）。**废纸篓探针不在这条腿里**：它是 `.github/workflows/verify.yml:138` 的**独立 job**（`node scripts/probe-trash.mjs`，macOS／Windows 两平台矩阵，超时 8 分钟，不依赖产品构建或测试结果），`pnpm ui:check` **不含**它——按分类 `trash` 决定跑不跑，要看 CI 日志就分别看这两个 job，别把代码腿的绿灯读成探针也跑了。附件没有独立探针，走的是 `pnpm test` 里的单元门。Windows 上**不会执行**两类 POSIX 专属夹具：`verifyV4ReadOnly` 里的权限拒写／恢复写权限三件（`chmod 0o500` 那套）与 `verifyV4NativeRestoreProducer` 里的原生关闭／R1·R2 恢复 producer 八件；另有两处**明确跳过并打印"未记通过"**：`verifyV4Retirement`（Windows 退休拒写夹具待原生证据）与 `verifyLedgerRecoveryHostPending`（Host 发布故障夹具待 Windows 专属注入）。因此 Windows 绿灯的正确读法是：**构建、原生装载、单元门、以及真正跑起来的那部分窗口检查通过**；上面点名的项**仍未验**。超时口径：CI 给 `ui:check` **5 分钟**，本机（macOS）实测完整窗口 **89 秒**（379 条失败 0）——约 3.4 倍余量；若 Windows 腿因超时变红，按测量值诚实调整而不是跳过。
+**Windows 读法**（拿到 CI 日志后逐条对）：代码腿跑的是 build → 原生装载 `scripts/check-native.mjs` → `pnpm test` → `pnpm ui:check`（CI 里超时 5 分钟）。**废纸篓探针不在这条腿里**：它是 `.github/workflows/verify.yml:138` 的**独立 job**（`node scripts/probe-trash.mjs`，macOS／Windows 两平台矩阵，超时 8 分钟，不依赖产品构建或测试结果），`pnpm ui:check` **不含**它——按分类 `trash` 决定跑不跑，要看 CI 日志就分别看这两个 job，别把代码腿的绿灯读成探针也跑了。附件没有独立探针，走的是 `pnpm test` 里的单元门。**2026-10-23 本机**：`verifyV4ReadOnly` 权限拒写、`verifyV4Retirement` 退休拒写、`verifyV4NativeRestoreProducer` preparing 拒写、`verifyLedgerRecoveryHostPending` Host 发布中断，以及 MULTI 两处 sibling／held-root，都走 `denyDirectoryWrites` 真拒写（Windows 对当前用户 SID 加 Deny `(WD,DC)`，POSIX 仍 chmod）；V4／MULTI 专项日志不再打印「未记通过」。不要再把那四处当未验。默认 `pnpm ui:check` 与 CI 代码腿**不含** `RGENT_UI_V4_ONLY`／`RGENT_UI_MULTI_VAULT_ONLY`，完整窗口绿灯不代称这四段已跑。单元里 `it.skipIf(win32)` 的符号链接／冒号 POSIX 例仍跳过（能力不存在）。超时口径：CI 给默认 `ui:check` **5 分钟**；本机 Windows 上 V4 专项约 196 秒、MULTI 专项约 156 秒（含两次 30 秒 watchdog），默认完整窗口 **385／1**、墙钟 **191 秒**（低于 CI 5 分钟，未改超时）。专项未纳入 CI，不把超时改到能串跑 V4＋MULTI。
 
 **macOS 拼音候选窗人工清单**（原生输入法，机器不能代证）：① 在正文里输入 `/` 后开始拼音组字，确认候选窗贴着光标出现且不遮挡该行；② 组字过程中按回车，确认**不会**启动任务（组合中的回车不属于提交）；③ 用数字键或空格选词，确认落的是汉字而不是拼音串；④ 选词后立刻按回车，确认这次**应当**启动任务；⑤ 组字中途按 Esc，确认只取消组字、不关窗、不提交；⑥ 中文与英文混排一次（如「以后用中文」后紧跟 `API`），确认光标与提交行为正常。记录格式：一条 JSON 或直接在债务行后追加一行「时间／版本／结果／异常现象」。
 
@@ -494,7 +509,7 @@ flowchart TD
 
 **全卷复核怎么走**（2026-10-14 已按此做过一遍，答案在本机 `artifacts/memory-review/`，目录不入库）：`node scripts/memory-review-pack.mjs`（生成 `artifacts/memory-review/index.html`，61 行，含英文材料行的中文重述）→ 人在页面里作答并导出 `answers.json` → `node scripts/memory-review-pack.mjs --answers answers.json`（产出标注，人工身份与 `humanReviewed:true`）→ 逐份用评测 CLI 导入校验。发布门只有在**被发布那一轮**的行全部人工覆盖时才写 `humanReviewed:true`，否则 `--require-human-review` 直接拒。r12 那次整卷**不**把后出成绩标成已人工复核。
 
-**未销账的部分不因换阶段消失**：POSIX 专属夹具与两处 Windows 跳过点、Windows 原生输入法、现行成绩的 `humanReviewed` 标记、仪器改判据后的新 revision 信封，仍按上表各行。Windows 删除入口仍关，见[Windows 上暂测不了的项](#windows-上暂测不了的项2026-10-17)。技能阶段的验收不得把未销项当作已清。
+**未销账的部分不因换阶段消失**：Windows 原生输入法（清单 ①–⑦ 人未按键）、现行成绩的 `humanReviewed` 标记、仪器改判据后的新 revision 信封，仍按上表各行。Windows 删除入口仍关（本机已复测、门仍关），见[Windows 上暂测不了的项](#windows-上暂测不了的项2026-10-17)。技能阶段的验收不得把未销项当作已清。
 
 ## 库内记忆
 

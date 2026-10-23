@@ -10,7 +10,7 @@
  * 最后给总账；有失败就退出码 1。
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, renameSync, statSync, realpathSync, chmodSync, readdirSync, cpSync, copyFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, renameSync, statSync, realpathSync, readdirSync, cpSync, copyFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -19,6 +19,7 @@ import { createServer as createHttpServer } from 'node:http'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { denyDirectoryWrites } from './fs-deny-write.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const require = createRequire(import.meta.url)
@@ -2851,7 +2852,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   check('启动恢复最后使用库 A',await waitFor(page,`document.querySelector('.status-vault')?.textContent==='研究库 A'`))
   check('右下角库名仅为只读状态',await page.eval(`(()=>{const n=document.querySelector('.status-vault');return n.tagName==='SPAN' && n.tabIndex<0 && !n.onclick && !n.hasAttribute('role')})()`))
   await page.eval(`document.querySelector('.settings-open').click()`)
-  check('普通设置默认界面且六页顺序正确',await waitFor(page,`document.querySelector('.settings-page-title')?.textContent==='界面' && JSON.stringify([...document.querySelectorAll('.settings-nav button')].map(n=>n.textContent))===JSON.stringify(['笔记库','界面','助手','记忆','模型','运行'])`))
+  check('普通设置默认界面且七页顺序正确',await waitFor(page,`document.querySelector('.settings-page-title')?.textContent==='界面' && JSON.stringify([...document.querySelectorAll('.settings-nav button')].map(n=>n.textContent))===JSON.stringify(['笔记库','界面','助手','记忆','技能','模型','运行'])`))
   await page.eval(`globalThis.__originalSettings=document.querySelector('.overlay-settings')`)
   await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').BrowserWindow.getAllWindows()[0].webContents.send('menu:open-vault');true`)
   check('原生库菜单在同一设置面板直达库页',await waitFor(page,`document.querySelector('.settings-page-title')?.textContent==='笔记库' && document.querySelector('.overlay-settings')===globalThis.__originalSettings && document.querySelectorAll('dialog[open]').length===1`))
@@ -3049,7 +3050,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   await closeLibrarySettings()
   await waitFor(page,`!document.querySelector('.vault-settings')`)
   await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;d.showOpenDialog=globalThis.__oldOpenDialog;d.showSaveDialog=globalThis.__oldSaveDialog})()`)
-  chmodSync(sibling,0o500)
+  const restoreSiblingWrites = denyDirectoryWrites(sibling)
   try {
     await page.eval(`document.querySelector('.cm-content').cmTile.root.view.dispatch({changes:{from:0,insert:'必须保留的草稿'}})`)
     await openLibrarySettings();await waitFor(page,`!!document.querySelector('[data-vault-open="vault-a"]')`)
@@ -3063,7 +3064,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
     }
     await closeLibrarySettings()
       await waitFor(page,`!document.querySelector('.vault-settings')`)
-  } finally { chmodSync(sibling,0o700) }
+  } finally { restoreSiblingWrites() }
   await page.eval(`if(document.querySelector('.note-unavailable')?.hidden===false)document.querySelector('.note-recheck').click()`)
   await waitFor(page,`document.querySelector('.note-unavailable')?.hidden===true`)
   await switchTo('vault-a','研究库 A');await switchTo('vault-b','写作库 B')
@@ -3089,8 +3090,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   if(await page.eval(`!!document.querySelector('.overlay-settings')`))await closeLibrarySettings()
   await waitFor(page,`document.querySelector('#app').inert===false && !document.querySelector('.conflict')`)
   await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').BrowserWindow.getAllWindows()[0].webContents.send('menu:save');true`)
-  await waitFor(page,`!!document.querySelector('.conflict [data-action="window"]')`)
-  await page.eval(`document.querySelector('.conflict [data-action="window"]').click()`)
+  if(await waitFor(page,`!!document.querySelector('.conflict [data-action="window"]')`))await page.eval(`document.querySelector('.conflict [data-action="window"]').click()`)
   check('关闭设置后普通保存仍提供既有冲突决策',await waitFor(page,`!document.querySelector('.conflict') && !document.querySelector('.tab-dirty')`) && readFileSync(path.join(sibling,'同名.md'),'utf8').startsWith('窗口冲突改动'))
   await page.eval(`(()=>{const v=document.querySelector('.cm-content').cmTile.root.view;v.dispatch({changes:{from:0,to:v.state.doc.length,insert:${JSON.stringify(beforeConflict)}}})})()`)
   await waitFor(page,`!document.querySelector('.tab-dirty')`)
@@ -3196,14 +3196,16 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
     const heldRoot=sibling+'-root-held',workspaceFile=path.join(profile,'vault-workspaces.json')
     const workspaceBefore=readFileSync(workspaceFile,'utf8')
     writeFileSync(path.join(sibling,'根保稿.md'),'第二篇原正文')
+    let restoreHeldWrites=()=>{}
     try{await restart(async restoredPage=>{
       if(!await waitFor(restoredPage,`document.querySelector('.status-vault')?.textContent==='写作库 B' && document.querySelector('#app').inert===false`))throw Error('根保稿夹具未就绪')
-      chmodSync(sibling,0o500)
+      restoreHeldWrites=denyDirectoryWrites(sibling)
       await restoredPage.eval(`document.querySelector('.cm-content').cmTile.root.view.dispatch({changes:{from:0,to:document.querySelector('.cm-content').cmTile.root.view.state.doc.length,insert:'根窗口稿一'}})`)
       await waitFor(restoredPage,`[...document.querySelectorAll('.tree-note')].some(n=>n.dataset.path==='根保稿.md')`)
       await restoredPage.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path==='根保稿.md').click()`)
       await waitFor(restoredPage,`document.querySelector('.tab[aria-selected="true"]')?.textContent.includes('根保稿')`)
       await restoredPage.eval(`document.querySelector('.cm-content').cmTile.root.view.dispatch({changes:{from:0,to:document.querySelector('.cm-content').cmTile.root.view.state.doc.length,insert:'根窗口稿二'}})`)
+      restoreHeldWrites()
       renameSync(sibling,heldRoot);mkdirSync(sibling);writeFileSync(path.join(sibling,'同名.md'),'新根同名不可覆写');writeFileSync(path.join(sibling,'根保稿.md'),'新根第二篇不可覆写')
       await restoredPage.eval(`document.querySelector('.settings-open').click()`)
       await waitFor(restoredPage,`!!document.querySelector('.settings-nav')`)
@@ -3219,7 +3221,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
       await restoredPage.eval(`[...document.querySelectorAll('[data-vault-id="vault-b"] button')].find(n=>n.textContent==='确认建立新关联').click()`)
       check('明确关联保留旧会话两篇稿并提供正文另存与舍弃出口',await waitFor(restoredPage,`!document.querySelector('.vault-settings') && document.querySelector('#app').inert===false && document.querySelectorAll('.tab').length===2 && document.querySelector('.cm-content')?.textContent.includes('根窗口稿二') && !document.querySelector('.note-unavailable').hidden && !!document.querySelector('.note-save-copy') && !!document.querySelector('.note-discard')`))
       check('根关联没有覆写新同名对象或不完整工作区',readFileSync(path.join(sibling,'同名.md'),'utf8')==='新根同名不可覆写'&&readFileSync(path.join(sibling,'根保稿.md'),'utf8')==='新根第二篇不可覆写'&&readFileSync(workspaceFile,'utf8')===workspaceBefore)
-    })}finally{if(existsSync(heldRoot)){rmSync(sibling,{recursive:true,force:true});renameSync(heldRoot,sibling);chmodSync(sibling,0o700)}writeFileSync(workspaceFile,workspaceBefore)}
+    })}finally{restoreHeldWrites();if(existsSync(heldRoot)){rmSync(sibling,{recursive:true,force:true});renameSync(heldRoot,sibling)}writeFileSync(workspaceFile,workspaceBefore)}
   }
   const singleCatalog=JSON.parse(catalogBefore)
   singleCatalog.entries=singleCatalog.entries.filter(entry=>entry.id==='vault-b')
@@ -3376,29 +3378,28 @@ async function verifyV4ReadOnly(page, nativePage, vault, shot) {
   await page.call('Input.insertText',{text:'保存增量'})
   const changed=await waitFor(page,`document.querySelector('.cm-content').cmTile.root.view.state.doc.toString().startsWith('\\ufeff保存增量') && !!document.querySelector('.tab[aria-selected=true] .tab-dirty')`)
   check('正常保存保留 BOM、混合换行和旧机器尾部原字节',changed&&await waitFor(page,`!document.querySelector('.tab[aria-selected=true] .tab-dirty')`)&&readFileSync(path.join(vault,cases[1][0]),'utf8')==='\ufeff保存增量'+cases[1][1].slice(1))
-  if(process.platform!=='win32'){
-    const mode=statSync(vault).mode&0o777,before=readFileSync(path.join(vault,cases[1][0]));
-    await nativePage.eval(`(()=>{const ipc=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain,old=ipc._invokeHandlers.get('note:write');globalThis.__v4DeniedWrite={old,results:[]};ipc._invokeHandlers.set('note:write',async(...args)=>{const result=await old(...args);globalThis.__v4DeniedWrite.results.push({request:args[1]?.args?.[0]??args[1],result});return result});return true})()`);chmodSync(vault,0o500)
-    try{
-      await page.call('Input.insertText',{text:'拒写保留稿'})
-      for(let n=0;n<100&&!await nativePage.eval(`globalThis.__v4DeniedWrite.results.some(r=>r.request?.relPath===${JSON.stringify(cases[1][0])}&&r.request.content.includes('拒写保留稿')&&r.result.ok===false)`);n++)await sleep(100)
-      check('权限仍拒写时真实 noteWrite 已返回失败',await nativePage.eval(`globalThis.__v4DeniedWrite.results.some(r=>r.request?.relPath===${JSON.stringify(cases[1][0])}&&r.request.content.includes('拒写保留稿')&&r.result.ok===false&&typeof r.result.error==='string')`))
-      await page.eval(`new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`)
-      check('实际权限拒写保留窗口稿和未保存标志',await waitFor(page,`!!document.querySelector('.tab[aria-selected=true] .tab-dirty') && document.querySelector('.cm-content')?.textContent.includes('拒写保留稿')`)&&readFileSync(path.join(vault,cases[1][0])).equals(before))
-    }finally{chmodSync(vault,mode);await nativePage.eval(`(()=>{const ipc=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain;ipc._invokeHandlers.set('note:write',globalThis.__v4DeniedWrite.old);return true})()`)}
-    await page.eval(`document.querySelector('.note-recheck')?.click()`)
-    // The failed write may still be finishing its renderer-side object inspection.
-    // An early save request joins that failed in-flight write, so retry the real
-    // menu action until its retained draft has actually reached disk.
-    let saved=false
-    for(let n=0;n<40;n++){
-      await nativePage.eval(`globalThis.__rgentTestWindow.webContents.send('menu:save');true`)
-      if(await waitFor(page,`!document.querySelector('.tab[aria-selected=true] .tab-dirty')`,300)){saved=true;break}
-    }
-    const expected='\ufeff保存增量拒写保留稿'+cases[1][1].slice(1)
-    check('恢复写权限后原拒写窗口稿真实保存且不遗留脏tab',saved&&readFileSync(path.join(vault,cases[1][0]),'utf8')===expected)
-    if(!saved||readFileSync(path.join(vault,cases[1][0]),'utf8')!==expected)throw Error('只读夹具拒写稿未真实保存，停止后续恢复夹具')
-  }else process.stdout.write('Windows 权限拒写夹具尚待原生证据；未记通过。\n')
+  const deniedBefore=readFileSync(path.join(vault,cases[1][0]));
+  await nativePage.eval(`(()=>{const ipc=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain,old=ipc._invokeHandlers.get('note:write');globalThis.__v4DeniedWrite={old,results:[]};ipc._invokeHandlers.set('note:write',async(...args)=>{const result=await old(...args);globalThis.__v4DeniedWrite.results.push({request:args[1]?.args?.[0]??args[1],result});return result});return true})()`)
+  const restoreVaultWrites=denyDirectoryWrites(vault)
+  try{
+    await page.call('Input.insertText',{text:'拒写保留稿'})
+    for(let n=0;n<100&&!await nativePage.eval(`globalThis.__v4DeniedWrite.results.some(r=>r.request?.relPath===${JSON.stringify(cases[1][0])}&&r.request.content.includes('拒写保留稿')&&r.result.ok===false)`);n++)await sleep(100)
+    check('权限仍拒写时真实 noteWrite 已返回失败',await nativePage.eval(`globalThis.__v4DeniedWrite.results.some(r=>r.request?.relPath===${JSON.stringify(cases[1][0])}&&r.request.content.includes('拒写保留稿')&&r.result.ok===false&&typeof r.result.error==='string')`))
+    await page.eval(`new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`)
+    check('实际权限拒写保留窗口稿和未保存标志',await waitFor(page,`!!document.querySelector('.tab[aria-selected=true] .tab-dirty') && document.querySelector('.cm-content')?.textContent.includes('拒写保留稿')`)&&readFileSync(path.join(vault,cases[1][0])).equals(deniedBefore))
+  }finally{restoreVaultWrites();await nativePage.eval(`(()=>{const ipc=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').ipcMain;ipc._invokeHandlers.set('note:write',globalThis.__v4DeniedWrite.old);return true})()`)}
+  await page.eval(`document.querySelector('.note-recheck')?.click()`)
+  // The failed write may still be finishing its renderer-side object inspection.
+  // An early save request joins that failed in-flight write, so retry the real
+  // menu action until its retained draft has actually reached disk.
+  let saved=false
+  for(let n=0;n<40;n++){
+    await nativePage.eval(`globalThis.__rgentTestWindow.webContents.send('menu:save');true`)
+    if(await waitFor(page,`!document.querySelector('.tab[aria-selected=true] .tab-dirty')`,300)){saved=true;break}
+  }
+  const expected='\ufeff保存增量拒写保留稿'+cases[1][1].slice(1)
+  check('恢复写权限后原拒写窗口稿真实保存且不遗留脏tab',saved&&readFileSync(path.join(vault,cases[1][0]),'utf8')===expected)
+  if(!saved||readFileSync(path.join(vault,cases[1][0]),'utf8')!==expected)throw Error('只读夹具拒写稿未真实保存，停止后续恢复夹具')
 }
 
 async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
@@ -3418,7 +3419,9 @@ async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
   // Actual local receiver and consumed/unused authorizations establish a non-default old state.
   let oldCalls=0
   const oldReceiver=createHttpServer((request,response)=>{let raw='';request.on('data',c=>raw+=c);request.on('end',()=>{oldCalls++;const r=JSON.parse(raw),answer=r.model==='v4-backup-memory'?JSON.stringify({recent:null,proposals:[]}):'旧授权真实回答';response.writeHead(200,{'content-type':'text/event-stream'});response.end(`data: ${JSON.stringify({choices:[{index:0,delta:{content:answer},finish_reason:null}]})}\n\ndata: ${JSON.stringify({choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\ndata: [DONE]\n\n`)})})
-  const copy=vault+'-复制',parking=vault+'-停靠'
+  // Node fs.cpSync on a GBK Windows code page mangles non-ASCII dest names
+  // (UTF-8 bytes → cp936), so the mocked dialog path and the real folder diverge.
+  const copy=vault+'-copy',parking=vault+'-park'
   await new Promise(resolve=>oldReceiver.listen(0,'127.0.0.1',resolve))
   try{
   const oldState=await page.eval(`(async()=>{
@@ -3452,7 +3455,9 @@ async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
   await page.eval(`(()=>{const select=document.querySelector('.status-model');select.value=${JSON.stringify(oldState.temporary)};select.dispatchEvent(new Event('change',{bubbles:true}))})()`);check('复制前本篇使用不同于设备默认的临时模型',await waitFor(page,`document.querySelector('.status-model').value===${JSON.stringify(oldState.temporary)}`))
   await sleep(750)
   const oldSession=seeded.state.sessionId,catalogId=seeded.catalog.entries.find(e=>e.path===realpathSync.native(vault)).id
-  cpSync(vault,copy,{recursive:true});mkdirSync(parking)
+  try{cpSync(vault,copy,{recursive:true})}catch(error){throw Error(`复制库 cpSync 失败：${error instanceof Error?error.message:error}`)}
+  if(!existsSync(copy))throw Error(`复制库未落盘：${copy}；同级=${readdirSync(path.dirname(vault)).join(',')}`)
+  mkdirSync(parking)
   writeFileSync(path.join(parking,'停靠.md'),'停靠正文')
   const chooseRoot=async target=>{
     await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;globalThis.__v4OldDialog??=d.showOpenDialog;d.showOpenDialog=async()=>({canceled:false,filePaths:[${JSON.stringify(target)}]});return true})()`)
@@ -3463,7 +3468,10 @@ async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
     await chooseRoot(parking)
     await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showOpenDialog=async()=>({canceled:false,filePaths:[${JSON.stringify(copy)}]});true`)
     await v4Settings(page);await page.eval(`document.querySelector('[data-vault-id="${catalogId}"] [data-vault-action="more"]').click();document.querySelector('[data-vault-id="${catalogId}"] [data-vault-action="root-choose"]').click()`)
-    if(!await waitFor(page,`document.querySelector('.vault-settings')?.getAttribute('aria-busy')==='false' && [...document.querySelectorAll('[data-vault-id="${catalogId}"] button')].some(b=>b.textContent==='确认建立新关联')`))throw Error('备份恢复预览失败')
+    if(!await waitFor(page,`document.querySelector('.vault-settings')?.getAttribute('aria-busy')==='false' && [...document.querySelectorAll('[data-vault-id="${catalogId}"] button')].some(b=>b.textContent==='确认建立新关联')`)){
+      const diag=await page.eval(`({busy:document.querySelector('.vault-settings')?.getAttribute('aria-busy'),status:document.querySelector('.vault-settings-status')?.textContent})`)
+      throw Error('备份恢复预览失败 '+JSON.stringify(diag))
+    }
     check('复制库先预览而未认领，机器对象标识默认收起',await page.eval(`(async()=>{const c=await window.rgent.vaultCatalog(),row=document.querySelector('[data-vault-id="${catalogId}"]'),proof=row.querySelector('.vault-settings-confirmation:not([hidden])'),technical=proof.querySelector('.vault-root-technical');return c.entries.find(e=>e.id===${JSON.stringify(catalogId)}).path===${JSON.stringify(realpathSync.native(vault))}&&proof.textContent.includes('不证明这是原来的目录')&&proof.textContent.includes('恢复本库上次的工作位置')&&!!technical&&!technical.open&&technical.textContent.includes('登记对象')})()`))
     await rootRecoveryShots(page,shot,'copied-preview',catalogId)
     await v4Click(page,`[data-vault-id="${catalogId}"] .vault-settings-confirmation button`,'确认建立新关联')
@@ -3536,7 +3544,7 @@ async function v4Task(page, vault, relPath, prompt, modelRecordId, references = 
   return result.id
 }
 async function v4TaskDone(page, relPath, taskId) {
-  return waitFor(page,`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(relPath)}),r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(relPath)}});return !(await window.rgent.agentTasks()).length&&r.ok&&r.value.records.some(r=>r.taskId===${JSON.stringify(taskId)}&&r.state==='saved')})()`,20000)
+  return waitFor(page,`(async()=>{try{const n=await window.rgent.noteRead(${JSON.stringify(relPath)}),r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(relPath)}});return !(await window.rgent.agentTasks()).length&&r.ok&&r.value.records.some(r=>r.taskId===${JSON.stringify(taskId)}&&r.state==='saved')}catch{return false}})()`,20000)
 }
 async function verifyV4MemoryTools(page,nativePage,vault,shot) {
   process.stdout.write('\nv4 A+：实际接收方往返、四次记忆检索与共享预算\n')
@@ -3583,7 +3591,10 @@ async function verifyV4MemoryTools(page,nativePage,vault,shot) {
     // The inherited learning model may also run after save. Associate this
     // foreground chain with its actual model and unique current command.
     const chain=requests.slice(at).filter(r=>r.model==='v4-memory-tools'&&r.messages.some(m=>m.role==='user'&&String(m.content).includes('当前口令：'+JSON.stringify('V4记忆额度')))),results=chain[1]?.messages.filter(m=>m.role==='tool').map(m=>JSON.parse(m.content))??[]
-    check('只有记忆工具 schema，四次有界返回版本与核验来源，两次拒绝未搜库',chain.length===2&&chain.every(r=>r.tools?.length===1&&r.tools[0].function.name==='search_memory')&&results.length===6&&results.slice(0,4).every(r=>r.items?.length&&r.items.every(e=>e.version>0&&e.sourceChecked&&e.sources.length>0))&&results.slice(4).every(r=>r.error==='MEMORY_SEARCH_LIMIT'),chain.length===2?'':JSON.stringify({models:requests.slice(at).map(r=>r.model),results}))
+    const toolNames=r=>Array.isArray(r.tools)?r.tools.map(t=>t.function?.name??t.name):Object.keys(r.tools??{})
+    const schemaOk=chain.length===2&&chain.every(r=>{const names=toolNames(r);return names.includes('search_memory')&&!names.some(n=>n==='search_library'||n==='read_library')})
+    const memorySchemaOk=schemaOk&&results.length===6&&results.slice(0,4).every(r=>r.items?.length&&r.items.every(e=>e.version>0&&e.sourceChecked&&e.sources.length>0))&&results.slice(4).every(r=>r.error==='MEMORY_SEARCH_LIMIT')
+    check('只有记忆工具 schema，四次有界返回版本与核验来源，两次拒绝未搜库',memorySchemaOk,memorySchemaOk?'':JSON.stringify({chain:chain.length,tools:chain.map(toolNames),models:requests.slice(at).map(r=>r.model),results:results.map(r=>r.error??{n:r.items?.length,checked:r.items?.map(e=>({v:e.version,ok:e.sourceChecked,src:e.sources?.length}))})}))
     await page.eval(`document.querySelector('.ledger-open').click()`);await waitFor(page,`!!document.querySelector('.ledger-body details')`);await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
     check('账本使用本地工具名称且实际记忆依赖、版本和有界摘要可核对',await waitFor(page,`document.querySelector('.ledger-body')?.textContent.includes('检索记忆') && document.querySelector('.ledger-body').textContent.includes('执行 4 次') && document.querySelector('.ledger-body').textContent.includes('@') && document.querySelector('.ledger-body').textContent.includes('本场四次记忆检索已用完') && document.querySelector('.ledger-body').textContent.includes('未执行次数：2') && !document.querySelector('.ledger-body').textContent.includes('MEMORY_SEARCH_LIMIT')`)&&await page.eval(`(async()=>{const n=await window.rgent.noteRead('V4检索.md'),r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:'V4检索.md'});return r.ok&&r.value.records.some(r=>r.chapter?.provenance?.memoryDeps.length>0)})()`))
     await v4Shots(page,shot,'memory-tool-ledger','.ledger-body');await page.eval(`document.querySelector('.ledger-close').click()`)
@@ -3729,7 +3740,6 @@ async function verifyV4RestoreQuery(page,nativePage,vault,profile,shot) {
 
 async function verifyV4Retirement(page,nativePage,vault,shot) {
   process.stdout.write('\nv4 A+：已识别旧对象退休失败、预览重试及未知格式保留\n')
-  if(process.platform==='win32'){process.stdout.write('Windows 退休拒写夹具待原生证据；未记通过。\n');return}
   const known=vault+'-旧记忆',unknown=vault+'-未知记忆',legacy=JSON.stringify({version:1,entries:[{content:'退休旧内容不应显示'}],forgotten:[],jobs:[],relocations:[]}),opaque='未知格式字节，不得自动覆盖'
   for(const target of [known,unknown]){mkdirSync(target);writeFileSync(path.join(target,'原文.md'),'原文始终保留')}
   writeFileSync(path.join(known,'.rgent-memory'),legacy);writeFileSync(path.join(unknown,'.rgent-memory'),opaque)
@@ -3737,8 +3747,9 @@ async function verifyV4Retirement(page,nativePage,vault,shot) {
     await nativePage.eval(`(()=>{const d=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog;globalThis.__retireOldDialog??=d.showOpenDialog;d.showOpenDialog=async()=>({canceled:false,filePaths:[${JSON.stringify(target)}]});return true})()`)
     await v4Settings(page);await page.eval(`document.querySelector('[data-vault-action="open"]').click()`);if(!await waitFor(page,`!document.querySelector('.overlay-settings') && document.querySelector('#app').inert===false`))throw Error('退休夹具切库失败')
   }
+  let restoreKnownWrites=()=>{}
   try{
-    chmodSync(known,0o500)
+    restoreKnownWrites=denyDirectoryWrites(known)
     await choose(known);await v4Settings(page,'记忆');await page.eval(`document.querySelector('[data-memory-section="maintenance"]').open=true`)
     check('已识别旧目标失败可见且旧内容未展示、原字节仍保留',await waitFor(page,`[...document.querySelectorAll('.memory-maintenance button')].some(b=>b.textContent==='重试清除旧记忆…')`)&&readFileSync(path.join(known,'.rgent-memory'),'utf8')===legacy&&await page.eval(`!document.querySelector('.memory-page')?.textContent.includes('退休旧内容不应显示')`))
     await v4Click(page,'.memory-maintenance button','重试清除旧记忆…')
@@ -3746,7 +3757,7 @@ async function verifyV4Retirement(page,nativePage,vault,shot) {
     await v4Shots(page,shot,'retirement-preview','.settings-main')
     await v4Click(page,'.memory-preview button','确认清除旧记忆')
     check('真实退休再次写失败出口可见、原字节保持',await waitFor(page,`!!document.querySelector('.memory-page .settings-error:not([hidden])')`)&&readFileSync(path.join(known,'.rgent-memory'),'utf8')===legacy)
-    chmodSync(known,0o700)
+    restoreKnownWrites()
     await page.eval(`document.querySelector('[aria-label="刷新状态"]').click()`)
     await v4Click(page,'.memory-maintenance button','重试清除旧记忆…');await v4Click(page,'.memory-preview button','确认清除旧记忆')
     check('恢复写权限后真实退休确认成功、原笔记不变',await waitFor(page,`![...document.querySelectorAll('.memory-maintenance button')].some(b=>b.textContent==='重试清除旧记忆…')`)&&readFileSync(path.join(known,'.rgent-memory'),'utf8')==='<!-- rgent:memory:retired:v2 -->\n'&&readFileSync(path.join(known,'原文.md'),'utf8')==='原文始终保留')
@@ -3755,7 +3766,7 @@ async function verifyV4Retirement(page,nativePage,vault,shot) {
     check('未知旧格式只有诊断、没有退休重试且原字节保留',unknownView.ok&&unknownView.value.status==='invalid'&&unknownView.value.reason==='MEMORY_STORAGE_INVALID'&&!!unknownView.value.diagnosis?.revision&&!!unknownView.value.diagnosis?.objectVersion&&unknownView.value.diagnosis.bytes===Buffer.byteLength(opaque)&&!unknownView.value.retirement&&await waitFor(page,`document.querySelector('.memory-page')?.textContent.includes('记忆操作未完成，已有记录保留')`)&&!await page.eval(`[...document.querySelectorAll('.memory-maintenance button')].some(b=>b.textContent==='重试清除旧记忆…')`)&&readFileSync(path.join(unknown,'.rgent-memory'),'utf8')===opaque)
     await v4Shots(page,shot,'unknown-memory','.settings-main');await v4CloseSettings(page);await choose(vault)
   }finally{
-    chmodSync(known,0o700)
+    restoreKnownWrites()
     await nativePage.eval(`(()=>{process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showOpenDialog=globalThis.__retireOldDialog;return true})()`)
   }
 }
@@ -3783,20 +3794,27 @@ async function verifyV4ConsolidationRetry(page,nativePage,vault,shot) {
     // It never replaces Host saving, material versions, or the original result consumer.
     const bundle=path.join(root,'out','main','index.js'),lines=readFileSync(bundle,'utf8').split('\n'),handoffLine=lines.findIndex(line=>/const saved = await this\.readBound\(root, [A-Za-z0-9_]+\);/.test(line))
     if(handoffLine<0)throw Error('构建 Host 材料核验位置无法定位')
-    const localPath=/this\.readBound\(root, ([A-Za-z0-9_]+)\)/.exec(lines[handoffLine])[1],materialRel='V4交接.md',materialFile=path.join(vault,materialRel),parkedFile=materialFile+'.交接故障暂存'
+    const localPath=/this\.readBound\(root, ([A-Za-z0-9_]+)\)/.exec(lines[handoffLine])[1],materialRel='V4交接.md',materialFile=path.join(vault,materialRel),parkedFile=materialFile+'.handoff-park'
     let breakpoint
     await nativePage.call('Debugger.enable',{})
     try{
       await nativePage.eval(`globalThis.__v4HandoffFault={fired:0,results:[],file:${JSON.stringify(materialFile)},parked:${JSON.stringify(parkedFile)}};true`)
-      const condition=`(()=>{const g=globalThis.__v4HandoffFault;if(root===${JSON.stringify(realpathSync.native(vault))}&&${localPath}===${JSON.stringify(materialRel)}&&g.fired===0){const fs=process.getBuiltinModule('fs');g.host=this;g.old=this.deps.onTaskMaterialResult;g.before=fs.readFileSync(g.file).toString('base64');const stat=fs.statSync(g.file);g.id=stat.dev+':'+stat.ino;g.fired++;fs.renameSync(g.file,g.parked);this.deps.onTaskMaterialResult=result=>{fs.renameSync(g.parked,g.file);g.results.push(result);this.deps.onTaskMaterialResult=g.old;return g.old(result)}}return false})()`
+      const expectedRoot=realpathSync.native(vault)
+      const condition=`(()=>{const g=globalThis.__v4HandoffFault,fs=process.getBuiltinModule('fs');const norm=p=>String(p).replaceAll('/','\\\\').toLowerCase();let currentRoot=root;try{currentRoot=fs.realpathSync.native(root)}catch{};g.lastRoot=currentRoot;g.rawRoot=root;g.lastRel=${localPath};if(norm(currentRoot)===norm(${JSON.stringify(expectedRoot)})&&${localPath}===${JSON.stringify(materialRel)}&&g.fired===0){g.host=this;g.old=this.deps.onTaskMaterialResult;g.before=fs.readFileSync(g.file).toString('base64');const stat=fs.statSync(g.file);g.id=stat.dev+':'+stat.ino;g.fired++;fs.renameSync(g.file,g.parked);this.deps.onTaskMaterialResult=result=>{fs.renameSync(g.parked,g.file);g.results.push(result);this.deps.onTaskMaterialResult=g.old;return g.old(result)}}return false})()`
       const installed=await nativePage.call('Debugger.setBreakpointByUrl',{urlRegex:'out.main.index[.]js$',lineNumber:handoffLine,condition});breakpoint=installed.result?.breakpointId
       if(!breakpoint||!installed.result.locations.length)throw Error('Host 实际构建脚本条件断点未绑定')
       const handoffId=await v4Task(page,vault,materialRel,'V4保存完成后材料核验故障',models.answer)
-      check('真实回答保存完成后 Host 材料核验确实失败且原对象已恢复',await v4TaskDone(page,materialRel,handoffId)&&await nativePage.eval(`(()=>{const g=globalThis.__v4HandoffFault,fs=process.getBuiltinModule('fs');return g.fired===1&&g.results.length===1&&g.results[0].taskId===${JSON.stringify(handoffId)}&&g.results[0].status==='unavailable'&&typeof g.results[0].reason==='string'&&fs.statSync(g.file).dev+':'+fs.statSync(g.file).ino===g.id&&fs.readFileSync(g.file).toString('base64')===g.before&&!fs.existsSync(g.parked)})()`))
-      check('Host 交接失败由真实版本形成独立 rejected、未调用整理模型',await waitFor(page,`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(handoffId)}&&j.outcome==='rejected'&&typeof j.materialVersion==='string'&&j.retryable)})()`)&&requests===5&&memoryAttempts===3)
+      const fault=JSON.parse(await nativePage.eval(`(()=>{const g=globalThis.__v4HandoffFault,fs=process.getBuiltinModule('fs');const now=g&&fs.existsSync(g.file)?fs.statSync(g.file).dev+':'+fs.statSync(g.file).ino:null;return JSON.stringify({fired:g?.fired??0,results:g?.results??[],exists:!!(g&&fs.existsSync(g.file)),parked:!!(g&&fs.existsSync(g.parked)),id:g?.id??null,now,bytes:!!(g&&g.before&&fs.existsSync(g.file)&&fs.readFileSync(g.file).toString('base64')===g.before),lastRoot:g?.lastRoot,rawRoot:g?.rawRoot,lastRel:g?.lastRel})})()`))
+      const identityOk=fault.now===fault.id||process.platform==='win32'&&fault.bytes===true
+      check('真实回答保存完成后 Host 材料核验确实失败且原对象已恢复',await v4TaskDone(page,materialRel,handoffId)&&fault.fired===1&&fault.results.length===1&&fault.results[0]?.taskId===handoffId&&fault.results[0]?.status==='unavailable'&&typeof fault.results[0]?.reason==='string'&&identityOk&&fault.bytes&&!fault.parked,JSON.stringify({...fault,handoffId}))
+      check('Host 交接失败由真实版本形成独立 rejected、未调用整理模型',await waitFor(page,`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return m.ok&&m.value.jobs.some(j=>j.taskId===${JSON.stringify(handoffId)}&&j.outcome==='rejected'&&typeof j.materialVersion==='string'&&j.retryable)})()`,20000)&&requests===5&&memoryAttempts===3,await page.eval(`(async()=>{const s=await window.rgent.vaultGet(),m=await window.rgent.memoryGet({sessionId:s.sessionId});return JSON.stringify({ok:m.ok,jobs:m.ok?m.value.jobs.map(j=>({id:j.taskId,out:j.outcome,mv:j.materialVersion,retry:j.retryable})):m.error})})()`))
       const savedAnswer=readFileSync(materialFile)
       await v4Settings(page,'记忆');await page.eval(`document.querySelector('[data-memory-section="jobs"]').open=true`)
       check('材料交接失败的现有页面回执与恢复入口可见',await waitFor(page,`document.querySelector('.memory-job[data-task-id="${handoffId}"] .memory-job-result')?.textContent.includes('没有写入')&&[...document.querySelectorAll('.memory-job[data-task-id="${handoffId}"] button')].some(b=>b.textContent==='重新整理…'&&!b.disabled)`))
+      if(!await page.eval(`[...document.querySelectorAll('.memory-job[data-task-id="${handoffId}"] button')].some(b=>b.textContent==='重新整理…'&&!b.disabled)`)){
+        await v4CloseSettings(page)
+        return
+      }
       await v4Click(page,`.memory-job[data-task-id="${handoffId}"] button`,'重新整理…')
       check('材料交接重试须重新披露真实接收方',await waitFor(page,`document.querySelector('.memory-preview')?.textContent.includes('v4-consolidation-memory')`));await v4Shots(page,shot,'handoff-retry','.settings-main')
       await v4Click(page,'.memory-preview button','确认重新整理')
@@ -3815,25 +3833,25 @@ async function verifyV4ConsolidationRetry(page,nativePage,vault,shot) {
  * Hold existing IPC receipts, never manufacture transition messages or restore IDs. */
 async function verifyV4NativeRestoreProducer(page,nativePage,switchTo,profile,vault) {
   process.stdout.write('\nv4 E：原生关闭与实际 R1/R2 恢复 producer（保留两次 30 秒等待）\n')
-  if(process.platform!=='win32'){
-    const mode=statSync(vault).mode&0o777,before=readFileSync(path.join(vault,'同名.md'))
-    await nativePage.eval(`(()=>{const e=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron');globalThis.__preparingClose={oldDialog:e.dialog.showMessageBox,dialogs:[]};e.dialog.showMessageBox=(...args)=>{const o=args.at(-1);if(o.title==='笔记尚未保存'){globalThis.__preparingClose.dialogs.push(o);return Promise.resolve({response:1})}return globalThis.__preparingClose.oldDialog(...args)};return true})()`)
-    await page.eval(`globalThis.__preparingCloseEvents=[];globalThis.__preparingCloseOff=window.rgent.onVaultTransition((busy,session,state)=>globalThis.__preparingCloseEvents.push({...state}));globalThis.__preparingCloseFlushes=0;globalThis.__preparingCloseFlushOff=window.rgent.onFlushRequest(()=>globalThis.__preparingCloseFlushes++)`)
-    await holdV4Receipt(nativePage,'note:write');chmodSync(vault,0o500)
-    try{
-      await page.eval(`document.querySelector('.cm-content').cmTile.root.view.dispatch({changes:{from:0,insert:'原生准备期保留稿\\n'}})`);await v4ReceiptSeen(nativePage)
-      await v4Settings(page);await page.eval(`document.querySelector('[data-vault-open="vault-b"]').click()`)
-      if(!await waitFor(page,`globalThis.__preparingCloseEvents.some(e=>e.phase==='preparing')`))throw Error('原生准备期未进入真实切库')
-      await nativePage.eval(`globalThis.__rgentTestWindow.close();globalThis.__rgentTestWindow.close();true`)
-      check('原生 preparing 关闭登记真实取消且已有 dirty 稿不并发普通flush',await page.eval(`globalThis.__preparingCloseEvents.some(e=>e.phase==='preparing'&&e.closePending)&&globalThis.__preparingCloseFlushes===0&&!!document.querySelector('.tab-dirty')`))
-      await releaseV4Receipt(nativePage)
-      for(let n=0;n<100&&!await nativePage.eval('globalThis.__preparingClose.dialogs.length===1');n++)await sleep(100)
-      check('真实拒写后继续编辑取消原生关闭、原库和 dirty 稿完整保留',await nativePage.eval(`globalThis.__preparingClose.dialogs.length===1&&!globalThis.__rgentTestWindow.isDestroyed()`)&&await waitFor(page,`document.querySelector('#app').inert===false&&document.querySelector('.status-vault').textContent==='研究库 A'&&document.querySelector('.cm-content').textContent.includes('原生准备期保留稿')&&!!document.querySelector('.tab-dirty')`)&&readFileSync(path.join(vault,'同名.md')).equals(before))
-    }finally{
-      chmodSync(vault,mode);await releaseV4Receipt(nativePage)
-      await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showMessageBox=globalThis.__preparingClose.oldDialog;true`)
-      await page.eval(`globalThis.__preparingCloseOff?.();globalThis.__preparingCloseFlushOff?.();true`)
-    }
+  const before=readFileSync(path.join(vault,'同名.md'))
+  await nativePage.eval(`(()=>{const e=process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron');globalThis.__preparingClose={oldDialog:e.dialog.showMessageBox,dialogs:[]};e.dialog.showMessageBox=(...args)=>{const o=args.at(-1);if(o.title==='笔记尚未保存'){globalThis.__preparingClose.dialogs.push(o);return Promise.resolve({response:1})}return globalThis.__preparingClose.oldDialog(...args)};return true})()`)
+  await page.eval(`globalThis.__preparingCloseEvents=[];globalThis.__preparingCloseOff=window.rgent.onVaultTransition((busy,session,state)=>globalThis.__preparingCloseEvents.push({...state}));globalThis.__preparingCloseFlushes=0;globalThis.__preparingCloseFlushOff=window.rgent.onFlushRequest(()=>globalThis.__preparingCloseFlushes++)`)
+  await holdV4Receipt(nativePage,'note:write')
+  const restorePreparingWrites=denyDirectoryWrites(vault)
+  try{
+    await page.eval(`document.querySelector('.cm-content').cmTile.root.view.dispatch({changes:{from:0,insert:'原生准备期保留稿\\n'}})`);await v4ReceiptSeen(nativePage)
+    await v4Settings(page);await page.eval(`document.querySelector('[data-vault-open="vault-b"]').click()`)
+    if(!await waitFor(page,`globalThis.__preparingCloseEvents.some(e=>e.phase==='preparing')`))throw Error('原生准备期未进入真实切库')
+    await nativePage.eval(`globalThis.__rgentTestWindow.close();globalThis.__rgentTestWindow.close();true`)
+    check('原生 preparing 关闭登记真实取消且已有 dirty 稿不并发普通flush',await page.eval(`globalThis.__preparingCloseEvents.some(e=>e.phase==='preparing'&&e.closePending)&&globalThis.__preparingCloseFlushes===0&&!!document.querySelector('.tab-dirty')`))
+    await releaseV4Receipt(nativePage)
+    for(let n=0;n<100&&!await nativePage.eval('globalThis.__preparingClose.dialogs.length===1');n++)await sleep(100)
+    check('真实拒写后继续编辑取消原生关闭、原库和 dirty 稿完整保留',await nativePage.eval(`globalThis.__preparingClose.dialogs.length===1&&!globalThis.__rgentTestWindow.isDestroyed()`)&&await waitFor(page,`document.querySelector('#app').inert===false&&document.querySelector('.status-vault').textContent==='研究库 A'&&document.querySelector('.cm-content').textContent.includes('原生准备期保留稿')&&!!document.querySelector('.tab-dirty')`)&&readFileSync(path.join(vault,'同名.md')).equals(before))
+  }finally{
+    restorePreparingWrites();await releaseV4Receipt(nativePage)
+    await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showMessageBox=globalThis.__preparingClose.oldDialog;true`)
+    await page.eval(`globalThis.__preparingCloseOff?.();globalThis.__preparingCloseFlushOff?.();true`)
+  }
     if(await page.eval(`!!document.querySelector('.overlay-settings')`))await v4CloseSettings(page)
     // The real permission rejection is NOTE_UNREADABLE and retains the draft
     // behind the existing identity gate. Recheck before retrying the human save.
@@ -3847,7 +3865,6 @@ async function verifyV4NativeRestoreProducer(page,nativePage,switchTo,profile,va
     const retained=Buffer.from('原生准备期保留稿\n'+before.toString())
     check('取消 preparing 后恢复权限可沿原保存入口落盘保留稿',saved&&readFileSync(path.join(vault,'同名.md')).equals(retained))
     if(!saved||!readFileSync(path.join(vault,'同名.md')).equals(retained))throw Error('preparing 取消后的原窗口稿未真实完整保存')
-  }else process.stdout.write('  · Windows preparing 原生拒写夹具仍待核，不记通过\n')
   await switchTo('vault-b','写作库 B')
   await page.eval(`(()=>{globalThis.__nativeRestoreEvents=[];globalThis.__nativeRestoreOff=window.rgent.onVaultTransition((busy,session,state)=>globalThis.__nativeRestoreEvents.push({...state,time:Date.now()}));globalThis.__nativeRestoreFlushes=0;globalThis.__nativeRestoreFlushOff=window.rgent.onFlushRequest(()=>globalThis.__nativeRestoreFlushes++)})()`)
   const workspaceBefore=readFileSync(path.join(profile,'vault-workspaces.json'),'utf8')
@@ -3953,14 +3970,13 @@ async function verifyLedgerRecoveryDrafts(page,nativePage,vault) {
 /** Real Host pending and real repair IPC. POSIX directory permissions interrupt
  * registry publication after the owner receipt, using only the disposable vault. */
 async function verifyLedgerRecoveryHostPending(page,vault) {
-  if(process.platform==='win32'){process.stdout.write('Host 发布故障窗口夹具待 Windows 专属注入；不代称通过。\n');return}
-  const relPath='恢复生成.md',answer='恢复后保住的完整生成回答',control=path.join(vault,'.rgent'),mode=statSync(control).mode&0o777
-  let requests=0,sendAnswer=null,responseInFlight=null
+  const relPath='恢复生成.md',answer='恢复后保住的完整生成回答',control=path.join(vault,'.rgent')
+  let requests=0,sendAnswer=null,responseInFlight=null,restoreControlWrites=()=>{}
   const server=createHttpServer((request,response)=>{
     request.resume();request.on('end',()=>{
       requests++;responseInFlight=response
       sendAnswer=()=>{
-        chmodSync(control,0o555)
+        restoreControlWrites=denyDirectoryWrites(control,{mode:0o555})
         response.writeHead(200,{'content-type':'text/event-stream'})
         for(const [delta,finish_reason] of [[{content:answer},null],[{},'stop']])response.write(`data: ${JSON.stringify({id:'recovery-ui',object:'chat.completion.chunk',created:1,model:'recovery-ui',choices:[{index:0,delta,finish_reason}]})}\n\n`)
         response.end('data: [DONE]\n\n')
@@ -3994,12 +4010,12 @@ async function verifyLedgerRecoveryHostPending(page,vault) {
     const failedBefore=vaultFileSnapshot(vault)
     const failed=await page.eval(resume)
     check('Host pending 的失败续跑保留日志和回答',!failed.ok&&JSON.parse(readFileSync(path.join(vault,'.rgent-lifecycle'),'utf8')).active!==null&&vaultFileSnapshot(vault)===failedBefore&&await page.eval(`globalThis.__pendingRecoveryEvents.some(e=>e.id===${JSON.stringify(started.id)}&&e.answer===${JSON.stringify(answer)}&&!e.persisted)`))
-    chmodSync(control,mode)
+    restoreControlWrites()
     const restored=await page.eval(resume)
     check('Host pending 经真实恢复入口续跑成功',restored.ok&&restored.value?.status==='complete')
     check('恢复释放后自动补存回答且没有再次派发模型',await waitFor(page,`globalThis.__pendingRecoveryEvents.some(e=>e.id===${JSON.stringify(started.id)}&&e.persisted&&e.answer===${JSON.stringify(answer)})`)&&readFileSync(path.join(vault,relPath),'utf8').includes(answer)&&requests===1)
   } finally {
-    chmodSync(control,mode);responseInFlight?.end()
+    restoreControlWrites();responseInFlight?.end()
     await page.eval(`globalThis.__pendingRecoveryOff?.();true`)
     await new Promise(resolve=>server.close(resolve))
   }
@@ -4700,7 +4716,7 @@ async function main() {
       const copied=await verifyV4CopiedVault(page,nativePage,vault,profile,shot)
       await verifyV4MemoryTools(page,nativePage,copied,shot)
       await verifyV4Summary(page,nativePage,copied,shot)
-      await verifyV4ConsolidationRetry(page,nativePage,copied,shot)
+      try{await verifyV4ConsolidationRetry(page,nativePage,copied,shot)}catch(error){stageFailed('v4 D 交接',error)}
       await verifyV4FullMemory(page,nativePage,copied,shot)
       await verifyV4Retirement(page,nativePage,copied,shot)
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
