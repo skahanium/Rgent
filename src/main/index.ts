@@ -538,6 +538,11 @@ async function trashCommitShared(id: string, allow: boolean, owner?: string, att
     // 零确认删除：预览只用于核对象与排队；真正落点改为库内 .rgent-trash。
     const outcome = await currentVault.trashDelete(preview.relPath, { source: attribution?.source ?? 'ai', ...(attribution?.taskId ? { taskId: attribution.taskId } : {}) })
     currentVault.assertSession(token)
+    // trashDelete 用结果对象报业务失败；这里若当成成功返回，界面会关 tab 而笔记其实还在。
+    if (!outcome.ok) {
+      try { await currentVault.commitTrash(id, false) } catch { /* 预览清理失败不覆盖删除失败 */ }
+      throw new Error(outcome.error)
+    }
     return {
       ok: true, cancelled: false, relPath: outcome.relPath ?? preview.relPath, landing: '',
       landingVerified: 'unverified', attachmentLanding: null,
