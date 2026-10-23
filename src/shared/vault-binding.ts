@@ -17,5 +17,5 @@ export function boundArguments(args: unknown[], session: string | null): unknown
 }
 
 export function isVaultEvent(channel: string): boolean {
-  return ['tree:changed','note:relocated','note:external-change','vault:lost','memory:changed','agent:event','agent:write-request'].includes(channel)
+  return ['tree:changed','note:relocated','note:deleted','note:external-change','vault:lost','memory:changed','agent:event','agent:write-request'].includes(channel)
 }

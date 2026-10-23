@@ -88,10 +88,10 @@ describe('overlay modality', () => {
         this.setAttribute('open', '')
       }
     })
-    const overlay = openOverlay({ label: 'card', modal: false, className: 'overlay-write-confirm write-confirm' })
+    const overlay = openOverlay({ label: 'card', modal: false, className: 'overlay-sample sample-card' })
     expect(seen[0]).toContain('overlay')
-    expect(seen[0]).toContain('overlay-write-confirm')
-    expect(seen[0]).toContain('write-confirm')
+    expect(seen[0]).toContain('overlay-sample')
+    expect(seen[0]).toContain('sample-card')
     overlay.close()
   })
 

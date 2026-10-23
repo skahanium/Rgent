@@ -37,6 +37,13 @@ async function fixture() {
   return { base, root, vault, binding: { sessionId: note.sessionId, objectVersion: note.objectVersion } }
 }
 
+/**
+ * 这里是**保留的旧送篓路**（`previewTrash`／`commitTrash`：先送系统废纸篓、再记一条
+ * `cause: 'trash'` 的外部消失记录）。R 轮之后的新删除走 `trashDelete`（进库里
+ * `.rgent-trash`，见 `vault.test.ts` 的 in-vault trash 与 `trash-store.test.ts`），
+ * 系统废纸篓只作为「明确删除／过期」的终点。这些用例明确保留，用来钉住旧接口
+ * 与「已进系统废纸篓的旧删除不迁移」这一段外部语义。
+ */
 describe('human trash', () => {
   const bases: string[] = []
   afterEach(async () => {

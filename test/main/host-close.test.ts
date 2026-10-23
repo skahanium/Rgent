@@ -43,7 +43,8 @@ vi.mock('../../src/main/agent-host.ts',()=>({AgentHost:class{
 let root:string
 const event=()=>({sender:state.win.webContents,senderFrame:state.win.webContents.mainFrame})
 const invoke=(name:string,...args:any[])=>state.handles.get(name)!(event(),...args)
-const startRequest={previewId:'preview',level:'write' as const,relPath:'a.md',expectedText:'/问',promptText:'问',modelRecordId:'m1',sessionId:'s',objectVersion:'o',expectedRevision:'r',range:{start:0,end:1}}
+// R3 之前 index.ts 仍按旧 level 校验；本轮带上 scope，两边都指向同一请求。
+const startRequest={previewId:'preview',scope:'vault' as const,level:'write' as const,relPath:'a.md',expectedText:'/问',promptText:'问',modelRecordId:'m1',sessionId:'s',objectVersion:'o',expectedRevision:'r',range:{start:0,end:1}}
 beforeEach(async()=>{
  vi.resetModules();state.handles.clear();state.listeners.clear();state.send=null
  state.launch=Promise.resolve();state.settled=0;state.stopped=0;state.started=0;state.cancels=[];state.tasks=[];state.pending=[]

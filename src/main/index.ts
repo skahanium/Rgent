@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { LifecycleFlushPhase, RecoveryFlushContext } from '../shared/flush.ts'
 import { parseLedgerRepairRequest } from '../shared/ledger.ts'
 import { listVaultTree, parseStoredVault } from './notes-fs.ts'
@@ -337,12 +338,6 @@ let cancellingForClose = false
 /** 预览时冻结的那一份技能集合随预览一起留存：启动只许发这一份，不再回存储重算。
  *  只留签名不够——亚秒级 A→B→A 双编辑能让启动路径读到 B 的正文、而两端的签名都还是 A。 */
 const memoryAuthorizationPreviews = new Map<string, { sessionId: string; signature: string;search:boolean;skills:import('./skills.ts').FrozenSkills }>()
-/** 「建」的人确认：主进程签发请求，渲染层只回是否同意；换库或关窗一律按不建结清。 */
-const pendingWriteConfirms = new Map<string, { sessionId: string; settle: (approved: boolean) => void }>()
-function clearWriteConfirms(): void {
-  for (const pending of pendingWriteConfirms.values()) pending.settle(false)
-  pendingWriteConfirms.clear()
-}
 const maintenancePreviews=new Map<string,{sessionId:string;objectVersion:string;relPath:string;action:'compress'|'clear';records:{taskId:string;revision:number}[];archive?:{revision:string;bytes:number}}>()
 /** 本库启用的技能：每次从磁盘现读，读不出就按「技能库损坏」冻结——绝不当成「没有技能」。
  *  任务启动时取一次，运行中编辑只影响下一场。 */
@@ -507,7 +502,7 @@ async function trashPreviewShared(relPath: string, owner?: string): Promise<Tras
   }
 }
 
-async function trashCommitShared(id: string, allow: boolean, owner?: string, attribution?: { taskId: string; prompt: string }): Promise<Exclude<TrashCommitResult, { ok: false }>> {
+async function trashCommitShared(id: string, allow: boolean, owner?: string, attribution?: { taskId: string; prompt: string; source?: 'human' | 'ai' }): Promise<Exclude<TrashCommitResult, { ok: false }>> {
   const currentVault = vault
   const win = mainWindow
   if (!currentVault || !win || !currentVault.root) throw new Error('BAD_REQUEST')
@@ -539,14 +534,13 @@ async function trashCommitShared(id: string, allow: boolean, owner?: string, att
     if (!(await flushBeforeStructure(win))) throw new Error('UNSAVED_DRAFT')
     currentVault.assertSession(token)
     structureGate.seal()
-    const outcome = await currentVault.commitTrash(id, true, token, attribution)
+    // 零确认删除：预览只用于核对象与排队；真正落点改为库内 .rgent-trash。
+    const outcome = await currentVault.trashDelete(preview.relPath, { source: attribution?.source ?? 'ai', ...(attribution?.taskId ? { taskId: attribution.taskId } : {}) })
     currentVault.assertSession(token)
-    if (outcome.cancelled) return { ok: true, cancelled: true }
     return {
-      ok: true, cancelled: false, relPath: outcome.relPath, landing: outcome.landing,
-      landingVerified: outcome.landingVerified, attachmentLanding: outcome.attachmentLanding,
-      orphan: outcome.orphan, ...(outcome.orphanReason ? { orphanReason: outcome.orphanReason } : {}),
-      degraded: outcome.degraded
+      ok: true, cancelled: false, relPath: outcome.relPath ?? preview.relPath, landing: '',
+      landingVerified: 'unverified', attachmentLanding: null,
+      orphan: false, degraded: []
     }
   } finally { structureGate.finish() }
 }
@@ -580,7 +574,6 @@ async function settleHostBeforeClose(win: BrowserWindow): Promise<boolean> {
   consolidation?.cancel(undefined,'MEMORY_SESSION_CLOSED')
   memoryIpc.clear()
   memoryAuthorizationPreviews.clear()
-  clearWriteConfirms()
   try {
     // 先等 launching 落地再 cancel：cancelAll 只覆盖 running，中途撕启动会丢授权与稿。
     await agentHost?.whenLaunchesSettled()
@@ -846,16 +839,6 @@ function registerIpc(): void {
     currentVault.assertSession(session)
     return result
   }
-  registerTrustedHandle(IPC.agentWriteConfirm, async (event, value: unknown): Promise<boolean> => {
-    if (!trusted(event) || !value || typeof value !== 'object') return false
-    const decision = value as Partial<import('../shared/ipc.ts').AgentWriteDecision>
-    if (typeof decision.requestId !== 'string' || typeof decision.approved !== 'boolean') return false
-    const pending = pendingWriteConfirms.get(decision.requestId)
-    if (!pending || pending.sessionId !== vault?.sessionId()) return false
-    pendingWriteConfirms.delete(decision.requestId)
-    pending.settle(decision.approved === true)
-    return true
-  })
   registerTrustedHandle(IPC.skillsGet, async (event, value: unknown): Promise<import('../shared/skills.ts').SkillsResult> => {
     if (!trusted(event) || !value || typeof value !== 'object' || typeof (value as { sessionId?: unknown }).sessionId !== 'string') return { ok: false, error: 'BAD_REQUEST' }
     const request = value as import('../shared/skills.ts').SkillsGetRequest
@@ -989,6 +972,50 @@ function registerIpc(): void {
     const request = value as Partial<ModelLimitsSetRequest>
     return modelWrite(() => modelConfig!.updateLimits(request.tier as LimitTier, request.limits!))
   })
+  /** 库内「已删除」：人删除、列表、还原、明确删除；AI 删除走同一条 vault 事务。 */
+  const trashSession = (): { vault: VaultSession; session: string } | null => {
+    const current = vault
+    if (!current) return null
+    try { return { vault: current, session: current.sessionId() ?? '' } } catch { return null }
+  }
+  registerTrustedHandle(IPC.vaultTrashDelete, async (event, value: unknown) => {
+    if (!trusted(event) || !value || typeof value !== 'object') return { ok: false, error: 'BAD_REQUEST' }
+    const relPath = (value as { relPath?: unknown }).relPath
+    if (typeof relPath !== 'string' || !relPath || relPath.length > 4096 || relPath.startsWith('/') || relPath.includes('\\')) return { ok: false, error: 'BAD_REQUEST' }
+    try {
+      // 与人删除共用同一条协调：停受影响任务、排空窗口稿，再进库内已删除。
+      const preview = await trashPreviewShared(relPath)
+      const result = await trashCommitShared(preview.id, true, undefined, { taskId: 'human', prompt: '人删除，移入库内已删除', source: 'human' })
+      if (!result.ok || result.cancelled) return { ok: false, error: 'TRASH_CANCELLED' }
+      try { await vault?.commitTrash(preview.id, false) } catch { /* 旧预览清理失败不影响已完成的删除 */ }
+      return { ok: true, relPath: result.relPath, trashId: '' }
+    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
+  })
+  registerTrustedHandle(IPC.vaultTrashList, async (event) => {
+    if (!trusted(event)) return { ok: false, error: 'BAD_SENDER' }
+    const state = trashSession()
+    if (!state) return { ok: false, error: 'NO_VAULT' }
+    try { return await state.vault.trashList() }
+    catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
+  })
+  registerTrustedHandle(IPC.vaultTrashRestore, async (event, value: unknown) => {
+    if (!trusted(event) || !value || typeof value !== 'object') return { ok: false, error: 'BAD_REQUEST' }
+    const id = (value as { id?: unknown }).id
+    if (typeof id !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(id)) return { ok: false, error: 'BAD_REQUEST' }
+    const state = trashSession()
+    if (!state) return { ok: false, error: 'NO_VAULT' }
+    try { return await state.vault.trashRestore(id) }
+    catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
+  })
+  registerTrustedHandle(IPC.vaultTrashPurge, async (event, value: unknown) => {
+    if (!trusted(event) || !value || typeof value !== 'object') return { ok: false, error: 'BAD_REQUEST' }
+    const id = (value as { id?: unknown }).id
+    if (typeof id !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(id)) return { ok: false, error: 'BAD_REQUEST' }
+    const state = trashSession()
+    if (!state) return { ok: false, error: 'NO_VAULT' }
+    try { return await state.vault.trashPurge(id) }
+    catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'IO_ERROR' } }
+  })
   registerTrustedHandle(IPC.agentAuthorizationPreview, async (event, value: unknown): Promise<import('../shared/ipc.ts').AgentAuthorizationResult> => {
     if(!authorizations || !isAuthorizationCommand(value))return {ok:false,error:'BAD_REQUEST'}
     const request=value as import('../shared/ipc.ts').AgentAuthorizationRequest
@@ -1006,7 +1033,14 @@ function registerIpc(): void {
       memoryAuthorizationPreviews.set(`${owner}:${preview.id}`, { sessionId: request.sessionId, signature: memory.signature,search:memorySearch,skills })
       const chapters=await vault!.ledgerContexts(request.relPath),note=await vault!.read(request.relPath)
       const validMemories=memory.disclosure?.use?await workingService()!.entries():[]
-      const policy=await historicalContextPolicy(note.content,async dep=>preview.sources.some(s=>s.relPath===dep.relPath&&s.objectVersion===dep.objectVersion&&s.fingerprint===dep.bodyHash),undefined,chapters,async dep=>validMemories.some(e=>e.status==='active'&&sameMemoryDependency(dep,memoryDependency(e))))
+      const scope=request.scope
+      const parent=request.relPath.includes('/')?request.relPath.slice(0,request.relPath.lastIndexOf('/')):''
+      const inScope=(path:string):boolean=>scope==='note'?path===request.relPath:scope==='folder'?(parent!==''&&(path===parent||path.startsWith(parent+'/'))):true
+      const policy=await historicalContextPolicy(note.content,async dep=>{
+        if(!inScope(dep.relPath))return false
+        try{await modelTierFor(vault!.root!,dep.relPath)}catch{return false}
+        try{const current=await vault!.read(dep.relPath);return current.objectVersion===dep.objectVersion&&createHash('sha256').update(current.content).digest('hex')===dep.bodyHash}catch{return false}
+      },undefined,chapters,async dep=>validMemories.some(e=>e.status==='active'&&sameMemoryDependency(dep,memoryDependency(e))))
       const generators=summaryCache?.valid(summaryHash(await vault!.ledgerKey(request.relPath)),chapters.filter(c=>policy.allowedLedgerChapterIds.includes(c.sourceId))).map(b=>({modelId:b.generator.modelId,host:b.generator.host,time:b.generator.time}))??[]
       vault!.assertSession(request.sessionId)
       if(memoryAuthorizationState(request.sessionId).signature!==memory.signature)throw Error('STALE_PREVIEW')
@@ -1030,7 +1064,7 @@ function registerIpc(): void {
         typeof request.promptText !== 'string' || request.promptText.length > 20000 ||
         typeof request.modelRecordId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(request.modelRecordId) ||
         typeof request.sessionId !== 'string' || typeof request.objectVersion !== 'string' || typeof request.expectedRevision !== 'string' ||
-        (request.level !== 'read' && request.level !== 'reference' && request.level !== 'write' && request.level !== 'auto') ||
+        (request.scope !== 'note' && request.scope !== 'folder' && request.scope !== 'vault') ||
         !request.range || !Number.isSafeInteger(request.range.start) || !Number.isSafeInteger(request.range.end)) {
       return { ok: false, error: 'BAD_REQUEST' }
     }
@@ -2106,30 +2140,6 @@ if (ownsInstance) app.whenReady().then(() => {
     assertMemoryAuthorization: input => {
       if (!input.sessionId || input.memoryAuthorizationSignature !== memoryAuthorizationState(input.sessionId).signature) throw Error('STALE_PREVIEW')
     },
-    confirmWrite: request => {
-      const session = vault?.sessionId()
-      if (!session || !mainWindow || mainWindow.isDestroyed()) return Promise.resolve(false)
-      return new Promise<boolean>(resolve => {
-        const requestId = randomUUID()
-        let settled = false
-        const settle = (approved: boolean): void => {
-          if (settled) return
-          settled = true
-          clearTimeout(timer)
-          pendingWriteConfirms.delete(requestId)
-          resolve(approved)
-        }
-        const timer = setTimeout(() => settle(false), 120_000)
-        request.signal.addEventListener('abort', () => settle(false), { once: true })
-        pendingWriteConfirms.set(requestId, { sessionId: session, settle })
-        // 建与结构操作各有自己的载荷；界面照 kind 渲染。
-        send(IPC.agentWriteRequest, request.kind === 'create'
-          ? { requestId, kind: 'create' as const, relPath: request.relPath, body: request.body }
-          : request.kind === 'delete'
-            ? { requestId, kind: 'delete' as const, relPath: request.relPath, hasAttachments: request.hasAttachments }
-          : { requestId, kind: request.kind, source: request.source, target: request.target, moves: request.moves, linkChanges: request.linkChanges, permissionChanges: request.permissionChanges })
-      })
-    },
     // AI 的结构操作走同一条共用迁移路径（含引用修复与权限不放宽），不另造实现。
     relocationPreview: (request, owner) => relocationPreviewShared({ kind: request.kind, source: request.source, target: request.target }, owner),
     relocationCommit: (previewId, repairLinks, owner) => relocationCommitShared(previewId, repairLinks, owner),
@@ -2192,6 +2202,7 @@ if (ownsInstance) app.whenReady().then(() => {
       return modelConfig.getPublic().limits.none
     },
     stream: (input, signal) => streamModelText({ ...input, signal }),
+    indexSearch: async query => (await vault!.search(query)).map(hit => ({ relPath: hit.relPath, title: hit.title, folder: hit.folder })),
     streamStep: (input, signal) => streamModelStep({ ...input, signal }),
     // 模型自带联网：只有 Host 判定总闸与允许列表都成立时才会走到这里；记忆检索等其它步骤仍用上面一条。
     nativeStreamStep: (input, signal) => streamNativeSearchStep({ ...input, signal }, signal),
@@ -2251,8 +2262,9 @@ if (ownsInstance) app.whenReady().then(() => {
     },
     // 第五个入参是写能力：必须原样转发，否则工具集看不到写工具，宿主也不会宣告它们。
     // 第六／七个入参是联网与 MCP 能力：必须原样转发，否则工具集看不到它们，宿主也不会宣告。
-    createReadOnlyTools: (grant, taskId, memory, materials, write, network, mcp) => createScopedAgentTools(grant, taskId, {
+    createReadOnlyTools: (grant, taskId, memory, materials, write, network, mcp, indexSearch) => createScopedAgentTools(grant, taskId, {
       read: relPath => vault!.read(relPath), tier: modelTierFor,
+      ...(indexSearch ? { indexSearch } : {}),
       validateMemory: dep => memory?.validateDependency(dep) ?? Promise.resolve(false),
       validateMemoryBatch: deps => memory?.validateDependencies(deps) ?? Promise.resolve(deps.map(() => false)), materials,
       acceptsObject: (relPath, expected, current) => vault?.acceptsObject(relPath, expected, current) ?? false,

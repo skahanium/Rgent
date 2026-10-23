@@ -4,8 +4,8 @@ import { start } from '../../src/renderer/src/shell.ts'
 import type { AgentAuthorizationPreview, AgentAuthorizationRequest, AgentStartRequest, NoteSnapshot } from '../../src/shared/ipc.ts'
 
 /**
- * 真实外壳 + 假 editor/API：四档授权卡的档位透传、自动档不记忆与自动新建通知。
- * 卡片自身的渲染与交互在 authorization-popover.test.ts 里钉住；这里只测接线。
+ * 真实外壳 + 假 editor/API：三档作业范围的静默提交、按 tab 记忆、零确认新建通知、
+ * 库内删除与 note:deleted。授权卡／写确认卡／删除确认卡已移除，这里同时钉住「没有浮层」。
  */
 const editorHarness = vi.hoisted(() => ({
   text: '',
@@ -39,6 +39,7 @@ vi.mock('../../src/renderer/src/view/read-only.ts', () => ({ renderReadOnlyMarkd
 let handlers: Record<string, Function>, api: any, root: HTMLElement
 let files: Map<string, { content: string; revision: string; objectVersion: string }>
 let revisionSerial = 0
+let started = 0
 
 const modelConfig = {
   providers: [{ provider: 'deepseek' as const, configured: true, baseURL: 'https://api.deepseek.com', hasKey: true, modelCount: 1 }],
@@ -53,17 +54,18 @@ const snapshotOf = (relPath: string): NoteSnapshot => {
   return { content: file.content, revision: file.revision, objectVersion: file.objectVersion, sessionId: 's' }
 }
 const previewFor = (request: AgentAuthorizationRequest, id: string): AgentAuthorizationPreview => ({
-  id, sessionId: 's', origin: request.relPath,
-  sources: [{ sourceId: 'a', relPath: '甲.md', title: '甲', revision: 'r', objectVersion: 'o', sessionId: 's', fingerprint: 'x', tier: 'reference' }],
+  id, sessionId: 's', origin: request.relPath, sources: [],
   recipient: { modelId: 'deepseek-chat', host: 'api.deepseek.com', provider: 'deepseek' },
-  level: request.level,
-  write: request.level === 'write' || request.level === 'auto',
-  autoApproveWrites: request.level === 'auto'
+  scope: request.scope,
+  canCreate: true, canStructure: true, canDelete: true
 })
 
 beforeEach(() => {
-  handlers = {}; revisionSerial = 0
-  files = new Map([['甲.md', { content: '', revision: 'r0', objectVersion: 'o0' }]])
+  handlers = {}; revisionSerial = 100; started = 0
+  files = new Map([
+    ['甲.md', { content: '', revision: 'r0', objectVersion: 'o0' }],
+    ['资料/乙.md', { content: '', revision: 'r1', objectVersion: 'o1' }]
+  ])
   editorHarness.text = ''; editorHarness.change = null
   localStorage.clear()
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
@@ -74,9 +76,17 @@ beforeEach(() => {
   const fallback = async () => null
   api = new Proxy({
     vaultGet: async () => ({ status: 'ready', sessionId: 's', rootName: 'notes' }),
-    vaultWorkspaceGet: async () => ({ version: 1, tabs: [{ relPath: '甲.md' }], active: '甲.md', sidebarHidden: true, treeScroll: 0, resourceScroll: 0 }),
+    vaultWorkspaceGet: async () => ({ version: 1, tabs: [{ relPath: '甲.md' }, { relPath: '资料/乙.md' }], active: '甲.md', sidebarHidden: true, treeScroll: 0, resourceScroll: 0 }),
     vaultWorkspaceSave: vi.fn(async () => true),
-    treeList: vi.fn(async () => [...files.keys()].map(relPath => ({ name: relPath.split('/').pop()!, relPath, kind: 'note' }))),
+    treeList: vi.fn(async () => [
+      ...[...files.keys()].filter(relPath => !relPath.includes('/')).map(relPath => ({ name: relPath, relPath, kind: 'note' })),
+      ...[...new Set([...files.keys()].filter(relPath => relPath.includes('/')).map(relPath => relPath.split('/')[0]!))].map(folder => ({
+        name: folder, relPath: folder, kind: 'dir',
+        children: [...files.keys()].filter(relPath => relPath.startsWith(`${folder}/`)).map(relPath => ({
+          name: relPath.split('/').pop()!, relPath, kind: 'note'
+        }))
+      }))
+    ]),
     backlinks: async () => [],
     permissionsGet: async () => ({ status: 'ready', entries: [] }),
     lifecycleStatus: async () => ({ status: 'ready', sessionId: 's' }),
@@ -97,10 +107,12 @@ beforeEach(() => {
       file.content = request.content; file.revision = `r${++revisionSerial}`; file.objectVersion = `o${revisionSerial}`
       return { ok: true, revision: file.revision, sessionId: 's', objectVersion: file.objectVersion }
     }),
+    humanTrashOnThisPlatform: true,
+    vaultTrashDelete: vi.fn(async () => ({ ok: true })),
+    vaultCatalog: async () => ({ revision: 'r1', diagnostic: null, lastVaultId: null, activeId: null, entries: [] }),
     agentAuthorizationPreview: vi.fn(async (request: AgentAuthorizationRequest) => ({ ok: true as const, preview: previewFor(request, `p${++previewSerial}`) })),
     agentAuthorizationDiscard: vi.fn(async () => {}),
-    agentStart: vi.fn(async (_request: AgentStartRequest) => ({ ok: true as const, id: 'task-1' })),
-    agentWriteConfirm: vi.fn(async () => ({ ok: true })),
+    agentStart: vi.fn(async (_request: AgentStartRequest) => ({ ok: true as const, id: `task-${++started}` })),
     onMenu: (channel: string, fn: Function) => { handlers[channel] = fn; return () => {} },
     flushDone: vi.fn(), lifecycleFlushDone: vi.fn(), vaultTransitionDone: vi.fn(async () => true)
   }, { get: (target, key: string) => key in target ? (target as any)[key] : key.startsWith('on') ? (fn: Function) => { handlers[key] = fn; return () => {} } : fallback })
@@ -109,9 +121,9 @@ beforeEach(() => {
 })
 afterEach(() => { document.body.replaceChildren(); vi.unstubAllGlobals(); vi.clearAllTimers() })
 
-const waitForNote = async (): Promise<void> => {
+const waitForNote = async (relPath = '甲.md'): Promise<void> => {
   await start(root)
-  await vi.waitFor(() => expect(root.querySelector('.tab')?.getAttribute('data-rel')).toBe('甲.md'))
+  await vi.waitFor(() => expect(root.querySelector('.tab')?.getAttribute('data-rel')).toBe(relPath))
   await vi.waitFor(() => expect(root.querySelector('.status-dot')).not.toBeNull())
 }
 const typeSlash = (prompt: string): void => {
@@ -119,76 +131,233 @@ const typeSlash = (prompt: string): void => {
   editorHarness.change!(editorHarness.text)
   editorHarness.dom.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
 }
-const waitForCard = async (): Promise<HTMLElement> => {
-  await vi.waitFor(() => expect(document.querySelector('.overlay-authorization')).not.toBeNull())
-  await vi.waitFor(() => expect(document.querySelector<HTMLButtonElement>('.authorization-send')!.disabled).toBe(false))
-  return document.querySelector<HTMLElement>('.overlay-authorization')!
+const chooseScope = async (scope: 'note' | 'folder' | 'vault'): Promise<void> => {
+  root.querySelector<HTMLButtonElement>('.status-scope-button')!.click()
+  const item = [...root.querySelectorAll<HTMLButtonElement>('.status-scope-option')]
+    .find(button => button.dataset.scopeOption === scope)!
+  item.click()
+  await vi.waitFor(() => expect(root.querySelector<HTMLButtonElement>('.status-scope-button')!.dataset.scope).toBe(scope))
 }
+const currentScope = (): string => root.querySelector<HTMLButtonElement>('.status-scope-button')!.dataset.scope ?? ''
 const endTask = (id = 'task-1'): void => { handlers.onAgentEvent({ id, relPath: '甲.md', status: 'completed', sessionId: 's' }) }
 
-it('passes the chosen level through preview and start without network or MCP flags', async () => {
+it('submits silently with the default note scope and never opens a card', async () => {
   await waitForNote()
   typeSlash('问题一')
-  await waitForCard()
-  expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0]).toMatchObject({ references: [], level: 'read' })
-  expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0]).not.toHaveProperty('network')
-  expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0]).not.toHaveProperty('mcp')
+  await vi.waitFor(() => expect(api.agentAuthorizationPreview).toHaveBeenCalledTimes(1))
+  const previewRequest = api.agentAuthorizationPreview.mock.calls[0]![0]
+  expect(previewRequest).toMatchObject({ scope: 'note' })
+  expect(previewRequest).not.toHaveProperty('references')
+  expect(previewRequest).not.toHaveProperty('level')
+  expect(previewRequest).not.toHaveProperty('network')
+  expect(previewRequest).not.toHaveProperty('mcp')
+  expect(document.querySelector('.overlay-authorization')).toBeNull()
+  expect(document.querySelector('.write-confirm')).toBeNull()
+  expect(document.querySelector('.overlay-write-confirm')).toBeNull()
 
-  document.querySelector<HTMLButtonElement>('.authorization-level[data-level="write"]')!.click()
-  await vi.waitFor(() => expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0].level).toBe('write'))
-  document.querySelector<HTMLButtonElement>('.authorization-send')!.click()
   await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
-  const started = api.agentStart.mock.calls[0]![0]
-  expect(started).toMatchObject({ previewId: expect.any(String), level: 'write' })
-  expect(started).not.toHaveProperty('network')
-  expect(started).not.toHaveProperty('mcp')
-  expect(started).not.toHaveProperty('references')
-
-  // 同会话下一场沿用上次手动档位（可写），不需要重新点档。
-  endTask()
-  typeSlash('问题二')
-  await waitForCard()
-  await vi.waitFor(() => expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0].level).toBe('write'))
-  expect(document.querySelector<HTMLButtonElement>('.authorization-level[data-level="write"]')!.getAttribute('aria-checked')).toBe('true')
+  const startedRequest = api.agentStart.mock.calls[0]![0]
+  expect(startedRequest).toMatchObject({ previewId: 'p1', scope: 'note' })
+  expect(startedRequest).not.toHaveProperty('level')
+  expect(startedRequest).not.toHaveProperty('references')
+  expect(startedRequest).not.toHaveProperty('network')
+  expect(startedRequest).not.toHaveProperty('mcp')
 })
 
-it('never carries the auto level into the next session', async () => {
+it('remembers the scope per tab and sends the chosen level', async () => {
   await waitForNote()
-  typeSlash('自动一场')
-  await waitForCard()
-  document.querySelector<HTMLButtonElement>('.authorization-level[data-level="auto"]')!.click()
-  await vi.waitFor(() => expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0].level).toBe('auto'))
-  document.querySelector<HTMLButtonElement>('.authorization-send')!.click()
+  await chooseScope('vault')
+  expect(currentScope()).toBe('vault')
+  typeSlash('整库一场')
   await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
-  expect(api.agentStart.mock.calls[0]![0].level).toBe('auto')
-
+  expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0].scope).toBe('vault')
+  expect(api.agentStart.mock.calls.at(-1)![0].scope).toBe('vault')
   endTask()
-  typeSlash('下一场')
-  await waitForCard()
-  // 自动档收口成「可写」：下一场仍是逐次确认，不是自动批准。
-  await vi.waitFor(() => expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0].level).toBe('write'))
-  expect(document.querySelector<HTMLButtonElement>('.authorization-level[data-level="auto"]')!.getAttribute('aria-checked')).toBe('false')
-  expect(document.querySelector<HTMLButtonElement>('.authorization-level[data-level="write"]')!.getAttribute('aria-checked')).toBe('true')
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('hidden'))
+
+  // 切到同库的另一篇：默认又是本篇；切回来仍记得整库。
+  root.querySelector<HTMLButtonElement>('.tab[data-rel="资料/乙.md"]')!.click()
+  await vi.waitFor(() => expect(root.querySelector('.tab[aria-selected="true"]')?.getAttribute('data-rel')).toBe('资料/乙.md'))
+  expect(currentScope()).toBe('note')
+  typeSlash('同册默认')
+  await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(2))
+  expect(api.agentStart.mock.calls.at(-1)![0].scope).toBe('note')
+
+  root.querySelector<HTMLButtonElement>('.tab[data-rel="甲.md"]')!.click()
+  await vi.waitFor(() => expect(currentScope()).toBe('vault'))
 })
 
-it('shows one actionable notice when the auto level creates a note', async () => {
+it('lets a folder note use 同册 but disables it on a root note', async () => {
   await waitForNote()
-  files.set('folder/新篇.md', { content: '自动新建的正文', revision: 'r-new', objectVersion: 'o-new' })
-  handlers.onAgentEvent({ id: 'task-2', relPath: '甲.md', status: 'running', sessionId: 's', created: { relPath: 'folder/新篇.md' } })
-  const notice = document.querySelector<HTMLElement>('.notice')!
+  // 根目录笔记：同册禁用，选了也不生效。
+  root.querySelector<HTMLButtonElement>('.status-scope-button')!.click()
+  const rootFolder = [...root.querySelectorAll<HTMLButtonElement>('.status-scope-option')].find(button => button.dataset.scopeOption === 'folder')!
+  expect(rootFolder.disabled).toBe(true)
+  expect(rootFolder.title).toContain('根目录笔记没有同册')
+  rootFolder.click()
+  expect(currentScope()).toBe('note')
+  root.querySelector<HTMLButtonElement>('.status-scope-button')!.click()
+
+  // 目录里的笔记可以选同册，并原样进入预览与启动请求。
+  root.querySelector<HTMLButtonElement>('.tab[data-rel="资料/乙.md"]')!.click()
+  await vi.waitFor(() => expect(root.querySelector('.tab[aria-selected="true"]')?.getAttribute('data-rel')).toBe('资料/乙.md'))
+  await chooseScope('folder')
+  typeSlash('同册一场')
+  await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
+  expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0]).toMatchObject({ scope: 'folder', relPath: '资料/乙.md' })
+  expect(api.agentStart.mock.calls.at(-1)![0]).toMatchObject({ scope: 'folder', relPath: '资料/乙.md' })
+})
+
+it('shows a plain notice and no card when previewing the scope fails', async () => {
+  api.agentAuthorizationPreview.mockResolvedValueOnce({ ok: false, error: 'STALE_AUTHORIZATION' })
+  await waitForNote()
+  typeSlash('失败一场')
+  await vi.waitFor(() => expect(root.querySelector('.status-host-notice')?.textContent).toContain('本场范围或对象在确认后发生变化'))
+  expect(api.agentStart).not.toHaveBeenCalled()
+  expect(document.querySelector('.overlay-authorization')).toBeNull()
+  expect(document.querySelector('.write-confirm')).toBeNull()
+})
+
+it('discards a preview and does not start when the draft changes while previewing', async () => {
+  let finish!: (value: unknown) => void
+  api.agentAuthorizationPreview.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+  await waitForNote()
+  typeSlash('准备中')
+  await vi.waitFor(() => expect(api.agentAuthorizationPreview).toHaveBeenCalledTimes(1))
+  editorHarness.text = '/准备中 又改了'
+  editorHarness.change!(editorHarness.text)
+  finish({ ok: true, preview: previewFor(api.agentAuthorizationPreview.mock.calls[0]![0], 'p-stale') })
+  await vi.waitFor(() => expect(api.agentAuthorizationDiscard).toHaveBeenCalledWith('p-stale'))
+  expect(api.agentStart).not.toHaveBeenCalled()
+  expect(root.querySelector('.status-host-notice')?.textContent).toContain('本场范围或对象在确认后发生变化')
+})
+
+it('keeps the created notice and opens the new note without a write confirmation card', async () => {
+  await waitForNote()
+  files.set('资料/新篇.md', { content: '静默新建的正文', revision: 'r-new', objectVersion: 'o-new' })
+  handlers.onAgentEvent({ id: 'task-created', relPath: '甲.md', status: 'running', sessionId: 's', created: { relPath: '资料/新篇.md' } })
+  const notice = root.querySelector<HTMLElement>('.notice')!
   expect(notice).not.toBeNull()
   expect(notice.querySelector('.notice-title')!.textContent).toBe('已新建《新篇》')
-  expect(notice.querySelector('.notice-detail')!.textContent).toBe('已按自动档创建；可以打开查看。')
+  expect(notice.querySelector('.notice-detail')!.textContent).toBe('已按本场范围创建；可以打开查看。')
+  expect(document.querySelector('.write-confirm')).toBeNull()
   const open = notice.querySelector<HTMLButtonElement>('.notice-action')!
   expect(open.textContent).toBe('打开')
   open.click()
-  await vi.waitFor(() => expect(api.noteRead).toHaveBeenCalledWith('folder/新篇.md'))
-  await vi.waitFor(() => expect(editorHarness.text).toBe('自动新建的正文'))
-  expect(root.querySelectorAll('.tab')).toHaveLength(2)
+  await vi.waitFor(() => expect(api.noteRead).toHaveBeenCalledWith('资料/新篇.md'))
+  await vi.waitFor(() => expect(editorHarness.text).toBe('静默新建的正文'))
 })
 
 it('ignores a created notice from a foreign vault session', async () => {
   await waitForNote()
   handlers.onAgentEvent({ id: 'task-3', relPath: '甲.md', status: 'running', sessionId: 'other', created: { relPath: '别库.md' } })
   expect(document.querySelector('.notice')).toBeNull()
+})
+
+it('deletes a note through the in-vault trash without a confirmation card', async () => {
+  await waitForNote()
+  await vi.waitFor(() => expect(root.querySelector('.tree-note[data-path="甲.md"]')).not.toBeNull())
+  root.querySelector('.tree-note[data-path="甲.md"]')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 40, clientY: 40 }))
+  const remove = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(item => item.textContent === '删除')!
+  expect(remove).not.toBeUndefined()
+  remove.click()
+  await vi.waitFor(() => expect(api.vaultTrashDelete).toHaveBeenCalledWith('甲.md'))
+  await vi.waitFor(() => expect(root.querySelectorAll('.tab')).toHaveLength(1))
+  expect(root.querySelector('.tab[aria-selected="true"]')?.getAttribute('data-rel')).toBe('资料/乙.md')
+  const notice = document.querySelector<HTMLElement>('.notice')!
+  expect(notice.querySelector('.notice-title')!.textContent).toBe('已移到已删除')
+  expect(notice.querySelector('.notice-detail')!.textContent).toContain('30 天')
+  expect(notice.querySelector<HTMLButtonElement>('.notice-action')!.textContent).toBe('打开')
+  expect(document.querySelector('.write-confirm')).toBeNull()
+  expect(document.querySelector('.overlay-write-confirm')).toBeNull()
+})
+
+it('reports a failed delete as a notice and keeps the tab', async () => {
+  api.vaultTrashDelete.mockResolvedValueOnce({ ok: false, error: 'IO_ERROR' })
+  await waitForNote()
+  await vi.waitFor(() => expect(root.querySelector('.tree-note[data-path="甲.md"]')).not.toBeNull())
+  root.querySelector('.tree-note[data-path="甲.md"]')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 40, clientY: 40 }))
+  ;[...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(item => item.textContent === '删除')!.click()
+  await vi.waitFor(() => expect(document.querySelector('.notice-title')?.textContent).toBe('删除没有完成'))
+  expect(document.querySelectorAll('.tab')).toHaveLength(2)
+})
+
+it('closes the tab and drops task state when the host reports the note deleted', async () => {
+  await waitForNote()
+  handlers.onAgentEvent({ id: 'running-1', relPath: '甲.md', status: 'running', sessionId: 's' })
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('generating'))
+  handlers.onNoteDeleted({ relPath: '甲.md', sessionId: 's', trashId: 'trash-1' })
+  await vi.waitFor(() => expect(root.querySelectorAll('.tab')).toHaveLength(1))
+  expect(root.querySelector('.tab[aria-selected="true"]')?.getAttribute('data-rel')).toBe('资料/乙.md')
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('hidden'))
+})
+
+it('ignores note:deleted from a foreign vault session', async () => {
+  await waitForNote()
+  handlers.onNoteDeleted({ relPath: '甲.md', sessionId: 'other', trashId: 'trash-x' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(root.querySelectorAll('.tab')).toHaveLength(2)
+})
+
+it('changes only the next session when the scope is switched during a running task', async () => {
+  await waitForNote()
+  typeSlash('第一场')
+  await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
+  expect(api.agentStart.mock.calls.at(-1)![0].scope).toBe('note')
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('generating'))
+  await chooseScope('vault')
+  expect(api.agentStart).toHaveBeenCalledTimes(1)
+  endTask()
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('hidden'))
+  typeSlash('第二场')
+  await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(2))
+  expect(api.agentStart.mock.calls.at(-1)![0].scope).toBe('vault')
+})
+
+it('falls back to 本篇 when a folder note moves to the vault root', async () => {
+  await waitForNote()
+  root.querySelector<HTMLButtonElement>('.tab[data-rel="资料/乙.md"]')!.click()
+  await vi.waitFor(() => expect(root.querySelector('.tab[aria-selected="true"]')?.getAttribute('data-rel')).toBe('资料/乙.md'))
+  await chooseScope('folder')
+  const file = files.get('资料/乙.md')!
+  files.delete('资料/乙.md')
+  files.set('乙.md', file)
+  handlers.onNoteRelocated({ moved: [{ from: '资料/乙.md', to: '乙.md' }], sessionId: 's' })
+  await vi.waitFor(() => expect(root.querySelector('.tab[aria-selected="true"]')?.getAttribute('data-rel')).toBe('乙.md'))
+  await vi.waitFor(() => expect(currentScope()).toBe('note'))
+  root.querySelector<HTMLButtonElement>('.status-scope-button')!.click()
+  const folder = [...root.querySelectorAll<HTMLButtonElement>('.status-scope-option')].find(button => button.dataset.scopeOption === 'folder')!
+  expect(folder.disabled).toBe(true)
+  root.querySelector<HTMLButtonElement>('.status-scope-button')!.click()
+  typeSlash('根目录一场')
+  await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
+  expect(api.agentStart.mock.calls.at(-1)![0]).toMatchObject({ scope: 'note', relPath: '乙.md' })
+})
+
+it('forgets the scope when its tab is closed and a fresh tab opens on the same path', async () => {
+  await waitForNote()
+  await chooseScope('vault')
+  root.querySelector<HTMLElement>('.tab[data-rel="甲.md"]')!.parentElement!.querySelector<HTMLButtonElement>('.tab-close')!.click()
+  await vi.waitFor(() => expect(root.querySelector('.tab[data-rel="甲.md"]')).toBeNull())
+  await vi.waitFor(() => expect(root.querySelector('.tree-note[data-path="甲.md"]')).not.toBeNull())
+  root.querySelector<HTMLButtonElement>('.tree-note[data-path="甲.md"]')!.click()
+  await vi.waitFor(() => expect(root.querySelector('.tab[aria-selected="true"]')?.getAttribute('data-rel')).toBe('甲.md'))
+  expect(currentScope()).toBe('note')
+})
+
+it('resumes with the scope captured when the task was paused', async () => {
+  await waitForNote()
+  typeSlash('暂停一场')
+  await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('generating'))
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  handlers.onAgentEvent({ id: 'task-1', relPath: '甲.md', status: 'cancelled', sessionId: 's' })
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')!.dataset.kind).toBe('paused'))
+  // 暂停后手动改成整库：重发仍用暂停那一场的本篇，不被当前按钮状态改写。
+  await chooseScope('vault')
+  root.querySelector<HTMLButtonElement>('.task-dock-resume')!.click()
+  await vi.waitFor(() => expect(api.agentAuthorizationPreview).toHaveBeenCalledTimes(2))
+  expect(api.agentAuthorizationPreview.mock.calls.at(-1)![0].scope).toBe('note')
+  await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(2))
+  expect(api.agentStart.mock.calls.at(-1)![0].scope).toBe('note')
 })

@@ -3,11 +3,14 @@ import type { LedgerRepairRequest, LedgerRepairResult, LedgerRecoveryView } from
 import type { LifecycleStatus, RecoveryAbandonResult, RecoveryConfirmResult, RecoveryScanResult, RecoveryScanView, RecoveryVerdict } from '../../shared/ipc.ts'
 import type { VaultCatalogEntry, VaultCatalogView, VaultRootPreview, VaultCatalogChangeRequest, VaultCatalogChangeResult } from '../../shared/vault-management'
 import { icon, type IconName } from './icons'
+import { mountTrashManager, trashErrorText, type TrashManagerHandlers, type TrashManagerPage } from './trash-manager.ts'
 
 type Catalog = VaultCatalogChangeResult & { activeId?: string | null; activeUnavailable?:boolean }
 export type VaultManagerHandlers = {
   recovery?: {state():Promise<LifecycleStatus>;repair(request:LedgerRepairRequest):Promise<LedgerRepairResult>}
   externalRecovery?: {scan():Promise<RecoveryScanResult>;confirm(relPath:string):Promise<RecoveryConfirmResult>;abandon?(relPath:string):Promise<RecoveryAbandonResult>}
+  /** 库内「已删除」；未提供时退回 preload 的同名接口（外壳尚未接线时页面仍可用）。 */
+  trash?: TrashManagerHandlers
   get(): Promise<Catalog>
   open(id: string): Promise<void>
   pick(create: boolean): Promise<void>
@@ -28,13 +31,24 @@ export function mountVaultManager(context: {
   let busy = false
   let disposed = false
   let sequence = 0
+  let trashPage: TrashManagerPage | null = null
+  let trashCountSequence = 0
+  const trash = handlers.trash ?? preloadTrashHandlers()
   const alive = (): boolean => !disposed && context.isCurrent()
   const rows = new Map<string, ReturnType<typeof createRow>>()
+  const primary = element('div', 'vault-settings-primary')
   const shortcuts = element('div', 'vault-settings-shortcuts')
   const open = button('打开已有笔记库', () => { void run('正在打开笔记库…', () => handlers.pick(false)) }, 'folder')
   const create = button('新建笔记库', () => { void run('正在创建空库…', () => handlers.pick(true)) }, 'folder-plus')
   open.dataset.vaultAction = 'open'; create.dataset.vaultAction = 'create'
   shortcuts.append(open, create)
+  // 「已删除（N）」只是这一页的次级入口，不新增导航项；没有列表接口时整行不出现。
+  const trashLink = element('div', 'vault-settings-trash-link')
+  const trashEntry = button('已删除（0）', () => openTrash())
+  trashEntry.dataset.vaultAction = 'trash'
+  const trashHint = element('p', 'vault-settings-diagnostic')
+  trashHint.hidden = true; trashHint.setAttribute('role', 'status')
+  trashLink.append(trashEntry, trashHint)
   const diagnostic = element('p', 'vault-settings-diagnostic')
   diagnostic.hidden = true; diagnostic.setAttribute('role', 'alert')
   const loading = element('p', 'vault-settings-empty', '正在读取库列表…')
@@ -46,10 +60,15 @@ export function mountVaultManager(context: {
   others.append(element('h3', '', '其他笔记库'), list, empty); others.hidden = true
   const status = element('p', 'vault-settings-status')
   status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite')
-  root.append(shortcuts, diagnostic, loading, current, others, status)
+  primary.append(shortcuts)
+  if (trash) primary.append(trashLink)
+  primary.append(diagnostic, loading, current, others, status)
+  const trashSection = element('section', 'vault-settings-trash')
+  trashSection.hidden = true; trashSection.setAttribute('aria-label', '已删除')
+  root.append(primary, trashSection)
   const recovery = element('section','vault-settings-recovery');recovery.hidden=true
   const recoveryMessage=element('p','vault-settings-hint'),recoveryRows=element('ul',''),recoveryActions=element('div','vault-settings-shortcuts')
-  recovery.append(element('h3','','账本登记与整库恢复'),recoveryMessage,recoveryRows,recoveryActions);root.append(recovery)
+  recovery.append(element('h3','','账本登记与整库恢复'),recoveryMessage,recoveryRows,recoveryActions);primary.append(recovery)
   let recoveryState:LifecycleStatus|null=null,recoveryPreview:LedgerRecoveryView|null=null
   const repair=async(request:LedgerRepairRequest)=>{const result=await handlers.recovery!.repair(request);if(!alive())return;if(!result.ok){
     if(request.action==='commit'||request.action==='cancel')recoveryPreview=null
@@ -89,7 +108,7 @@ export function mountVaultManager(context: {
   // 外部消失（在库外被删或移走）的对象：只核验、只上报，不提供删除或替代路径。
   const external = element('section','vault-settings-recovery');external.hidden=true
   const externalMessage=element('p','vault-settings-hint'),externalRows=element('ul',''),externalActions=element('div','vault-settings-shortcuts')
-  external.append(element('h3','','外部消失与恢复核验'),externalMessage,externalRows,externalActions);root.append(external)
+  external.append(element('h3','','外部消失与恢复核验'),externalMessage,externalRows,externalActions);primary.append(external)
   let externalView:RecoveryScanView|null=null
   const verdictLabels:Record<RecoveryVerdict,string>={restored:'可以核验恢复','still-missing':'仍在库外','object-replaced':'原路径换成了另一个对象','content-changed':'内容已变','attachments-missing':'附件夹缺失（降级）','attachments-changed':'附件子树已变','permission-denied':'权限档禁止','permission-changed':'权限档已变（仍可恢复）','permission-unreadable':'权限名单无法核验','ledger-unverified':'账本登记无法核验'}
   /** 二次确认面板只在人点「放弃恢复」后才进 DOM：默认列表里不出现删除／废纸篓字样。 */
@@ -152,7 +171,7 @@ export function mountVaultManager(context: {
 
   function refreshControls(): void {
     root.setAttribute('aria-busy', String(busy))
-    open.disabled = busy; create.disabled = busy
+    open.disabled = busy; create.disabled = busy; trashEntry.disabled = busy
     for(const action of recoveryActions.querySelectorAll<HTMLButtonElement>('button'))action.disabled=busy||action.dataset.recoveryRefused==='true'
     for(const action of externalActions.querySelectorAll<HTMLButtonElement>('button'))action.disabled=busy
     for (const row of rows.values()) {
@@ -187,6 +206,58 @@ export function mountVaultManager(context: {
         } else if (focused && !focused.isConnected) open.focus()
       }
     }
+  }
+  function applyTrashCount(count: number): void {
+    const next = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0
+    trashEntry.textContent = `已删除（${next}）`
+    trashHint.textContent = ''
+    trashHint.hidden = true
+  }
+  async function refreshTrashCount(): Promise<void> {
+    if (!trash || disposed || !alive()) return
+    const ticket = ++trashCountSequence
+    try {
+      const result = await trash.list()
+      if (!alive() || ticket !== trashCountSequence) return
+      if (!result.ok) {
+        applyTrashCount(0)
+        trashHint.textContent = trashErrorText(result.error)
+        trashHint.hidden = false
+        return
+      }
+      applyTrashCount(result.entries.length)
+    } catch (cause) {
+      if (!alive() || ticket !== trashCountSequence) return
+      applyTrashCount(0)
+      trashHint.textContent = trashErrorText(cause)
+      trashHint.hidden = false
+    }
+  }
+  function openTrash(): void {
+    if (!trash || busy || disposed || !alive()) return
+    trashPage?.dispose(); trashPage = null
+    trashSection.replaceChildren()
+    primary.hidden = true
+    trashSection.hidden = false
+    root.dataset.vaultView = 'trash'
+    trashPage = mountTrashManager({
+      body: trashSection,
+      isCurrent: () => alive() && !trashSection.hidden,
+      onBack: closeTrash,
+      // 列表是计数的唯一来源：读到后才改「已删除（N）」，失败时由入口自己显示 0 与提示。
+      onChanged: count => { trashCountSequence++; applyTrashCount(count) },
+      onBusyChange: next => { busy = next; context.onBusyChange?.(next); refreshControls() }
+    }, trash)
+    trashSection.querySelector<HTMLButtonElement>('.settings-back')?.focus()
+  }
+  function closeTrash(): void {
+    if (busy || disposed) return
+    trashPage?.dispose(); trashPage = null
+    trashSection.replaceChildren()
+    trashSection.hidden = true
+    primary.hidden = false
+    delete root.dataset.vaultView
+    trashEntry.focus()
   }
   function change(entry: VaultCatalogEntry, action: 'pin' | 'label' | 'remove' | 'relocate', patch: { pinned?: boolean; label?: string } = {}): void {
     if (!catalog || busy) return
@@ -307,8 +378,13 @@ export function mountVaultManager(context: {
     loading.hidden = true; diagnostic.hidden = false
     diagnostic.textContent = `库列表无法读取。${errorText(error)} 可以手动打开已有笔记库。`
   })
+  if (trash) void refreshTrashCount()
   return {
-    dispose: () => { disposed = true; sequence++; if (busy) context.onBusyChange?.(false); busy = false },
+    dispose: () => {
+      disposed = true; sequence++; trashCountSequence++
+      trashPage?.dispose(); trashPage = null
+      if (busy) context.onBusyChange?.(false); busy = false
+    },
     isDirty: () => [...rows.values()].some(row => !row.form.hidden && row.input.value.trim() !== row.entry.label),
     isBusy: () => busy
   }
@@ -327,6 +403,16 @@ function button(text: string, click: () => void, glyph?: IconName): HTMLButtonEl
   else node.textContent = text
   node.addEventListener('click', click)
   return node
+}
+/** 外壳尚未接线时的退路：直接走 preload 的库内已删除接口；测试仍注入 mock。 */
+function preloadTrashHandlers(): TrashManagerHandlers | null {
+  const api = (typeof window === 'undefined' ? undefined : window.rgent) as typeof window.rgent | undefined
+  if (!api || typeof api.vaultTrashList !== 'function' || typeof api.vaultTrashRestore !== 'function' || typeof api.vaultTrashPurge !== 'function') return null
+  return {
+    list: () => api.vaultTrashList(),
+    restore: id => api.vaultTrashRestore(id),
+    purge: id => api.vaultTrashPurge(id)
+  }
 }
 function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : ''

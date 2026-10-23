@@ -232,6 +232,12 @@ const api = {
     subscribe(IPC.treeChanged, () => handler()),
   onNoteRelocated: (handler: (payload: RelocationEvent) => void): (() => void) =>
     subscribe(IPC.noteRelocated, (payload) => handler(payload as RelocationEvent)),
+  onNoteDeleted: (handler: (payload: import('../shared/ipc.ts').NoteDeletedEvent) => void): (() => void) =>
+    subscribe(IPC.noteDeleted, (payload) => handler(payload as import('../shared/ipc.ts').NoteDeletedEvent)),
+  vaultTrashDelete: (relPath: string): Promise<import('../shared/ipc.ts').TrashPurgeResult & { relPath?: string }> => invoke(IPC.vaultTrashDelete, { relPath }),
+  vaultTrashList: (): Promise<import('../shared/ipc.ts').TrashListResult> => invoke(IPC.vaultTrashList),
+  vaultTrashRestore: (id: string): Promise<import('../shared/ipc.ts').TrashRestoreResult> => invoke(IPC.vaultTrashRestore, { id }),
+  vaultTrashPurge: (id: string): Promise<import('../shared/ipc.ts').TrashPurgeResult> => invoke(IPC.vaultTrashPurge, { id }),
   onLifecycleFlushRequest: (handler: (id: string, cleanUnavailablePaths: readonly string[], phase?: LifecycleFlushPhase, context?: RecoveryFlushContext) => void): (() => void) =>
     subscribe(IPC.lifecycleFlushRequest, (id, paths, phase, context) => {
       if (typeof id !== 'string' || !Array.isArray(paths) || !paths.every(path => typeof path === 'string')) return

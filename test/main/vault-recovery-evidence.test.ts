@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto'
 import { sameRootInode } from '../../src/main/vault-catalog.ts'
+import { rmSync } from 'node:fs'
 import { copyFile, mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { VaultSession } from '../../src/main/vault.ts'
+import { SecureVaultFs, secureFsFor } from '../../src/main/secure-fs.ts'
+import { LedgerStore } from '../../src/main/ledger-store.ts'
 import { serializeStoredVault } from '../../src/main/notes-fs.ts'
 import { markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
 import { vaultRootIdentity } from '../../src/main/watch.ts'
@@ -14,7 +17,7 @@ vi.mock('../../src/main/watch.ts', async importOriginal => ({ ...await importOri
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
 
-async function journal(root: string): Promise<{ version: number; active: unknown; missing?: Record<string, unknown>[] }> {
+async function journal(root: string): Promise<{ version: number; active: unknown; missing?: Record<string, unknown>[]; trashed?: unknown[] }> {
   return JSON.parse(await readFile(path.join(root, '.rgent-lifecycle'), 'utf8'))
 }
 
@@ -302,5 +305,66 @@ describe('recovery evidence and identity', () => {
       expect(scan.rows[0]).toMatchObject({ relPath, verdict: 'restored', canRestore: true })
       expect((await f.vault.recoveryConfirm(relPath)).restored).toBe(true)
     } finally { f.vault.dispose() }
+  })
+})
+
+describe('in-vault trash evidence', () => {
+  const bases: string[] = []
+  afterEach(async () => {
+    for (const base of bases.splice(0)) await rm(base, { recursive: true, force: true }).catch(() => {})
+  })
+
+  it('deletes a registered note into the vault trash without an external-disappearance record', async () => {
+    if (!HUMAN_TRASH_ON_THIS_PLATFORM) return
+    const f = await registeredVault()
+    bases.push(f.base)
+    try {
+      const result = await f.vault.trashDelete('a.md')
+      expect(result).toMatchObject({ ok: true, relPath: 'a.md' })
+      // 登记对象仍在：既有的 ledger owner 不会因为主动删除被当成「库外消失」。
+      const scan = await f.vault.recoveryScan()
+      expect(scan.rows).toEqual([])
+      await expect(f.vault.recoveryAbandon('a.md')).rejects.toThrow('STALE_PREVIEW')
+      // 不是 PATH_RESERVED：原路径立即可重建（还原时会落成副本）。
+      await expect(f.vault.create('a')).resolves.toBe('a.md')
+      // 既有账本记录照写，落点是库内条目而不是系统废纸篓。
+      const ledgers = path.join(f.root, '.rgent', 'ledgers')
+      const owners = (await readdir(ledgers)).filter((name) => name !== '.DS_Store')
+      const files = await readdir(path.join(ledgers, owners[0]!))
+      expect(files).toContain('humantrash.json')
+      const record = JSON.parse(await readFile(path.join(ledgers, owners[0]!, 'humantrash.json'), 'utf8')) as { chapter: { prompt: string; answer: string } }
+      expect(record.chapter.prompt).toBe('移入库内已删除')
+      expect(record.chapter.answer).toContain('.rgent-trash/')
+      const listed = await f.vault.trashList()
+      if (!listed.ok) throw new Error(listed.error)
+      expect(listed.entries).toEqual([expect.objectContaining({ originalRelPath: 'a.md', state: 'ok', source: 'human' })])
+      expect((await journal(f.root)).missing ?? []).toEqual([])
+    } finally { f.vault.dispose() }
+  })
+
+  it('rolls the whole deletion back when the ledger record cannot be written', async () => {
+    if (!HUMAN_TRASH_ON_THIS_PLATFORM) return
+    const f = await registeredVault()
+    bases.push(f.base)
+    // 回滚清条目目录要送系统废纸篓：替身真移走文件，绝不碰真实废纸篓。
+    vi.spyOn(SecureVaultFs.prototype, 'trash').mockImplementation((relPath: string, expectedId: string) => {
+      const leaf = secureFsFor(f.root).resolve(relPath).at(-1)
+      if (!leaf || leaf.id !== expectedId) throw new Error('PATH_CHANGED')
+      rmSync(path.join(f.root, relPath), { recursive: true, force: true })
+      return path.join(f.root, '..', 'os-trash', relPath)
+    })
+    const record = vi.spyOn(LedgerStore.prototype, 'recordHumanTrash').mockImplementation(() => { throw new Error('LEDGER_FAILED') })
+    try {
+      // 「写 meta trashed ＋ journal ＋ 账本」是一步：账本写不进去就整件事回滚，不留下半截删除。
+      await expect(f.vault.trashDelete('a.md')).resolves.toMatchObject({ ok: false, error: 'TRASH_PARTIAL' })
+      expect(record).toHaveBeenCalled()
+      expect(await readFile(path.join(f.root, 'a.md'), 'utf8')).toContain('以后用中文')
+      expect(await readFile(path.join(f.root, 'a', '附件.txt'), 'utf8')).toBe('附件正文')
+      const listed = await f.vault.trashList()
+      if (!listed.ok) throw new Error(listed.error)
+      expect(listed.entries).toEqual([])
+      expect((await journal(f.root)).trashed ?? []).toEqual([])
+      expect(f.vault.trashDiagnostics()).toEqual([expect.stringContaining('delete:LEDGER_FAILED')])
+    } finally { vi.restoreAllMocks(); f.vault.dispose() }
   })
 })

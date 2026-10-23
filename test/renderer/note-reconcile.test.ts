@@ -204,8 +204,7 @@ describe('a note created over an unavailable tab', () => {
         file.revision = nextRevision(); file.objectVersion = `o${revisionSerial}`
         return { ok: true, revision: file.revision, sessionId: 's', objectVersion: file.objectVersion }
       }),
-      flushDone: vi.fn(), lifecycleFlushDone: vi.fn(), vaultTransitionDone: vi.fn(async () => true),
-      agentWriteConfirm: vi.fn(async () => ({ ok: true }))
+      flushDone: vi.fn(), lifecycleFlushDone: vi.fn(), vaultTransitionDone: vi.fn(async () => true)
     }, { get: (target, key: string) => key in target ? (target as any)[key] : key.startsWith('on') ? (fn: Function) => { handlers[key] = fn; return () => {} } : fallback })
     window.rgent = api
     root = document.createElement('main'); document.body.append(root)
@@ -288,17 +287,18 @@ describe('a note created over an unavailable tab', () => {
     expect(root.querySelector<HTMLElement>('.note-unavailable')!.hidden).toBe(true)
   })
 
-  it('opens an AI-created note through the same hand-off instead of reusing the unusable tab', async () => {
+  it('opens an AI-created note through the created notice hand-off instead of reusing the unusable tab', async () => {
     await markOldTabMissing()
-    // 「建」由主进程在人工确认后落盘；这里模拟确认那一刻文件已经存在。
+    // 零确认后「建」直接落盘，只剩 created 事件的通知；这里走同一条打开入口。
     files.set('甲.md', { content: 'AI 建的新笔记', revision: 'r-ai', objectVersion: 'o-ai' })
-    handlers.onAgentWriteRequest({ kind: 'create', relPath: '甲.md', body: 'AI 建的新笔记' })
-    await vi.waitFor(() => expect(document.querySelector('.write-confirm-accept')).not.toBeNull())
-    ;(document.querySelector('.write-confirm-accept') as HTMLElement).click()
+    handlers.onAgentEvent({ id: 'task-ai', relPath: '甲.md', status: 'completed', sessionId: 's', created: { relPath: '甲.md' } })
+    const notice = document.querySelector<HTMLElement>('.notice')!
+    expect(notice.querySelector('.notice-title')!.textContent).toBe('已新建《甲》')
+    expect(document.querySelector('.write-confirm')).toBeNull()
+    ;(notice.querySelector('.notice-action') as HTMLElement).click()
     await vi.waitFor(() => expect(files.get('甲（恢复的旧稿）.md')?.content).toBe('旧稿正文'))
     await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.note-unavailable')!.hidden).toBe(true))
     expect(root.querySelector('.tab')!.getAttribute('data-rel')).toBe('甲.md')
     expect(editorHarness.text).toBe('AI 建的新笔记')
-    expect(api.agentWriteConfirm).toHaveBeenCalledWith(expect.objectContaining({ approved: true }))
   })
 })

@@ -1,5 +1,6 @@
 import { LedgerStore } from '../../src/main/ledger-store.ts'
 import { VaultLifecycle, type MissingObject } from '../../src/main/vault-lifecycle.ts'
+import type { TrashedRecord } from '../../src/main/trash-store.ts'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync } from 'node:fs'
@@ -30,8 +31,15 @@ function missing(relPath: string, overrides: Partial<MissingObject> = {}): Missi
     ...overrides
   }
 }
-const journal = async (root: string): Promise<{ version: number; active: unknown; missing?: unknown[]; retired?: unknown[] }> =>
+const journal = async (root: string): Promise<{ version: number; active: unknown; missing?: unknown[]; retired?: unknown[]; trashed?: unknown[] }> =>
   JSON.parse(await readFile(path.join(root, '.rgent-lifecycle'), 'utf8'))
+/** 一条形状完整的库内「已删除」记录。 */
+function trashed(overrides: Partial<TrashedRecord> = {}): TrashedRecord {
+  return {
+    trashId: '11111111-1111-4111-8111-111111111111', relPath: 'a.md', objectVersion: 'obj-a.md',
+    contentHash: digest('a.md'), at: '2026-10-23T00:00:00.000Z', ...overrides
+  }
+}
 
 describe('secure vault structure', () => {
   it('creates a directory beneath an existing verified parent', async () => {
@@ -302,5 +310,144 @@ describe('retired missing records', () => {
     expect(lifecycle.retiredObjects()).toEqual([])
     expect(lifecycle.retireMissing('a.md', '2026-10-22T00:00:00.000Z')).toBe(true)
     expect(lifecycle.retiredObjects()).toEqual([{ ...legacy, retiredAt: '2026-10-22T00:00:00.000Z', reason: 'recreated' }])
+  })
+})
+
+describe('in-vault trashed records', () => {
+  it('adds a bounded record, frees the external-missing slot, and removes it again', async () => {
+    const root = await vault(), fs = secureFsFor(root)
+    // 这条路径此前有一条外部消失记录（例如人在原路径重建后还没核验）：删除成功后只留已删除记录。
+    fs.replace('.rgent-lifecycle', null, JSON.stringify({ version: 1, active: null, missing: [missing('a.md'), missing('b.md')] }))
+    const lifecycle = new VaultLifecycle(root)
+    const entry = trashed()
+    expect(lifecycle.isTrashed('a.md')).toBe(false)
+    expect(lifecycle.addTrashed(entry)).toBe(true)
+    expect(lifecycle.isTrashed('a.md')).toBe(true)
+    expect(lifecycle.trashedObjects()).toEqual([entry])
+    // 主动删除的路径不占外部消失位、也不出现在消失列表里。
+    expect(lifecycle.hasMissing('a.md')).toBe(false)
+    expect(lifecycle.missingObjects().map((item) => item.relPath)).toEqual(['b.md'])
+    // 同一路径不会再登记成外部消失；同一 id 重复追加按幂等处理。
+    expect(lifecycle.recordMissing(missing('a.md'))).toBe(false)
+    expect(lifecycle.addTrashed(entry)).toBe(false)
+    const after = await journal(root)
+    expect(after.trashed).toEqual([entry])
+    expect(after.missing).toHaveLength(1)
+    // 移除后路径回到既有的消失判据。
+    expect(lifecycle.removeTrashed(entry.trashId)).toBe(true)
+    expect(lifecycle.removeTrashed(entry.trashId)).toBe(false)
+    expect(lifecycle.isTrashed('a.md')).toBe(false)
+    expect((await journal(root)).trashed ?? []).toEqual([])
+    expect(lifecycle.recordMissing(missing('a.md'))).toBe(true)
+  })
+
+  it('keeps trashed records across unrelated journal rewrites, retirement and clearing', async () => {
+    const root = await vault(), fs = secureFsFor(root)
+    fs.replace('.rgent-lifecycle', null, JSON.stringify({ version: 1, active: null, missing: [missing('b.md')] }))
+    const lifecycle = new VaultLifecycle(root)
+    const entry = trashed()
+    expect(lifecycle.addTrashed(entry)).toBe(true)
+    expect(lifecycle.recordMissing(missing('c.md'))).toBe(true)
+    expect(lifecycle.retireMissing('b.md', '2026-10-23T01:00:00.000Z')).toBe(true)
+    expect(lifecycle.clearMissing('c.md')).toBe(true)
+    expect(lifecycle.trashedObjects()).toEqual([entry])
+    const after = await journal(root)
+    expect(after.trashed).toEqual([entry])
+    expect(after.retired).toHaveLength(1)
+    expect(after.missing ?? []).toEqual([])
+  })
+
+  it('refuses to write a missing record back for a path that is in the trash', async () => {
+    const root = await vault(), fs = secureFsFor(root)
+    const entry = trashed()
+    fs.replace('.rgent-lifecycle', null, JSON.stringify({ version: 1, active: null, missing: [], retired: [], trashed: [entry] }))
+    const lifecycle = new VaultLifecycle(root)
+    // 退休撤销会把记录放回 missing[]；这条路径已经主动删除，不能制造两边同时存在的 journal。
+    const retired = { ...missing('a.md'), retiredAt: '2026-10-23T02:00:00.000Z', reason: 'recreated' as const }
+    fs.replace('.rgent-lifecycle', fs.readText('.rgent-lifecycle'), JSON.stringify({ version: 1, active: null, retired: [retired], trashed: [entry] }))
+    expect(lifecycle.restoreRetired(retired)).toBe(false)
+    expect(lifecycle.status().status).toBe('ready')
+    expect(lifecycle.trashedObjects()).toEqual([entry])
+  })
+
+  it('bounds trashed records at 256 and rejects a duplicate id', async () => {
+    const root = await vault(), fs = secureFsFor(root)
+    const lifecycle = new VaultLifecycle(root)
+    for (let index = 0; index < 256; index += 1) {
+      const id = `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`
+      expect(lifecycle.addTrashed(trashed({ trashId: id, relPath: `note-${index}.md` }))).toBe(true)
+    }
+    expect(() => lifecycle.addTrashed(trashed({ trashId: '99999999-9999-4999-8999-999999999999', relPath: 'note-256.md' })))
+      .toThrow('TRASH_RECORD_LIMIT')
+    fs.replace('.rgent-lifecycle', fs.readText('.rgent-lifecycle'),
+      JSON.stringify({ version: 1, active: null, trashed: [trashed(), trashed()] }))
+    expect(() => lifecycle.trashedObjects()).toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+    expect(lifecycle.status()).toMatchObject({ status: 'invalid', reason: 'journal-invalid' })
+  })
+
+  it('rejects malformed trashed shapes and coexistence with missing records', async () => {
+    const root = await vault()
+    const entry = trashed()
+    const overflow = Array.from({ length: 257 }, (_, index) => trashed({
+      trashId: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, relPath: `n-${index}.md`
+    }))
+    const cases: unknown[] = [
+      'not-an-array',
+      [{ ...entry, extra: true }],
+      [{ ...entry, at: 'not-a-date' }],
+      [{ ...entry, contentHash: 'nope' }],
+      [{ ...entry, relPath: '.rgent-trash/a.md' }],
+      [{ ...entry, relPath: 'attachment.txt' }],
+      [{ ...entry, trashId: '../escape' }],
+      [{ ...entry, taskId: 'nope' }],
+      overflow
+    ]
+    for (const value of cases) {
+      await writeFile(path.join(root, '.rgent-lifecycle'), JSON.stringify({ version: 1, active: null, trashed: value }))
+      const lifecycle = new VaultLifecycle(root)
+      expect(() => lifecycle.trashedObjects()).toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+      expect(() => lifecycle.isTrashed('a.md')).toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+      expect(lifecycle.status()).toMatchObject({ status: 'invalid', reason: 'journal-invalid' })
+    }
+    // 同一路径同时出现在 missing 与 trashed：一次删除只记一处，整本 journal 按不可解析处理。
+    await writeFile(path.join(root, '.rgent-lifecycle'),
+      JSON.stringify({ version: 1, active: null, missing: [missing('a.md')], trashed: [entry] }))
+    expect(() => new VaultLifecycle(root).missingObjects()).toThrow('LIFECYCLE_RECOVERY_REQUIRED')
+  })
+
+  it('applies a store reconcile report to the journal and keeps other history', async () => {
+    const root = await vault(), fs = secureFsFor(root)
+    const retired = { ...missing('c.md'), retiredAt: '2026-10-23T00:00:00.000Z', reason: 'recreated' as const }
+    fs.replace('.rgent-lifecycle', null,
+      JSON.stringify({ version: 1, active: null, missing: [missing('b.md')], retired: [retired] }))
+    const lifecycle = new VaultLifecycle(root)
+    const first = trashed()
+    // 目录补完后的记录：先新增，同内容再写是幂等的；与磁盘不一致时按磁盘修正（同 id 覆盖）。
+    expect(lifecycle.upsertTrashed(first)).toBe(true)
+    expect(lifecycle.upsertTrashed(first)).toBe(false)
+    const corrected = trashed({ objectVersion: 'obj-corrected' })
+    expect(lifecycle.upsertTrashed(corrected)).toBe(true)
+    expect(lifecycle.trashedObjects()).toEqual([corrected])
+    // journal 有记录、目录已不在：记录保留（列表里会标 damaged），只能明确删除。
+    expect(lifecycle.removeTrashed('00000000-0000-4000-8000-000000000000')).toBe(false)
+    expect(lifecycle.trashedObjects()).toEqual([corrected])
+    expect(lifecycle.removeTrashed(corrected.trashId)).toBe(true)
+    const after = await journal(root)
+    expect(after.trashed ?? []).toEqual([])
+    expect(after.missing).toHaveLength(1)
+    expect(after.retired).toHaveLength(1)
+  })
+
+  it('reads a journal written before trashed existed', async () => {
+    const root = await vault()
+    const { cause: _cause, ...legacy } = missing('a.md')
+    await writeFile(path.join(root, '.rgent-lifecycle'), JSON.stringify({ version: 1, active: null, missing: [legacy] }))
+    const lifecycle = new VaultLifecycle(root)
+    expect(lifecycle.status().status).toBe('ready')
+    expect(lifecycle.trashedObjects()).toEqual([])
+    expect(lifecycle.isTrashed('a.md')).toBe(false)
+    expect(lifecycle.hasMissing('a.md')).toBe(true)
+    expect(lifecycle.addTrashed(trashed())).toBe(true)
+    expect(lifecycle.hasMissing('a.md')).toBe(false)
   })
 })

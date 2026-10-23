@@ -28,6 +28,7 @@ export const IPC = {
   noteTrashPreview: 'note:trash-preview',
   noteTrashCommit: 'note:trash-commit',
   noteRelocated: 'note:relocated',
+  noteDeleted: 'note:deleted',
   lifecycleFlushRequest: 'lifecycle:flush-request',
   lifecycleFlushDone: 'lifecycle:flush-done',
   lifecycleStatus: 'lifecycle:status',
@@ -94,6 +95,10 @@ export const IPC = {
   mcpServerSave: 'mcp:server-save',
   mcpServerRemove: 'mcp:server-remove',
   mcpDiscover: 'mcp:discover',
+  vaultTrashDelete: 'vault:trash-delete',
+  vaultTrashList: 'vault:trash-list',
+  vaultTrashRestore: 'vault:trash-restore',
+  vaultTrashPurge: 'vault:trash-purge',
   memoryChanged: 'memory:changed',
   memoryGet: 'memory:get',
   memoryConfigSave: 'memory:config-save',
@@ -167,10 +172,10 @@ export type AgentCommandRequest = ObjectBinding & {
   promptText: string
 }
 /** 四档授权：只读/参考不宣告写工具；自动只自动批准新建。 */
-export type AgentPermissionLevel = 'read' | 'reference' | 'write' | 'auto'
+export type AgentScopeLevel = 'note' | 'folder' | 'vault'
 /** 本场联网只读：默认不勾；勾选结果随预览摘要与 start 请求一起校验，防重放。
  *  远端只读 MCP 是同一张口令卡上的另一个独立勾选：`mcp` 默认不勾，与 `network` 互不影响。 */
-export type AgentAuthorizationRequest = AgentCommandRequest & { references: string[]; level: AgentPermissionLevel }
+export type AgentAuthorizationRequest = AgentCommandRequest & { scope: AgentScopeLevel }
 export type AuthorizedSource = ObjectBinding & { sourceId: string; relPath: string; title: string; revision: string; fingerprint: string; tier: 'reference' | 'follow' }
 /** 一台可用的远端只读 MCP 服务器：只有名字、主机与白名单工具名。
  *  token、密文、schema 与服务器正文都不在这里。 */
@@ -192,10 +197,11 @@ export type AgentAuthorizationPreview = {
   skills?: { id: string; name: string }[]
   /** 已启用但没加载的技能：名称与人话原因，便于人当场决定是否重来。 */
   skillsUnavailable?: { name: string | null; reason: import('./skills.ts').SkillUnavailableReason }[]
-  /** 四档授权：只读/参考不宣告写工具；自动只自动批准新建。 */
-  level: AgentPermissionLevel
-  write: boolean
-  autoApproveWrites: boolean
+  /** 作业范围：本篇/同册/整库；回答与补写始终可写。 */
+  scope: AgentScopeLevel
+  canCreate: boolean
+  canStructure: boolean
+  canDelete: boolean
   /** 本场是否可能宣告删笔记：主进程已有删除实现时为 true（macOS）；Windows 仍关。渲染层不猜平台。 */
   deleteEnabled?: boolean
 }
@@ -208,7 +214,7 @@ export type AgentWritePreview =
 export type AgentWriteDecision = { requestId: string; approved: boolean }
 
 export type AgentAuthorizationResult = { ok: true; preview: AgentAuthorizationPreview } | { ok: false; error: string }
-export type AgentStartRequest = AgentCommandRequest & { previewId: string; level: AgentPermissionLevel }
+export type AgentStartRequest = AgentCommandRequest & { previewId: string; scope: AgentScopeLevel }
 export type AgentStartResult = { ok: true; id: string } | { ok: false; error: string }
 export type AgentTaskView = { id: string; relPath: string; startedAt: number; activity?: string }
 /** 预设搜索服务；同一时间只接一家，端点与主机写死在主进程。 */
@@ -272,6 +278,29 @@ export type HumanSearchResult =
     degraded?: 'log-failed'
   }
   | { ok: false; error: string }
+
+/** 库内「已删除」的一条：只给人看，AI 不可达。 */
+export type TrashEntryView = {
+  id: string
+  originalRelPath: string
+  name: string
+  kind: 'note' | 'attachment'
+  deletedAt: string
+  expiresAt: string
+  bytes: number
+  source: 'human' | 'ai'
+  state: 'ok' | 'damaged'
+}
+/** `bytes` 是全部条目的累计字节（含 damaged 条目）；坏条目仍以 damaged 列出，不丢。 */
+export type TrashListResult = { ok: true; entries: TrashEntryView[]; bytes: number } | { ok: false; error: string }
+/** `copied`：原路径被占，笔记落成 `名字（恢复）.md` 副本（同名附件夹一起改名）。 */
+export type TrashRestoreResult =
+  | { ok: true; relPath: string; copied: boolean }
+  | { ok: false; error: string }
+/** 明确删除／过期清理：失败时条目保留在原处，不 unlink、不假装成功。 */
+export type TrashPurgeResult = { ok: true } | { ok: false; error: string }
+/** 删除成功后由主进程发出（人删与 AI 删同一条），index 转发给渲染层关闭 tab。 */
+export type NoteDeletedEvent = { relPath: string; sessionId?: string; trashId: string }
 
 /** 人发起外发日志的一条：只有时间／类型／主机／字节／条数／结果码，永不含 URL、查询、正文或凭据。 */
 export type EgressLogEntry = {

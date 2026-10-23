@@ -187,10 +187,10 @@ it('exposes an unknown tool attempt for finite Host refusal without SDK auto rep
 it('runs a real approved three-note SSE search → read → answer loop with source provenance', async () => {
   const requests: Record<string, unknown>[] = []
   const source: Record<string, NoteSnapshot> = {
-    'a.md': { content: '/查证 needle\n', revision: '1', sessionId: 'session', objectVersion: 'a' },
-    'b.md': { content: '# 参考\n\nneedle：原文证据。', revision: 'b', sessionId: 'session', objectVersion: 'b' },
-    'c.md': { content: '无关内容。', revision: 'c', sessionId: 'session', objectVersion: 'c' },
-    'outside.md': { content: 'needle：未经本场授权内容。', revision: 'out', sessionId: 'session', objectVersion: 'out' }
+    'dir/a.md': { content: '/查证 needle\n', revision: '1', sessionId: 'session', objectVersion: 'a' },
+    'dir/b.md': { content: '# 参考\n\nneedle：原文证据。', revision: 'b', sessionId: 'session', objectVersion: 'b' },
+    'dir/c.md': { content: '无关内容。', revision: 'c', sessionId: 'session', objectVersion: 'c' },
+    'other/outside.md': { content: 'needle：未经本场授权内容。', revision: 'out', sessionId: 'session', objectVersion: 'out' }
   }
   const baseURL = await serverFor((request, response) => {
     let raw = ''; request.on('data', chunk => { raw += chunk }); request.on('end', () => {
@@ -202,7 +202,7 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
         emit({ tool_calls: [{ index: 0, function: { arguments: 'dle"}' } }] }); emit({}, 'tool_calls')
       } else if (requests.length === 2) {
         const result = JSON.parse(body.messages.find((message: { role: string }) => message.role === 'tool').content)
-        const hit = result.items.find((item: { relPath: string }) => item.relPath === 'b.md')
+        const hit = result.items.find((item: { relPath: string }) => item.relPath === 'dir/b.md')
         emit({ tool_calls: [{ index: 0, id: 'read', type: 'function', function: { name: 'read_library', arguments: JSON.stringify({ sourceId: hit.sourceId }) } }] }); emit({}, 'tool_calls')
       } else if(requests.length===4){emit({tool_calls:[{index:0,id:'memory',type:'function',function:{name:'search_memory',arguments:'{\"query\":\"火星\"}'}}]});emit({},'tool_calls')} else { emit({ reasoning_content: '隐藏推理' }); emit({ content: '已核对参考原文。' }); emit({}, 'stop') }
       response.end('data: [DONE]\n\n')
@@ -220,7 +220,7 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
     write: async (path, content, expected) => { if (expected !== source[path]!.revision) throw Error('CONFLICT'); source[path] = { ...source[path]!, content, revision: String(++revision) }; return { ...source[path]! } },
     credential: () => credential, limits: () => limits, stream: (input, signal) => streamModelText({ ...input, signal }), streamStep: (input, signal) => streamModelStep({ ...input, signal }), createReadOnlyTools: (grant, id) => createScopedAgentTools(grant, id, { read, tier, acceptsObject: () => false }), emit: () => {}
   })
-  const command = { modelRecordId: 'model-record', relPath: 'a.md', sessionId: 'session', objectVersion: 'a', expectedRevision: '1', range: { start: 0, end: '/查证 needle'.length }, expectedText: '/查证 needle', level:'write' as const,promptText: '查证 needle', references: ['b.md', 'c.md'] }
+  const command = { modelRecordId: 'model-record', relPath: 'dir/a.md', sessionId: 'session', objectVersion: 'a', expectedRevision: '1', range: { start: 0, end: '/查证 needle'.length }, expectedText: '/查证 needle', scope:'folder' as const,promptText: '查证 needle' }
   const preview = await registry.preview('owner', command)
   const task = await host.start({ ...command, previewId: preview.id })
   expect(await task.done).toEqual({ status: 'completed' })
@@ -228,7 +228,7 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
   expect(JSON.stringify(requests)).not.toContain('未经本场授权')
   expect(JSON.stringify(requests)).not.toContain('outside.md')
   expect(JSON.stringify(requests[0])).not.toContain('原文证据')
-  const part = partitionSource(source['a.md']!.content)
+  const part = partitionSource(source['dir/a.md']!.content)
   expect(part.body).toContain('已核对参考原文。')
   expect(part.body).not.toContain('原文证据')
   expect(part.body).not.toContain('隐藏推理')
@@ -236,14 +236,14 @@ it('runs a real approved three-note SSE search → read → answer loop with sou
   expect(record.status).toBe('valid')
   if (record.status === 'valid') {
     expect(record.record.tools.map(tool => tool.name)).toEqual(['search_library', 'read_library'])
-    expect(record.record.sources.map(item => item.relPath)).toEqual(['b.md', 'c.md'])
-    expect(record.record.sentSources).toEqual(['b.md'])
+    expect(record.record.sources.map(item => item.relPath)).toEqual(['dir/b.md', 'dir/c.md'])
+    expect(record.record.sentSources).toEqual(['dir/b.md'])
   }
   expect(host.supportsMemorySearch(credential)).toBe(true)
   expect(host.supportsMemorySearch({...credential,apiKey:'changed-secret'})).toBe(false)
-  source['a.md']={...source['a.md']!,content:source['a.md']!.content+'\n/搜索火星\n',revision:String(++revision)}
-  const current=source['a.md']!,start=current.content.indexOf('/搜索火星')
-  const memoryCommand={...command,references:[],expectedRevision:current.revision,range:{start,end:start+'/搜索火星'.length},expectedText:'/搜索火星',promptText:'搜索火星'}
+  source['dir/a.md']={...source['dir/a.md']!,content:source['dir/a.md']!.content+'\n/搜索火星\n',revision:String(++revision)}
+  const current=source['dir/a.md']!,start=current.content.indexOf('/搜索火星')
+  const memoryCommand={...command,scope:'note' as const,expectedRevision:current.revision,range:{start,end:start+'/搜索火星'.length},expectedText:'/搜索火星',promptText:'搜索火星'}
   const memoryPreview=await registry.preview('owner',memoryCommand)
   const memoryTask=await host.start({...memoryCommand,previewId:memoryPreview.id,memorySearchAuthorized:true});expect(await memoryTask.done).toEqual({status:'completed'})
   expect(requests).toHaveLength(5)

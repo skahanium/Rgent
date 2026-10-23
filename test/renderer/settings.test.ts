@@ -1034,6 +1034,54 @@ it('reports library busy state to native and global entry guards until cancellat
  reject(Error('VAULT_SWITCH_CANCELLED'));await vaultFlush();expect(panel.isBusy()).toBe(false);panel.close()
 })
 
+const deletedEntry=(id:string,name:string)=>({id,name,originalRelPath:name,kind:'note' as const,deletedAt:'2026-10-20T00:00:00.000Z',expiresAt:'2026-11-19T00:00:00.000Z',bytes:1024,source:'human' as const,state:'ok' as const})
+const deletedList=(entries:ReturnType<typeof deletedEntry>[])=>({ok:true as const,entries,bytes:entries.reduce((sum,item)=>sum+item.bytes,0)})
+
+it('opens the deleted page from vault settings and returns to the same library list',async()=>{
+ const trash={list:vi.fn(async()=>deletedList([deletedEntry('t1','a.md'),deletedEntry('t2','b.md')])),restore:vi.fn(),purge:vi.fn()}
+ const {panel}=vaultSettings({trash});panel.open('笔记库');await vaultFlush()
+ expect(document.querySelector('[data-vault-id="a"]')).not.toBeNull();expect(document.querySelector('[data-vault-id="b"]')).not.toBeNull()
+ const entryButton=document.querySelector<HTMLButtonElement>('[data-vault-action="trash"]')!
+ expect(entryButton.textContent).toBe('已删除（2）')
+ // 次级视图不新增导航项：仍只有笔记库／界面／联网。
+ expect([...document.querySelectorAll('.settings-nav button')].map(b=>b.textContent)).toEqual(['笔记库','界面','联网'])
+ entryButton.click();await vaultFlush()
+ expect(document.querySelector('.settings-page-title')!.textContent).toBe('笔记库')
+ expect(document.querySelector<HTMLElement>('.vault-settings-primary')!.hidden).toBe(true)
+ expect(document.querySelector<HTMLElement>('.vault-settings-trash')!.hidden).toBe(false)
+ expect(document.body.textContent).toContain('删除的笔记和附件会留在这里 30 天；过期或你明确删除后移入系统废纸篓。')
+ expect(document.querySelector('[data-trash-id="t1"]')).not.toBeNull()
+ document.querySelector<HTMLButtonElement>('.vault-settings-trash .settings-back')!.click();await vaultFlush()
+ expect(document.querySelector<HTMLElement>('.vault-settings-primary')!.hidden).toBe(false)
+ expect(document.querySelector<HTMLElement>('.vault-settings-trash')!.hidden).toBe(true)
+ expect(document.querySelector('[data-vault-id="a"]')).not.toBeNull();expect(document.querySelector('[data-vault-id="b"]')).not.toBeNull()
+ panel.close()
+})
+
+it('shows zero and a readable note when the deleted count cannot be read',async()=>{
+ const trash={list:vi.fn(async()=>({ok:false as const,error:'IO_ERROR'})),restore:vi.fn(),purge:vi.fn()}
+ const {panel}=vaultSettings({trash});panel.open('笔记库');await vaultFlush()
+ expect(document.querySelector<HTMLButtonElement>('[data-vault-action="trash"]')!.textContent).toBe('已删除（0）')
+ const hint=document.querySelector<HTMLElement>('.vault-settings-trash-link .vault-settings-diagnostic')!
+ expect(hint.hidden).toBe(false);expect(hint.textContent).toContain('读写笔记库失败')
+ panel.close()
+})
+
+it('refreshes the deleted count after an entry moves to the system trash',async()=>{
+ const list=vi.fn()
+  .mockResolvedValueOnce(deletedList([deletedEntry('t1','a.md')]))
+  .mockResolvedValueOnce(deletedList([deletedEntry('t1','a.md')]))
+  .mockResolvedValueOnce(deletedList([]))
+ const trash={list,restore:vi.fn(),purge:vi.fn(async()=>({ok:true as const}))}
+ const {panel}=vaultSettings({trash});panel.open('笔记库');await vaultFlush()
+ expect(document.querySelector<HTMLButtonElement>('[data-vault-action="trash"]')!.textContent).toBe('已删除（1）')
+ document.querySelector<HTMLButtonElement>('[data-vault-action="trash"]')!.click();await vaultFlush()
+ document.querySelector<HTMLButtonElement>('[data-trash-action="purge"]')!.click();await vaultFlush()
+ document.querySelector<HTMLButtonElement>('.vault-settings-trash .settings-back')!.click();await vaultFlush()
+ expect(document.querySelector<HTMLButtonElement>('[data-vault-action="trash"]')!.textContent).toBe('已删除（0）')
+ panel.close()
+})
+
 it('adds the skills page to the agent group only when the host can serve it', async () => {
   const overlay = (skills: unknown) => createSettingsOverlay({
     getMode: async () => 'day',

@@ -15,6 +15,7 @@ function appFor(steps: ModelStepEvent[][], options: { tools?: number; modelSteps
   const limits = { seconds: 30, steps: options.modelSteps ?? 8, tools: options.tools ?? 8 }
   const grant = {
     id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', credential, limits,
+    scope: 'vault' as const,
     sources: [{ sourceId: 'a', relPath: 'a.md' }, { sourceId: 'b', relPath: 'b.md' }],
     assertLive: async () => { if (!live) throw Error('AUTHORIZATION_REVOKED'); if (fault) throw Error(fault) },
     validateSources: async () => { if (fault) throw Error(fault) }, assertWriteTarget: () => {}, acknowledgeOrigin: () => {}, revoke: () => { live = false }
@@ -51,14 +52,14 @@ describe('Host loop over the real grant and tools', () => {
       ['outside.md', { content: 'needle OUTSIDE_SECRET\n', revision: 'rc', sessionId: 's', objectVersion: 'oc' }]
     ])
     const readNote = async (path: string) => { const item = records.get(path); if (!item) throw Error('ENOENT'); return { ...item } }
-    const tier = async (_root: string, path: string) => (path === 'a.md' ? 'reference' as const : 'follow' as const)
+    const tier = async (_root: string, path: string) => { if (path === 'outside.md') throw Error('FORBIDDEN'); return path === 'a.md' ? 'reference' as const : 'follow' as const }
     const registry = new TaskAuthorizationRegistry({
       root: () => '/vault', session: () => 's',
       tree: async () => [...records.keys()].map((relPath) => ({ name: relPath, relPath, kind: 'note' as const })),
       read: readNote, tier, acceptsObject: () => false,
       configuration: () => ({ credential: { provider: 'custom', baseURL: 'http://127.0.0.1:1/v1', modelId: 'm', contextTokens: 20000, apiKey: 'k' }, limits: { seconds: 30, steps: 4, tools: 6 } })
     })
-    const request = { modelRecordId: 'model-record', relPath: 'a.md', sessionId: 's', objectVersion: 'oa', expectedRevision: 'ra', range: { start: 0, end: 2 }, expectedText: '/问', level:'reference' as const, promptText: '问', references: ['b.md'] }
+    const request = { modelRecordId: 'model-record', relPath: 'a.md', sessionId: 's', objectVersion: 'oa', expectedRevision: 'ra', range: { start: 0, end: 2 }, expectedText: '/问', scope:'vault' as const, promptText: '问' }
     const preview = await registry.preview('owner', request)
     let revision = 1
     const sent: unknown[][] = []

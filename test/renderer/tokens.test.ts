@@ -125,10 +125,10 @@ it('limits the tab name preference to tab labels rather than settings and confli
   expect(selectors).toEqual(['.tab'])
 })
 
-it('keeps chrome geometry continuous: no 700/820 snaps, night first frame, write-confirm above the status row', () => {
+it('keeps chrome geometry continuous: no 700/820 snaps, night first frame, scope menu above the status row', () => {
   expect(css).toContain('--editor-top-padding: clamp(52px, calc(52px + (100vw - 800px) * 0.21), 94px)')
   expect(css).not.toMatch(/@media\s*\(max-width:\s*700px\)[^{]*\{[^}]*overlay-search[^}]*translateY/s)
   expect(css).not.toMatch(/@media\s*\(max-width:\s*820px\)[^{]*\{[^}]*--editor-top-padding:\s*52px/)
   expect(css).toMatch(/@media\s*\(prefers-color-scheme:\s*dark\)\s*\{\s*html:not\(\[data-theme\]\)/)
-  expect(css).toMatch(/\.write-confirm\s*\{[^}]*bottom:\s*48px/s)
+  expect(css).toMatch(/\.status-scope-menu\s*\{[^}]*bottom:\s*calc\(100% \+ 6px\)/s)
 })

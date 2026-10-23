@@ -5,7 +5,7 @@ import { memoryErrorText, renderMemoryPreview, ledgerRememberCommand, type Memor
 import type { SkillsPageHandlers } from './settings-skills.ts'
 import type { SkillsResult } from '../../shared/skills.ts'
 import { networkEvidenceText, skillsEvidenceText } from './ledger-evidence.ts'
-import { IPC, type AgentEvent, type AgentPermissionLevel, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type PublicModelConfig, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
+import { IPC, type AgentEvent, type AgentScopeLevel, type AgentTaskView, type LifecycleStatus, type NoteSnapshot, type PermissionState, type PermissionTier, type PublicModelConfig, type RelocationPreviewView, type SearchHit, type TreeEntry, type VaultState } from '@shared'
 import { composeSource, partitionSource } from '@markdown'
 import { RecoveryDraftGate, reportFlush, saveWorkspacePosition } from '../../shared/flush.ts'
 import { renderBacklinks } from './backlinks.ts'
@@ -23,16 +23,13 @@ import { renderReadOnlyMarkdown, disposeReadOnlyImages } from './view/read-only.
 import { icon } from './icons.ts'
 import { outlineLabel, outlineMarks } from './outline.ts'
 import { installShortcuts, shortcutLabel } from './shortcuts.ts'
-import { modelModuleGroups, renderStatusbar, statusModel, wordsOf, type StatusModelModule } from './statusbar.ts'
+import { modelModuleGroups, renderStatusbar, statusModel, wordsOf, type StatusModelModule, type StatusScopeModule } from './statusbar.ts'
 
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
-import { openAuthorizationPopover, resetScopeMemory } from './authorization-popover.ts'
-import { installWriteConfirm } from './write-confirm.ts'
 import { hostErrorMessage, hostErrorText } from './host-errors.ts'
 import { pendingSlash } from './slash.ts'
 import { createFileBrowser, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
-import { confirmTrash } from './trash-confirm.ts'
 import { createSidebarSizer } from './sidebar.ts'
 import { applyResolvedTheme, type Theme } from './theme.ts'
 
@@ -63,54 +60,6 @@ export const lifecycleErrorText = (error: unknown): string => {
   return hostErrorMessage(code) ?? LIFECYCLE_ERRORS[code] ?? raw
 }
 const ROOT_UNAVAILABLE_NOTICE = '笔记库暂时无法读取，窗口稿和账本已保留。恢复原库后重新核验；换库前须处理或明确舍弃。'
-
-/**
- * 不可逆风险（删除落点不符、路径冲突）保留模态：短标题只说发生了什么，
- * 原文、路径与落点都进可复制的详情，不再用原生 alert 糊成一整段。
- */
-function openCopyableNotice(title: string, detail: string): void {
-  const overlay = openOverlay({ label: title, className: 'modal copyable-notice' })
-  const heading = document.createElement('h2')
-  heading.textContent = title
-  const body = document.createElement('p')
-  body.className = 'copyable-notice-detail'
-  body.textContent = detail
-  const hint = document.createElement('p')
-  hint.className = 'copyable-notice-hint'
-  hint.setAttribute('role', 'status')
-  const actions = document.createElement('div')
-  actions.className = 'modal-actions'
-  const selectBody = (): void => {
-    const range = document.createRange()
-    range.selectNodeContents(body)
-    const selection = window.getSelection()
-    selection?.removeAllRanges()
-    selection?.addRange(range)
-  }
-  const copyButton = document.createElement('button')
-  copyButton.type = 'button'
-  copyButton.textContent = '复制详情'
-  copyButton.addEventListener('click', () => {
-    const clipboard = navigator.clipboard
-    if (!clipboard || typeof clipboard.writeText !== 'function') {
-      selectBody()
-      hint.textContent = '这个环境不能写入剪贴板；详情已选中，请手动复制。'
-      return
-    }
-    void clipboard.writeText(detail).then(() => {
-      if (overlay.isOpen()) hint.textContent = '已复制。'
-    }).catch(() => {
-      selectBody()
-      if (overlay.isOpen()) hint.textContent = '复制失败；详情已选中，请手动复制。'
-    })
-  })
-  const done = document.createElement('button')
-  done.type = 'button'
-  done.textContent = '知道了'
-  done.addEventListener('click', () => overlay.close())
-  actions.append(copyButton, done)
-  overlay.root.append(heading, body, hint, actions)
-}
 
 /** 放弃窗口稿仍是不可逆动作，保留模态；文案短，默认焦点放在「保留」。 */
 function confirmDiscardWindowDraft(): Promise<boolean> {
@@ -232,6 +181,7 @@ export async function start(root: HTMLElement): Promise<void> {
     onOpenNote: (path) => { void openNote(path) },
     onSetTier: (path, tier) => { void changePermission(path, tier) },
     onAction: (entry, action) => { void handleTreeAction(entry, action) },
+    // 库内「已删除」仍以系统废纸篓为最终出口；没有原生送篓能力的平台不出现删除入口。
     canTrash: window.rgent.humanTrashOnThisPlatform
   })
   const sidebarSizer = createSidebarSizer({
@@ -255,6 +205,8 @@ export async function start(root: HTMLElement): Promise<void> {
   let workspaceTimer: number | null = null
   let restoredSession: string | null = null
   const tabs: Tab[] = []
+  /** 按 tab 记下一场作业范围；默认本篇，内存、不落盘，关 tab／换库即清。 */
+  const tabScopes = new Map<string, AgentScopeLevel>()
   let active: string | null = null
   let renderedActive: string | null = null
   // 窗口收窄或警告占用顶栏时，仍保证当前项在 tab 栏自己的可视区内。
@@ -293,8 +245,6 @@ export async function start(root: HTMLElement): Promise<void> {
   let permissionState: PermissionState = { status: 'ready', entries: [] }
   let vaultNameText: string | null = null
   let networkEnabled = false
-  // 同会话沿用上次手动档位；自动档只对本场有效，成功启动后回落成可写。
-  let sessionLevel: AgentPermissionLevel = 'read'
   // 首次打开联网总闸之前先出一次非模态披露；这里只记浏览偏好，不是授权证明。
   const NETWORK_ACK_KEY = 'rgent.network.acknowledged'
   // 声明放在状态区：applyState 会在定义点之前调用 closeVaultPicker，
@@ -477,6 +427,38 @@ export async function start(root: HTMLElement): Promise<void> {
     modelConfigSnapshot = result.config
     updateStatus()
   }
+  /** 库根笔记没有「同册」：存了 folder 时回落到本篇，绝不把非法档位带进提交。 */
+  const isRootNote = (relPath: string): boolean => !relPath.includes('/')
+  const scopeOf = (tab: Tab): AgentScopeLevel => {
+    const stored = tabScopes.get(tab.relPath) ?? 'note'
+    if (stored === 'folder' && isRootNote(tab.relPath)) {
+      tabScopes.set(tab.relPath, 'note')
+      return 'note'
+    }
+    return stored
+  }
+  const scopeModule = (): StatusScopeModule | undefined => {
+    const tab = current()
+    if (!tab) return undefined
+    const root = isRootNote(tab.relPath)
+    return {
+      value: scopeOf(tab),
+      options: [
+        { value: 'note', label: '本篇', detail: '只读发起篇；回答与补写照常。' },
+        {
+          value: 'folder', label: '同册', detail: root ? '根目录笔记没有同册。' : '可读发起篇所在的目录。',
+          ...(root ? { disabled: true, title: '根目录笔记没有同册；请用本篇或整库。' } : {})
+        },
+        { value: 'vault', label: '整库', detail: '可读整个笔记库。' }
+      ],
+      onChange: scope => {
+        if (!tabs.includes(tab) || tab !== current()) return
+        tabScopes.set(tab.relPath, scope === 'folder' && isRootNote(tab.relPath) ? 'note' : scope)
+        hostNotice = ''
+        updateStatus()
+      }
+    }
+  }
   let saveInFlight: Promise<boolean> | null = null
   let ledgerOpen = false
   let countedPath: string | null = null
@@ -487,7 +469,6 @@ export async function start(root: HTMLElement): Promise<void> {
   const hostRevisions = new Map<string, string>()
   let taskOverlay: ReturnType<typeof openOverlay> | null = null
   let hostNotice = ''
-  let authorizationPopover: ReturnType<typeof openAuthorizationPopover> | null = null
 
   const editor: EditorHost = mountEditor(editorHostEl, (text) => {
     const tab = current()
@@ -558,8 +539,6 @@ export async function start(root: HTMLElement): Promise<void> {
   }, { capture: true })
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229 || editor.view.compositionStarted || modalOpen()) return
-    // 授权卡是非模态：modalOpen() 看不见它。卡开着时 Esc 归卡片／取消，不能顺便清掉「暂停中」。
-    if (authorizationPopover) return
     const tab = current()
     const task = tab && [...activeTasks.values()].find((item) => item.relPath === tab.relPath)
     if (task) {
@@ -660,6 +639,11 @@ export async function start(root: HTMLElement): Promise<void> {
     applyRelocation(moved)
     void refreshLifecycle()
   })
+  // 库内删除成功后主进程广播：对应 tab、范围与任务状态立即收掉，不留一条指向已删对象的坏 tab。
+  window.rgent.onNoteDeleted(({ relPath, sessionId }) => {
+    if (sessionId && sessionId !== vaultSession) return
+    noteDeleted(relPath)
+  })
 
   function applyRelocation(moved: { from: string; to: string }[]): void {
     const remap = (relPath: string): string => {
@@ -668,6 +652,10 @@ export async function start(root: HTMLElement): Promise<void> {
     }
     fileBrowser.relocate(moved)
     for (const tab of tabs) tab.relPath = remap(tab.relPath)
+    // 范围按 tab 记：对象被挪走时键也要跟着走，否则旧路径的档位会丢、新路径会落回本篇。
+    const scopes = [...tabScopes.entries()]
+    tabScopes.clear()
+    for (const [relPath, scope] of scopes) tabScopes.set(remap(relPath), scope)
     if (active) active = remap(active)
     const revisions = [...hostRevisions.entries()]
     hostRevisions.clear()
@@ -679,6 +667,8 @@ export async function start(root: HTMLElement): Promise<void> {
     pendingConflictChoice = null
     syncEditorHost()
     renderTabs()
+    // 路径变了，底栏的作业范围也要立刻按新位置重算（目录笔记挪到库根时回落到本篇）。
+    updateStatus()
     void refreshTree()
     void refreshMovedTabs()
   }
@@ -697,28 +687,6 @@ export async function start(root: HTMLElement): Promise<void> {
       updateStatus()
     }).catch(() => { /* 读写失败时保留窗口稿，后续保存仍会复核修订值。 */ })
   })
-  // 「建」的人确认：主进程发起请求，这里只摆一张卡并回一个是否同意。
-  // 路径按 requestId 记账，后开不能覆盖先开；确认 IPC 失败／超时都不当成功。
-  const writeConfirmEffects = new Map<string, { delete?: string; create?: string }>()
-  installWriteConfirm({
-    onRequest: handler => window.rgent.onAgentWriteRequest(preview => {
-      writeConfirmEffects.set(preview.requestId, {
-        ...(preview.kind === 'delete' ? { delete: preview.relPath } : {}),
-        ...(preview.kind === 'create' ? { create: preview.relPath } : {})
-      })
-      handler(preview)
-    }),
-    decide: async decision => {
-      const pending = writeConfirmEffects.get(decision.requestId)
-      writeConfirmEffects.delete(decision.requestId)
-      const result = await window.rgent.agentWriteConfirm(decision)
-      if (decision.approved && result && pending?.delete) await closeTrashedTabs(pending.delete, { includeAttachment: false })
-      // AI 的「建」也要走同一个打开入口：否则文件树里点新笔记会复用同路径那个不可用的旧 tab。
-      if (decision.approved && result && pending?.create) await openCreatedNote(pending.create)
-      return result
-    }
-  })
-
   window.rgent.onMemoryChanged(session => {
     if (session !== vaultSession) return
     void refreshMemory()
@@ -737,57 +705,64 @@ export async function start(root: HTMLElement): Promise<void> {
     updateStatus()
   }).catch(() => {})
 
-  async function submitSlash(submission: { range: { start: number; end: number }; prompt: string }, initials?: { level?: AgentPermissionLevel }): Promise<void> {
-    const tab=current();if(!tab || authorizationPopover || conflictDecisionOpen)return
-    if(tab.availability || !tab.sessionId || !tab.objectVersion)return
+  /**
+   * 口令提交：零确认。校验→保存→预览→启动直连，不弹卡；失败只走状态栏通知。
+   * 范围来自这个 tab 的记忆（默认本篇），任务运行中改档只影响下一场。
+   */
+  async function submitSlash(submission: { range: { start: number; end: number }; prompt: string }): Promise<void> {
+    const tab = current()
+    if (!tab || conflictDecisionOpen) return
+    if (tab.availability || !tab.sessionId || !tab.objectVersion) return
     const selectedModelId = taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null)
     if (!selectedModelId || !modelConfigSnapshot || !modelModuleGroups(modelConfigSnapshot).some(group => group.items.some(item => item.id === selectedModelId))) {
       hostNotice = '请选择可用模型；设备默认可在设置的「助手」页保存。'; updateStatus(); return
     }
-    if([...activeTasks.values()].some(task=>task.relPath===tab.relPath)){hostNotice='这篇笔记已有正在运行的任务。';updateStatus();return}
-    if(!await flushSave()){hostNotice='先保存所有窗口稿，才能准备本场范围。';updateStatus();return}
-    if(current()!==tab || !tabs.includes(tab))return
-    const draft=editor.getText()
-    if(draft.slice(submission.range.start,submission.range.end)!==`/${submission.prompt}`)return
-    const request=()=>({modelRecordId:taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null) ?? '',relPath:tab.relPath,range:submission.range,expectedText:draft.slice(submission.range.start,submission.range.end),promptText:submission.prompt,
-      sessionId:tab.sessionId!,objectVersion:tab.objectVersion!,expectedRevision:tab.revision})
-    let displayedRequest:ReturnType<typeof request>|null=null
-    const coords=editor.view.coordsAtPos(editor.view.state.selection.main.head)??editor.view.dom.getBoundingClientRect()
-    authorizationPopover=openAuthorizationPopover({discard:id=>window.rgent.agentAuthorizationDiscard(id),origin:tab.relPath,entries:tree,anchor:coords,
-      returnFocus:()=>editor.view.contentDOM,
-      initialLevel:initials?.level ?? sessionLevel,
-      onClose:()=>{authorizationPopover=null},
-      preview:async (references,level)=>{
-        if(current()!==tab || !tabs.includes(tab) || editor.getText()!==draft)return {ok:false,error:'STALE_AUTHORIZATION'}
-        if(!await flushSave())return {ok:false,error:'UNSAVED_DRAFT'}
-        displayedRequest=request()
-        return window.rgent.agentAuthorizationPreview({...displayedRequest,references,level})
-      },
-      send:async (preview,level)=>{
-        if(!displayedRequest || current()!==tab || !tabs.includes(tab) || editor.getText()!==draft || taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null)!==displayedRequest.modelRecordId)return {ok:false,error:'STALE_AUTHORIZATION'}
-        if(!await flushSave())return {ok:false,error:'UNSAVED_DRAFT'}
-        const result=await window.rgent.agentStart({...displayedRequest,previewId:preview.id,level})
-        if(!result.ok)return result
-        // 档位记进暂停重启；自动档绝不带到下一场。
-        tab.pausedRestart={promptText:displayedRequest.promptText,modelRecordId:displayedRequest.modelRecordId,level}
-        sessionLevel=level==='auto'?'write':level
-        tab.pausedByUser=false
-        if(!endedTaskIds.has(result.id))activeTasks.set(result.id,{id:result.id,relPath:tab.relPath,startedAt:Date.now()})
-        hostNotice='';syncActiveLocks();updateStatus()
-        void runExclusiveConflict(()=>syncHostTab(tab,vaultEpoch))
-        return result
-      }
-    })
+    if ([...activeTasks.values()].some(task => task.relPath === tab.relPath)) { hostNotice = '这篇笔记已有正在运行的任务。'; updateStatus(); return }
+    if (!await flushSave()) { hostNotice = hostErrorText('UNSAVED_DRAFT'); updateStatus(); return }
+    if (current() !== tab || !tabs.includes(tab)) return
+    const draft = editor.getText()
+    if (draft.slice(submission.range.start, submission.range.end) !== `/${submission.prompt}`) return
+    const scope = scopeOf(tab)
+    // 防御：界面已把根目录的「同册」标灰并回落本篇；任何路径也不把非法 folder 交给主进程。
+    if (scope === 'folder' && isRootNote(tab.relPath)) {
+      hostNotice = '根目录笔记请用本篇或整库。'; updateStatus(); return
+    }
+    const request = {
+      modelRecordId: selectedModelId,
+      relPath: tab.relPath,
+      range: submission.range,
+      expectedText: draft.slice(submission.range.start, submission.range.end),
+      promptText: submission.prompt,
+      sessionId: tab.sessionId!, objectVersion: tab.objectVersion!, expectedRevision: tab.revision,
+      scope
+    }
+    const preview = await window.rgent.agentAuthorizationPreview(request).catch(() => null)
+    if (!preview) { hostNotice = hostErrorText('MODEL_REQUEST_FAILED'); updateStatus(); return }
+    if (!preview.ok) { hostNotice = hostErrorText(preview.error); updateStatus(); return }
+    const stale = current() !== tab || !tabs.includes(tab) || editor.getText() !== draft ||
+      taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null) !== request.modelRecordId
+    if (stale) {
+      void window.rgent.agentAuthorizationDiscard(preview.preview.id)
+      hostNotice = hostErrorText('STALE_AUTHORIZATION'); updateStatus(); return
+    }
+    const result = await window.rgent.agentStart({ ...request, previewId: preview.preview.id, scope })
+    if (!result.ok) { hostNotice = hostErrorText(result.error); updateStatus(); return }
+    // 供「暂停中」重发使用；任务运行中改档不会改已启动的这一场。
+    tab.pausedRestart = { promptText: request.promptText, modelRecordId: request.modelRecordId, scope }
+    tab.pausedByUser = false
+    if (!endedTaskIds.has(result.id)) activeTasks.set(result.id, { id: result.id, relPath: tab.relPath, startedAt: Date.now() })
+    hostNotice = ''; syncActiveLocks(); updateStatus()
+    void runExclusiveConflict(() => syncHostTab(tab, vaultEpoch))
   }
 
   function onHostEvent(event: AgentEvent): void {
     if (event.sessionId && event.sessionId !== vaultSession) return
-    // 自动档的新建没有确认卡：给一条可打开落点的非模态通知，标题只取文件名。
+    // 零确认后新建不再有确认卡，只留一条可打开落点的非模态通知；标题只取文件名。
     if (event.created?.relPath) {
       const created = event.created.relPath
       pushNotice({
         title: `已新建《${titleOf(created.slice(created.lastIndexOf('/') + 1))}》`,
-        detail: '已按自动档创建；可以打开查看。',
+        detail: '已按本场范围创建；可以打开查看。',
         tone: 'info',
         action: { label: '打开', run: () => { void openCreatedNote(created) } }
       })
@@ -1145,9 +1120,8 @@ export async function start(root: HTMLElement): Promise<void> {
 
   function resetSession(): void {
     clearDebounceTimers()
-    resetScopeMemory()
-    // 换库即新的一场：档位也回到默认只读，不把上一个库的手动档带进新库。
-    sessionLevel = 'read'
+    // 换库即新的一场：范围全部回到默认本篇，同名路径在新库里可能是另一篇笔记。
+    tabScopes.clear()
     vaultEpoch += 1
     // 换库后旧横幅的「核对」已经指向不存在的窗口稿，连同待兑现的选择一起作废；
     // 其余通知也在描述上一个库的操作，不能跟着进新库。
@@ -1473,36 +1447,25 @@ export async function start(root: HTMLElement): Promise<void> {
         return
       }
       if (action === 'trash') {
-        if (entry.kind !== 'note' || !window.rgent.humanTrashOnThisPlatform) return
-        if (!(await flushSave())) { pushNotice({ title:'有草稿尚未保存', detail:'请先处理保存冲突，再做这次操作。', tone:'warning' }); return }
-        const prepared = await window.rgent.noteTrashPreview({ relPath: entry.relPath })
-        if (epoch !== vaultEpoch) return
-        if (!prepared.ok) throw new Error(prepared.error)
-        if (vaultSession && prepared.preview.sessionId !== vaultSession) return
-        const allow = await confirmTrash(prepared.preview)
-        if (epoch !== vaultEpoch) return
-        const result = await window.rgent.noteTrashCommit({ id: prepared.preview.id, allow })
+        if (entry.kind !== 'note') return
+        if (!(await flushSave())) { pushNotice({ title: '有草稿尚未保存', detail: '请先处理保存冲突，再做这次操作。', tone: 'warning' }); return }
+        const result = await window.rgent.vaultTrashDelete(entry.relPath)
         if (epoch !== vaultEpoch) return
         if (!result.ok) {
-          // 落点核验不符或原路径冲突时，错误里带着系统实际落点：摆出来，人才能去废纸篓找回。
-          // 这是不可逆风险，保留模态；标题只写发生了什么，原文与落点都进可复制的详情。
-          const text = lifecycleErrorText(result.error)
-          if (result.landing) openCopyableNotice('删除没有完成，请核对落点', `${text}\n本次落点：${result.landing}`)
-          else pushNotice({ title:'删除没有完成', detail:text, tone:'error' })
+          pushNotice({ title: '删除没有完成', detail: lifecycleErrorText(result.error), tone: 'error' })
           return
         }
-        if (result.cancelled) return
-        await closeTrashedTabs(entry.relPath, { includeAttachment: !result.orphan })
+        // 零确认：直接进库内「已删除」；关 tab、刷新树，通知里给「打开」去还原或明确删除。
+        const name = titleOf(entry.relPath.split('/').pop() ?? entry.relPath)
+        await closeTab(entry.relPath, { save: false })
         await refreshTree()
-        const notices = ['笔记已移入系统废纸篓']
-        if (result.orphan) notices.push(result.orphanReason === 'attachment-missing'
-          ? '同名附件夹在确认前已不在原路径，没有一起送入；笔记本身已移入系统废纸篓。'
-          : '同名附件夹没能一起送入；它仍在库里时可恢复笔记后一并处理，或去 Finder 处理。')
-        if (result.landingVerified === 'unverified') notices.push('系统没有给出可核对的落点：删除已按记录处理，但落点身份未核验。')
-        if (result.degraded.includes('record-limit') || result.degraded.includes('record-failed')) notices.push('消失记录未能写入磁盘：笔记已进废纸篓，但重启后路径占位与来源失效可能不再保留。')
-        if (result.degraded.includes('ledger-failed')) notices.push('账本留痕未能写入，删除本身已完成。')
-        hostNotice = notices.join(' ')
         updateStatus()
+        pushNotice({
+          title: '已移到已删除',
+          detail: `《${name}》在库内保留 30 天，可还原。`,
+          tone: 'info',
+          action: { label: '打开', run: openDeletedNotes }
+        })
         return
       }
       if (!(await flushSave())) { pushNotice({ title:'有草稿尚未保存', detail:'请先处理保存冲突，再做这次操作。', tone:'warning' }); return }
@@ -1869,13 +1832,15 @@ export async function start(root: HTMLElement): Promise<void> {
     updateStatus()
   }
 
-  /** 今天：插口令＋授权卡。真断点接续未开，以后只换这个函数。 */
+  /** 今天：插口令＋沿用暂停时的范围。真断点接续未开，以后只换这个函数。 */
   async function resumeOrRestart(): Promise<void> {
     const tab = current()
-    if (!tab?.pausedRestart || authorizationPopover || conflictDecisionOpen) return
+    if (!tab?.pausedRestart || conflictDecisionOpen) return
     if ([...activeTasks.values()].some((task) => task.relPath === tab.relPath)) return
-    const { promptText, modelRecordId, level } = tab.pausedRestart
+    const { promptText, modelRecordId, scope } = tab.pausedRestart
     if (modelRecordId) tab.temporaryModelId = modelRecordId
+    // 暂停时用的是哪一档，重发就用哪一档；当前篇换到库根时仍走本篇回落。
+    tabScopes.set(tab.relPath, scope)
     const marker = `/${promptText}`
     let text = editor.getText()
     let start = text.endsWith(marker) ? text.length - marker.length : -1
@@ -1895,7 +1860,7 @@ export async function start(root: HTMLElement): Promise<void> {
         return
       }
     }
-    await submitSlash({ range: { start, end: start + marker.length }, prompt: promptText }, { level })
+    await submitSlash({ range: { start, end: start + marker.length }, prompt: promptText })
   }
 
   /** 底栏：行列、字数、总闸。字数只算正文，标记行不算。库名只写在 #app[data-vault]。 */
@@ -1919,7 +1884,7 @@ export async function start(root: HTMLElement): Promise<void> {
         column: info?.column ?? 1,
         words: tab ? countedWords : 0,
         noteOpen: tab != null
-      }, { enabled: networkEnabled, onToggle: toggleNetworkGate }, modelModule())
+      }, { enabled: networkEnabled, onToggle: toggleNetworkGate }, modelModule(), scopeModule())
     )
     const center = statusEl.querySelector<HTMLElement>('.status-center')
     if (center) { center.hidden = false; if (memoryToggle.parentElement !== center) center.append(memoryToggle) }
@@ -2081,26 +2046,25 @@ export async function start(root: HTMLElement): Promise<void> {
     if (restoreFocus) ledgerOpenButton.focus()
   }
 
-  async function waitNoteGone(relPath: string): Promise<boolean> {
-    const deadline = Date.now() + 10_000
-    while (Date.now() < deadline) {
-      try { await window.rgent.noteRead(relPath) }
-      catch { return true }
-      await new Promise(resolve => setTimeout(resolve, 40))
-    }
-    return false
+  /** 「已删除」页由 R4 落在笔记库设置里；页面未到时先打开笔记库，恢复入口接上后只改这里。 */
+  function openDeletedNotes(): void {
+    settingsOverlay.open('笔记库')
   }
 
-  /** 删除成功后关掉目标笔记的标签页；附件夹**确实送进废纸篓**时再关整棵子树的标签页。
-   *  附件夹没送进去（孤儿）时子树还在库里，夹里的草稿不该因为一次没完成的第二步被无谓关掉；
-   *  那些标签会在文件被外部移走时按既有「文件已消失」路径变成不可保存，稿子仍留着。 */
-  async function closeTrashedTabs(relPath: string, opts: { includeAttachment: boolean }): Promise<void> {
-    const stem = relPath.replace(/\.md$/i, '')
-    const doomed = tabs
-      .filter(tab => tab.relPath === relPath || (opts.includeAttachment && tab.relPath.startsWith(`${stem}/`)))
-      .map(tab => tab.relPath)
-    if (!(await waitNoteGone(relPath))) return
-    for (const path of doomed) await closeTab(path, { save: false })
+  /** 主进程广播某篇已进库内「已删除」：关掉对应 tab，并把它的任务与范围状态一起收掉。 */
+  function noteDeleted(relPath: string): void {
+    tabScopes.delete(relPath)
+    for (const [id, task] of [...activeTasks]) {
+      if (task.relPath !== relPath) continue
+      activeTasks.delete(id)
+      endedTaskIds.add(id)
+    }
+    const tab = tabs.find((item) => item.relPath === relPath)
+    if (tab) void closeTab(relPath, { save: false })
+    else paintTree()
+    syncActiveLocks()
+    renderTaskOverlay()
+    updateStatus()
   }
 
   async function closeTab(relPath: string, opts: { save?: boolean } = {}): Promise<void> {
@@ -2110,6 +2074,7 @@ export async function start(root: HTMLElement): Promise<void> {
     if (opts.save !== false && tab.dirty && (!(await writeTab(tab)) || tab.dirty)) return
     const index = tabs.findIndex((item) => item.relPath === relPath)
     tabs.splice(index, 1)
+    tabScopes.delete(relPath)
     dismissConflictNotice(relPath)
     pendingConflictChoice = null
     if (active === relPath) {

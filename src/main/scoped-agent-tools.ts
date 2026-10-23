@@ -3,19 +3,20 @@ import type { TaskMaterialTracker, MaterialDependencies } from './host-material.
 import { createHash, randomUUID } from 'node:crypto'
 import { compile } from '../markdown/index.ts'
 import type { CompileResult } from '../markdown/types.ts'
-import type { NetworkProvider, NoteSnapshot, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
+import type { NetworkProvider, NoteSnapshot, SearchHit, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
 import type { TaskGrant } from './task-authorization.ts'
 import { blankMarkers, folderOf, searchDocuments, searchSnippetRange } from './vault-index.ts'
+import { noteTitle } from '../shared/vault-rel.ts'
 import { bodyFingerprint, historicalContextPolicy, ledgerProvenance, chapterProvenance, type LedgerSource, type LedgerMemoryDependency } from './ledger-provenance.ts'
 import { ledgerChapters, historicalBodyTasks, type ContextSourceRef } from './host-context.ts'
 import { SEARCH_LIMITS } from './search.ts'
 
 export const READ_ONLY_TOOL_SCHEMAS = {
-  read_library: { description: '列出本场获准笔记；使用返回的 sourceId 分页读取正文块。账本与附件不可读，nextCursor 用于续读。', inputSchema: { type: 'object', properties: { sourceId: { type: 'string', maxLength: 256 }, cursor: { type: 'string', maxLength: 256 } }, additionalProperties: false } },
-  search_library: { description: '仅搜索本场获准笔记标题和正文，返回来源及命中片段；结果有分页和省略说明。', inputSchema: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 512 }, cursor: { type: 'string', maxLength: 256 } }, required: ['query'], additionalProperties: false } }
+  read_library: { description: '列出本场范围内当前可读的普通笔记；使用返回的 sourceId 按需读取正文块。账本与附件不可读，nextCursor 用于续读，失效来源会被省略。', inputSchema: { type: 'object', properties: { sourceId: { type: 'string', maxLength: 256 }, cursor: { type: 'string', maxLength: 256 } }, additionalProperties: false } },
+  search_library: { description: '仅搜索本场范围内笔记标题和正文，返回来源及命中片段；结果有分页和省略说明。', inputSchema: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 512 }, cursor: { type: 'string', maxLength: 256 } }, required: ['query'], additionalProperties: false } }
 } as const
 
-/** 写类工具：补／建在仅发起篇也宣告；读搜与结构仍要范围内另有对象。 */
+/** 写类工具：补始终宣告；建按范围（同册／整库），结构只在整库。三档内均无逐次确认。 */
 export const WRITE_TOOL_SCHEMAS = {
   append_to_note: {
     description: '只往本场发起篇正文末尾追加一个新块，用来补充依据或结论。不能改人写文本、不能动账本，也不能写别的笔记；超限会被拒。',
@@ -27,7 +28,7 @@ export const WRITE_TOOL_SCHEMAS = {
     }
   },
   rename_note: {
-    description: '给本场授权范围内的一篇笔记改名（不含正在写入的发起篇）。会先给人看预览，人点了同意才真的改；库里有引用会一并修好。',
+    description: '给本场整库范围内的一篇笔记改名（不含发起篇）。档位内直接执行；库里有引用会一并修好。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -39,7 +40,7 @@ export const WRITE_TOOL_SCHEMAS = {
     }
   },
   move_note: {
-    description: '把本场授权范围内的一篇笔记挪到库里已有的某个目录（不含正在写入的发起篇）。文件名不变；会先给人看预览，人点了同意才真的挪。',
+    description: '把本场整库范围内的一篇笔记挪到库里已有的某个目录（不含发起篇）。文件名不变；档位内直接执行。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -51,7 +52,7 @@ export const WRITE_TOOL_SCHEMAS = {
     }
   },
   create_note: {
-    description: '在发起篇所在目录新建一篇笔记，内容由你给出。落点不能选，重名会被拒；会先给人看预览，人点了同意才真的建。',
+    description: '在发起篇所在目录新建一篇笔记，内容由你给出。落点不能选，重名会被拒；档位内直接执行。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -63,7 +64,7 @@ export const WRITE_TOOL_SCHEMAS = {
     }
   },
   delete_note: {
-    description: '把本场授权范围内的一篇笔记移入系统废纸篓（不含正在写入的发起篇）。会先给人看预览，人点了同意才真的删；其他笔记里的链接不会代为改掉。',
+    description: '把本场整库范围内的一篇笔记移入库内已删除（不含发起篇）。档位内直接执行；其他笔记里的链接不会代为改掉。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -249,7 +250,7 @@ export function wrappedSearchContent(value: { provider: string; results: readonl
 }
 
 /** 宿主提供的写入能力：门在宿主侧构造，这里只调用并记账。
- *  create 只在宿主既有人确认、又能真的落盘时才出现。 */
+ *  create 只在宿主能真的落盘且范围允许时才出现。 */
 export type StructuralOutcome = { ok: true; target: string; moved: number; linkChanges: number; permissionChanges: number } | { ok: false; reason: string }
 export type DeleteOutcome = {
   ok: true
@@ -262,21 +263,21 @@ export type DeleteOutcome = {
 export type ScopedWriteTool = {
   append(text: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number } | { ok: false; reason: string }>
   create?(name: string, body: string, signal: AbortSignal): Promise<{ ok: true; revision: string; bytes: number; relPath: string; objectVersion?: string } | { ok: false; reason: string }>
-  /** 结构操作（改名／挪）：要人确认与库层迁移两条都在才出现。 */
+  /** 结构操作（改名／挪）：整库范围与库层迁移两条都在才出现。 */
   rename?(relPath: string, newName: string, signal: AbortSignal): Promise<StructuralOutcome>
   move?(relPath: string, targetFolder: string, signal: AbortSignal): Promise<StructuralOutcome>
-  /** 删除：要人确认与库层送篓两条都在才出现。 */
+  /** 删除：整库范围与库层删除两条都在才出现。 */
   delete?(relPath: string, signal: AbortSignal): Promise<DeleteOutcome>
 }
 
 export interface ScopedAgentTools {
   /** 这套工具是否带写入能力；宿主据此决定要不要把写工具宣告给模型。 */
   writes?: boolean
-  /** 是否带「建」的能力（需要人确认与落盘两条都在）。 */
+  /** 是否带「建」的能力（范围允许与落盘两条都在）。 */
   creates?: boolean
   /** 是否带结构操作（改名／挪）。 */
   renames?: boolean
-  /** 是否带删除（需要人确认与送篓）。 */
+  /** 是否带删除（需要整库范围与库层删除）。 */
   deletes?: boolean
   /** 是否带联网只读（宿主给了抓页能力且本场获准时才为 true）。 */
   networks?: boolean
@@ -295,6 +296,7 @@ export interface ScopedAgentTools {
   markSent(includeTools?: boolean): void
   sentSources(): string[]
 }
+export type ScopedSearchCandidate = { relPath: string; title: string; folder: string }
 type Dependencies = {
   read(path: string): Promise<NoteSnapshot>
   tier(root: string, path: string): Promise<'reference' | 'follow'>
@@ -302,6 +304,9 @@ type Dependencies = {
   validateMemoryBatch?: (dependencies: readonly LedgerMemoryDependency[]) => Promise<boolean[]>
   validateMemory?: (dependency: LedgerMemoryDependency) => Promise<boolean>
   acceptsObject(path: string, expected: string, current: string): boolean
+  /** 活索引候选：只在整库/同册范围生效，且候选仍要逐篇 `validateRead`。
+   *  生产由主进程注入 vault-index 的实时搜索；没有时退回逐页实时读（大库会慢，报告里注明）。 */
+  indexSearch?: (query: string) => Promise<readonly ScopedSearchCandidate[]>
   /** 只有宿主给了写入能力时，「补任务发起篇」才会出现在工具清单里。 */
   write?: ScopedWriteTool
   /** 只有本场获准联网且总闸可用时，`fetch_url` 才会出现在工具清单里。 */
@@ -310,7 +315,7 @@ type Dependencies = {
   mcp?: ScopedMcpTool
 }
 type Policy = { bodyTasks: Map<number,string[]>; memoryByChapter: Map<string, LedgerMemoryDependency[]>; memoryByTask: Map<string, LedgerMemoryDependency[]>; allowedLedgerChapterIds: string[]; excludedAiTaskIds: string[]; byChapter: Map<string, LedgerSource[]>; byTask: Map<string, LedgerSource[]> }
-type Loaded = { path: string; snapshot: NoteSnapshot; parsed: CompileResult; body: string; policy: Policy; proof: LedgerSource }
+type Loaded = { path: string; snapshot: NoteSnapshot; parsed: CompileResult; body: string; policy: Policy; proof: LedgerSource; tier: 'reference' | 'follow' }
 type Cursor = { kind: 'list' | 'read' | 'search'; sourceId?: string; query?: string; stamp: string; index: number; offset: number }
 const hash = (text: string) => createHash('sha256').update(text).digest('hex')
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value))
@@ -363,8 +368,9 @@ function mcpArgs(value: unknown): { server: string; tool: string; arguments: Rec
 }
 /** Only receives a fixed, main-process grant; it never sees the human global index. */
 export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: Dependencies): ScopedAgentTools {
-  const sources = new Map(grant.sources.map(source => [source.relPath, source]))
-  const ids = new Map(grant.sources.map(source => [source.sourceId, source.relPath]))
+  // sourceId 只在本次工具集内有意义：由实际读到的路径按需签发，不是预览期冻结清单。
+  const ids = new Map<string, string>()
+  const idsByPath = new Map<string, string>()
   const reads = new Map<string, LedgerSource>()
   const memories = new Map<string, LedgerMemoryDependency>()
   const stagedMemory = new Set<string>(), sentMemory = new Set<string>()
@@ -377,8 +383,17 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
   let originPolicy: Policy | undefined
   let originParsed: CompileResult | undefined
 
+  function sourceIdFor(path: string): string {
+    const existing = idsByPath.get(path)
+    if (existing) return existing
+    const id = randomUUID()
+    ids.set(id, path)
+    idsByPath.set(path, id)
+    return id
+  }
   async function check(signal: AbortSignal): Promise<void> {
     active(signal)
+    // 只核验范围与发起篇快照；其他来源是「按需快照」，每次读的时候才逐篇核。
     await awaiting(grant.validateSources(signal), signal)
     for (const dependency of reads.values()) {
       if (!(await dependencyValid(dependency, signal))) { grant.revoke(); throw Error('SOURCE_CHANGED') }
@@ -386,25 +401,19 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
     if ((await memoryValid([...memories.values()],signal)).some(valid=>!valid)) { grant.revoke(); throw Error('MEMORY_CHANGED') }
     active(signal)
   }
-  async function snapshot(path: string, signal: AbortSignal): Promise<NoteSnapshot> {
+  async function snapshot(path: string, signal: AbortSignal): Promise<{ snapshot: NoteSnapshot; tier: 'reference' | 'follow' }> {
     active(signal)
-    const approved = sources.get(path)
-    if (!approved) throw Error('OUTSIDE_TASK_SCOPE')
-    const tier = await awaiting(deps.tier(grant.root, path), signal)
-    const current = await awaiting(deps.read(path), signal)
-    const after = await awaiting(deps.tier(grant.root, path), signal)
-    if (tier !== approved.tier || after !== approved.tier) throw Error('SOURCE_PERMISSION_CHANGED')
-    if (current.sessionId !== grant.sessionId) throw Error('VAULT_CHANGED')
-    const proof = path === grant.origin ? grant.originProof : approved
-    if (current.objectVersion !== proof.objectVersion && !deps.acceptsObject(path, proof.objectVersion, current.objectVersion)) throw Error('SOURCE_REPLACED')
-    if (current.revision !== proof.revision || hash(current.content) !== proof.fingerprint) throw Error('SOURCE_CHANGED')
-    return current
+    // 真实来源核验在授权里做：普通笔记、非附件、非 forbidden、会话与读前读后权限。
+    const read = await awaiting(grant.validateRead(path, signal), signal)
+    active(signal)
+    return { snapshot: read.snapshot, tier: read.proof.tier }
   }
   async function dependencyValid(dependency: LedgerSource, signal: AbortSignal): Promise<boolean> {
     active(signal)
-    if (!sources.has(dependency.relPath) || dependency.relPath === grant.origin) return false
+    // 范围外与发起篇都不算历史依赖：前者不读，后者由 originProof 单独核。
+    if (!grant.contains(dependency.relPath) || dependency.relPath === grant.origin) return false
     try {
-      const current = await snapshot(dependency.relPath, signal)
+      const current = (await snapshot(dependency.relPath, signal)).snapshot
       return (current.objectVersion === dependency.objectVersion || deps.acceptsObject(dependency.relPath, dependency.objectVersion, current.objectVersion)) && bodyFingerprint(current.content) === dependency.bodyHash
     } catch (error) { active(signal); return false }
   }
@@ -460,14 +469,14 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
     }
   }
   async function load(path: string, signal: AbortSignal): Promise<Loaded> {
-    const current = await snapshot(path, signal)
+    const { snapshot: current, tier } = await snapshot(path, signal)
     const parsed = compile(current.content)
     if (parsed.stale) throw Error('SOURCE_PARSE_FAILED')
     const p = await policy(current.content, signal, parsed)
     let body = blankMarkers(parsed.partition.body, parsed.index.markers)
     for (const block of parsed.index.blocks) if (excluded(parsed, p, block.range.start, block.identity)) body = body.slice(0, block.range.start) + ' '.repeat(block.range.end - block.range.start) + body.slice(block.range.end)
     const proof = { relPath: path, objectVersion: current.objectVersion, bodyHash: bodyFingerprint(current.content, parsed) }
-    return { path, snapshot: current, parsed, body, policy: p, proof }
+    return { path, snapshot: current, parsed, body, policy: p, proof, tier }
   }
   function recordBody(item: Loaded, start?: number, end?: number): void {
     remember(item.proof, true)
@@ -475,7 +484,7 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
       if (excluded(item.parsed, item.policy, block.range.start, block.identity)) continue
       if (start !== undefined && end !== undefined && (block.range.end <= start || block.range.start >= end)) continue
       const dependencies = blockDependencies(item.policy,block.range.start)
-      deps.materials?.body(item.snapshot.content, {start:Math.max(start ?? 0, block.range.start), end:Math.min(end ?? item.body.length, block.range.end)}, { ...item.snapshot,relPath:item.path,permissionTier:grant.sources.find(s=>s.relPath===item.path)!.tier }, {sources:[item.proof,...dependencies.sources],memories:dependencies.memories}, false, item.parsed, item.policy.bodyTasks)
+      deps.materials?.body(item.snapshot.content, {start:Math.max(start ?? 0, block.range.start), end:Math.min(end ?? item.body.length, block.range.end)}, { ...item.snapshot,relPath:item.path,permissionTier:item.tier }, {sources:[item.proof,...dependencies.sources],memories:dependencies.memories}, false, item.parsed, item.policy.bodyTasks)
       for (const dep of dependencies.sources) remember(dep, true)
       rememberMemory(dependencies.memories)
     }
@@ -483,7 +492,10 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
   function cursor(input: string | undefined, expected: Pick<Cursor, 'kind' | 'sourceId' | 'query' | 'stamp'>): Cursor {
     if (!input) return { ...expected, index: 0, offset: 0 }
     const value = cursors.get(input)
-    if (!value || Object.entries(expected).some(([key, v]) => value[key as keyof Cursor] !== v)) throw Error('INVALID_TOOL_CURSOR')
+    // 游标本身要对得上用法（哪种续页、哪一篇、哪个查询），否则视为伪造／跨场复用。
+    if (!value || value.kind !== expected.kind || value.sourceId !== expected.sourceId || value.query !== expected.query) throw Error('INVALID_TOOL_CURSOR')
+    // 同一篇在续页之间改了修订：如实报来源变化，不把它折成游标错误。
+    if (value.stamp !== expected.stamp) throw Error('SOURCE_CHANGED')
     return { ...value }
   }
   function next(value: Cursor): string {
@@ -492,25 +504,56 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
     cursors.set(id, value)
     return id
   }
-  function base(items: unknown[], complete: boolean, nextCursor?: string, omitted = 0): Record<string, unknown> {
-    return { items, complete, omitted, ...(nextCursor ? { nextCursor } : {}), notice: complete ? '已返回本次范围内全部结果；正文不含账本或未授权历史派生内容。' : '本页因预算省略后续内容；使用 nextCursor 续读，不代表完整原文。' }
+  function base(items: unknown[], complete: boolean, nextCursor?: string, omitted = 0, notice?: string): Record<string, unknown> {
+    return { items, complete, omitted, ...(nextCursor ? { nextCursor } : {}), notice: notice ?? (complete ? '已返回本次范围内全部结果；正文不含账本或未授权历史派生内容。' : '本页因预算省略后续内容；使用 nextCursor 续读，不代表完整原文。') }
   }
+  /** 单篇失效只省略这一篇；任务级撤销、换库、取消与树不可读照旧整场失败。 */
+  const SKIPPABLE_SOURCE_ERROR = /^(OUTSIDE_TASK_SCOPE|FORBIDDEN|SOURCE_CHANGED|SOURCE_REPLACED|SOURCE_PERMISSION_CHANGED|ENOENT|NOTE_MISSING|NOTE_REPLACED|UNSAFE_PATH|NOTE_NOT_REFERENCE)$/u
+  function skippable(error: unknown): boolean {
+    return error instanceof Error && SKIPPABLE_SOURCE_ERROR.test(error.message)
+  }
+  /** 列表页大小：只是实时枚举的元数据批次，不是来源上限；预算另由工具结果长度控制。 */
+  const LIST_PAGE = 32
   async function list(input: Record<string, string>, signal: AbortSignal): Promise<unknown> {
-    const approved = [...grant.sources]
-    const state = cursor(input.cursor, { kind: 'list', stamp: hash(JSON.stringify(approved)) })
+    // 范围戳只含范围身份，不枚举来源：分页续页时重新实时枚举，每个条目仍逐篇核验。
+    const state = cursor(input.cursor, { kind: 'list', stamp: hash(`list\0${grant.scope}\0${grant.origin}`) })
     const items: unknown[] = []
-    let at = state.index
     const loaded: Loaded[] = []
-    for (; at < approved.length; at++) {
-      const source = approved[at]!
-      const item = { sourceId: source.sourceId, relPath: source.relPath, title: source.title, fingerprint: source.fingerprint }
-      if (bytes(base([...items, item], false, 'x'.repeat(36), approved.length)) > limit) break
-      loaded.push(await load(source.relPath, signal)); items.push(item)
+    let offset = state.index
+    let total = 0
+    let skipped = 0
+    let complete = false
+    outer: while (true) {
+      const page = await awaiting(grant.list({ offset, limit: LIST_PAGE }, signal), signal)
+      active(signal)
+      total = page.total
+      if (!page.items.length) { complete = offset >= total; break }
+      for (const meta of page.items) {
+        active(signal)
+        const item = { sourceId: sourceIdFor(meta.relPath), relPath: meta.relPath, title: meta.title, fingerprint: '0'.repeat(64) }
+        // 预算先按元数据试算：正文指纹是定长十六进制，占位与实际等长。
+        if (items.length && bytes(base([...items, item], false, 'x'.repeat(36), total)) > limit) { complete = false; break outer }
+        let doc: Loaded
+        try { doc = await load(meta.relPath, signal) } catch (error) {
+          if (!skippable(error)) throw error
+          // 失效／越界／禁区／换对象：只省略这一篇，别把整页或整场拖死。
+          offset += 1; skipped += 1
+          continue
+        }
+        item.fingerprint = doc.proof.bodyHash
+        items.push(item); loaded.push(doc); offset += 1
+      }
+      if (offset >= total) { complete = true; break }
     }
-    if (!items.length && at < approved.length) throw Error('SOURCE_METADATA_TOO_LARGE')
+    if (!items.length && !complete) throw Error('SOURCE_METADATA_TOO_LARGE')
+    for (const doc of loaded) remember(doc.proof, true)
+    // 先登记再复核：结果即将回给模型，这中间被换掉的来源不能当成新正文发出去。
     await check(signal)
-    for (const item of loaded) remember(item.proof, true)
-    return base(items, at === approved.length, at < approved.length ? next({ ...state, index: at }) : undefined, approved.length - at)
+    const omitted = Math.max(0, total - items.length)
+    const notice = complete
+      ? (skipped > 0 ? `已走完本次范围；其中 ${skipped} 篇已失效或被省略，未返回。正文不含账本或未授权历史派生内容。` : undefined)
+      : undefined
+    return base(items, complete, complete ? undefined : next({ ...state, index: offset }), omitted, notice)
   }
   async function read(input: Record<string, string>, signal: AbortSignal): Promise<unknown> {
     const path = ids.get(input.sourceId!)
@@ -520,7 +563,7 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
     const blocks = item.parsed.index.blocks.filter(block => !excluded(item.parsed, item.policy, block.range.start, block.identity))
     const output: { block: number; from: number; to: number; text: string }[] = []
     let at = state.index; let offset = state.offset
-    const wrap = (items: unknown[], complete = false) => ({ ...base(items, complete, complete ? undefined : 'x'.repeat(36), blocks.length - at), sourceId: input.sourceId, relPath: path, title: sources.get(path)!.title, fingerprint: item.proof.bodyHash })
+    const wrap = (items: unknown[], complete = false) => ({ ...base(items, complete, complete ? undefined : 'x'.repeat(36), blocks.length - at), sourceId: input.sourceId, relPath: path, title: noteTitle(path), fingerprint: item.proof.bodyHash })
     while (at < blocks.length) {
       const block = blocks[at]!
       const text = item.body.slice(block.range.start + offset, block.range.end)
@@ -538,38 +581,77 @@ export function createScopedAgentTools(grant: TaskGrant, _taskId: string, deps: 
       if (offset < block.range.end - block.range.start) break
       at++; offset = 0
     }
-    await check(signal)
     remember(item.proof, false)
+    await check(signal)
     for (const part of output) recordBody(item, part.from, part.to)
     const complete = at === blocks.length
-    const result = { ...base(output, complete, complete ? undefined : next({ ...state, index: at, offset }), blocks.length - at), sourceId: input.sourceId, relPath: path, title: sources.get(path)!.title, fingerprint: item.proof.bodyHash }
+    const result = { ...base(output, complete, complete ? undefined : next({ ...state, index: at, offset }), blocks.length - at), sourceId: input.sourceId, relPath: path, title: noteTitle(path), fingerprint: item.proof.bodyHash }
     if (bytes(result) > limit) throw Error('TOOL_RESULT_LIMIT')
     return result
   }
+  /** 单次搜索最多回给模型这么多条命中（与人索引的排序上限一致）。 */
+  const SEARCH_TOOL_RESULTS = 100
+  /** 候选路径：整库/同册用活索引（实时文档，不预载全库）；没有索引端口时退回逐页实时枚举。 */
+  async function searchCandidates(query: string, signal: AbortSignal): Promise<string[]> {
+    const seen = new Set<string>()
+    const candidates: string[] = []
+    if (deps.indexSearch) {
+      for (const candidate of await awaiting(deps.indexSearch(query), signal)) {
+        active(signal)
+        if (!seen.has(candidate.relPath) && grant.contains(candidate.relPath)) { seen.add(candidate.relPath); candidates.push(candidate.relPath) }
+      }
+      return candidates
+    }
+    // 兜底：只有宿主没注入活索引时走这里；仍是实时范围，不是冻结清单。
+    let offset = 0
+    let total = 0
+    do {
+      const page = await awaiting(grant.list({ offset, limit: LIST_PAGE }, signal), signal)
+      active(signal)
+      total = page.total
+      for (const meta of page.items) if (!seen.has(meta.relPath) && grant.contains(meta.relPath)) { seen.add(meta.relPath); candidates.push(meta.relPath) }
+      offset += page.items.length
+      if (!page.items.length) break
+    } while (offset < total)
+    return candidates
+  }
   async function search(input: Record<string, string>, signal: AbortSignal): Promise<unknown> {
+    const query = input.query!
+    // 范围戳只含范围身份与查询；续页时按同一范围重新实时匹配。
+    const state = cursor(input.cursor, { kind: 'search', query, stamp: hash(`search\0${grant.scope}\0${grant.origin}\0${query}`) })
+    const candidates = await searchCandidates(query, signal)
     const documents: Loaded[] = []
-    for (const source of grant.sources) { active(signal); documents.push(await load(source.relPath, signal)) }
-    const stamp = hash(documents.map(doc => `${doc.path}:${doc.snapshot.revision}`).join('\n'))
-    const state = cursor(input.cursor, { kind: 'search', query: input.query, stamp })
-    // Scope first. The human index is never called, even if thousands of outside hits exist.
-    const hits = searchDocuments(documents.map(doc => ({ relPath: doc.path, folder: folderOf(doc.path), title: sources.get(doc.path)!.title, body: doc.body })), input.query!, grant.sources.length)
+    const hits: (SearchHit & { doc: Loaded })[] = []
+    for (const path of candidates) {
+      active(signal)
+      let doc: Loaded
+      try { doc = await load(path, signal) } catch (error) {
+        if (!skippable(error)) throw error
+        continue
+      }
+      documents.push(doc)
+      // 只信核验过的正文：索引候选只用来定位路径，命中片段由活正文重算（不把人的全量索引正文交给模型）。
+      const [hit] = searchDocuments([{ relPath: doc.path, folder: folderOf(doc.path), title: noteTitle(doc.path), body: doc.body }], query, 1)
+      if (hit) hits.push({ ...hit, doc })
+    }
+    hits.sort((a, b) => Number(b.titleHit) - Number(a.titleHit) || b.count - a.count || a.relPath.localeCompare(b.relPath, 'zh'))
+    hits.length = Math.min(hits.length, SEARCH_TOOL_RESULTS)
     const items: unknown[] = []
     let at = state.index
     for (; at < hits.length; at++) {
       const hit = hits[at]!
-      const doc = documents.find(doc => doc.path === hit.relPath)!
-      const item = { ...hit, sourceId: sources.get(hit.relPath)!.sourceId, fingerprint: doc.proof.bodyHash }
+      const { doc, ...publicHit } = hit
+      const item = { ...publicHit, sourceId: sourceIdFor(hit.relPath), fingerprint: doc.proof.bodyHash }
       if (bytes(base([...items, item], false, 'x'.repeat(36), hits.length)) > limit) break
       items.push(item)
     }
     if (!items.length && at < hits.length) throw Error('SOURCE_METADATA_TOO_LARGE')
-    await check(signal)
     for (const doc of documents) remember(doc.proof, false)
+    await check(signal)
     for (const hit of hits.slice(state.index, at)) {
-      const doc = documents.find(doc => doc.path === hit.relPath)!
-      const range = searchSnippetRange(doc.body, input.query!)
-      if (range) recordBody(doc, range.start, range.end)
-      else remember(doc.proof, true)
+      const range = searchSnippetRange(hit.doc.body, query)
+      if (range) recordBody(hit.doc, range.start, range.end)
+      else remember(hit.doc.proof, true)
     }
     return base(items, at === hits.length, at < hits.length ? next({ ...state, index: at }) : undefined, hits.length - at)
   }

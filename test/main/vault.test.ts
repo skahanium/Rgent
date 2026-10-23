@@ -1,10 +1,11 @@
 import { chmod, stat, symlink, link, mkdtemp, mkdir, readFile, readdir, writeFile, rename, unlink, rm } from 'node:fs/promises'
-import { writeFileSync,renameSync } from 'node:fs'
+import { existsSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { dialog } from 'electron'
-import { secureFsFor } from '../../src/main/secure-fs.ts'
+import { SecureVaultFs, secureFsFor } from '../../src/main/secure-fs.ts'
 import { TaskAuthorizationRegistry } from '../../src/main/task-authorization.ts'
 import { modelTierFor } from '../../src/main/permissions.ts'
 import { VaultSession } from '../../src/main/vault.ts'
@@ -730,7 +731,7 @@ it('uses actual native alias resolution for attachment ancestors and rejects mis
 
 async function migrationGrant(session:VaultSession,relPath:string){
  const note=await session.read(relPath),registry=new TaskAuthorizationRegistry({root:()=>session.root,session:()=>session.sessionId(),tree:()=>session.tree(),read:path=>session.read(path),tier:modelTierFor,assertOrdinaryNotes:paths=>session.requireOrdinaryNotes(paths),acceptsObject:(path,before,after)=>session.acceptsObject(path,before,after),configuration:()=>({credential:{provider:'custom',baseURL:'https://fixture.example/v1',modelId:'fixture',contextTokens:16000,apiKey:'fixture'},limits:{seconds:30,steps:4,tools:0}})})
- const request={...note,relPath,expectedRevision:note.revision,range:{start:0,end:2},expectedText:note.content.slice(0,2),level:'reference' as const,promptText:'问',modelRecordId:'fixture',references:[]},preview=await registry.preview('owner',request)
+ const request={...note,relPath,expectedRevision:note.revision,range:{start:0,end:2},expectedText:note.content.slice(0,2),scope:'note' as const,promptText:'问',modelRecordId:'fixture'},preview=await registry.preview('owner',request)
  return registry.consume('owner',{...request,previewId:preview.id})
 }
 it('keeps open tab binding continuous after explicit batch migration and permits its next body save',async()=>{
@@ -1143,4 +1144,177 @@ it('revokes managed derived caches only after verified legacy retirement, includ
  await writeFile(file,legacy);const preview=await session.memoryRetirementPreview();await session.memoryRetirementRetry(preview,()=>{});expect(invalidate).toHaveBeenCalledTimes(2)
  await writeFile(file,'unknown bytes');await expect(session.memoryRetirementPreview()).rejects.toThrow();expect(invalidate).toHaveBeenCalledTimes(2)
  }finally{session.dispose();await rm(userData,{recursive:true,force:true})}
+})
+
+/** 原生 trash 的替身：任何用例都不许把测试库的条目送进真实系统废纸篓。 */
+function mockNativeTrash(root: string) {
+  return vi.spyOn(SecureVaultFs.prototype, 'trash').mockImplementation((relPath: string, expectedId: string) => {
+    const leaf = secureFsFor(root).resolve(relPath).at(-1)
+    if (!leaf || leaf.id !== expectedId) throw new Error('PATH_CHANGED')
+    rmSync(path.join(root, relPath), { recursive: true, force: true })
+    return path.join(root, '..', 'os-trash', relPath)
+  })
+}
+
+/** 库内已删除的删除／还原只在 macOS 开放（收尾靠原生 trash）；Windows 删除入口继续关。 */
+describe.skipIf(process.platform !== 'darwin')('in-vault trash', () => {
+  it('deletes into the vault trash, emits note:deleted, and restores the note in place', async () => {
+    const app = await setup()
+    mockNativeTrash(app.first)
+    try {
+      await mkdir(path.join(app.first, '原篇'))
+      await writeFile(path.join(app.first, '原篇', '附件.txt'), '附件正文')
+      await app.attach(app.first)
+      const result = await app.session.trashDelete('原篇.md')
+      expect(result).toMatchObject({ ok: true, relPath: '原篇.md' })
+      const trashId = (result as { trashId?: string }).trashId!
+      expect(trashId).toMatch(/^[a-f0-9-]{36}$/)
+      expect(existsSync(path.join(app.first, '原篇.md'))).toBe(false)
+      // 同名附件夹一起进已删除，还是一次一个对象。
+      expect(existsSync(path.join(app.first, '原篇'))).toBe(false)
+      // 事件：index 转发给渲染层关闭 tab；人删与 AI 删同一条。
+      expect(app.emit).toHaveBeenCalledWith('note:deleted', { relPath: '原篇.md', sessionId: app.session.sessionId(), trashId })
+      // 隐藏的已删除目录不进树。
+      expect(JSON.stringify(await app.session.tree())).not.toContain('.rgent-trash')
+      // 已删除不是「库外消失」：读它报缺失，却没有消失记录可清。
+      await expect(app.session.read('原篇.md')).rejects.toThrow('NOTE_MISSING')
+      await expect(app.session.recoveryAbandon('原篇.md')).rejects.toThrow('STALE_PREVIEW')
+      expect((await app.session.recoveryScan()).rows).toEqual([])
+      const listed = await app.session.trashList()
+      if (!listed.ok) throw new Error(listed.error)
+      expect(listed.entries).toHaveLength(1)
+      expect(listed.entries[0]).toMatchObject({
+        id: trashId, originalRelPath: '原篇.md', name: '原篇.md', kind: 'note', state: 'ok', source: 'human'
+      })
+      expect(listed.bytes).toBeGreaterThan(0)
+      expect(await app.session.trashRestore(trashId)).toEqual({ ok: true, relPath: '原篇.md', copied: false })
+      expect(await readFile(path.join(app.first, '原篇.md'), 'utf8')).toBe('first')
+      expect(await readFile(path.join(app.first, '原篇', '附件.txt'), 'utf8')).toBe('附件正文')
+      expect(app.emit).toHaveBeenCalledWith('tree:changed')
+      const empty = await app.session.trashList()
+      if (!empty.ok) throw new Error(empty.error)
+      expect(empty.entries).toEqual([])
+      expect(empty.bytes).toBe(0)
+      expect(JSON.parse(await readFile(path.join(app.first, '.rgent-lifecycle'), 'utf8')).trashed ?? []).toEqual([])
+    } finally { app.session.dispose() }
+  })
+
+  it('leaves the original path usable and restores a copy after it was reused', async () => {
+    const app = await setup()
+    mockNativeTrash(app.first)
+    try {
+      await app.attach(app.first)
+      const trashId = (await app.session.trashDelete('原篇.md') as { trashId?: string }).trashId!
+      // 已删除不占路径：不是 PATH_RESERVED，人立刻在原位重建同名笔记是允许的。
+      expect(await app.session.create('原篇')).toBe('原篇.md')
+      expect(await app.session.trashRestore(trashId)).toEqual({ ok: true, relPath: '原篇（恢复）.md', copied: true })
+      expect(await readFile(path.join(app.first, '原篇.md'), 'utf8')).toBe('')
+      expect(await readFile(path.join(app.first, '原篇（恢复）.md'), 'utf8')).toBe('first')
+    } finally { app.session.dispose() }
+  })
+
+  it('records AI attribution in the entry metadata and uses the same transaction', async () => {
+    const app = await setup()
+    try {
+      await app.attach(app.first)
+      const result = await app.session.trashDelete('原篇.md', { source: 'ai', taskId: 'task-9' })
+      const trashId = (result as { trashId?: string }).trashId!
+      const meta = JSON.parse(await readFile(path.join(app.first, '.rgent-trash', trashId, 'meta.json'), 'utf8'))
+      expect(meta).toMatchObject({ originalRelPath: '原篇.md', source: 'ai', taskId: 'task-9', state: 'trashed', kind: 'note' })
+      expect(app.emit).toHaveBeenCalledWith('note:deleted', expect.objectContaining({ relPath: '原篇.md', trashId }))
+    } finally { app.session.dispose() }
+  })
+
+  it('removes the entry and its journal record on explicit delete, and keeps damaged entries visible', async () => {
+    const app = await setup()
+    mockNativeTrash(app.first)
+    try {
+      await app.attach(app.first)
+      const trashId = (await app.session.trashDelete('原篇.md') as { trashId?: string }).trashId!
+      await expect(app.session.trashRestore('../escape')).resolves.toEqual({ ok: false, error: 'BAD_REQUEST' })
+      expect(await app.session.trashPurge(trashId)).toEqual({ ok: true })
+      const listed = await app.session.trashList()
+      if (!listed.ok) throw new Error(listed.error)
+      expect(listed.entries).toEqual([])
+      expect(JSON.parse(await readFile(path.join(app.first, '.rgent-lifecycle'), 'utf8')).trashed ?? []).toEqual([])
+      expect(await app.session.trashPurge(trashId)).toEqual({ ok: false, error: 'TRASH_ENTRY_MISSING' })
+      // 坏条目（没有 meta）仍在列表里标 damaged，也能被人明确删除。
+      const bare = '22222222-2222-4222-8222-222222222222'
+      await mkdir(path.join(app.first, '.rgent-trash', bare), { recursive: true })
+      const damaged = await app.session.trashList()
+      if (!damaged.ok) throw new Error(damaged.error)
+      expect(damaged.entries).toEqual([expect.objectContaining({ id: bare, state: 'damaged', originalRelPath: '' })])
+      expect(await app.session.trashPurge(bare)).toEqual({ ok: true })
+      expect((await app.session.trashList() as { entries: unknown[] }).entries).toEqual([])
+    } finally { app.session.dispose() }
+  })
+
+  it('refuses hidden, non-note and missing paths without creating the trash directory', async () => {
+    const app = await setup()
+    try {
+      await app.attach(app.first)
+      expect(await app.session.trashDelete('.rgent-trash/原篇.md')).toMatchObject({ ok: false, error: 'BAD_PATH' })
+      expect(await app.session.trashDelete('文献.txt')).toMatchObject({ ok: false, error: 'BAD_PATH' })
+      expect(await app.session.trashDelete('不存在.md')).toMatchObject({ ok: false, error: 'ENOENT' })
+      expect(app.emit).not.toHaveBeenCalledWith('note:deleted', expect.anything())
+      expect(existsSync(path.join(app.first, '.rgent-trash'))).toBe(false)
+      expect(await app.session.trashList()).toMatchObject({ ok: true, entries: [], bytes: 0 })
+      expect(await app.session.trashSweep()).toEqual({ ok: true })
+    } finally { app.session.dispose() }
+  })
+
+  it('sweeps an entry older than 30 days when the vault opens', async () => {
+    const userData = await mkdtemp(path.join(os.tmpdir(), 'rgent-trash-open-'))
+    const root = path.join(userData, 'vault')
+    await mkdir(root)
+    await writeFile(path.join(root, '旧篇.md'), 'old')
+    await writeFile(path.join(userData, 'vault.json'), serializeStoredVault(root))
+    const first = new VaultSession(userData, vi.fn())
+    first.restore()
+    let trashId = ''
+    try {
+      trashId = (await first.trashDelete('旧篇.md') as { trashId?: string }).trashId!
+      const metaPath = path.join(root, '.rgent-trash', trashId, 'meta.json')
+      const meta = JSON.parse(await readFile(metaPath, 'utf8'))
+      await writeFile(metaPath, `${JSON.stringify({ ...meta, deletedAt: new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString() })}\n`)
+    } finally { first.dispose() }
+    mockNativeTrash(root)
+    const second = new VaultSession(userData, vi.fn())
+    second.restore()
+    try {
+      const listed = await second.trashList()
+      if (!listed.ok) throw new Error(listed.error)
+      expect(listed.entries).toEqual([])
+      expect(existsSync(path.join(root, '.rgent-trash', trashId))).toBe(false)
+      expect(JSON.parse(await readFile(path.join(root, '.rgent-lifecycle'), 'utf8')).trashed ?? []).toEqual([])
+    } finally { second.dispose(); vi.restoreAllMocks(); await rm(userData, { recursive: true, force: true }) }
+  })
+
+  it('finishes a half-done moving entry when the vault opens', async () => {
+    const userData = await mkdtemp(path.join(os.tmpdir(), 'rgent-trash-moving-'))
+    const root = path.join(userData, 'vault')
+    await mkdir(root)
+    await writeFile(path.join(root, '原篇.md'), 'first')
+    const trashId = '33333333-3333-4333-8333-333333333333'
+    await mkdir(path.join(root, '.rgent-trash', trashId, 'payload'), { recursive: true })
+    await rename(path.join(root, '原篇.md'), path.join(root, '.rgent-trash', trashId, 'payload', '原篇.md'))
+    const objectVersion = secureFsFor(root).resolve(`.rgent-trash/${trashId}/payload/原篇.md`).at(-1)!.id
+    await writeFile(path.join(root, '.rgent-trash', trashId, 'meta.json'), `${JSON.stringify({
+      version: 1, trashId, originalRelPath: '原篇.md', objectVersion,
+      contentHash: createHash('sha256').update('first').digest('hex'), kind: 'note', attachmentRelPath: null,
+      bytes: Buffer.byteLength('first'), deletedAt: new Date().toISOString(), source: 'human', state: 'moving'
+    })}\n`)
+    await writeFile(path.join(userData, 'vault.json'), serializeStoredVault(root))
+    const session = new VaultSession(userData, vi.fn())
+    session.restore()
+    try {
+      // 读列表会等启动对账跑完：半截条目被补完，journal 记上同一条。
+      const listed = await session.trashList()
+      if (!listed.ok) throw new Error(listed.error)
+      expect(listed.entries).toEqual([expect.objectContaining({ id: trashId, originalRelPath: '原篇.md', state: 'ok' })])
+      const record = JSON.parse(await readFile(path.join(root, '.rgent-lifecycle'), 'utf8')).trashed
+      expect(record).toEqual([expect.objectContaining({ trashId, relPath: '原篇.md', objectVersion })])
+      expect(session.trashDiagnostics()).toEqual([])
+    } finally { session.dispose(); await rm(userData, { recursive: true, force: true }) }
+  })
 })

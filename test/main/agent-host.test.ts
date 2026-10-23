@@ -12,6 +12,110 @@ import { AgentHost } from '../../src/main/agent-host.ts'
 import { assertLedgerPreserved, partitionSource } from '../../src/markdown/partition.ts'
 import { appendLedgerChapter, markPrompt, upsertAiAnswer } from '../../src/main/host-source.ts'
 
+import type { NoteSnapshot } from '../../src/shared/ipc.ts'
+/** 测试用授权：范围语义与 LiveGrant 同形，读/结构/建都走同一套逐篇判据。 */
+function fakeGrant(options: {
+  origin: string
+  scope: import('../../src/shared/ipc.ts').AgentScopeLevel
+  credential: import('../../src/main/model-config.ts').ModelCredential
+  limits: { seconds: number; steps: number; tools: number }
+  read: (path: string) => Promise<NoteSnapshot>
+  root?: string
+  sessionId?: string
+  tier: (path: string) => Promise<'reference' | 'follow'>
+  sources?: readonly import('../../src/shared/ipc.ts').AuthorizedSource[]
+  acceptsObject?: (path: string, expected: string, current: string) => boolean
+  validateSources?: () => void | Promise<void>
+  assertLive?: () => void | Promise<void>
+  createTarget?: (path: string) => void
+  onRead?: (proof: import('../../src/main/task-authorization.ts').ScopeReadProof) => void
+}): TaskGrant {
+  const folder = options.origin.includes('/') ? options.origin.slice(0, options.origin.lastIndexOf('/')) : ''
+  const contains = (path: string): boolean => options.scope === 'vault' ? true
+    : options.scope === 'note' ? path === options.origin
+    : path === options.origin || (!!folder && path.startsWith(`${folder}/`))
+  const originProof: import('../../src/shared/ipc.ts').AuthorizedSource = options.sources?.find(source => source.relPath === options.origin) ?? {
+    sourceId: 'origin', relPath: options.origin, title: options.origin, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: 'f', tier: 'reference'
+  }
+  const actual = new Map<string, import('../../src/main/task-authorization.ts').ScopeReadProof>()
+  // 传入真实 sources 的夹具才核发起篇身份；只给范围的夹具按当次读到的快照当基准。
+  const verifyOrigin = options.sources !== undefined
+  let live = true
+  const assertActive = (): void => { if (!live) throw Error('AUTHORIZATION_REVOKED') }
+  const validateRead = async (path: string): Promise<import('../../src/main/task-authorization.ts').ScopeRead> => {
+    assertActive()
+    if (!contains(path)) throw Error('OUTSIDE_TASK_SCOPE')
+    await options.assertLive?.()
+    const tier = await options.tier(path)
+    if (tier !== 'reference' && tier !== 'follow') throw Error('OUTSIDE_TASK_SCOPE')
+    const snapshot = await options.read(path)
+    const proof = { relPath: path, sessionId: snapshot.sessionId ?? 's', objectVersion: snapshot.objectVersion ?? 'o', revision: snapshot.revision, fingerprint: createHash('sha256').update(snapshot.content).digest('hex'), tier } as const
+    if (path !== options.origin) actual.set(path, { ...proof })
+    options.onRead?.(proof)
+    return { snapshot, proof }
+  }
+  const scopeSources = (): string[] => {
+    const list = [options.origin, ...(options.sources ?? []).map(source => source.relPath)]
+    return [...new Set(list)].filter(contains)
+  }
+  const grant: TaskGrant = {
+    id: 'g', root: options.root ?? '/vault', sessionId: options.sessionId ?? 's', origin: options.origin, scope: options.scope, originProof,
+    sources: Object.freeze((options.sources ?? [originProof]).map(source => Object.freeze({ ...source }))),
+    credential: options.credential, limits: options.limits,
+    assertActive,
+    async validateSources() { assertActive(); await options.validateSources?.() },
+    async validateRead(path: string) {
+      const result = await validateRead(path)
+      if (path === options.origin && verifyOrigin) {
+        if (result.snapshot.revision !== originProof.revision || result.proof.fingerprint !== originProof.fingerprint) throw Error('SOURCE_CHANGED')
+        if (result.snapshot.objectVersion !== originProof.objectVersion && !(options.acceptsObject?.(path, originProof.objectVersion, result.snapshot.objectVersion ?? '') ?? false)) throw Error('SOURCE_REPLACED')
+      }
+      return result
+    },
+    contains,
+    actualSources: () => [originProof, ...actual.values()],
+    async list(page: { offset: number; limit: number }) {
+      const paths = scopeSources().sort((a, b) => a === options.origin ? -1 : b === options.origin ? 1 : a.localeCompare(b))
+      const items = paths.slice(page.offset, page.offset + page.limit).map(relPath => ({ relPath, title: relPath }))
+      return { items, total: paths.length, complete: page.offset + items.length >= paths.length }
+    },
+    async assertStructuralTarget(path: string) {
+      assertActive()
+      if (options.scope !== 'vault' || !contains(path)) throw Error('OUTSIDE_TASK_SCOPE')
+      if (path === options.origin) throw Error('ORIGIN_LOCKED')
+      if (await options.tier(path) !== 'reference') throw Error('OUTSIDE_TASK_SCOPE')
+    },
+    async assertCreateTarget(path: string) {
+      assertActive()
+      if (options.scope === 'note') throw Error('OUTSIDE_TASK_SCOPE')
+      const targetFolder = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+      if (targetFolder !== folder) throw Error('OUTSIDE_TASK_SCOPE')
+      if (path === options.origin) throw Error('TARGET_EXISTS')
+      options.createTarget?.(path)
+    },
+    assertWriteTarget(path: string) { if (path !== options.origin) throw Error('OUTSIDE_TASK_SCOPE') },
+    acknowledgeOrigin(snapshot) {
+      assertActive()
+      originProof.objectVersion = snapshot.objectVersion
+      originProof.revision = snapshot.revision
+      originProof.fingerprint = createHash('sha256').update(snapshot.content).digest('hex')
+    },
+    async assertLive(action, path) {
+      assertActive()
+      await options.assertLive?.()
+      if (action === 'write') grant.assertWriteTarget(path ?? '')
+      if (action === 'read') await grant.validateRead(path ?? '')
+      if (action === 'model') await grant.validateSources()
+    },
+    assertNetwork() { throw Error('NETWORK_NOT_AUTHORIZED') },
+    revokeNetwork() {},
+    assertMcp() { throw Error('MCP_NOT_AUTHORIZED') },
+    revokeMcp() {},
+    revoke() { live = false }
+  }
+  return grant
+}
+
 /** 稳态正文：已有一章账本，正文尾部留一个新口令段。与真实落盘形状一致。 */
 function withExistingLedger(): { source: string; range: { start: number; end: number } } {
   let source = markPrompt('/写个回答\n', { taskId: 't0', range: { start: 0, end: 5 }, expectedText: '/写个回答', promptText: '写个回答' })
@@ -416,7 +520,7 @@ it.each(['valid','revision','object','session'] as const)('continues only a veri
  const credential={provider:'custom' as const,baseURL:'https://model.example/v1',modelId:'m',contextTokens:16000,apiKey:'fixture'},limits={seconds:30,steps:4,tools:0}
  const read=async()=>({content,revision,sessionId:'s',objectVersion})
  const registry=new TaskAuthorizationRegistry({root:()=>'/v',session:()=>'s',tree:async()=>[{kind:'note',relPath:'a.md',name:'a.md'}],read,tier:async()=> 'reference',acceptsObject:(_path,previous,next)=>previous==='old'&&next==='new',configuration:()=>({credential,limits})})
- const request={modelRecordId:'m',relPath:'a.md',sessionId:'s',objectVersion,expectedRevision:revision,range:{start:0,end:2},expectedText:'/问',level:'write' as const,promptText:'问',references:[]}
+ const request={modelRecordId:'m',relPath:'a.md',sessionId:'s',objectVersion,expectedRevision:revision,range:{start:0,end:2},expectedText:'/问',scope:'note' as const,promptText:'问'}
  const preview=await registry.preview('owner',request);let writes=0,streams=0
  const host=new AgentHost({root:()=>'/v',session:()=>'s',acceptsObject:(_path,previous,next)=>previous==='old'&&next==='new',tier:async()=> 'reference',authorize:input=>registry.consume('owner',input as never),prepareSource:async()=>{
   const previousRevision=revision;content='/问\n';revision=hash(content);objectVersion='new'
@@ -480,9 +584,9 @@ function memoryToolHarness(options:{calls?:{id:string;name:string;input:unknown}
  const credential={provider:'custom' as const,baseURL:'https://model.example/v1',modelId:'m',contextTokens:32000,apiKey:'fixture'}
  const source={id:'s',version:1,relPath:'outside.md',objectVersion:'outside',revision:'a'.repeat(64),permissionTier:'reference' as const,kind:'body' as const,taskId:null,taskMaterialHash:null,classification:'human' as const,start:0,end:2,text:'依据',hash:'b'.repeat(64),basisHash:'c'.repeat(64),sourceDeps:[],memoryDeps:[]}
  const memory={context:()=>({sessionId:'s',vaultKey:'v'}),config:()=>({enabled,revision:enabled?0:1}),entries:async(ids?:readonly string[])=>{const result=options.empty?[]:[{id:'m',version:entriesVersion,content:'火星计划约定',layer:'demand' as const,scope:'仅项目甲',attribution:'人的约定',status:paused?'paused' as const:'active' as const,reason:null,updatedAt:'2026-10-05',updateBasis:{kind:'manual' as const,id:'manual',version:1},sources:[source]}];if(ids){proofReads++;if(proofReads===1)await options.proof?.()}return result}}
- const originProof={sourceId:'origin',relPath:'a.md',title:'a',sessionId:'s',objectVersion:'o',revision:'1',fingerprint:createHash('sha256').update(content).digest('hex'),tier:'reference' as const}
- const grant={id:'g',root:'/v',sessionId:'s',origin:'a.md',level:'write' as const,autoApproveWrites:false,originProof,sources:[originProof,...(options.library?[{sourceId:'external',relPath:'b.md',title:'b',sessionId:'s',objectVersion:'b',revision:'b',fingerprint:'b',tier:'reference' as const}]:[])],credential,limits:{seconds:30,steps:options.steps??12,tools:options.tools??20},assertActive(){},async assertLive(){},async validateSources(){},assertWriteTarget(){},acknowledgeOrigin(){},revoke(){},assertNetwork(){throw Error('NETWORK_NOT_AUTHORIZED')},revokeNetwork(){},assertMcp(){throw Error('MCP_NOT_AUTHORIZED')},revokeMcp(){}}
  const read=async(path:string)=>path==='b.md'?{content:'外篇普通正文',revision:'b',sessionId:'s',objectVersion:'b'}:{content,revision:String(revision),sessionId:'s',objectVersion:'o'}
+ const originProof={sourceId:'origin',relPath:'a.md',title:'a',sessionId:'s',objectVersion:'o',revision:'1',fingerprint:createHash('sha256').update(content).digest('hex'),tier:'reference' as const}
+ const grant=fakeGrant({origin:'a.md',root:'/v',scope:options.library?'vault':'note',credential,limits:{seconds:30,steps:options.steps??12,tools:options.tools??20},read,tier:async()=> 'reference',sources:[originProof,...(options.library?[{sourceId:'external',relPath:'b.md',title:'b',sessionId:'s',objectVersion:'b',revision:'b',fingerprint:'b',tier:'reference' as const}]:[])]})
  const host=new AgentHost({ledger:history.ledger,...(options.library?{createReadOnlyTools:(grant:import('../../src/main/task-authorization.ts').TaskGrant,id:string)=>createScopedAgentTools(grant,id,{read,tier:async()=> 'reference',acceptsObject:()=>false})}:{}),root:()=>'/v',session:()=> 's',read,write:async(_path,next,expected)=>{if(expected!==String(revision))throw Error('CONFLICT');content=next;return String(++revision)},tier:async()=> 'reference',credential:()=>credential,limits:()=>grant.limits,authorize:async()=>grant,memory,stream:async function*(){throw Error('OLD_STREAM')},streamStep:async function*(input){requests.push(structuredClone(input));dispatches++;if(dispatches===1){for(const c of options.calls??[{id:'one',name:'search_memory',input:{query:'火星'}}])yield {type:'tool-call',...c};yield {type:'finish',reason:'tool-calls'}}else {options.change?.();yield {type:'text',text:'已答'};yield {type:'finish',reason:'stop'}}},emit:()=>{}})
  if(options.verified!==false)host.supportsMemorySearch=()=>true
  const run=()=>host.start({relPath:'a.md',sessionId:'s',objectVersion:'o',expectedRevision:'1',range:{start:content.indexOf('/问'),end:content.indexOf('/问')+2},expectedText:'/问',promptText:'问',memorySearchAuthorized:true})
@@ -638,22 +742,18 @@ it.each(['missing-connection','extra-field','material-envelope'] as const)('save
  }finally{vault.dispose();await rm(base,{recursive:true,force:true})}
 })
 
-function writeToolHarness(options: { text?: string; calls?: { id: string; name: string; input: unknown }[]; confirm?: (request: import('../../src/main/agent-host.ts').AgentWriteConfirm) => Promise<boolean>; noCreate?: boolean; relocation?: boolean; trash?: boolean; originOnly?: boolean; extras?: { relPath: string; tier: 'reference' | 'follow' }[]; sourcesVanishAfterTrash?: boolean; recheckAfterTrash?: boolean; trashError?: string } = {}) {
+function writeToolHarness(options: { text?: string; calls?: { id: string; name: string; input: unknown }[]; noCreate?: boolean; relocation?: boolean; trash?: boolean; scope?: import('../../src/shared/ipc.ts').AgentScopeLevel; extras?: { relPath: string; tier: 'reference' | 'follow' }[]; sourcesVanishAfterTrash?: boolean; recheckAfterTrash?: boolean; trashError?: string; createTargetDenied?: boolean; legacyConfirm?: (request: unknown) => Promise<boolean> } = {}) {
   let content = '人写的段落。\n\n/问\n'
   let revision = 1
   const history = hostLedgerFixture()
   const requests: Parameters<NonNullable<import('../../src/main/agent-host.ts').HostDependencies['streamStep']>>[0][] = []
   const credential = { provider: 'custom' as const, baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 32000, apiKey: 'fixture' }
-  const extras = options.originOnly ? [] : (options.extras ?? [{ relPath: 'b.md', tier: 'reference' as const }])
-  const source = (relPath: string, tier: 'reference' | 'follow' = 'reference') => ({ sourceId: relPath === 'a.md' ? 'origin' : relPath, relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: relPath === 'a.md' ? createHash('sha256').update(content).digest('hex') : 'f',
-    tier, kind: 'body' as const, taskId: null, taskMaterialHash: null, classification: 'human' as const, start: 0, end: 2, hash: 'a'.repeat(64), basisHash: 'b'.repeat(64), sourceDeps: [], memoryDeps: [] })
-  const grant = { id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', originProof: source('a.md'), sources: [source('a.md'), ...extras.map(item => source(item.relPath, item.tier))], credential, limits: { seconds: 30, steps: 4, tools: 4 }, level:'write' as const, autoApproveWrites:false,
-    assertActive() {}, validateSources: async () => { if (options.sourcesVanishAfterTrash && trashed.length) throw Error('ENOENT') }, acknowledgeOrigin() {}, revoke() {}, assertNetwork() { throw Error('NETWORK_NOT_AUTHORIZED') }, revokeNetwork() {}, assertMcp() { throw Error('MCP_NOT_AUTHORIZED') }, revokeMcp() {},
-    assertWriteTarget(path: string) { if (path !== 'a.md') throw Error('OUTSIDE_TASK_SCOPE') },
-    assertLive: async () => { if (options.sourcesVanishAfterTrash && trashed.length) throw Error('ENOENT') } }
+  const extras = options.extras ?? [{ relPath: 'b.md', tier: 'reference' as const }]
+  const source = (relPath: string, tier: 'reference' | 'follow' = 'reference') => ({ sourceId: relPath === 'a.md' ? 'origin' : relPath, relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: relPath === 'a.md' ? createHash('sha256').update(content).digest('hex') : 'f', tier })
   const created: { relPath: string; body: string }[] = []
   const moved: { id: string; repairLinks: boolean }[] = []
   const trashed: { id: string; attribution?: { taskId: string; prompt: string } }[] = []
+  const events: unknown[] = []
   const read = async (path: string) => {
     if (path === 'a.md') return { content, revision: String(revision), sessionId: 's', objectVersion: 'o' }
     if (extras.some(item => item.relPath === path) || path === 'b.md' || path === 'c.md') return { content: '外篇正文', revision: 'b', sessionId: 's', objectVersion: 'o' }
@@ -667,11 +767,18 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
     return String(revision)
   }
   const extraTier = (path: string): 'reference' | 'follow' => extras.find(item => item.relPath === path)?.tier ?? 'reference'
+  const grant = fakeGrant({
+    origin: 'a.md', scope: options.scope ?? 'vault', credential, limits: { seconds: 30, steps: 4, tools: 4 },
+    read, tier: async (path: string) => extraTier(path),
+    sources: [source('a.md'), ...extras.map(item => source(item.relPath, item.tier))],
+    validateSources: () => { if (options.sourcesVanishAfterTrash && trashed.length) throw Error('ENOENT') },
+    assertLive: () => { if (options.sourcesVanishAfterTrash && trashed.length) throw Error('ENOENT') },
+    createTarget: () => { if (options.createTargetDenied) throw Error('OUTSIDE_TASK_SCOPE') }
+  })
   let host!: AgentHost
   host = new AgentHost({ ledger: history.ledger, root: () => '/vault', read, write, tier: async (_root, path) => extraTier(path), credential: () => credential, limits: () => grant.limits,
     authorize: async () => grant, session: () => 's', stream: async function* () {},
     createReadOnlyTools: (granted, id, _memory, _materials, writeTool) => createScopedAgentTools(granted, id, { read, tier: async (_root, path) => extraTier(path), acceptsObject: () => false, write: writeTool }),
-    ...(options.confirm ? { confirmWrite: options.confirm } : {}),
     ...(options.relocation ? {
       relocationPreview: async (request: { kind: 'note'; source: string; target: string }) => ({ id: 'lib-1', source: request.source, target: request.target, moves: [{ from: request.source, to: request.target }], linkChanges: [], permissionChanges: [] }),
       relocationCommit: async (id: string, repairLinks: boolean) => { moved.push({ id, repairLinks }); return { moved: [{ from: 'b.md', to: '归档笔记.md' }] } }
@@ -699,9 +806,9 @@ function writeToolHarness(options: { text?: string; calls?: { id: string; name: 
       }
       else { yield { type: 'text', text: '已答。' }; yield { type: 'finish', reason: 'stop' } }
     },
-    emit: () => {} })
+    emit: (event) => { events.push(event) } })
   const run = () => host.start({ relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: '1', range: { start: content.indexOf('/问'), end: content.indexOf('/问') + 2 }, expectedText: '/问', promptText: '问' })
-  return { host, history, requests, run, content: () => content, created, moved, trashed }
+  return { host, history, requests, events, run, content: () => content, created, moved, trashed }
 }
 
 /** 包 2：补任务发起篇——模型请求经真门、真组合器落到正文并进账本。 */
@@ -730,34 +837,27 @@ it('超限的追加被拒并如实记 refused:OVER_LIMIT_BYTES，正文不被写
   expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'append_to_note')?.outcome).toContain('refused:OVER_LIMIT_BYTES')
 })
 
-/** 包 3：建——模型提议、人点一下、才落盘。 */
-it('人同意后新建笔记：落点在发起篇所在目录，并记进账本与工具轨迹', async () => {
-  const asked: string[] = []
-  const app = writeToolHarness({
-    calls: [{ id: 'c1', name: 'create_note', input: { name: '新笔记', body: '新笔记正文。' } }],
-    confirm: async request => { if (request.kind !== 'create') throw Error('UNEXPECTED_CONFIRM'); asked.push(request.relPath); return true }
-  })
+/** 包 3：建——档位内直接建，不再有人确认卡；落点与范围判据照旧。 */
+it('整库／同册档位内直接新建笔记：落点在发起篇所在目录，并给界面一条可打开的落点事件', async () => {
+  const app = writeToolHarness({ calls: [{ id: 'c1', name: 'create_note', input: { name: '新笔记', body: '新笔记正文。' } }] })
   const task = await app.run()
   expect(await task.done).toEqual({ status: 'completed' })
-  expect(asked).toEqual(['新笔记.md'])
   expect(app.created).toEqual([{ relPath: '新笔记.md', body: '新笔记正文。' }])
+  expect(app.events).toContainEqual(expect.objectContaining({ id: task.id, created: { relPath: '新笔记.md' } }))
   expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'create_note')?.outcome).toContain('ok:新笔记.md·co1 (1)')
   expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('建笔记')
 })
 
-it('人拒绝就不落盘，账本记 refused:DECLINED，整场照常收尾', async () => {
-  const app = writeToolHarness({
-    calls: [{ id: 'c1', name: 'create_note', input: { name: '不想要的', body: '正文' } }],
-    confirm: async () => false
-  })
+it('建的目标被范围判据拒时不落盘，账本记 refused:OUTSIDE_TASK_SCOPE', async () => {
+  const app = writeToolHarness({ calls: [{ id: 'c1', name: 'create_note', input: { name: '越界', body: '正文' } }], createTargetDenied: true })
   const task = await app.run()
   expect(await task.done).toEqual({ status: 'completed' })
   expect(app.created).toEqual([])
-  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'create_note')?.outcome).toContain('refused:DECLINED')
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'create_note')?.outcome).toContain('refused:OUTSIDE_TASK_SCOPE')
 })
 
-it('没有确认入口时不宣告建工具，硬叫也只能吃 TOOL_NOT_ALLOWED', async () => {
-  const app = writeToolHarness({ calls: [{ id: 'c1', name: 'create_note', input: { name: '偷建', body: '正文' } }], noCreate: true })
+it('本篇范围不宣告建；硬叫也只吃未注册，不会落盘', async () => {
+  const app = writeToolHarness({ scope: 'note', calls: [{ id: 'c1', name: 'create_note', input: { name: '偷建', body: '正文' } }] })
   const task = await app.run()
   expect(await task.done).toEqual({ status: 'completed' })
   expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('create_note')
@@ -767,34 +867,44 @@ it('没有确认入口时不宣告建工具，硬叫也只能吃 TOOL_NOT_ALLOWE
   expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('未执行')
 })
 
-/** 结构工具（改名／挪）：预览＋一次点击，之后本场按「库在任务底下变了」收尾。 */
-it('模型请求改名：人同意才走库层迁移，随后本场收尾并留痕', async () => {
-  const asked: import('../../src/main/agent-host.ts').AgentWriteConfirm[] = []
+it('没有建的能力（宿主没接落盘）时不宣告 create_note', async () => {
+  const app = writeToolHarness({ calls: [{ id: 'c1', name: 'create_note', input: { name: '偷建', body: '正文' } }], noCreate: true })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('create_note')
+  expect(app.created).toEqual([])
+})
+
+/** 结构工具（改名／挪）：整库档位内直接执行，没有确认卡；之后本场按「库在任务底下变了」收尾。 */
+it('整库档位内直接改名：走库层迁移，随后本场收尾并留痕', async () => {
   const app = writeToolHarness({
     calls: [{ id: 'c1', name: 'rename_note', input: { relPath: 'b.md', newName: '归档笔记' } }],
-    relocation: true,
-    confirm: async request => { asked.push(request); return true }
+    relocation: true
   })
   const task = await app.run()
   // 本场来源被搬走：已写内容与账本保留，但不继续读旧路径（否则只会假失败）。
   expect(await task.done).toEqual({ status: 'cancelled', reason: 'vault-change' })
-  expect(asked[0]).toMatchObject({ kind: 'rename', source: 'b.md', target: '归档笔记.md' })
   expect(app.moved).toEqual([{ id: 'lib-1', repairLinks: true }])
   // 账本要能审：新身份与影响面都在 outcome 里。
   expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'rename_note')?.outcome).toBe('ok:归档笔记.md·引用0·权限0 (1)')
   expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('改名')
 })
 
-it('模型请求挪动：人拒绝就什么都不动，本场照常收尾', async () => {
-  const app = writeToolHarness({
-    calls: [{ id: 'c1', name: 'move_note', input: { relPath: 'b.md', targetFolder: '归档' } }],
-    relocation: true,
-    confirm: async () => false
-  })
+it('整库档位内直接挪动，不再弹确认', async () => {
+  const app = writeToolHarness({ calls: [{ id: 'c1', name: 'move_note', input: { relPath: 'b.md', targetFolder: '归档' } }], relocation: true })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'cancelled', reason: 'vault-change' })
+  expect(app.moved).toEqual([{ id: 'lib-1', repairLinks: true }])
+  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'move_note')?.outcome).toContain('ok:归档/b.md')
+})
+
+it('同册档位不宣告结构工具；硬叫也只吃未注册，不惊动迁移', async () => {
+  const app = writeToolHarness({ scope: 'folder', calls: [{ id: 'c1', name: 'rename_note', input: { relPath: 'b.md', newName: '偷改' } }], relocation: true })
   const task = await app.run()
   expect(await task.done).toEqual({ status: 'completed' })
+  expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('rename_note')
   expect(app.moved).toEqual([])
-  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'move_note')?.outcome).toContain('refused:DECLINED')
+  expect(app.history.records().at(-1)?.provenance?.tools?.some(item => item.name === 'rename_note')).toBe(false)
 })
 
 it('没有库层迁移时不宣告结构工具，硬叫也只吃未注册', async () => {
@@ -806,26 +916,42 @@ it('没有库层迁移时不宣告结构工具，硬叫也只吃未注册', asyn
   expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('未执行')
 })
 
-it('仅发起篇也宣告补与建，不宣告读库搜库与结构工具', async () => {
-  const app = writeToolHarness({ originOnly: true, relocation: true, confirm: async () => true })
+it('建／改名／删除都不再调用任何写确认入口', async () => {
+  const confirm = vi.fn(async () => true)
+  const created = writeToolHarness({ legacyConfirm: confirm, calls: [{ id: 'c1', name: 'create_note', input: { name: '新笔记', body: '正文' } }] })
+  await (await created.run()).done
+  expect(created.created).toHaveLength(1)
+  const renamed = writeToolHarness({ legacyConfirm: confirm, relocation: true, calls: [{ id: 'c1', name: 'rename_note', input: { relPath: 'b.md', newName: '归档笔记' } }] })
+  await (await renamed.run()).done
+  expect(renamed.moved).toHaveLength(1)
+  if (process.platform === 'darwin') {
+    const removed = writeToolHarness({ legacyConfirm: confirm, trash: true, calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }] })
+    await (await removed.run()).done
+    expect(removed.trashed).toHaveLength(1)
+  }
+  expect(confirm).not.toHaveBeenCalled()
+})
+
+it('账本记实际读到的来源，而不是预览期的全量清单', async () => {
+  const app = writeToolHarness({ scope: 'vault', extras: [{ relPath: 'b.md', tier: 'reference' }], calls: [{ id: 'c1', name: 'search_library', input: { query: '外篇' } }] })
+  const task = await app.run()
+  expect(await task.done).toEqual({ status: 'completed' })
+  const provenance = app.history.records().at(-1)?.provenance
+  expect(provenance?.scope).toEqual(['a.md', 'b.md'])
+  expect(provenance?.sources.map(source => source.relPath)).toEqual(['b.md'])
+  expect(provenance?.tools?.find(item => item.name === 'search_library')?.outcome).toBe('ok (1)')
+})
+
+it('本篇范围只宣告补，不宣告建/读库/搜库/结构/删除', async () => {
+  const app = writeToolHarness({ scope: 'note', relocation: true, trash: true })
   const task = await app.run()
   expect(await task.done).toEqual({ status: 'completed' })
   const names = Object.keys(app.requests[0]!.tools ?? {})
-  expect(names).toEqual(expect.arrayContaining(['append_to_note', 'create_note']))
-  expect(names).not.toContain('read_library')
-  expect(names).not.toContain('search_library')
-  expect(names).not.toContain('rename_note')
-  expect(names).not.toContain('move_note')
-  expect(names).not.toContain('delete_note')
+  expect(names).toEqual(['append_to_note'])
 })
 
-it('模型请求删除：人同意才送篓，随后本场收尾并留痕', async () => {
-  const asked: import('../../src/main/agent-host.ts').AgentWriteConfirm[] = []
-  const app = writeToolHarness({
-    calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }],
-    trash: true,
-    confirm: async request => { asked.push(request); return true }
-  })
+it('整库档位内直接删除：走同一条送篓路，随后本场收尾并留痕', async () => {
+  const app = writeToolHarness({ calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }], trash: true })
   const task = await app.run()
   if (process.platform !== 'darwin') {
     expect(await task.done).toEqual({ status: 'completed' })
@@ -834,8 +960,7 @@ it('模型请求删除：人同意才送篓，随后本场收尾并留痕', asyn
     return
   }
   expect(await task.done).toEqual({ status: 'cancelled', reason: 'vault-change' })
-  expect(asked[0]).toMatchObject({ kind: 'delete', relPath: 'b.md', hasAttachments: false })
-  expect(app.trashed).toEqual([{ id: 'trash-1', attribution: { taskId: task.id, prompt: 'AI 提议移入系统废纸篓（人已确认）' } }])
+  expect(app.trashed).toEqual([{ id: 'trash-1', attribution: { taskId: task.id, prompt: 'AI 提议移入库内已删除（档位内直接执行）' } }])
   expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'delete_note')?.outcome).toBe('ok:b.md (1)')
   expect(app.history.records().at(-1)?.trace?.join('\n')).toContain('删笔记')
 })
@@ -845,8 +970,7 @@ it('送篓后旧来源再核只会假失败：本场仍按 vault-change 收尾�
     calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }],
     trash: true,
     sourcesVanishAfterTrash: true,
-    recheckAfterTrash: true,
-    confirm: async () => true
+    recheckAfterTrash: true
   })
   const task = await app.run()
   if (process.platform !== 'darwin') {
@@ -859,27 +983,16 @@ it('送篓后旧来源再核只会假失败：本场仍按 vault-change 收尾�
   expect(app.history.records().at(-1)?.trace?.join('\n')).not.toContain('ENOENT')
 })
 
-it('模型请求删除：人拒绝就什么都不动，本场照常收尾', async () => {
-  const app = writeToolHarness({
-    calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }],
-    trash: true,
-    confirm: async () => false
-  })
+it('同册档位不宣告删除；硬叫也不送篓', async () => {
+  const app = writeToolHarness({ scope: 'folder', calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }], trash: true })
   const task = await app.run()
   expect(await task.done).toEqual({ status: 'completed' })
   expect(app.trashed).toEqual([])
-  if (process.platform !== 'darwin') {
-    expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('delete_note')
-    return
-  }
-  expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'delete_note')?.outcome).toContain('refused:DECLINED')
+  expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('delete_note')
 })
 
 it('没有送篓能力时不宣告 delete_note', async () => {
-  const app = writeToolHarness({
-    calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }],
-    confirm: async () => true
-  })
+  const app = writeToolHarness({ calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }] })
   const task = await app.run()
   expect(await task.done).toEqual({ status: 'completed' })
   expect(Object.keys(app.requests[0]!.tools ?? {})).not.toContain('delete_note')
@@ -892,8 +1005,7 @@ it('送篓后报 TRASH_CONFLICT：错误如实进账本，但 structuralMoves �
     calls: [{ id: 'c1', name: 'delete_note', input: { relPath: 'b.md' } }],
     trash: true,
     sourcesVanishAfterTrash: true,
-    trashError: 'TRASH_CONFLICT',
-    confirm: async () => true
+    trashError: 'TRASH_CONFLICT'
   })
   const task = await app.run()
   if (process.platform !== 'darwin') {
@@ -914,15 +1026,12 @@ it('送篓后报 TRASH_CONFLICT：错误如实进账本，但 structuralMoves �
 })
 
 it('delete_note 的工具返回与账本 outcome 都带出孤儿与降级字段', async () => {
-  const source = (relPath: string) => ({ sourceId: `id-${relPath}`, relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: 'f', tier: 'reference' as const })
-  const origin = source('a.md')
-  const grant: TaskGrant = {
-    id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', originProof: origin, sources: [origin],
-    credential: { provider: 'custom', baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 32000, apiKey: 'fixture' },
-    limits: { seconds: 30, steps: 4, tools: 4 }, level:'write' as const, autoApproveWrites:false,
-    assertActive() {}, validateSources: async () => {}, assertWriteTarget() {}, assertLive: async () => {}, acknowledgeOrigin() {}, revoke() {},
-    assertNetwork() { throw Error('NETWORK_NOT_AUTHORIZED') }, revokeNetwork() {}, assertMcp() { throw Error('MCP_NOT_AUTHORIZED') }, revokeMcp() {}
-  }
+  const credential = { provider: 'custom' as const, baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 32000, apiKey: 'fixture' }
+  const grant = fakeGrant({
+    origin: 'a.md', scope: 'vault', credential, limits: { seconds: 30, steps: 4, tools: 4 },
+    read: async () => ({ content: '正文', revision: '1', sessionId: 's', objectVersion: 'o' }),
+    tier: async () => 'reference'
+  })
   const tools = createScopedAgentTools(grant, 't1', {
     read: async () => ({ content: '正文', revision: '1', sessionId: 's', objectVersion: 'o' }),
     tier: async () => 'reference',
@@ -937,7 +1046,7 @@ it('delete_note 的工具返回与账本 outcome 都带出孤儿与降级字段'
   expect(tools.summary()).toContainEqual({ name: 'delete_note', outcome: 'ok:b.md·孤儿:attachment-failed·降级:record-failed,ledger-failed (1)' })
 })
 
-/** 三场同时在跑：发起甲这一场在授权范围内“读”了目标.md；发起乙的标签页在笔记.md 的附件夹子树里。 */
+/** 每场一个范围：同册按目录包含，本篇只看自己，整库看整库。 */
 function affectedHarness() {
   const contents = new Map<string, string>()
   const body = () => '前言\n\n/问\n\n后文\n'
@@ -947,35 +1056,26 @@ function affectedHarness() {
   }
   const credential = { provider: 'custom' as const, baseURL: 'https://model.example/v1', modelId: 'm', contextTokens: 32000, apiKey: 'fixture' }
   const limits = { seconds: 30, steps: 4, tools: 0 }
-  const source = (relPath: string) => ({ sourceId: `id-${relPath}`, relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1', fingerprint: 'f', tier: 'reference' as const })
+  const read = async (relPath: string) => ({ content: contentOf(relPath), revision: '1', sessionId: 's', objectVersion: 'o' })
+  const scopes: Record<string, import('../../src/shared/ipc.ts').AgentScopeLevel> = {
+    '资料/发起甲.md': 'folder', '笔记/附件页.md': 'folder', '别处/无关.md': 'folder', '整库/任务.md': 'vault', '笔记本.md': 'note'
+  }
   const host = new AgentHost({
     ledger: hostLedgerFixture().ledger,
     root: () => '/vault',
     session: () => 's',
-    read: async (relPath) => ({ content: contentOf(relPath), revision: '1', sessionId: 's', objectVersion: 'o' }),
+    read,
     write: async (relPath, next) => { contents.set(relPath, next); return '2' },
     tier: async () => 'reference',
     credential: () => credential,
     limits: () => limits,
-    createReadOnlyTools: (granted, id) => createScopedAgentTools(granted, id, {
-      read: async (relPath) => ({ content: contentOf(relPath), revision: '1', sessionId: 's', objectVersion: 'o' }),
-      tier: async () => 'reference',
-      acceptsObject: () => false
-    }),
+    createReadOnlyTools: (granted, id) => createScopedAgentTools(granted, id, { read, tier: async () => 'reference', acceptsObject: () => false }),
     stream: async function* (_input, signal) { await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true })) },
     streamStep: async function* (_input, signal) { await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true })) },
-    authorize: async (input) => {
-      const origin = source(input.relPath)
-      const grant: TaskGrant = {
-        id: `grant-${input.relPath}`, root: '/vault', sessionId: 's', origin: input.relPath, originProof: origin,
-        // 只有发起甲这一场的 scopePaths 含目标.md：它的任务 relPath 与目标无关，旧写法找不到它。
-        sources: input.relPath === '发起甲.md' ? [origin, source('目标.md')] : [origin],
-        credential, limits, level:'write' as const, autoApproveWrites:false,
-        assertActive() {}, validateSources: async () => {}, assertWriteTarget() {}, assertLive: async () => {}, acknowledgeOrigin() {}, revoke() {},
-        assertNetwork() { throw Error('NETWORK_NOT_AUTHORIZED') }, revokeNetwork() {}, assertMcp() { throw Error('MCP_NOT_AUTHORIZED') }, revokeMcp() {}
-      }
-      return grant
-    },
+    authorize: async (input) => fakeGrant({
+      origin: input.relPath, scope: scopes[input.relPath] ?? 'note', credential, limits, read,
+      tier: async () => 'reference'
+    }),
     emit: () => {}
   })
   const start = (relPath: string) => {
@@ -986,20 +1086,20 @@ function affectedHarness() {
   return { host, start }
 }
 
-it('affectedBy 按任务授权范围命中目标与附件夹子树，并排除发起者自己', async () => {
+it('affectedBy 按范围命中目标与附件夹子树，并排除发起者自己', async () => {
   const app = affectedHarness()
-  const first = await app.start('发起甲.md')
+  const first = await app.start('资料/发起甲.md')
   const inside = await app.start('笔记/附件页.md')
   const unrelated = await app.start('别处/无关.md')
   expect(app.host.active()).toHaveLength(3)
-  // 目标本身：任务 relPath 是发起甲.md，但授权范围里有目标.md，必须被找出来。
-  expect(app.host.affectedBy('/vault', ['目标.md', '目标']).map(task => task.id)).toEqual([first.id])
-  // 附件夹子树：目标笔记的附件夹前缀（笔记/）覆盖夹里的标签页。
+  // 同册：目标在「资料」目录里，发起甲这一场即使还没读它也可能受这次操作影响。
+  expect(app.host.affectedBy('/vault', ['资料/目标.md', '资料/目标']).map(task => task.id)).toEqual([first.id])
+  // 前缀就是目录本身：笔记/ 下的标签页受「笔记」子树操作影响。
   expect(app.host.affectedBy('/vault', ['笔记.md', '笔记']).map(task => task.id)).toEqual([inside.id])
   // 发起这次操作的那一场不能把自己停掉。
-  expect(app.host.affectedBy('/vault', ['目标.md', '目标'], first.id)).toEqual([])
+  expect(app.host.affectedBy('/vault', ['资料/目标.md', '资料/目标'], first.id)).toEqual([])
   // 不相干的场不受影响。
-  expect(app.host.affectedBy('/vault', ['目标.md', '目标']).some(task => task.id === unrelated.id)).toBe(false)
+  expect(app.host.affectedBy('/vault', ['资料/目标.md', '资料/目标']).some(task => task.id === unrelated.id)).toBe(false)
   app.host.cancelAll('user')
   await Promise.all([first.done, inside.done, unrelated.done])
 })
@@ -1014,12 +1114,21 @@ it('affectedBy 的父目录前缀不误伤同名前缀的另一个名字', async
   await Promise.all([inside.done, sibling.done])
 })
 
-it('额外参考才宣告读库搜库；必须遵循可参考但不能当改名目标', async () => {
+it('affectedBy 对整库任务保守：任何文件操作都算可能影响它', async () => {
+  const app = affectedHarness()
+  const vault = await app.start('整库/任务.md')
+  const unrelated = await app.start('别处/无关.md')
+  expect(app.host.affectedBy('/vault', ['资料/目标.md', '资料/目标']).map(task => task.id)).toEqual([vault.id])
+  expect(app.host.affectedBy('/vault', ['完全不存在的目标.md']).map(task => task.id)).toEqual([vault.id])
+  app.host.cancelAll('user')
+  await Promise.all([vault.done, unrelated.done])
+})
+
+it('整库宣告读库搜库、建与结构；必须遵循可参考但不能当结构目标', async () => {
   const app = writeToolHarness({
     extras: [{ relPath: 'b.md', tier: 'reference' }, { relPath: 'c.md', tier: 'follow' }],
     relocation: true,
-    calls: [{ id: 'c1', name: 'rename_note', input: { relPath: 'c.md', newName: '改掉遵循' } }],
-    confirm: async () => true
+    calls: [{ id: 'c1', name: 'rename_note', input: { relPath: 'c.md', newName: '改掉遵循' } }]
   })
   const task = await app.run()
   expect(await task.done).toEqual({ status: 'completed' })
@@ -1029,18 +1138,15 @@ it('额外参考才宣告读库搜库；必须遵循可参考但不能当改名�
   expect(app.history.records().at(-1)?.provenance?.tools?.find(item => item.name === 'rename_note')?.outcome).toContain('refused:OUTSIDE_TASK_SCOPE')
 })
 
-it('只有必须遵循外篇时宣告读搜，不宣告改名挪', async () => {
-  const app = writeToolHarness({
-    extras: [{ relPath: 'c.md', tier: 'follow' }],
-    relocation: true,
-    confirm: async () => true
-  })
+it('同册宣告读搜与建，但不宣告结构／删除', async () => {
+  const app = writeToolHarness({ scope: 'folder', extras: [{ relPath: 'c.md', tier: 'follow' }], relocation: true, trash: true })
   const task = await app.run()
   expect(await task.done).toEqual({ status: 'completed' })
   const names = Object.keys(app.requests[0]!.tools ?? {})
   expect(names).toEqual(expect.arrayContaining(['read_library', 'search_library', 'append_to_note', 'create_note']))
   expect(names).not.toContain('rename_note')
   expect(names).not.toContain('move_note')
+  expect(names).not.toContain('delete_note')
 })
 
 describe('skills in the request', () => {
@@ -1203,7 +1309,7 @@ describe('start 前复核联网可用性快照', () => {
     })
     const request = {
       modelRecordId: 'm', relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: 'r',
-      range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', references: [], level:'write' as const
+      range: { start: 0, end: 2 }, expectedText: '/问', promptText: '问', scope: 'vault' as const
     }
     const host = new AgentHost({
       ledger: hostLedgerFixture().ledger,

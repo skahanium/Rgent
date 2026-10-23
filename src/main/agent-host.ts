@@ -15,8 +15,6 @@ import { buildShingles, containsEcho } from './content-echo.ts'
 import { createWriteGate } from './agent-write.ts'
 import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 
-/** 人确认的载荷：建、改名／挪、删除。 */
-export type AgentWriteConfirm = ({ kind: 'create'; relPath: string; body: string } | { kind: 'rename' | 'move'; source: string; target: string; moves: number; linkChanges: number; permissionChanges: number } | { kind: 'delete'; relPath: string; hasAttachments: boolean }) & { signal: AbortSignal }
 import { MODEL_STREAM_BOUNDS, type ModelStepEvent, type ToolSchema } from './model-stream.ts'
 import { supportsNativeSearch } from './native-search.ts'
 import { randomUUID } from 'node:crypto'
@@ -229,7 +227,9 @@ export type HostDependencies = {
   /** Handoff outcome only, never a claim that consolidation succeeded. Sink must be local and synchronous. */
   onTaskMaterialResult?: (result: {sessionId?: string; taskId: string; status: 'handed-off' | 'unavailable' | 'failed'; reason?: string}) => void
   memory?: MemoryUsePort
-  createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker, write?: ScopedWriteTool, network?: ScopedNetworkTool, mcp?: ScopedMcpTool) => ScopedAgentTools
+  createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker, write?: ScopedWriteTool, network?: ScopedNetworkTool, mcp?: ScopedMcpTool, indexSearch?: (query: string) => Promise<readonly { relPath: string; title: string; folder: string }[]>) => ScopedAgentTools
+  /** 活索引搜索：只给候选路径；命中片段仍由工具层按需读正文重算。没注入时工具层退回实时枚举。 */
+  indexSearch?: (query: string) => Promise<readonly { relPath: string; title: string; folder: string }[]>
   /** 联网只读能力：出口、偷渡词片与可用性都由主进程给。搜索只在服务商与密钥配置好后出现。 */
   network?: {
     fetch(url: string, signal: AbortSignal): Promise<{ text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true; service?: 'direct' | 'deepseek' }>
@@ -251,9 +251,6 @@ export type HostDependencies = {
     /** 任务结束／取消／切库：关闭该任务的 MCP 会话。 */
     closeTask?(taskId: string): void
   }
-  /** 「建」需要人在预览里点一下同意；没有这个入口就不宣告该工具。 */
-  /** 人确认：建是「落点＋正文」，改名／挪是「旧路径 → 新路径＋影响面」，删是「路径＋是否带附件夹」。 */
-  confirmWrite?: (request: AgentWriteConfirm) => Promise<boolean>
   /** 结构操作的库层预览／提交：由主进程用库自己的迁移实现（含引用修复与权限不放宽）。 */
   relocationPreview?: (request: { kind: 'note'; source: string; target: string }, ownerTaskId?: string) => Promise<import('./agent-write.ts').StructuralPreview>
   relocationCommit?: (previewId: string, repairLinks: boolean, ownerTaskId?: string) => Promise<{ moved: { from: string; to: string }[] }>
@@ -468,7 +465,26 @@ export class AgentHost {
   scopePaths(id: string): string[] {
     const task = this.active().find(task => task.id === id)
     if (!task) return []
-    return this.grants.get(`${task.root}\0${task.relPath}`)?.sources.map(source => source.relPath) ?? [task.relPath]
+    const grant = this.grants.get(`${task.root}\0${task.relPath}`)
+    if (!grant) return [task.relPath]
+    const paths = new Set<string>([grant.origin])
+    // 惰性范围没有全量清单：实际读过的来源 + 发起篇；结构操作另有范围包含判断。
+    for (const source of grant.sources) paths.add(source.relPath)
+    try { for (const proof of grant.actualSources()) paths.add(proof.relPath) } catch { /* 活范围已撤：只用手上的 */ }
+    for (const dep of this.scoped.get(`${task.root}\0${task.relPath}`)?.dependencies() ?? []) paths.add(dep.relPath)
+    return [...paths]
+  }
+  /** 这次文件操作是否落在该任务的范围里：同册按目录包含，整库一律算受影响（消费方会先停任务）。 */
+  private taskAffected(task: ActiveTask, targets: readonly string[]): boolean {
+    const grant = this.grants.get(`${task.root}\0${task.relPath}`)
+    if (!grant) return targets.some(target => task.relPath === target || task.relPath.startsWith(`${target}/`))
+    if (grant.scope === 'vault') return targets.length > 0
+    const folder = grant.scope === 'folder' ? grant.origin.slice(0, grant.origin.lastIndexOf('/')) : ''
+    for (const target of targets) {
+      if (folder && (folder === target || folder.startsWith(`${target}/`) || target.startsWith(`${folder}/`))) return true
+    }
+    const paths = this.scopePaths(task.id)
+    return paths.some(path => targets.some(target => path === target || path.startsWith(`${target}/`)))
   }
   /** 停止本场联网只读：撤销网络与 MCP 两项能力并 abort 在途请求；任务本身继续收尾。 */
   stopNetwork(id: string): boolean {
@@ -538,8 +554,7 @@ export class AgentHost {
    *  任务只是在读／引用目标笔记时也会被找到，不只按任务自己的 relPath 判断。
    *  `excludeId` 留给发起这次操作的 AI 自己，否则它会把自己停掉。 */
   affectedBy(root: string, paths: readonly string[], excludeId?: string): ActiveTask[] {
-    return this.active().filter(task => task.id !== excludeId && task.root === root &&
-      this.scopePaths(task.id).some(path => paths.some(target => path === target || path.startsWith(`${target}/`))))
+    return this.active().filter(task => task.id !== excludeId && task.root === root && this.taskAffected(task, paths))
   }
   /** Watcher notifications are only signals: revalidate live sources, after our own save receipt. */
   async recheckSources(root: string, sessionId?: string): Promise<void> {
@@ -638,9 +653,9 @@ export class AgentHost {
       if (memory) this.memoryUses.set(key, {permit: memory, credential})
       const materials = new TaskMaterialTracker()
       const savedMaterial = {tracker:materials,context:memory?.context ?? null}
-      const originPath = grant?.origin
-      const libraryReadEnabled = Boolean(grant && originPath && grant.sources.some(source => source.relPath !== originPath))
-      const structuralTargets = Boolean(grant && originPath && grant.sources.some(source => source.relPath !== originPath && source.tier !== 'follow'))
+      // 工具矩阵由范围决定：本篇只有回答写回；同册／整库才有读库搜库；结构操作只在整库。
+      const libraryReadEnabled = Boolean(grant && grant.scope !== 'note')
+      const structuralTargets = Boolean(grant && grant.scope === 'vault')
       // 搜索/抓取闸是设备级：任务开始时开即可用；运行中关闭由 revokeNetwork 撤掉。
       const availability = (() => { try { return this.deps.network?.availability() ?? null } catch { return null } })()
       const networkAvailable = availability?.available === true
@@ -888,13 +903,12 @@ export class AgentHost {
           }
         }
       } : undefined
-      // 补／建跟读搜拆开：仅发起篇也必须能补、能建；读库／搜库仍要范围内另有篇。
-      // 只读/参考档不宣告写工具；写能力本身也由档位决定，避免"宣告了却执行不了"。
-      const write = grant && grant.level !== 'read' && grant.level !== 'reference' ? this.writeCapability(grant, root, input.relPath, id) : undefined
-      const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials, write, networkTool, mcpTool)
+      // 补永远宣告（回答写回是产品本体）；建/改名/挪/删由范围与宿主能力决定。
+      const write = grant ? this.writeCapability(grant, root, input.relPath, id) : undefined
+      const scoped = grant && this.deps.createReadOnlyTools?.(grant, id, memory, materials, write, networkTool, mcpTool, this.deps.indexSearch)
       // 宣告与白名单必须同源：工具集没有写入能力就不宣告，宣告了就必须在白名单里。
       const writeEnabled = Boolean(write && scoped?.writes)
-      const createEnabled = Boolean(write?.create && scoped?.creates)
+      const createEnabled = Boolean(grant && grant.scope !== 'note' && write?.create && scoped?.creates)
       const structuralEnabled = Boolean(structuralTargets && write?.rename && write?.move && scoped?.renames)
       const deleteEnabled = Boolean(structuralTargets && write?.delete && scoped?.deletes)
       const networkRegistered = Boolean(networkEnabled && scoped?.networks)
@@ -944,7 +958,16 @@ export class AgentHost {
       const refused = new Map<string, number>()
       const recordProvenance=(summaries:readonly SentSummary[],includeStaged=false)=>{
         const inherited=summaries.flatMap(s=>s.dependencies.flatMap(d=>d.provenance?[d.provenance]:[]))
-        return {...(skills?.record.length ? { skills: skills.record } : {}), version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies(includeStaged)??[]),...(scoped?.memoryDependencies?.()??[]),...inherited.flatMap(p=>p.version===2?p.memoryDeps:[])].map(d=>[d.id,d])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:grant?.sources.map(s=>s.relPath)??[input.relPath],sources:[...new Map([...(scoped?.dependencies()??[]),...inherited.flatMap(p=>p.sources)].map(d=>[d.relPath,d])).values()],sentSources:scoped?.sentSources()??[],tools:[...(scoped?.summary()??[]),...(memorySearchCalls?[{name:'search_memory',outcome:`执行 ${memorySearchCalls} 次，失败 ${memorySearchFailures} 次`}]:[]),...memoryToolOutcomes,...networkToolOutcomes,...[...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`拒绝 ${label.split(':')[1]} × ${count}`}))]}
+        // 惰性范围：账本只记实际读到/发送的来源。账本的 scope/sources 各有 256 上限，
+        // 超过时只记前 255 篇并在 tools 里如实留一句，不假装记全了。
+        const actual=[...new Map([...(scoped?.dependencies()??[]),...inherited.flatMap(p=>p.sources)].map(d=>[d.relPath,d])).values()]
+          // 发起篇已经在 scope 第一位，不能再重复（账本要求 scope 唯一）。
+          .filter(d=>d.relPath!==input.relPath)
+        const capped=actual.length>255
+        const recorded=capped?actual.slice(0,255):actual
+        const recordedPaths=new Set(recorded.map(d=>d.relPath))
+        const sent=(scoped?.sentSources()??[]).filter(path=>recordedPaths.has(path))
+        return {...(skills?.record.length ? { skills: skills.record } : {}), version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies(includeStaged)??[]),...(scoped?.memoryDependencies?.()??[]),...inherited.flatMap(p=>p.version===2?p.memoryDeps:[])].map(d=>[d.id,d])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:[input.relPath,...recorded.map(d=>d.relPath)],sources:recorded,sentSources:sent,tools:[...(scoped?.summary()??[]),...(capped?[{name:'sources',outcome:`实际来源 ${actual.length} 篇，超过账本上限 256，只记了前 ${recorded.length} 篇`}]:[]),...(memorySearchCalls?[{name:'search_memory',outcome:`执行 ${memorySearchCalls} 次，失败 ${memorySearchFailures} 次`}]:[]),...memoryToolOutcomes,...networkToolOutcomes,...[...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`拒绝 ${label.split(':')[1]} × ${count}`}))]}
       }
       let lastCheckpoint = 0
       const snapshot = (status: HostEvent['status'], reason?: string, revision?: string): void => {
@@ -1316,8 +1339,12 @@ export class AgentHost {
     if (tier !== 'reference') throw new Error('NOTE_NOT_REFERENCE')
   }
 
-  /** 写类工具的能力面：门用宿主自己的读／写与授权检查搭起来，工具层拿不到裸通道。 */
+  /** 写类工具的能力面：门用宿主自己的读／写与授权检查搭起来，工具层拿不到裸通道。
+   *  三档范围内直接执行：建/改名/挪/删不再经过人确认；范围与库层判据一条不放宽。 */
   private writeCapability(grant: TaskGrant, root: string, relPath: string, taskId: string): ScopedWriteTool {
+    const canCreate = grant.scope !== 'note'
+    const canStructure = grant.scope === 'vault'
+    const reasonOf = (error: unknown): string => error instanceof Error && error.message ? error.message : 'WRITE_FAILED'
     const gate = createWriteGate({
       origin: () => relPath,
       session: () => this.deps.session?.() ?? null,
@@ -1326,23 +1353,24 @@ export class AgentHost {
       read: () => this.readBound(root, relPath),
       write: async (path, content, revision) => ({ revision: await this.writeBound(root, path, content, revision) }),
       composeAppend: (previous, text) => appendAiBlock(previous, { taskId, text }),
-      ...(this.deps.relocationPreview && this.deps.relocationCommit && grant.sources.length ? { structural: {
-        authorized: (path: string) => grant.sources.some(source => source.relPath === path && source.tier !== 'follow'),
+      ...(canStructure && this.deps.relocationPreview && this.deps.relocationCommit ? { structural: {
+        // 结构目标与引用修复都只在整库范围；目标本身的权限/归属由宿主在每次调用前用 ScopeResolver 实时核。
+        authorized: (path: string) => canStructure && path.length > 0,
         origin: () => relPath,
         otherTaskRunning: () => this.active().some(task => task.id !== taskId),
         // 把本场任务 id 交给迁移路径：它不能把自己停掉。
         preview: (request: { kind: 'note'; source: string; target: string }) => this.deps.relocationPreview!(request, taskId),
         commit: (previewId: string, repairLinks: boolean) => this.deps.relocationCommit!(previewId, repairLinks, taskId)
       } } : {}),
-      ...(this.deps.createNote ? { create: (relPath: string, body: string) => this.deps.createNote!(relPath, body) } : {}),
+      ...(canCreate && this.deps.createNote ? { create: (relPath: string, body: string) => this.deps.createNote!(relPath, body) } : {}),
       ...(this.deps.attachmentFolder ? { attachmentFolder: (relPath: string) => this.deps.attachmentFolder!(relPath) } : {}),
-      ...(HUMAN_TRASH_ON_THIS_PLATFORM && this.deps.trashPreview && this.deps.trashCommit ? { trash: {
-        authorized: (path: string) => grant.sources.some(source => source.relPath === path && source.tier !== 'follow'),
+      ...(canStructure && HUMAN_TRASH_ON_THIS_PLATFORM && this.deps.trashPreview && this.deps.trashCommit ? { trash: {
+        authorized: (path: string) => canStructure && path.length > 0,
         origin: () => relPath,
         otherTaskRunning: () => this.active().some(task => task.id !== taskId),
         preview: (path: string) => this.deps.trashPreview!(path, taskId),
         commit: async (previewId: string) => {
-          const result = await this.deps.trashCommit!(previewId, true, { taskId, prompt: 'AI 提议移入系统废纸篓（人已确认）' }, taskId)
+          const result = await this.deps.trashCommit!(previewId, true, { taskId, prompt: 'AI 提议移入库内已删除（档位内直接执行）' }, taskId)
           if (result.cancelled || !result.relPath) throw Error('DECLINED')
           return { relPath: result.relPath, orphan: result.orphan === true }
         }
@@ -1354,26 +1382,23 @@ export class AgentHost {
         catch (error) { if (error instanceof Error && /^(ENOENT|NOTE_MISSING)$|NOT_FOUND|UNSAFE_PATH/u.test(error.message)) return false; throw error }
       }
     })
-    const create = this.deps.confirmWrite && this.deps.createNote
+    const create = canCreate && this.deps.createNote
       ? async (name: string, body: string, signal: AbortSignal) => {
         const preview = await gate.previewCreate({ name })
         if (!preview.ok) return preview
         if (signal.aborted) { gate.discardCreate(preview.previewId); return { ok: false as const, reason: 'TASK_CANCELLED' } }
-        let approved = grant.autoApproveWrites
-        if (!approved) {
-          try { approved = await this.deps.confirmWrite!({ kind: 'create', relPath: preview.relPath, body, signal }) } catch { approved = false }
-        }
-        if (!approved) { gate.discardCreate(preview.previewId); return { ok: false as const, reason: signal.aborted ? 'TASK_CANCELLED' : 'DECLINED' } }
+        // 零确认也要核落点：建只能落在发起篇所在目录。
+        try { await grant.assertCreateTarget(preview.relPath) }
+        catch (error) { gate.discardCreate(preview.previewId); return { ok: false as const, reason: reasonOf(error) } }
         const created = await gate.commitCreate({ previewId: preview.previewId, body })
-        // 自动档没有确认卡，必须给界面一条可打开的落点通知；普通档由确认后的 openCreatedNote 负责。
-        if (grant.autoApproveWrites && created.ok) this.deps.emit({ ...this.bindings.get(`${root}\0${relPath}`), id: taskId, root, relPath, status: 'running', created: { relPath: created.relPath } })
+        // 没有确认卡，必须给界面一条可打开的落点通知。
+        if (created.ok) this.deps.emit({ ...this.bindings.get(`${root}\0${relPath}`), id: taskId, root, relPath, status: 'running', created: { relPath: created.relPath } })
         return created
       }
       : undefined
-    const structural = this.deps.relocationPreview && this.deps.relocationCommit
+    const structural = canStructure && this.deps.relocationPreview && this.deps.relocationCommit
       ? {
-        // 结构对象只能是可参考：必须遵循可被参考，但不能改名／挪。发起篇由门按 ORIGIN_LOCKED 拒。
-        authorized: (path: string) => grant.sources.some(source => source.relPath === path && source.tier !== 'follow'),
+        authorized: (path: string) => canStructure && path.length > 0,
         origin: () => relPath,
         otherTaskRunning: () => this.active().some(task => task.id !== taskId),
         // 把本场任务 id 交给迁移路径：它不能把自己停掉。
@@ -1383,14 +1408,17 @@ export class AgentHost {
       : undefined
     // 结构操作失败一律不落盘；成功则本场收尾（来源已搬迁，继续读旧路径会假失败）。
     const move = async (kind: 'rename' | 'move', source: string, target: string, signal: AbortSignal) => {
+      // 目标先过 ScopeResolver：整库、非发起篇、普通笔记、可参考；库层判据不复刻。
+      try { await grant.assertStructuralTarget(source, signal) }
+      catch (error) { return { ok: false as const, reason: reasonOf(error) } }
       const preview = kind === 'rename'
         ? await gate.previewStruct({ kind: 'rename', relPath: source, newName: target })
         : await gate.previewStruct({ kind: 'move', relPath: source, targetFolder: target })
       if (!preview.ok) return preview
       if (signal.aborted) { gate.discardStruct(preview.previewId); return { ok: false as const, reason: 'TASK_CANCELLED' } }
-      let approved = false
-      try { approved = await this.deps.confirmWrite!({ kind: preview.kind, source: preview.source, target: preview.target, moves: preview.moves, linkChanges: preview.linkChanges, permissionChanges: preview.permissionChanges, signal }) } catch { approved = false }
-      if (!approved) { gate.discardStruct(preview.previewId); return { ok: false as const, reason: signal.aborted ? 'TASK_CANCELLED' : 'DECLINED' } }
+      // 预览与提交之间权限/归属可能变化：提交前按同一判据再核一次。
+      try { await grant.assertStructuralTarget(source, signal) }
+      catch (error) { gate.discardStruct(preview.previewId); return { ok: false as const, reason: reasonOf(error) } }
       this.structuralMoves.add(taskId)
       let committed
       try { committed = await gate.commitStruct({ previewId: preview.previewId }) }
@@ -1399,14 +1427,15 @@ export class AgentHost {
       // 工具层只需要「成了没、落到哪、动了几项、影响面多大」，不把库层的 move 清单透给模型。
       return { ok: true as const, target: committed.target, moved: committed.moved.length, linkChanges: preview.linkChanges, permissionChanges: preview.permissionChanges }
     }
-    const remove = HUMAN_TRASH_ON_THIS_PLATFORM && this.deps.confirmWrite && this.deps.trashPreview && this.deps.trashCommit
+    const remove = canStructure && HUMAN_TRASH_ON_THIS_PLATFORM && this.deps.trashPreview && this.deps.trashCommit
       ? async (source: string, signal: AbortSignal) => {
+        try { await grant.assertStructuralTarget(source, signal) }
+        catch (error) { return { ok: false as const, reason: reasonOf(error) } }
         const preview = await gate.previewDelete({ relPath: source })
         if (!preview.ok) return preview
         if (signal.aborted) { gate.discardDelete(preview.previewId); return { ok: false as const, reason: 'TASK_CANCELLED' } }
-        let approved = false
-        try { approved = await this.deps.confirmWrite!({ kind: 'delete', relPath: preview.relPath, hasAttachments: preview.hasAttachments, signal }) } catch { approved = false }
-        if (!approved) { gate.discardDelete(preview.previewId); return { ok: false as const, reason: signal.aborted ? 'TASK_CANCELLED' : 'DECLINED' } }
+        try { await grant.assertStructuralTarget(source, signal) }
+        catch (error) { gate.discardDelete(preview.previewId); return { ok: false as const, reason: reasonOf(error) } }
         this.structuralMoves.add(taskId)
         let committed
         try { committed = await gate.commitDelete({ previewId: preview.previewId }) }

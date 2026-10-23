@@ -10,6 +10,7 @@ import { effectivePermissionEntries, loadPermissionSnapshot, tierFor } from './p
 import { hasHiddenSegment, isNotePath, resolveInVault } from './paths.ts'
 import { secureFsFor } from './secure-fs.ts'
 import { VaultMutationQueue } from './vault-mutation-queue.ts'
+import { TRASH_RECORD_LIMIT, validTrashedRecord, type TrashedRecord } from './trash-store.ts'
 import type { LifecycleStatus } from '../shared/ipc.ts'
 
 const JOURNAL = '.rgent-lifecycle'
@@ -79,7 +80,11 @@ export type MissingObject = {
 /** 人（含人工确认过的「建」）已在原路径重建同名对象：这条记录不再占路径，
  *  移入有界的 `retired[]` 作为历史。旧对象之后回到同一路径也不会静默顶替新对象。 */
 export type RetiredObject = MissingObject & { retiredAt: string; reason: 'recreated' }
-type Journal = { version: 1; active: PendingMove | PendingLedgerRepair | LedgerPublication | null; missing?: MissingObject[]; retired?: RetiredObject[] }
+/** 主动删除进库根 `.rgent-trash` 的对象：与「库外消失」分开记，双方互斥。
+ *  `at` 是删除时间（与 meta 的 `deletedAt` 同源），过期清理按它算。
+ *  旧 journal 没有这个字段，按「没有已删除对象」读，不因为新增字段让整本记录失效。 */
+export type { TrashedRecord }
+type Journal = { version: 1; active: PendingMove | PendingLedgerRepair | LedgerPublication | null; missing?: MissingObject[]; retired?: RetiredObject[]; trashed?: TrashedRecord[] }
 const MISSING_LIMIT = 64
 const RETIRED_LIMIT = 64
 
@@ -211,19 +216,111 @@ export class VaultLifecycle {
   }
 
   /** 未核验的外部消失记录；只读，不改变 `active` 的中断语义。
-   *  旧 journal 没有 `cause`：按外部消失读，不因为新增字段让整本记录失效。 */
+   *  旧 journal 没有 `cause`：按外部消失读，不因为新增字段让整本记录失效。
+   *  主动删除进库内「已删除」的路径由 `trashed[]` 记，不算外部消失，也不在这份列表里。 */
   missingObjects(): MissingObject[] {
     this.assertCurrent()
-    return (this.loadJournal().missing ?? []).map((item) => ({ ...structuredClone(item), cause: item.cause ?? 'external' }))
+    const journal = this.loadJournal()
+    const trashed = new Set((journal.trashed ?? []).map((item) => item.relPath))
+    return (journal.missing ?? []).filter((item) => !trashed.has(item.relPath))
+      .map((item) => ({ ...structuredClone(item), cause: item.cause ?? 'external' }))
   }
 
-  /** 有记录的对象在核验通过前不继承身份：来源核验、任务绑定与写回一律失败关闭。 */
+  /** 有记录的对象在核验通过前不继承身份：来源核验、任务绑定与写回一律失败关闭。
+   *  主动删除的路径不是「外部消失」，不占位、也不按外部恢复核验。 */
   hasMissing(relPath: string): boolean {
     this.assertCurrent()
-    return (this.loadJournal().missing ?? []).some((item) => item.relPath === relPath)
+    const journal = this.loadJournal()
+    if ((journal.trashed ?? []).some((item) => item.relPath === relPath)) return false
+    return (journal.missing ?? []).some((item) => item.relPath === relPath)
   }
 
-  /** 登记只按原字节 CAS 追加，不经过队列，也不覆盖既有记录（最早那次的外部消失证据保留）。 */
+  /** 主动删除进库内「已删除」的路径：外部消失登记、树标记与恢复核验都跳过它。 */
+  isTrashed(relPath: string): boolean {
+    this.assertCurrent()
+    return (this.loadJournal().trashed ?? []).some((item) => item.relPath === relPath)
+  }
+
+  /** 库内「已删除」的记录（最多 256 条）。只读；删除成功后才由库层追加。 */
+  trashedObjects(): TrashedRecord[] {
+    this.assertCurrent()
+    return (this.loadJournal().trashed ?? []).map((item) => structuredClone(item))
+  }
+
+  /** 删除事务第 3 步：把条目记进 `trashed[]`。同 id 已在列表里按幂等处理（返回 false）；
+   *  同 id 不同内容属于身份冲突，不覆盖。同一路径若还挂着外部消失记录（例如人在原路径
+   *  重建又没核验过），在这一次写入里一并移除——一次删除只记一处。 */
+  addTrashed(entry: TrashedRecord): boolean {
+    this.assertCurrent()
+    if (!validTrashedRecord(entry)) throw new Error('BAD_REQUEST')
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const raw = this.readOptional(JOURNAL)
+      const journal = parseJournal(raw)
+      if (journal.active) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      const trashed = journal.trashed ?? []
+      const existing = trashed.find((item) => item.trashId === entry.trashId)
+      if (existing) {
+        if (JSON.stringify(existing) === JSON.stringify(entry)) return false
+        throw new Error('TRASH_CONFLICT')
+      }
+      if (trashed.length >= TRASH_RECORD_LIMIT) throw new Error('TRASH_RECORD_LIMIT')
+      const missing = (journal.missing ?? []).filter((item) => item.relPath !== entry.relPath)
+      try {
+        this.saveJournal({ version: 1, active: null, missing, trashed: [...trashed, entry] }, raw)
+        return true
+      } catch (error) {
+        if (attempt === 2) throw error
+      }
+    }
+    return false
+  }
+
+  /** 对账修正：按 `trashId` 覆盖同一条记录（磁盘上的 meta 是权威）。 */
+  upsertTrashed(entry: TrashedRecord): boolean {
+    this.assertCurrent()
+    if (!validTrashedRecord(entry)) throw new Error('BAD_REQUEST')
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const raw = this.readOptional(JOURNAL)
+      const journal = parseJournal(raw)
+      if (journal.active) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      const trashed = journal.trashed ?? []
+      const existing = trashed.find((item) => item.trashId === entry.trashId)
+      if (existing && JSON.stringify(existing) === JSON.stringify(entry)) return false
+      const next = existing ? trashed.map((item) => item.trashId === entry.trashId ? entry : item) : [...trashed, entry]
+      if (next.length > TRASH_RECORD_LIMIT) throw new Error('TRASH_RECORD_LIMIT')
+      const missing = (journal.missing ?? []).filter((item) => item.relPath !== entry.relPath)
+      try {
+        this.saveJournal({ version: 1, active: null, missing, trashed: next }, raw)
+        return true
+      } catch (error) {
+        if (attempt === 2) throw error
+      }
+    }
+    return false
+  }
+
+  /** 还原或明确删除成功后移除记录；找不到返回 false（不报错，调用方按幂等处理）。 */
+  removeTrashed(trashId: string): boolean {
+    this.assertCurrent()
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const raw = this.readOptional(JOURNAL)
+      const journal = parseJournal(raw)
+      if (journal.active) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      const trashed = journal.trashed ?? []
+      if (!trashed.some((item) => item.trashId === trashId)) return false
+      const next = trashed.filter((item) => item.trashId !== trashId)
+      try {
+        this.saveJournal({ version: 1, active: null, trashed: next }, raw)
+        return true
+      } catch (error) {
+        if (attempt === 2) throw error
+      }
+    }
+    return false
+  }
+
+  /** 登记只按原字节 CAS 追加，不经过队列，也不覆盖既有记录（最早那次的外部消失证据保留）。
+   *  已主动删除进库内「已删除」的路径不再登记为外部消失（一次删除只记一处）。 */
   recordMissing(entry: MissingObject): boolean {
     this.assertCurrent()
     if (!validMissing(entry)) throw new Error('BAD_REQUEST')
@@ -231,6 +328,7 @@ export class VaultLifecycle {
       const raw = this.readOptional(JOURNAL)
       const journal = parseJournal(raw)
       if (journal.active) throw new Error('LIFECYCLE_RECOVERY_REQUIRED')
+      if ((journal.trashed ?? []).some((item) => item.relPath === entry.relPath)) return false
       const missing = journal.missing ?? []
       if (missing.some((item) => item.relPath === entry.relPath)) return false
       if (missing.length >= MISSING_LIMIT) throw new Error('MISSING_RECORD_LIMIT')
@@ -293,6 +391,8 @@ export class VaultLifecycle {
       }
       if (index < 0) return false
       const missing = journal.missing ?? []
+      // 同一路径已主动删除进库内「已删除」时不能放回活跃消失列表：两边互斥，写进去 journal 就不可解析。
+      if ((journal.trashed ?? []).some((item) => item.relPath === original.relPath)) return false
       const present = missing.some((item) => item.relPath === original.relPath)
       const restored = present ? missing : [...missing, original]
       if (!present && restored.length > MISSING_LIMIT) throw new Error('MISSING_RECORD_LIMIT')
@@ -674,22 +774,28 @@ export class VaultLifecycle {
   }
 
   private saveJournal(next: Journal, expected = this.readOptional(JOURNAL)): string {
-    // 外部消失记录与退休历史不随移动／账本恢复／其它记录重写而消失；调用方显式给出时以它为准。
+    // 外部消失记录、退休历史与库内已删除记录不随移动／账本恢复／其它记录重写而消失；
+    // 调用方显式给出时以它为准。
     let preserved = next.missing
     let retired = next.retired
-    if (preserved === undefined || retired === undefined) {
+    let trashed = next.trashed
+    if (preserved === undefined || retired === undefined || trashed === undefined) {
       try {
         const prior = parseJournal(expected)
         if (preserved === undefined) preserved = prior.missing
         if (retired === undefined) retired = prior.retired
+        if (trashed === undefined) trashed = prior.trashed
       } catch {
         if (preserved === undefined) preserved = []
         if (retired === undefined) retired = []
+        if (trashed === undefined) trashed = []
       }
     }
     const payload: Journal = { ...next, ...(preserved?.length ? { missing: preserved } : {}) }
     if (retired?.length) payload.retired = retired
     else delete payload.retired
+    if (trashed?.length) payload.trashed = trashed
+    else delete payload.trashed
     const raw = `${JSON.stringify(payload)}\n`
     secureFsFor(this.root).replace(JOURNAL, expected, raw)
     return raw
@@ -832,8 +938,19 @@ function parseJournal(raw: string | null): Journal {
     if (retired !== undefined && (!Array.isArray(retired) || retired.length > RETIRED_LIMIT || !retired.every(validRetired))) {
       throw new Error('BAD_JOURNAL')
     }
+    const trashed = (parsed as Journal).trashed
+    // 已删除记录有界（≤256），id 唯一；每条都按严格形状校验，旧 journal 没有这个字段照常读。
+    if (trashed !== undefined && (!Array.isArray(trashed) || trashed.length > TRASH_RECORD_LIMIT ||
+        !trashed.every(validTrashedRecord) || new Set(trashed.map((item) => item.trashId)).size !== trashed.length)) {
+      throw new Error('BAD_JOURNAL')
+    }
+    // 一次删除只记一处：同一路径不能在 missing 与 trashed 里同时出现。
+    if (trashed?.length && missing?.length && trashed.some((item) => missing.some((entry) => entry.relPath === item.relPath))) {
+      throw new Error('BAD_JOURNAL')
+    }
     return { version: 1, active: (parsed as Journal).active,
-      ...(missing?.length ? { missing } : {}), ...(retired?.length ? { retired } : {}) }
+      ...(missing?.length ? { missing } : {}), ...(retired?.length ? { retired } : {}),
+      ...(trashed?.length ? { trashed } : {}) }
   } catch { throw new Error('LIFECYCLE_RECOVERY_REQUIRED') }
 }
 

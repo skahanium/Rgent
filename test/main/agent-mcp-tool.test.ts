@@ -63,7 +63,14 @@ function mcpHarness(options: {
   const grant: TaskGrant = {
     id: 'g', root: '/vault', sessionId: 's', origin: 'a.md',
     originProof: source('a.md'), sources: [source('a.md'), source('b.md')],
-    credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, level:'write' as const, autoApproveWrites:false, 
+    credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, scope: 'vault' as const,
+    contains: () => true,
+    validateRead: async (path: string) => { const snapshot = await read(path); return { snapshot, proof: { relPath: path, sessionId: 's', objectVersion: snapshot.objectVersion ?? 'o', revision: snapshot.revision, fingerprint: createHash('sha256').update(snapshot.content).digest('hex'), tier: 'reference' as const } } },
+    list: async () => ({ items: [], total: 0, complete: true }),
+    actualSources: () => [],
+    assertStructuralTarget: async () => {},
+    assertCreateTarget: async () => {},
+    
     get network() { return { allowed: true as const } },
     get mcp() { return mcpLive ? { allowed: true as const, servers } : undefined },
     assertActive() {},
@@ -541,7 +548,14 @@ function mcpPairHarness() {
     const proof = source(relPath)
     return {
       id: `g-${relPath}`, root: '/vault', sessionId: 's', origin: relPath, originProof: proof, sources: [proof],
-      credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, level:'write' as const, autoApproveWrites:false, 
+      credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, scope: 'vault' as const,
+    contains: () => true,
+    validateRead: async (path: string) => { const snapshot = await read(path); return { snapshot, proof: { relPath: path, sessionId: 's', objectVersion: snapshot.objectVersion ?? 'o', revision: snapshot.revision, fingerprint: createHash('sha256').update(snapshot.content).digest('hex'), tier: 'reference' as const } } },
+    list: async () => ({ items: [], total: 0, complete: true }),
+    actualSources: () => [],
+    assertStructuralTarget: async () => {},
+    assertCreateTarget: async () => {},
+    
       get network() { return { allowed: true as const } },
       get mcp() { return live.get(relPath) ? { allowed: true as const, servers: SERVERS } : undefined },
       assertActive() {},

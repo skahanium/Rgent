@@ -1,17 +1,17 @@
 import type { MarkerRef } from '@markdown'
-import type { PublicModelConfig } from '@shared'
+import type { AgentScopeLevel, PublicModelConfig } from '@shared'
 import { PROVIDER_LABELS } from '../../shared/model-endpoints.ts'
 
 /**
  * 底栏。围栏 docs/frontend.md §编辑画布与辅助信息、
- * docs/decisions.md §2026-10-23 底栏减负与任务浮层：
- * 与上方用一条细线分开：左侧行列与字数，中间是模型模块，右侧只有联网总闸小球。
+ * docs/decisions.md §2026-10-23 三档工作范围与库内已删除：
+ * 与上方用一条细线分开：左侧行列与字数，中间是模型与作业范围模块，右侧只有联网总闸小球。
  *
  * 默认模型在助手设置保存；此处只为当前笔记的下一场任务临时选择，不写设备配置。
- * 无活动笔记时提供配置引导，失效选择不自动改用其他模型。
+ * 作业范围按 tab 记在渲染层内存里（shell 的 Map），这里只负责显示与回写。
  *
- * 底栏每次状态更新都会重绘，所以三个容器与那个下拉必须复用而不是重建，
- * 否则光标移动会把下拉和它的焦点一起销毁。
+ * 底栏每次状态更新都会重绘，所以容器、下拉、范围按钮与锚定菜单都必须复用而不是重建，
+ * 否则光标移动会把下拉、菜单和它们的焦点一起销毁。
  */
 
 export type StatusInput = {
@@ -34,6 +34,21 @@ export type StatusModelModule = {
   onConfigure: () => void
 }
 
+/** 三档作业范围：本篇／同册／整库。根目录笔记的「同册」由 shell 标灰并回落到本篇。 */
+export type StatusScopeOption = {
+  value: AgentScopeLevel
+  label: string
+  detail: string
+  disabled?: boolean
+  /** 禁用时用 title 说明原因：根目录没有同册。 */
+  title?: string
+}
+export type StatusScopeModule = {
+  value: AgentScopeLevel
+  options: StatusScopeOption[]
+  onChange: (scope: AgentScopeLevel) => void
+}
+
 export type StatusNetwork = {
   enabled: boolean
   onToggle: () => void
@@ -44,6 +59,7 @@ export type StatusModel = {
   words: string | null
   network: StatusNetwork
   model?: StatusModelModule
+  scope?: StatusScopeModule
 }
 
 /**
@@ -59,12 +75,13 @@ export function modelModuleGroups(config: PublicModelConfig): StatusModelGroup[]
     }))
 }
 
-export function statusModel(input: StatusInput, network: StatusNetwork, model?: StatusModelModule): StatusModel {
+export function statusModel(input: StatusInput, network: StatusNetwork, model?: StatusModelModule, scope?: StatusScopeModule): StatusModel {
   return {
     position: input.noteOpen ? `第 ${input.line} 行, 第 ${input.column} 列` : null,
     words: input.noteOpen ? `字数 ${input.words}` : null,
     network,
-    ...(model ? { model } : {})
+    ...(model ? { model } : {}),
+    ...(scope ? { scope } : {})
   }
 }
 
@@ -108,17 +125,17 @@ function container(host: HTMLElement, className: string): HTMLElement {
 }
 
 /** 模型模块：同一次会话里保持同一个 select 节点，只在下拉内容真的变化时重建选项。 */
-function renderModelModule(center: HTMLElement, module: StatusModelModule | undefined): void {
-  center.hidden = !module
+function renderModelModule(slot: HTMLElement, module: StatusModelModule | undefined): void {
+  slot.hidden = !module
   if (!module) return
   const available = module.groups.some(group => group.items.length > 0) && !module.disabled
-  let select = center.querySelector<HTMLSelectElement>('.status-model')
-  let configure = center.querySelector<HTMLButtonElement>('.status-model-config')
+  let select = slot.querySelector<HTMLSelectElement>('.status-model')
+  let configure = slot.querySelector<HTMLButtonElement>('.status-model-config')
   if (!available) {
     const signature = `empty:${module.unavailableLabel ?? '未配置模型'}`
-    if (center.dataset.signature !== signature) {
-      center.dataset.signature = signature
-      center.replaceChildren()
+    if (slot.dataset.signature !== signature) {
+      slot.dataset.signature = signature
+      slot.replaceChildren()
       const label = document.createElement('span')
       label.className = 'status-model-label'; label.textContent = '模型'
       const empty = document.createElement('span')
@@ -126,24 +143,24 @@ function renderModelModule(center: HTMLElement, module: StatusModelModule | unde
       empty.textContent = module.unavailableLabel ?? '未配置模型'
       configure = document.createElement('button')
       configure.type = 'button'; configure.className = 'status-model-config'; configure.textContent = '配置'
-      center.append(label, empty, configure)
+      slot.append(label, empty, configure)
     }
     configure!.onclick = module.onConfigure
     return
   }
   if (!select) {
-    center.replaceChildren()
+    slot.replaceChildren()
     const label = document.createElement('span')
     label.className = 'status-model-label'; label.textContent = '模型'
     select = document.createElement('select')
     select.className = 'status-model'
     select.setAttribute('aria-label', '新任务使用的模型')
-    center.append(label, select)
+    slot.append(label, select)
   }
   // 回调也随当前笔记更新；复用节点不能把旧 tab 的选择处理器留在原处。
   select.onchange = () => { if (select!.value) module.onChange(select!.value) }
-  if (center.dataset.signature !== module.signature) {
-    center.dataset.signature = module.signature
+  if (slot.dataset.signature !== module.signature) {
+    slot.dataset.signature = module.signature
     select.replaceChildren()
     for (const group of module.groups) {
       if (!group.items.length) continue
@@ -160,6 +177,167 @@ function renderModelModule(center: HTMLElement, module: StatusModelModule | unde
       select.prepend(placeholder)
       select.value = ''
     } else select.value = module.value
+  }
+}
+
+type ScopeUi = {
+  root: HTMLElement
+  button: HTMLButtonElement
+  menu: HTMLElement
+  items: Map<AgentScopeLevel, HTMLButtonElement>
+  module: StatusScopeModule | null
+  renderedValue: AgentScopeLevel | null
+  open: boolean
+  onPointer: (event: Event) => void
+  onKey: (event: KeyboardEvent) => void
+  onBlur: () => void
+}
+
+const scopeUis = new WeakMap<HTMLElement, ScopeUi>()
+const SCOPE_ORDER: AgentScopeLevel[] = ['note', 'folder', 'vault']
+
+function closeScopeMenu(ui: ScopeUi, focusButton: boolean): void {
+  if (ui.open) {
+    ui.open = false
+    ui.menu.hidden = true
+    ui.button.setAttribute('aria-expanded', 'false')
+    delete ui.root.dataset.open
+    window.removeEventListener('pointerdown', ui.onPointer, true)
+    window.removeEventListener('click', ui.onPointer, true)
+    window.removeEventListener('keydown', ui.onKey, true)
+    window.removeEventListener('blur', ui.onBlur)
+  }
+  if (focusButton) ui.button.focus()
+}
+
+function openScopeMenu(ui: ScopeUi): void {
+  if (ui.open) return
+  ui.open = true
+  ui.menu.hidden = false
+  ui.button.setAttribute('aria-expanded', 'true')
+  ui.root.dataset.open = 'true'
+  // 菜单非模态：焦点仍留在按钮上；点外面或 Esc 关闭，不能把 Esc 漏给「停止任务」。
+  window.addEventListener('pointerdown', ui.onPointer, true)
+  window.addEventListener('click', ui.onPointer, true)
+  window.addEventListener('keydown', ui.onKey, true)
+  window.addEventListener('blur', ui.onBlur)
+}
+
+function scopeUiFor(containerEl: HTMLElement): ScopeUi {
+  const existing = scopeUis.get(containerEl)
+  if (existing) return existing
+  containerEl.classList.add('status-scope')
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = 'status-scope-button'
+  button.setAttribute('aria-haspopup', 'menu')
+  button.setAttribute('aria-expanded', 'false')
+  button.setAttribute('data-scope', 'note')
+  const menu = document.createElement('div')
+  menu.className = 'status-scope-menu'
+  menu.setAttribute('role', 'menu')
+  menu.setAttribute('aria-label', '作业范围')
+  menu.hidden = true
+  const items = new Map<AgentScopeLevel, HTMLButtonElement>()
+  for (const value of SCOPE_ORDER) {
+    const item = document.createElement('button')
+    item.type = 'button'
+    item.className = 'status-scope-option'
+    item.setAttribute('role', 'menuitemradio')
+    item.setAttribute('aria-checked', 'false')
+    item.dataset.scopeOption = value
+    const name = document.createElement('span')
+    name.className = 'status-scope-option-name'
+    const detail = document.createElement('span')
+    detail.className = 'status-scope-option-detail'
+    const check = document.createElement('span')
+    check.className = 'status-scope-check'
+    check.setAttribute('aria-hidden', 'true')
+    check.textContent = '✓'
+    item.append(name, detail, check)
+    item.addEventListener('click', () => {
+      const module = ui.module
+      const option = module?.options.find(candidate => candidate.value === value)
+      if (!module || !option || option.disabled) return
+      closeScopeMenu(ui, true)
+      module.onChange(value)
+    })
+    menu.append(item)
+    items.set(value, item)
+  }
+  containerEl.append(button, menu)
+  const ui: ScopeUi = {
+    root: containerEl, button, menu, items, module: null, renderedValue: null, open: false,
+    onPointer: (event) => { if (!ui.root.contains(event.target as Node)) closeScopeMenu(ui, false) },
+    onKey: (event) => {
+      if (!ui.open) return
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        closeScopeMenu(ui, true)
+        return
+      }
+      if (event.key === 'Tab') { closeScopeMenu(ui, false); return }
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+      event.preventDefault()
+      const enabled = [...ui.items.values()].filter(item => !item.hidden && !item.disabled)
+      if (!enabled.length) return
+      const at = enabled.indexOf(document.activeElement as HTMLButtonElement)
+      const next = event.key === 'ArrowDown'
+        ? enabled[(at + 1 + enabled.length) % enabled.length]!
+        : enabled[at <= 0 ? enabled.length - 1 : at - 1]!
+      next.focus()
+    },
+    onBlur: () => closeScopeMenu(ui, false)
+  }
+  button.addEventListener('click', () => {
+    if (ui.open) closeScopeMenu(ui, true)
+    else openScopeMenu(ui)
+  })
+  scopeUis.set(containerEl, ui)
+  return ui
+}
+
+/**
+ * 范围模块：固定三个菜单项节点，重绘只改文字／勾选／禁用，不重建。
+ * 这样光标移动、状态高频刷新时，打开着的菜单与焦点都不会被销毁。
+ */
+function renderScopeModule(containerEl: HTMLElement, module: StatusScopeModule | undefined): void {
+  if (!module) {
+    containerEl.hidden = true
+    const existing = scopeUis.get(containerEl)
+    if (existing) { closeScopeMenu(existing, false); existing.module = null }
+    return
+  }
+  containerEl.hidden = false
+  const ui = scopeUiFor(containerEl)
+  const selected = module.options.find(option => option.value === module.value && !option.disabled)
+    ?? module.options.find(option => !option.disabled)
+    ?? module.options.find(option => option.value === module.value)
+  // 外部换了当前篇的范围（不在选择中）：菜单开着也先收起，避免把旧选择当成新篇的。
+  if (ui.open && ui.renderedValue !== null && ui.renderedValue !== module.value) closeScopeMenu(ui, false)
+  ui.module = module
+  ui.renderedValue = module.value
+  const label = selected?.label ?? '本篇'
+  const text = `${label} ▾`
+  if (ui.button.textContent !== text) ui.button.textContent = text
+  ui.button.dataset.scope = selected?.value ?? module.value
+  const title = selected ? `作业范围：${selected.label}。${selected.detail}` : '作业范围'
+  if (ui.button.title !== title) ui.button.title = title
+  for (const [value, item] of ui.items) {
+    const option = module.options.find(candidate => candidate.value === value)
+    if (!option) { item.hidden = true; continue }
+    item.hidden = false
+    item.dataset.scopeOption = value
+    const disabled = option.disabled === true
+    if (item.disabled !== disabled) item.disabled = disabled
+    item.setAttribute('aria-disabled', String(disabled))
+    item.title = option.title ?? (disabled ? '这一档当前不可用。' : '')
+    const name = item.querySelector<HTMLElement>('.status-scope-option-name')!
+    if (name.textContent !== option.label) name.textContent = option.label
+    const detail = item.querySelector<HTMLElement>('.status-scope-option-detail')!
+    if (detail.textContent !== option.detail) detail.textContent = option.detail
+    item.setAttribute('aria-checked', String(option.value === (selected?.value ?? module.value)))
   }
 }
 
@@ -208,7 +386,23 @@ export function renderStatusbar(host: HTMLElement, model: StatusModel): void {
   const right = container(host, 'status-right')
   right.querySelector('.status-vault')?.remove()
   renderNetworkDot(right, model.network)
-  renderModelModule(center, model.model)
+  // 模型槽与范围槽是稳定兄弟节点：重绘只改内部，记忆按钮还在它们后面。
+  let modelSlot = center.querySelector<HTMLElement>(':scope > .status-model-slot')
+  if (!modelSlot) {
+    modelSlot = document.createElement('div')
+    modelSlot.className = 'status-model-slot'
+    center.prepend(modelSlot)
+  }
+  let scopeSlot = center.querySelector<HTMLElement>(':scope > .status-scope')
+  if (!scopeSlot) {
+    scopeSlot = document.createElement('div')
+    scopeSlot.className = 'status-scope'
+    scopeSlot.hidden = true
+    modelSlot.after(scopeSlot)
+  }
+  renderModelModule(modelSlot, model.model)
+  renderScopeModule(scopeSlot, model.scope)
+  center.hidden = !model.model && !model.scope
   // 只在顺序不对时重排；常规重绘不移动节点，保住下拉与焦点。
   if (host.children.length !== 4 || host.children[0] !== lead || host.children[1] !== left ||
       host.children[2] !== center || host.children[3] !== right) {

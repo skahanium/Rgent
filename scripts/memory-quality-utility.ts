@@ -97,8 +97,8 @@ async function utilityHost(artifact:UtilityArtifact,task:typeof UTILITY_TASKS[nu
   const history=await session.ledgerContexts(relPath);if(history.length)throw Error('EVALUATION_UTILITY_HISTORY')
   const entries=await service.entries(),port={context:()=>service.context(),config:()=>({enabled,revision:1}),entries:(ids?:readonly string[])=>service.entries(ids)}
   const authorization=new TaskAuthorizationRegistry({root:()=>root,session:()=>session.sessionId(),tree:()=>session.tree(),read:rel=>session.readOpened(rel),tier:modelTierFor,acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),configuration:()=>({credential,limits:{seconds:120,steps:1,tools:0}})})
-  const note=await session.readOpened(relPath),start=note.content.lastIndexOf(raw),command={...note,level:'reference' as const,modelRecordId:'utility',expectedRevision:note.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:task.prompt}
-  const preview=await authorization.preview('utility',{...command,references:[]})
+  const note=await session.readOpened(relPath),start=note.content.lastIndexOf(raw),command={...note,scope:'note' as const,modelRecordId:'utility',expectedRevision:note.revision,relPath,range:{start,end:start+raw.length},expectedText:raw,promptText:task.prompt}
+  const preview=await authorization.preview('utility',{...command})
   let observed:ReturnType<typeof publicInput>|null=null,bodyOutput='',finishReason:string|null=null,usage:unknown=null,streamError:string|null=null,gateError:unknown=null,calls=0
   const started=performance.now()
   host=new AgentHost({root:()=>root,session:()=>session.sessionId(),acceptsObject:(rel,expected,current)=>session.acceptsObject(rel,expected,current),read:rel=>session.readOpened(rel),write:(rel,text,revision,binding)=>{if(!binding)throw Error('NOTE_REPLACED');return session.write(rel,text,revision,binding)},authorize:()=>authorization.consume('utility',{...command,previewId:preview.id}),tier:modelTierFor,credential:()=>credential,limits:()=>({seconds:120,steps:1,tools:0}),memory:port,

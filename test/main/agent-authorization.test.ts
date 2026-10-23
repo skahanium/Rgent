@@ -18,7 +18,7 @@ function fixture(stream:(signal:AbortSignal)=>AsyncIterable<string>) {
     stream:(_input,signal)=>{calls++;return stream(signal)},
     streamStep:async function*(_input,signal){calls++;for await(const text of stream(signal))yield {type:'text',text};yield {type:'finish',reason:'stop'}},
     createReadOnlyTools:(grant,id)=>createScopedAgentTools(grant,id,{read:async p=>({...source[p]!}),tier,acceptsObject:()=>false}),emit:()=>{}})
-  const request={modelRecordId:'model-record',relPath:'a.md',sessionId:'session',objectVersion:'a',expectedRevision:'1',range:{start:0,end:2},expectedText:'/问',level:'write' as const,promptText:'问',references:['b.md']}
+  const request={modelRecordId:'model-record',relPath:'a.md',sessionId:'session',objectVersion:'a',expectedRevision:'1',range:{start:0,end:2},expectedText:'/问',scope:'vault' as const,promptText:'问'}
   return {host,history,registry,request,source,calls:()=>calls,deny:(p:string)=>{denied=p}}
 }
 it('requires one-use authorization before changing the note and uses its fixed credential',async()=>{
@@ -34,7 +34,7 @@ it('requires one-use authorization before changing the note and uses its fixed c
 it('stops on source changes and trusted finalization retains produced text and reason',async()=>{
   let change=()=>{}
   const app=fixture(async function*(){yield '已产生文本';change();yield '不得继续'})
-  change=()=>{app.source['b.md']!.content='外部改变';app.source['b.md']!.revision='changed'}
+  change=()=>{app.source['a.md']!.content+='\n外部改变';app.source['a.md']!.revision='changed'}
   const p=await app.registry.preview('owner',app.request)
   const task=await app.host.start({...app.request,previewId:p.id,authorizationOwner:'owner'})
   await expect(task.done).resolves.toMatchObject({status:'failed',reason:'SOURCE_CHANGED'})
@@ -55,7 +55,7 @@ it('source invalidation aborts the provider and closes its iterator without chan
     providerSignal=signal
     try{yield '此前已生成';changed();yield '过期增量'}finally{returned=true}
   })
-  changed=()=>{app.source['b.md']!.revision='source-changed'}
+  changed=()=>{app.source['a.md']!.revision='source-changed';app.source['a.md']!.content+='\n外部改变'}
   const p=await app.registry.preview('owner',app.request)
   const task=await app.host.start({...app.request,previewId:p.id,authorizationOwner:'owner'})
   expect(await task.done).toEqual({status:'failed',reason:'SOURCE_CHANGED'})
@@ -75,7 +75,7 @@ it('binds a task to the explicit model record instead of a device default', asyn
       if (modelRecordId !== 'second') throw Error('MODEL_NOT_FOUND')
       return { credential: { provider: 'minimax', baseURL: 'https://api.minimax.io/v1', modelId: 'M', contextTokens: 16000, apiKey: 'second-secret' }, limits: { seconds: 180, steps: 4, tools: 0 } }
     } })
-  const request = { relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: 'r', range: { start: 0, end: 2 }, expectedText: '/问', level:'write' as const,promptText: '问', references: [], modelRecordId: 'second' }
+  const request = { relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: 'r', range: { start: 0, end: 2 }, expectedText: '/问', scope:'note' as const,promptText: '问', modelRecordId: 'second' }
   const preview = await registry.preview('owner', request)
   expect(preview.recipient).toEqual({ provider: 'minimax', modelId: 'M', host: 'api.minimax.io' })
   expect(JSON.stringify(preview)).not.toContain('second-secret')

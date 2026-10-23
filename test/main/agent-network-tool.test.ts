@@ -50,7 +50,14 @@ function networkHarness(options: {
   const grant: TaskGrant = {
     id: 'g', root: '/vault', sessionId: 's', origin: 'a.md',
     originProof: source('a.md'), sources: [source('a.md'), source('b.md')],
-    credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, level:'write' as const, autoApproveWrites:false, 
+    credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, scope: 'vault' as const,
+    contains: () => true,
+    validateRead: async (path: string) => { const snapshot = await read(path); return { snapshot, proof: { relPath: path, sessionId: 's', objectVersion: snapshot.objectVersion ?? 'o', revision: snapshot.revision, fingerprint: createHash('sha256').update(snapshot.content).digest('hex'), tier: 'reference' as const } } },
+    list: async () => ({ items: [], total: 0, complete: true }),
+    actualSources: () => [],
+    assertStructuralTarget: async () => {},
+    assertCreateTarget: async () => {},
+    
     get network() { return networkLive ? { allowed: true as const } : undefined },
     assertActive() {},
     validateSources: async () => {},
@@ -604,7 +611,14 @@ describe('revokeNetworkForAll（配置变更撤网）', () => {
       const proof = source(relPath)
       return {
         id: `g-${relPath}`, root: '/vault', sessionId: 's', origin: relPath, originProof: proof, sources: [proof],
-        credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, level:'write' as const, autoApproveWrites:false, 
+        credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, scope: 'vault' as const,
+    contains: () => true,
+    validateRead: async (path: string) => { const snapshot = await read(path); return { snapshot, proof: { relPath: path, sessionId: 's', objectVersion: snapshot.objectVersion ?? 'o', revision: snapshot.revision, fingerprint: createHash('sha256').update(snapshot.content).digest('hex'), tier: 'reference' as const } } },
+    list: async () => ({ items: [], total: 0, complete: true }),
+    actualSources: () => [],
+    assertStructuralTarget: async () => {},
+    assertCreateTarget: async () => {},
+    
         get network() { return live.get(relPath) ? { allowed: true as const } : undefined },
         assertActive() {},
         validateSources: async () => {},

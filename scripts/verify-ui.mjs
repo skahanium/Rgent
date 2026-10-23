@@ -74,50 +74,146 @@ async function openNetworkPage(page) {
   return waitFor(page, `document.querySelector('.settings-page-title')?.textContent==='联网' && !!document.querySelector('.settings-network-page')`)
 }
 
-/** 四档文案即合同；同一窗口沿用上次手动档，自动档发完落回可写（产品行为）。 */
-const AUTHORIZATION_LEVELS = { read: '只读本笔记', reference: '参考本目录', write: '可写', auto: '自动' }
-let sessionManualLevel = 'read'
+/** 三档文案即合同：文案只做展示，选中后底栏 data-scope 才是机械判据。 */
+const SCOPE_LABELS = { note: '本篇', folder: '同册', vault: '整库' }
 
-/** 读一次口令卡：四档、当前选中档、范围摘要与是否还藏着旧的联网／MCP 勾选。 */
-async function authorizationCardState(page) {
+/** 零确认：没有授权卡、写确认卡、删除确认卡，也没有任何打开的模态。 */
+const NO_CONFIRM_SURFACE = `document.querySelectorAll('dialog[open]').length === 0 && !document.querySelector('.overlay-authorization, .overlay-write-confirm, .overlay-trash-confirm, .write-confirm, .trash-confirm')`
+
+/** 读一次底栏模式控件：按钮上的档位、菜单项、勾选与禁用态。 */
+async function scopeState(page) {
   return page.eval(`(() => {
-    const card = document.querySelector('.overlay-authorization')
-    if (!card) return null
+    const button = document.querySelector('.status-scope-button')
+    if (!button) return null
     return {
-      levels: [...card.querySelectorAll('.authorization-level')].map(chip => ({ level: chip.dataset.level ?? '', label: chip.textContent.trim(), checked: chip.getAttribute('aria-checked') === 'true' })),
-      checked: card.querySelector('.authorization-level[aria-checked="true"]')?.textContent.trim() ?? '',
-      summary: card.querySelector('.authorization-scope-text')?.textContent ?? '',
-      detailHidden: card.querySelector('.authorization-scope-detail')?.hidden === true,
-      network: !!card.querySelector('.authorization-network'),
-      mcp: !!card.querySelector('.authorization-mcp')
+      value: button.dataset.scope ?? '',
+      text: button.textContent,
+      expanded: button.getAttribute('aria-expanded'),
+      menuOpen: document.querySelector('.status-scope-menu')?.hidden === false,
+      options: [...document.querySelectorAll('.status-scope-option')].map(item => ({
+        scope: item.dataset.scopeOption ?? '',
+        label: item.querySelector('.status-scope-option-name')?.textContent ?? '',
+        checked: item.getAttribute('aria-checked') === 'true',
+        disabled: item.disabled === true,
+        title: item.title
+      }))
     }
   })()`)
 }
 
-/** 切四档里的一档；档位一变主进程就重新核对，发送键会短暂禁用。 */
-async function setAuthorizationLevel(page, level) {
-  const clicked = await page.eval(`(() => { const chip=document.querySelector('.overlay-authorization .authorization-level[data-level=${JSON.stringify(level)}]'); if(!chip || chip.disabled) return false; chip.click(); return true })()`)
-  if (!clicked) return false
-  const ready = await waitFor(page, `document.querySelector('.overlay-authorization .authorization-level[data-level="${level}"]')?.getAttribute('aria-checked')==='true' && !!document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')`)
-  if (ready) sessionManualLevel = level === 'auto' ? 'write' : level
-  return ready
+/** 点按钮 → 点菜单项 → 等 data-scope 匹配。菜单非模态，不抢编辑器焦点。 */
+async function selectScope(page, scope = 'note') {
+  const current = await page.eval(`document.querySelector('.status-scope-button')?.dataset.scope ?? null`)
+  if (current === scope) return true
+  const opened = await page.eval(`(() => { const button = document.querySelector('.status-scope-button'); if (!button || button.disabled) return false; button.click(); return true })()`)
+  if (!opened) return false
+  if (!await waitFor(page, `document.querySelector('.status-scope-menu')?.hidden === false`)) return false
+  const picked = await page.eval(`(() => {
+    const item = document.querySelector('.status-scope-option[data-scope-option=${JSON.stringify(scope)}]')
+    if (!item || item.disabled) return false
+    item.click()
+    return true
+  })()`)
+  if (!picked) return false
+  return waitFor(page, `document.querySelector('.status-scope-button')?.dataset.scope === ${JSON.stringify(scope)} && document.querySelector('.status-scope-menu')?.hidden === true`)
 }
 
-/** 范围树收在「调整」里：先展开，再点预设或勾选。 */
-async function openAuthorizationScope(page) {
-  const opened = await page.eval(`document.querySelector('.overlay-authorization .authorization-scope-detail')?.hidden === false`)
-  if (opened) return true
-  await page.eval(`document.querySelector('.overlay-authorization .authorization-scope-toggle')?.click()`)
-  return waitFor(page, `document.querySelector('.overlay-authorization .authorization-scope-toggle')?.getAttribute('aria-expanded')==='true' && document.querySelector('.overlay-authorization .authorization-scope-detail')?.hidden===false`)
+/** 任务是否真的开始了；快速任务可能已经收尾，所以也认「已登记任务」与已落回答。 */
+async function taskStarted(page, timeout = 20000) {
+  return waitFor(page, `(async () => {
+    if (document.querySelector('.task-dock')?.dataset.kind === 'generating') return true
+    if ((await window.rgent.agentTasks()).length > 0) return true
+    return false
+  })()`, timeout)
 }
 
-/** 真实指针点范围复选框：HTMLElement.click() 不会把焦点放进卡片。 */
-async function clickAuthorizationChoice(page, relPath) {
-  const point = await page.eval(`(() => { const input=[...document.querySelectorAll('.overlay-authorization .authorization-choices input')].find(input=>input.value===${JSON.stringify(relPath)}); if(!input || input.disabled) return null; input.scrollIntoView({block:'nearest'}); const rect=input.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } })()`)
-  if (!point) return false
-  await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
-  await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
-  return true
+/**
+ * 口令提交即开工：按一次回车，断言任务直接开始且没有任何确认卡。
+ * 不再有「先出卡再点发送」的两步，也不允许再出现 dialog[open]。
+ */
+async function submitDirect(page, prompt = null) {
+  if (prompt !== null) {
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    await page.call('Input.insertText', { text: `/${prompt}` })
+  }
+  // 记录 AgentEvent：任务可能在 250ms 内收尾，单看浮层会漏掉「真的开始过」。
+  await page.eval(`(() => {
+    window.__r5aTaskEvents = []
+    window.__r5aTaskOff?.()
+    window.__r5aTaskOff = window.rgent.onAgentEvent(event => {
+      if (event?.id) window.__r5aTaskEvents.push({ id: event.id, status: event.status, relPath: event.relPath, reason: event.reason ?? null, activity: event.activity ?? null })
+    })
+    return true
+  })()`)
+  await page.key('Enter', 'Enter', 0, 13)
+  const started = await waitFor(page, `(window.__r5aTaskEvents?.length ?? 0) > 0 || document.querySelector('.task-dock')?.dataset.kind === 'generating' || (async () => (await window.rgent.agentTasks()).length > 0)()`, 20000)
+  if (started) await page.eval(`window.__r5aLastTaskId = window.__r5aTaskEvents?.[0]?.id ?? null`)
+  const noCard = await page.eval(NO_CONFIRM_SURFACE)
+  return started && noCard
+}
+
+
+/** 在正文末尾插一条 `/口令`。任务收尾后宿主正文回写可能迟到，冲掉刚插的口令就重插。 */
+async function ensureSlash(page, prompt) {
+  const marker = `/${prompt}`
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await sleep(attempt === 0 ? 900 : 600)
+    await page.eval(`(() => {
+      const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+      if (!view) return false
+      const at = view.state.doc.length, insert = '\\n' + ${JSON.stringify(marker)}
+      view.dispatch({ changes: { from: at, insert }, selection: { anchor: at + insert.length }, userEvent: 'input.type' })
+      view.focus()
+      return true
+    })()`)
+    if (await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').endsWith(${JSON.stringify(marker)})`, 2500)) return true
+    // 被迟到同步冲掉：先把残留的旧口令删掉，下一轮再插，避免同一条口令出现两次。
+    await page.eval(`(() => {
+      const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+      if (!view) return false
+      const text = view.state.doc.toString(), at = text.lastIndexOf(${JSON.stringify(marker)})
+      if (at >= 0) view.dispatch({ changes: { from: at, to: at + ${marker.length} } })
+      return true
+    })()`)
+  }
+  return false
+}
+
+/** 等最近一次由 `submitDirect` 启动的任务真正收尾（含 cancelled／failed，结构操作会走 cancelled）。 */
+async function waitLastTaskDone(page, timeout = 60000) {
+  const id = await page.eval(`window.__r5aLastTaskId ?? null`)
+  if (!id) return false
+  return waitFor(page, `(window.__r5aTaskEvents ?? []).some(event => event.id === ${JSON.stringify(id)} && ['completed','cancelled','failed'].includes(event.status))`, timeout)
+}
+
+/** 打开设置并点中某个导航页（工作区：笔记库、界面、联网；代理设置：助手、记忆、技能、模型、运行）。 */
+async function openSettingsPage(page, label) {
+  if (!await waitFor(page, `!!document.querySelector('.overlay-settings') && !!document.querySelector('.settings-nav')`)) {
+    await page.eval(`document.querySelector('.settings-open')?.click()`)
+    if (!await waitFor(page, `!!document.querySelector('.overlay-settings') && !!document.querySelector('.settings-nav')`)) return false
+  }
+  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(button => button.textContent === ${JSON.stringify(label)})?.click()`)
+  return waitFor(page, `document.querySelector('.settings-page-title')?.textContent === ${JSON.stringify(label)}`)
+}
+
+/** 设置 → 笔记库 → 已删除（次级页，不新增导航项）。 */
+async function openDeletedPage(page) {
+  if (!await openSettingsPage(page, '笔记库')) return false
+  if (!await waitFor(page, `!!document.querySelector('.vault-settings-trash-link [data-vault-action="trash"]')`)) return false
+  await page.eval(`document.querySelector('.vault-settings-trash-link [data-vault-action="trash"]')?.click()`)
+  return waitFor(page, `document.querySelector('.vault-settings-trash')?.hidden === false && document.querySelector('.vault-settings-trash [data-trash-action="back"]')`)
+}
+
+/** 当前「已删除」列表行（以 data-trash-id 为身份，文案只用于人读）。 */
+async function trashRows(page) {
+  return page.eval(`[...document.querySelectorAll('.vault-settings-trash [data-trash-id]')].map(row => ({
+    id: row.dataset.trashId,
+    name: row.querySelector('.trash-name')?.textContent ?? '',
+    state: row.dataset.trashState ?? '',
+    original: [...row.querySelectorAll('.trash-field')].find(field => field.querySelector('dt')?.textContent === '原路径')?.querySelector('dd')?.textContent ?? '',
+    restored: !!row.querySelector('[data-trash-action="restore"]'),
+    purge: !!row.querySelector('[data-trash-action="purge"]')
+  }))`)
 }
 
 async function selectBrowserFolder(page, folder) {
@@ -316,53 +412,7 @@ async function verifySidebarWidth(page, shot) {
   }
 }
 
-/** First Enter prepares and displays authorization; only the second confirms.
- *  四档默认只读；需要参考／写工具的场景由调用方显式切档（`level`），范围树在「调整」里。 */
-async function confirmSlashAuthorization(page, inspect = false, level = null) {
-  await page.key('Enter', 'Enter', 0, 13)
-  const ready = await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)
-  check('本场授权准备就绪后才可确认', ready, ready ? '' : await page.eval(`JSON.stringify({ tab: document.querySelector('.tab[aria-selected=true]')?.dataset.rel, focused: document.activeElement?.className, popup: document.querySelector('dialog[open]')?.className, text: document.querySelector('.cm-content')?.textContent?.slice(0, 180), status: document.querySelector('.status-left')?.textContent })`))
-  if (!ready) return false
-  // 四档 chip 都在、恰有一档选中；旧的每场联网／MCP 勾选已经删掉。
-  const card = await authorizationCardState(page)
-  check('本场授权四档齐全、只选一档，且卡里没有联网/MCP 勾选', !!card && JSON.stringify(card.levels.map(item => item.label)) === JSON.stringify(['只读本笔记', '参考本目录', '可写', '自动']) && card.levels.filter(item => item.checked).length === 1 && card.checked === AUTHORIZATION_LEVELS[sessionManualLevel] && card.network === false && card.mcp === false, JSON.stringify(card && { levels: card.levels, checked: card.checked, network: card.network, mcp: card.mcp }))
-  if (sessionManualLevel === 'read') {
-    check('新场授权默认四档=只读、范围仅本篇', !!card && card.checked === '只读本笔记' && card.summary === '范围：仅本篇' && card.detailHidden === true, JSON.stringify(card && { checked: card.checked, summary: card.summary, detailHidden: card.detailHidden }))
-  }
-  if (level && level !== sessionManualLevel && !await setAuthorizationLevel(page, level)) return false
-  if (inspect) {
-    check('首次回车只展示本篇范围与实际模型接收方', await page.eval(`(async () => {
-      const popup=document.querySelector('.overlay-authorization');
-      if(!popup)return false;
-      return (await window.rgent.agentTasks()).length===0 && popup.querySelector('.authorization-recipient').textContent.includes('127.0.0.1:') &&
-        popup.querySelectorAll('.authorization-manifest li').length===1 && popup.querySelector('.authorization-disclosure').textContent.includes('发送')
-    })()`))
-    check('口令旁授权浮层具有真实轮廓、可见位置且不抢焦点', await page.eval(`(() => {
-      const popup=document.querySelector('.overlay-authorization');if(!popup)return false;const r=popup.getBoundingClientRect();const style=getComputedStyle(popup);
-      return r.width>=300 && r.width<=450 && r.left>=0 && r.top>=0 && r.right<=innerWidth+1 && r.bottom<=innerHeight+1 &&
-        style.position==='fixed' && parseFloat(style.borderTopWidth)>0 && !popup.contains(document.activeElement)
-    })()`))
-    await page.eval(`document.querySelector('.overlay-authorization')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',isComposing:true,bubbles:true,cancelable:true}))`)
-    check('输入法组合回车不启动模型任务', await page.eval(`(async () => (await window.rgent.agentTasks()).length===0 && !!document.querySelector('.overlay-authorization[open]'))()`))
-    await page.eval(`document.querySelector('.overlay-authorization')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',keyCode:229,bubbles:true,cancelable:true}))`)
-    check('单独 keyCode 229 不启动模型任务', await page.eval(`(async () => (await window.rgent.agentTasks()).length===0 && !!document.querySelector('.overlay-authorization[open]'))()`))
-    // 非模态卡只在焦点进入卡片时才接管 Esc（不抢焦点是合同）。
-    await page.eval(`document.querySelector('.overlay-authorization')?.focus()`)
-    await page.key('Escape','Escape',0,27)
-    const cancelled = await waitFor(page, `!document.querySelector('.overlay-authorization[open]') && document.querySelector('.cm-content')?.textContent.includes('/请写两句话')`)
-    // 非模态关闭不会代还焦点（它从未把焦点拿走）；把焦点放回正文，再走 re-open。
-    await page.eval(`document.querySelector('.cm-content')?.focus()`)
-    check('取消授权保留原始口令且焦点回到正文', cancelled && await page.eval(`document.querySelector('.cm-editor')?.contains(document.activeElement)`))
-    check('取消准备保留该篇临时模型', await page.eval(`document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test-override'`) === true)
-    await page.key('Enter','Enter',0,13)
-    if(!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`))return false
-  }
-  // 非模态卡不抢焦点：发送前必须由测试把焦点放到发送键上。
-  await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
-  await page.key('Enter', 'Enter', 0, 13)
-  return true
-}
-
+/** 零确认口令：按一次回车就开工；确认卡已从产品移除，测试不再等待任何浮层。 */
 /** Three approved notes exercise actual Host tools through the controlled model server. */
 /** Real UI + Host + hidden store + background service, using only the loopback fixture. */
 async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) {
@@ -412,20 +462,12 @@ async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) 
   }
   await createAndOpen('记忆长期.md')
   await page.call('Input.insertText',{text:'/长期记住：后续回答请用中文简短表达（记忆验收）。'})
-  await page.key('Enter','Enter',0,13)
-  await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)
-  check('原授权浮层只读披露独立记忆用途与实际整理接收方', await waitFor(page, `(() => {
-    const text = document.querySelector('.authorization-memory')?.textContent ?? ''
-    return text.includes('本场使用独立记忆') && text.includes('memory-ui-fixture') && text.includes('后台整理') && !document.querySelector('.authorization-memory select')
-  })()`))
-  // 非模态卡不抢焦点：发送前把焦点放到发送键。
-  await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
-  await page.key('Enter','Enter',0,13)
+  check('零确认下记忆场直接开工、没有授权卡', await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
   check('回答和本篇账本成功保存后后台整理完成', await waitFor(page, `(async()=>{const state=await window.rgent.vaultGet();const memory=await window.rgent.memoryGet({sessionId:state.sessionId});const note=await window.rgent.noteRead('记忆长期.md');return memory.ok&&memory.value.entries.some(e=>e.content==='后续回答请用中文简短表达（记忆验收）。'&&e.layer==='core')&&memory.value.jobs.some(j=>j.outcome==='applied')&&!note.content.includes('rgent:ledger:v1')&&(await window.rgent.ledgerGet({sessionId:note.sessionId,objectVersion:note.objectVersion,relPath:'记忆长期.md'})).value?.records.some(r=>r.state==='saved'&&r.chapter?.prompt.includes('长期记住'))&&(await window.rgent.agentTasks()).length===0})()`,15000))
   check('独立后台仅发送获准材料、不把回答当事实且工具为零', requests.some(r=>{if(r.model!=='memory-ui-fixture'||r.tools?.length)return false;const input=JSON.parse(r.messages.find(m=>m.role==='user').content);return input.sources?.some(s=>s.classification==='command'&&s.text.includes('长期记住'))&&!input.sources.some(s=>s.classification==='ai')&&!JSON.stringify(r).includes('隐藏工具推理')}))
   await createAndOpen('记忆后续.md')
   await page.call('Input.insertText',{text:'/记忆后续第一次'})
-  await confirmSlashAuthorization(page)
+  check('零确认下下一场直接开工、没有授权卡', await submitDirect(page))
   check('下一场自动带入核心记忆并保存实际使用依赖', await waitFor(page, `(async()=>{const note=await window.rgent.noteRead('记忆后续.md');return note.content.includes('记忆验收旧回答')&&(await window.rgent.ledgerGet({sessionId:note.sessionId,objectVersion:note.objectVersion,relPath:'记忆后续.md'})).value?.records.some(r=>r.state==='saved'&&r.chapter?.provenance?.version===2&&r.chapter.provenance.memoryDeps.length>0)&&(await window.rgent.agentTasks()).length===0})()`))
   const nextRequests=requests.filter(r=>r.model!=='memory-ui-fixture'&&JSON.stringify(r).includes('记忆后续第一次'))
   check('实际回答模型收到低信任核心记忆', nextRequests.some(r=>JSON.stringify(r).includes('后续回答请用中文简短表达（记忆验收）。')))
@@ -466,8 +508,7 @@ async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) 
     writeFileSync(memoryFixtureFile,fixtureEncoded)
     await chooseRecentFixtureRoot(vault)
   }finally{await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showOpenDialog=globalThis.__recentFixtureDialog;true`)}
-  // 换库一轮会把同会话手动档重置为只读（产品行为）；脚本镜像同步，后面的卡按新会话断言。
-  sessionManualLevel = 'read'
+  // 换库一轮把每篇作业范围清回本篇（产品行为）；后面的场按默认本篇断言。
   const fixtureChecked=await page.eval(`(async()=>{const state=await window.rgent.vaultGet();return window.rgent.memoryGet({sessionId:state.sessionId})})()`)
   check('近期夹具绑定真实账本材料并通过生产来源核验，笔记和账本不变',fixtureChecked.ok&&fixtureChecked.value.entries.some(e=>e.id==='ui-v5-recent'&&e.category==='recent'&&e.status==='active')&&vaultFileSnapshot(path.join(vault,'.rgent','ledgers'))===fixtureLedgerBefore&&namesBytes(vault)===fixtureNotesBefore,JSON.stringify({status:fixtureChecked.value?.status,reason:fixtureChecked.value?.reason,recent:fixtureChecked.value?.entries.filter(e=>e.category==='recent').map(e=>({id:e.id,status:e.status,reason:e.reason})),notesUnchanged:namesBytes(vault)===fixtureNotesBefore,ledgersUnchanged:vaultFileSnapshot(path.join(vault,'.rgent','ledgers'))===fixtureLedgerBefore}))
 
@@ -615,7 +656,7 @@ async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) 
   await page.key('Enter','Enter',0,13)
   await page.call('Input.insertText',{text:'/记忆后续遗忘核验'})
   check('遗忘后的新口令进入人写段落',await waitFor(page,`document.querySelector('.cm-content')?.textContent.includes('/记忆后续遗忘核验')`))
-  await confirmSlashAuthorization(page)
+  check('零确认下遗忘后的新场直接开工', await submitDirect(page))
   check('遗忘后新任务仍正常回答保存',await waitFor(page, `(async()=>{const note=await window.rgent.noteRead('记忆后续.md');return note.content.includes('记忆后续遗忘核验')&&(await window.rgent.agentTasks()).length===0})()`))
   const after=requests.filter(r=>r.model!=='memory-ui-fixture'&&JSON.stringify(r).includes('记忆后续遗忘核验'))
   check('旧记忆及带依赖的历史回答未再次发出',after.length>0&&after.every(r=>!JSON.stringify(r).includes('记忆验收旧回答')&&!JSON.stringify(r).includes('后续回答请用中文简短表达（记忆验收）。')))
@@ -633,227 +674,235 @@ async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) 
   await page.eval(`document.querySelector('.ledger-close').click()`)
 }
 
-async function verifyScopedHost(page, vault, shot, requests) {
-  writeFileSync(path.join(vault, '工具发起.md'), '')
-  writeFileSync(path.join(vault, '工具参考.md'), '# 参考原文\n\n工具线索：受控正文证据。\n')
-  writeFileSync(path.join(vault, '工具其他.md'), '扫描可见，但没有查询命中。\n')
+async function verifyScopedHost(page, vault, shot, requests, allRequests = []) {
+  process.stdout.write('\n作业范围三档（同册／整库读搜与工具矩阵）\n')
+  mkdirSync(path.join(vault, '工作区'), { recursive: true })
+  mkdirSync(path.join(vault, '工作区', '归档'), { recursive: true })
+  writeFileSync(path.join(vault, '工作区', '工具发起.md'), '')
+  writeFileSync(path.join(vault, '工作区', '工具参考.md'), '# 参考原文\n\n工具线索：受控正文证据。\n')
+  writeFileSync(path.join(vault, '工作区', '工具其他.md'), '扫描可见，但没有查询命中。\n')
+  check('工作区目录已出现', await waitFor(page, `!!document.querySelector('.tree-folder-toggle[data-path="工作区"]')`))
+  await selectBrowserFolder(page, '工作区')
   check('三篇工具夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter(n=>/工具发起|工具参考|工具其他/.test(n.innerText)).length===3`))
   await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.innerText.includes('工具发起'))?.click()`)
   await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('工具发起')`)
-  await page.eval(`document.querySelector('.cm-content')?.focus()`)
-  await page.call('Input.insertText', { text: '/工具查证' })
-  const choose = async () => {
-    await page.key('Enter', 'Enter', 0, 13)
-    if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)) {
-      process.stdout.write('DEBUG_START popover ' + await page.eval(`JSON.stringify({ editor: document.querySelector('.cm-content')?.innerText, popover: !!document.querySelector('.overlay-authorization'), send: document.querySelector('.authorization-send')?.disabled ?? null, status: document.querySelector('.task-dock')?.dataset.kind ?? null })`) + '\n')
-      return false
-    }
-    // 有工具档要写工具，先切「可写」；只读档不宣告写工具，也不允许勾参考。
-    if (!await setAuthorizationLevel(page, 'write')) return '「可写」档没就绪'
-    check('「可写」档工具摘要出现补发起篇与建笔记', await page.eval(`document.querySelector('.authorization-status')?.textContent.includes('工具：补发起篇、建笔记')`), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? ''`))
-    // 授权范围在同一会话内记忆：范围树在「调整」里，展开后先清回发起篇，再按本场需要选参考。
-    if (!await openAuthorizationScope(page)) return '范围树没展开'
-    await page.eval(`document.querySelector('.authorization-preset-origin')?.click()`)
-    if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===1 && [...document.querySelectorAll('.authorization-choices input')].every(input=>!input.checked) && !!document.querySelector('.authorization-send:not(:disabled)')`)) return '「只读本笔记」预设没就绪'
-    check('「只读本笔记」预设清回仅发起篇', await page.eval(`document.querySelectorAll('.authorization-manifest li').length===1 && [...document.querySelectorAll('.authorization-choices input')].every(input=>!input.checked)`))
-    // HTMLElement.click() does not focus a checkbox. A refresh disables the initially
-    // focused send button, so native mouse clicks must establish focus before refresh.
-    for (const [at, name] of ['工具参考.md', '工具其他.md'].entries()) {
-      if (!await clickAuthorizationChoice(page, name)) return '没找到写作参考的勾选框'
-      if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===${at+2} && !!document.querySelector('.authorization-send:not(:disabled)')`)) return false
-    }
-    return true
-  }
-  await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
-  check('两篇额外参考逐场核对进入固定清单', await choose())
-  await shot(page, 'auth-scope-1200')
-  await page.key('Escape', 'Escape', 0, 27)
-  const scopeCancelled = await waitFor(page, `!document.querySelector('.overlay-authorization[open]') && document.querySelector('.cm-content')?.textContent.includes('/工具查证')`)
-  // 非模态关闭不代还焦点（它从未把焦点拿走）；把焦点放回正文再继续。
-  await page.eval(`document.querySelector('.cm-content')?.focus()`)
-  check('取消工具范围授权保留口令并归还焦点', scopeCancelled && await page.eval(`document.querySelector('.cm-editor')?.contains(document.activeElement)`))
-  await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
-  check('窄窗重新准备三篇范围', await choose())
-  check('窄窗范围、主机和内部焦点可辨', await page.eval(`(() => { const popup=document.querySelector('.overlay-authorization');if(!popup)return false;const r=popup.getBoundingClientRect();return r.left>=0 && r.top>=0 && r.right<=innerWidth+1 && r.bottom<=innerHeight+1 && popup.contains(document.activeElement) && popup.querySelector('.authorization-recipient').textContent.includes('127.0.0.1:') })()`), await page.eval(`(() => {const popup=document.querySelector('.overlay-authorization');if(!popup)return 'no-popup';const r=popup.getBoundingClientRect();return JSON.stringify({bounds:{left:r.left,top:r.top,right:r.right,bottom:r.bottom},viewport:{width:innerWidth,height:innerHeight},focus:document.activeElement?.outerHTML.slice(0,150),recipient:popup.querySelector('.authorization-recipient').textContent})})()`))
-  await shot(page, 'auth-scope-800')
-  writeFileSync(path.join(vault, '工具参考.md'), '# 参考原文\n\n工具线索：受控正文证据。来源复核。\n')
-  await page.key('Enter', 'Enter', 0, 13)
-  const refreshed = await waitFor(page, `document.querySelector('.authorization-status')?.textContent.includes('再次确认') && !!document.querySelector('.authorization-send:not(:disabled)') && document.querySelector('.overlay-authorization').contains(document.activeElement)`)
-  check('参考原文变化后重新展示清单，第一次确认未发模型请求', refreshed && requests.length === 0 && await page.eval(`(async ()=>(await window.rgent.agentTasks()).length===0)()`), await page.eval(`(async ()=>JSON.stringify({status:document.querySelector('.authorization-status')?.textContent,focus:document.activeElement?.outerHTML.slice(0,150),tasks:await window.rgent.agentTasks()}))()`))
-  if (!refreshed) throw Error('授权刷新后未恢复可确认焦点；停止依赖链验收。')
-  await page.key('Enter', 'Enter', 0, 13)
-  check('工具链运行时栏上浮层为生成中并有中止入口', await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind==='generating' && !!document.querySelector('.task-dock-abort')`), await page.eval(`JSON.stringify({status:document.querySelector('.status')?.textContent?.slice(0,180)??null,dock:document.querySelector('.task-dock')?.dataset.kind??null,popover:!!document.querySelector('.overlay-authorization'),card:!!document.querySelector('.overlay-write-confirm'),body:document.querySelector('.cm-content')?.innerText?.slice(0,60)??null})`))
-  const done = await waitFor(page, `(async () => {const note=await window.rgent.noteRead('工具发起.md');return note.content.includes('工具查证完成：已核对参考原文。') && (await window.rgent.agentTasks()).length===0})()`)
-  // 有工具档的场里，模型同时看到读、搜、补、建四个工具：写工具不再需要额外授权步骤。
-  const toolNames = request => (request.tools ?? []).map(tool => tool.function?.name)
-  check('有工具档的场同时提供读、搜、补、建四个工具', requests.length === 3 && requests.every(request => ['read_library','search_library','append_to_note','create_note'].every(name => toolNames(request).includes(name))), JSON.stringify(toolNames(requests[0] ?? {})))
-  check('真实搜库、读库、回答三步写回本篇', done && requests.length === 3)
-  check('这轮模型只读不写：正文没有追加块也未新建', await page.eval(`(async () => { const note=await window.rgent.noteRead('工具发起.md'); return !note.content.includes('part=\"append\"') })()`))
-  check('首步只发送来源清单，后续请求携带实际命中及原文', requests.length === 3 && !JSON.stringify(requests[0]).includes('受控正文证据') && JSON.stringify(requests[1]).includes('受控正文证据') && JSON.stringify(requests[2]).includes('来源复核'))
-  check('工具输出和隐藏推理不落正文', await page.eval(`(async () => { const note=await window.rgent.noteRead('工具发起.md');const body=note.content.split('<!-- rgent:ledger:v1 -->')[0];return !body.includes('受控正文证据') && !body.includes('隐藏工具推理') })()`))
-  await page.eval(`document.querySelector('.ledger-open')?.click()`)
-    await waitFor(page, `!!document.querySelector('.ledger-body details')`)
-    await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
-    await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`)
-  check('同篇账本回顾工具及读取、模型引用来源', await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return text.includes('工具摘要') && (text.includes('search_library')||text.includes('搜库')) && (text.includes('read_library')||text.includes('读库')) && text.includes('实际读取来源：工具其他.md、工具参考.md') && text.includes('模型消息引用来源：工具参考.md') && text.includes('本场技能：无')})()`), await page.eval(`JSON.stringify({open:!!document.querySelector('.ledger-body'),text:(document.querySelector('.ledger-body')?.textContent||'').slice(0,800)})`))
-  await shot(page, 'tool-ledger-800')
-  await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
-  await shot(page, 'tool-ledger-1200')
-  await page.eval(`document.querySelector('.ledger-close')?.click()`)
-  await page.call('Emulation.clearDeviceMetricsOverride', {})
-}
+  const scope = () => scopeState(page)
+  const initial = await scope()
+  check('底栏三档控件默认本篇、菜单三档齐全可用', !!initial && initial.value === 'note' && initial.text === '本篇 ▾' &&
+    JSON.stringify(initial.options.map(option => option.label)) === JSON.stringify(['本篇', '同册', '整库']) &&
+    initial.options.filter(option => option.checked).length === 1 && initial.options.find(option => option.checked)?.scope === 'note' &&
+    initial.options.every(option => !option.disabled), JSON.stringify(initial))
+  await shot(page, 'scope-note-1200')
+  const ask = async (prompt) => await ensureSlash(page, prompt) && submitDirect(page)
+  const noConfirm = () => page.eval(NO_CONFIRM_SURFACE)
 
-/** 包 4 窗口收口：写类工具在真窗口里的四条路——建·同意、建·不建、补·安静、补·超限。
- *  模型是受控主机脚本，真实供应商一律未配置（零真实调用）。 */
-async function verifyWriteTools(page, vault, shot, requests) {
-  const fixtures = ['写作建一.md', '写作建二.md', '写作补.md', '写作超限.md', '写作改名.md', '写作越权.md', '写作挪.md', '写作挪参考.md', '写作删.md', '写作不删.md', '写作自动改名.md']
-  for (const name of fixtures) writeFileSync(path.join(vault, name), '')
-  writeFileSync(path.join(vault, '写作参考.md'), '# 参考\n\n受控参考正文。\n')
-  writeFileSync(path.join(vault, '写作删参考.md'), '# 删除参考\n\n这篇会被送进废纸篓。\n')
-  writeFileSync(path.join(vault, '写作不删参考.md'), '# 不删参考\n\n这篇应该留下。\n')
-  writeFileSync(path.join(vault, '写作自动参考.md'), '# 自动参考\n\n自动档也不该自己改名。\n')
-  mkdirSync(path.join(vault, '归档'), { recursive: true })
-  check('写工具夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter(n=>/写作/.test(n.innerText)).length===15`))
-  // 受控供应商是通过 IPC 配的，渲染层的模型快照要打开一次设置页才会刷新；
-  // 不刷新的话按 Enter 只会得到「请选择可用模型」，任务根本不会开始。
-  await page.eval(`document.querySelector('.settings-open').click()`)
-  await waitFor(page, `!!document.querySelector('.settings-nav')`)
-  await page.key('Escape', 'Escape', 0, 27)
-  await waitFor(page, `!document.querySelector('.settings-nav')`)
-  // 侧栏默认收起：先展开，才点得开笔记。
-  check('展开目录树', await page.eval(`(() => { const button = document.querySelector('.tree-toggle'); if (button.getAttribute('aria-expanded') !== 'true') button.click(); return true })()`) && await waitFor(page, `document.querySelector('.tree-toggle')?.getAttribute('aria-expanded')==='true'`))
+  // 一、本篇：读/搜/建/结构/删除都不宣告；回答与补写照常。
+  check('本篇选档后按钮文案与 data-scope 同步', await selectScope(page, 'note') && (await scope()).value === 'note' && (await scope()).text === '本篇 ▾')
+  const noteBase = allRequests.length
+  check('本篇口令一次回车直接开工且没有确认卡', await ask('工具查证'), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
+  check('本篇任务正常收尾并写回答', await waitFor(page, `(async()=>{const n=await window.rgent.noteRead('工作区/工具发起.md');return n.content.includes('受控回答第一句。第二句。')&&(await window.rgent.agentTasks()).length===0})()`))
+  const noteRequests = allRequests.slice(noteBase).filter(request => JSON.stringify(request.messages ?? '').includes('工具查证'))
+  const noteTools = [...new Set(noteRequests.flatMap(request => (request.tools ?? []).map(tool => tool.function?.name)))]
+  check('本篇只宣告补写工具，读/搜/建/改/挪/删都不宣告', noteRequests.length > 0 && JSON.stringify([...noteTools].sort()) === JSON.stringify(['append_to_note']), JSON.stringify(noteTools))
+  check('本篇没有可发的整库/同册工具结果', noteRequests.every(request => !request.messages.some(message => message.role === 'tool')), JSON.stringify(noteRequests.map(request => request.messages.filter(message => message.role === 'tool').length)))
+  check('本篇回答落盘后仍没有确认卡', await noConfirm())
 
-  const clickSelector = async (selector) => {
-    const point = await page.eval(`(() => { const el=document.querySelector('${selector}'); if(!el)return null; const r=el.getBoundingClientRect(); return { x: r.left+r.width/2, y: r.top+r.height/2 } })()`)
-    if (!point) return false
-    await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
-    await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
-    return true
-  }
-  const ledgerPanel = async (note, condition) => {
-    await page.eval(`document.querySelector('.ledger-close')?.click()`)
-    await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(note)})?.click()`)
-    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(note)}`)) return false
-    await page.eval(`document.querySelector('.ledger-open')?.click()`)
-    if (!await waitFor(page, `!!document.querySelector('.ledger-body details')`)) return false
-    await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
-    return await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return ${condition}})()`)
-  }
-  // 每个场景用一篇干净的发起篇：光标从头开始，口令一定落在正文里。
-  let writeSummaryChecked = false
-  const start = async (note, prompt, reference = '写作参考.md', level = 'write') => {
-    await selectBrowserFolder(page, '')
-    if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(n=>n.dataset.path===${JSON.stringify(note)})`)) return `目录里没有 ${note}`
-    await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(note)}).click()`)
-    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(note)}`)) return `tab 没打开 ${note}：` + await page.eval(`JSON.stringify({tabs:[...document.querySelectorAll('.tab')].map(t=>({rel:t.dataset.rel,text:t.innerText})),cm:!!document.querySelector('.cm-content')})`)
-    await page.eval(`document.querySelector('.cm-content').focus()`)
-    await page.call('Input.insertText', { text: `/${prompt}` })
-    await page.key('Enter', 'Enter', 0, 13)
-    if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 60000)) {
-      const state = await page.eval(`JSON.stringify({editor:document.querySelector('.cm-content')?.innerText,notice:document.querySelector('.status')?.textContent??null,tab:document.querySelector('.tab[aria-selected=true]')?.dataset.rel??null,session:document.querySelector('.tab[aria-selected=true]')?.dataset.session??null,statuses:[...document.querySelectorAll('.status *')].map(n=>n.textContent).filter(Boolean).slice(0,4)})`)
-      return '授权弹窗没出现：' + state
-    }
-    // 写工具不默认宣告：新场仍是只读，由测试显式切档。
-    const initial = await authorizationCardState(page)
-    if (sessionManualLevel === 'read') check('写工具场默认仍是只读、范围仅本篇', !!initial && initial.checked === '只读本笔记' && initial.summary === '范围：仅本篇' && initial.detailHidden === true, JSON.stringify(initial && { checked: initial.checked, summary: initial.summary, detailHidden: initial.detailHidden }))
-    if (!await setAuthorizationLevel(page, level)) return `「${AUTHORIZATION_LEVELS[level]}」档没就绪`
-    if (level === 'write' && !writeSummaryChecked) {
-      writeSummaryChecked = true
-      check('「可写」档工具摘要出现补发起篇与建笔记', await page.eval(`document.querySelector('.authorization-status')?.textContent.includes('工具：补发起篇、建笔记')`), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? ''`))
-    }
-    // 范围树在「调整」里：展开后先用「只读本笔记」预设清回发起篇，再选本场这一篇参考。
-    if (!await openAuthorizationScope(page)) return '范围树没展开'
-    await page.eval(`document.querySelector('.authorization-preset-origin')?.click()`)
-    if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===1 && !!document.querySelector('.authorization-send:not(:disabled)')`)) return '「只读本笔记」预设没就绪'
-    // 选一篇额外参考：这样本场才是"有工具档"，写工具才会出现。
-    if (!await clickAuthorizationChoice(page, reference)) return false
-    if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===2 && !!document.querySelector('.authorization-send:not(:disabled)')`)) return '清单没变成 2 条'
-    // 非模态卡不抢焦点：勾选参考后焦点在复选框上，发送前必须把焦点放回发送键。
-    await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
-    await page.key('Enter', 'Enter', 0, 13)
-    return true
-  }
-  const settle = () => waitFor(page, `document.querySelector('.task-dock')?.dataset.kind!=='generating'`)
-
-  // 一、建·同意：卡片出现 -> 点「建」-> 真的落盘。
-  const started = await start('写作建一.md', '建样张一')
-  check('打开建样张发起篇并带着额外参考开工', started === true, started === true ? '' : String(started))
-  check('任务真的开始跑了', await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind==='generating'`, 20000), await page.eval(`document.querySelector('.task-dock')?.dataset.kind??null`))
-  check('模型提议新建时弹出确认卡', await waitFor(page, `!!document.querySelector('.overlay-write-confirm[open]')`, 30000), await page.eval(`JSON.stringify({status:document.querySelector('.status')?.textContent?.slice(0,160)??null,editor:document.querySelector('.cm-content')?.innerText?.slice(0,80)})`))
-  check('卡片摆出落点与正文，且没有改路径的入口', await page.eval(`(() => { const text=document.querySelector('.overlay-write-confirm')?.textContent||''; return text.includes('将新建：写工具样张.md') && text.includes('写工具样张') })()`))
-  await shot(page, 'write-confirm-1200')
-  check('点「建」后落盘到发起篇所在目录', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `!!document.querySelector('.tree-note')?.parentElement || true`) && existsSync(path.join(vault, '写工具样张.md')))
-  check('新笔记内容就是模型给的那份', readFileSync(path.join(vault, '写工具样张.md'), 'utf8').includes('受控正文。'))
-  check('建完照常收尾，回答落在发起篇', (await settle()) && await page.eval(`(async () => (await window.rgent.noteRead('写作建一.md')).content.includes('写工具核验完成。'))()`))
-  await shot(page, 'write-created-1200')
-
-  // 二、建·不建：卡片出现 -> 点「不建」-> 什么都不写。
-  check('打开第二篇发起篇开工', await start('写作建二.md', '建样张二'))
-  check('第二张确认卡带自己的落点', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将新建：写工具二.md')})()`))
-  check('点「不建」后没有落盘', (await clickSelector('.write-confirm-cancel')) && (await settle()) && !existsSync(path.join(vault, '写工具二.md')))
-  check('拒绝后整场照常收尾', await page.eval(`(async () => (await window.rgent.noteRead('写作建二.md')).content.includes('写工具核验完成。'))()`))
-
-  // 三、补·安静：不弹窗，只往发起篇追加一个新块。
-  check('打开补样张发起篇开工', await start('写作补.md', '补样张'))
-  check('补不额外弹窗且追加落到发起篇', (await settle()) && !(await page.eval(`!!document.querySelector('.overlay-write-confirm')`)) && await page.eval(`(async () => { const body=(await window.rgent.noteRead('写作补.md')).content.split('<!-- rgent:ledger')[0]; return body.includes('补充依据。') && body.includes('part=\"append\"') })()`))
-  check('追加不碰人写文本与已有块', await page.eval(`(async () => { const body=(await window.rgent.noteRead('写作补.md')).content.split('<!-- rgent:ledger')[0]; return body.includes('建样张一')===false && body.indexOf('补充依据。')>body.indexOf('补样张') })()`), await page.eval(`(async () => JSON.stringify((await window.rgent.noteRead('写作补.md')).content))()`))
-
-  // 四、补·超限：12 KB 汉字撞 8 KiB 字节线，当场拒，正文不动。
-  check('打开超限发起篇开工', await start('写作超限.md', '超限样张'))
-  check('超限追加被拒且正文没被写坏', (await settle()) && await page.eval(`(async () => { const body=(await window.rgent.noteRead('写作超限.md')).content.split('<!-- rgent:ledger')[0]; return !body.includes('汉汉汉') })()`))
-  check('拒绝原因如实报给模型', requests.some(request => request.messages.some(message => message.role === 'tool' && String(message.content).includes('OVER_LIMIT_BYTES'))))
-
-  // 五、改名：授权范围内的参考篇才能动；发起篇自己一律拒。
-  check('打开越权发起篇开工', await start('写作越权.md', '越权样张'))
-  check('发起篇自己的结构操作不出卡片，账本记 ORIGIN_LOCKED', (await settle()) && !(await page.eval(`!!document.querySelector('.overlay-write-confirm')`)) && requests.some(request => request.messages.some(message => message.role === 'tool' && String(message.content).includes('ORIGIN_LOCKED'))))
-  await shot(page, 'write-structural-origin-refused-1200')
-
-  check('打开改名发起篇并授权参考篇', await start('写作改名.md', '改名样张'))
-  check('改名卡片摆出旧路径 → 新路径与影响面', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将改名：写作参考.md → 写作参考改.md') && text.includes('处引用')})()`))
-  await shot(page, 'write-rename-1200')
-  check('点「改名」后文件真的换了名字', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind!=='generating'`, 30000) && existsSync(path.join(vault, '写作参考改.md')) && !existsSync(path.join(vault, '写作参考.md')))
-
-  // 五·二、自动档：只有新建自动批准；结构操作仍逐次确认，不因为选了「自动」就直接改名。
-  check('打开自动改名发起篇并授权参考篇', await start('写作自动改名.md', '自动改名样张', '写作自动参考.md', 'auto'))
-  check('自动档改名仍出确认卡而不是直接改', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将改名：写作自动参考.md → 写作自动参考改.md') && text.includes('处引用')})()`, 30000), await page.eval(`document.querySelector('.overlay-write-confirm')?.textContent?.slice(0,220) ?? '(无确认卡)'`))
-  check('点「不改」后参考篇仍是旧名', (await clickSelector('.write-confirm-cancel')) && (await settle()) && existsSync(path.join(vault, '写作自动参考.md')) && !existsSync(path.join(vault, '写作自动参考改.md')))
-
-  check('打开挪动发起篇并授权另一篇参考', await start('写作挪.md', '挪样张', '写作挪参考.md'))
-  check('挪动卡片摆出旧路径 → 新路径', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将移动：写作挪参考.md → 归档/写作挪参考.md')})()`))
-  check('点「移动」后文件真的挪进目标目录', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind!=='generating'`, 30000) && existsSync(path.join(vault, '归档', '写作挪参考.md')) && !existsSync(path.join(vault, '写作挪参考.md')))
-
-  if (process.platform === 'darwin') {
-    check('先打开要删的参考篇', await page.eval(`(() => { const n=[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path==='写作删参考.md'); if (!n) return false; n.click(); return true })()`) && await waitFor(page, `!!document.querySelector('.tab[data-rel="写作删参考.md"]')`))
-    check('打开删除发起篇并授权参考篇', await start('写作删.md', '删样张', '写作删参考.md'))
-    check('删除卡片写明送篓且不代改引用', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将删除：写作删参考.md') && text.includes('链接会失效') && text.includes('移入废纸篓')})()`))
-    await shot(page, 'write-delete-1200')
-    check('点「移入废纸篓」后面从库里消失且标签关掉', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind!=='generating'`, 30000) && !existsSync(path.join(vault, '写作删参考.md')) && await page.eval(`![...document.querySelectorAll('.tab')].some(t => t.dataset.rel === '写作删参考.md')`))
-    check('删除账本留痕看得见', await ledgerPanel('写作删.md', `text.includes('delete_note') && text.includes('ok:写作删参考.md') && text.includes('vault-change') && !text.includes('ENOENT')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,240)??'(无)'`))
-
-    check('打开不删发起篇', await start('写作不删.md', '不删样张', '写作不删参考.md'))
-    check('不删卡片出现', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将删除：写作不删参考.md')})()`))
-    check('点「不删」后面还在', (await clickSelector('.write-confirm-cancel')) && (await settle()) && existsSync(path.join(vault, '写作不删参考.md')))
-  } else {
-    check('Windows 写工具专项不走送篓路', existsSync(path.join(vault, '写作删参考.md')) && existsSync(path.join(vault, '写作不删参考.md')))
-  }
-
-  // 账本：面板上看"未执行（超限）"的如实记录，数据上看三场各自的工具留痕。
+  // 二、同册：读、搜、建可用；结构/删除不宣告也不执行。
+  check('切到同册后按钮显示同册', await selectScope(page, 'folder') && (await scope()).value === 'folder' && (await scope()).text === '同册 ▾')
+  const folderBase = requests.length
+  check('同册口令一次回车直接开工且没有确认卡', await ask('工具查证'), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null })`))
+  const folderDone = await waitFor(page, `(async()=>{const n=await window.rgent.noteRead('工作区/工具发起.md');return n.content.includes('工具查证完成：已核对参考原文。')&&(await window.rgent.agentTasks()).length===0})()`)
+  const folderRequests = requests.slice(folderBase)
+  const toolsOf = request => (request.tools ?? []).map(tool => tool.function?.name)
+  check('同册同时提供读、搜、补、建四个工具', folderRequests.length === 3 && folderRequests.every(request => ['read_library','search_library','append_to_note','create_note'].every(name => toolsOf(request).includes(name))), JSON.stringify(toolsOf(folderRequests[0] ?? {})))
+  check('同册不宣告结构操作与删除', folderRequests.every(request => !toolsOf(request).some(name => ['rename_note','move_note','delete_note'].includes(name))), JSON.stringify(folderRequests.map(toolsOf)))
+  check('同册真实搜库、读库、回答三步写回本篇', folderDone && folderRequests.length === 3)
+  check('同册工具链边栏浮层为生成中并有中止入口', folderRequests.length === 3 && await noConfirm(), await page.eval(`document.querySelector('.task-dock')?.dataset.kind ?? null`))
+  check('同册首步只发送来源清单，后续请求携带实际命中及原文', folderRequests.length === 3 && !JSON.stringify(folderRequests[0]).includes('受控正文证据') && folderRequests.slice(1).some(request => JSON.stringify(request).includes('受控正文证据')), JSON.stringify({length:folderRequests.length,first:JSON.stringify(folderRequests[0]??{}).slice(0,120),last:JSON.stringify(folderRequests[2]??{}).slice(0,120)}))
+  check('同册工具输出和隐藏推理不落正文', await page.eval(`(async () => { const note=await window.rgent.noteRead('工作区/工具发起.md');const body=note.content.split('<!-- rgent:ledger')[0];return !body.includes('受控正文证据') && !body.includes('隐藏工具推理') })()`))
   await page.eval(`document.querySelector('.ledger-open')?.click()`)
   await waitFor(page, `!!document.querySelector('.ledger-body details')`)
   await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
   await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`)
-  check('账本面板如实写「未执行（超限）」并带工具名', await ledgerPanel('写作超限.md', `text.includes('append_to_note') && text.includes('refused:OVER_LIMIT_BYTES') && text.includes('未执行（OVER_LIMIT_BYTES）')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,260)??'(无账本面板)'`))
-  check('建的账本留痕看得见', await ledgerPanel('写作建一.md', `text.includes('create_note') && /ok:[^\\s]+·/.test(text)`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
-  check('补的账本留痕看得见', await ledgerPanel('写作补.md', `text.includes('append_to_note') && text.includes('ok (1)')`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0,200)??'(无)'`))
-  await shot(page, 'write-ledger-1200')
+  check('同册账本回顾工具及实际读取、模型引用来源', await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return text.includes('工具摘要') && (text.includes('search_library')||text.includes('搜库')) && (text.includes('read_library')||text.includes('读库')) && text.includes('实际读取来源：') && text.includes('工作区/工具参考.md') && text.includes('模型消息引用来源：') && text.includes('工作区/工具参考.md') && text.includes('本场技能：无')})()`), await page.eval(`JSON.stringify({open:!!document.querySelector('.ledger-body'),text:(document.querySelector('.ledger-body')?.textContent||'').slice(0,800)})`))
+  await shot(page, 'scope-folder-ledger-1200')
   await page.eval(`document.querySelector('.ledger-close')?.click()`)
-  if (process.platform === 'darwin') {
-    const trash = path.join(homedir(), '.Trash')
-    for (const name of ['写作删参考.md', '写作删参考']) {
-      try { rmSync(path.join(trash, name), { recursive: true, force: true }) } catch { /* 废纸篓列举会 EPERM */ }
-    }
-    spawnSync('osascript', ['-e', 'tell application "Finder"\ntry\ndelete (every item of trash whose name contains "写作删参考")\nend try\nend tell'], { encoding: 'utf8', timeout: 10000 })
+
+  // 三、整库：结构/删除都在清单里，档位内直接执行；这里只断言宣告，真执放在写工具专项。
+  check('切到整库后按钮显示整库', await selectScope(page, 'vault') && (await scope()).value === 'vault' && (await scope()).text === '整库 ▾')
+  const vaultBase = requests.length
+  check('整库口令一次回车直接开工且没有确认卡', await ask('工具查证'), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null })`))
+  check('整库任务正常收尾并写回答', await waitFor(page, `(async()=>{const n=await window.rgent.noteRead('工作区/工具发起.md');return n.content.includes('工具查证完成：已核对参考原文。')&&(await window.rgent.agentTasks()).length===0})()`))
+  const vaultRequests = requests.slice(vaultBase)
+  check('整库宣告读、搜、补、建、改、挪、删', vaultRequests.length === 3 && vaultRequests.every(request => ['read_library','search_library','append_to_note','create_note','rename_note','move_note','delete_note'].every(name => toolsOf(request).includes(name))), JSON.stringify(vaultRequests.map(toolsOf)))
+  check('整库仍没有确认卡', await noConfirm())
+  await shot(page, 'scope-vault-ledger-1200')
+  await page.eval(`document.querySelector('.ledger-close')?.click()`)
+  await selectScope(page, 'note')
+}
+
+/** 三档工具矩阵：本篇只补写；同册可读/搜/建；整库改/挪/删直接执行（零确认），
+ *  删除进库内「已删除」并可还原、再删。受控模型脚本，零真实供应商调用。 */
+async function verifyWriteTools(page, vault, shot, requests) {
+  process.stdout.write('\n三档工具矩阵与库内已删除\n')
+  const dir = '工具档'
+  mkdirSync(path.join(vault, dir, '归档'), { recursive: true })
+  writeFileSync(path.join(vault, '本篇发起.md'), '')
+  writeFileSync(path.join(vault, dir, '发起.md'), '')
+  writeFileSync(path.join(vault, dir, '挪发起.md'), '')
+  writeFileSync(path.join(vault, dir, '原篇发起.md'), '')
+  writeFileSync(path.join(vault, dir, '删发起.md'), '')
+  writeFileSync(path.join(vault, dir, '再删发起.md'), '')
+  writeFileSync(path.join(vault, dir, '参考.md'), '# 参考\n\n受控参考正文。\n')
+  writeFileSync(path.join(vault, dir, '挪参考.md'), '# 挪\n\n挪动参考。\n')
+  writeFileSync(path.join(vault, dir, '删参考.md'), '# 删\n\n删除参考。\n')
+  check('三档工具夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(n=>n.dataset.path==='本篇发起.md')`))
+  // 受控供应商经 IPC 配好；渲染层模型快照要开关一次设置页才刷新。
+  await page.eval(`document.querySelector('.settings-open').click()`)
+  await waitFor(page, `!!document.querySelector('.settings-nav')`)
+  await page.key('Escape', 'Escape', 0, 27)
+  await waitFor(page, `!document.querySelector('.settings-nav')`)
+  check('展开目录树', await setTreeExpanded(page, true))
+  await selectBrowserFolder(page, '')
+
+  const openNote = async (note) => {
+    const folder = note.includes('/') ? note.slice(0, note.lastIndexOf('/')) : ''
+    await selectBrowserFolder(page, folder)
+    if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(n => n.dataset.path === ${JSON.stringify(note)})`)) return false
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find(n => n.dataset.path === ${JSON.stringify(note)})?.click()`)
+    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(note)}`)) return false
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    return true
   }
+  const ask = async (prompt) => await ensureSlash(page, prompt) && submitDirect(page)
+  const settle = () => waitLastTaskDone(page)
+  const toolsOf = request => (request.tools ?? []).map(tool => tool.function?.name)
+  const noConfirm = () => page.eval(NO_CONFIRM_SURFACE)
+  const toolText = request => request.messages.filter(message => message.role === 'tool').map(message => String(message.content)).join('\n')
+  const bodyOf = async note => page.eval(`(async () => (await window.rgent.noteRead(${JSON.stringify(note)})).content.split('<!-- rgent:ledger')[0])()`)
+
+  // 一、本篇：只宣告补写；模型逐个请求读/搜/建/改/挪/删，全部被拒，回答与补写照常。
+  check('打开发起篇（本篇）', await openNote('本篇发起.md'))
+  check('切到本篇', await selectScope(page, 'note'))
+  const noteBase = requests.length
+  check('本篇口令一次回车直接开工且没有确认卡', await ask('本篇边界'), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
+  check('本篇任务收尾、回答与补写都落盘', (await settle()) && (await bodyOf('本篇发起.md')).includes('本篇边界核验完成。') && (await bodyOf('本篇发起.md')).includes('part="append"') && (await bodyOf('本篇发起.md')).includes('本篇补写。'), await bodyOf('本篇发起.md'))
+  const noteRequests = requests.slice(noteBase).filter(request => JSON.stringify(request).includes('本篇边界'))
+  check('本篇只宣告补发起篇，不宣告读/搜/建/改/挪/删', noteRequests.length > 0 && noteRequests.every(request => JSON.stringify(toolsOf(request)) === JSON.stringify(['append_to_note'])), JSON.stringify(noteRequests.map(toolsOf)))
+  check('本篇模型发起的越界工具全部被拒（TOOL_NOT_ALLOWED），未产生副作用', noteRequests.some(request => toolText(request).includes('TOOL_NOT_ALLOWED')) &&
+    !existsSync(path.join(vault, '本篇不该建.md')) && existsSync(path.join(vault, dir, '参考.md')) && !existsSync(path.join(vault, dir, '参考改.md')) &&
+    existsSync(path.join(vault, dir, '挪参考.md')) && existsSync(path.join(vault, dir, '删参考.md')),
+  JSON.stringify({ files: readdirSync(path.join(vault, dir)) }))
+  check('本篇结束时没有确认卡', await noConfirm())
+
+  // 二、同册：读/搜/建可用；建直接落盘并只出一条「已新建」通知；结构/删除不宣告。
+  check('打开同册发起篇', await openNote(`${dir}/发起.md`))
+  check('切到同册', await selectScope(page, 'folder'))
+  const folderBase = requests.length
+  check('同册口令一次回车直接开工且没有确认卡', await ask('同册读写'), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null })`))
+  check('同册任务收尾、回答与补写落盘、建直接落盘', (await settle()) &&
+    (await bodyOf(`${dir}/发起.md`)).includes('同册读写核验完成。') && (await bodyOf(`${dir}/发起.md`)).includes('同册补写。') &&
+    existsSync(path.join(vault, dir, '同册建样张.md')) && readFileSync(path.join(vault, dir, '同册建样张.md'), 'utf8').includes('同册受控正文。'))
+  check('同册新建只出「已新建」通知、没有写确认卡', await waitFor(page, `[...document.querySelectorAll('.notice')].some(node => (node.querySelector('.notice-title')?.textContent||'').includes('已新建'))`) && await page.eval(`!document.querySelector('.overlay-write-confirm') && document.querySelectorAll('dialog[open]').length===0`) && await noConfirm())
+  const folderRequests = requests.slice(folderBase).filter(request => JSON.stringify(request).includes('同册读写'))
+  check('同册宣告读、搜、补、建，不宣告改/挪/删', folderRequests.length > 0 && folderRequests.every(request => {
+    const names = toolsOf(request)
+    return ['read_library', 'search_library', 'append_to_note', 'create_note'].every(name => names.includes(name)) &&
+      !names.some(name => ['rename_note', 'move_note', 'delete_note'].includes(name))
+  }), JSON.stringify(folderRequests.map(toolsOf)))
+  const folderBoundaryBase = requests.length
+  check('同册越界口令一次回车直接开工', await ask('同册越界'))
+  {
+    const done = await settle()
+    const body = await bodyOf(`${dir}/发起.md`)
+    check('同册越界任务照常收尾', done && body.includes('同册越界核验完成。'), JSON.stringify({ done, body: body.slice(-200), events: await page.eval(`window.__r5aTaskEvents ?? []`) }))
+  }
+  const boundaryRequests = requests.slice(folderBoundaryBase).filter(request => JSON.stringify(request).includes('同册越界'))
+  check('同册的结构/删除调用全被拒且文件未动', boundaryRequests.some(request => toolText(request).includes('TOOL_NOT_ALLOWED')) &&
+    existsSync(path.join(vault, dir, '参考.md')) && !existsSync(path.join(vault, dir, '参考改.md')) &&
+    existsSync(path.join(vault, dir, '挪参考.md')) && !existsSync(path.join(vault, dir, '归档', '挪参考.md')) &&
+    existsSync(path.join(vault, dir, '删参考.md')))
+  check('同册越界没有确认卡', await noConfirm())
+
+  // 三、整库：改/挪/删直接执行，无确认卡；删除进库内「已删除」，可还原、可再删。
+  check('切到整库', await selectScope(page, 'vault'))
+  const vaultBase = requests.length
+  check('整库改名一次回车直接执行', await ask('整库改名'))
+  check('整库改名的文件真的换了名字、没有确认卡', await waitFor(page, `(async () => (await window.rgent.agentTasks()).length === 0)()` , 30000) &&
+    existsSync(path.join(vault, dir, '参考改.md')) && !existsSync(path.join(vault, dir, '参考.md')) && await noConfirm(),
+  JSON.stringify({ files: readdirSync(path.join(vault, dir)), events: await page.eval(`window.__r5aTaskEvents ?? []`) }))
+  const renameRequests = requests.slice(vaultBase).filter(request => JSON.stringify(request).includes('整库改名'))
+  check('整库宣告改/挪/删并在档位内直接提交', renameRequests.length > 0 && renameRequests.every(request => ['rename_note', 'move_note', 'delete_note'].every(name => toolsOf(request).includes(name))))
+
+  check('打开挪动发起篇', await openNote(`${dir}/挪发起.md`))
+  check('切到整库（挪动）', await selectScope(page, 'vault'))
+  check('整库挪动一次回车直接执行', await ask('整库挪动'), JSON.stringify({ doc: await page.eval(`document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString().slice(-160) ?? null`), status: await page.eval(`document.querySelector('.status-left')?.textContent ?? null`) }))
+  check('整库挪动的笔记真的进了归档目录、没有确认卡', await waitFor(page, `(async () => (await window.rgent.agentTasks()).length === 0)()`, 30000) &&
+    existsSync(path.join(vault, dir, '归档', '挪参考.md')) && !existsSync(path.join(vault, dir, '挪参考.md')) && await noConfirm(),
+  JSON.stringify({ files: readdirSync(path.join(vault, dir)), archive: readdirSync(path.join(vault, dir, '归档')), events: await page.eval(`window.__r5aTaskEvents ?? []`) }))
+
+  check('打开原篇结构发起篇', await openNote(`${dir}/原篇发起.md`))
+  check('切到整库（原篇结构）', await selectScope(page, 'vault'))
+  const originBase = requests.length
+  check('原篇结构请求被拒但回答照写', await ask('原篇结构'))
+  {
+    const done = await settle()
+    const body = await bodyOf(`${dir}/原篇发起.md`)
+    check('发起篇自己的改名不出确认卡、按 ORIGIN_LOCKED 拒绝', done && existsSync(path.join(vault, dir, '原篇发起.md')) && !existsSync(path.join(vault, dir, '偷改发起篇.md')) &&
+      body.includes('原篇结构拒绝后照样写回答。') &&
+      requests.slice(originBase).some(request => toolText(request).includes('ORIGIN_LOCKED')) && await noConfirm(),
+    JSON.stringify({ done, body: body.slice(-200), tools: requests.slice(originBase).map(request => request.messages.filter(message => message.role === 'tool').map(message => String(message.content))), events: await page.eval(`window.__r5aTaskEvents ?? []`) }))
+  }
+
+  // 删除：先把目标 tab 打开，AI 删除后 tab 必须立刻关闭。
+  check('打开发起篇（删除前）', await openNote(`${dir}/删发起.md`))
+  check('打开要删的参考篇', await openNote(`${dir}/删参考.md`) && await waitFor(page, `!!document.querySelector('.tab[data-rel="${dir}/删参考.md"]')`))
+  check('回到删除发起篇', await openNote(`${dir}/删发起.md`))
+  check('切到整库（删除）', await selectScope(page, 'vault'))
+  const deleteBase = requests.length
+  check('整库删除一次回车直接执行、没有确认卡', await ask('整库删除'))
+  check('删除后文件进库内已删除、标签关闭、没有确认卡', await waitFor(page, `(async () => (await window.rgent.agentTasks()).length === 0)()`, 30000) &&
+    !existsSync(path.join(vault, dir, '删参考.md')) &&
+    await page.eval(`![...document.querySelectorAll('.tab')].some(tab => tab.dataset.rel === ${JSON.stringify(`${dir}/删参考.md`)})`) && await noConfirm(),
+  JSON.stringify({ files: readdirSync(path.join(vault, dir)), tab: await page.eval(`[...document.querySelectorAll('.tab')].map(tab => tab.dataset.rel)`), events: await page.eval(`window.__r5aTaskEvents ?? []`) }))
+  check('删除账本记下 delete_note 与结果', await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(`${dir}/删发起.md`)}),r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(`${dir}/删发起.md`)}});return r.ok&&r.value.records.some(rec=>rec.chapter?.provenance?.tools?.some(tool=>tool.name==='delete_note'&&String(tool.outcome).startsWith('ok:')))})()`))
+  const deleteRequests = requests.slice(deleteBase).filter(request => JSON.stringify(request).includes('整库删除'))
+  check('删除请求在整库档里带 delete_note 且没有确认卡', deleteRequests.length > 0 && deleteRequests.every(request => toolsOf(request).includes('delete_note')) && await noConfirm())
+
+  // 已删除页：条目出现 → 还原回原位 → 再删一次 → 页内「删除」清空列表。
+  check('打开设置→笔记库→已删除', await openDeletedPage(page))
+  check('已删除列表出现刚删的条目（原路径与类型可读）', await waitFor(page, `!!document.querySelector('.vault-settings-trash [data-trash-id]')`) && (await trashRows(page)).some(row => row.original === `${dir}/删参考.md` && row.name === '删参考.md' && row.state === 'ok' && row.restored && row.purge), JSON.stringify(await trashRows(page)))
+  await shot(page, 'trash-list-1200')
+  await page.eval(`(() => { const row=[...document.querySelectorAll('.vault-settings-trash [data-trash-id]')].find(node => (node.textContent||'').includes('删参考.md')); row?.querySelector('[data-trash-action="restore"]')?.click() })()`)
+  check('点还原后文件回到原位、列表清空', await waitFor(page, `document.querySelector('.trash-status')?.textContent.includes('已还原到：${dir}/删参考.md')`) &&
+    existsSync(path.join(vault, dir, '删参考.md')) && await waitFor(page, `document.querySelectorAll('.vault-settings-trash [data-trash-id]').length === 0`))
+  await page.key('Escape', 'Escape', 0, 27)
+  check('关闭设置回到正文', await waitFor(page, `!document.querySelector('.overlay-settings')`))
+
+  check('回到发起篇（再删）', await openNote(`${dir}/再删发起.md`))
+  check('切到整库（再删）', await selectScope(page, 'vault'))
+  check('再删一次也直接执行', await ask('整库再删'), JSON.stringify({ doc: await page.eval(`document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString().slice(-160) ?? null`), status: await page.eval(`document.querySelector('.status-left')?.textContent ?? null`) }))
+  check('再删后文件再次消失、标签仍关闭', await waitFor(page, `(async () => (await window.rgent.agentTasks()).length === 0)()`, 30000) && !existsSync(path.join(vault, dir, '删参考.md')) && await noConfirm())
+  check('再次打开已删除页', await openDeletedPage(page))
+  check('再删后的条目仍在列表里', await waitFor(page, `!!document.querySelector('.vault-settings-trash [data-trash-id]')`) && (await trashRows(page)).some(row => row.original === `${dir}/删参考.md`))
+  await page.eval(`(() => { const row=[...document.querySelectorAll('.vault-settings-trash [data-trash-id]')].find(node => (node.textContent||'').includes('删参考.md')); row?.querySelector('[data-trash-action="purge"]')?.click() })()`)
+  check('点「删除」后列表移除条目并交系统废纸篓', await waitFor(page, `document.querySelector('.trash-status')?.textContent.includes('已移入系统废纸篓。')`) &&
+    await waitFor(page, `document.querySelectorAll('.vault-settings-trash [data-trash-id]').length === 0`) &&
+    !existsSync(path.join(vault, dir, '删参考.md')))
+  const trashCount = await page.eval(`document.querySelector('.vault-settings-trash-link [data-vault-action="trash"]')?.textContent ?? ''`)
+  check('已删除计数回到 0', trashCount === '已删除（0）', trashCount)
+  await page.key('Escape', 'Escape', 0, 27)
+  check('库内已删除收尾没有残留浮层', await waitFor(page, `!document.querySelector('.overlay-settings') && !document.querySelector('.overlay-write-confirm') && document.querySelectorAll('dialog[open]').length === 0`))
+
+  // 账本：补写与删除都可审。
+  await openNote(`${dir}/删发起.md`)
+  await page.eval(`document.querySelector('.ledger-open')?.click()`)
+  if (await waitFor(page, `!!document.querySelector('.ledger-body details')`)) {
+    await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d => { d.open = true })`)
+    check('账本面板能看到本次补写与删除留痕', await waitFor(page, `(() => { const text = document.querySelector('.ledger-body')?.textContent || ''; return text.includes('append_to_note') || text.includes('delete_note') })()`), await page.eval(`document.querySelector('.ledger-body')?.textContent?.slice(0, 400) ?? ''`))
+    await page.eval(`document.querySelector('.ledger-close')?.click()`)
+  }
+  await shot(page, 'write-tools-zero-confirm-1200')
 }
 
 /** 联网只读专项（RGENT_UI_NETWORK_ONLY=1）：只证门控、拒绝与账本，零真实外网。
@@ -956,12 +1005,17 @@ async function verifyNetworkOnly(page, vault, shot, requests, gate) {
   await page.eval(`[...document.querySelectorAll('.tree-note')].find(note=>note.dataset.path==='联网抓页专项.md')?.click()`)
   check('打开联网发起篇', await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel==='联网抓页专项.md'`))
   check('打开笔记后底栏模型快照就绪', await waitFor(page, `document.querySelector('.status-model')?.value!==''`), await page.eval(`document.querySelector('.status-model')?.innerText??''`))
+  const scope = await scopeState(page)
+  check('底栏模式选择是三档、默认本篇且没有授权卡', !!scope && scope.value === 'note' && scope.text === '本篇 ▾' && scope.expanded === 'false' &&
+    JSON.stringify(scope.options.map(option => option.label)) === JSON.stringify(['本篇', '同册', '整库']) && await page.eval(NO_CONFIRM_SURFACE), JSON.stringify(scope))
+  // 联网与档位正交：切到整库不改变小球，也不把联网变成按档授权。
+  check('联网与档位正交：切整库后小球仍开、没有确认卡', await selectScope(page, 'vault') && (await scopeState(page)).value === 'vault' &&
+    await page.eval(`document.querySelector('.status-dot')?.dataset.state === 'online' && ${NO_CONFIRM_SURFACE}`), await page.eval(`JSON.stringify({ dot: document.querySelector('.status-dot')?.dataset.state, scope: document.querySelector('.status-scope-button')?.dataset.scope })`))
   await page.eval(`document.querySelector('.cm-content')?.focus()`)
   await page.call('Input.insertText', { text: '/联网抓页专项' })
-  await page.key('Enter', 'Enter', 0, 13)
-  check('口令卡不再按场勾选联网、默认四档只读', await waitFor(page, `(() => { const card=document.querySelector('.overlay-authorization'); if(!card) return false; const chips=[...card.querySelectorAll('.authorization-level')]; return chips.length===4 && chips.filter(chip=>chip.getAttribute('aria-checked')==='true').map(chip=>chip.textContent.trim()).join()==='只读本笔记' && card.querySelector('.authorization-scope-text')?.textContent==='范围：仅本篇' && !card.querySelector('.authorization-network') && !card.querySelector('.authorization-mcp') && !(card.textContent||'').includes('允许联网') && !!card.querySelector('.authorization-send:not(:disabled)') })()`, 60000), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? '(无口令卡)'`))
-  await shot(page, 'network-authorization-1200')
-  if (!await clickSelector('.authorization-send')) throw Error('找不到确认发送按钮')
+  check('零确认口令一次回车直接开工且没有授权卡', await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
+  await shot(page, 'network-scope-vault-1200')
+  check('整库档位下联网工具仍照常宣告', requests.length > 0 && (requests[0].tools ?? []).some(tool => tool.function?.name === 'fetch_url'), JSON.stringify((requests[0]?.tools ?? []).map(tool => tool.function?.name)))
 
   // ⑤ 任务进行中浮层是生成中；主机名不进底栏。
   check('任务进行中栏上浮层为生成中且底栏无联网摘要', await waitFor(page, `(() => { const dock=document.querySelector('.task-dock'); return dock?.dataset.kind==='generating' && !document.querySelector('.status-task-network') })()`, 30000), await page.eval(`document.querySelector('.task-dock')?.dataset.kind??'(无浮层)'`))
@@ -1202,13 +1256,12 @@ async function verifyMcpOnly(page, vault, profile, shot, requests) {
   check('MCP 专项：打开发起篇（关闸）', await openFixtureNote())
   check('MCP 专项：底栏模型快照就绪（关闸）', await waitFor(page, `document.querySelector('.status-model')?.value!==''`))
   const offBase = requests.length
+  const offScope = await scopeState(page)
+  check('MCP 专项：三档模式可直接选、默认本篇且没有授权卡', !!offScope && offScope.value === 'note' && offScope.text === '本篇 ▾' &&
+    JSON.stringify(offScope.options.map(option => option.label)) === JSON.stringify(['本篇', '同册', '整库']) && await page.eval(NO_CONFIRM_SURFACE), JSON.stringify(offScope))
   await page.call('Input.insertText', { text: '/mcp 关闸门控' })
-  await page.key('Enter', 'Enter', 0, 13)
-  check('MCP 专项：口令卡不再按场勾选 MCP，默认四档只读', await waitFor(page, `(() => { const card=document.querySelector('.overlay-authorization'); if(!card) return false; const chips=[...card.querySelectorAll('.authorization-level')]; return chips.length===4 && chips.filter(chip=>chip.getAttribute('aria-checked')==='true').map(chip=>chip.textContent.trim()).join()==='只读本笔记' && card.querySelector('.authorization-scope-text')?.textContent==='范围：仅本篇' && !card.querySelector('.authorization-mcp') && !card.querySelector('.authorization-network') && !!card.querySelector('.authorization-send:not(:disabled)') })()`, 60000), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? '(无口令卡)'`))
-  await shot(page, 'mcp-authorization-1200')
-  // 非模态卡不抢焦点：发送前把焦点放到发送键。
-  await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
-  await page.key('Enter', 'Enter', 0, 13)
+  check('MCP 专项：零确认口令一次回车直接开工', await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
+  await shot(page, 'mcp-scope-note-1200')
   check('MCP 专项：关闸任务正常结束并保存回答', await waitFor(page, `(async()=>{ if((await window.rgent.agentTasks()).length) return false; const note=await window.rgent.noteRead('MCP 门控专项.md'); return note.content.includes('受控回答第一句。') })()`, 60000))
   const offRequests = requests.slice(offBase).filter(request => JSON.stringify(request).includes('mcp 关闸门控'))
   const offAnnouncements = offRequests.map(request => ({ tools: toolNamesOf(request), search: JSON.stringify(request).includes('窗口专项搜索') || JSON.stringify(request).includes('search_web'), plain: JSON.stringify(request).includes('窗口专项非搜索') && JSON.stringify(request).includes('read_doc') }))
@@ -1218,18 +1271,17 @@ async function verifyMcpOnly(page, vault, profile, shot, requests) {
   check('MCP 专项：回联网页开闸', await openSettings() && await openNetworkPage(page) && await waitFor(page, `document.querySelector('[data-network="enabled"]')?.checked===false && !document.querySelector('[data-network="enabled"]')?.disabled`) && await page.eval(`(() => { const toggle=document.querySelector('[data-network="enabled"]'); toggle.click(); return true })()`) && await waitFor(page, `(async () => { const toggle=document.querySelector('[data-network="enabled"]'); if(!toggle?.checked || toggle.disabled) return false; const result=await window.rgent.networkConfig(); return result.ok===true && result.config.enabled===true })()`))
   check('MCP 专项：关闭设置（开闸任务前）', await closeSettings())
   check('MCP 专项：打开发起篇（开闸）', await openFixtureNote('MCP 门控专项二.md'))
+  check('MCP 专项：整库档位下 MCP 与联网仍正交', await selectScope(page, 'vault') && (await scopeState(page)).value === 'vault' &&
+    await page.eval(`document.querySelector('.status-dot')?.dataset.state === 'online' && ${NO_CONFIRM_SURFACE}`))
   const onBase = requests.length
   await page.call('Input.insertText', { text: '/mcp 开闸门控' })
-  await page.key('Enter', 'Enter', 0, 13)
-  check('MCP 专项：开闸后口令卡准备就绪', await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 60000), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? ''`))
-  await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
-  await page.key('Enter', 'Enter', 0, 13)
+  check('MCP 专项：开闸后仍一次回车直接开工、没有授权卡', await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, scope: document.querySelector('.status-scope-button')?.dataset.scope ?? null })`))
   check('MCP 专项：开闸任务正常结束并保存回答', await waitFor(page, `(async()=>{ if((await window.rgent.agentTasks()).length) return false; const note=await window.rgent.noteRead('MCP 门控专项二.md'); return note.content.includes('受控回答第一句。') })()`, 60000))
   const onRequests = requests.slice(onBase).filter(request => JSON.stringify(request).includes('mcp 开闸门控'))
   const onAnnouncements = onRequests.map(request => ({ tools: toolNamesOf(request), search: JSON.stringify(request).includes('窗口专项搜索') && JSON.stringify(request).includes('search_web'), plain: JSON.stringify(request).includes('窗口专项非搜索') && JSON.stringify(request).includes('read_doc') }))
   check('MCP 专项：开闸后搜索类与非搜索类都宣告', onRequests.length > 0 && onAnnouncements.every(item => item.tools.includes('mcp_call') && item.search && item.plain), JSON.stringify(onAnnouncements))
   check('MCP 专项：任务只走受控主机', requests.length >= 2, String(requests.length))
-  check('MCP 专项：专项结束时没有残留浮层', await waitFor(page, `!document.querySelector('.overlay-authorization') && !document.querySelector('.overlay-settings') && !document.querySelector('.fetch-dialog')`))
+  check('MCP 专项：专项结束时没有残留确认卡与浮层', await waitFor(page, `${NO_CONFIRM_SURFACE} && !document.querySelector('.overlay-settings') && !document.querySelector('.fetch-dialog')`))
 }
 
 /** 外部消失与恢复核验专项（RGENT_UI_RECOVERY_ONLY=1）：在专用临时库里真删真放回，逐条走
@@ -1306,7 +1358,7 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
     return true
   }
   /** 登记场：真开一场（受控主机），让账本记住这篇的对象身份、正文哈希与附件证据。 */
-  const register = async (name, prompt, expectManifest = false) => {
+  const register = async (name, prompt) => {
     await selectBrowserFolder(page, '')
     if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(node => node.dataset.path === ${JSON.stringify(name)})`)) return `目录里没有 ${name}`
     await page.eval(`[...document.querySelectorAll('.tree-note')].find(node => node.dataset.path === ${JSON.stringify(name)}).click()`)
@@ -1322,17 +1374,9 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
       return true
     })()`)
     await sleep(300)
-    await page.key('Enter', 'Enter', 0, 13)
-    if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 60000)) {
-      return `授权弹窗没出现（${name}）` + await page.eval(`JSON.stringify({ editor: document.querySelector('.cm-content')?.innerText?.slice(0, 80), popover: !!document.querySelector('.overlay-authorization'), send: document.querySelector('.authorization-send')?.disabled ?? null, status: document.querySelector('.status')?.textContent?.slice(0, 160) })`)
+    if (!await submitDirect(page)) {
+      return `任务没有直接开始（${name}）` + await page.eval(`JSON.stringify({ editor: document.querySelector('.cm-content')?.innerText?.slice(0, 80), dialog: document.querySelector('dialog[open]')?.className ?? null, status: document.querySelector('.status')?.textContent?.slice(0, 160) })`)
     }
-    if (expectManifest) {
-      const manifest = await page.eval(`[...document.querySelectorAll('.authorization-manifest li')].map(node => node.textContent)`)
-      if (manifest.length !== 1 || manifest[0] !== name) return `授权清单不是仅有发起篇：${JSON.stringify(manifest)}`
-    }
-    // 非模态卡不抢焦点：发送前把焦点放到发送键。
-    await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
-    await page.key('Enter', 'Enter', 0, 13)
     if (!await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind!=='generating'`, 60000)) return `任务没有收尾（${name}）`
     if (!await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content.includes('受控回答第一句。'))()`, 30000)) return `回答没有落盘（${name}）`
     return true
@@ -1410,7 +1454,7 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
   const tabUsable = await waitFor(page, `document.querySelector('.note-unavailable')?.hidden === true && document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() === ${JSON.stringify(beforeDelete)}`, 20000)
   const readWorks = await page.eval(`window.rgent.noteRead('恢复甲.md').then(note => note.content === ${JSON.stringify(beforeDelete)}, () => false)`)
   // 来源恢复可用：再开一场，授权清单里必须正好是这一篇（读不出来时这一场根本起不来）。
-  const rerun = await register('恢复甲.md', '恢复复跑', true)
+  const rerun = await register('恢复甲.md', '恢复复跑')
   const answeredTwice = await page.eval(`(async () => ((await window.rgent.noteRead('恢复甲.md')).content.split('受控回答第一句。').length - 1) >= 2)()`)
   check('核验通过分支：记录清除、树标记消失、tab 与来源恢复可用',
     clearedRows && confirmMessage.includes('核验通过') && confirmMessage.includes('来源恢复可用') && treeMarkerGone && tabUsable && readWorks && rerun === true && answeredTwice,
@@ -1532,11 +1576,15 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
     const scopes = [['设置面板', document.querySelector('.overlay-settings')], ['目录树', document.querySelector('#tree-panel')], ['顶栏', document.querySelector('.top')], ['目录菜单', document.querySelector('.tier-menu')]]
     for (const [scope, node] of scopes) {
       if (!node) { if (scope !== '目录菜单') hits.push(scope + '：整块缺失'); continue }
-      for (const label of [...node.querySelectorAll(interactive)].map(item => (item.getAttribute('aria-label') || item.textContent || '').trim()).filter(Boolean)) if (forbidden.test(label)) hits.push(scope + '：' + label)
+      for (const label of [...node.querySelectorAll(interactive)].map(item => (item.getAttribute('aria-label') || item.textContent || '').trim()).filter(Boolean)) {
+        // 「已删除（N）」是库内已删除列表入口，不是删除动作；其余「删除」字样仍不许出现。
+        if (label.startsWith('已删除')) continue
+        if (forbidden.test(label)) hits.push(scope + '：' + label)
+      }
     }
     const panel = document.querySelector('.settings-main .vault-settings')
     // 「从列表移除」的说明里那句「不会删除」是解释文字，不是入口；剔掉它以后整页不许再出现「删除」。
-    const pageText = (panel?.textContent ?? '').split('不会删除').join('')
+    const pageText = (panel?.textContent ?? '').split('不会删除').join('').replace(/已删除（\d+）/gu, '')
     const section = [...document.querySelectorAll('.settings-main section')].find(node => node.querySelector('h3')?.textContent === '外部消失与恢复核验')
     return {
       hits,
@@ -1552,7 +1600,7 @@ async function verifyExternalRecovery(page, vault, staging, shot, requests, shot
     JSON.stringify(noteMenu) === JSON.stringify(expectedNoteMenu) &&
       JSON.stringify(dirMenu) === JSON.stringify(['在此新建笔记', '新建文件夹', '改名', '移动', '可参考', '必须遵循', '禁止触碰']) &&
       !dirMenu.includes('删除') &&
-      gate.hits.length === 0 && gate.pageDeleteHits.length === 0 &&
+      gate.hits.length === 0 &&
       gate.recoveryActions.includes('重扫并核验恢复') &&
       gate.recoveryActions.filter(action => action === '放弃恢复').length === gate.recoveryVerdicts.length &&
       JSON.stringify(gate.recoveryVerdicts) === JSON.stringify(['content-changed', 'attachments-missing']) &&
@@ -1604,55 +1652,68 @@ function reclaimTrashSamples() {
   return n
 }
 
-/** macOS 人删除专项：右键 → 确认 → 进废纸篓；不删则不动。Windows 只断言没有删除项。 */
+/** macOS 人删除专项：右键 → 直接进库内「已删除」（零确认）→ 标签关闭、通知可读 →
+ *  已删除页还原回原位 → 再删一次 → 页内明确「删除」清空列表。Windows 只断言没有删除项。 */
 async function verifyHumanTrash(page, vault, shot) {
-  process.stdout.write('\n人删除\n')
+  process.stdout.write('\n人删除（库内已删除、零确认）\n')
   const darwin = process.platform === 'darwin'
   check('窗口起来并展开目录', await waitFor(page, `!!document.querySelector('.tree-toggle') && document.querySelectorAll('.tree-row').length>0`) && await setTreeExpanded(page, true))
   await selectBrowserFolder(page, '')
   const openMenu = async (selector) => {
-    await page.eval(`(() => { const row = document.querySelector(${JSON.stringify(selector)}); const rect = row.getBoundingClientRect(); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.left + 20, clientY: rect.top + 12 })) })()`)
-    return waitFor(page, `!!document.querySelector('.tier-menu')`)
+    const opened = await page.eval(`(() => { const row = document.querySelector(${JSON.stringify(selector)}); if (!row) return false; const rect = row.getBoundingClientRect(); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.left + 20, clientY: rect.top + 12 })); return true })()`)
+    return opened && waitFor(page, `!!document.querySelector('.tier-menu')`)
   }
-  const labels = async () => page.eval(`[...document.querySelectorAll('.tier-menu button')].map(node => node.textContent)`)
+  const menuClick = async (label) => page.eval(`(() => { const button=[...document.querySelectorAll('.tier-menu button')].find(node => node.textContent === ${JSON.stringify(label)}); if (!button) return false; button.click(); return true })()`)
   await waitFor(page, `document.querySelectorAll('.tree-note').length>0`)
-  const noteSelector = '.tree-note[data-path="研究记录.md"]'
-  check('打开一篇笔记的右键菜单', await openMenu(noteSelector))
-  const noteMenu = await labels()
+  check('打开一篇笔记的右键菜单', await openMenu('.tree-note[data-path="研究记录.md"]'))
+  const noteMenu = await page.eval(`[...document.querySelectorAll('.tier-menu button')].map(node => node.textContent)`)
   check(darwin ? 'macOS 笔记菜单有删除' : 'Windows 笔记菜单没有删除',
-    darwin ? noteMenu.includes('删除') : !noteMenu.includes('删除'),
-    JSON.stringify(noteMenu))
+    darwin ? noteMenu.includes('删除') : !noteMenu.includes('删除'), JSON.stringify(noteMenu))
   check('打开一个文件夹的右键菜单', await openMenu('.tree-dir[data-path="资料"]'))
-  const dirMenu = await labels()
+  const dirMenu = await page.eval(`[...document.querySelectorAll('.tier-menu button')].map(node => node.textContent)`)
   check('文件夹菜单没有删除', !dirMenu.includes('删除'), JSON.stringify(dirMenu))
   if (!darwin) {
     await shot(page, 'trash-windows-no-entry-1200')
     return
   }
   const token = `rg-trash-${Date.now()}`
-  writeFileSync(path.join(vault, 'rg-trash-keep.md'), `# 不删\n\n${token}-keep\n`)
   writeFileSync(path.join(vault, 'rg-trash-sample.md'), `# 样张\n\n${token}\n`)
   mkdirSync(path.join(vault, 'rg-trash-sample'))
   writeFileSync(path.join(vault, 'rg-trash-sample', '附图.txt'), `${token}-附图`)
   try {
-    check('样张出现在树里', await waitFor(page, `!!document.querySelector('.tree-note[data-path="rg-trash-sample.md"]') && !!document.querySelector('.tree-note[data-path="rg-trash-keep.md"]')`))
-    await openMenu('.tree-note[data-path="rg-trash-keep.md"]')
-    await page.eval(`[...document.querySelectorAll('.tier-menu button')].find(n => n.textContent === '删除')?.click()`)
-    check('确认卡写出路径', await waitFor(page, `!!document.querySelector('.overlay-write-confirm') && document.querySelector('.overlay-write-confirm').textContent.includes('rg-trash-keep.md')`))
-    check('确认卡写明链接会失效、不会代为改字', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm')?.textContent||'';return text.includes('链接会失效') && text.includes('不会代为改字')})()`))
-    await shot(page, 'trash-confirm-1200')
-    await page.eval(`document.querySelector('.write-confirm-cancel')?.click()`)
-    check('点「不删」后文件仍在', await waitFor(page, `!document.querySelector('.overlay-write-confirm')`) && existsSync(path.join(vault, 'rg-trash-keep.md')))
-    await page.eval(`document.querySelector('.tree-note[data-path="rg-trash-sample.md"]')?.click()`)
-    check('样张标签已打开', await waitFor(page, `document.querySelector('.tab[data-rel="rg-trash-sample.md"]')`))
-    await openMenu('.tree-note[data-path="rg-trash-sample.md"]')
-    await page.eval(`[...document.querySelectorAll('.tier-menu button')].find(n => n.textContent === '删除')?.click()`)
-    check('带附件夹的确认卡说明会一起送', await waitFor(page, `document.querySelector('.overlay-write-confirm')?.textContent.includes('同名附件夹')`))
-    await page.eval(`document.querySelector('.write-confirm-accept')?.click()`)
-    check('确认后笔记从库里消失', await waitFor(page, `!document.querySelector('.tree-note[data-path="rg-trash-sample.md"]')`, 15000) &&
-      !existsSync(path.join(vault, 'rg-trash-sample.md')) && !existsSync(path.join(vault, 'rg-trash-sample')))
-    check('被删笔记的标签已关掉', await page.eval(`![...document.querySelectorAll('.tab')].some(t => t.dataset.rel === 'rg-trash-sample.md')`))
-    await shot(page, 'trash-after-1200')
+    check('样张出现在树里', await waitFor(page, `!!document.querySelector('.tree-note[data-path="rg-trash-sample.md"]')`))
+    check('先打开要删的样张标签', await page.eval(`(() => { const row=document.querySelector('.tree-note[data-path="rg-trash-sample.md"]'); if (!row) return false; row.click(); return true })()`) && await waitFor(page, `document.querySelector('.tab[data-rel="rg-trash-sample.md"]')`))
+    check('右键删除后不再出现确认卡', await openMenu('.tree-note[data-path="rg-trash-sample.md"]') && await menuClick('删除') &&
+      await waitFor(page, `!document.querySelector('.tree-note[data-path="rg-trash-sample.md"]')`, 15000) &&
+      await page.eval(NO_CONFIRM_SURFACE), await page.eval(`JSON.stringify({ dialogs: document.querySelectorAll('dialog[open]').length, write: !!document.querySelector('.overlay-write-confirm'), trash: !!document.querySelector('.trash-confirm') })`))
+    check('删除后笔记与附件夹都离开原位置', !existsSync(path.join(vault, 'rg-trash-sample.md')) && !existsSync(path.join(vault, 'rg-trash-sample')))
+    check('删除后样张标签已关闭', await page.eval(`![...document.querySelectorAll('.tab')].some(tab => tab.dataset.rel === 'rg-trash-sample.md')`))
+    check('删除后通知写「已移到已删除」并可打开已删除页', await waitFor(page, `(() => { const card=[...document.querySelectorAll('.notice')].find(node => (node.querySelector('.notice-title')?.textContent||'').includes('已移到已删除')); return !!card && [...card.querySelectorAll('.notice-action')].some(button => button.textContent.trim() === '打开') })()`), await page.eval(`document.querySelector('.notice-stack')?.textContent ?? '(无通知)'`))
+    await shot(page, 'trash-after-zero-confirm-1200')
+
+    check('打开设置→笔记库→已删除', await openDeletedPage(page))
+    check('已删除列表出现笔记条目（原路径、正常态、还原/删除按钮）', await waitFor(page, `!!document.querySelector('.vault-settings-trash [data-trash-id]')`) &&
+      (await trashRows(page)).some(row => row.original === 'rg-trash-sample.md' && row.name === 'rg-trash-sample.md' && row.state === 'ok' && row.restored && row.purge), JSON.stringify(await trashRows(page)))
+    await shot(page, 'trash-deleted-list-1200')
+    check('点还原后笔记与附件夹回到原位、列表清空', await page.eval(`(() => { const row=[...document.querySelectorAll('.vault-settings-trash [data-trash-id]')].find(node => (node.textContent||'').includes('rg-trash-sample.md')); if (!row) return false; row.querySelector('[data-trash-action="restore"]')?.click(); return true })()`) &&
+      await waitFor(page, `document.querySelector('.trash-status')?.textContent.includes('已还原到：rg-trash-sample.md')`) &&
+      existsSync(path.join(vault, 'rg-trash-sample.md')) && existsSync(path.join(vault, 'rg-trash-sample', '附图.txt')) &&
+      await waitFor(page, `document.querySelectorAll('.vault-settings-trash [data-trash-id]').length === 0`),
+    JSON.stringify({ status: await page.eval(`document.querySelector('.trash-status')?.textContent ?? ''`), rows: await trashRows(page), note: existsSync(path.join(vault, 'rg-trash-sample.md')), attachment: existsSync(path.join(vault, 'rg-trash-sample', '附图.txt')) }))
+    await page.key('Escape', 'Escape', 0, 27)
+    check('关闭设置回到正文（还原后）', await waitFor(page, `!document.querySelector('.overlay-settings')`))
+
+    check('再删一次（仍零确认）', await waitFor(page, `!!document.querySelector('.tree-note[data-path="rg-trash-sample.md"]')`) && await openMenu('.tree-note[data-path="rg-trash-sample.md"]') && await menuClick('删除') &&
+      await waitFor(page, `!document.querySelector('.tree-note[data-path="rg-trash-sample.md"]')`, 15000) && await page.eval(NO_CONFIRM_SURFACE))
+    check('再次打开已删除页', await openDeletedPage(page))
+    check('条目再次出现', await waitFor(page, `!!document.querySelector('.vault-settings-trash [data-trash-id]')`) && (await trashRows(page)).some(row => row.original === 'rg-trash-sample.md'))
+    await page.eval(`(() => { const row=[...document.querySelectorAll('.vault-settings-trash [data-trash-id]')].find(node => (node.textContent||'').includes('rg-trash-sample.md')); row?.querySelector('[data-trash-action="purge"]')?.click() })()`)
+    check('点「删除」后条目移除并交系统废纸篓', await waitFor(page, `document.querySelector('.trash-status')?.textContent.includes('已移入系统废纸篓。')`) &&
+      await waitFor(page, `document.querySelectorAll('.vault-settings-trash [data-trash-id]').length === 0`) &&
+      !existsSync(path.join(vault, 'rg-trash-sample.md')))
+    check('已删除计数回到 0', await page.eval(`document.querySelector('.vault-settings-trash-link [data-vault-action="trash"]')?.textContent === '已删除（0）'`))
+    await page.key('Escape', 'Escape', 0, 27)
+    check('人删除收尾没有残留确认卡与设置页', await waitFor(page, `${NO_CONFIRM_SURFACE} && !document.querySelector('.overlay-settings')`))
   } finally {
     const cleaned = reclaimTrashSamples()
     if (!cleaned) process.stdout.write('  ! 未能从废纸篓清掉样张，请在访达废纸篓里找 rg-trash-sample\n')
@@ -1683,7 +1744,7 @@ async function verifyJourney(page, vault, shot) {
     })()`)
     return dropped && waitFor(page, `!!document.querySelector('.tier-menu')`)
   }
-  const menuClick = async (label) => page.eval(`[...document.querySelectorAll('.tier-menu button')].find(node => node.textContent === ${JSON.stringify(label)})?.click()`)
+  const menuClick = async (label) => page.eval(`(() => { const button=[...document.querySelectorAll('.tier-menu button')].find(node => node.textContent === ${JSON.stringify(label)}); if (!button) return false; button.click(); return true })()`)
   const fillModal = async (value) => {
     if (!await waitFor(page, `!!document.querySelector('.modal input')`)) return false
     await page.eval(`(() => {
@@ -1728,11 +1789,12 @@ async function verifyJourney(page, vault, shot) {
     check('旅程：中文正文保存后 noteRead 与磁盘都含该段', saved && onDisk && String(readBack).includes(bodyText), JSON.stringify({ saved, onDisk, read: String(readBack ?? '').slice(0, 120) }))
 
     // 三、补：受控模型按口令追加一句；正文与账本各留证据。
-    // 补是写工具：新场默认只读，测试显式切「可写」；口令必须是空段落开头，否则 `/` 只是普通字符。
+    // 补写任何档位都可用；口令必须是空段落开头，否则 `/` 只是普通字符。
     await page.key('Enter', 'Enter', 0, 13)
     await page.key('Enter', 'Enter', 0, 13)
     await page.call('Input.insertText', { text: `/${prompt}` })
-    const confirmed = await confirmSlashAuthorization(page, false, 'write')
+    check('旅程：本篇档一次回车直接开工、没有授权卡', await selectScope(page, 'note') && await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
+    const confirmed = true
     const finished = confirmed && await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead(${JSON.stringify(journeyPath)})
       const history = await window.rgent.ledgerGet({ sessionId: note.sessionId, objectVersion: note.objectVersion, relPath: ${JSON.stringify(journeyPath)} })
@@ -1805,16 +1867,18 @@ async function verifyJourney(page, vault, shot) {
       if (scratchInTree && await openMenu(`.tree-note[data-path=${JSON.stringify(scratchPath)}]`)) {
         menuOpened = true
         await menuClick('删除')
-        confirmShown = await waitFor(page, `(() => { const text = document.querySelector('.overlay-write-confirm')?.textContent ?? ''; return text.includes(${JSON.stringify(scratchPath)}) && text.includes('移入系统废纸篓') })()`, 15000)
+        // 零确认：菜单点下去就删；这里等文件消失，并断言全程没有确认卡。
+        confirmShown = await waitFor(page, `!document.querySelector('.tree-note[data-path=${JSON.stringify(scratchPath)}]')`, 15000)
       }
-      if (confirmShown) await page.eval(`document.querySelector('.write-confirm-accept')?.click()`)
-      const gone = confirmShown && await waitFor(page, `!document.querySelector('.tree-note[data-path=${JSON.stringify(scratchPath)}]')`, 15000)
+      const gone = confirmShown && !existsSync(path.join(vault, scratchPath))
       const tabClosed = gone && await page.eval(`![...document.querySelectorAll('.tab')].some(tab => tab.dataset.rel === ${JSON.stringify(scratchPath)})`)
-      const noticeOk = gone && await waitFor(page, `(document.querySelector('.status-host-notice')?.textContent ?? '').includes('笔记已移入系统废纸篓')`, 10000)
-      const notice = await page.eval(`document.querySelector('.status-host-notice')?.textContent ?? ''`)
+      const noticeOk = gone && await waitFor(page, `[...document.querySelectorAll('.notice')].some(node => (node.querySelector('.notice-title')?.textContent||'').includes('已移到已删除'))`, 10000)
+      const notice = await page.eval(`[...document.querySelectorAll('.notice')].map(node => (node.querySelector('.notice-title')?.textContent||'') + ' ' + (node.querySelector('.notice-detail')?.textContent||'')).join(' | ')`)
+      const noCard = await page.eval(NO_CONFIRM_SURFACE)
+      check('旅程：删除后没有确认卡', gone && noCard, JSON.stringify({ gone, noCard }))
       const journeyTabAfter = await page.eval(`(() => { const tab = document.querySelector('.tab[data-rel=${JSON.stringify(movedPath)}]'); return tab ? { label: tab.querySelector('.tab-label')?.textContent ?? '', title: tab.title } : null })()`)
       const journeyTabKept = !!journeyTabBefore && !!journeyTabAfter && journeyTabAfter.label === journeyTabBefore.label && journeyTabAfter.title === journeyTabBefore.title && journeyTabAfter.label === '旅程笔记改'
-      check('旅程：右键删除两步确认后树里消失、tab 关闭、废纸篓无异常', scratchWasAbsent && scratchCreated && String(scratchRead).includes(scratchBody) && scratchInTree && menuOpened && confirmShown && gone && tabClosed && journeyTabKept && noticeOk && !existsSync(path.join(vault, scratchPath)) && !/未能|未核验|孤儿/.test(notice), JSON.stringify({ scratchWasAbsent, scratchCreated, scratchSaved: String(scratchRead).includes(scratchBody), scratchInTree, menuOpened, confirmShown, gone, tabClosed, journeyTabKept, journeyTabBefore, journeyTabAfter, notice }))
+      check('旅程：右键删除后树里消失、tab 关闭、已删除通知可读', scratchWasAbsent && scratchCreated && String(scratchRead).includes(scratchBody) && scratchInTree && menuOpened && confirmShown && gone && tabClosed && journeyTabKept && noticeOk && !existsSync(path.join(vault, scratchPath)) && /已移到已删除/.test(notice), JSON.stringify({ scratchWasAbsent, scratchCreated, scratchSaved: String(scratchRead).includes(scratchBody), scratchInTree, menuOpened, confirmShown, gone, tabClosed, journeyTabKept, journeyTabBefore, journeyTabAfter, notice }))
       await shot(page, 'journey-trash-1200')
     } else {
       check('（跳过）旅程：人删除（当前平台没有删除入口）', true, `platform=${process.platform}`)
@@ -1842,7 +1906,7 @@ async function verifyJourney(page, vault, shot) {
     const endState = await page.eval(`(async () => ({
       tasks: (await window.rgent.agentTasks()).length,
       statusTask: document.querySelector('.task-dock')?.dataset.kind==='generating',
-      overlays: document.querySelectorAll('dialog[open], .overlay-write-confirm[open], .tier-menu').length
+      overlays: document.querySelectorAll('dialog[open], .overlay-write-confirm[open], .overlay-trash-confirm[open], .tier-menu').length
     }))()`)
     const rootNames = readdirSync(vault).filter(name => !name.startsWith('.')).sort()
     const movedNames = readdirSync(path.join(vault, '资料')).filter(name => !name.startsWith('.')).sort()
@@ -1853,9 +1917,8 @@ async function verifyJourney(page, vault, shot) {
   }
 }
 
-/** 交互减负专项的受控主机（RGENT_UI_UX_ONLY=1）：只按专属口令回脚本化回答，
- *  「UX建许可」「UX建拒绝」两个口令各发一次 create_note；其余请求给既有受控回答。
- *  独立于 createControlledHostServer，既有专项的口令与分流一个字节都不动。 */
+/** 交互减负专项的受控主机（RGENT_UI_UX_ONLY=1）：按口令脚本化零确认建笔记与普通回答。
+ *  独立于 createControlledHostServer，既有专项的口令一个字节都不动。 */
 function createUxHostServer(requests) {
   const server = createHttpServer((request, response) => {
     let body = ''
@@ -1868,18 +1931,13 @@ function createUxHostServer(requests) {
       const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'ux-ui', object: 'chat.completion.chunk', created: 1, model: decoded.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       const toolResults = (decoded.messages ?? []).filter((message) => message.role === 'tool')
-      const scenario = transcript.includes('UX建许可') ? 'allow' : transcript.includes('UX建拒绝') ? 'deny' : transcript.includes('UX自动建') ? 'auto-create' : null
-      if (scenario && toolResults.length === 0) {
-        // 第一轮只提议一次写操作；普通档等人在写确认卡上点允许／不允许，自动档由主进程直接批准新建。
-        const call = scenario === 'allow'
-          ? { name: 'create_note', input: { name: 'UX确认样张', body: '# UX 确认样张\n\n交互减负受控正文。' } }
-          : scenario === 'deny'
-            ? { name: 'create_note', input: { name: 'UX拒绝样张', body: '# UX 拒绝样张\n\n不应该落盘。' } }
-            : { name: 'create_note', input: { name: 'UX自动样张', body: '# UX 自动样张\n\n自动档受控正文。' } }
-        emit({ tool_calls: [{ index: 0, id: 'ux-' + scenario, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.input) } }] })
+      if (transcript.includes('UX建许可') && toolResults.length === 0) {
+        // 同册档内建直接执行；没有写确认卡，也没有第二轮人工决定。
+        const call = { name: 'create_note', input: { name: 'UX确认样张', body: '# UX 确认样张\n\n交互减负受控正文。' } }
+        emit({ tool_calls: [{ index: 0, id: 'ux-allow', type: 'function', function: { name: call.name, arguments: JSON.stringify(call.input) } }] })
         emit({}, 'tool_calls')
       } else {
-        emit({ content: scenario === 'allow' ? 'UX 写许可完成。' : scenario === 'deny' ? 'UX 写拒绝完成。' : scenario === 'auto-create' ? 'UX 自动完成。' : '受控回答第一句。第二句。' })
+        emit({ content: transcript.includes('UX建许可') ? 'UX 写许可完成。' : '受控回答第一句。第二句。' })
         emit({}, 'stop')
       }
       response.end('data: [DONE]\n\n')
@@ -1888,29 +1946,31 @@ function createUxHostServer(requests) {
   return server
 }
 
-/** 交互减负专项（RGENT_UI_UX_ONLY=1）：授权卡与写确认卡非模态、卡内 Enter 发送、
- *  冲突先出可点横幅再进核对浮层、正常路径零原生 alert／confirm、卡片文案首行短且无机器码。
- *  模型是受控主机脚本，零真实供应商调用。 */
+/** 交互减负专项（RGENT_UI_UX_ONLY=1）：底栏模式菜单非模态、口令零确认直开、
+ *  同册新建直接落盘、冲突先出可点横幅再进核对浮层、正常路径零原生 alert／confirm。 */
 async function verifyUx(page, vault, shot) {
-  process.stdout.write('\n交互减负（非模态卡片、冲突横幅、零原生弹窗）\n')
+  process.stdout.write('\n交互减负（模式菜单、零确认、冲突横幅、零原生弹窗）\n')
   const modifier = process.platform === 'darwin' ? 4 : 2
   const nativeDialogs = []
   await page.call('Page.enable', {})
-  // 沿用各专项的拦截模式：记下每一条原生对话框并立刻确认，免得自动化被卡死。断言只认 0 条。
   page.onEvent = (message) => {
     if (message.method !== 'Page.javascriptDialogOpening') return
     nativeDialogs.push(message.params.message)
     void page.call('Page.handleJavaScriptDialog', { accept: true })
   }
   const at = (name) => path.join(vault, name)
-  for (const [name, body] of Object.entries({ 'UX 授权.md': '', 'UX 写许可.md': '', 'UX 写拒绝.md': '', 'UX 自动.md': '', 'UX 冲突.md': '# UX 冲突\n\n窗口正文。\n' })) writeFileSync(at(name), body)
-  // 外壳、库与文件树都就绪后再开设置页；否则设置关闭后的模型快照刷新可能还没轮到。
+  mkdirSync(at('UX 同册'), { recursive: true })
+  for (const [name, body] of Object.entries({
+    'UX 授权.md': '',
+    'UX 同册/UX 写许可.md': '',
+    'UX 冲突.md': '# UX 冲突\n\n窗口正文。\n'
+  })) writeFileSync(at(name), body)
   const vaultReady = await waitFor(page, `(async () => { const state = await window.rgent.vaultGet(); return !!state?.sessionId && state.status === 'ready' })()`, 20000)
   await waitFor(page, `!!document.querySelector('.tree-toggle') && !!document.querySelector('.status')`, 20000)
   await setTreeExpanded(page, true)
   await selectBrowserFolder(page, '')
-  const fixturesReady = await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter((node) => ['UX 授权.md', 'UX 写许可.md', 'UX 写拒绝.md', 'UX 自动.md', 'UX 冲突.md'].includes(node.dataset.path)).length === 5`, 20000)
-  // 受控供应商是经 IPC 配的；渲染层模型快照要开关一次设置页才刷新（与写工具专项同一条路）。
+  const fixturesReady = await waitFor(page, `['UX 授权.md', 'UX 冲突.md'].every(path => [...document.querySelectorAll('.tree-note')].some(node => node.dataset.path === path))`, 20000)
+  // 受控供应商是经 IPC 配的；渲染层模型快照要开关一次设置页才刷新。
   await page.eval(`document.querySelector('.settings-open')?.click()`)
   await waitFor(page, `!!document.querySelector('.settings-nav')`)
   await page.key('Escape', 'Escape', 0, 27)
@@ -1919,6 +1979,16 @@ async function verifyUx(page, vault, shot) {
   await selectBrowserFolder(page, '')
 
   const editorText = () => page.eval(`document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null`)
+  const setEditorText = async (text) => page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: ${JSON.stringify(text)} }, selection: { anchor: ${JSON.stringify(text.length)} } }); view.focus(); return true })()`)
+  const openNote = async (name) => {
+    const folder = name.includes('/') ? name.slice(0, name.lastIndexOf('/')) : ''
+    await selectBrowserFolder(page, folder)
+    if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((node) => node.dataset.path === ${JSON.stringify(name)})`, 15000)) return false
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find((node) => node.dataset.path === ${JSON.stringify(name)})?.click()`)
+    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(name)}`, 10000)) return false
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    return true
+  }
   const clickSelector = async (selector) => {
     const point = await page.eval(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; el.scrollIntoView({ block: 'nearest' }); const rect = el.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } })()`)
     if (!point) return false
@@ -1934,204 +2004,57 @@ async function verifyUx(page, vault, shot) {
     }
     return false
   }
-  const openNote = async (name) => {
-    await selectBrowserFolder(page, '')
-    if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some((node) => node.dataset.path === ${JSON.stringify(name)})`, 15000)) return false
-    await page.eval(`[...document.querySelectorAll('.tree-note')].find((node) => node.dataset.path === ${JSON.stringify(name)})?.click()`)
-    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === ${JSON.stringify(name)}`, 10000)) return false
-    await page.eval(`document.querySelector('.cm-content')?.focus()`)
-    return true
-  }
-  const prepareAuthorization = async (prompt, level = 'write') => {
-    await page.call('Input.insertText', { text: '/' + prompt })
-    await page.key('Enter', 'Enter', 0, 13)
-    if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 30000)) return false
-    // 写工具与自动批准都不再是默认：新场只读，测试按场景显式切档。
-    return setAuthorizationLevel(page, level)
-  }
-  const clickNoticeAction = async (title) => {
-    const point = await page.eval(`(() => { const card=[...document.querySelectorAll('.notice')].find(node=>(node.querySelector('.notice-title')?.textContent||'').includes(${JSON.stringify(title)})); const button=card?.querySelector('.notice-action'); if(!button) return null; button.scrollIntoView({block:'nearest'}); const rect=button.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } })()`)
-    if (!point) return false
-    await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
-    await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
-    return true
-  }
-  // 非模态卡不抢焦点：测试必须先把焦点放进卡里，再按 Enter；只有焦点在卡内时 Esc／Enter 才归卡片。
-  const confirmInCard = async () => {
-    const focused = await page.eval(`(() => { const button = document.querySelector('.authorization-send'); if (!button || button.disabled) return false; button.focus({ preventScroll: true }); return document.activeElement === button })()`)
-    if (!focused) return { ok: false, focused }
-    await page.key('Enter', 'Enter', 0, 13)
-    let sent = await waitFor(page, `!document.querySelector('.overlay-authorization[open]')`, 12000)
-    if (!sent && await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 15000)) {
-      // 卡片开着时在正文里打过字：内容变化会让卡片自我刷新一次，再按一次仍是卡内 Enter 发送。
-      await page.eval(`document.querySelector('.authorization-send')?.focus()`)
-      await page.key('Enter', 'Enter', 0, 13)
-      sent = await waitFor(page, `!document.querySelector('.overlay-authorization[open]')`, 12000)
-    }
-    return { ok: sent, focused }
-  }
 
-  // 一、授权卡非模态：卡开着，编辑器仍能输入。
+  // 一、模式菜单非模态：菜单开着，编辑器仍能输入；根目录笔记的「同册」标灰。
   const openedAuth = await openNote('UX 授权.md')
-  // 设置页关闭后才异步刷新模型快照；状态栏的模型下拉出现即证明它已经换了新配置。
   const modelReady = await waitFor(page, `!!document.querySelector('.status-model')`, 15000)
+  const menuOpened = await page.eval(`(() => {
+    const button = document.querySelector('.status-scope-button')
+    if (!button) return false
+    button.click()
+    return !document.querySelector('.status-scope-menu')?.hidden
+  })()`)
+  const menuState = menuOpened ? await scopeState(page) : null
+  const menuText = await page.eval(`document.querySelector('.status-scope-menu')?.textContent ?? ''`)
+  const folderDisabled = menuState?.options.find(option => option.scope === 'folder')?.disabled === true
+  const editorReachable = await page.eval(`(() => { const content = document.querySelector('.cm-content'); if (!content) return false; content.focus(); return document.activeElement === content || document.querySelector('.cm-editor')?.contains(document.activeElement) })()`)
+  await page.call('Input.insertText', { text: 'UX菜单非模态输入' })
+  const inputLanded = await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').includes('UX菜单非模态输入')`, 5000)
+  const menuStayedOpen = await page.eval(`document.querySelector('.status-scope-menu')?.hidden === false && !document.querySelector('dialog[open]')`)
+  check('UX：三档模式菜单非模态，打开时编辑器仍能输入', vaultReady && fixturesReady && openedAuth && modelReady && menuOpened && !!menuState && menuState.options.length === 3 && menuState.options.every(option => !option.checked || option.scope === 'note') && folderDisabled && editorReachable && inputLanded && menuStayedOpen, JSON.stringify({ vaultReady, fixturesReady, openedAuth, modelReady, menuOpened, menuState, editorReachable, inputLanded, menuStayedOpen }))
+  await shot(page, 'ux-scope-menu-1200')
+  await page.key('Escape', 'Escape', 0, 27)
+  check('UX：Esc 关闭模式菜单并回到按钮', await waitFor(page, `document.querySelector('.status-scope-menu')?.hidden === true && document.activeElement?.classList?.contains('status-scope-button')`))
+  await setEditorText('')
+
+  // 二、零确认：口令一次回车直接开工，没有授权卡／写确认卡。
+  await page.eval(`document.querySelector('.cm-content')?.focus()`)
   await page.call('Input.insertText', { text: '/请写一句话' })
-  const draftBeforeCard = await editorText()
-  await page.key('Enter', 'Enter', 0, 13)
-  const authReady = await waitFor(page, `!!document.querySelector('dialog[open][data-modal="false"].overlay-authorization .authorization-send:not(:disabled)')`, 30000)
-  const defaultCardState = authReady ? await authorizationCardState(page) : null
-  check('UX：授权卡四档齐全、默认只读、范围仅本篇', !!defaultCardState && JSON.stringify(defaultCardState.levels.map(item => item.label)) === JSON.stringify(['只读本笔记', '参考本目录', '可写', '自动']) && defaultCardState.checked === '只读本笔记' && defaultCardState.summary === '范围：仅本篇' && defaultCardState.detailHidden === true && defaultCardState.network === false && defaultCardState.mcp === false, JSON.stringify(defaultCardState && { levels: defaultCardState.levels, checked: defaultCardState.checked, summary: defaultCardState.summary }))
-  const authState = authReady ? await page.eval(`(() => {
-    const card = document.querySelector('dialog[open][data-modal="false"].overlay-authorization')
-    if (!card) return null
-    let modal = null
-    let modalSupported = true
-    try { modal = card.matches(':modal') } catch { modalSupported = false }
-    const rect = card.getBoundingClientRect()
-    return {
-      open: card.open,
-      dataModal: card.dataset.modal,
-      modal,
-      modalSupported,
-      inViewport: rect.width > 0 && rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1,
-      tookFocus: card.contains(document.activeElement),
-      text: card.innerText,
-      first: card.querySelector('h2')?.innerText?.trim() ?? ''
-    }
-  })()`) : null
-  const editorReachable = authState ? await page.eval(`(() => { const content = document.querySelector('.cm-content'); if (!content) return false; content.focus(); return document.activeElement === content || document.querySelector('.cm-editor')?.contains(document.activeElement) })()`) : false
-  await page.call('Input.insertText', { text: 'UX非模态输入' })
-  const inputLanded = await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').includes('UX非模态输入')`, 5000)
-  const cardStayedOpen = await page.eval(`!!document.querySelector('dialog[open][data-modal="false"].overlay-authorization')`)
-  check('UX：授权卡非模态，打开时编辑器仍能输入', vaultReady && fixturesReady && openedAuth && modelReady && authReady && !!authState && authState.modalSupported && authState.modal === false && authState.open === true && authState.dataModal === 'false' && authState.inViewport && authState.tookFocus === false && editorReachable && inputLanded && cardStayedOpen, JSON.stringify({ vaultReady, fixturesReady, openedAuth, modelReady, authReady, authState: authState ? { open: authState.open, dataModal: authState.dataModal, modal: authState.modal, modalSupported: authState.modalSupported, inViewport: authState.inViewport, tookFocus: authState.tookFocus } : null, editorReachable, inputLanded, cardStayedOpen }))
-  await shot(page, 'ux-authorization-1200')
-  if (cardStayedOpen) {
-    await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
-    await sleep(80)
-  }
-  const afterResize = cardStayedOpen ? await page.eval(`(() => {
-    const card = document.querySelector('dialog[open].overlay-authorization')
-    if (!card) return null
-    const rect = card.getBoundingClientRect()
-    return {
-      open: card.open,
-      dataModal: card.dataset.modal,
-      visible: rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight
-    }
-  })()`) : null
-  if (cardStayedOpen) {
-    await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
-    await sleep(80)
-  }
-  check('UX：授权卡打开期间缩放仍可见', !!afterResize && afterResize.open === true && afterResize.dataModal === 'false' && afterResize.visible === true, JSON.stringify({ afterResize }))
+  const directStarted = await submitDirect(page)
+  check('UX：口令一次回车直接开工且没有任何确认卡', directStarted && await page.eval(NO_CONFIRM_SURFACE), JSON.stringify({ directStarted }))
+  const answered = await waitFor(page, `(async () => { const note = await window.rgent.noteRead('UX 授权.md'); return note.content.includes('受控回答第一句。') && (await window.rgent.agentTasks()).length === 0 })()`, 60000)
+  check('UX：直接开工后回答正常落盘、仍无确认卡', answered && await page.eval(NO_CONFIRM_SURFACE), JSON.stringify({ answered }))
 
-  // 二、卡内 Enter 发送：焦点放在发送键上按 Enter，任务启动并落回答。
-  // 输入测试改过正文；先撤销回原稿。撤销可能把两次输入并成一组，所以再以事务精确还原一次：
-  // submitSlash 捕获的是开卡时的全文，正文必须逐字回到那一刻，卡片才可能发送成功。
-  let undoRestored = await editorText() === draftBeforeCard
-  for (let attempt = 0; attempt < 3 && !undoRestored; attempt += 1) {
-    await page.key('z', 'KeyZ', modifier, 90)
-    undoRestored = await editorText() === draftBeforeCard
-  }
-  if (!undoRestored && typeof draftBeforeCard === 'string') {
-    await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: ${JSON.stringify(draftBeforeCard)} } }); view.focus(); return true })()`)
-    undoRestored = await editorText() === draftBeforeCard
-  }
-  const confirmation = await confirmInCard()
-  const answered = confirmation.ok && await waitFor(page, `(async () => { const note = await window.rgent.noteRead('UX 授权.md'); return note.content.includes('受控回答第一句。') && (await window.rgent.agentTasks()).length === 0 })()`, 60000)
-  check('UX：焦点在卡内按 Enter 就发送并完成', confirmation.focused === true && confirmation.ok && answered, JSON.stringify({ ...confirmation, undoRestored, answered }))
+  // 三、同册零确认建：切到同册后模型提议新建，文件直接落盘，只留「已新建」通知。
+  const openedAllow = await openNote('UX 同册/UX 写许可.md')
+  const scopeReady = openedAllow && await selectScope(page, 'folder') && (await scopeState(page)).text === '同册 ▾'
+  await page.eval(`document.querySelector('.cm-content')?.focus()`)
+  await page.call('Input.insertText', { text: '/UX建许可' })
+  const allowStarted = scopeReady && await submitDirect(page)
+  const allowNotice = allowStarted && await waitFor(page, `(() => { const card=[...document.querySelectorAll('.notice')].find(node => (node.querySelector('.notice-title')?.textContent||'').includes('已新建')); return !!card && [...card.querySelectorAll('button')].some(button => button.textContent.trim() === '打开') })()`, 60000)
+  const created = await waitFile(at('UX 同册/UX确认样张.md'))
+  const createdBody = created ? readFileSync(at('UX 同册/UX确认样张.md'), 'utf8') : ''
+  const allowSettled = created && await waitFor(page, `(async () => { const note = await window.rgent.noteRead('UX 同册/UX 写许可.md'); return note.content.includes('UX 写许可完成。') && (await window.rgent.agentTasks()).length === 0 })()`, 60000)
+  const createdNotice = await page.eval(`(() => { const card=[...document.querySelectorAll('.notice')].find(node => (node.querySelector('.notice-title')?.textContent||'').includes('已新建')); return card ? card.innerText : '' })()`)
+  check('UX：同册新建直接落盘、只出「已新建」通知且没有写确认卡', scopeReady && allowStarted && allowNotice && created && createdBody.includes('交互减负受控正文。') && allowSettled && await page.eval(`!document.querySelector('.overlay-write-confirm') && document.querySelectorAll('dialog[open]').length === 0`), JSON.stringify({ scopeReady, allowStarted, allowNotice, created, allowSettled }))
+  check('UX：同册新建后可以关闭「已新建」通知', await page.eval(`(() => { const card=[...document.querySelectorAll('.notice')].find(node => (node.querySelector('.notice-title')?.textContent||'').includes('已新建')); card?.querySelector('.notice-close')?.click(); return true })()`) && await waitFor(page, `![...document.querySelectorAll('.notice')].some(node => (node.querySelector('.notice-title')?.textContent||'').includes('已新建'))`))
 
-  // 三、写确认卡非模态：受控模型在「UX建许可」这场发 create_note，点允许才落盘。
-  const openedAllow = await openNote('UX 写许可.md')
-  const allowReady = openedAllow && await prepareAuthorization('UX建许可')
-  const allowSent = allowReady && (await confirmInCard()).ok
-  const allowConfirm = allowSent && await waitFor(page, `!!document.querySelector('.overlay-write-confirm[open]')`, 30000)
-  const allowState = allowConfirm ? await page.eval(`(() => {
-    const card = document.querySelector('.overlay-write-confirm')
-    if (!card) return null
-    const openDialogs = [...document.querySelectorAll('dialog[open]')]
-    let anyModal = false
-    let modalSupported = true
-    for (const dialog of openDialogs) {
-      try { if (dialog.matches(':modal')) anyModal = true } catch { modalSupported = false }
-    }
-    const rect = card.getBoundingClientRect()
-    return {
-      open: card.open,
-      dataModal: card.dataset.modal,
-      openDialogs: openDialogs.length,
-      anyModal,
-      modalSupported,
-      inViewport: rect.width > 0 && rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1,
-      tookFocus: card.contains(document.activeElement),
-      text: card.innerText,
-      first: card.querySelector('.write-confirm-title')?.innerText?.trim() ?? ''
-    }
-  })()`) : null
-  const editorStillFocusable = allowState ? await page.eval(`(() => { const content = document.querySelector('.cm-content'); if (!content) return false; content.focus(); return document.activeElement === content || document.querySelector('.cm-editor')?.contains(document.activeElement) })()`) : false
-  await shot(page, 'ux-write-confirm-1200')
-  if (allowState) {
-    await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
-    await sleep(80)
-  }
-  const narrowConfirm = allowState ? await page.eval(`(() => {
-    const card = document.querySelector('.write-confirm')
-    const status = document.querySelector('.status')
-    const notice = document.querySelector('.notice')
-    if (!card || !status) return null
-    const a = card.getBoundingClientRect()
-    const b = status.getBoundingClientRect()
-    const overlap = (x, y) => x.left < y.right && x.right > y.left && x.top < y.bottom && x.bottom > y.top
-    return {
-      overlapStatus: overlap(a, b),
-      overlapNotice: notice ? overlap(a, notice.getBoundingClientRect()) : false,
-      cardBottom: Math.round(a.bottom),
-      statusTop: Math.round(b.top)
-    }
-  })()`) : null
-  if (allowState) {
-    await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
-    await sleep(80)
-  }
-  check('UX：最低尺寸下写确认不压状态行/通知', !!narrowConfirm && narrowConfirm.overlapStatus === false && narrowConfirm.overlapNotice === false, JSON.stringify(narrowConfirm))
-  const accepted = allowState && await clickSelector('.write-confirm-accept')
-  const created = accepted && await waitFile(at('UX确认样张.md'))
-  const createdBody = created ? readFileSync(at('UX确认样张.md'), 'utf8') : ''
-  const allowSettled = created && await waitFor(page, `(async () => { const note = await window.rgent.noteRead('UX 写许可.md'); return note.content.includes('UX 写许可完成。') && (await window.rgent.agentTasks()).length === 0 })()`, 60000)
-  check('UX：写确认卡非模态，点「允许」才落盘', openedAllow && allowReady && allowSent && allowConfirm && !!allowState && allowState.open === true && allowState.dataModal === 'false' && allowState.modalSupported && allowState.anyModal === false && allowState.openDialogs === 1 && allowState.inViewport && allowState.tookFocus === false && editorStillFocusable && accepted && created && createdBody.includes('交互减负受控正文。') && allowSettled, JSON.stringify({ openedAllow, allowReady, allowSent, allowConfirm, allowState: allowState ? { open: allowState.open, dataModal: allowState.dataModal, openDialogs: allowState.openDialogs, anyModal: allowState.anyModal, modalSupported: allowState.modalSupported, inViewport: allowState.inViewport, tookFocus: allowState.tookFocus } : null, editorStillFocusable, accepted, created, allowSettled }))
-
-  // 四、拒绝不落盘：再跑一场发 create_note，点不允许；文件不在、任务照常收尾、没有弹窗。
-  const openedDeny = await openNote('UX 写拒绝.md')
-  const denyReady = openedDeny && await prepareAuthorization('UX建拒绝')
-  const denySent = denyReady && (await confirmInCard()).ok
-  const denyConfirm = denySent && await waitFor(page, `!!document.querySelector('.overlay-write-confirm[open]')`, 30000)
-  const denied = denyConfirm && await clickSelector('.write-confirm-cancel')
-  const denySettled = denied && await waitFor(page, `(async () => { const note = await window.rgent.noteRead('UX 写拒绝.md'); return note.content.includes('UX 写拒绝完成。') && (await window.rgent.agentTasks()).length === 0 })()`, 60000)
-  const denyClean = denySettled && await page.eval(`document.querySelectorAll('dialog[open]').length === 0 && !document.querySelector('.overlay-write-confirm')`)
-  check('UX：点「不允许」不落盘，任务照常收尾且无弹窗', openedDeny && denyReady && denySent && denyConfirm && denied && !existsSync(at('UX拒绝样张.md')) && denySettled && denyClean, JSON.stringify({ openedDeny, denyReady, denySent, denyConfirm, denied, rejectedAbsent: !existsSync(at('UX拒绝样张.md')), denySettled, denyClean }))
-
-  // 四·二、自动档：新建由主进程直接批准、不出写确认卡；用一条「已新建」通知给出落点并可直接打开。
-  const openedAuto = await openNote('UX 自动.md')
-  const autoReady = openedAuto && await prepareAuthorization('UX自动建', 'auto')
-  const autoSent = autoReady && (await confirmInCard()).ok
-  const autoNotice = autoSent && await waitFor(page, `(() => { const card=[...document.querySelectorAll('.notice')].find(node=>(node.querySelector('.notice-title')?.textContent||'').includes('已新建')); return !!card && [...card.querySelectorAll('button')].some(button=>button.textContent.trim()==='打开') })()`, 60000)
-  const autoCardAbsent = autoSent && !await page.eval(`!!document.querySelector('.overlay-write-confirm')`)
-  const autoCreated = autoNotice && await waitFile(at('UX自动样张.md'))
-  const autoNoticeTitle = autoNotice ? await page.eval(`[...document.querySelectorAll('.notice')].find(node=>(node.querySelector('.notice-title')?.textContent||'').includes('已新建'))?.querySelector('.notice-title')?.textContent ?? ''`) : ''
-  const autoOpened = autoNotice && await clickNoticeAction('已新建')
-  const autoTab = autoOpened && await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === 'UX自动样张.md'`, 15000)
-  const autoSettled = autoNotice && await waitFor(page, `(async () => (await window.rgent.agentTasks()).length === 0)()`, 60000)
-  check('UX：自动档新建不出确认卡，只出「已新建」通知且能打开', openedAuto && autoReady && autoSent && autoNotice && autoCardAbsent && autoCreated && autoNoticeTitle.includes('已新建') && autoOpened && autoTab && autoSettled, JSON.stringify({ openedAuto, autoReady, autoSent, autoNotice, autoCardAbsent, autoCreated, autoNoticeTitle, autoOpened, autoTab, autoSettled }))
-  const autoNoticeClosed = await page.eval(`(() => { const card=[...document.querySelectorAll('.notice')].find(node=>(node.querySelector('.notice-title')?.textContent||'').includes('已新建')); if(!card) return false; card.querySelector('.notice-close')?.click(); return true })()`)
-  if (autoNoticeClosed) await waitFor(page, `![...document.querySelectorAll('.notice')].some(node=>(node.querySelector('.notice-title')?.textContent||'').includes('已新建'))`)
-
-  // 五、冲突先横幅：编辑器里的未保存稿 vs 磁盘上的外部改动；Cmd/Ctrl+S 后只出 notice，
+  // 四、冲突先横幅：编辑器里的未保存稿 vs 磁盘上的外部改动；Cmd/Ctrl+S 后只出 notice，
   //    点 notice 的「核对」才进既有的模态核对浮层。这里用真文件改写构造冲突。
   const openedConflict = await openNote('UX 冲突.md')
   const conflictCaret = openedConflict && await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ selection: { anchor: view.state.doc.length } }); view.focus(); return true })()`)
   await page.call('Input.insertText', { text: '窗口未保存标记' })
   const windowDraft = await editorText()
-  // 正文已与开篇夹具不同（=窗口里的未保存稿）；不拿 dot 当判据，避免自动保存抢在检查前。
   const conflictDirty = typeof windowDraft === 'string' && windowDraft.includes('窗口未保存标记') && windowDraft !== '# UX 冲突\n\n窗口正文。\n'
   writeFileSync(at('UX 冲突.md'), '# UX 冲突\n\n磁盘改动标记：外部改了这一版。\n')
   await page.key('s', 'KeyS', modifier, 83)
@@ -2142,8 +2065,6 @@ async function verifyUx(page, vault, shot) {
     return { text: notice.innerText, first: notice.querySelector('.notice-title')?.innerText?.trim() ?? '', dialogs: document.querySelectorAll('dialog[open]').length, actions: [...notice.querySelectorAll('button')].map((button) => button.textContent.trim()) }
   })()`) : null
   await shot(page, 'ux-conflict-notice-1200')
-  // 极端慢机器上自动保存可能先一步把草稿写盘：tab 不脏时「核对」只会重跑对照、不开模态。
-  // 补一个字再按一次保存，重新制造窗口稿 vs 磁盘的对照；正常时序下这段不执行。
   const dirtyForReview = await page.eval(`!!document.querySelector('.tab[aria-selected=true] .tab-dirty')`)
   if (noticeShown && !dirtyForReview) {
     await page.eval(`document.querySelector('.cm-content')?.focus()`)
@@ -2154,26 +2075,25 @@ async function verifyUx(page, vault, shot) {
   const conflictShown = reviewClicked && await waitFor(page, `!!document.querySelector('dialog[open].conflict')`, 15000)
   const conflictState = conflictShown ? await page.eval(`(() => { const dialog = document.querySelector('dialog[open].conflict'); let modal = null; let modalSupported = true; try { modal = dialog.matches(':modal') } catch { modalSupported = false } return { modal, modalSupported, dataModal: dialog.dataset.modal } })()`) : null
   await shot(page, 'ux-conflict-dialog-1200')
-  // 关闭核对浮层按「继续编辑」算：两份都留着，什么都不写。横幅随后由测试清掉，收尾才可能干净。
   const conflictClosed = conflictShown && await page.eval(`(() => { document.querySelector('[data-action="continue"]')?.click(); return true })()`) && await waitFor(page, `!document.querySelector('dialog[open]')`, 15000)
-  const noticeCleared = conflictClosed && await page.eval(`(() => { document.querySelector('.notice-close')?.click(); return true })()`) && await waitFor(page, `!document.querySelector('.notice')`, 5000)
+  const noticeCleared = conflictClosed && await page.eval(`(() => { document.querySelectorAll('.notice-close').forEach(button => button.click()); return true })()`) && await waitFor(page, `document.querySelectorAll('.notice').length === 0`, 5000)
   check('UX：冲突先出横幅，点「核对」才进模态', openedConflict && conflictDirty && noticeShown && noticeState?.dialogs === 0 && noticeState.text.includes('不一致') && noticeState.actions.includes('核对') && reviewClicked && conflictShown && conflictState?.modalSupported && conflictState.modal === true && conflictClosed && noticeCleared, JSON.stringify({ openedConflict, conflictCaret, conflictDirty, windowDraft, noticeShown, noticeState: noticeState ? { dialogs: noticeState.dialogs, actions: noticeState.actions } : null, dirtyForReview, reviewClicked, conflictShown, conflictState, conflictClosed, noticeCleared }))
 
-  // 六、零原生弹窗：全程只在 Page.javascriptDialogOpening 上记数。
+  // 五、零原生弹窗：全程只在 Page.javascriptDialogOpening 上记数。
   check('UX：全程零原生 alert／confirm', nativeDialogs.length === 0, JSON.stringify({ dialogs: nativeDialogs.slice(0, 3) }))
 
-  // 七、文案：三张卡片的可见文本无机器码，首行不超过 60 字。
+  // 六、文案：模式菜单与通知可见文本无机器码，首行不超过 60 字。
   const MACHINE_CODE = /\b[A-Z][A-Z0-9_]{5,}\b/
   const copyCards = [
-    { card: '授权卡', text: authState?.text ?? '', first: authState?.first ?? '' },
-    { card: '写确认卡', text: allowState?.text ?? '', first: allowState?.first ?? '' },
+    { card: '模式菜单', text: menuText, first: menuText.split('\n').find(line => line.trim()) ?? '' },
+    { card: '已新建通知', text: createdNotice, first: createdNotice.split('\n').find(line => line.trim()) ?? '' },
     { card: '冲突横幅', text: noticeState?.text ?? '', first: noticeState?.first ?? '' }
   ]
   const machineFree = copyCards.every((item) => item.text.length > 0 && !MACHINE_CODE.test(item.text))
   const firstLinesShort = copyCards.every((item) => item.first.length > 0 && [...item.first].length <= 60)
-  check('UX：卡片与横幅没有机器码，首行不超过 60 字', !!authState && !!allowState && !!noticeState && machineFree && firstLinesShort, JSON.stringify(copyCards.map((item) => ({ card: item.card, first: item.first, firstLength: [...item.first].length, machineCode: MACHINE_CODE.test(item.text) }))))
+  check('UX：模式菜单与通知没有机器码，首行不超过 60 字', !!menuText && !!createdNotice && !!noticeState && machineFree && firstLinesShort, JSON.stringify(copyCards.map((item) => ({ card: item.card, first: item.first, firstLength: [...item.first].length, machineCode: MACHINE_CODE.test(item.text) }))))
 
-  // 八、收尾：横幅与模态都已清掉、任务清空，正文两侧都没被这次冲突破坏。
+  // 七、收尾：横幅与模态都已清掉、任务清空，正文两侧都没被这次冲突破坏。
   const endState = await page.eval(`(async () => ({
     tasks: (await window.rgent.agentTasks()).length,
     taskBar: document.querySelector('.task-dock')?.dataset.kind==='generating',
@@ -2184,13 +2104,13 @@ async function verifyUx(page, vault, shot) {
   const authorizedContent = await page.eval(`(async () => (await window.rgent.noteRead('UX 授权.md')).content)()`)
   const conflictDisk = readFileSync(at('UX 冲突.md'), 'utf8')
   const conflictDraft = typeof endState.editor === 'string' ? endState.editor : ''
-  const createdKept = existsSync(at('UX确认样张.md')) && readFileSync(at('UX确认样张.md'), 'utf8').includes('交互减负受控正文。')
-  const contentIntact = createdKept && !existsSync(at('UX拒绝样张.md')) && authorizedContent.includes('受控回答第一句。') &&
+  const createdKept = existsSync(at('UX 同册/UX确认样张.md')) && readFileSync(at('UX 同册/UX确认样张.md'), 'utf8').includes('交互减负受控正文。')
+  const contentIntact = createdKept && authorizedContent.includes('受控回答第一句。') &&
     conflictDisk === '# UX 冲突\n\n磁盘改动标记：外部改了这一版。\n' &&
     conflictDraft.includes('窗口正文。') && conflictDraft.includes('窗口未保存标记')
   check('UX：收尾无横幅无模态、任务清空、笔记内容未被破坏', endState.tasks === 0 && !endState.taskBar && endState.notices === 0 && endState.dialogs === 0 && contentIntact && page.errors.length === 0, JSON.stringify({ endState, contentIntact, dialogs: nativeDialogs, errors: page.errors.slice(0, 1) }))
 
-  // 九、连续输入不拆 tab：焦点在关闭钮上时，正文输入不得把关闭钮从文档里拆掉。
+  // 八、连续输入不拆 tab：焦点在关闭钮上时，正文输入不得把关闭钮从文档里拆掉。
   const openedFocus = await openNote('UX 授权.md')
   const closeFocused = openedFocus && await page.eval(`(() => {
     const close = document.querySelector('.tab-wrap:has(.tab[aria-selected="true"]) .tab-close')
@@ -2210,7 +2130,7 @@ async function verifyUx(page, vault, shot) {
   const closeKept = closeFocused && await page.eval(`document.activeElement?.classList?.contains('tab-close') === true && !!document.querySelector('.tab-wrap:has(.tab[aria-selected="true"]) .tab-close')`)
   check('UX：连续输入不丢当前 tab 关闭钮焦点', openedFocus && closeFocused && closeKept, JSON.stringify({ openedFocus, closeFocused, closeKept }))
 
-  // 十一、搜索过 700、编辑器过 820 无硬折；夜间第一帧用系统偏好，不加内联脚本。
+  // 九、搜索过 700、编辑器过 820 无硬折；夜间第一帧用系统偏好，不加内联脚本。
   await setTreeExpanded(page, true)
   await page.eval(`document.querySelector('.search-open')?.click()`)
   const searchReady = await waitFor(page, `!!document.querySelector('.overlay-search[open]')`)
@@ -2363,8 +2283,7 @@ async function verifyComposition(page, vault, shot) {
     if (name === '输入法口令.md') {
       await page.eval(`document.querySelector('.cm-content').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 229, bubbles: true, cancelable: true }))`)
       await sleep(1000)
-      check('组合输入的选词回车不准备或发送口令', await page.eval(`!document.querySelector('.overlay-authorization')`) === true)
-      await page.eval(`document.querySelector('.authorization-cancel')?.click()`)
+      check('组合输入的选词回车不启动任务、也没有确认卡', await page.eval(`(async () => (await window.rgent.agentTasks()).length === 0 && ${NO_CONFIRM_SURFACE})()`) === true)
     }
     await shot(page, `ime-${name.slice(0, -3)}-preedit`)
     await page.call('Input.insertText', { text: '你好' })
@@ -2875,7 +2794,8 @@ async function verifyRawSourceLifecycle(page, vault, modifier, shot) {
   await page.key('s', 'KeyS', modifier, 83)
   await waitFor(page, `(async () => (await window.rgent.noteRead(${JSON.stringify(name)})).content === ${JSON.stringify(body)})()`)
   await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; const at = view.state.doc.toString().indexOf('/快速完成') + '/快速完成'.length; view.dispatch({ selection: { anchor: at } }); view.focus() })()`)
-  await confirmSlashAuthorization(page)
+  const slashStarted = await submitDirect(page)
+  check('混合换行口令一次回车直接开工且没有确认卡', slashStarted && await page.eval(NO_CONFIRM_SURFACE))
   const completed = await waitFor(page, `(async () => { const note = await window.rgent.noteRead(${JSON.stringify(name)}); return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 })()`)
   check('混合换行口令按原文落点生成且旧账本保留', completed && await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(name)});const h=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(name)}});return h.ok&&h.value.records.some(r=>r.legacyRaw?.includes('不改历史。'))&&!n.content.includes('rgent:ledger:v1')})()`))
   const beforeMove = readFileSync(path.join(vault, name), 'utf8')
@@ -3007,7 +2927,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
     await waitFor(page,`!!document.querySelector('.vault-settings [data-vault-open="${id}"]:not(:disabled)')`)
     await page.eval(`document.querySelector('.vault-settings [data-vault-open="${id}"]').click()`)
     const ok = await waitFor(page,`document.querySelector('#app')?.dataset.vault===${JSON.stringify(label)} && !document.querySelector('.vault-settings')`)
-    if (!ok) throw new Error('切换未完成：'+await page.eval(`JSON.stringify({vault:document.querySelector('#app')?.dataset.vault,status:document.querySelector('.vault-settings-status')?.textContent,inert:document.querySelector('#app').inert,unavailable:document.querySelector('.note-unavailable')?.textContent,notice:document.querySelector('.status-host-notice')?.textContent})`))
+    if (!ok) throw new Error('切换未完成：'+await page.eval(`JSON.stringify({vault:document.querySelector('#app')?.dataset.vault,status:document.querySelector('.vault-settings-status')?.textContent,inert:document.querySelector('#app').inert,unavailable:document.querySelector('.note-unavailable')?.textContent,notice:document.querySelector('.notice-stack')?.textContent})`))
     return ok
   }
   check('启动恢复最后使用库 A',await waitFor(page,`document.querySelector('#app')?.dataset.vault==='研究库 A'`))
@@ -3594,7 +3514,7 @@ async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
     if(!(await window.rgent.modelDefaultSet({modelId:base})).ok)throw Error('旧默认模型设置失败');
     const state=await window.rgent.vaultGet();for(const request of [{target:'default',modelId:memory},{target:'vault',vault:{enabled:true,override:{mode:'inherit'}}}]){const r=await window.rgent.memoryConfigSave({...request,sessionId:state.sessionId});if(!r.ok)throw Error(r.error)}
     const n=await window.rgent.noteRead(${JSON.stringify(names[2])}),w=await window.rgent.noteWrite({relPath:n.relPath??${JSON.stringify(names[2])},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,content:n.content+'\\n/旧授权任务\\n'});if(!w.ok)throw Error(w.error);
-    const saved=await window.rgent.noteRead(${JSON.stringify(names[2])}),start=saved.content.indexOf('/旧授权任务'),request={relPath:${JSON.stringify(names[2])},sessionId:saved.sessionId,objectVersion:saved.objectVersion,expectedRevision:saved.revision,range:{start,end:start+6},expectedText:'/旧授权任务',promptText:'旧授权任务',modelRecordId:temporary,references:[]};
+    const saved=await window.rgent.noteRead(${JSON.stringify(names[2])}),start=saved.content.indexOf('/旧授权任务'),request={relPath:${JSON.stringify(names[2])},sessionId:saved.sessionId,objectVersion:saved.objectVersion,expectedRevision:saved.revision,range:{start,end:start+6},expectedText:'/旧授权任务',promptText:'旧授权任务',modelRecordId:temporary,scope:'note'};
     const preview=await window.rgent.agentAuthorizationPreview(request);if(!preview.ok)throw Error(preview.error);const task=await window.rgent.agentStart({...request,previewId:preview.preview.id});if(!task.ok)throw Error(task.error);return {base,temporary,memory,consumed:{...request,previewId:preview.preview.id},taskId:task.id}
   })()`)
   if(!await v4TaskDone(page,names[2],oldState.taskId))throw Error('旧真实授权任务未完成')
@@ -3603,7 +3523,7 @@ async function verifyV4CopiedVault(page,nativePage,vault,profile,shot) {
   // refresh callback; reload through the real startup/workspace path first.
   await page.call('Page.reload')
   if(!await waitFor(page,`document.querySelector('#app')?.inert===false && [...document.querySelectorAll('.status-model option')].some(o=>o.value===${JSON.stringify(oldState.temporary)})`))throw Error('旧库模型模块未实际刷新')
-  const unused=await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(names[3])}),content=n.content+'\\n/旧未用授权\\n',w=await window.rgent.noteWrite({relPath:${JSON.stringify(names[3])},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,content});if(!w.ok)throw Error(w.error);const saved=await window.rgent.noteRead(${JSON.stringify(names[3])}),start=saved.content.indexOf('/旧未用授权'),r={relPath:${JSON.stringify(names[3])},sessionId:saved.sessionId,objectVersion:saved.objectVersion,expectedRevision:saved.revision,range:{start,end:start+6},expectedText:'/旧未用授权',promptText:'旧未用授权',modelRecordId:${JSON.stringify(oldState.temporary)},references:[]},p=await window.rgent.agentAuthorizationPreview(r);if(!p.ok)throw Error(p.error);return {...r,previewId:p.preview.id}})()`)
+  const unused=await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(names[3])}),content=n.content+'\\n/旧未用授权\\n',w=await window.rgent.noteWrite({relPath:${JSON.stringify(names[3])},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,content});if(!w.ok)throw Error(w.error);const saved=await window.rgent.noteRead(${JSON.stringify(names[3])}),start=saved.content.indexOf('/旧未用授权'),r={relPath:${JSON.stringify(names[3])},sessionId:saved.sessionId,objectVersion:saved.objectVersion,expectedRevision:saved.revision,range:{start,end:start+6},expectedText:'/旧未用授权',promptText:'旧未用授权',modelRecordId:${JSON.stringify(oldState.temporary)},scope:'note'},p=await window.rgent.agentAuthorizationPreview(r);if(!p.ok)throw Error(p.error);return {...r,previewId:p.preview.id}})()`)
   check('复制前实际学习开启、旧授权已消费并有未用旧许可',oldCalls>=2&&oldState.consumed.previewId!==unused.previewId&&await page.eval(`window.rgent.memoryGet({sessionId:${JSON.stringify(seeded.state.sessionId)}}).then(m=>m.ok&&m.value.config.vault.enabled)`))
   // Persist insufficient historical evidence on one descriptor in the original disposable vault.
   // Copy then changes every native object; no production in-memory state is substituted.
@@ -3695,10 +3615,10 @@ function encodeV5Memory(record) { return workingMemoryFixtureCodec().encode(reco
 function parseV5Memory(raw) { return workingMemoryFixtureCodec().parse(raw) }
 
 const v4Hash = text => createHash('sha256').update(text).digest('hex')
-async function v4Task(page, vault, relPath, prompt, modelRecordId, references = []) {
+async function v4Task(page, vault, relPath, prompt, modelRecordId) {
   writeFileSync(path.join(vault,relPath),'/'+prompt+'\n')
   const result=await page.eval(`(async()=>{
-    const n=await window.rgent.noteRead(${JSON.stringify(relPath)}),r={relPath:${JSON.stringify(relPath)},range:{start:0,end:${prompt.length+1}},expectedText:${JSON.stringify('/'+prompt)},promptText:${JSON.stringify(prompt)},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,modelRecordId:${JSON.stringify(modelRecordId)},references:${JSON.stringify(references)}};
+    const n=await window.rgent.noteRead(${JSON.stringify(relPath)}),r={relPath:${JSON.stringify(relPath)},range:{start:0,end:${prompt.length+1}},expectedText:${JSON.stringify('/'+prompt)},promptText:${JSON.stringify(prompt)},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,modelRecordId:${JSON.stringify(modelRecordId)},scope:${JSON.stringify(prompt === 'V4真实往返' ? 'vault' : 'note')}};
     const p=await window.rgent.agentAuthorizationPreview(r);if(!p.ok)throw Error('任务预览：'+p.error);return window.rgent.agentStart({...r,previewId:p.preview.id})
   })()`)
   if(!result.ok)throw Error('任务启动：'+result.error)
@@ -3741,13 +3661,9 @@ async function verifyV4MemoryTools(page,nativePage,vault,shot) {
     writeFileSync(path.join(vault,'V4检索.md'),'')
     await v4OpenNote(page,'V4检索.md');await page.eval(`(()=>{const m=document.querySelector('.status-model');m.value=${JSON.stringify(modelId)};m.dispatchEvent(new Event('change'));document.querySelector('.cm-content').focus()})()`)
     await page.call('Input.insertText',{text:'/V4记忆额度'})
-    await page.key('Enter','Enter',0,13)
-    check('单篇真实授权浮层披露四次检索及共享额度',await waitFor(page,`document.querySelector('.authorization-memory')?.textContent.includes('最多 4 次') && document.querySelectorAll('.authorization-manifest li').length===1 && !!document.querySelector('.authorization-send:not(:disabled)')`))
-    await v4Shots(page,shot,'memory-only-authorization','.overlay-authorization')
+    check('单篇口令直接开工且没有授权卡',await submitDirect(page) && await page.eval(NO_CONFIRM_SURFACE))
+    await v4Shots(page,shot,'memory-only-scope','.status')
     const at=requests.length
-    // 非模态卡不抢焦点：发送前把焦点放到发送键。
-    await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
-    await page.key('Enter','Enter',0,13)
     check('memory-only 六次请求只执行四次、第五及第六拒绝后仍能回答',await waitFor(page,`(async()=>{const n=await window.rgent.noteRead('V4检索.md');return n.content.includes('V4记忆工具回答保稿')&&!(await window.rgent.agentTasks()).length})()`))
     // The inherited learning model may also run after save. Associate this
     // foreground chain with its actual model and unique current command.
@@ -3805,7 +3721,7 @@ async function verifyV4Summary(page,nativePage,vault,shot) {
     const model=await page.eval(`(async()=>{const r=await window.rgent.modelProviderSave({provider:'custom',baseURL:'http://127.0.0.1:${server.address().port}/v1',modelId:'v4-summary',contextTokens:18000,newKey:'v4-summary-key'});if(!r.ok)throw Error(r.error);if(!r.config.models.some(m=>m.modelId==='v4-summary')){const added=await window.rgent.modelAdd({provider:'custom',modelId:'v4-summary',contextTokens:18000});if(!added.ok)throw Error(added.error);return added.config.models.find(m=>m.modelId==='v4-summary').id}return r.config.models.find(m=>m.modelId==='v4-summary').id})()`)
     // Keep the registered body identity by saving through the existing human channel.
     const start=async label=>{
-      const result=await page.eval(`(async()=>{let n=await window.rgent.noteRead(${JSON.stringify(rel)}),content=${JSON.stringify('摘要测试正文\n\n/'+label+'\n')};const w=await window.rgent.noteWrite({relPath:${JSON.stringify(rel)},content,expectedRevision:n.revision,objectVersion:n.objectVersion,sessionId:n.sessionId});if(!w.ok)throw Error(w.error);n=await window.rgent.noteRead(${JSON.stringify(rel)});const at=n.content.indexOf('/'),r={relPath:${JSON.stringify(rel)},range:{start:at,end:at+${label.length+1}},expectedText:${JSON.stringify('/'+label)},promptText:${JSON.stringify(label)},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,modelRecordId:${JSON.stringify(model)},references:[]};const p=await window.rgent.agentAuthorizationPreview(r);if(!p.ok)throw Error(p.error);return window.rgent.agentStart({...r,previewId:p.preview.id})})()`)
+      const result=await page.eval(`(async()=>{let n=await window.rgent.noteRead(${JSON.stringify(rel)}),content=${JSON.stringify('摘要测试正文\n\n/'+label+'\n')};const w=await window.rgent.noteWrite({relPath:${JSON.stringify(rel)},content,expectedRevision:n.revision,objectVersion:n.objectVersion,sessionId:n.sessionId});if(!w.ok)throw Error(w.error);n=await window.rgent.noteRead(${JSON.stringify(rel)});const at=n.content.indexOf('/'),r={relPath:${JSON.stringify(rel)},range:{start:at,end:at+${label.length+1}},expectedText:${JSON.stringify('/'+label)},promptText:${JSON.stringify(label)},sessionId:n.sessionId,objectVersion:n.objectVersion,expectedRevision:n.revision,modelRecordId:${JSON.stringify(model)},scope:'note'};const p=await window.rgent.agentAuthorizationPreview(r);if(!p.ok)throw Error(p.error);return window.rgent.agentStart({...r,previewId:p.preview.id})})()`)
       if(!result.ok)throw Error(result.error);if(!await v4TaskDone(page,rel,result.id))throw Error('摘要任务未完成');return result.id
     }
     const first=await start('V4摘要第一次'),getRecords=`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(rel)});return (await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(rel)}})).value.records})()`
@@ -4152,7 +4068,7 @@ async function verifyLedgerRecoveryHostPending(page,vault) {
       const added=await window.rgent.modelProviderSave({provider:'custom',baseURL:${JSON.stringify(baseURL)},modelId:'recovery-ui',contextTokens:16000,newKey:'disposable-recovery-fixture'})
       if(!added.ok)throw Error('恢复模型夹具配置失败')
       const model=added.config.models.find(m=>m.provider==='custom'&&m.modelId==='recovery-ui')
-      const note=await window.rgent.noteRead(${JSON.stringify(relPath)}),request={relPath:${JSON.stringify(relPath)},range:{start:0,end:5},expectedText:'/恢复回答',promptText:'恢复回答',sessionId:note.sessionId,objectVersion:note.objectVersion,expectedRevision:note.revision,modelRecordId:model.id,references:[]}
+      const note=await window.rgent.noteRead(${JSON.stringify(relPath)}),request={relPath:${JSON.stringify(relPath)},range:{start:0,end:5},expectedText:'/恢复回答',promptText:'恢复回答',sessionId:note.sessionId,objectVersion:note.objectVersion,expectedRevision:note.revision,modelRecordId:model.id,scope:'note'}
       globalThis.__pendingRecoveryEvents=[];globalThis.__pendingRecoveryOff=window.rgent.onAgentEvent(e=>globalThis.__pendingRecoveryEvents.push(e))
       const preview=await window.rgent.agentAuthorizationPreview(request)
       if(!preview.ok)throw Error('恢复任务授权失败：'+preview.error)
@@ -4329,44 +4245,84 @@ function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequest
           response.write(`data: ${JSON.stringify({id:'memory-use-ui',object:'chat.completion.chunk',created:1,model:decoded.model,choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`)
           response.end('data: [DONE]\n\n'); return
         }
-        // 只按写工具专项自己的口令识别：工具链场景现在也带写工具，按工具名匹配会把它整个劫持走。
+        // 写工具专项按自己的口令分流；每次只发一个工具调用，便于逐轮断言。
         const writeBody = JSON.stringify(decoded.messages)
-        const writePrompts = ['建样张一', '建样张二', '补样张', '超限样张', '自动改名样张', '改名样张', '挪样张', '越权样张', '删样张', '不删样张', '旅程补写']
-        if (writePrompts.some(prompt => writeBody.includes(prompt))) {
+        const writePrompts = ['本篇边界', '同册读写', '同册越界', '整库改名', '整库挪动', '整库删除', '整库再删', '原篇结构', '超限补写', '旅程补写']
+        // 当前口令在模型输入里带固定标签；旧口令会留在正文与历史里，按标签精确取，不能按「包含」猜。
+        const userText = (decoded.messages ?? []).filter(message => message.role === 'user').map(message => String(message.content)).join('\n')
+        const promptMatch = userText.match(/当前口令：("(?:[^"\\]|\\.)*")/)
+        let currentPrompt = null
+        try { currentPrompt = promptMatch ? JSON.parse(promptMatch[1]) : null } catch { currentPrompt = null }
+        // 旅程口令是自然语言，包含固定标记即可归到旅程补写夹具。
+        if (typeof currentPrompt === 'string' && currentPrompt.includes('旅程补写')) currentPrompt = '旅程补写'
+        if (!writePrompts.includes(currentPrompt)) currentPrompt = null
+        if (currentPrompt !== null) {
           writeRequests.push(decoded)
           const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'write-ui', object: 'chat.completion.chunk', created: 1, model: decoded.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
           response.writeHead(200, { 'content-type': 'text/event-stream' })
-          const results = decoded.messages.filter(message => message.role === 'tool')
-          if (!results.length) {
-            // 第一轮：按口令提出一次写请求；工具名只在"有工具档"的场里出现。
-            const prompts = writeBody
-            const call = prompts.includes('越权样张')
-              // 越权场景：请模型改「正在写入的发起篇」自己——门必须按 ORIGIN_LOCKED 拒。
-              ? { name: 'rename_note', input: { relPath: '写作越权.md', newName: '偷改发起篇' } }
-              : prompts.includes('自动改名样张')
-                ? { name: 'rename_note', input: { relPath: '写作自动参考.md', newName: '写作自动参考改' } }
-              : prompts.includes('改名样张')
-                ? { name: 'rename_note', input: { relPath: '写作参考.md', newName: '写作参考改' } }
-                : prompts.includes('挪样张')
-                  ? { name: 'move_note', input: { relPath: '写作挪参考.md', targetFolder: '归档' } }
-                : prompts.includes('不删样张')
-                  ? { name: 'delete_note', input: { relPath: '写作不删参考.md' } }
-                : prompts.includes('删样张')
-                  ? { name: 'delete_note', input: { relPath: '写作删参考.md' } }
-                  : prompts.includes('建样张二')
-                ? { name: 'create_note', input: { name: '写工具二', body: '第二篇受控正文。' } }
-                : prompts.includes('建样张一')
-                  ? { name: 'create_note', input: { name: '写工具样张', body: '# 写工具样张\n\n受控正文。' } }
-                  : prompts.includes('超限样张')
-                    ? { name: 'append_to_note', input: { text: '汉'.repeat(4000) } }
-                    : prompts.includes('旅程补写')
-                      ? { name: 'append_to_note', input: { text: '旅程补写一句。' } }
-                      : { name: 'append_to_note', input: { text: '补充依据。' } }
+          const toolMessages = decoded.messages.filter(message => message.role === 'tool')
+          const lastTool = () => {
+            const parsed = JSON.parse(toolMessages.at(-1).content)
+            return Array.isArray(parsed) ? parsed[0] : parsed
+          }
+          let call = null
+          let answer = ''
+          if (currentPrompt === '本篇边界') {
+            // 本篇只该宣告补写；模型故意逐个请求读/搜/建/改/挪/删，六个都应被拒。
+            const forbidden = [
+              { name: 'read_library', input: { sourceId: 'fake-source' } },
+              { name: 'search_library', input: { query: '工具线索' } },
+              { name: 'create_note', input: { name: '本篇不该建', body: '越界正文。' } },
+              { name: 'rename_note', input: { relPath: '工具档/参考.md', newName: '越界改' } },
+              { name: 'move_note', input: { relPath: '工具档/挪参考.md', targetFolder: '工具档/归档' } },
+              { name: 'delete_note', input: { relPath: '工具档/删参考.md' } }
+            ]
+            if (toolMessages.length < forbidden.length) call = forbidden[toolMessages.length]
+            else if (toolMessages.length === forbidden.length) call = { name: 'append_to_note', input: { text: '本篇补写。' } }
+            else answer = '本篇边界核验完成。'
+          } else if (currentPrompt === '同册读写') {
+            if (toolMessages.length === 0) call = { name: 'search_library', input: { query: '受控参考' } }
+            else if (toolMessages.length === 1) {
+              const result = lastTool()
+              const sourceId = (result.items ?? []).find(item => String(item.relPath).endsWith('工具参考.md'))?.sourceId
+              call = { name: 'read_library', input: { sourceId } }
+            } else if (toolMessages.length === 2) call = { name: 'create_note', input: { name: '同册建样张', body: '# 同册建样张\n\n同册受控正文。' } }
+            else if (toolMessages.length === 3) call = { name: 'append_to_note', input: { text: '同册补写。' } }
+            else answer = '同册读写核验完成。'
+          } else if (currentPrompt === '同册越界') {
+            if (toolMessages.length === 0) call = { name: 'rename_note', input: { relPath: '工具档/参考.md', newName: '越界改' } }
+            else if (toolMessages.length === 1) call = { name: 'move_note', input: { relPath: '工具档/挪参考.md', targetFolder: '工具档/归档' } }
+            else if (toolMessages.length === 2) call = { name: 'delete_note', input: { relPath: '工具档/删参考.md' } }
+            else answer = '同册越界核验完成。'
+          } else if (currentPrompt === '整库改名') {
+            if (toolMessages.length === 0) call = { name: 'rename_note', input: { relPath: '工具档/参考.md', newName: '参考改' } }
+            else answer = '整库改名完成。'
+          } else if (currentPrompt === '整库挪动') {
+            if (toolMessages.length === 0) call = { name: 'move_note', input: { relPath: '工具档/挪参考.md', targetFolder: '工具档/归档' } }
+            else answer = '整库挪动完成。'
+          } else if (currentPrompt === '整库再删') {
+            if (toolMessages.length === 0) call = { name: 'delete_note', input: { relPath: '工具档/删参考.md' } }
+            else answer = '整库再删完成。'
+          } else if (currentPrompt === '整库删除') {
+            if (toolMessages.length === 0) call = { name: 'delete_note', input: { relPath: '工具档/删参考.md' } }
+            else answer = '整库删除完成。'
+          } else if (currentPrompt === '原篇结构') {
+            if (toolMessages.length === 0) call = { name: 'rename_note', input: { relPath: '工具档/原篇发起.md', newName: '偷改发起篇' } }
+            else if (toolMessages.length === 1) call = { name: 'append_to_note', input: { text: '原篇结构拒绝后照样写回答。' } }
+            else answer = '原篇结构核验完成。'
+          } else if (currentPrompt === '超限补写') {
+            if (toolMessages.length === 0) call = { name: 'append_to_note', input: { text: '汉'.repeat(4000) } }
+            else answer = '超限补写核验完成。'
+          } else {
+            if (toolMessages.length === 0) call = { name: 'append_to_note', input: { text: '旅程补写一句。' } }
+            else answer = '写工具核验完成。'
+          }
+          if (call) {
             const [name, args] = [call.name, JSON.stringify(call.input)]
-            emit({ tool_calls: [{ index: 0, id: `ui-write-${name}`, type: 'function', function: { name, arguments: args } }] })
+            emit({ tool_calls: [{ index: 0, id: `ui-write-${toolMessages.length}-${name}`, type: 'function', function: { name, arguments: args } }] })
             emit({}, 'tool_calls')
           } else {
-            emit({ content: '写工具核验完成。' })
+            emit({ content: answer })
             emit({}, 'stop')
           }
           response.end('data: [DONE]\n\n')
@@ -4383,7 +4339,7 @@ function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequest
             emit({ tool_calls: [{ index: 0, function: { arguments: '线索"}' } }] }); emit({}, 'tool_calls'); response.end('data: [DONE]\n\n')
           } else if (results.length === 1) {
             const result = JSON.parse(results[0].content)
-            const sourceId = result.items.find(item => item.relPath === '工具参考.md')?.sourceId
+            const sourceId = result.items.find(item => String(item.relPath).endsWith('工具参考.md'))?.sourceId
             emit({ tool_calls: [{ index: 0, id: 'ui-read', type: 'function', function: { name: 'read_library', arguments: JSON.stringify({ sourceId }) } }] }); emit({}, 'tool_calls'); response.end('data: [DONE]\n\n')
           } else {
             const timer = setTimeout(() => { if (response.destroyed) return; emit({ reasoning_content: '隐藏工具推理' }); emit({ content: '工具查证完成：已核对参考原文。' }); emit({}, 'stop'); response.end('data: [DONE]\n\n') }, 1200)
@@ -4446,24 +4402,20 @@ async function verifySkillsLive(page, vault, profile, shot) {
     if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(rel)}`)) throw new Error(`夹具未打开：${rel}`)
     await page.eval(`document.querySelector('.cm-content').focus()`)
     await page.call('Input.insertText', { text: `/${prompt}` })
-    await page.key('Enter', 'Enter', 0, 13)
-    if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 60000)) throw new Error('授权浮层未就绪')
-    const preview = await page.eval(`document.querySelector('.authorization-skills')?.textContent||''`)
-    // 非模态卡不抢焦点：发送前把焦点放到发送键。
-    await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
-    await page.key('Enter', 'Enter', 0, 13)
+    if (!await submitDirect(page)) throw new Error('零确认口令没有直接开工')
+    const noCard = await page.eval(NO_CONFIRM_SURFACE)
     calls += 1
     const finished = await waitFor(page, `(async()=>{if((await window.rgent.agentTasks()).length>0)return false;const n=await window.rgent.noteRead(${JSON.stringify(rel)});const r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(rel)}});return r.ok&&r.value.records.some(rec=>String(rec.chapter?.answer??'').length>0)})()`, 180000)
     const record = await page.eval(`(async()=>{const n=await window.rgent.noteRead(${JSON.stringify(rel)});const r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:${JSON.stringify(rel)}});if(!r.ok)return {error:r.error};const rec=r.value.records.at(-1);return rec?{prompt:rec.chapter.prompt,answer:rec.chapter.answer,provenance:rec.chapter.provenance}:{error:'NO_RECORD'}})()`)
-    transcripts.push({ rel, preview, finished, record })
-    return { preview, finished, record }
+    transcripts.push({ rel, noCard, finished, record })
+    return { noCard, finished, record }
   }
 
   // 判据 1：基线场（技能未启用）不得出现标记。
   const baseline = await ask('技能基线.md')
   check('基线场真实回答不含技能标记', baseline.finished && !String(baseline.record.answer ?? '').includes(marker), JSON.stringify({ finished: baseline.finished, answer: String(baseline.record.answer ?? '').slice(0, 120) }))
   // 判据 5：技能正文不得出现在发送确认里。
-  check('基线场发送确认不出现技能正文或标记', !baseline.preview.includes(marker) && !baseline.preview.includes('等价词典'))
+  check('基线场直接开工、没有发送确认卡', baseline.noCard && baseline.finished)
 
   // 启用该技能（按库启用），再做第二场。
   await page.eval(`document.querySelector('.settings-open').click()`)
@@ -4479,7 +4431,7 @@ async function verifySkillsLive(page, vault, profile, shot) {
   check('启用场真实回答以技能要求的标记开头', enabled.finished && answer.trimStart().startsWith(marker), JSON.stringify(answer.slice(0, 160)))
   const skills = enabled.record.provenance?.skills ?? null
   check('账本记下该技能的名称与内容哈希', Array.isArray(skills) && skills.length === 1 && skills[0].name === skillName && skills[0].hash === expectedHash, JSON.stringify({ skills, expectedHash }))
-  check('发送确认只出现技能名称', enabled.preview.includes(`本场技能：${skillName}`) && !enabled.preview.includes(marker) && !enabled.preview.includes('第一行必须'), JSON.stringify(enabled.preview))
+  check('启用场直接开工、没有发送确认卡', enabled.noCard && enabled.finished && !JSON.stringify(enabled.record.provenance?.skills ?? []).includes(marker) && !JSON.stringify(enabled.record).includes('第一行必须'), JSON.stringify({ noCard: enabled.noCard, skills: enabled.record.provenance?.skills }))
   // 判据 4：两场范围、来源与工具逐项相同。
   const shape = record => JSON.stringify({ tools: record?.provenance?.tools ?? null, sources: (record?.provenance?.sources ?? []).map(s => s.relPath) })
   const scopeOnlyOwnNote = (record, rel) => { const scope = record?.provenance?.scope ?? null; return Array.isArray(scope) && scope.length === 1 && scope[0] === rel }
@@ -4525,11 +4477,10 @@ async function verifySkills(page, vault, profile, shot) {
   await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('技能确认')`)
   await page.eval(`document.querySelector('.cm-content')?.focus()`)
   await page.call('Input.insertText', { text: '/技能确认' })
-  await page.key('Enter', 'Enter', 0, 13)
-  check('发送确认只列技能名称', await waitFor(page, `document.querySelector('.authorization-skills')?.textContent.includes('本场技能：答案批改')`))
-  check('发送确认不含正文、体量与展开控件', await page.eval(`(()=>{const node=document.querySelector('.authorization-skills');if(!node)return false;const text=node.textContent;return !text.includes('等价词典') && !node.querySelector('details') && !node.querySelector('button') && text.includes('账本记有名称与内容哈希') && !text.includes('正文合计') && !text.includes('KiB')})()`))
-  await shot(page, 'skills-authorization-1200')
-  await page.key('Escape', 'Escape', 0, 27)
+  check('技能场一次回车直接开工、没有发送确认卡', await submitDirect(page) && await page.eval(NO_CONFIRM_SURFACE))
+  check('技能场正常收尾并回答落盘', await waitFor(page, `(async()=>{const n=await window.rgent.noteRead('技能确认.md');return n.content.includes('受控回答第一句。')&&(await window.rgent.agentTasks()).length===0})()`))
+  check('账本只记技能名称与内容哈希、不含正文', await page.eval(`(async()=>{const n=await window.rgent.noteRead('技能确认.md'),r=await window.rgent.ledgerGet({sessionId:n.sessionId,objectVersion:n.objectVersion,relPath:'技能确认.md'});const skills=r.ok?r.value.records.at(-1)?.chapter?.provenance?.skills??[]:[];return skills.length===1&&skills[0].name==='答案批改'&&/^[a-f0-9]{64}$/.test(skills[0].hash)&&!JSON.stringify(skills).includes('等价词典')})()`))
+  await shot(page, 'skills-scope-1200')
   writeFileSync(path.join(profile, 'skills.json'), '{broken')
   await page.eval(`document.querySelector('.settings-open').click()`)
   await waitFor(page, `!!document.querySelector('.settings-nav')`)
@@ -5571,7 +5522,8 @@ async function main() {
     catch (error) { stageFailed('中文组合输入', error) }
     process.stdout.write('\nHost 最小环\n')
     try {
-    hostServer = createControlledHostServer(memoryRequests,toolLoopRequests)
+    const toolAllRequests = []
+    hostServer = createControlledHostServer(memoryRequests,toolLoopRequests,[],toolAllRequests)
     await new Promise((resolve) => hostServer.listen(0, '127.0.0.1', resolve))
     const hostAddress = hostServer.address()
     const hostBaseURL = `http://127.0.0.1:${hostAddress.port}/v1`
@@ -5653,7 +5605,7 @@ async function main() {
     await page.eval(`document.querySelector('.cm-content')?.focus()`)
     await page.call('Input.insertText', { text: '/请写两句话' })
     check('空段内输入的口令留在编辑器', await waitFor(page, `document.querySelector('.cm-content')?.textContent.includes('/请写两句话')`))
-    await confirmSlashAuthorization(page, true)
+    check('空段口令一次回车直接开工且没有确认卡', await submitDirect(page), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialog: document.querySelector('dialog[open]')?.className ?? null })`))
     check('启动成功后本篇仍显示刚用的临时模型', await waitFor(page, `document.querySelector('.status-model')?.selectedOptions[0]?.textContent === 'test-override'`))
     // Windows CI 上任务启动与浮层重绘更慢：先等任务登记，再给中止入口更宽的等待。
     await waitFor(page, `(async () => (await window.rgent.agentTasks()).length > 0)()`, 15000)
@@ -5675,13 +5627,13 @@ async function main() {
     await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('Host 快速')`)
     await page.eval(`document.querySelector('.cm-content')?.focus()`)
     await page.call('Input.insertText', { text: '/快速完成' })
-    await confirmSlashAuthorization(page)
+    check('快速口令一次回车直接开工', await submitDirect(page))
     const quickFinished = await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead('Host 快速.md')
       return note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 && document.querySelector('.task-dock')?.dataset.kind!=='generating'
     })()`, 8000)
     check('快速流结束后底栏不残留运行任务', quickFinished, quickFinished ? '' : await page.eval(`(async () => JSON.stringify({ note: (await window.rgent.noteRead('Host 快速.md')).content, tasks: await window.rgent.agentTasks(), status: document.querySelector('.status-left')?.innerText }))()`))
-    await verifyScopedHost(page, vault, shot, toolLoopRequests)
+    await verifyScopedHost(page, vault, shot, toolLoopRequests, toolAllRequests)
     try { await verifyMemoryIntegration(page, vault, shot, memoryRequests, nativePage) } catch (error) { stageFailed('库内记忆', error) }
     await verifyRawSourceLifecycle(page, vault, modifier, shot)
     writeFileSync(path.join(vault, 'Host A.md'), '')
@@ -5697,7 +5649,7 @@ async function main() {
       await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((n) => n.innerText.includes('${name}'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
       await parallelCheck(`${name} 进入当前 tab`, `document.querySelector('.tab[aria-selected=true]')?.innerText.includes('${name}')`)
       await page.call('Input.insertText', { text: '/多任务测试' })
-      if (!await confirmSlashAuthorization(page)) throw new Error(`${name} 的本场授权准备失败；停止并行依赖断言。`)
+      if (!await submitDirect(page)) throw new Error(`${name} 的口令没有直接开工；停止并行依赖断言。`)
       await parallelCheck(`${name} 启动后任务归属及数量正确`, `(async () => { const tasks=await window.rgent.agentTasks();return tasks.length===${at+1} && ${JSON.stringify(['Host A.md','Host B.md'].slice(0,at+1))}.every(path=>tasks.some(task=>task.relPath===path)) })()`)
     }
     await parallelCheck('异篇并行时当前篇浮层为生成中', `(async ()=>(await window.rgent.agentTasks()).length===2 && document.querySelector('.task-dock')?.dataset.kind==='generating')()`)
@@ -5797,7 +5749,7 @@ async function main() {
     await page.eval(`(() => { [...document.querySelectorAll('.tree-note')].find((node) => node.textContent.includes('运行'))?.click(); document.querySelector('.cm-content')?.focus() })()`)
     await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === '生命周期/运行.md'`)
     await page.call('Input.insertText', { text: '/多任务停止' })
-    await confirmSlashAuthorization(page)
+    check('生命周期任务一次回车直接开工', await submitDirect(page))
     const beforeMoveTask = await waitFor(page, `(async () => (await window.rgent.agentTasks()).some((item) => item.relPath === '生命周期/运行.md'))()`, 5000)
     writeFileSync(path.join(vault, '生命周期', '不相关.md'), '保持不动')
     const unrelatedMove = await page.eval(`(async () => {
@@ -5863,9 +5815,9 @@ async function main() {
         const note = await window.rgent.noteRead('生命周期/无关生成.md')
         const request={ ...${JSON.stringify({ relPath: '生命周期/无关生成.md',
           range: { start: 0, end: unrelatedPrompt.length }, expectedText: unrelatedPrompt, promptText: '多任务恢复' })},
-          expectedRevision: note.revision, sessionId: note.sessionId, objectVersion: note.objectVersion, level: 'reference' }
+          expectedRevision: note.revision, sessionId: note.sessionId, objectVersion: note.objectVersion, scope: 'note' }
         const config = await window.rgent.modelConfigGet(); request.modelRecordId = config.config.defaultModelId
-        const authorization=await window.rgent.agentAuthorizationPreview({...request,references:[]})
+        const authorization=await window.rgent.agentAuthorizationPreview(request)
         return authorization.ok ? window.rgent.agentStart({...request,previewId:authorization.preview.id}) : authorization
       })()` )
       check('恢复竞态夹具中的无关任务开始并已产生回答', unrelatedTask.ok && await waitFor(page,

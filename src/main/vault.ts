@@ -7,7 +7,7 @@ import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { dialog, type BrowserWindow } from 'electron'
-import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, RecoveryRow, RecoveryScanView, RecoveryVerdict, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason } from '../shared/ipc.ts'
+import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, RecoveryRow, RecoveryScanView, RecoveryVerdict, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason, TrashListResult, TrashPurgeResult, TrashRestoreResult } from '../shared/ipc.ts'
 import { createFolder, createNote, createNoteWithBody, listVaultTree, parseStoredVault, readNoteSnapshot, requireOrdinaryNotes as verifyOrdinaryNotes, revisionOf, serializeStoredVault, writeNote } from './notes-fs.ts'
 import { VaultMutationQueue } from './vault-mutation-queue.ts'
 import { VaultLifecycle, type MissingObject, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite, type RetiredObject, type TrashPreview } from './vault-lifecycle.ts'
@@ -19,6 +19,7 @@ import { effectivePermissionEntries, loadPermissions, loadPermissionSnapshot, mo
 import type { TaskGrant } from './task-authorization.ts'
 import { closeSecureFs, secureFsFor } from './secure-fs.ts'
 import { postTrashOutcome, verifyLanding } from './trash-result.ts'
+import { TRASH_OPERATIONS_ON_THIS_PLATFORM, TRASH_RECORD_LIMIT, TrashStore, isTrashId } from './trash-store.ts'
 import { VaultIndex } from './vault-index.ts'
 import { vaultRootIdentity, watchVault } from './watch.ts'
 import { assertLedgerPreserved, composeSource, partitionSource } from '../markdown/partition.ts'
@@ -60,6 +61,10 @@ export class VaultSession {
   private lifecycle: VaultLifecycle | null = null
   private lifecycleReady: Promise<void> = Promise.resolve()
   private lifecycleError: Error | null = null
+  /** 库内「已删除」存储：与 lifecycle 同一个 mutation 队列，不另开写通道。 */
+  private trash: TrashStore | null = null
+  /** 对账／清理里没能自动处理的小问题（坏条目、清不掉的条目）：如实留着，不静默吞。 */
+  private trashIssues: string[] = []
   private token: string | null = null
   root: string | null = null
   private rootIdentity: string | null = null
@@ -523,7 +528,7 @@ export class VaultSession {
     let observed = false
     try {
       const root = this.root, ledger = this.ledgerStore
-      if (!root || !ledger || !isNotePath(relPath) || this.lifecycle?.hasMissing(relPath) || this.reservedMissing.has(relPath)) return
+      if (!root || !ledger || !isNotePath(relPath) || this.trashedPath(relPath) || this.lifecycle?.hasMissing(relPath) || this.reservedMissing.has(relPath)) return
       try { secureFsFor(root).resolve(relPath); return }
       catch (error) { if (!(error instanceof Error && error.message === 'ENOENT')) return }
       let owners: ReturnType<LedgerStore['recoveryOwners']>['owners']
@@ -705,8 +710,9 @@ export class VaultSession {
       owners = error instanceof Error && error.message === 'ENOENT' ? [] : null
     }
     // 程序不在场时（关闭期间、换库期间）消失的登记对象也要被看见，不能只靠运行时监视。
+    // 已主动删除进库内「已删除」的路径不算库外消失，不进外部恢复清点。
     if (owners) for (const owner of owners) {
-      if (this.missingRecord(owner.relPath)) continue
+      if (this.missingRecord(owner.relPath) || this.trashedPath(owner.relPath)) continue
       try { secureFsFor(root).resolve(owner.relPath); continue }
       catch (error) { if (!(error instanceof Error && error.message === 'ENOENT')) continue }
       await this.recordExternalDisappearance(owner.relPath)
@@ -1346,6 +1352,206 @@ export class VaultSession {
     this.emit('tree:changed')
   }
 
+  /* ------------------------------------------------------------ 库内「已删除」 */
+
+  /**
+   * 人／AI 共用的删除：进库根 `.rgent-trash`（隐藏），不再是「第一站就送系统废纸篓」。
+   * 磁盘事务（核身份／附件、建 meta、移动、回滚）在 `TrashStore`；这里补会话、
+   * 权限证据、journal `trashed[]`、既有账本记录、`note:deleted` 事件与删后清理。
+   * `attribution.source` 缺省按人删；AI 传 `ai` 与任务 id，账本能审。
+   */
+  async trashDelete(relPath: string, attribution: { source?: 'human' | 'ai'; taskId?: string } = {}):
+    Promise<TrashPurgeResult & { relPath?: string; trashId?: string }> {
+    const token = this.captureSession()
+    await this.lifecycleReady
+    this.assertSession(token)
+    try {
+      return await this.mutations.run(async () => {
+        this.assertSession(token)
+        this.requireStableStructure()
+        // 删除／还原／明确删除共用同一条平台边界：收尾靠原生 trash，只有 macOS 实现。
+        if (!TRASH_OPERATIONS_ON_THIS_PLATFORM) throw new Error('PLATFORM_UNPROVEN')
+        const root = this.requireUsableRoot()
+        if (!isNotePath(relPath) || hasHiddenSegment(relPath) || relPath.includes('\\') || !resolveInVault(root, relPath)) {
+          throw new Error('BAD_PATH')
+        }
+        // 删除事务要求身份／权限／附件三样都核得动；权限名单读不了就不动磁盘。
+        const policy = await loadPermissionSnapshot(root)
+        this.assertSession(token)
+        this.requireStableStructure()
+        if (policy.state.status !== 'ready') throw new Error('PERMISSIONS_INVALID')
+        if (this.lifecycle!.trashedObjects().length >= TRASH_RECORD_LIMIT) throw new Error('TRASH_RECORD_LIMIT')
+        const source = attribution.source ?? 'human'
+        const store = this.trashStore()
+        const outcome = store.delete(relPath, {
+          source,
+          ...(attribution.taskId ? { taskId: attribution.taskId } : {}),
+          // 第 3 步的整体：meta 已写成 trashed，这里写 journal 与既有账本记录。
+          // 任一步失败都让调用方回滚已移动项（文件退回原位、条目清掉），报 TRASH_PARTIAL。
+          record: (meta) => {
+            this.lifecycle!.addTrashed({
+              trashId: meta.trashId, relPath: meta.originalRelPath, objectVersion: meta.objectVersion,
+              contentHash: meta.contentHash, at: meta.deletedAt
+            })
+            try {
+              const folder = meta.attachmentRelPath === null ? null : meta.attachmentRelPath.split('/').pop() ?? null
+              this.ledgerStore?.recordHumanTrash(meta.originalRelPath, store.entryDir(meta.trashId),
+                folder === null ? null : `${store.payloadDir(meta.trashId)}/${folder}`, false, {
+                  taskId: attribution.taskId ?? (source === 'ai' ? `aitrash-${meta.trashId}` : 'humantrash'),
+                  prompt: source === 'ai' ? 'AI 移入库内已删除' : '移入库内已删除'
+                })
+            } catch (error) {
+              // 账本写不进去就把刚写的 journal 记录退回：一次删除要么三样都落下，要么什么都不留。
+              try { this.lifecycle!.removeTrashed(meta.trashId) } catch { this.trashIssues.push(`delete-journal:${meta.trashId}`) }
+              throw error
+            }
+          }
+        })
+        this.assertSession(token)
+        const original = outcome.meta.originalRelPath
+        this.reservedMissing.delete(original)
+        this.forgetTrashedPath(original)
+        // 人删与 AI 删是同一条事件；index 转发给渲染层关闭 tab。
+        this.emit('note:deleted', { relPath: original, sessionId: token, trashId: outcome.meta.trashId })
+        // 每次删除后扫一遍；刚删的这条不在当场清理范围（它还没到 30 天，也不该立刻被大小上限顶掉）。
+        try { this.sweepTrashEntries([outcome.meta.trashId]) } catch (error) { this.trashIssues.push(`sweep:${codeOf(error)}`) }
+        return { ok: true as const, relPath: original, trashId: outcome.meta.trashId }
+      })
+    } catch (error) {
+      // 回滚后的失败只报 TRASH_PARTIAL；真正的原因（journal 写失败、路径被换等）留在诊断里。
+      if (error instanceof Error && error.message === 'TRASH_PARTIAL' && error.cause) this.trashIssues.push(`delete:${codeOf(error.cause)}`)
+      return { ok: false, error: codeOf(error) }
+    }
+  }
+
+  /** 库内「已删除」列表；坏条目与只剩 journal 记录的条目都以 damaged 列出，不丢。 */
+  async trashList(): Promise<TrashListResult> {
+    const token = this.captureSession()
+    await this.lifecycleReady
+    this.assertSession(token)
+    try {
+      return await this.mutations.run(() => {
+        this.assertSession(token)
+        this.requireUsableRoot()
+        const listed = this.trashStore().list(this.lifecycle?.trashedObjects() ?? [])
+        return { ok: true as const, entries: listed.entries, bytes: listed.bytes }
+      })
+    } catch (error) {
+      return { ok: false, error: codeOf(error) }
+    }
+  }
+
+  /** 还原一条已删除记录：原位或 `名字（恢复）.md` 副本；父目录缺失则重建。 */
+  async trashRestore(id: string): Promise<TrashRestoreResult> {
+    const token = this.captureSession()
+    await this.lifecycleReady
+    this.assertSession(token)
+    try {
+      return await this.mutations.run(() => {
+        this.assertSession(token)
+        this.requireStableStructure()
+        this.requireUsableRoot()
+        if (!TRASH_OPERATIONS_ON_THIS_PLATFORM) throw new Error('PLATFORM_UNPROVEN')
+        if (!isTrashId(id)) throw new Error('BAD_REQUEST')
+        const result = this.trashStore().restore(id)
+        if (!result.ok) return result
+        // 记录移除失败不回滚已还原的笔记：旧记录会以 damaged 出现在列表里，可明确删除，不算静默丢。
+        try { this.lifecycle!.removeTrashed(id) } catch (error) { this.trashIssues.push(`restore-journal:${id}:${codeOf(error)}`) }
+        this.index.markDirty()
+        this.emit('tree:changed')
+        return result
+      })
+    } catch (error) {
+      return { ok: false, error: codeOf(error) }
+    }
+  }
+
+  /** 人在「已删除」里明确删除一条：整条目目录送系统废纸篓（绝不 unlink）；失败保留并报错。
+   *  只由人的界面调用，AI 工具链不接这个入口。 */
+  async trashPurge(id: string): Promise<TrashPurgeResult> {
+    const token = this.captureSession()
+    await this.lifecycleReady
+    this.assertSession(token)
+    try {
+      return await this.mutations.run(() => {
+        this.assertSession(token)
+        this.requireStableStructure()
+        this.requireUsableRoot()
+        if (!TRASH_OPERATIONS_ON_THIS_PLATFORM) throw new Error('PLATFORM_UNPROVEN')
+        if (!isTrashId(id)) throw new Error('BAD_REQUEST')
+        const recorded = this.lifecycle!.trashedObjects().some((item) => item.trashId === id)
+        const result = this.trashStore().purge(id)
+        if (!result.ok) return result
+        const removed = recorded ? this.lifecycle!.removeTrashed(id) : false
+        if (!result.removed && !removed) return { ok: false as const, error: 'TRASH_ENTRY_MISSING' }
+        this.index.markDirty()
+        return { ok: true as const }
+      })
+    } catch (error) {
+      return { ok: false, error: codeOf(error) }
+    }
+  }
+
+  /** 过期／超额清理：30 天＋1 GiB，从最旧开始送系统废纸篓。只由人（库打开或删后）触发。 */
+  async trashSweep(): Promise<TrashPurgeResult> {
+    const token = this.captureSession()
+    await this.lifecycleReady
+    this.assertSession(token)
+    try {
+      return await this.mutations.run(() => {
+        this.assertSession(token)
+        this.requireStableStructure()
+        this.requireUsableRoot()
+        const before = this.trashIssues.length
+        this.sweepTrashEntries()
+        const failures = this.trashIssues.length - before
+        return failures ? { ok: false as const, error: 'TRASH_SWEEP_PARTIAL' } : { ok: true as const }
+      })
+    } catch (error) {
+      return { ok: false, error: codeOf(error) }
+    }
+  }
+
+  /** 对账与清理留下的小问题；只作诊断，不冒充产品状态。 */
+  trashDiagnostics(): readonly string[] { this.assertCall(); return [...this.trashIssues] }
+
+  private trashStore(): TrashStore {
+    if (!this.trash) this.trash = new TrashStore(this.requireUsableRoot())
+    return this.trash
+  }
+
+  /** 启动对账：journal ↔ `.rgent-trash` ↔ 原路径。写 journal 失败只记问题，不让库打不开。 */
+  private reconcileTrash(): void {
+    const report = this.trashStore().reconcile(this.lifecycle!.trashedObjects())
+    for (const record of report.upsert) {
+      try { this.lifecycle!.upsertTrashed(record) } catch (error) { this.trashIssues.push(`reconcile-record:${record.trashId}:${codeOf(error)}`) }
+    }
+    for (const id of report.remove) {
+      try { this.lifecycle!.removeTrashed(id) } catch (error) { this.trashIssues.push(`reconcile-remove:${id}:${codeOf(error)}`) }
+    }
+    this.trashIssues.push(...report.issues)
+    if (report.completed.length || report.rolledBack.length || report.restored.length || report.damaged.length) this.index.markDirty()
+  }
+
+  private sweepTrashEntries(exclude: readonly string[] = []): void {
+    const report = this.trashStore().sweep(exclude)
+    for (const id of report.purged) {
+      try { this.lifecycle!.removeTrashed(id) } catch (error) { this.trashIssues.push(`sweep-journal:${id}:${codeOf(error)}`) }
+    }
+    for (const failure of report.failed) this.trashIssues.push(`sweep:${failure.id}:${failure.error}`)
+  }
+
+  /** 主动删除的路径不再被当成「库外消失」。记录读不了时按「不是已删除」处理：
+   *  整本 journal 坏掉的时候，外部变化事件照样要照常上报。 */
+  private trashedPath(relPath: string): boolean {
+    try { return this.lifecycle?.isTrashed(relPath) ?? false } catch { return false }
+  }
+
+  /** 一批文件变化里要跳过的已删除路径；一次读 journal，失败按空集继续上报外部变化。 */
+  private trashedPaths(): Set<string> {
+    try { return new Set((this.lifecycle?.trashedObjects() ?? []).map((item) => item.relPath)) } catch { return new Set() }
+  }
+
   async commitRelocation(id: string, repairLinks: boolean, token = this.captureSession()): Promise<{ moved: RelocationMove[]; unrepaired: string[] }> {
     this.assertSession(token)
     const lifecycle = this.lifecycle
@@ -1439,6 +1645,8 @@ export class VaultSession {
     this.rootIdentity = null
     this.rootUnavailable = false
     this.lifecycle = null
+    this.trash = null
+    this.trashIssues = []
     this.memoryFailure = null
     this.memoryBindingFailure = null
     this.token = null
@@ -1462,6 +1670,8 @@ export class VaultSession {
     this.root = path.resolve(root)
     this.rootIdentity = vaultRootIdentity(this.root)
     this.rootUnavailable = false
+    this.trash = null
+    this.trashIssues = []
     this.memoryFailure = null
     this.memoryBindingFailure = null
     this.initializationFailure = null
@@ -1483,6 +1693,15 @@ export class VaultSession {
       if(this.lifecycle?.status().status!=='ready')return
       try { check(); if(retireMemoryFile(this.root!, check))this.afterMemoryRetirement() } catch { this.memoryFailure = 'MEMORY_RETIREMENT_FAILED' }
       return this.mutations.run(()=>{try{check();const basis=this.workingMemory!.read();if(basis.raw)this.workingMemory!.interrupted(basis)}catch{/* Local memory diagnosis remains accessible; do not block ordinary notes. */}})
+    }).then(() => {
+      if (this.token !== token) return
+      if (this.lifecycle?.status().status !== 'ready') return
+      // 库打开时对账并清理：journal ↔ `.rgent-trash` ↔ 原路径，再把过期／超额的最旧条目
+      // 送系统废纸篓。任何一步失败只留诊断，不让库打不开、也不静默处理。
+      return this.mutations.run(() => {
+        try { check(); this.reconcileTrash() } catch (error) { this.trashIssues.push(`reconcile:${codeOf(error)}`) }
+        try { check(); this.sweepTrashEntries() } catch (error) { this.trashIssues.push(`sweep:${codeOf(error)}`) }
+      })
     }).catch((error: unknown) => {
       if (this.token !== token) return
       this.lifecycleError = error instanceof Error ? error : new Error('LIFECYCLE_RECOVERY_REQUIRED')
@@ -1512,7 +1731,10 @@ export class VaultSession {
       this.emit('tree:changed')
       const notes = this.changedNotes
       this.changedNotes = new Set()
-      if (this.root) for (const note of notes) void this.emitNoteChange(note)
+      // 主动删进库内「已删除」的路径由删除方发过 `note:deleted`，不再补一条「库外消失」。
+      // 每批只读一次 journal（整批几十条笔记时不至于每条读一遍记录）。
+      const trashed = this.trashedPaths()
+      if (this.root) for (const note of notes) if (!trashed.has(note)) void this.emitNoteChange(note)
     }, 80)
   }
 
@@ -1611,4 +1833,9 @@ function noteReadError(error: unknown): Error {
   if (code === 'ENOENT' || code === 'NOTE_MISSING') return new Error('NOTE_MISSING')
   if (code === 'PATH_CHANGED' || code === 'NOTE_REPLACED') return new Error('NOTE_REPLACED')
   return new Error('NOTE_UNREADABLE')
+}
+
+/** 把内部错误收成结果码：库内已删除的接口用共享的结果联合回报，不把异常抛给 IPC。 */
+function codeOf(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : 'TRASH_FAILED'
 }
