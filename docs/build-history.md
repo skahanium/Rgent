@@ -2351,3 +2351,42 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 2. 不打开 `.html` 笔记，不扩大 `renderSafeHtmlFragment`。
 
 **受验提交**：本机已交、未推送。
+
+## 2026-10-23 联网搜索与抓取整合及四级授权（本机已交、未推送）
+
+**动机**：联网、MCP、模型自带联网各有一套开关与逐场勾选，模型页还塞着净网与 MCP 卡片；授权卡把每条披露都摆上第一屏。本轮把"联网搜索/抓取"收敛成一个设备闸，把 MCP 变成设备级渠道，把逐场勾选换成四档。
+
+**实现**
+
+- **N0 围栏**（`2afee12`）：一个搜索/抓取闸（内置抓页/搜索、搜索类 MCP、模型自带联网）；非搜索类 MCP 不受闸；MCP 设备级＋用途标记；四档只读/参考/可写/自动，自动仅新建，删除永远逐次；新增「联网」页（工作区）。
+- **N1 配置**（`70fadfa`）：联网配置 v3（三家密钥、`deepseekKeySource`、`fetch`、`nativeSearch`，v1/v2 迁移、坏文件 fail closed）；MCP 服务器加 `searchChannel`（旧服务器迁移默认 true，新服务器默认 false）。
+- **N2 主进程**：`TaskGrant` 带 `level/autoApproveWrites`；设备级联网/MCP 在任务开始冻结；搜索类 MCP 随闸撤；`network:stop` 只停搜索/抓取；自动批准仅 `create`，成功后发 `created` 事件。
+- **N3 设置**：新增「联网」页（总闸→内置搜索/抓取→MCP→自带联网→无头占位→日志/统计）；模型页删除两张卡；DeepSeek 密钥来源、抓取服务、service 列。
+- **N4 授权卡**：四档 chip、范围摘要＋「调整」、默认只读、参考/可写/自动首开默认本目录（库根只发起篇）、同会话记住手动档但 auto 不带到下一场；自动新建出非模态「已新建」通知可打开。
+- **N5 DeepSeek**：Search provider（`/v1/tools/search`）与可选 Fetch（`/v1/tools/fetch`）；fetch 缺 key 抛 `SEARCH_NOT_CONFIGURED` 不静默回退直连；人发起抓页仍直连。
+- **N6 模型自带联网**（`92705dd`）：仅 MiniMax M3 系列；Responses SSE 适配器（function call／text／reasoning／web_search_call 计数）；启用前探测（ping，无用户数据）；native 生效时抑制内置 `search_web`、保留 `fetch_url`；探测失败不写配置。
+- **N7 日志/文案**：账本与日志的 fetch/search 事件带 `service`（direct/deepseek/provider）；`SEARCH_NOT_CONFIGURED` 改指「联网」页；`NATIVE_SEARCH_UNAVAILABLE` 人话。
+- **N8 证据**（`92705dd`）：窗口脚本迁移到「联网」页；四档卡驱动；新增开关同源/首次披露/MCP 用途分组/自动新建通知/自动改名仍确认等断言；完整窗口 380→403。
+
+**实现期发现**
+
+- 原来 `network`/`mcp` 是预览与 start 的逐场布尔值，且测试把它们当"互不影响"；设备级后必须从 IPC 与 grant 里删干净，测试夹具也要显式 `level`。
+- 自动新建绕过 `agent:write-request`，不会触发 `openCreatedNote`；必须补 `created` 事件与非模态「打开」。
+- 非搜索 MCP 不能跟着搜索闸一起撤；grant 需要按 `searchChannel` 过滤，`revokeNetwork` 只收起搜索组。
+- MiniMax 自带联网走 Responses/Anthropic，而现有模型步走 chat completions；适配器是独立工程，不能复用 `streamModelStep`。
+- 首次开闸披露若做成全局模态会关掉设置浮层；改用通知（球）＋页内静态说明。
+- 恢复竞态夹具直接调 IPC，需要显式 `level`；缺档会先报 `BAD_REQUEST` 而不是任务错误。
+
+**门（本机 2026-10-23）**：单元 **167 文件 2908 通过／4 跳过**；文档 14 篇；构建通过；完整窗口 **403／0**；联网 **32／0**；人发起 **25／0**；MCP **44／0**；写工具 **46／0**；UX **16／0**；旅程 **14／0**；人删除 **14／0**；恢复 **13／0**。
+
+**边界**
+
+1. **真实外发烟测未跑**：DeepSeek Search/Fetch 与 MiniMax native 只有单测/探测代码；需所有者密钥与付费调用后再记"已验证"。
+2. MiniMax Responses 的 `web_search` 服务端工具是 Beta，文档与 schema 有出入；探测失败时渠道置灰，失败不阻塞其他渠道。
+3. native 搜索的 `web_search_call` 只计数，未写账本/统计；总闸关闭不中断已在途的整次模型请求（只 abort 工具请求）。
+4. DeepSeek Fetch 目标主机名的公网性未在本地解析；服务端可能被 DNS rebinding/重定向影响，文档与提示已写明"由 DeepSeek 代取"。
+5. 设置页首次开启总闸不弹披露（披露只在底栏小球；页内为静态说明）。
+6. 授权卡"参考/可写/自动"首开默认父目录；若上次手动是"仅本篇"，下次同会话仍保持空（与"默认本目录"存在取舍）。
+7. 搜索类 MCP 的用途标记旧服务器默认 true；人可在行内取消。
+
+**受验提交**：`92705dd`／`70fadfa`／`2afee12`（本机、未推送、零 CI）。
