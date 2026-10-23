@@ -257,6 +257,7 @@ describe('settings interface page', () => {
     setDeepSeekKeySource: vi.fn(async (source: 'own' | 'model') => ({ ok: true as const, config: { ...config, deepseekKeySource: source } })),
     setFetch: vi.fn(async (fetch: 'direct' | 'deepseek') => ({ ok: true as const, config: { ...config, fetch } })),
     setNativeSearch: vi.fn(async (minimax: boolean) => ({ ok: true as const, config: { ...config, nativeSearch: { minimax } } })),
+    probe: vi.fn(async () => ({ ok: true as const })),
     saveProvider: vi.fn(async (request: { provider: 'brave' | 'tavily' | 'deepseek'; key: string }) => ({
       ok: true as const,
       config: { ...config, searchProvider: request.provider, keyedProviders: [request.provider] }
@@ -293,7 +294,7 @@ describe('settings interface page', () => {
     expect(document.querySelector('[data-network="enabled"]')).not.toBeNull()
     const native = document.querySelector<HTMLInputElement>('[data-native="minimax"]')!
     expect(native).not.toBeNull()
-    expect(document.querySelector('[data-native="status"]')?.textContent).toContain('未启用/不可用')
+    await vi.waitFor(() => expect(document.querySelector('[data-native="status"]')?.textContent).toBe('状态：未启用'))
     const headless = document.querySelector<HTMLButtonElement>('.settings-network-headless-state')!
     expect(headless.textContent).toBe('未开放')
     expect(headless.disabled).toBe(true)

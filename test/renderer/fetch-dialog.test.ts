@@ -177,7 +177,7 @@ describe('fetch dialog', () => {
     missing.input.value = '小猫'
     missing.submit.click()
     await settle()
-    expect(missing.status.textContent).toContain('还没有配置搜索服务')
+    expect(missing.status.textContent).toContain('还没有配置联网服务')
     expect(missing.status.textContent).not.toContain('SEARCH_NOT_CONFIGURED')
   })
 

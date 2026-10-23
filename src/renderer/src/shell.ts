@@ -362,8 +362,8 @@ export async function start(root: HTMLElement): Promise<void> {
     readModels: (request) => window.rgent.modelList(request),
     setDefaultModel: (request) => window.rgent.modelDefaultSet(request),
     setLimits: (request) => window.rgent.modelLimitsSet(request),
-    // 「联网」页：总闸保存即生效，密钥保存后不显示；DeepSeek 来源、抓页服务与
-    // 模型自带联网都只写设备配置，不发测试请求。
+    // 「联网」页：总闸保存即生效，密钥保存后不显示；DeepSeek 来源与抓页服务只写设备配置。
+    // 模型自带联网在勾选时先探测（只发 ping，不带笔记内容），成功才写配置。
     network: () => ({
       get: () => window.rgent.networkConfig(),
       setEnabled: async enabled => {
@@ -374,6 +374,7 @@ export async function start(root: HTMLElement): Promise<void> {
       setDeepSeekKeySource: source => window.rgent.networkConfig({ deepseekKeySource: source }),
       setFetch: service => window.rgent.networkConfig({ fetch: service }),
       setNativeSearch: minimax => window.rgent.networkConfig({ nativeSearch: { minimax } }),
+      probe: () => window.rgent.networkNativeProbe(),
       saveProvider: request => window.rgent.networkProviderSave(request),
       clearProvider: provider => window.rgent.networkProviderClear(provider ? { provider } : undefined),
       stats: () => window.rgent.networkStats(),

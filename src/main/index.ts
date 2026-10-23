@@ -31,7 +31,7 @@ import type { RemoteImageGetResult } from '../shared/ipc.ts'
 import type { NetworkPreviewRequest, NetworkPreviewResult } from '../shared/ipc.ts'
 import type { DeepSeekKeySource, FetchService, NetworkConfigResult, NetworkConfigSetRequest, NetworkProvider, NetworkProviderClearRequest, NetworkProviderSaveRequest } from '../shared/ipc.ts'
 import type { AgentMcpAvailability, AgentMcpServerView, McpConfigResult, McpConfigView, McpDiscoverResult, McpPublicTool, McpServerSaveRequest } from '../shared/ipc.ts'
-import type { EgressLogResult, HumanFetchResult, HumanSearchResult, NetworkStatKind, NetworkStatsClearResult, NetworkStatsResult } from '../shared/ipc.ts'
+import type { EgressLogResult, HumanFetchResult, HumanSearchResult, NativeSearchProbeResult, NetworkStatKind, NetworkStatsClearResult, NetworkStatsResult } from '../shared/ipc.ts'
 import { createEgressLog, type EgressLog } from './egress-log.ts'
 import { createHumanNetwork, applyHumanNetworkGate, type HumanNetwork } from './human-network.ts'
 import { createNetworkStats, flushNetworkStats, networkErrorCode, networkFailureCode, type NetworkStatEvent, type NetworkStats } from './network-stats.ts'
@@ -64,6 +64,7 @@ import { createMemoryIpc } from './memory-ipc.ts'
 import { AgentHost } from './agent-host.ts'
 import { modelTierFor } from './permissions.ts'
 import { streamModelText, streamModelStep } from './model-stream.ts'
+import { probeNativeSearch, streamNativeSearchStep, supportsNativeSearch } from './native-search.ts'
 import { VaultStructureGate } from './vault-mutation-queue.ts'
 import { isTrustedIpcSender } from './ipc-sender.ts'
 
@@ -107,19 +108,21 @@ let humanNetwork: HumanNetwork | null = null
 /** 设备级外发统计：只记次数／字节／拒绝码，记录失败不影响外发本身。 */
 let networkStats: NetworkStats | null = null
 let agentHost: AgentHost | null = null
-/** 联网搜索与抓取的可用性：抓页只依赖总闸；搜索另要求当前搜索服务与该家凭据可用。
+/** 联网搜索与抓取的可用性：抓页只依赖总闸；搜索另要求当前搜索服务与该家凭据可用；
+ *  模型自带联网只要求总闸与「联网」页的选择（探测在启用时完成）。
  *  配置保存后立即生效：这里按需读文件、不缓存，下一次判定自然看到新值。 */
-function networkAvailability(): { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' } {
+function networkAvailability(): { available: boolean; search: boolean; providerHost: string | null; native: boolean; reason?: 'off' | 'not-configured' } {
   try {
     const config = networkConfig?.getPublic()
-    if (!config || !config.enabled) return { available: false, search: false, providerHost: null, reason: 'off' }
+    if (!config || !config.enabled) return { available: false, search: false, providerHost: null, native: false, reason: 'off' }
+    const native = config.nativeSearch.minimax === true
     // 抓页不需要服务商：总闸开着就可抓。搜索服务或密钥没配好（含密文解不开）只关搜索。
     const provider = config.searchProvider
-    if (!provider) return { available: true, search: false, providerHost: null, reason: 'not-configured' }
+    if (!provider) return { available: true, search: false, providerHost: null, native, reason: 'not-configured' }
     const credential = networkSearchCredential()
-    if (!credential) return { available: true, search: false, providerHost: null, reason: 'not-configured' }
-    return { available: true, search: true, providerHost: SEARCH_PROVIDERS[provider].host }
-  } catch { return { available: false, search: false, providerHost: null, reason: 'off' } }
+    if (!credential) return { available: true, search: false, providerHost: null, native, reason: 'not-configured' }
+    return { available: true, search: true, providerHost: SEARCH_PROVIDERS[provider].host, native }
+  } catch { return { available: false, search: false, providerHost: null, native: false, reason: 'off' } }
 }
 
 /** 搜索凭据：DeepSeek 允许复用模型页的密钥；其余按联网配置里的独立密钥。 */
@@ -1231,6 +1234,19 @@ function registerIpc(): void {
     try { networkStats.clear() } catch { return { ok: false, error: 'IO_ERROR' } }
     return { ok: true }
   })
+  /** 模型自带联网探测：取 MiniMax 连接密钥与第一个 M3 系列模型，只发 ping；不写配置。
+   *  找不到模型／没有密钥／探测失败都回同一个固定码，上游原文与密钥不进渲染层。 */
+  registerTrustedHandle(IPC.networkNativeProbe, async (event): Promise<NativeSearchProbeResult> => {
+    if (!trusted(event)) return { ok: false, error: 'NATIVE_SEARCH_UNAVAILABLE' }
+    if (!modelConfig) return { ok: false, error: 'NATIVE_SEARCH_UNAVAILABLE' }
+    try {
+      const secret = modelConfig.providerSecret('minimax')
+      const model = modelConfig.getPublic().models.find(item => item.provider === 'minimax' && supportsNativeSearch(item.provider, item.modelId))
+      if (!model) return { ok: false, error: 'NATIVE_SEARCH_UNAVAILABLE' }
+      const result = await probeNativeSearch({ baseURL: secret.baseURL, apiKey: secret.apiKey, modelId: model.modelId })
+      return result.ok ? { ok: true } : { ok: false, error: 'NATIVE_SEARCH_UNAVAILABLE' }
+    } catch { return { ok: false, error: 'NATIVE_SEARCH_UNAVAILABLE' } }
+  })
   /** MCP 配置只回摘要；错误只过固定码白名单，store 抛出的文件系统原文不进渲染层。 */
   const MCP_STORE_CODES = new Set([
     'MCP_BAD_NAME', 'MCP_BAD_URL', 'MCP_BAD_TOKEN', 'MCP_DUPLICATE_URL', 'MCP_TOO_MANY',
@@ -2177,6 +2193,8 @@ if (ownsInstance) app.whenReady().then(() => {
     },
     stream: (input, signal) => streamModelText({ ...input, signal }),
     streamStep: (input, signal) => streamModelStep({ ...input, signal }),
+    // 模型自带联网：只有 Host 判定总闸与允许列表都成立时才会走到这里；记忆检索等其它步骤仍用上面一条。
+    nativeStreamStep: (input, signal) => streamNativeSearchStep({ ...input, signal }, signal),
     // 唯一出口：两条路内部都走 EgressClient；错误码已是 EGRESS_*，Host 直接如实上报。
     // 任务内抓页按设备配置读：选了 DeepSeek 就必须有 DeepSeek 凭据，缺凭据不静默降级直连
     // （`resolveFetchRoute` 抛 SEARCH_NOT_CONFIGURED）。人发起抓页仍直连，不走这里。
@@ -2196,7 +2214,8 @@ if (ownsInstance) app.whenReady().then(() => {
             ...(result.title ? { title: result.title } : {}),
             bytes: result.bytes,
             truncated: result.truncated,
-            lowTrust: true as const
+            lowTrust: true as const,
+            service: route.service
           }
         } catch (error) {
           recordNetworkStat('fetch', { outcome: 'refused', code: networkFailureCode(error, signal) })

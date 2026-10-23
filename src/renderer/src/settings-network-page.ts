@@ -1,12 +1,13 @@
-import type { NetworkConfigResult, NetworkConfigView } from '../../shared/ipc.ts'
-import { mountNetworkCard, mountNetworkGate, type NetworkCardHandlers } from './settings-network.ts'
+import type { NetworkConfigView } from '../../shared/ipc.ts'
+import { hostErrorText } from './host-errors.ts'
+import { mountNetworkCard, mountNetworkGate, networkErrorText, type NetworkCardHandlers } from './settings-network.ts'
 import { mountMcpCard, type McpCardHandlers } from './settings-mcp.ts'
 
 /**
  * 「联网」页：设备总闸、内置搜索／抓取、远端 MCP、模型自带联网与无头浏览器占位。
  *
  * 页头总闸只管搜索／抓取（含搜索类 MCP）与模型自带联网；非搜索类 MCP 只受启用与白名单约束，
- * 所以 MCP 卡自己写明边界。模型自带联网的探测由后续包接线，本页先保留启用选择与状态占位。
+ * 所以 MCP 卡自己写明边界。模型自带联网在勾选时先探测，成功才写配置。
  * 围栏见 docs/decisions.md 的 2026-10-23 联网搜索与抓取整合。
  */
 export type NetworkPageHost = {
@@ -24,17 +25,18 @@ const element = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: stri
   return node
 }
 
-/** 模型自带联网：由模型服务商执行搜索；探测未接线前只显示占位状态。 */
-function mountNativeSearch(host: NetworkPageHost, handlers: Pick<NetworkCardHandlers, 'get' | 'setNativeSearch'>): () => void {
+/** 模型自带联网：勾选时先探测（只发 ping），成功才写配置；失败保持未勾选并显示人话。 */
+export function mountNativeSearch(host: NetworkPageHost, handlers: Pick<NetworkCardHandlers, 'get' | 'setNativeSearch' | 'probe'>): () => void {
   const body = host.body
   let config: NetworkConfigView | null = null
   let busy = false
   let disposed = false
+  let probeFailed = false
 
   const heading = element('h3', 'settings-section-title')
   heading.textContent = '模型自带联网'
   const intro = element('p', 'settings-hint')
-  intro.textContent = '由模型服务商执行搜索；启用前探测、仅部分模型支持。'
+  intro.textContent = '由模型服务商执行搜索；启用前先探测，仅部分模型支持。'
   const toggleLabel = element('label', 'settings-network-toggle')
   const minimax = element('input')
   minimax.type = 'checkbox'
@@ -43,9 +45,9 @@ function mountNativeSearch(host: NetworkPageHost, handlers: Pick<NetworkCardHand
   const state = element('p', 'settings-hint')
   state.dataset.native = 'status'
   state.setAttribute('role', 'status')
-  state.textContent = '状态：未启用/不可用'
+  state.textContent = '状态：读取中…'
   const note = element('p', 'settings-hint')
-  note.textContent = '搜索由模型服务商执行，查询不经过 Rgent；Rgent 只能中止整次请求。'
+  note.textContent = '搜索由模型服务商执行，查询不经过 Rgent；Rgent 只能中止整次请求。启用探测只发 ping，不带笔记内容。'
   const error = element('p', 'settings-network-error')
   error.setAttribute('role', 'alert')
   error.hidden = true
@@ -56,28 +58,65 @@ function mountNativeSearch(host: NetworkPageHost, handlers: Pick<NetworkCardHand
   const paint = (): void => {
     minimax.checked = config?.nativeSearch.minimax === true
     minimax.disabled = busy || config === null
+    state.textContent = !config
+      ? '状态：读取中…'
+      : busy
+        ? '状态：处理中…'
+        : config.nativeSearch.minimax
+          ? '状态：探测通过（已启用）'
+          : probeFailed
+            ? '状态：不可用'
+            : '状态：未启用'
   }
-  minimax.addEventListener('change', () => {
+
+  const change = async (): Promise<void> => {
     if (busy || !config) return
     const next = minimax.checked
     busy = true
     showError('')
     paint()
-    void handlers.setNativeSearch(next).then((result: NetworkConfigResult) => {
-      if (disposed || !host.isCurrent()) return
-      if (!result.ok) { showError('保存失败，请重试。'); return }
-      config = result.config
-    }).catch(() => {
-      if (!disposed && host.isCurrent()) showError('保存失败，请重试。')
-    }).finally(() => {
+    try {
+      if (next) {
+        // 先探测再落配置：探测失败时磁盘保持原样，界面也不留下勾选。
+        if (!handlers.probe) {
+          probeFailed = true
+          showError(hostErrorText('NATIVE_SEARCH_UNAVAILABLE'))
+          return
+        }
+        const probe = await handlers.probe()
+        if (disposed || !host.isCurrent()) return
+        if (!probe.ok) {
+          probeFailed = true
+          showError(hostErrorText(probe.error))
+          return
+        }
+        probeFailed = false
+        const result = await handlers.setNativeSearch(true)
+        if (disposed || !host.isCurrent()) return
+        if (!result.ok) { showError(networkErrorText(result.error)); return }
+        config = result.config
+      } else {
+        const result = await handlers.setNativeSearch(false)
+        if (disposed || !host.isCurrent()) return
+        if (!result.ok) { showError(networkErrorText(result.error)); return }
+        config = result.config
+        probeFailed = false
+      }
+    } catch {
+      if (!disposed && host.isCurrent()) {
+        probeFailed = next
+        showError(next ? hostErrorText('NATIVE_SEARCH_UNAVAILABLE') : '操作未完成，请重试；仍然失败时请检查联网配置。')
+      }
+    } finally {
       if (!disposed) { busy = false; paint() }
-    })
-  })
+    }
+  }
+  minimax.addEventListener('change', () => { void change() })
 
   paint()
   void handlers.get().then(result => {
     if (disposed || !host.isCurrent()) return
-    if (!result.ok) { showError('暂时无法读取联网配置。'); return }
+    if (!result.ok) { showError(networkErrorText(result.error)); return }
     config = result.config
   }).catch(() => {
     if (!disposed && host.isCurrent()) showError('暂时无法读取联网配置。')

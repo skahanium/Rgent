@@ -55,6 +55,7 @@ import {
   type EgressLogResult,
   type NetworkStatsResult,
   type NetworkStatsClearResult,
+  type NativeSearchProbeResult,
   type McpConfigResult,
   type McpServerSaveRequest,
   type McpServerRemoveRequest,
@@ -216,6 +217,8 @@ const api = {
   networkStats: (): Promise<NetworkStatsResult> => invoke(IPC.networkStats),
   /** 清空统计并同时清外发日志；两步都成功才回 ok。 */
   networkStatsClear: (): Promise<NetworkStatsClearResult> => invoke(IPC.networkStatsClear),
+  /** 模型自带联网探测：只发 ping，不带用户数据；失败只回固定错误码。 */
+  networkNativeProbe: (): Promise<NativeSearchProbeResult> => invoke(IPC.networkNativeProbe),
   /** 远端只读 MCP：配置只存本机，token 加密后不回渲染层。 */
   mcpConfig: (): Promise<McpConfigResult> => invoke(IPC.mcpConfig),
   mcpServerSave: (request: McpServerSaveRequest): Promise<McpConfigResult> => invoke(IPC.mcpServerSave, request),

@@ -18,6 +18,7 @@ import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 /** 人确认的载荷：建、改名／挪、删除。 */
 export type AgentWriteConfirm = ({ kind: 'create'; relPath: string; body: string } | { kind: 'rename' | 'move'; source: string; target: string; moves: number; linkChanges: number; permissionChanges: number } | { kind: 'delete'; relPath: string; hasAttachments: boolean }) & { signal: AbortSignal }
 import { MODEL_STREAM_BOUNDS, type ModelStepEvent, type ToolSchema } from './model-stream.ts'
+import { supportsNativeSearch } from './native-search.ts'
 import { randomUUID } from 'node:crypto'
 import { AgentTasks, type TaskResult, type StopReason, type ActiveTask } from './agent-tasks.ts'
 import { buildHostContext, type ContextChapter, type ContextSummary } from './host-context.ts'
@@ -215,6 +216,9 @@ export type HostDependencies = {
   limits: () => RunLimits
   stream: (input: ModelCredential & { system: string; prompt: string; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<string>
   streamStep?: (input: ModelCredential & { system: string; messages: ModelMessage[]; tools?: Record<string,ToolSchema>; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<ModelStepEvent>
+  /** 模型自带联网（MiniMax Responses）：只在总闸开着、模型在允许列表里时替换模型步。
+   *  记忆检索等其它步骤仍走 `streamStep`。 */
+  nativeStreamStep?: (input: ModelCredential & { system: string; messages: ModelMessage[]; tools?: Record<string,ToolSchema>; maxOutputTokens: number }, signal: AbortSignal) => AsyncIterable<ModelStepEvent>
   /** Independent background permission snapshot; unavailable roles must not fail the foreground. */
   onReasoning?: (taskId:string,text:string)=>void
   onTaskStarted?: (taskId: string) => void
@@ -228,7 +232,7 @@ export type HostDependencies = {
   createReadOnlyTools?: (grant: TaskGrant, taskId: string, memory?: MemoryUsePermit, materials?: TaskMaterialTracker, write?: ScopedWriteTool, network?: ScopedNetworkTool, mcp?: ScopedMcpTool) => ScopedAgentTools
   /** 联网只读能力：出口、偷渡词片与可用性都由主进程给。搜索只在服务商与密钥配置好后出现。 */
   network?: {
-    fetch(url: string, signal: AbortSignal): Promise<{ text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true }>
+    fetch(url: string, signal: AbortSignal): Promise<{ text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true; service?: 'direct' | 'deepseek' }>
     search?(query: string, maxResults: number, signal: AbortSignal): Promise<{
       provider: import('../shared/ipc.ts').NetworkProvider
       host: string
@@ -237,7 +241,7 @@ export type HostDependencies = {
     }>
     /** 额外的偷渡词片（例如搜索服务）；授权来源正文由 Host 在任务开始时建。 */
     echoShingles?: Set<string>
-    availability(): { available: boolean; search: boolean; providerHost: string | null; reason?: string }
+    availability(): { available: boolean; search: boolean; providerHost: string | null; native?: boolean; reason?: string }
   }
   /** 远端只读 MCP：可用性（含系统提示里那份工具清单）与调用都由主进程给。
    *  `call` 需要本场任务 id 才能按任务复用／关闭连接，所以由 Host 放进去。 */
@@ -642,8 +646,14 @@ export class AgentHost {
       const networkAvailable = availability?.available === true
       // `available` 管抓页；`search` 另要求预设服务与密钥可用。
       const networkEnabled = networkAvailable && !!grant && !!this.deps.network
-      const searchEnabled = Boolean(networkEnabled && availability?.search === true)
+      // 模型自带联网：总闸开着、服务商是 MiniMax 且模型在 M3 允许列表里才替换模型步。
+      // 同时不宣告内置 `search_web`；抓页 `fetch_url` 仍照常宣告。其它步骤（记忆检索等）不换。
+      const nativeSearchEnabled = availability?.native === true && credential.provider === 'minimax' &&
+        supportsNativeSearch(credential.provider, credential.modelId) && !!this.deps.nativeStreamStep
+      const searchEnabled = Boolean(networkEnabled && availability?.search === true && !nativeSearchEnabled)
       const searchHost = searchEnabled ? availability?.providerHost ?? '' : ''
+      // 唯一的模型步调用点：native 与内置适配器二选一；两者都没有时退回纯文本流。
+      const stepStream = nativeSearchEnabled ? this.deps.nativeStreamStep : this.deps.streamStep
       // 远端只读 MCP：可用性（含系统提示里那份工具清单）+ 本场勾选 + 宿主能力三条都在才算启用。
       // 清单超过 4 KiB 时主进程已判不可用；这里再判一次，确保系统提示总长不超过合同上限。
       const mcpAvailability = (() => { try { return this.deps.mcp?.availability() ?? null } catch { return null } })()
@@ -665,15 +675,15 @@ export class AgentHost {
       // 只勾 MCP、没勾抓页时也要有预览缓存：MCP 结果同样给人看。
       if (networkEnabled || mcpEnabled) this.networkPreviews.set(id, networkPreviews)
       if (networkEnabled || mcpEnabled) this.networkAborts.set(id, networkAborts)
-      type NetworkRecordTarget = { action: 'fetch' | 'search' | 'mcp'; host: string; path: string; query?: string; server?: string; tool?: string }
+      type NetworkRecordTarget = { action: 'fetch' | 'search' | 'mcp'; host: string; path: string; service?: 'direct' | 'deepseek' | 'provider'; query?: string; server?: string; tool?: string }
       const recordNetwork = (at: string, target: NetworkRecordTarget | null, outcome: string, extra: { bytes?: number; truncated?: boolean; count?: number } = {}): void => {
         if (!target?.host) return
         if (networkLog.length >= NETWORK_LEDGER_LIMIT) return
         networkLog.push({ at, action: target.action, host: target.host, path: target.path, ...(target.query ? { query: target.query } : {}), ...(target.server ? { server: target.server } : {}), ...(target.tool ? { tool: target.tool } : {}), ...extra, outcome })
       }
-      const fetchTarget = (target: { host: string; path: string } | null): NetworkRecordTarget | null => target ? { action: 'fetch', ...target } : null
+      const fetchTarget = (target: { host: string; path: string; service?: 'direct' | 'deepseek' } | null): NetworkRecordTarget | null => target ? { action: 'fetch', ...target } : null
       // 搜索查询进账本前截到 120 字，且只进这一场的账本章节。
-      const searchTarget = (query: string, host = searchHost): NetworkRecordTarget => ({ action: 'search', host, path: '', ...(query ? { query: query.slice(0, 120) } : {}) })
+      const searchTarget = (query: string, host = searchHost): NetworkRecordTarget => ({ action: 'search', host, path: '', service: credential.provider === 'deepseek' ? 'deepseek' : 'direct', ...(query ? { query: query.slice(0, 120) } : {}) })
       type NetworkAttemptTarget = { kind: 'fetch' | 'search'; host: string; path: string }
       /** 拒绝事件只报「试过哪里」：抓页取尝试 URL 的主机与 pathname，搜索取已配置主机。
        *  `ledgerAligned` 时用与账本相同的 https 目标解析（NETWORK_NOT_AUTHORIZED），
@@ -756,7 +766,7 @@ export class AgentHost {
               url: result.url, truncated: result.truncated, fetchedAt: at,
               ...(previewId ? { previewId } : {})
             })
-            recordNetwork(at, fetchTarget(finalTarget), 'ok', { bytes: result.bytes, truncated: result.truncated })
+            recordNetwork(at, fetchTarget(finalTarget ? { host: finalTarget.host, path: finalTarget.path, ...(result.service ? { service: result.service } : {}) } : null), 'ok', { bytes: result.bytes, truncated: result.truncated })
             this.deps.emit({
               ...this.bindings.get(key), id, root, relPath: input.relPath, status: 'running',
               // 成功抓页带预览 id，界面才能在任务结束后按合同失效前取一次纯文本。
@@ -899,7 +909,7 @@ export class AgentHost {
       // 偷渡检测在调用工具前做：命中的调用不进 execute，账本记 refused:EGRESS_CONTENT_ECHO。
       const networkToolOutcomes:{name:string;outcome:string}[]=[]
       let successfulLibraryTool=false
-      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled || deleteEnabled || networkRegistered || searchRegistered || mcpRegistered) && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
+      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled || deleteEnabled || networkRegistered || searchRegistered || mcpRegistered) && (!scoped || !stepStream)) throw Error('TOOLS_UNAVAILABLE')
       if (scoped) this.scoped.set(key, scoped)
       const marked = markPrompt(original.content, { ...input, taskId: id })
       const submitted = promptBlock(marked, id)
@@ -975,7 +985,7 @@ export class AgentHost {
         const audit=(value:ContextSummary,chapters:readonly ContextChapter[],nextStep=steps+1):SentSummary=>({step:nextStep,text:value.text,sourceChapterIds:[...value.sourceChapterIds],generators:structuredClone(value.generators??[]),dependencies:value.sourceChapterIds.map(sourceId=>{const c=chapters.find(c=>c.sourceId===sourceId);if(!c||c.eligible===false)throw Error('SOURCE_CHANGED');return {sourceId,hash:summaryHash(c.text),...(c.provenance?{provenance:structuredClone(c.provenance)}:{})}})})
         const fits=(values:SentSummary[])=>{const all=[...sentSummaries,...values];if(!summaryAuditFits(all)||!all.every(validSentSummary))return false;try{encodeLedgerProvenance(recordProvenance(all,true));return true}catch{return false}}
         const resolveSummary=(candidate:ContextSummary,status:SummaryResolution['status'],chapters:readonly ContextChapter[]):SummaryResolution=>candidate.text&&!fits([audit(candidate,chapters)])?{status:'omitted',summary:{text:'',sourceChapterIds:[]}}:{status,summary:candidate}
-        const step = (outgoing: ModelMessage[], withTools: boolean, maxOutputTokens: number, summaries:SentSummary[]=[]): AsyncIterable<ModelStepEvent> => {
+        const step = (outgoing: ModelMessage[], withTools: boolean, maxOutputTokens: number, summaries:SentSummary[]=[], native = false): AsyncIterable<ModelStepEvent> => {
           if(!fits(summaries))throw Error('LEDGER_RECORD_LIMIT')
           if (++steps > limits.steps) throw Error('MODEL_STEP_LIMIT')
           const schemas = withTools ? toolSchemas : undefined
@@ -990,8 +1000,10 @@ export class AgentHost {
             sentSummaries.push(...structuredClone(summaries))
             scoped?.markSent(withTools)
             memory?.markSent()
-            return this.deps.streamStep
-            ? this.deps.streamStep({ ...credential, system, messages: outgoing, ...(schemas ? { tools: schemas } : {}), maxOutputTokens }, signal)
+            // 只有本场主对话步走模型自带联网；账本摘要／格式修复等内部步骤仍用内置适配器。
+            const selected = native ? stepStream : this.deps.streamStep
+            return selected
+            ? selected({ ...credential, system, messages: outgoing, ...(schemas ? { tools: schemas } : {}), maxOutputTokens }, signal)
             : textEvents(this.deps.stream({ ...credential, system, prompt: String(outgoing[0]?.content ?? ''), maxOutputTokens }, signal))
           }
           return (async function*(){if(summaries.length&&!await derivedAllowed(summaries.flatMap(s=>s.sourceChapterIds)))throw Error('MEMORY_CHANGED');for await(const event of safeModelStep(create,signal,credential.apiKey)){if(event.type==='finish'&&event.usage){metric.actualInput=event.usage.inputTokens;metric.actualOutput=event.usage.outputTokens}yield event}})()
@@ -1077,7 +1089,7 @@ export class AgentHost {
           const parts: AssistantContent = []
           const calls: Extract<ModelStepEvent, { type: 'tool-call' }>[] = []
           let finishReason: string | undefined
-          for await (const event of step(outgoing, toolsEnabled, this.outputBudget(credential.contextTokens),outgoingAudits)) {
+          for await (const event of step(outgoing, toolsEnabled, this.outputBudget(credential.contextTokens),outgoingAudits,true)) {
             if (event.type === 'reasoning') {
               if (finishReason) throw Error('MODEL_PROTOCOL_ERROR')
               if (reasoning.length < 16000) reasoning += event.text

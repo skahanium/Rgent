@@ -168,7 +168,7 @@ export function mcpToolCatalog(servers: readonly McpCatalogServer[]): string {
 /** 宿主给的联网能力：只返回包裹前的纯文本与元数据，不暴露出口通道。
  *  `reused` 只在宿主直接返回本任务同 URL 的既有成功结果时出现（没有再次外发）。 */
 export type ScopedNetworkTool = {
-  fetch(url: string, signal: AbortSignal): Promise<{ text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true; reused?: true }>
+  fetch(url: string, signal: AbortSignal): Promise<{ text: string; host: string; url: string; title?: string; bytes: number; truncated: boolean; lowTrust: true; reused?: true; service?: 'direct' | 'deepseek' }>
   /** 只有服务商与密钥都配置好时宿主才给这一支；结果已做结构校验，包裹由工具层做。 */
   search?(query: string, maxResults: number, signal: AbortSignal): Promise<{
     provider: NetworkProvider

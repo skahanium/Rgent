@@ -124,7 +124,7 @@ export function createHumanNetwork(deps: HumanNetworkDependencies): HumanNetwork
         if (controller.signal.aborted) throw Error('EGRESS_ABORTED')
         const host = hostOf(result.finalUrl) || fallbackHost
         const fetchedAt = now()
-        const logged = record({ at: fetchedAt, action: 'fetch', host, bytes: result.bytes, outcome: 'ok' })
+        const logged = record({ at: fetchedAt, action: 'fetch', service: 'direct', host, bytes: result.bytes, outcome: 'ok' })
         // 日志写失败只降级 `degraded`；外发本身成功，统计照实记 ok＋字节。
         stat('humanFetch', { outcome: 'ok', bytes: result.bytes })
         return {
@@ -173,7 +173,7 @@ export function createHumanNetwork(deps: HumanNetworkDependencies): HumanNetwork
           if (controller.signal.aborted) throw Error('EGRESS_ABORTED')
           if (!result.results.length) throw Error('SEARCH_EMPTY')
           const at = now()
-          const logged = record({ at, action: 'search', host: service.host, count: result.results.length, outcome: 'ok' })
+          const logged = record({ at, action: 'search', service: 'direct', host: service.host, count: result.results.length, outcome: 'ok' })
           stat('humanSearch', { outcome: 'ok' })
           return {
             ok: true,

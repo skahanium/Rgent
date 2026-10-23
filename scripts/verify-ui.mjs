@@ -64,6 +64,62 @@ async function waitFor(page, expression, timeout = 12000) {
   return false
 }
 
+/** 打开设置并落到「联网」页（工作区：笔记库、界面、联网）；页头标题是唯一的就绪信号。 */
+async function openNetworkPage(page) {
+  if (!await waitFor(page, `!!document.querySelector('.overlay-settings') && !!document.querySelector('.settings-nav')`)) {
+    await page.eval(`document.querySelector('.settings-open')?.click()`)
+    if (!await waitFor(page, `!!document.querySelector('.overlay-settings') && !!document.querySelector('.settings-nav')`)) return false
+  }
+  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(button=>button.textContent==='联网')?.click()`)
+  return waitFor(page, `document.querySelector('.settings-page-title')?.textContent==='联网' && !!document.querySelector('.settings-network-page')`)
+}
+
+/** 四档文案即合同；同一窗口沿用上次手动档，自动档发完落回可写（产品行为）。 */
+const AUTHORIZATION_LEVELS = { read: '只读本笔记', reference: '参考本目录', write: '可写', auto: '自动' }
+let sessionManualLevel = 'read'
+
+/** 读一次口令卡：四档、当前选中档、范围摘要与是否还藏着旧的联网／MCP 勾选。 */
+async function authorizationCardState(page) {
+  return page.eval(`(() => {
+    const card = document.querySelector('.overlay-authorization')
+    if (!card) return null
+    return {
+      levels: [...card.querySelectorAll('.authorization-level')].map(chip => ({ level: chip.dataset.level ?? '', label: chip.textContent.trim(), checked: chip.getAttribute('aria-checked') === 'true' })),
+      checked: card.querySelector('.authorization-level[aria-checked="true"]')?.textContent.trim() ?? '',
+      summary: card.querySelector('.authorization-scope-text')?.textContent ?? '',
+      detailHidden: card.querySelector('.authorization-scope-detail')?.hidden === true,
+      network: !!card.querySelector('.authorization-network'),
+      mcp: !!card.querySelector('.authorization-mcp')
+    }
+  })()`)
+}
+
+/** 切四档里的一档；档位一变主进程就重新核对，发送键会短暂禁用。 */
+async function setAuthorizationLevel(page, level) {
+  const clicked = await page.eval(`(() => { const chip=document.querySelector('.overlay-authorization .authorization-level[data-level=${JSON.stringify(level)}]'); if(!chip || chip.disabled) return false; chip.click(); return true })()`)
+  if (!clicked) return false
+  const ready = await waitFor(page, `document.querySelector('.overlay-authorization .authorization-level[data-level="${level}"]')?.getAttribute('aria-checked')==='true' && !!document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')`)
+  if (ready) sessionManualLevel = level === 'auto' ? 'write' : level
+  return ready
+}
+
+/** 范围树收在「调整」里：先展开，再点预设或勾选。 */
+async function openAuthorizationScope(page) {
+  const opened = await page.eval(`document.querySelector('.overlay-authorization .authorization-scope-detail')?.hidden === false`)
+  if (opened) return true
+  await page.eval(`document.querySelector('.overlay-authorization .authorization-scope-toggle')?.click()`)
+  return waitFor(page, `document.querySelector('.overlay-authorization .authorization-scope-toggle')?.getAttribute('aria-expanded')==='true' && document.querySelector('.overlay-authorization .authorization-scope-detail')?.hidden===false`)
+}
+
+/** 真实指针点范围复选框：HTMLElement.click() 不会把焦点放进卡片。 */
+async function clickAuthorizationChoice(page, relPath) {
+  const point = await page.eval(`(() => { const input=[...document.querySelectorAll('.overlay-authorization .authorization-choices input')].find(input=>input.value===${JSON.stringify(relPath)}); if(!input || input.disabled) return null; input.scrollIntoView({block:'nearest'}); const rect=input.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } })()`)
+  if (!point) return false
+  await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+  await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+  return true
+}
+
 async function selectBrowserFolder(page, folder) {
   await page.eval(`(() => {
     const target = ${JSON.stringify(folder)}
@@ -260,12 +316,20 @@ async function verifySidebarWidth(page, shot) {
   }
 }
 
-/** First Enter prepares and displays authorization; only the second confirms. */
-async function confirmSlashAuthorization(page, inspect = false) {
+/** First Enter prepares and displays authorization; only the second confirms.
+ *  四档默认只读；需要参考／写工具的场景由调用方显式切档（`level`），范围树在「调整」里。 */
+async function confirmSlashAuthorization(page, inspect = false, level = null) {
   await page.key('Enter', 'Enter', 0, 13)
   const ready = await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`)
   check('本场授权准备就绪后才可确认', ready, ready ? '' : await page.eval(`JSON.stringify({ tab: document.querySelector('.tab[aria-selected=true]')?.dataset.rel, focused: document.activeElement?.className, popup: document.querySelector('dialog[open]')?.className, text: document.querySelector('.cm-content')?.textContent?.slice(0, 180), status: document.querySelector('.status-left')?.textContent })`))
   if (!ready) return false
+  // 四档 chip 都在、恰有一档选中；旧的每场联网／MCP 勾选已经删掉。
+  const card = await authorizationCardState(page)
+  check('本场授权四档齐全、只选一档，且卡里没有联网/MCP 勾选', !!card && JSON.stringify(card.levels.map(item => item.label)) === JSON.stringify(['只读本笔记', '参考本目录', '可写', '自动']) && card.levels.filter(item => item.checked).length === 1 && card.checked === AUTHORIZATION_LEVELS[sessionManualLevel] && card.network === false && card.mcp === false, JSON.stringify(card && { levels: card.levels, checked: card.checked, network: card.network, mcp: card.mcp }))
+  if (sessionManualLevel === 'read') {
+    check('新场授权默认四档=只读、范围仅本篇', !!card && card.checked === '只读本笔记' && card.summary === '范围：仅本篇' && card.detailHidden === true, JSON.stringify(card && { checked: card.checked, summary: card.summary, detailHidden: card.detailHidden }))
+  }
+  if (level && level !== sessionManualLevel && !await setAuthorizationLevel(page, level)) return false
   if (inspect) {
     check('首次回车只展示本篇范围与实际模型接收方', await page.eval(`(async () => {
       const popup=document.querySelector('.overlay-authorization');
@@ -402,6 +466,8 @@ async function verifyMemoryIntegration(page, vault, shot, requests, nativePage) 
     writeFileSync(memoryFixtureFile,fixtureEncoded)
     await chooseRecentFixtureRoot(vault)
   }finally{await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').dialog.showOpenDialog=globalThis.__recentFixtureDialog;true`)}
+  // 换库一轮会把同会话手动档重置为只读（产品行为）；脚本镜像同步，后面的卡按新会话断言。
+  sessionManualLevel = 'read'
   const fixtureChecked=await page.eval(`(async()=>{const state=await window.rgent.vaultGet();return window.rgent.memoryGet({sessionId:state.sessionId})})()`)
   check('近期夹具绑定真实账本材料并通过生产来源核验，笔记和账本不变',fixtureChecked.ok&&fixtureChecked.value.entries.some(e=>e.id==='ui-v5-recent'&&e.category==='recent'&&e.status==='active')&&vaultFileSnapshot(path.join(vault,'.rgent','ledgers'))===fixtureLedgerBefore&&namesBytes(vault)===fixtureNotesBefore,JSON.stringify({status:fixtureChecked.value?.status,reason:fixtureChecked.value?.reason,recent:fixtureChecked.value?.entries.filter(e=>e.category==='recent').map(e=>({id:e.id,status:e.status,reason:e.reason})),notesUnchanged:namesBytes(vault)===fixtureNotesBefore,ledgersUnchanged:vaultFileSnapshot(path.join(vault,'.rgent','ledgers'))===fixtureLedgerBefore}))
 
@@ -582,17 +648,18 @@ async function verifyScopedHost(page, vault, shot, requests) {
       process.stdout.write('DEBUG_START popover ' + await page.eval(`JSON.stringify({ editor: document.querySelector('.cm-content')?.innerText, popover: !!document.querySelector('.overlay-authorization'), send: document.querySelector('.authorization-send')?.disabled ?? null, status: document.querySelector('.task-dock')?.dataset.kind ?? null })`) + '\n')
       return false
     }
-    // 授权范围在同一会话内记忆：每次准备都用「只读本笔记」预设清回发起篇，再按本场需要选参考。
+    // 有工具档要写工具，先切「可写」；只读档不宣告写工具，也不允许勾参考。
+    if (!await setAuthorizationLevel(page, 'write')) return '「可写」档没就绪'
+    check('「可写」档工具摘要出现补发起篇与建笔记', await page.eval(`document.querySelector('.authorization-status')?.textContent.includes('工具：补发起篇、建笔记')`), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? ''`))
+    // 授权范围在同一会话内记忆：范围树在「调整」里，展开后先清回发起篇，再按本场需要选参考。
+    if (!await openAuthorizationScope(page)) return '范围树没展开'
     await page.eval(`document.querySelector('.authorization-preset-origin')?.click()`)
     if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===1 && [...document.querySelectorAll('.authorization-choices input')].every(input=>!input.checked) && !!document.querySelector('.authorization-send:not(:disabled)')`)) return '「只读本笔记」预设没就绪'
     check('「只读本笔记」预设清回仅发起篇', await page.eval(`document.querySelectorAll('.authorization-manifest li').length===1 && [...document.querySelectorAll('.authorization-choices input')].every(input=>!input.checked)`))
     // HTMLElement.click() does not focus a checkbox. A refresh disables the initially
     // focused send button, so native mouse clicks must establish focus before refresh.
     for (const [at, name] of ['工具参考.md', '工具其他.md'].entries()) {
-      const point = await page.eval(`(() => { const input=[...document.querySelectorAll('.authorization-choices input')].find(input=>input.value===${JSON.stringify(name)}); if(!input || input.disabled)return null;input.scrollIntoView({block:'nearest'});const r=input.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2} })()`)
-      if (!point) return '没找到写作参考的勾选框'
-      await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
-      await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+      if (!await clickAuthorizationChoice(page, name)) return '没找到写作参考的勾选框'
       if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===${at+2} && !!document.querySelector('.authorization-send:not(:disabled)')`)) return false
     }
     return true
@@ -639,13 +706,14 @@ async function verifyScopedHost(page, vault, shot, requests) {
 /** 包 4 窗口收口：写类工具在真窗口里的四条路——建·同意、建·不建、补·安静、补·超限。
  *  模型是受控主机脚本，真实供应商一律未配置（零真实调用）。 */
 async function verifyWriteTools(page, vault, shot, requests) {
-  const fixtures = ['写作建一.md', '写作建二.md', '写作补.md', '写作超限.md', '写作改名.md', '写作越权.md', '写作挪.md', '写作挪参考.md', '写作删.md', '写作不删.md']
+  const fixtures = ['写作建一.md', '写作建二.md', '写作补.md', '写作超限.md', '写作改名.md', '写作越权.md', '写作挪.md', '写作挪参考.md', '写作删.md', '写作不删.md', '写作自动改名.md']
   for (const name of fixtures) writeFileSync(path.join(vault, name), '')
   writeFileSync(path.join(vault, '写作参考.md'), '# 参考\n\n受控参考正文。\n')
   writeFileSync(path.join(vault, '写作删参考.md'), '# 删除参考\n\n这篇会被送进废纸篓。\n')
   writeFileSync(path.join(vault, '写作不删参考.md'), '# 不删参考\n\n这篇应该留下。\n')
+  writeFileSync(path.join(vault, '写作自动参考.md'), '# 自动参考\n\n自动档也不该自己改名。\n')
   mkdirSync(path.join(vault, '归档'), { recursive: true })
-  check('写工具夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter(n=>/写作/.test(n.innerText)).length===13`))
+  check('写工具夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter(n=>/写作/.test(n.innerText)).length===15`))
   // 受控供应商是通过 IPC 配的，渲染层的模型快照要打开一次设置页才会刷新；
   // 不刷新的话按 Enter 只会得到「请选择可用模型」，任务根本不会开始。
   await page.eval(`document.querySelector('.settings-open').click()`)
@@ -672,7 +740,8 @@ async function verifyWriteTools(page, vault, shot, requests) {
     return await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return ${condition}})()`)
   }
   // 每个场景用一篇干净的发起篇：光标从头开始，口令一定落在正文里。
-  const start = async (note, prompt, reference = '写作参考.md') => {
+  let writeSummaryChecked = false
+  const start = async (note, prompt, reference = '写作参考.md', level = 'write') => {
     await selectBrowserFolder(page, '')
     if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(n=>n.dataset.path===${JSON.stringify(note)})`)) return `目录里没有 ${note}`
     await page.eval(`[...document.querySelectorAll('.tree-note')].find(n=>n.dataset.path===${JSON.stringify(note)}).click()`)
@@ -684,14 +753,20 @@ async function verifyWriteTools(page, vault, shot, requests) {
       const state = await page.eval(`JSON.stringify({editor:document.querySelector('.cm-content')?.innerText,notice:document.querySelector('.status')?.textContent??null,tab:document.querySelector('.tab[aria-selected=true]')?.dataset.rel??null,session:document.querySelector('.tab[aria-selected=true]')?.dataset.session??null,statuses:[...document.querySelectorAll('.status *')].map(n=>n.textContent).filter(Boolean).slice(0,4)})`)
       return '授权弹窗没出现：' + state
     }
-    // 授权范围在同一会话内记忆：先用「只读本笔记」预设清回发起篇，再选本场这一篇参考。
+    // 写工具不默认宣告：新场仍是只读，由测试显式切档。
+    const initial = await authorizationCardState(page)
+    if (sessionManualLevel === 'read') check('写工具场默认仍是只读、范围仅本篇', !!initial && initial.checked === '只读本笔记' && initial.summary === '范围：仅本篇' && initial.detailHidden === true, JSON.stringify(initial && { checked: initial.checked, summary: initial.summary, detailHidden: initial.detailHidden }))
+    if (!await setAuthorizationLevel(page, level)) return `「${AUTHORIZATION_LEVELS[level]}」档没就绪`
+    if (level === 'write' && !writeSummaryChecked) {
+      writeSummaryChecked = true
+      check('「可写」档工具摘要出现补发起篇与建笔记', await page.eval(`document.querySelector('.authorization-status')?.textContent.includes('工具：补发起篇、建笔记')`), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? ''`))
+    }
+    // 范围树在「调整」里：展开后先用「只读本笔记」预设清回发起篇，再选本场这一篇参考。
+    if (!await openAuthorizationScope(page)) return '范围树没展开'
     await page.eval(`document.querySelector('.authorization-preset-origin')?.click()`)
     if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===1 && !!document.querySelector('.authorization-send:not(:disabled)')`)) return '「只读本笔记」预设没就绪'
     // 选一篇额外参考：这样本场才是"有工具档"，写工具才会出现。
-    const point = await page.eval(`(() => { const input=[...document.querySelectorAll('.authorization-choices input')].find(input=>input.value===${JSON.stringify(reference)}); if(!input||input.disabled)return null; input.scrollIntoView({block:'nearest'}); const r=input.getBoundingClientRect(); return { x: r.left+r.width/2, y: r.top+r.height/2 } })()`)
-    if (!point) return false
-    await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
-    await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    if (!await clickAuthorizationChoice(page, reference)) return false
     if (!await waitFor(page, `document.querySelectorAll('.authorization-manifest li').length===2 && !!document.querySelector('.authorization-send:not(:disabled)')`)) return '清单没变成 2 条'
     // 非模态卡不抢焦点：勾选参考后焦点在复选框上，发送前必须把焦点放回发送键。
     await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
@@ -737,6 +812,11 @@ async function verifyWriteTools(page, vault, shot, requests) {
   check('改名卡片摆出旧路径 → 新路径与影响面', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将改名：写作参考.md → 写作参考改.md') && text.includes('处引用')})()`))
   await shot(page, 'write-rename-1200')
   check('点「改名」后文件真的换了名字', (await clickSelector('.write-confirm-accept')) && await waitFor(page, `document.querySelector('.task-dock')?.dataset.kind!=='generating'`, 30000) && existsSync(path.join(vault, '写作参考改.md')) && !existsSync(path.join(vault, '写作参考.md')))
+
+  // 五·二、自动档：只有新建自动批准；结构操作仍逐次确认，不因为选了「自动」就直接改名。
+  check('打开自动改名发起篇并授权参考篇', await start('写作自动改名.md', '自动改名样张', '写作自动参考.md', 'auto'))
+  check('自动档改名仍出确认卡而不是直接改', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将改名：写作自动参考.md → 写作自动参考改.md') && text.includes('处引用')})()`, 30000), await page.eval(`document.querySelector('.overlay-write-confirm')?.textContent?.slice(0,220) ?? '(无确认卡)'`))
+  check('点「不改」后参考篇仍是旧名', (await clickSelector('.write-confirm-cancel')) && (await settle()) && existsSync(path.join(vault, '写作自动参考.md')) && !existsSync(path.join(vault, '写作自动参考改.md')))
 
   check('打开挪动发起篇并授权另一篇参考', await start('写作挪.md', '挪样张', '写作挪参考.md'))
   check('挪动卡片摆出旧路径 → 新路径', await waitFor(page, `(() => {const text=document.querySelector('.overlay-write-confirm[open]')?.textContent||'';return text.includes('将移动：写作挪参考.md → 归档/写作挪参考.md')})()`))
@@ -829,8 +909,8 @@ function createNetworkOnlyHostServer(requests, gate) {
   return server
 }
 
-/** 联网只读专项：① 总开关默认关 ② 勾选默认不勾且写明抓网页 ③ 回环抓页被拒并进账本
- *  ④ 关总闸后第二次抓取被拒 ⑤ 任务进行中栏上浮层为生成中。 */
+/** 联网只读专项：① 联网页总闸默认关、与底栏小球同源 ② 首次开闸先出披露
+ *  ③ 回环抓页被拒并进账本 ④ 关总闸后第二次抓取被拒 ⑤ 任务进行中栏上浮层为生成中。 */
 async function verifyNetworkOnly(page, vault, shot, requests, gate) {
   process.stdout.write('\n联网只读专项\n')
   await waitFor(page, `document.querySelector('#app')?.inert===false && !!document.querySelector('.settings-open')`)
@@ -841,22 +921,35 @@ async function verifyNetworkOnly(page, vault, shot, requests, gate) {
     await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
     return true
   }
+  const closeSettings = async () => { await page.key('Escape', 'Escape', 0, 27); return waitFor(page, `!document.querySelector('.overlay-settings')`) }
+  const gateEnabled = () => page.eval(`window.rgent.networkConfig().then(result => result.ok ? result.config.enabled === true : null)`)
   const toolMessages = () => requests.flatMap(request => request.messages.filter(message => message.role === 'tool').map(message => String(message.content)))
   // 夹具先落盘：设置页操作期间文件监听有时间把新笔记送进目录。
   writeFileSync(path.join(vault, '联网抓页专项.md'), '')
 
-  // ① 设置「模型」页里的联网卡：默认关闭。
-  await page.eval(`document.querySelector('.settings-open')?.click()`)
-  check('设置页打开', await waitFor(page, `!!document.querySelector('.settings-nav')`))
-  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(button=>button.textContent==='模型')?.click()`)
-  check('联网只读总开关默认关闭', await waitFor(page, `(() => { const toggle=document.querySelector('[data-network="enabled"]'); return !!toggle && toggle.checked===false && !toggle.disabled && !!document.querySelector('.settings-network')?.textContent.includes('允许联网只读') })()`), await page.eval(`document.querySelector('.settings-network')?.textContent?.slice(0,180)??'(无联网卡)'`))
+  // ① 联网页：总闸默认关，边界写明只管搜索／抓取；模型页不再有联网卡与 MCP 卡。
+  check('设置页打开并落到联网页', await openNetworkPage(page))
+  check('联网总闸默认关闭且写明只管搜索与抓取', await waitFor(page, `(() => { const toggle=document.querySelector('[data-network="enabled"]'); const text=document.querySelector('.settings-network-page')?.textContent||''; return !!toggle && toggle.checked===false && !toggle.disabled && text.includes('允许联网搜索与抓取（设备总闸，保存即生效）') && text.includes('非搜索类 MCP 不受影响') && text.includes('与底栏最右的小球是同一个开关') })()`), await page.eval(`document.querySelector('.settings-network-page')?.textContent?.slice(0,260)??'(无联网页)'`))
+  check('联网页有内置搜索/抓取卡、MCP 卡、统计区与模型自带联网占位', await page.eval(`(() => { const host=document.querySelector('.settings-network-page'); return !!host?.querySelector('.settings-network-gate') && !!host.querySelector('.settings-network-card .settings-network-stats') && !!host.querySelector('.settings-mcp') && !!host.querySelector('.settings-network-native') && !!host.querySelector('.settings-network-headless') })()`))
   await shot(page, 'network-settings-1200')
+  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(button=>button.textContent==='模型')?.click()`)
+  check('模型页不再有联网卡与 MCP 卡', await waitFor(page, `document.querySelector('.settings-page-title')?.textContent==='模型' && !document.querySelector('.settings-network') && !document.querySelector('.settings-mcp') && !document.querySelector('[data-network="enabled"]') && !document.querySelector('[data-fetch]')`))
+  check('关闭设置后回到正文', await closeSettings())
 
-  // ② 打开总开关，发起一场并检查口令卡。
-  await page.eval(`(() => { const toggle=document.querySelector('[data-network="enabled"]'); toggle.checked=true; toggle.dispatchEvent(new Event('change')) })()`)
-  check('总开关经真实设置卡保存为开', await waitFor(page, `(() => { const toggle=document.querySelector('[data-network="enabled"]'); return toggle?.checked===true && !toggle.disabled })()`), await page.eval(`document.querySelector('[data-network="status"]')?.textContent??''`))
-  await page.key('Escape', 'Escape', 0, 27)
-  check('关闭设置后回到正文', await waitFor(page, `!document.querySelector('.overlay-settings')`))
+  // ② 首次开闸：清掉「已看过披露」后点小球只出通知，点「开启」才写配置。
+  await page.eval(`localStorage.removeItem('rgent.network.acknowledged')`)
+  check('首次开闸前底栏小球为关', await waitFor(page, `document.querySelector('.status-dot')?.dataset.state==='offline'`))
+  check('点小球首次开闸只出非模态披露、尚未写配置', await page.eval(`(() => { const button=document.querySelector('.status-dot'); if(!button) return false; button.click(); return true })()`) && await waitFor(page, `(() => { const card=[...document.querySelectorAll('.notice')].find(node=>(node.querySelector('.notice-title')?.textContent||'').includes('开启联网搜索与抓取？')); return !!card && [...card.querySelectorAll('.notice-action')].some(button=>button.textContent.trim()==='开启') })()`) && await gateEnabled() === false && await page.eval(`document.querySelector('.status-dot')?.dataset.state`) === 'offline', await page.eval(`document.querySelector('.notice-stack')?.textContent ?? '(无通知)'`))
+  check('点通知「开启」后才写配置且小球跟随', await clickSelector('.notice-action') && await waitFor(page, `(async () => { if(document.querySelector('.status-dot')?.dataset.state!=='online') return false; if([...document.querySelectorAll('.notice')].some(node=>(node.querySelector('.notice-title')?.textContent||'').includes('开启联网搜索与抓取？'))) return false; const result=await window.rgent.networkConfig(); return result.ok===true && result.config.enabled===true })()`, 15000), await page.eval(`JSON.stringify({ dot: document.querySelector('.status-dot')?.dataset.state ?? '', ack: localStorage.getItem('rgent.network.acknowledged') })`))
+
+  // ③ 页内总闸与底栏小球同源：页内关 → 小球关；页内开 → 小球开。
+  check('回联网页读到总闸已开', await openNetworkPage(page) && await waitFor(page, `document.querySelector('[data-network="enabled"]')?.checked===true && !document.querySelector('[data-network="enabled"]')?.disabled`))
+  await page.eval(`document.querySelector('[data-network="enabled"]')?.click()`)
+  check('页内关闸即写配置且底栏小球跟随', await waitFor(page, `(async () => { const toggle=document.querySelector('[data-network="enabled"]'); if(!toggle || toggle.checked || toggle.disabled) return false; const result=await window.rgent.networkConfig(); return result.ok===true && result.config.enabled===false && document.querySelector('.status-dot')?.dataset.state==='offline' })()`), await page.eval(`document.querySelector('.status-dot')?.dataset.state ?? ''`))
+  await page.eval(`document.querySelector('[data-network="enabled"]')?.click()`)
+  check('页内开闸后底栏小球跟随为开', await waitFor(page, `(async () => { const toggle=document.querySelector('[data-network="enabled"]'); if(!toggle || !toggle.checked || toggle.disabled) return false; const result=await window.rgent.networkConfig(); return result.ok===true && result.config.enabled===true && document.querySelector('.status-dot')?.dataset.state==='online' })()`), await page.eval(`document.querySelector('.status-dot')?.dataset.state ?? ''`))
+  await shot(page, 'network-gate-on-1200')
+  check('关闭设置后回到正文（任务前）', await closeSettings())
 
   await page.eval(`(() => { const toggle=document.querySelector('.tree-toggle'); if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click(); return true })()`)
   check('联网专项夹具进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(note=>note.dataset.path==='联网抓页专项.md')`))
@@ -866,8 +959,7 @@ async function verifyNetworkOnly(page, vault, shot, requests, gate) {
   await page.eval(`document.querySelector('.cm-content')?.focus()`)
   await page.call('Input.insertText', { text: '/联网抓页专项' })
   await page.key('Enter', 'Enter', 0, 13)
-  check('口令卡出现联网勾选且默认不勾、写明抓网页', await waitFor(page, `(() => { const card=document.querySelector('.authorization-network'); const input=card?.querySelector('input[type="checkbox"]'); return !!input && input.checked===false && card.textContent.includes('抓网页') && !!document.querySelector('.authorization-send:not(:disabled)') })()`, 60000), await page.eval(`document.querySelector('.authorization-network')?.textContent??'(无联网勾选)'`))
-  check('勾选联网后口令卡重新核对并可发送', await clickSelector('.authorization-network input[type="checkbox"]') && await waitFor(page, `document.querySelector('.authorization-network input[type="checkbox"]')?.checked===true && !!document.querySelector('.authorization-send:not(:disabled)')`, 30000), await page.eval(`document.querySelector('.authorization-status')?.textContent??''`))
+  check('口令卡不再按场勾选联网、默认四档只读', await waitFor(page, `(() => { const card=document.querySelector('.overlay-authorization'); if(!card) return false; const chips=[...card.querySelectorAll('.authorization-level')]; return chips.length===4 && chips.filter(chip=>chip.getAttribute('aria-checked')==='true').map(chip=>chip.textContent.trim()).join()==='只读本笔记' && card.querySelector('.authorization-scope-text')?.textContent==='范围：仅本篇' && !card.querySelector('.authorization-network') && !card.querySelector('.authorization-mcp') && !(card.textContent||'').includes('允许联网') && !!card.querySelector('.authorization-send:not(:disabled)') })()`, 60000), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? '(无口令卡)'`))
   await shot(page, 'network-authorization-1200')
   if (!await clickSelector('.authorization-send')) throw Error('找不到确认发送按钮')
 
@@ -911,10 +1003,6 @@ async function verifyHumanNetwork(page, shot) {
     await page.eval(`document.querySelector('.settings-open')?.click()`)
     return waitFor(page, `!!document.querySelector('.overlay-settings') && !!document.querySelector('.settings-nav')`)
   }
-  const openModelPage = async () => {
-    await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(button=>button.textContent==='模型')?.click()`)
-    return waitFor(page, `document.querySelector('.settings-page-title')?.textContent==='模型' && !!document.querySelector('[data-network="enabled"]:not(:disabled)')`)
-  }
   const closeSettings = async () => {
     await page.key('Escape', 'Escape', 0, 27)
     return waitFor(page, `!document.querySelector('.overlay-settings')`)
@@ -937,10 +1025,12 @@ async function verifyHumanNetwork(page, shot) {
   }
   const egressLog = () => page.eval(`window.rgent.networkEgressLog({ limit: 5 })`)
 
-  // ① 默认关：设置「模型」页里的总开关未勾选，且不是禁用态（能由人打开）。
+  // ① 默认关：设置「联网」页里的总开关未勾选，且不是禁用态（能由人打开）。
   check('人发起联网：设置页打开', await openSettings())
-  check('人发起联网：模型页的总开关默认关闭', await openModelPage() && JSON.stringify(await toggleState()) === JSON.stringify({ checked: false, disabled: false }), JSON.stringify(await toggleState()))
+  check('人发起联网：联网页的总开关默认关闭', await openNetworkPage(page) && await waitFor(page, `document.querySelector('[data-network="enabled"]:not(:disabled)')`) && JSON.stringify(await toggleState()) === JSON.stringify({ checked: false, disabled: false }), JSON.stringify(await toggleState()))
   await shot(page, 'human-network-settings-off-1200')
+  await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(button=>button.textContent==='模型')?.click()`)
+  check('人发起联网：模型页不再有联网卡与 MCP 卡', await waitFor(page, `document.querySelector('.settings-page-title')?.textContent==='模型' && !document.querySelector('.settings-network') && !document.querySelector('.settings-mcp') && !document.querySelector('[data-network="enabled"]')`))
   check('人发起联网：关闭设置回到正文', await closeSettings())
 
   // ② 快捷键打开同一个对话框；总闸关闭时提交被抓，零成功外发。
@@ -960,7 +1050,7 @@ async function verifyHumanNetwork(page, shot) {
   check('人发起联网：关闭抓页对话框', await closeDialog())
 
   // ③ 开总闸（change 即保存）后重开对话框；回环地址在出口被拒，审计与统计只留这次拒绝。
-  check('人发起联网：回设置打开模型页', await openSettings() && await openModelPage())
+  check('人发起联网：回设置打开联网页', await openSettings() && await openNetworkPage(page))
   check('勾选总开关', await page.eval(`(() => { const node=document.querySelector('[data-network="enabled"]'); if(!node || node.checked || node.disabled) return false; node.click(); return true })()`))
   check('总开关经设置卡保存为开（控件重新可用且读回 enabled）', await waitFor(page, `(async () => { const node=document.querySelector('[data-network="enabled"]'); if(!node || !node.checked || node.disabled) return false; const result=await window.rgent.networkConfig(); return result.ok===true && result.config.enabled===true })()`), await page.eval(`document.querySelector('[data-network="status"]')?.textContent ?? ''`))
   await shot(page, 'human-network-settings-on-1200')
@@ -982,7 +1072,7 @@ async function verifyHumanNetwork(page, shot) {
   check('人发起联网：关闭抓页对话框', await closeDialog())
 
   // ④ 设置卡统计区：非空、写明「抓页(人)」，最近人发起列表带这次主机。
-  check('人发起联网：设置页打开（统计）', await openSettings() && await openModelPage())
+  check('人发起联网：设置页打开（统计）', await openSettings() && await openNetworkPage(page))
   check('设置卡统计区可见「抓页(人)」与最近一次主机 127.0.0.1', await waitFor(page, `(() => { const node=document.querySelector('.settings-network-stats'); const text=node?.textContent||''; return !!node && text.length>0 && text.includes('抓页(人)') && text.includes('127.0.0.1') && text.includes('拒绝 EGRESS_INVALID_URL') })()`), await page.eval(`document.querySelector('.settings-network-stats')?.textContent?.slice(0,500) ?? '(无统计区)'`))
   await shot(page, 'human-network-stats-1200')
 
@@ -991,18 +1081,15 @@ async function verifyHumanNetwork(page, shot) {
   check('人发起联网：专项结束时没有残留浮层', await waitFor(page, `!document.querySelector('.fetch-dialog') && !document.querySelector('.overlay-settings')`))
 }
 
-/** 远端只读 MCP 窗口专项（RGENT_UI_MCP_ONLY=1）：只证设置卡、坏地址拒绝、抓页对话框回归
- *  与口令卡门控；零真实外网、零真实模型。公共只读服务器不带 token 也是合法形状。 */
-async function verifyMcpOnly(page, vault, shot, requests) {
+/** 远端只读 MCP 窗口专项（RGENT_UI_MCP_ONLY=1）：只证设置卡、用途标记、坏地址拒绝、
+ *  抓页对话框回归、口令卡门控与「搜索类受总闸、非搜索类不受闸」的宣告；零真实外网、零真实模型。
+ *  两台服务器用设备配置文件夹具直写（无 token、不发现、不连接），只为让任务系统提示里的清单可见。 */
+async function verifyMcpOnly(page, vault, profile, shot, requests) {
   process.stdout.write('\n远端只读 MCP 专项\n')
   await waitFor(page, `document.querySelector('#app')?.inert===false && !!document.querySelector('.settings-open')`)
   const openSettings = async () => {
     await page.eval(`document.querySelector('.settings-open')?.click()`)
     return waitFor(page, `!!document.querySelector('.overlay-settings') && !!document.querySelector('.settings-nav')`)
-  }
-  const openModelPage = async () => {
-    await page.eval(`[...document.querySelectorAll('.settings-nav button')].find(button=>button.textContent==='模型')?.click()`)
-    return waitFor(page, `document.querySelector('.settings-page-title')?.textContent==='模型' && !!document.querySelector('.settings-mcp')`)
   }
   const closeSettings = async () => {
     await page.key('Escape', 'Escape', 0, 27)
@@ -1020,13 +1107,23 @@ async function verifyMcpOnly(page, vault, shot, requests) {
     await page.eval(`(() => { const button=document.querySelector('.fetch-dialog-close'); if(!button) return false; button.click(); return true })()`)
     return waitFor(page, `!document.querySelector('.fetch-dialog')`)
   }
+  const toolNamesOf = (request) => (request.tools ?? []).map(tool => tool.function?.name)
+  const openFixtureNote = async (name = 'MCP 门控专项.md') => {
+    await page.eval(`(() => { const toggle=document.querySelector('.tree-toggle'); if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click(); return true })()`)
+    if (!await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(note=>note.dataset.path===${JSON.stringify(name)})`)) return false
+    await page.eval(`[...document.querySelectorAll('.tree-note')].find(note=>note.dataset.path===${JSON.stringify(name)})?.click()`)
+    if (!await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel===${JSON.stringify(name)}`)) return false
+    await page.eval(`document.querySelector('.cm-content')?.focus()`)
+    return true
+  }
 
-  // 夹具先落盘：设置页操作期间文件监听有时间把新笔记送进目录。
+  // 夹具先落盘：设置页操作期间文件监听有时间把新笔记送进目录；两场各用一篇干净发起篇。
   writeFileSync(path.join(vault, 'MCP 门控专项.md'), '')
+  writeFileSync(path.join(vault, 'MCP 门控专项二.md'), '')
 
-  // ①a 空配置：MCP 卡片可见，空服务器列表有说明文案。
+  // ①a 空配置：联网页的 MCP 卡片可见，空服务器列表有说明文案。
   check('MCP 专项：设置页打开（空配置）', await openSettings())
-  check('MCP 专项：MCP 卡片可见且空列表有说明文案', await openModelPage() && await waitFor(page, `(() => { const card=document.querySelector('.settings-mcp'); const empty=card?.querySelector('[data-mcp="empty"]'); return !!card && card.getBoundingClientRect().height>0 && empty?.hidden===false && empty.textContent.includes('还没有服务器') })()`), await page.eval(`document.querySelector('.settings-mcp [data-mcp="empty"]')?.textContent ?? '(无空态)'`))
+  check('MCP 专项：联网页的 MCP 卡片可见且空列表有说明文案', await openNetworkPage(page) && await waitFor(page, `(() => { const card=document.querySelector('.settings-mcp'); const empty=card?.querySelector('[data-mcp="empty"]'); return !!card && card.getBoundingClientRect().height>0 && empty?.hidden===false && empty.textContent.includes('还没有服务器') })()`), await page.eval(`document.querySelector('.settings-mcp [data-mcp="empty"]')?.textContent ?? '(无空态)'`))
   check('MCP 专项：空配置时没有服务器行', await page.eval(`document.querySelectorAll('.settings-mcp [data-mcp="row"]').length===0`))
   check('MCP 专项：关闭设置（空配置）', await closeSettings())
 
@@ -1035,10 +1132,14 @@ async function verifyMcpOnly(page, vault, shot, requests) {
   check('MCP 专项：能保存不带 token 的公共只读服务器', seeded?.ok === true && seeded.config.servers.length === 1 && seeded.config.servers[0].hasToken === false, JSON.stringify(seeded))
 
   // ①c 重开设置：卡片读到这一行，空工具列表有说明，「连接并列出工具」按钮在且未禁用。
-  check('MCP 专项：模型页的 MCP 卡片可见并读到夹具服务器', await openSettings() && await openModelPage() && await waitFor(page, `!!document.querySelector('.settings-mcp [data-mcp="row"]')`) && await page.eval(`(() => { const card=document.querySelector('.settings-mcp'); return !!card && card.getBoundingClientRect().height>0 && card.textContent.includes('远端只读 MCP') })()`))
+  check('MCP 专项：联网页的 MCP 卡片可见并读到夹具服务器', await openSettings() && await openNetworkPage(page) && await waitFor(page, `!!document.querySelector('.settings-mcp [data-mcp="row"]')`) && await page.eval(`(() => { const card=document.querySelector('.settings-mcp'); return !!card && card.getBoundingClientRect().height>0 && card.textContent.includes('远端只读 MCP') })()`))
   check('MCP 专项：空工具列表有说明文案', await page.eval(`(() => { const hint=document.querySelector('.settings-mcp [data-mcp="tools-empty"]'); return !!hint && hint.textContent.includes('还没有读取过工具') })()`), await page.eval(`document.querySelector('.settings-mcp [data-mcp="tools-empty"]')?.textContent ?? '(无说明)'`))
   check('MCP 专项：卡片有「连接并列出工具」按钮且无 token 也可点', await page.eval(`(() => { const button=document.querySelector('.settings-mcp [data-mcp="discover"]'); return !!button && button.textContent==='连接并列出工具' && !button.disabled })()`))
   check('MCP 专项：行内状态写明无 token', await page.eval(`document.querySelector('.settings-mcp [data-mcp="counts"]')?.textContent.includes('无 token') === true`), await page.eval(`document.querySelector('.settings-mcp [data-mcp="counts"]')?.textContent ?? '(无行)'`))
+
+  // ①d 用途标记：每行有「用于联网搜索/抓取（受搜索闸管）」，默认不勾；勾选即保存。
+  check('MCP 专项：用途复选框在且默认不勾、卡片写明闸边界', await page.eval(`(() => { const row=document.querySelector('.settings-mcp [data-mcp="row"]'); const input=row?.querySelector('[data-mcp="search-channel"]'); const hint=document.querySelector('.settings-mcp [data-mcp="gate-hint"]'); return !!input && input.checked===false && (row.textContent||'').includes('用于联网搜索/抓取（受搜索闸管）') && (hint?.textContent||'').includes('非搜索类 MCP 不受搜索闸管') })()`), await page.eval(`document.querySelector('.settings-mcp [data-mcp="gate-hint"]')?.textContent ?? '(无边界说明)'`))
+  check('MCP 专项：勾选用途后保存为搜索渠道', await page.eval(`(() => { const input=document.querySelector('.settings-mcp [data-mcp="search-channel"]'); if(!input) return false; input.click(); return true })()`) && await waitFor(page, `(async () => { const config=await window.rgent.mcpConfig(); return config.ok===true && config.config.servers[0]?.searchChannel===true && (document.querySelector('.settings-mcp [data-mcp="status"]')?.textContent||'').includes('受底栏总闸管') })()`, 10000), await page.eval(`document.querySelector('.settings-mcp [data-mcp="status"]')?.textContent ?? ''`))
   await shot(page, 'mcp-settings-1200')
 
   // ② 添加表单填回环地址、token 留空 → 人话错误，且没有新增行。
@@ -1065,8 +1166,8 @@ async function verifyMcpOnly(page, vault, shot, requests) {
   check('MCP 专项：抓页对话框仍可输入与提交', await page.eval(`!!document.querySelector('.fetch-dialog-input:not([disabled])') && !!document.querySelector('.fetch-dialog-submit')`))
   check('MCP 专项：关闭抓页对话框', await closeFetchDialog())
 
-  // ④ 删除夹具，恢复到「未配置 MCP」；最小任务的整张口令卡只应有原因行，没有 MCP 勾选框。
-  check('MCP 专项：回设置删除夹具', await openSettings() && await openModelPage() && await waitFor(page, `!!document.querySelector('.settings-mcp [data-mcp="row"]')`))
+  // ④ 删除夹具，恢复到「未配置 MCP」。
+  check('MCP 专项：回设置删除夹具', await openSettings() && await openNetworkPage(page) && await waitFor(page, `!!document.querySelector('.settings-mcp [data-mcp="row"]')`))
   check('MCP 专项：两下确认删除夹具服务器', await page.eval(`(() => {
     const button=document.querySelector('.settings-mcp [data-mcp="remove"]');
     if(!button) return false;
@@ -1076,26 +1177,58 @@ async function verifyMcpOnly(page, vault, shot, requests) {
     return true;
   })()`))
   check('MCP 专项：删除后 MCP 列表为空', await waitFor(page, `!document.querySelector('.settings-mcp [data-mcp="row"]') && document.querySelector('.settings-mcp')?.textContent.includes('还没有服务器')`))
-  check('MCP 专项：关闭设置（任务前）', await closeSettings())
   const configEmpty = await page.eval(`window.rgent.mcpConfig()`)
   check('MCP 专项：MCP 配置已清空', configEmpty?.ok === true && configEmpty.config.servers.length === 0, JSON.stringify(configEmpty))
+  // 页面不会自己重读设备配置：写下夹具后关掉重开，才看到这两行。
+  check('MCP 专项：关闭设置（写夹具前）', await closeSettings())
 
-  await page.eval(`(() => { const toggle=document.querySelector('.tree-toggle'); if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click(); return true })()`)
-  check('MCP 专项：夹具笔记进入目录', await waitFor(page, `[...document.querySelectorAll('.tree-note')].some(note=>note.dataset.path==='MCP 门控专项.md')`))
-  await page.eval(`[...document.querySelectorAll('.tree-note')].find(note=>note.dataset.path==='MCP 门控专项.md')?.click()`)
-  check('MCP 专项：打开发起篇', await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel==='MCP 门控专项.md'`))
-  check('MCP 专项：底栏模型快照就绪', await waitFor(page, `document.querySelector('.status-model')?.value!==''`))
-  await page.eval(`document.querySelector('.cm-content')?.focus()`)
-  await page.call('Input.insertText', { text: '/mcp 门控专项' })
+  // ⑤ 两台设备配置夹具：一台标记为搜索/抓取，一台不是；各有白名单工具，不连接也不发现。
+  const fixtureServers = [
+    { id: 'mcp-ui-search', name: '窗口专项搜索', url: 'https://search.example.com/mcp', enabled: true, searchChannel: true, tools: [{ name: 'search_web', description: '联网搜索' }], whitelist: ['search_web'] },
+    { id: 'mcp-ui-plain', name: '窗口专项非搜索', url: 'https://plain.example.com/mcp', enabled: true, searchChannel: false, tools: [{ name: 'read_doc', description: '读取文档' }], whitelist: ['read_doc'] }
+  ]
+  writeFileSync(path.join(profile, 'mcp-config.json'), JSON.stringify({ version: 1, servers: fixtureServers }))
+  check('MCP 专项：两台夹具服务器按用途与白名单读回', await openSettings() && await openNetworkPage(page) && await waitFor(page, `(async () => { const config=await window.rgent.mcpConfig(); return config.ok===true && config.config.servers.length===2 && config.config.servers.find(server=>server.name==='窗口专项搜索')?.searchChannel===true && config.config.servers.find(server=>server.name==='窗口专项非搜索')?.searchChannel===false })()`) && await waitFor(page, `document.querySelectorAll('.settings-mcp [data-mcp="row"]').length===2`), await page.eval(`window.rgent.mcpConfig().then(result => JSON.stringify(result))`))
+  const fixtureRows = await page.eval(`[...document.querySelectorAll('.settings-mcp [data-mcp="row"]')].map(row => ({ name: row.querySelector('[data-mcp="name"]')?.textContent ?? '', searchChannel: row.querySelector('[data-mcp="search-channel"]')?.checked === true, tools: row.querySelectorAll('[data-mcp="tool"]').length, whitelist: [...row.querySelectorAll('[data-mcp="tool"]')].filter(input=>input.checked).length }))`)
+  check('MCP 专项：搜索行勾用途、非搜索行不勾，两行各有一个白名单工具', JSON.stringify(fixtureRows) === JSON.stringify([
+    { name: '窗口专项搜索', searchChannel: true, tools: 1, whitelist: 1 },
+    { name: '窗口专项非搜索', searchChannel: false, tools: 1, whitelist: 1 }
+  ]), JSON.stringify(fixtureRows))
+  await shot(page, 'mcp-two-servers-1200')
+  check('MCP 专项：关闭设置（关闸任务前）', await closeSettings())
+  check('MCP 专项：任务前总闸是关的', await page.eval(`window.rgent.networkConfig().then(result => result.ok && result.config.enabled === false)`) === true)
+
+  // ⑥ 关闸：搜索类不进工具清单，非搜索类照常宣告。
+  check('MCP 专项：打开发起篇（关闸）', await openFixtureNote())
+  check('MCP 专项：底栏模型快照就绪（关闸）', await waitFor(page, `document.querySelector('.status-model')?.value!==''`))
+  const offBase = requests.length
+  await page.call('Input.insertText', { text: '/mcp 关闸门控' })
   await page.key('Enter', 'Enter', 0, 13)
-  check('MCP 专项：口令卡准备就绪', await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 60000), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? ''`))
-  check('MCP 专项：未配置 MCP 时只有原因行、没有 MCP 勾选框', await page.eval(`(() => { const card=document.querySelector('.authorization-mcp'); return !!card && !card.querySelector('input[type="checkbox"]') && card.textContent.includes('本场不能使用 MCP') })()`), await page.eval(`document.querySelector('.authorization-mcp')?.textContent ?? '(无 MCP 行)'`))
+  check('MCP 专项：口令卡不再按场勾选 MCP，默认四档只读', await waitFor(page, `(() => { const card=document.querySelector('.overlay-authorization'); if(!card) return false; const chips=[...card.querySelectorAll('.authorization-level')]; return chips.length===4 && chips.filter(chip=>chip.getAttribute('aria-checked')==='true').map(chip=>chip.textContent.trim()).join()==='只读本笔记' && card.querySelector('.authorization-scope-text')?.textContent==='范围：仅本篇' && !card.querySelector('.authorization-mcp') && !card.querySelector('.authorization-network') && !!card.querySelector('.authorization-send:not(:disabled)') })()`, 60000), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? '(无口令卡)'`))
   await shot(page, 'mcp-authorization-1200')
   // 非模态卡不抢焦点：发送前把焦点放到发送键。
   await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
   await page.key('Enter', 'Enter', 0, 13)
-  check('MCP 专项：最小任务正常结束并保存回答', await waitFor(page, `(async()=>{ if((await window.rgent.agentTasks()).length) return false; const note=await window.rgent.noteRead('MCP 门控专项.md'); return note.content.includes('受控回答第一句。') })()`, 60000))
-  check('MCP 专项：任务只走受控主机', requests.length >= 1, String(requests.length))
+  check('MCP 专项：关闸任务正常结束并保存回答', await waitFor(page, `(async()=>{ if((await window.rgent.agentTasks()).length) return false; const note=await window.rgent.noteRead('MCP 门控专项.md'); return note.content.includes('受控回答第一句。') })()`, 60000))
+  const offRequests = requests.slice(offBase).filter(request => JSON.stringify(request).includes('mcp 关闸门控'))
+  const offAnnouncements = offRequests.map(request => ({ tools: toolNamesOf(request), search: JSON.stringify(request).includes('窗口专项搜索') || JSON.stringify(request).includes('search_web'), plain: JSON.stringify(request).includes('窗口专项非搜索') && JSON.stringify(request).includes('read_doc') }))
+  check('MCP 专项：关闸后搜索类不宣告、非搜索类仍宣告', offRequests.length > 0 && offAnnouncements.every(item => item.tools.includes('mcp_call') && item.plain && item.search === false), JSON.stringify(offAnnouncements))
+
+  // ⑦ 开闸：搜索类也进清单；非搜索类仍不受影响。
+  check('MCP 专项：回联网页开闸', await openSettings() && await openNetworkPage(page) && await waitFor(page, `document.querySelector('[data-network="enabled"]')?.checked===false && !document.querySelector('[data-network="enabled"]')?.disabled`) && await page.eval(`(() => { const toggle=document.querySelector('[data-network="enabled"]'); toggle.click(); return true })()`) && await waitFor(page, `(async () => { const toggle=document.querySelector('[data-network="enabled"]'); if(!toggle?.checked || toggle.disabled) return false; const result=await window.rgent.networkConfig(); return result.ok===true && result.config.enabled===true })()`))
+  check('MCP 专项：关闭设置（开闸任务前）', await closeSettings())
+  check('MCP 专项：打开发起篇（开闸）', await openFixtureNote('MCP 门控专项二.md'))
+  const onBase = requests.length
+  await page.call('Input.insertText', { text: '/mcp 开闸门控' })
+  await page.key('Enter', 'Enter', 0, 13)
+  check('MCP 专项：开闸后口令卡准备就绪', await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 60000), await page.eval(`document.querySelector('.authorization-status')?.textContent ?? ''`))
+  await page.eval(`document.querySelector('.overlay-authorization .authorization-send:not(:disabled)')?.focus()`)
+  await page.key('Enter', 'Enter', 0, 13)
+  check('MCP 专项：开闸任务正常结束并保存回答', await waitFor(page, `(async()=>{ if((await window.rgent.agentTasks()).length) return false; const note=await window.rgent.noteRead('MCP 门控专项二.md'); return note.content.includes('受控回答第一句。') })()`, 60000))
+  const onRequests = requests.slice(onBase).filter(request => JSON.stringify(request).includes('mcp 开闸门控'))
+  const onAnnouncements = onRequests.map(request => ({ tools: toolNamesOf(request), search: JSON.stringify(request).includes('窗口专项搜索') && JSON.stringify(request).includes('search_web'), plain: JSON.stringify(request).includes('窗口专项非搜索') && JSON.stringify(request).includes('read_doc') }))
+  check('MCP 专项：开闸后搜索类与非搜索类都宣告', onRequests.length > 0 && onAnnouncements.every(item => item.tools.includes('mcp_call') && item.search && item.plain), JSON.stringify(onAnnouncements))
+  check('MCP 专项：任务只走受控主机', requests.length >= 2, String(requests.length))
   check('MCP 专项：专项结束时没有残留浮层', await waitFor(page, `!document.querySelector('.overlay-authorization') && !document.querySelector('.overlay-settings') && !document.querySelector('.fetch-dialog')`))
 }
 
@@ -1595,11 +1728,11 @@ async function verifyJourney(page, vault, shot) {
     check('旅程：中文正文保存后 noteRead 与磁盘都含该段', saved && onDisk && String(readBack).includes(bodyText), JSON.stringify({ saved, onDisk, read: String(readBack ?? '').slice(0, 120) }))
 
     // 三、补：受控模型按口令追加一句；正文与账本各留证据。
-    // 口令必须是空段落开头：正文与口令之间留一个空行，否则 `/` 只是普通字符。
+    // 补是写工具：新场默认只读，测试显式切「可写」；口令必须是空段落开头，否则 `/` 只是普通字符。
     await page.key('Enter', 'Enter', 0, 13)
     await page.key('Enter', 'Enter', 0, 13)
     await page.call('Input.insertText', { text: `/${prompt}` })
-    const confirmed = await confirmSlashAuthorization(page)
+    const confirmed = await confirmSlashAuthorization(page, false, 'write')
     const finished = confirmed && await waitFor(page, `(async () => {
       const note = await window.rgent.noteRead(${JSON.stringify(journeyPath)})
       const history = await window.rgent.ledgerGet({ sessionId: note.sessionId, objectVersion: note.objectVersion, relPath: ${JSON.stringify(journeyPath)} })
@@ -1735,16 +1868,18 @@ function createUxHostServer(requests) {
       const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'ux-ui', object: 'chat.completion.chunk', created: 1, model: decoded.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       const toolResults = (decoded.messages ?? []).filter((message) => message.role === 'tool')
-      const scenario = transcript.includes('UX建许可') ? 'allow' : transcript.includes('UX建拒绝') ? 'deny' : null
+      const scenario = transcript.includes('UX建许可') ? 'allow' : transcript.includes('UX建拒绝') ? 'deny' : transcript.includes('UX自动建') ? 'auto-create' : null
       if (scenario && toolResults.length === 0) {
-        // 第一轮只提议一次新建；写确认卡由人点允许／不允许，第二轮才收尾。
+        // 第一轮只提议一次写操作；普通档等人在写确认卡上点允许／不允许，自动档由主进程直接批准新建。
         const call = scenario === 'allow'
           ? { name: 'create_note', input: { name: 'UX确认样张', body: '# UX 确认样张\n\n交互减负受控正文。' } }
-          : { name: 'create_note', input: { name: 'UX拒绝样张', body: '# UX 拒绝样张\n\n不应该落盘。' } }
+          : scenario === 'deny'
+            ? { name: 'create_note', input: { name: 'UX拒绝样张', body: '# UX 拒绝样张\n\n不应该落盘。' } }
+            : { name: 'create_note', input: { name: 'UX自动样张', body: '# UX 自动样张\n\n自动档受控正文。' } }
         emit({ tool_calls: [{ index: 0, id: 'ux-' + scenario, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.input) } }] })
         emit({}, 'tool_calls')
       } else {
-        emit({ content: scenario === 'allow' ? 'UX 写许可完成。' : scenario === 'deny' ? 'UX 写拒绝完成。' : '受控回答第一句。第二句。' })
+        emit({ content: scenario === 'allow' ? 'UX 写许可完成。' : scenario === 'deny' ? 'UX 写拒绝完成。' : scenario === 'auto-create' ? 'UX 自动完成。' : '受控回答第一句。第二句。' })
         emit({}, 'stop')
       }
       response.end('data: [DONE]\n\n')
@@ -1768,13 +1903,13 @@ async function verifyUx(page, vault, shot) {
     void page.call('Page.handleJavaScriptDialog', { accept: true })
   }
   const at = (name) => path.join(vault, name)
-  for (const [name, body] of Object.entries({ 'UX 授权.md': '', 'UX 写许可.md': '', 'UX 写拒绝.md': '', 'UX 冲突.md': '# UX 冲突\n\n窗口正文。\n' })) writeFileSync(at(name), body)
+  for (const [name, body] of Object.entries({ 'UX 授权.md': '', 'UX 写许可.md': '', 'UX 写拒绝.md': '', 'UX 自动.md': '', 'UX 冲突.md': '# UX 冲突\n\n窗口正文。\n' })) writeFileSync(at(name), body)
   // 外壳、库与文件树都就绪后再开设置页；否则设置关闭后的模型快照刷新可能还没轮到。
   const vaultReady = await waitFor(page, `(async () => { const state = await window.rgent.vaultGet(); return !!state?.sessionId && state.status === 'ready' })()`, 20000)
   await waitFor(page, `!!document.querySelector('.tree-toggle') && !!document.querySelector('.status')`, 20000)
   await setTreeExpanded(page, true)
   await selectBrowserFolder(page, '')
-  const fixturesReady = await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter((node) => ['UX 授权.md', 'UX 写许可.md', 'UX 写拒绝.md', 'UX 冲突.md'].includes(node.dataset.path)).length === 4`, 20000)
+  const fixturesReady = await waitFor(page, `[...document.querySelectorAll('.tree-note')].filter((node) => ['UX 授权.md', 'UX 写许可.md', 'UX 写拒绝.md', 'UX 自动.md', 'UX 冲突.md'].includes(node.dataset.path)).length === 5`, 20000)
   // 受控供应商是经 IPC 配的；渲染层模型快照要开关一次设置页才刷新（与写工具专项同一条路）。
   await page.eval(`document.querySelector('.settings-open')?.click()`)
   await waitFor(page, `!!document.querySelector('.settings-nav')`)
@@ -1807,10 +1942,19 @@ async function verifyUx(page, vault, shot) {
     await page.eval(`document.querySelector('.cm-content')?.focus()`)
     return true
   }
-  const prepareAuthorization = async (prompt) => {
+  const prepareAuthorization = async (prompt, level = 'write') => {
     await page.call('Input.insertText', { text: '/' + prompt })
     await page.key('Enter', 'Enter', 0, 13)
-    return waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 30000)
+    if (!await waitFor(page, `!!document.querySelector('.overlay-authorization[open] .authorization-send:not(:disabled)')`, 30000)) return false
+    // 写工具与自动批准都不再是默认：新场只读，测试按场景显式切档。
+    return setAuthorizationLevel(page, level)
+  }
+  const clickNoticeAction = async (title) => {
+    const point = await page.eval(`(() => { const card=[...document.querySelectorAll('.notice')].find(node=>(node.querySelector('.notice-title')?.textContent||'').includes(${JSON.stringify(title)})); const button=card?.querySelector('.notice-action'); if(!button) return null; button.scrollIntoView({block:'nearest'}); const rect=button.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } })()`)
+    if (!point) return false
+    await page.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    await page.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    return true
   }
   // 非模态卡不抢焦点：测试必须先把焦点放进卡里，再按 Enter；只有焦点在卡内时 Esc／Enter 才归卡片。
   const confirmInCard = async () => {
@@ -1835,6 +1979,8 @@ async function verifyUx(page, vault, shot) {
   const draftBeforeCard = await editorText()
   await page.key('Enter', 'Enter', 0, 13)
   const authReady = await waitFor(page, `!!document.querySelector('dialog[open][data-modal="false"].overlay-authorization .authorization-send:not(:disabled)')`, 30000)
+  const defaultCardState = authReady ? await authorizationCardState(page) : null
+  check('UX：授权卡四档齐全、默认只读、范围仅本篇', !!defaultCardState && JSON.stringify(defaultCardState.levels.map(item => item.label)) === JSON.stringify(['只读本笔记', '参考本目录', '可写', '自动']) && defaultCardState.checked === '只读本笔记' && defaultCardState.summary === '范围：仅本篇' && defaultCardState.detailHidden === true && defaultCardState.network === false && defaultCardState.mcp === false, JSON.stringify(defaultCardState && { levels: defaultCardState.levels, checked: defaultCardState.checked, summary: defaultCardState.summary }))
   const authState = authReady ? await page.eval(`(() => {
     const card = document.querySelector('dialog[open][data-modal="false"].overlay-authorization')
     if (!card) return null
@@ -1963,6 +2109,21 @@ async function verifyUx(page, vault, shot) {
   const denySettled = denied && await waitFor(page, `(async () => { const note = await window.rgent.noteRead('UX 写拒绝.md'); return note.content.includes('UX 写拒绝完成。') && (await window.rgent.agentTasks()).length === 0 })()`, 60000)
   const denyClean = denySettled && await page.eval(`document.querySelectorAll('dialog[open]').length === 0 && !document.querySelector('.overlay-write-confirm')`)
   check('UX：点「不允许」不落盘，任务照常收尾且无弹窗', openedDeny && denyReady && denySent && denyConfirm && denied && !existsSync(at('UX拒绝样张.md')) && denySettled && denyClean, JSON.stringify({ openedDeny, denyReady, denySent, denyConfirm, denied, rejectedAbsent: !existsSync(at('UX拒绝样张.md')), denySettled, denyClean }))
+
+  // 四·二、自动档：新建由主进程直接批准、不出写确认卡；用一条「已新建」通知给出落点并可直接打开。
+  const openedAuto = await openNote('UX 自动.md')
+  const autoReady = openedAuto && await prepareAuthorization('UX自动建', 'auto')
+  const autoSent = autoReady && (await confirmInCard()).ok
+  const autoNotice = autoSent && await waitFor(page, `(() => { const card=[...document.querySelectorAll('.notice')].find(node=>(node.querySelector('.notice-title')?.textContent||'').includes('已新建')); return !!card && [...card.querySelectorAll('button')].some(button=>button.textContent.trim()==='打开') })()`, 60000)
+  const autoCardAbsent = autoSent && !await page.eval(`!!document.querySelector('.overlay-write-confirm')`)
+  const autoCreated = autoNotice && await waitFile(at('UX自动样张.md'))
+  const autoNoticeTitle = autoNotice ? await page.eval(`[...document.querySelectorAll('.notice')].find(node=>(node.querySelector('.notice-title')?.textContent||'').includes('已新建'))?.querySelector('.notice-title')?.textContent ?? ''`) : ''
+  const autoOpened = autoNotice && await clickNoticeAction('已新建')
+  const autoTab = autoOpened && await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel === 'UX自动样张.md'`, 15000)
+  const autoSettled = autoNotice && await waitFor(page, `(async () => (await window.rgent.agentTasks()).length === 0)()`, 60000)
+  check('UX：自动档新建不出确认卡，只出「已新建」通知且能打开', openedAuto && autoReady && autoSent && autoNotice && autoCardAbsent && autoCreated && autoNoticeTitle.includes('已新建') && autoOpened && autoTab && autoSettled, JSON.stringify({ openedAuto, autoReady, autoSent, autoNotice, autoCardAbsent, autoCreated, autoNoticeTitle, autoOpened, autoTab, autoSettled }))
+  const autoNoticeClosed = await page.eval(`(() => { const card=[...document.querySelectorAll('.notice')].find(node=>(node.querySelector('.notice-title')?.textContent||'').includes('已新建')); if(!card) return false; card.querySelector('.notice-close')?.click(); return true })()`)
+  if (autoNoticeClosed) await waitFor(page, `![...document.querySelectorAll('.notice')].some(node=>(node.querySelector('.notice-title')?.textContent||'').includes('已新建'))`)
 
   // 五、冲突先横幅：编辑器里的未保存稿 vs 磁盘上的外部改动；Cmd/Ctrl+S 后只出 notice，
   //    点 notice 的「核对」才进既有的模态核对浮层。这里用真文件改写构造冲突。
@@ -2852,7 +3013,7 @@ async function verifyMultiVault(page,nativePage,vault,sibling,profile,shot,elect
   check('启动恢复最后使用库 A',await waitFor(page,`document.querySelector('#app')?.dataset.vault==='研究库 A'`))
   check('底栏无库名，库名只在 data-vault',await page.eval(`!document.querySelector('.status-vault') && document.querySelector('#app')?.dataset.vault==='研究库 A'`))
   await page.eval(`document.querySelector('.settings-open').click()`)
-  check('普通设置默认界面且七页顺序正确',await waitFor(page,`document.querySelector('.settings-page-title')?.textContent==='界面' && JSON.stringify([...document.querySelectorAll('.settings-nav button')].map(n=>n.textContent))===JSON.stringify(['笔记库','界面','助手','记忆','技能','模型','运行'])`))
+  check('普通设置默认界面且八页顺序正确（联网在工作区）',await waitFor(page,`document.querySelector('.settings-page-title')?.textContent==='界面' && JSON.stringify([...document.querySelectorAll('.settings-nav button')].map(n=>n.textContent))===JSON.stringify(['笔记库','界面','联网','助手','记忆','技能','模型','运行'])`))
   await page.eval(`globalThis.__originalSettings=document.querySelector('.overlay-settings')`)
   await nativePage.eval(`process.getBuiltinModule('module').createRequire(process.cwd()+'/package.json')('electron').BrowserWindow.getAllWindows()[0].webContents.send('menu:open-vault');true`)
   check('原生库菜单在同一设置面板直达库页',await waitFor(page,`document.querySelector('.settings-page-title')?.textContent==='笔记库' && document.querySelector('.overlay-settings')===globalThis.__originalSettings && document.querySelectorAll('dialog[open]').length===1`))
@@ -4083,7 +4244,7 @@ async function verifyModelFeedback(page, nativePage, shot) {
     }
     if(!gated)throw new Error('模型反馈批量失败回执未抵达屏障')
     check('模型反馈成功项在后续回执挂起时已同步且重复项退出候选',await waitFor(page,`document.querySelectorAll('.settings-candidate').length===3 && [...document.querySelectorAll('.settings-model-id')].some(n=>n.textContent==='feedback-added') && [...document.querySelectorAll('.status-model option')].some(n=>n.textContent==='feedback-added')`))
-    check('模型反馈 busy 防重复并禁用读取和候选操作',await nativePage.eval(`globalThis.__modelFeedback.calls.length===3`) && await page.eval(`[...document.querySelectorAll('.settings-form button,.settings-form input')].filter(n=>!n.closest('.settings-network')).every(n=>n.disabled)`))
+    check('模型反馈 busy 防重复并禁用读取和候选操作',await nativePage.eval(`globalThis.__modelFeedback.calls.length===3`) && await page.eval(`[...document.querySelectorAll('.settings-form button,.settings-form input')].every(n=>n.disabled)`))
     await nativePage.eval(`globalThis.__modelFeedback.release();globalThis.__modelFeedback.release=null;true`)
     check('模型反馈分别报告成功、重复、失败与未尝试',await waitFor(page,`document.querySelector('.settings-read-panel')?.textContent.includes('已添加 1 个，已存在 1 个，失败 1 个，未尝试 1 个')`))
     check('模型反馈长名称、容量与未勾选草稿保留且结束恢复控件',await page.eval(`(()=>{const rows=[...document.querySelectorAll('.settings-candidate')];return rows[0].querySelector('.settings-candidate-id').textContent===${JSON.stringify(longId)} && rows[0].querySelector('input[type=number]').value==='8192' && rows[0].querySelector('input[type=checkbox]').checked && !rows[2].querySelector('input[type=checkbox]').checked && !document.querySelector('.settings-read-row button').disabled})()`))
@@ -4170,7 +4331,7 @@ function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequest
         }
         // 只按写工具专项自己的口令识别：工具链场景现在也带写工具，按工具名匹配会把它整个劫持走。
         const writeBody = JSON.stringify(decoded.messages)
-        const writePrompts = ['建样张一', '建样张二', '补样张', '超限样张', '改名样张', '挪样张', '越权样张', '删样张', '不删样张', '旅程补写']
+        const writePrompts = ['建样张一', '建样张二', '补样张', '超限样张', '自动改名样张', '改名样张', '挪样张', '越权样张', '删样张', '不删样张', '旅程补写']
         if (writePrompts.some(prompt => writeBody.includes(prompt))) {
           writeRequests.push(decoded)
           const emit = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: 'write-ui', object: 'chat.completion.chunk', created: 1, model: decoded.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
@@ -4182,6 +4343,8 @@ function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequest
             const call = prompts.includes('越权样张')
               // 越权场景：请模型改「正在写入的发起篇」自己——门必须按 ORIGIN_LOCKED 拒。
               ? { name: 'rename_note', input: { relPath: '写作越权.md', newName: '偷改发起篇' } }
+              : prompts.includes('自动改名样张')
+                ? { name: 'rename_note', input: { relPath: '写作自动参考.md', newName: '写作自动参考改' } }
               : prompts.includes('改名样张')
                 ? { name: 'rename_note', input: { relPath: '写作参考.md', newName: '写作参考改' } }
                 : prompts.includes('挪样张')
@@ -4643,7 +4806,7 @@ async function main() {
       const configured=await configureControlledHost(page,`http://127.0.0.1:${hostServer.address().port}/v1`)
       check('MCP 专项初始化受控供应商与设备默认模型',configured===true)
       if(!configured)throw Error('MCP 专项受控模型初始化失败')
-      try{await verifyMcpOnly(page,vault,shot,mcpRequests)}catch(error){stageFailed('远端只读 MCP 专项',error)}
+      try{await verifyMcpOnly(page,vault,profile,shot,mcpRequests)}catch(error){stageFailed('远端只读 MCP 专项',error)}
       check('远端只读 MCP 专项没有未捕获异常',page.errors.length===0,page.errors.slice(0,1).join(''))
       check('远端只读 MCP 专项全程只走受控主机',mcpRequests.length>=1,String(mcpRequests.length))
       process.stdout.write(`\n共 ${results.length} 条，失败 ${failures} 条。\n`)
@@ -5700,7 +5863,7 @@ async function main() {
         const note = await window.rgent.noteRead('生命周期/无关生成.md')
         const request={ ...${JSON.stringify({ relPath: '生命周期/无关生成.md',
           range: { start: 0, end: unrelatedPrompt.length }, expectedText: unrelatedPrompt, promptText: '多任务恢复' })},
-          expectedRevision: note.revision, sessionId: note.sessionId, objectVersion: note.objectVersion }
+          expectedRevision: note.revision, sessionId: note.sessionId, objectVersion: note.objectVersion, level: 'reference' }
         const config = await window.rgent.modelConfigGet(); request.modelRecordId = config.config.defaultModelId
         const authorization=await window.rgent.agentAuthorizationPreview({...request,references:[]})
         return authorization.ok ? window.rgent.agentStart({...request,previewId:authorization.preview.id}) : authorization

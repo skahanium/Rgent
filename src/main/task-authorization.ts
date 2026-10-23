@@ -17,8 +17,8 @@ export type AuthorizationDependencies = {
   acceptsObject(path: string, expected: string, current: string): boolean
   ownerValid?: (owner:string)=>boolean
   memoryAuthorization?: (request:AgentCommandRequest)=>Promise<{signature:string;search:boolean;snapshotSignature?:string;disclosure?:AgentAuthorizationPreview['memory']}>
-  /** 联网只读的可用性：`available` 管抓页，`search` 另要求服务与密钥可用；界面只拿摘要。 */
-  network?: () => { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' }
+  /** 联网只读的可用性：`available` 管抓页，`search` 另要求服务与密钥可用；`native` 是模型自带联网选择。 */
+  network?: () => { available: boolean; search: boolean; providerHost: string | null; native?: boolean; reason?: 'off' | 'not-configured' }
   /** 远端只读 MCP 的可用性：只在「有可解密的 token 且白名单非空」时为可用。 */
   mcp?: () => AgentMcpAvailability
   /** 本机是否已证明可送系统废纸篓；预览只披露这个已有事实，不改变删除门。 */
@@ -58,8 +58,8 @@ export interface TaskGrant {
   acknowledgeOrigin(snapshot: NoteSnapshot): void
   revoke(): void
 }
-/** 预览时冻结的联网可用性快照：start 必须逐项一致，防「确认后换目标主机」。 */
-type NetworkAvailabilitySnapshot = { available: boolean; search: boolean; providerHost: string | null }
+/** 预览时冻结的联网可用性快照：start 必须逐项一致，防「确认后换目标主机或渠道」。 */
+type NetworkAvailabilitySnapshot = { available: boolean; search: boolean; providerHost: string | null; native: boolean }
 /** 预览时冻结的 MCP 可用性快照：服务器名／主机／白名单工具逐项一致才放行。
  *  只冻「有什么」，不冻 token 或服务器正文。 */
 type Prepared = { owner: string; request: AgentCommandRequest; modelRecordId: string; view: AgentAuthorizationPreview; root: string; config: AuthorizationConfiguration; configHash: string; expires: number; memory?:{signature:string;search:boolean;snapshotSignature?:string}; level: AgentPermissionLevel; write: boolean; autoApproveWrites: boolean; networkAvailable: NetworkAvailabilitySnapshot; mcpServers: readonly McpGrantServer[] }
@@ -163,18 +163,18 @@ export class TaskAuthorizationRegistry {
       deleteEnabled:this.deps.deleteAvailable?.()===true,
       ...(memory?.disclosure?{memory:{...memory.disclosure,search:{available:memory.search,calls:memory.search?4:0,sharedTools:config.limits.tools}}}:{})}
     for(const [id,p]of this.previews)if(p.expires<Date.now() || p.owner===owner)this.previews.delete(id)
-    this.previews.set(view.id,{owner,request:command(request),view:structuredClone(view),modelRecordId:request.modelRecordId,root,config,configHash:digest(config),expires:Date.now()+300000,memory:memory?{signature:memory.signature,search:memory.search,...(memory.snapshotSignature?{snapshotSignature:memory.snapshotSignature}:{})}:undefined,level:request.level,write:request.level==='write'||request.level==='auto',autoApproveWrites:request.level==='auto',networkAvailable:{available:availability.available,search:availability.search,providerHost:availability.providerHost},mcpServers:mcpServers.map(server=>({...server,tools:[...server.tools]}))})
+    this.previews.set(view.id,{owner,request:command(request),view:structuredClone(view),modelRecordId:request.modelRecordId,root,config,configHash:digest(config),expires:Date.now()+300000,memory:memory?{signature:memory.signature,search:memory.search,...(memory.snapshotSignature?{snapshotSignature:memory.snapshotSignature}:{})}:undefined,level:request.level,write:request.level==='write'||request.level==='auto',autoApproveWrites:request.level==='auto',networkAvailable:{available:availability.available,search:availability.search,providerHost:availability.providerHost,native:availability.native},mcpServers:mcpServers.map(server=>({...server,tools:[...server.tools]}))})
     return structuredClone(view)
   }
 
-  private networkAvailability(): { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' } {
+  private networkAvailability(): { available: boolean; search: boolean; providerHost: string | null; native: boolean; reason?: 'off' | 'not-configured' } {
     try {
       const value = this.deps.network?.()
-      if (!value) return { available: false, search: false, providerHost: null, reason: 'off' }
+      if (!value) return { available: false, search: false, providerHost: null, native: false, reason: 'off' }
       const available = value.available === true
       // 搜索不可能独立于抓页可用：总闸关或本场未获准时一并置 false。
-      return { available, search: available && value.search === true, providerHost: value.providerHost, ...(value.reason ? { reason: value.reason } : {}) }
-    } catch { return { available: false, search: false, providerHost: null, reason: 'off' } }
+      return { available, search: available && value.search === true, providerHost: value.providerHost, native: available && value.native === true, ...(value.reason ? { reason: value.reason } : {}) }
+    } catch { return { available: false, search: false, providerHost: null, native: false, reason: 'off' } }
   }
 
   /** 设备级 MCP 快照：启用＋白名单非空；搜索类带标记，闸关时由 LiveGrant 过滤。 */
@@ -200,7 +200,7 @@ export class TaskAuthorizationRegistry {
     if(request.level!==prepared.level)throw Error('INVALID_AUTHORIZATION')
     // 闸与 MCP 都是设备级：预览后换服务商／关闸／改动服务器，都要求重新预览。
     const availability=this.networkAvailability(), frozen=prepared.networkAvailable
-    if(availability.available!==frozen.available||availability.search!==frozen.search||availability.providerHost!==frozen.providerHost)throw Error('INVALID_AUTHORIZATION')
+    if(availability.available!==frozen.available||availability.search!==frozen.search||availability.providerHost!==frozen.providerHost||availability.native!==frozen.native)throw Error('INVALID_AUTHORIZATION')
     const mcp=this.mcpGrantServers()
     if(digest(mcp)!==digest(prepared.mcpServers))throw Error('INVALID_AUTHORIZATION')
     this.checkSession(prepared.root,prepared.view.sessionId)

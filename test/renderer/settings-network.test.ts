@@ -8,11 +8,14 @@ import {
   networkStatsErrorText,
   type NetworkCardHandlers
 } from '../../src/renderer/src/settings-network.ts'
+import { mountNativeSearch } from '../../src/renderer/src/settings-network-page.ts'
+import { hostErrorText } from '../../src/renderer/src/host-errors.ts'
 import type {
   DeepSeekKeySource,
   EgressLogEntry,
   EgressLogResult,
   FetchService,
+  NativeSearchProbeResult,
   NetworkConfigResult,
   NetworkProviderSaveRequest,
   NetworkConfigView,
@@ -479,5 +482,89 @@ describe('联网搜索与抓取设置卡', () => {
     expect(statNode<HTMLElement>(body, 'log-note').textContent).toContain('读取最近外发记录失败')
     expect(formatStatsBytes(1234)).toBe('1.2 KB')
     expect(formatStatsBytes(0)).toBe('0 B')
+  })
+})
+
+describe('模型自带联网（设置页）', () => {
+  const probeOk: NativeSearchProbeResult = { ok: true }
+  const probeFail: NativeSearchProbeResult = { ok: false, error: 'NATIVE_SEARCH_UNAVAILABLE' }
+
+  function mountNative(initial: NetworkConfigResult = ok(view()), overrides: Partial<Pick<NetworkCardHandlers, 'get' | 'setNativeSearch' | 'probe'>> = {}) {
+    const body = document.createElement('section')
+    document.body.append(body)
+    const handlers = {
+      get: vi.fn(async () => initial),
+      setNativeSearch: vi.fn(async (minimax: boolean) => ok(view({ nativeSearch: { minimax } }))),
+      probe: vi.fn(async () => probeOk),
+      ...overrides
+    }
+    const dispose = mountNativeSearch({ body, isCurrent: () => true }, handlers)
+    return { body, handlers, dispose }
+  }
+  const nativeNode = <T extends HTMLElement>(body: HTMLElement, name: string): T => body.querySelector<T>(`[data-native="${name}"]`)!
+
+  it('勾选时先探测，成功才写配置并显示「探测通过」', async () => {
+    const { body, handlers } = mountNative()
+    await tick()
+    const minimax = nativeNode<HTMLInputElement>(body, 'minimax')
+    expect(minimax.checked).toBe(false)
+    minimax.checked = true
+    minimax.dispatchEvent(new Event('change'))
+    await tick()
+    await tick()
+    expect(handlers.probe).toHaveBeenCalledTimes(1)
+    expect(handlers.setNativeSearch).toHaveBeenCalledWith(true)
+    expect(handlers.setNativeSearch).toHaveBeenCalledTimes(1)
+    expect(minimax.checked).toBe(true)
+    expect(nativeNode<HTMLElement>(body, 'status').textContent).toContain('探测通过')
+    expect(nativeNode<HTMLElement>(body, 'error').hidden).toBe(true)
+  })
+
+  it('探测失败时保持未勾选、不写配置，并显示错误码人话与「不可用」', async () => {
+    const { body, handlers } = mountNative(ok(view()), { probe: vi.fn(async () => probeFail) })
+    await tick()
+    const minimax = nativeNode<HTMLInputElement>(body, 'minimax')
+    minimax.checked = true
+    minimax.dispatchEvent(new Event('change'))
+    await tick()
+    await tick()
+    expect(handlers.probe).toHaveBeenCalledTimes(1)
+    expect(handlers.setNativeSearch).not.toHaveBeenCalled()
+    expect(minimax.checked).toBe(false)
+    expect(minimax.disabled).toBe(false)
+    expect(nativeNode<HTMLElement>(body, 'status').textContent).toBe('状态：不可用')
+    const error = nativeNode<HTMLElement>(body, 'error')
+    expect(error.hidden).toBe(false)
+    expect(error.textContent).toBe(hostErrorText('NATIVE_SEARCH_UNAVAILABLE'))
+    expect(body.textContent).not.toContain('NATIVE_SEARCH_UNAVAILABLE')
+  })
+
+  it('已启用时显示探测通过；取消勾选直接写配置、不再探测', async () => {
+    const { body, handlers } = mountNative(ok(view({ nativeSearch: { minimax: true } })))
+    await tick()
+    const minimax = nativeNode<HTMLInputElement>(body, 'minimax')
+    expect(minimax.checked).toBe(true)
+    expect(nativeNode<HTMLElement>(body, 'status').textContent).toContain('探测通过')
+    minimax.checked = false
+    minimax.dispatchEvent(new Event('change'))
+    await tick()
+    await tick()
+    expect(handlers.probe).not.toHaveBeenCalled()
+    expect(handlers.setNativeSearch).toHaveBeenCalledWith(false)
+    expect(minimax.checked).toBe(false)
+    expect(nativeNode<HTMLElement>(body, 'status').textContent).toBe('状态：未启用')
+  })
+
+  it('探测通过但保存失败时回滚勾选并显示保存错误', async () => {
+    const { body, handlers } = mountNative(ok(view()), { setNativeSearch: vi.fn(async () => fail('IO_ERROR')) })
+    await tick()
+    const minimax = nativeNode<HTMLInputElement>(body, 'minimax')
+    minimax.checked = true
+    minimax.dispatchEvent(new Event('change'))
+    await tick()
+    await tick()
+    expect(handlers.probe).toHaveBeenCalledTimes(1)
+    expect(minimax.checked).toBe(false)
+    expect(nativeNode<HTMLElement>(body, 'error').textContent).toBe(networkErrorText('IO_ERROR'))
   })
 })

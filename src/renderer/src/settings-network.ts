@@ -11,7 +11,8 @@ import type {
   NetworkStatKind,
   NetworkStatsClearResult,
   NetworkStatsResult,
-  NetworkStatsView
+  NetworkStatsView,
+  NativeSearchProbeResult
 } from '../../shared/ipc.ts'
 import { confirmAction } from './settings-model.ts'
 
@@ -36,6 +37,8 @@ export type NetworkCardHandlers = {
   setFetch: (service: FetchService) => Promise<NetworkConfigResult>
   /** 模型自带联网（MiniMax）的启用选择；是否可用由主进程探测，本页只存选择。 */
   setNativeSearch: (enabled: boolean) => Promise<NetworkConfigResult>
+  /** 启用前的探测：只发 ping，不带用户数据；成功才写配置。旧宿主未接时按不可用处理。 */
+  probe?: () => Promise<NativeSearchProbeResult>
   /** 设备级外发统计（可选：测试或旧宿主没接时，卡片如实显示不可用）。 */
   stats?: () => Promise<NetworkStatsResult>
   /** 清空统计并同时清外发日志；主进程保证「日志失败则统计不动」。 */

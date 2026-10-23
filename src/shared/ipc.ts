@@ -89,6 +89,7 @@ export const IPC = {
   networkEgressLog: 'network:egress-log',
   networkStats: 'network:stats',
   networkStatsClear: 'network:stats-clear',
+  networkNativeProbe: 'network:native-probe',
   mcpConfig: 'mcp:config',
   mcpServerSave: 'mcp:server-save',
   mcpServerRemove: 'mcp:server-remove',
@@ -238,6 +239,8 @@ export type NetworkProviderSaveRequest = { provider: NetworkProvider; key: strin
 /** 清除某个服务商的密钥；不带参数时清除当前搜索服务商（兼容旧调用）。 */
 export type NetworkProviderClearRequest = { provider?: NetworkProvider }
 export type NetworkConfigResult = { ok: true; config: NetworkConfigView } | { ok: false; error: string }
+/** 模型自带联网探测：只回是否可用；失败码固定，不把上游原文或密钥带回渲染层。 */
+export type NativeSearchProbeResult = { ok: true } | { ok: false; error: 'NATIVE_SEARCH_UNAVAILABLE' }
 
 /** 人发起抓页：只发人输入的 URL；渲染层拿不到凭据，也不带笔记正文。 */
 export type HumanFetchRequest = { url: string; requestId?: string }
@@ -274,6 +277,8 @@ export type HumanSearchResult =
 export type EgressLogEntry = {
   at: string
   action: 'fetch' | 'search'
+  /** 实际外发路径；旧记录没有该字段。 */
+  service?: 'direct' | 'deepseek' | 'provider'
   host: string
   bytes?: number
   count?: number
