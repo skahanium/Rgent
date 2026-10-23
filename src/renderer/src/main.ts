@@ -1,3 +1,4 @@
+import './reading-fonts.css'
 import './styles.css'
 import { start } from './shell.ts'
 import { watchTheme } from './theme.ts'

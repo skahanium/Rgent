@@ -23,7 +23,7 @@ export type ReadingPreference = {
 
 export const DEFAULT_READING_PREFERENCE: ReadingPreference = {
   bodyFont: 'literary',
-  headingFont: 'system',
+  headingFont: 'humanist',
   fontSize: 17,
   lineHeight: 1.65,
   maxWidth: 768

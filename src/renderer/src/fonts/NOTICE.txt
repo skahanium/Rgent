@@ -1,0 +1,8 @@
+Rgent 默认阅读字体（内部名 Rgent Serif / Rgent Sans）来自下列 SIL Open Font License 1.1 发行，全文见同目录 OFL.txt。
+
+- Source Serif 4（拉丁）：Adobe
+- Source Sans 3（拉丁）：Adobe
+- Noto Serif SC（简体）：Google（基于思源宋）
+- Noto Sans SC（简体）：Google（基于思源黑）
+
+只收录 latin / chinese-simplified 的 400 与 600 字重。不随包装分发苹果或微软系统字体。

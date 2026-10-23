@@ -118,7 +118,7 @@ function render(node: ExtendedNode, source: string, host?: NoteHost, standaloneI
     case 'thematicBreak': return document.createElement('hr')
     case 'break': return document.createElement('br')
     case 'link': {
-      const link = element('a') as HTMLAnchorElement
+      const link = element('a', 'md-link') as HTMLAnchorElement
       const href = safeHref(node.url ?? '')
       if (href) { link.href = href; link.rel = 'noopener noreferrer'; link.target = '_blank' }
       return link

@@ -2404,7 +2404,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       const style = getComputedStyle(document.querySelector('.cm-line.md-h1'))
       return JSON.stringify({ size: parseFloat(style.fontSize), weight: Number(style.fontWeight) })
     })()`))
-    return { ok: state.size >= 30 && state.size <= 34 && state.weight <= 500, detail: JSON.stringify(state) }
+    return { ok: state.size >= 24 && state.size <= 29 && state.weight >= 500 && state.weight <= 700, detail: JSON.stringify(state) }
   })
   await probe('页边索引在画布右缘纵向居中且保持紧凑', async () => {
     const geometry = JSON.parse(await page.eval(`(() => {
@@ -4886,7 +4886,8 @@ async function main() {
     await probe('阅读态标题不露 Markdown 定界符', async () =>
       (await page.eval(`(() => {
         const line = [...document.querySelectorAll('.cm-line')].find((n) => n.innerText.includes('设计动机'))
-        return !!line && line.innerText.trim() === '设计动机' && getComputedStyle(line).fontFamily.includes('sans-serif')
+        const family = getComputedStyle(line).fontFamily
+        return !!line && line.innerText.trim() === '设计动机' && /Rgent Sans|sans-serif/i.test(family)
       })()`)) === true
     )
     await probe('账本复用阅读呈现且正文不含账本', async () => {
@@ -5088,7 +5089,29 @@ async function main() {
         const heading = getComputedStyle(document.querySelector('.cm-line.md-heading')).fontFamily
         return JSON.stringify({ body, heading })
       })()`))
-      return { ok: fonts.body !== fonts.heading && /sans-serif/.test(fonts.heading), detail: `${fonts.body} → ${fonts.heading}` }
+      return { ok: fonts.body !== fonts.heading && /Rgent Serif|serif/i.test(fonts.body) && /Rgent Sans|sans-serif/i.test(fonts.heading) && !/SimSun/i.test(fonts.body), detail: `${fonts.body} → ${fonts.heading}` }
+    })
+    await probe('默认正文使用随包装阅读字体', async () => {
+      const fonts = JSON.parse(await page.eval(`(() => {
+        const body = getComputedStyle(document.querySelector('.cm-scroller')).fontFamily
+        const heading = document.querySelector('.cm-line.md-heading')
+        const h1 = document.querySelector('.cm-line.md-h1')
+        const headingStyle = heading ? getComputedStyle(heading) : null
+        const h1Style = h1 ? getComputedStyle(h1) : null
+        const declared = getComputedStyle(document.documentElement).getPropertyValue('--reading-font-family')
+        return JSON.stringify({
+          body,
+          declared,
+          headingFamily: headingStyle?.fontFamily ?? '',
+          headingWeight: headingStyle ? Number(headingStyle.fontWeight) : 0,
+          h1Size: h1Style ? parseFloat(h1Style.fontSize) : null,
+          h1Weight: h1Style ? Number(h1Style.fontWeight) : null
+        })
+      })()`))
+      const packaged = /Rgent Serif/i.test(`${fonts.body} ${fonts.declared}`) && !/SimSun|Iowan/i.test(`${fonts.body} ${fonts.declared}`)
+      const headingOk = /Rgent Sans|sans-serif/i.test(fonts.headingFamily) && fonts.headingWeight >= 500
+      const h1Ok = fonts.h1Size == null || (fonts.h1Size >= 24 && fonts.h1Size <= 29 && fonts.h1Weight >= 500)
+      return { ok: packaged && headingOk && h1Ok, detail: JSON.stringify(fonts) }
     })
     await probe('切换 tab 后恢复各自光标位置', async () => {
       const point = JSON.parse(await page.eval(`(() => {

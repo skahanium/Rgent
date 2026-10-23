@@ -86,6 +86,15 @@ describe('read-only ledger presentation', () => {
     expect(host.textContent).not.toContain('**')
   })
 
+  it('marks links with the same quiet class as the canvas', () => {
+    const host = document.createElement('div')
+    renderReadOnlyMarkdown(host, '[说明](https://example.com/path)')
+    const link = host.querySelector('a')
+    expect(link?.className).toBe('md-link')
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(link?.getAttribute('href')).toMatch(/^https:\/\/example\.com\/path\/?$/)
+  })
+
   it('keeps unsafe HTML inert', () => {
     const host = document.createElement('div')
     renderReadOnlyMarkdown(host, '文字\n\n<iframe src="https://example.com"></iframe>\n')

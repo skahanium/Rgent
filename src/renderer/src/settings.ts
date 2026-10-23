@@ -655,6 +655,9 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       sample.className = 'settings-reading-sample'
       sample.setAttribute('aria-label', '笔记排版预览')
       sample.innerHTML = '<span class="settings-sample-eyebrow">笔记样张 · 阅读预览</span><h4>自然生长</h4><p>好的想法不一定在写下时就已经完整。先留下一个清晰的落点，日后再回来，让新的线索与旧的经验相遇。</p><p>Writing is thinking in motion. 在中文与 English 之间，行距和字形应该保持安静、连贯。</p><p class="settings-sample-prompt">&gt; 能否把这个想法整理成两个可观察的行为？</p><p class="settings-sample-answer">可以。先记下离开笔记时的上下文，再观察重新打开后是否能够接着写。</p>'
+      const fontNote = document.createElement('p')
+      fontNote.className = 'settings-reading-font-note'
+      fontNote.textContent = '典雅衬线与人文无衬线随软件，各机相同；系统无衬线跟随这台电脑；宋体阅读仅在本机有宋体-简时使用。'
       const controls = document.createElement('div')
       controls.className = 'settings-reading-controls'
       const fontSelect = (key: 'bodyFont' | 'headingFont', labelText: string): HTMLSelectElement => {
@@ -710,7 +713,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
       const footer = document.createElement('div')
       footer.className = 'settings-reading-footer'
       footer.append(save, saveError)
-      readingSection.append(heading, description, sample, controls, footer)
+      readingSection.append(heading, description, sample, fontNote, controls, footer)
       let original: ReadingPreference | null = null
       let draft: ReadingPreference | null = null
       const paintDraft = (): void => {

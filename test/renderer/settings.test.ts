@@ -103,6 +103,8 @@ describe('settings interface page', () => {
     })
     panel.open()
     await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>('[data-setting="bodyFont"]')?.value).toBe('literary'))
+    expect(document.querySelector('.settings-reading-font-note')?.textContent).toContain('随软件，各机相同')
+    expect(document.querySelector<HTMLSelectElement>('[data-setting="headingFont"]')?.value).toBe('humanist')
     const bodyFont = document.querySelector<HTMLSelectElement>('[data-setting="bodyFont"]')!
     bodyFont.value = 'humanist'
     bodyFont.dispatchEvent(new Event('change', { bubbles: true }))
