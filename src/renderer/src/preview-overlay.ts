@@ -10,9 +10,9 @@ export function openNetworkPreview(view: NetworkPreviewView): Overlay {
   const mcpLabel = isMcp ? `MCP ${view.server ?? '未知服务器'}/${view.tool ?? '未知工具'}` : ''
   const overlay = openOverlay({
     label: isMcp ? `${mcpLabel}（低信任·未核对）` : '外部内容（低信任·未核对）',
+    className: 'overlay-network-preview',
     initialFocus: () => overlay.root.querySelector<HTMLElement>('.network-preview-close')
   })
-  overlay.root.classList.add('overlay-network-preview')
 
   const title = document.createElement('h2')
   title.textContent = isMcp ? mcpLabel : '外部内容（低信任·未核对）'
@@ -21,7 +21,10 @@ export function openNetworkPreview(view: NetworkPreviewView): Overlay {
   meta.className = 'network-preview-meta settings-hint'
   // MCP 的 url 只是占位来源，真正的来源是服务器/工具；抓页仍按原样显示 URL。
   const source = isMcp ? mcpLabel : view.url
-  meta.textContent = `来源：${source} · 获取时间：${view.fetchedAt} · 字节数：${view.bytes} 字节 · ${view.truncated ? '已截断' : '未截断'}`
+  const fetched = Number.isFinite(Date.parse(view.fetchedAt))
+    ? new Date(view.fetchedAt).toLocaleString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
+    : view.fetchedAt
+  meta.textContent = `来源：${source} · 获取时间：${fetched} · 字节数：${view.bytes} 字节 · ${view.truncated ? '已截断' : '未截断'}`
   meta.style.overflowWrap = 'anywhere'
 
   const notice = isMcp ? document.createElement('p') : null

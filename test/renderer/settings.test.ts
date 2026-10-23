@@ -268,17 +268,22 @@ describe('settings interface page', () => {
     panel.close()
   })
 
-  it('clears the password field as soon as save is clicked', async () => {
-    let finish!: (value: { ok: true; config: ReturnType<typeof modelConfig> }) => void
+  it('keeps the password until save succeeds, and restores it when save fails', async () => {
+    let finish!: (value: { ok: true; config: ReturnType<typeof modelConfig> } | { ok: false; error: string }) => void
     const handlers = modelHandlers()
-    handlers.saveProvider = vi.fn().mockReturnValue(new Promise((resolve) => { finish = resolve }))
+    handlers.saveProvider = vi.fn().mockImplementation(() => new Promise((resolve) => { finish = resolve }))
     const panel = await openProvider(handlers, 'minimax')
     const secret = document.querySelector<HTMLInputElement>('input[type="password"]')!
     secret.value = 'live-secret'
     buttonByText('保存配置')!.click()
-    expect(secret.value).toBe('')
+    expect(secret.value).toBe('live-secret')
     expect(handlers.saveProvider).toHaveBeenCalledWith(expect.objectContaining({ newKey: 'live-secret' }))
+    finish({ ok: false, error: 'IO_ERROR' })
+    await vi.waitFor(() => expect(document.querySelector('.settings-error')?.textContent).toMatch(/未完成|失败/))
+    expect(secret.value).toBe('live-secret')
+    buttonByText('保存配置')!.click()
     finish({ ok: true, config: modelConfig() })
+    await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe(''))
     panel.close()
   })
 
@@ -790,6 +795,20 @@ it('refreshes the model options on return without clearing an unsaved memory mod
  expect(document.querySelector('[data-memory="default-model"]')).toBe(select);expect(select.value).toBe('m')
  expect(document.querySelector('.memory-model-grid [role="status"]')!.textContent).toBe('尚未保存')
  panel.close()
+})
+
+it('does not treat an immediately saved theme change as unsaved settings', async () => {
+  const setMode = vi.fn(async (mode: 'day' | 'night' | 'system') => ({ ok: true as const, mode }))
+  const panel = createSettingsOverlay({ getMode: async () => 'day', setMode,
+    getChromeText: async () => ({ tabs: 'default', sidebar: 'default' }), setChromeText: async () => ({ ok: true, preference: { tabs: 'default', sidebar: 'default' } }) } as never)
+  panel.open()
+  await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>('input[value="day"]')?.checked).toBe(true))
+  document.querySelector<HTMLInputElement>('input[value="night"]')?.click()
+  await vi.waitFor(() => expect(setMode).toHaveBeenCalledWith('night'))
+  expect(panel.prepareVaultChange()).toBe(true)
+  const notice = document.querySelector<HTMLElement>('.settings-vault-blocked')!
+  expect(notice.hidden).toBe(true)
+  panel.close()
 })
 
 it('blocks vault switching with an in-page notice while settings drafts are unsaved', async () => {

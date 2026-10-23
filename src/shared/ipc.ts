@@ -193,6 +193,8 @@ export type AgentAuthorizationPreview = {
   network?: { available: boolean; search: boolean; providerHost: string | null; reason?: 'off' | 'not-configured' }
   /** 本场远端只读 MCP：只有主进程判定可用时才给勾选；服务器与工具名只是白名单摘要。 */
   mcp?: AgentMcpAvailability
+  /** 本场是否可能宣告删笔记：主进程已有删除实现时为 true（macOS）；Windows 仍关。渲染层不猜平台。 */
+  deleteEnabled?: boolean
 }
 /** 写类工具的人确认：主进程发起请求，渲染层只回一个是否同意。
  *  建给「落点＋正文」；改名／挪给「旧路径 → 新路径＋影响面（引用与权限条数）」；删给路径。 */

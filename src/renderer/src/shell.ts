@@ -29,39 +29,28 @@ import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
 import { openAuthorizationPopover, resetScopeMemory } from './authorization-popover.ts'
 import { installWriteConfirm } from './write-confirm.ts'
-import { hostErrorText } from './host-errors.ts'
+import { hostErrorMessage, hostErrorText } from './host-errors.ts'
 import { pendingSlash } from './slash.ts'
 import { createFileBrowser, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
 import { confirmTrash } from './trash-confirm.ts'
 import { createSidebarSizer } from './sidebar.ts'
-import type { Theme } from './theme.ts'
+import { applyResolvedTheme, type Theme } from './theme.ts'
 
 const SAVE_MS = 800
+/** 生命周期专属码。与 host-errors 重叠的码以 host-errors 为权威，这里不再复写。 */
 const LIFECYCLE_ERRORS: Record<string, string> = {
   COPY_PARENT_CHANGED: '新文件已创建，但目标目录身份无法确认。请检查目标；窗口稿和待保存任务已保留，请勿重试覆盖。',
   COPY_VERIFY_FAILED: '新文件发布后的内容或身份无法确认。请检查目标；窗口稿和待保存任务已保留。',
   SOURCE_AVAILABLE: '原对象已能核验，请重新查看当前笔记后处理保存。',
   LEDGER_BASIS_UNAVAILABLE: '无法核对原账本依据，窗口稿仍保留，另存未提交。',
-  LEDGER_BOUNDARY_INVALID: '正文语法遮住了账本边界，尚未保存。请闭合代码块或注释，并在 HTML 块后保留空行；窗口稿和原账本仍保留。',
   BAD_SENDER:'原调用窗口已变更，正文未提交，请重新预览。',
-  OBJECT_BINDING_LIMIT:'保稿证明达到容量上限，原窗口稿保留；请先处理已有保留稿。',
   STALE_PREVIEW: '文件或引用在预览后发生变化，请重新预览再提交。',
   STALE_RECOVERY: '恢复记录已变化，请重新查看状态再重试。',
-  VAULT_CHANGED: '笔记库已切换，本次操作已停止。',
-  OTHER_TASK_RUNNING: '本库还有其他笔记的运行任务，请先停止并保存其生成内容，再进行文件操作。',
   EEXIST: '目标位置已有同名文件或文件夹。',
   PERMISSION_DOWNGRADE: '这次移动会使部分对象的 AI 权限意外降档，已阻止提交。',
   PERMISSION_COLLISION: '目标位置的显式权限规则发生冲突，已阻止提交。',
-  PERMISSIONS_INVALID: '权限名单无法核验，请先修复库根的 .rgent-permissions。',
-  UNSAVED_DRAFT: '有草稿尚未保存，请先处理保存冲突。',
-  PREVIOUS_TASK_UNSAVED: '运行任务的内容尚未保存，请先处理再修改文件位置。',
-  LIFECYCLE_RECOVERY_REQUIRED: '文件操作中断且无法自动核对。恢复记录仍在库中；AI 访问已暂停，请人工检查。',
-  STRUCTURE_BUSY: '另一个文件位置操作正在进行，请稍后重试。',
   PATH_RESERVED: '从界面新建同名笔记会接替旧记录。想找回原对象，请把它原样放回，再到设置的「笔记库」重扫核验。',
   PLATFORM_UNPROVEN: '这台电脑上的系统废纸篓还没有可证明的删除实现，没有执行删除。',
-  PATH_CHANGED: '文件在确认前被换掉了，没有删除。请重新查看后再试。',
-  TRASH_CONFLICT: '删除后原路径又出现了另一个对象，这次不能当成功。请到系统废纸篓核对本次落点；新出现的对象要你自己确认，别把它当成刚删的笔记。',
-  LANDING_MISMATCH: '系统废纸篓里的落点不是这次确认的笔记，可能删错了对象。请立刻到系统废纸篓核对本次新增的那一项；在核对清楚前不要再动这个路径。',
   TRASH_INCOMPLETE: '系统报告原路径仍被占用，删除没有完成。请检查该文件后再试。',
   ATTACHMENT_COLLISION: '同名位置是一个普通文件，不是附件夹，不能和笔记一起移动；请先处理那个文件。'
 }
@@ -71,7 +60,7 @@ export const lifecycleErrorText = (error: unknown): string => {
   // 直接查表会落空，把中文说明漏成原始串（实测：同路径新建被拒时人只看到 PATH_RESERVED）。
   const marker = raw.lastIndexOf('Error: ')
   const code = raw.startsWith('Error invoking remote method') && marker >= 0 ? raw.slice(marker + 'Error: '.length).trim() : raw
-  return LIFECYCLE_ERRORS[code] ?? raw
+  return hostErrorMessage(code) ?? LIFECYCLE_ERRORS[code] ?? raw
 }
 const ROOT_UNAVAILABLE_NOTICE = '笔记库暂时无法读取，窗口稿和账本已保留。恢复原库后重新核验；换库前须处理或明确舍弃。'
 
@@ -80,8 +69,7 @@ const ROOT_UNAVAILABLE_NOTICE = '笔记库暂时无法读取，窗口稿和账�
  * 原文、路径与落点都进可复制的详情，不再用原生 alert 糊成一整段。
  */
 function openCopyableNotice(title: string, detail: string): void {
-  const overlay = openOverlay({ label: title })
-  overlay.root.classList.add('modal', 'copyable-notice')
+  const overlay = openOverlay({ label: title, className: 'modal copyable-notice' })
   const heading = document.createElement('h2')
   heading.textContent = title
   const body = document.createElement('p')
@@ -128,8 +116,7 @@ function openCopyableNotice(title: string, detail: string): void {
 function confirmDiscardWindowDraft(): Promise<boolean> {
   return new Promise((resolve) => {
     let answer = false
-    const overlay = openOverlay({ label: '明确舍弃窗口稿', onClose: () => resolve(answer) })
-    overlay.root.classList.add('modal', 'discard-dialog')
+    const overlay = openOverlay({ label: '明确舍弃窗口稿', className: 'modal discard-dialog', onClose: () => resolve(answer) })
     const heading = document.createElement('h2')
     heading.textContent = '明确舍弃这篇窗口稿？'
     const copy = document.createElement('p')
@@ -349,7 +336,11 @@ export async function start(root: HTMLElement): Promise<void> {
     memory: memoryHandlers,
     skills: skillsHandlers,
     getMode: () => window.rgent.themeGet(),
-    setMode: (mode) => window.rgent.themeSet(mode),
+    setMode: async (mode) => {
+      const result = await window.rgent.themeSet(mode)
+      if (result.ok) applyResolvedTheme(result.mode)
+      return result
+    },
     getReading: () => window.rgent.readingGet(),
     setReading: (reading) => window.rgent.readingSet(reading),
     getChromeText: () => window.rgent.chromeTextGet(),
@@ -546,6 +537,7 @@ export async function start(root: HTMLElement): Promise<void> {
     renderOutline()
     scheduleWorkspace()
   })
+  editor.onViewportChange(() => { renderOutline() })
   window.addEventListener('rgent:theme', (event) => {
     editor.setTheme((event as CustomEvent<Theme>).detail === 'night')
   })
@@ -693,23 +685,23 @@ export async function start(root: HTMLElement): Promise<void> {
     }).catch(() => { /* 读写失败时保留窗口稿，后续保存仍会复核修订值。 */ })
   })
   // 「建」的人确认：主进程发起请求，这里只摆一张卡并回一个是否同意。
-  let pendingDeletePath: string | null = null
-  let pendingCreatePath: string | null = null
+  // 路径按 requestId 记账，后开不能覆盖先开；确认 IPC 失败／超时都不当成功。
+  const writeConfirmEffects = new Map<string, { delete?: string; create?: string }>()
   installWriteConfirm({
     onRequest: handler => window.rgent.onAgentWriteRequest(preview => {
-      pendingDeletePath = preview.kind === 'delete' ? preview.relPath : null
-      pendingCreatePath = preview.kind === 'create' ? preview.relPath : null
+      writeConfirmEffects.set(preview.requestId, {
+        ...(preview.kind === 'delete' ? { delete: preview.relPath } : {}),
+        ...(preview.kind === 'create' ? { create: preview.relPath } : {})
+      })
       handler(preview)
     }),
     decide: async decision => {
-      const path = pendingDeletePath
-      const created = pendingCreatePath
+      const pending = writeConfirmEffects.get(decision.requestId)
+      writeConfirmEffects.delete(decision.requestId)
       const result = await window.rgent.agentWriteConfirm(decision)
-      if (decision.approved && path) await closeTrashedTabs(path, { includeAttachment: false })
+      if (decision.approved && result && pending?.delete) await closeTrashedTabs(pending.delete, { includeAttachment: false })
       // AI 的「建」也要走同一个打开入口：否则文件树里点新笔记会复用同路径那个不可用的旧 tab。
-      if (decision.approved && created) await openCreatedNote(created)
-      pendingDeletePath = null
-      pendingCreatePath = null
+      if (decision.approved && result && pending?.create) await openCreatedNote(pending.create)
       return result
     }
   })
@@ -1332,7 +1324,15 @@ export async function start(root: HTMLElement): Promise<void> {
     recoveryOverlay = openLifecycleStatus(status, async (request) => {
       const result = await window.rgent.lifecycleRetry(request)
       if (epoch !== vaultEpoch) throw new Error('VAULT_CHANGED')
-      const next = await refreshLifecycle()
+      // 续跑 IPC 已返回后，并发的 lifecycleStatus 会抬高 serial，冲掉这次刷新。
+      // 成功不能因此说成失败：先走常规刷新，空了再直接读一次现状。
+      let next = await refreshLifecycle()
+      if (!next && epoch === vaultEpoch) {
+        try {
+          const status = await window.rgent.lifecycleStatus()
+          if (epoch === vaultEpoch && (!vaultSession || status.sessionId === vaultSession)) next = status
+        } catch { /* 下面按 VAULT_CHANGED 处理 */ }
+      }
       if (!next) throw new Error('VAULT_CHANGED')
       if (result.ok) {
         await refreshMovedTabs()
@@ -1387,8 +1387,7 @@ export async function start(root: HTMLElement): Promise<void> {
     return new Promise((resolve) => {
       let settled = false
       const finish = (path: string | null): void => { if (!settled) { settled = true; resolve(path) } }
-      const overlay = openOverlay({ label: '选择目标文件夹', onClose: () => finish(null), initialFocus: () => select })
-      overlay.root.classList.add('lifecycle-dialog')
+      const overlay = openOverlay({ label: '选择目标文件夹', className: 'lifecycle-dialog', onClose: () => finish(null), initialFocus: () => select })
       const heading = document.createElement('h2')
       heading.textContent = '移动到'
       const description = document.createElement('p')
@@ -1418,8 +1417,7 @@ export async function start(root: HTMLElement): Promise<void> {
     return new Promise((resolve) => {
       let settled = false
       const finish = (value: { repairLinks: boolean } | null): void => { if (!settled) { settled = true; resolve(value) } }
-      const overlay = openOverlay({ label: '核对文件变更', onClose: () => finish(null), initialFocus: () => cancel })
-      overlay.root.classList.add('lifecycle-dialog')
+      const overlay = openOverlay({ label: '核对文件变更', className: 'lifecycle-dialog', onClose: () => finish(null), initialFocus: () => cancel })
       const heading = document.createElement('h2')
       heading.textContent = '核对文件变更'
       const intro = document.createElement('p')
@@ -1657,56 +1655,82 @@ export async function start(root: HTMLElement): Promise<void> {
     scheduleWorkspace()
     const scrollLeft = tabsEl.scrollLeft
     const activeChanged = renderedActive !== active
-    tabsEl.replaceChildren()
-    for (const tab of tabs) {
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.className = 'tab'
-      button.setAttribute('role', 'tab')
-      button.setAttribute('aria-selected', String(tab.relPath === active))
-      button.setAttribute('aria-controls', 'note-panel')
-      // 一组 tab 只留一个焦点站：当前项进 Tab 键序，其余用左右方向键走。
-      button.tabIndex = tab.relPath === active ? 0 : -1
-      button.dataset.rel = tab.relPath
-      button.append(icon('note', 'icon-type'))
-      const label = document.createElement('span')
-      label.className = 'tab-label'
-      label.textContent = titleOf(tab.relPath.split('/').pop() ?? tab.relPath)
-      button.append(label)
-      if (tab.dirty) {
-        const dot = document.createElement('span')
-        dot.className = 'tab-dirty'
-        dot.setAttribute('aria-label', '未保存')
-        dot.textContent = '•'
-        button.append(dot)
+    const wraps = [...tabsEl.querySelectorAll<HTMLElement>(':scope > .tab-wrap')]
+    const existing = wraps.map((wrap) => wrap.querySelector<HTMLElement>('.tab')?.dataset.rel ?? '')
+    const next = tabs.map((tab) => tab.relPath)
+    const sameIdentity = existing.length === next.length && existing.every((rel, index) => rel === next[index])
+    if (sameIdentity) {
+      for (const [index, tab] of tabs.entries()) {
+        const wrap = wraps[index]!
+        const button = wrap.querySelector<HTMLButtonElement>('.tab')!
+        const label = wrap.querySelector<HTMLElement>('.tab-label')!
+        const title = titleOf(tab.relPath.split('/').pop() ?? tab.relPath)
+        button.setAttribute('aria-selected', String(tab.relPath === active))
+        button.tabIndex = tab.relPath === active ? 0 : -1
+        if (label.textContent !== title) label.textContent = title
+        button.title = tab.relPath
+        let dirty = wrap.querySelector<HTMLElement>('.tab-dirty')
+        if (tab.dirty && !dirty) {
+          dirty = document.createElement('span')
+          dirty.className = 'tab-dirty'
+          dirty.setAttribute('aria-label', '未保存')
+          dirty.textContent = '•'
+          label.after(dirty)
+        } else if (!tab.dirty && dirty) dirty.remove()
+        wrap.querySelector('.tab-close')?.setAttribute('aria-label', `关闭 ${title}`)
       }
-      button.title = tab.relPath
-      button.addEventListener('click', () => activate(tab.relPath))
-      button.addEventListener('keydown', (event) => {
-        const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
-        if (step === 0) return
-        event.preventDefault()
-        const at = tabs.findIndex((item) => item.relPath === tab.relPath)
-        const next = tabs[(at + step + tabs.length) % tabs.length]
-        if (!next) return
-        activate(next.relPath, false)
-        tabsEl.querySelector<HTMLButtonElement>(`.tab[data-rel="${CSS.escape(next.relPath)}"]`)?.focus()
-      })
-      const close = document.createElement('button')
-      close.type = 'button'
-      close.className = 'tab-close'
-      close.setAttribute('aria-label', `关闭 ${label.textContent}`)
-      close.append(icon('close'))
-      close.addEventListener('click', (event) => {
-        event.stopPropagation()
-        void closeTab(tab.relPath)
-      })
-      const wrap = document.createElement('div')
-      wrap.className = 'tab-wrap'
-      wrap.append(button, close)
-      tabsEl.append(wrap)
+    } else {
+      tabsEl.replaceChildren()
+      for (const tab of tabs) {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'tab'
+        button.setAttribute('role', 'tab')
+        button.setAttribute('aria-selected', String(tab.relPath === active))
+        button.setAttribute('aria-controls', 'note-panel')
+        // 一组 tab 只留一个焦点站：当前项进 Tab 键序，其余用左右方向键走。
+        button.tabIndex = tab.relPath === active ? 0 : -1
+        button.dataset.rel = tab.relPath
+        button.append(icon('note', 'icon-type'))
+        const label = document.createElement('span')
+        label.className = 'tab-label'
+        label.textContent = titleOf(tab.relPath.split('/').pop() ?? tab.relPath)
+        button.append(label)
+        if (tab.dirty) {
+          const dot = document.createElement('span')
+          dot.className = 'tab-dirty'
+          dot.setAttribute('aria-label', '未保存')
+          dot.textContent = '•'
+          button.append(dot)
+        }
+        button.title = tab.relPath
+        button.addEventListener('click', () => activate(tab.relPath))
+        button.addEventListener('keydown', (event) => {
+          const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
+          if (step === 0) return
+          event.preventDefault()
+          const at = tabs.findIndex((item) => item.relPath === tab.relPath)
+          const nextTab = tabs[(at + step + tabs.length) % tabs.length]
+          if (!nextTab) return
+          activate(nextTab.relPath, false)
+          tabsEl.querySelector<HTMLButtonElement>(`.tab[data-rel="${CSS.escape(nextTab.relPath)}"]`)?.focus()
+        })
+        const close = document.createElement('button')
+        close.type = 'button'
+        close.className = 'tab-close'
+        close.setAttribute('aria-label', `关闭 ${label.textContent}`)
+        close.append(icon('close'))
+        close.addEventListener('click', (event) => {
+          event.stopPropagation()
+          void closeTab(tab.relPath)
+        })
+        const wrap = document.createElement('div')
+        wrap.className = 'tab-wrap'
+        wrap.append(button, close)
+        tabsEl.append(wrap)
+      }
+      tabsEl.append(tabNew)
     }
-    tabsEl.append(tabNew)
     // 编辑、保存和任务状态重绘不把人手动滚动的位置重置到最左。
     tabsEl.scrollLeft = scrollLeft
     renderedActive = active
@@ -1727,43 +1751,62 @@ export async function start(root: HTMLElement): Promise<void> {
     if (!current()) {
       outlineEl.hidden = true
       outlineEl.replaceChildren()
+      outlineEl.dataset.signature = ''
       return
     }
     const marks = outlineMarks(editor.headings(), editor.viewport(), editor.caret())
-    const previousScroll = outlineEl.scrollTop
+    const identity = marks.map((mark) => `${mark.heading.range.start}:${mark.heading.depth}:${outlineLabel(mark.heading)}`).join('|')
+    const signature = marks.map((mark) => `${mark.heading.range.start}:${mark.scale}:${mark.current ? 1 : 0}`).join('|')
     outlineEl.hidden = marks.length === 0
-    outlineEl.replaceChildren()
-    for (const mark of marks) {
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.className = 'outline-mark'
-      button.dataset.depth = String(mark.heading.depth)
-      button.dataset.scale = String(mark.scale)
-      if (mark.current) button.setAttribute('aria-current', 'true')
-      const rule = document.createElement('span')
-      rule.className = 'outline-rule'
-      rule.style.width = `${Math.round(26 * mark.scale)}px`
-      button.append(rule)
-      const title = outlineLabel(mark.heading)
-      button.setAttribute('aria-label', title)
-      const showTitle = (): void => {
-        const stage = outlineEl.parentElement!.getBoundingClientRect()
-        const line = button.getBoundingClientRect()
-        outlineTooltip.textContent = title
-        outlineTooltip.style.top = `${line.top + line.height / 2 - stage.top}px`
-        outlineTooltip.hidden = false
+    const buttons = [...outlineEl.querySelectorAll<HTMLButtonElement>(':scope > .outline-mark')]
+    if (outlineEl.dataset.identity === identity && buttons.length === marks.length) {
+      if (outlineEl.dataset.signature === signature) return
+      for (const [index, mark] of marks.entries()) {
+        const button = buttons[index]!
+        button.dataset.scale = String(mark.scale)
+        if (mark.current) button.setAttribute('aria-current', 'true')
+        else button.removeAttribute('aria-current')
+        const rule = button.querySelector<HTMLElement>('.outline-rule')
+        if (rule) rule.style.width = `${Math.round(26 * mark.scale)}px`
       }
-      button.addEventListener('mouseenter', showTitle)
-      button.addEventListener('mouseleave', () => { outlineTooltip.hidden = true })
-      button.addEventListener('focus', showTitle)
-      button.addEventListener('blur', () => { outlineTooltip.hidden = true })
-      button.addEventListener('click', () => {
-        editor.scrollTo(mark.heading.range.start)
-        editor.focus()
-      })
-      outlineEl.append(button)
+      outlineEl.dataset.signature = signature
+    } else {
+      const previousScroll = outlineEl.scrollTop
+      outlineEl.replaceChildren()
+      for (const mark of marks) {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'outline-mark'
+        button.dataset.depth = String(mark.heading.depth)
+        button.dataset.scale = String(mark.scale)
+        if (mark.current) button.setAttribute('aria-current', 'true')
+        const rule = document.createElement('span')
+        rule.className = 'outline-rule'
+        rule.style.width = `${Math.round(26 * mark.scale)}px`
+        button.append(rule)
+        const title = outlineLabel(mark.heading)
+        button.setAttribute('aria-label', title)
+        const showTitle = (): void => {
+          const stage = outlineEl.parentElement!.getBoundingClientRect()
+          const line = button.getBoundingClientRect()
+          outlineTooltip.textContent = title
+          outlineTooltip.style.top = `${line.top + line.height / 2 - stage.top}px`
+          outlineTooltip.hidden = false
+        }
+        button.addEventListener('mouseenter', showTitle)
+        button.addEventListener('mouseleave', () => { outlineTooltip.hidden = true })
+        button.addEventListener('focus', showTitle)
+        button.addEventListener('blur', () => { outlineTooltip.hidden = true })
+        button.addEventListener('click', () => {
+          editor.scrollTo(mark.heading.range.start)
+          editor.focus()
+        })
+        outlineEl.append(button)
+      }
+      outlineEl.scrollTop = previousScroll
+      outlineEl.dataset.identity = identity
+      outlineEl.dataset.signature = signature
     }
-    outlineEl.scrollTop = previousScroll
     const currentMark = outlineEl.querySelector<HTMLElement>(".outline-mark[aria-current='true']")
     if (currentMark && (currentMark.offsetTop < outlineEl.scrollTop || currentMark.offsetTop + currentMark.offsetHeight > outlineEl.scrollTop + outlineEl.clientHeight)) {
       outlineEl.scrollTop = currentMark.offsetTop - outlineEl.clientHeight / 2
@@ -1947,9 +1990,8 @@ export async function start(root: HTMLElement): Promise<void> {
 
   function openTaskOverlay(): void {
     if (taskOverlay?.isOpen()) return
-    const overlay = openOverlay({ label: '运行中的任务', initialFocus: () => overlay.root.querySelector<HTMLElement>('button') })
+    const overlay = openOverlay({ label: '运行中的任务', className: 'overlay-tasks', initialFocus: () => overlay.root.querySelector<HTMLElement>('button') })
     taskOverlay = overlay
-    overlay.root.classList.add('overlay-tasks')
     renderTaskOverlay()
   }
 
@@ -1984,8 +2026,8 @@ export async function start(root: HTMLElement): Promise<void> {
     const result = await window.rgent.memoryManualPreview(request).catch(() => null)
     if (current() !== tab || vaultSession !== session) return
     if (!result?.ok) { hostNotice = memoryErrorText(result?.error ?? 'MEMORY_UNAVAILABLE'); updateStatus(); return }
-    const panel = openOverlay({ label: '记住预览', returnFocus: () => editor.view.contentDOM, onClose: () => { if (memoryOverlay === panel) memoryOverlay = null } })
-    memoryOverlay = panel; panel.root.classList.add('overlay-memory')
+    const panel = openOverlay({ label: '记住预览', className: 'overlay-memory', returnFocus: () => editor.view.contentDOM, onClose: () => { if (memoryOverlay === panel) memoryOverlay = null } })
+    memoryOverlay = panel
     renderMemoryPreview(panel.root, result.value, {
       commit: r => window.rgent.memoryPreviewCommit({ ...r, sessionId: session }),
       isCurrent: () => panel.isOpen() && vaultSession === session && current() === tab,
@@ -2176,7 +2218,7 @@ export async function start(root: HTMLElement): Promise<void> {
       dismissConflictNotice(tab.relPath)
       await refreshLifecycle()
       if(epoch!==vaultEpoch||!tabs.includes(tab))return false
-      if (hostNotice === LIFECYCLE_ERRORS.LEDGER_BOUNDARY_INVALID) { hostNotice = ''; updateStatus() }
+      if (hostNotice === hostErrorText('LEDGER_BOUNDARY_INVALID')) { hostNotice = ''; updateStatus() }
       syncEditorHost()
       void refreshBacklinks()
       return true
@@ -2279,8 +2321,7 @@ export async function start(root: HTMLElement): Promise<void> {
       if (!result.ok) throw new Error(result.error)
       const accepted = await new Promise<boolean>(resolve => {
         let answer=false
-        const panel=openOverlay({label:'确认另存',onClose:()=>resolve(answer)})
-        panel.root.classList.add('save-copy-preview')
+        const panel=openOverlay({label:'确认另存',className:'save-copy-preview',onClose:()=>resolve(answer)})
         const title=document.createElement('h2'); title.textContent='另存为新笔记'
         const description=document.createElement('p'); description.textContent=`${source} → ${result.preview.target}`
         const note=document.createElement('p'); note.textContent=result.preview.warning

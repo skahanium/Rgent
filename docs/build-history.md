@@ -2199,3 +2199,46 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 6. `RGENT_UI_MULTI_VAULT_ONLY` 是既有未维护 scope：仍期望设置六页（实际七页含「技能」）、冲突段仍直接等模态；本轮未修，先记债务。
 
 **受验提交**：`6319698`／`5a8de9a`／`8934991`／`0431db6`／`52de5f4`／`8f7c506`／`95193bc`／`c032d0b`／`17a7449`／`b7bb76e`（已推送）；CI [run 39875286692](https://github.com/skahanium/Rgent/actions/runs/39875286692) 全绿。
+
+## 2026-10-23 窗口稳定与说了算数（本机已交）
+
+**口径**：[2026-10-23 窗口稳定与说了算数](decisions.md#2026-10-23-窗口稳定与说了算数)。收口后质量轮，不换阶段名、不新开口子、不改授权语义。围栏两项（删除影响进详情、账本来源顺序断言）只登记。
+
+**实现**
+
+- **S0 围栏**：合同八条、施工图包表、frontend 呈现句；`AGENTS.md` 只补一句，阶段名仍是「远端 MCP 与联网」。
+- **S1 Windows 能编**：`binding.gyp` AdditionalOptions 加 `/utf-8`。本机 MSVC 原生重建通过，不再因 CP936 把中文测试串当源编码。POSIX／符号链接夹具继续 skip，不把 Unix 权限位测伪装成已过。
+- **S2 说了算数**：写确认 `settle` 等 `decide` 完成再关卡，超时按拒绝，待处理按 `requestId` 记账。主题即时保存不标脏、不挡切库。授权预览由主进程带 `deleteEnabled`，渲染层不猜平台。重叠错误码以 `host-errors` 为权威；`LIFECYCLE_RECOVERY_REQUIRED`／`PATH_CHANGED` 保留「恢复记录」「没有删除」。密钥保存失败不再先清空输入。偏好保存成功后立刻 `applyResolvedTheme`，不等 nativeTheme 媒体查询回传。续跑 IPC 已成功时，并发 `lifecycleStatus` 冲掉刷新也不把成功说成失败。
+- **S3 重绘与焦点**：`openOverlay({ className })` 在 `show`／`showModal` 前写入终态类。tab／大纲身份集合未变只补 dirty／active／标题。编辑器视口滚动只更新大纲，不重绘状态行。
+- **S4 壳几何**：写确认 `bottom: 48px`；废纸篓确认补 `.write-confirm`。去掉搜索 700px `translateY` 硬折与编辑器 820px 顶垫跳变（改 `clamp`）。夜间第一帧用 `@media (prefers-color-scheme: dark)` 配 `html:not([data-theme])`，不加内联脚本。授权卡打开期间跟随 resize／scroll，仍不抢焦点。
+- **S5 样式与文案**：全局 40×40 保留，tab 关闭／chip／通知关闭等加微型例外。设置表与 Markdown 表加横向溢出。记忆成绩加载中／已核／适用范围已变分开。技能图标路径收进 16×16。设置／预览时间戳用本地 locale。
+
+**窗口专项补**
+
+- 连续输入不丢当前 tab 关闭钮焦点。
+- 授权卡打开期间缩放仍可见。
+- 最低尺寸下写确认不与 `.status`／`.notice` 相交。
+- 搜索过 700、编辑器过 820 无硬折。
+- 夜间冷启动有 `prefers-color-scheme` 规则、无内联主题脚本。
+
+**实现期发现**
+
+- 词典合并若只留任务语境的 `LIFECYCLE_RECOVERY_REQUIRED`，恢复浮层会丢掉「恢复记录」——已并回权威句。
+- Windows 上 `themeSet('day')` 后 `dataset.theme` 会等媒体查询，160ms 内偶发仍是 night——保存成功后立刻写根节点。
+- 续跑成功后并发刷新会让 `refreshLifecycle` 因 serial 返回空，卡片说「无法完成重试」而磁盘已完成——成功路径改为再读一次现状。
+
+**门（本机 Windows 2026-10-23）**：单元 **158 文件 2759 通过／17 跳过**（POSIX／符号链接夹具按惯例 skip）；文档 14 篇；构建通过；完整窗口 **381／1**；写工具 **34／0**（Windows 不走送篓，比 macOS 41 条少删路）；恢复 **13／0**。`delivery:check` 如实报未推送。不把本机绿写成双平台已验。
+
+**围栏（本轮不改）**
+
+1. 删除影响进详情 vs 界面可见性。
+2. 账本来源顺序断言：仪器仍要求 `实际读取来源：工具其他.md、工具参考.md`；本机 Windows 稳定为 `工具参考.md、工具其他.md`。不改正文收集顺序，不改仪器。
+
+**边界**
+
+1. 能编 ≠ 窗口已稳。
+2. 窄 tab「长…」截断仍按 frontend 合同，不修。
+3. 状态行约 18px 纵向微调本轮不单开。
+4. Windows 删除入口与原生输入法仍是既有债务。
+
+**受验提交**：本机已交、未推送。

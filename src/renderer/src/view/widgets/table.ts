@@ -20,11 +20,17 @@ export class TableWidget extends WidgetType {
   }
 
   toDOM(view?: EditorView): HTMLElement {
+    const wrap = (table: HTMLElement): HTMLElement => {
+      const host = document.createElement('div')
+      host.className = 'md-table-host'
+      host.append(table)
+      return attachRevealSource(host, view, this.table.range.start, this.table.range.end)
+    }
     if (this.table.node) {
       const table = renderReadOnlyNode(this.table.node, this.table.source ?? '', this.host) as HTMLElement
       table.classList.add('md-table')
       table.setAttribute('aria-label', '表格')
-      return attachRevealSource(table, view, this.table.range.start, this.table.range.end)
+      return wrap(table)
     }
     const table = document.createElement('table')
     table.className = 'md-table'
@@ -49,7 +55,7 @@ export class TableWidget extends WidgetType {
       tbody.append(tr)
     }
     table.append(tbody)
-    return attachRevealSource(table, view, this.table.range.start, this.table.range.end)
+    return wrap(table)
   }
 
   destroy(dom: HTMLElement): void { disposeReadOnlyImages(dom) }

@@ -15,7 +15,7 @@ vi.mock('../../src/renderer/src/view/editor.ts', () => ({
       getText: () => editorHarness.text,
       setText: (value: string) => { text = value; editorHarness.text = value },
       setReadOnly: () => {}, setTheme: () => {}, setActiveTaskIds: () => {}, setNoteHost: () => {},
-      onStateChange: () => {}, focus: editorHarness.focus,
+      onStateChange: () => {}, onViewportChange: () => {}, focus: editorHarness.focus,
       selectionRange: () => ({ anchor: 0, head: 0 }),
       selectionInfo: () => ({ line: 1, column: 1 }),
       headings: () => [], viewport: () => ({ from: 0, to: 0 }), caret: () => 0, markers: () => []

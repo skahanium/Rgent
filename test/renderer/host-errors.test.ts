@@ -14,6 +14,11 @@ describe('Host failure messages', () => {
     expect(text).toContain('保存')
   })
 
+  it('keeps the unique recovery and trash facts on overlapping codes', () => {
+    expect(hostErrorText('LIFECYCLE_RECOVERY_REQUIRED')).toContain('恢复记录')
+    expect(hostErrorText('PATH_CHANGED')).toContain('没有删除')
+  })
+
   it('covers the authorization and start-up codes the popover can show', () => {
     const popoverCodes = ['STALE_AUTHORIZATION', 'INVALID_AUTHORIZATION', 'AUTHORIZATION_SCOPE_TOO_LARGE', 'UNSAVED_DRAFT', 'NOTE_BUSY', 'MODEL_CONFIG_UNAVAILABLE', 'LIFECYCLE_RECOVERY_REQUIRED', 'AI_BLOCK_CHANGED']
     for (const code of popoverCodes) expect(hostErrorText(code)).not.toBe(code)

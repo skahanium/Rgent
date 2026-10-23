@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { readFileSync } from 'node:fs'
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { modalOpen } from '../../src/renderer/src/overlay.ts'
 import { installWriteConfirm } from '../../src/renderer/src/write-confirm.ts'
 import type { AgentWritePreview } from '../../src/shared/ipc.ts'
@@ -240,7 +240,7 @@ it('卡片固定在右下角：宽 360px、最高 60vh、内部滚动，样式�
   const rule = writeConfirmRule()
   expect(rule).toContain('position: fixed')
   expect(rule).toContain('right: 16px')
-  expect(rule).toContain('bottom: 16px')
+  expect(rule).toContain('bottom: 48px')
   expect(rule).toContain('width: 360px')
   expect(rule).toContain('max-width: calc(100vw - 32px)')
   expect(rule).toContain('max-height: 60vh')
@@ -282,6 +282,45 @@ it('关掉卡片（焦点在卡里按 Esc、程序关闭）都按不允许结清
   disposed.dispose()
   expect(disposed.calls).toEqual([{ requestId: 'r-closed', approved: false }])
   expect(disposed.dialog()).toBeNull()
+})
+
+it('异步 decide 完成前不关卡，失败也不暗示已执行', async () => {
+  const handlers: ((preview: AgentWritePreview) => void)[] = []
+  let finish!: (value: unknown) => void
+  const calls: { requestId: string; approved: boolean }[] = []
+  const dispose = installWriteConfirm({
+    onRequest: (handler) => {
+      handlers.push(handler)
+      return () => { const at = handlers.indexOf(handler); if (at >= 0) handlers.splice(at, 1) }
+    },
+    decide: (decision) => {
+      calls.push(decision)
+      return new Promise((resolve) => { finish = resolve })
+    }
+  })
+  disposers.push(dispose)
+  handlers[0]!({ requestId: 'r-async', kind: 'create', relPath: '工作/异步.md', body: '正文' })
+  document.querySelector<HTMLButtonElement>('.write-confirm-accept')!.click()
+  expect(calls).toEqual([{ requestId: 'r-async', approved: true }])
+  expect(document.querySelector('.write-confirm')).not.toBeNull()
+  finish(false)
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(document.querySelector('.write-confirm')).toBeNull()
+})
+
+it('超时按不允许结清，不暗示已执行', () => {
+  vi.useFakeTimers()
+  try {
+    const app = mount()
+    app.send(createPreview({ requestId: 'r-timeout' }))
+    expect(app.dialog()).not.toBeNull()
+    vi.advanceTimersByTime(120_000)
+    expect(app.calls).toEqual([{ requestId: 'r-timeout', approved: false }])
+    expect(app.dialog()).toBeNull()
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 it('前一张没答就来了新请求：旧请求按不允许结清，只留一张卡', () => {

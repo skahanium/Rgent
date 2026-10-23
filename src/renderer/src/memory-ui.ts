@@ -75,6 +75,12 @@ export type MemoryPageHandlers={
   maintenance:(r:Omit<MemoryMaintenanceRequest,'sessionId'>)=>Promise<MemoryResult<MemoryPreview>>
   commit:(r:Omit<MemoryCommitRequest,'sessionId'>)=>Promise<MemoryResult<MemoryView>>
 }
+/** 可解析的时间戳用本地写法；解析不了的原样留下，不把「today」之类假装成日期。 */
+export function formatLocalStamp(value:string|undefined):string{
+  if(!value)return ''
+  const parsed=Date.parse(value)
+  return Number.isFinite(parsed)?new Date(parsed).toLocaleString('zh-CN',{year:'numeric',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}):value
+}
 /** 质量成绩四种状态分别如实显示；未取得人工复核时明确标注，不显示为通过。 */
 export function qualityEvidenceText(quality:MemoryView['quality']):string{
  const base=(()=>{switch(quality?.state){
@@ -96,7 +102,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
   const status=paragraph('正在读取记忆…','memory-status-line'),statusHead=el('div','memory-card-heading')
   const heading=el('h3');heading.textContent='本库记忆'
   const refresh=button('',()=>void mutate(handlers.get,refresh));refresh.classList.add('memory-refresh');refresh.append(icon('refresh'));refresh.setAttribute('aria-label','刷新状态');refresh.title='刷新状态'
-  const qualityNote=paragraph(qualityEvidenceText(undefined),'settings-hint memory-quality-status')
+  const qualityNote=paragraph('正在读取质量成绩…','settings-hint memory-quality-status')
   statusHead.append(heading,refresh);statusCard.append(statusHead,status,qualityNote)
   const recentCard=el('section','memory-card memory-recent');recentCard.dataset.memorySection='recent'
   const recentTitle=el('h3');recentTitle.textContent='近期工作背景'
@@ -199,7 +205,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
         detail.textContent=`任务结果：${outcome} · 建立：${createdLabel} · 有效期：${created?'建立后 14 天':'未提供'}${entry.reason?' · '+memoryErrorText(entry.reason):''}`
         let technical=metadata.querySelector<HTMLDetailsElement>(':scope > .memory-technical')
         if(!technical){technical=el('details','memory-technical');technical.append(Object.assign(el('summary'),{textContent:'详细信息'}),paragraph(''));metadata.append(technical)}
-        technical.querySelector('p')!.textContent=`更新：${entry.updatedAt} · 版本 ${entry.version} · 任务编号：${entry.recent?.taskId||'未提供'}`
+        technical.querySelector('p')!.textContent=`更新：${formatLocalStamp(entry.updatedAt)||entry.updatedAt} · 版本 ${entry.version} · 任务编号：${entry.recent?.taskId||'未提供'}`
         sources(metadata,entry.sources)
         row.dataset.metadata=signature
       }
@@ -222,7 +228,7 @@ export function mountMemoryPage(host:MemoryPageHost,handlers:MemoryPageHandlers)
     if (!detail) { detail = paragraph(''); metadata.prepend(detail) }
     detail.textContent=`适用范围：${entry.scope||'本库'}${entry.attribution?' · '+entry.attribution:''}${entry.reason?' · '+memoryErrorText(entry.reason):''}`
     const technical=row.querySelector<HTMLElement>('.memory-entry-technical')!
-    technical.textContent=`更新：${entry.updatedAt} · 版本 ${entry.version} · ${entry.reviewAt?'复核日期：'+entry.reviewAt:'未设复核日期'}`
+    technical.textContent=`更新：${formatLocalStamp(entry.updatedAt)||entry.updatedAt} · 版本 ${entry.version} · ${entry.reviewAt?'复核日期：'+formatLocalStamp(entry.reviewAt):'未设复核日期'}`
     sources(metadata, entry.sources)
     const action = row.querySelector<HTMLButtonElement>('.memory-entry-state-action')!
     action.textContent = entry.status === 'active' ? '停用' : entry.pendingTarget ? '核对更正' : entry.status==='pending'||entry.status==='disputed'?'确认新事实':'检查来源并恢复'

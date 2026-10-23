@@ -55,7 +55,7 @@
 
   --motion-fast: 90ms;
   --motion-base: 140ms;
-  --editor-top-padding: 94px;
+  --editor-top-padding: clamp(52px, calc(52px + (100vw - 800px) * 0.21), 94px);
   --reading-max-width: 48rem;
   --reading-side-gap: clamp(28px, 6vw, 74px);
 
@@ -120,6 +120,37 @@
   --shadow-2: 0 16px 40px rgba(0, 0, 0, 0.5);
 }
 
+/* 夜间第一帧：JS 尚未写 data-theme 时跟系统偏好，不加内联脚本。 */
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]) {
+    color-scheme: dark;
+    --surface-canvas: #24313b;
+    --surface-nav: #1d2933;
+    --surface-overlay: #2c3944;
+    --text-body: #e4e8ec;
+    --text-heading: #f2f5f8;
+    --text-muted: #abb6c0;
+    --text-on-accent: #ffffff;
+    --accent-primary: #b0a5f5;
+    --accent-solid: #6459bc;
+    --accent-soft: #3b3c5c;
+    --accent-focus: #b0a5f5;
+    --focus-ring: #abb6c0;
+    --border-subtle: #3a4853;
+    --border-strong: #8997a3;
+    --state-hover: #33414c;
+    --state-selected: #39425b;
+    --state-disabled: #6b737d;
+    --ai-prompt: #c4b8ff;
+    --ai-answer: #b4afd4;
+    --status-online: #6fa8ff;
+    --status-offline: #7c848f;
+    --status-error: #ff8a80;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 16px 40px rgba(0, 0, 0, 0.5);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --motion-fast: 0ms;
@@ -154,6 +185,19 @@ button {
   border: 1px solid transparent;
   background: transparent;
   cursor: pointer;
+}
+
+/* 40×40 只约束真操作；关闭钮、chip、壳微型控件用更小的明确例外。 */
+button.tab-close,
+button.tab-new,
+button.write-confirm-close,
+button.notice-close,
+button.memory-refresh,
+button.status-memory,
+.memory-filters button,
+.rgent-marker-actions button {
+  min-width: 24px;
+  min-height: 24px;
 }
 
 button:focus-visible,
@@ -291,10 +335,6 @@ a[href]:focus-visible,
 }
 .overlay-settings::backdrop { background: rgba(24, 31, 58, 0.30); backdrop-filter: blur(8px); }
 [data-theme='night'] .overlay-settings::backdrop { background: rgba(8, 13, 25, 0.50); backdrop-filter: blur(8px); }
-
-@media (min-height: 700px) {
-  .overlay-search { transform: translateY(-48px); }
-}
 
 .settings-layout {
   display: grid;
@@ -596,7 +636,6 @@ a[href]:focus-visible,
 .settings-mcp-error[hidden] { display: none; }
 
 @media (max-width: 820px) {
-  :root { --editor-top-padding: 52px; }
   .settings-layout { grid-template-columns: 154px minmax(0, 1fr); }
   .settings-main { padding: 42px 18px 28px; }
   .settings-nav { padding: 28px 8px 20px; }
@@ -1460,6 +1499,11 @@ a[href]:focus-visible,
   padding: 0 4px;
 }
 
+.md-table-host {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
 .md-table {
   border-collapse: collapse;
   width: 100%;
@@ -1467,6 +1511,13 @@ a[href]:focus-visible,
   background: var(--surface-canvas);
   font-family: var(--ui);
   font-size: 0.95rem;
+}
+
+.settings-main table,
+.ledger-body table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
 }
 
 .md-table th,
@@ -1663,6 +1714,7 @@ a[href]:focus-visible,
 }
 
 .rgent-marker button {
+  min-width: 24px;
   min-height: 24px;
   padding: 0 9px;
   color: var(--text-muted);
@@ -1945,7 +1997,7 @@ a[href]:focus-visible,
 .write-confirm {
   position: fixed;
   right: 16px;
-  bottom: 16px;
+  bottom: 48px;
   left: auto;
   top: auto;
   margin: 0;

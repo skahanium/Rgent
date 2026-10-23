@@ -14,10 +14,9 @@ export function openLifecycleStatus(initial: LifecycleStatus,
   fallbackFocus?: () => HTMLElement | null): Overlay {
   const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
   let busy = false
-  const overlay = openOverlay({ label: '文件操作恢复状态', initialFocus: () => close,
+  const overlay = openOverlay({ label: '文件操作恢复状态', className: 'lifecycle-dialog lifecycle-recovery', initialFocus: () => close,
     canDismiss: () => !busy,
     returnFocus: () => trigger?.isConnected && !trigger.closest('[hidden]') ? trigger : fallbackFocus?.() ?? null })
-  overlay.root.classList.add('lifecycle-dialog', 'lifecycle-recovery')
   const heading = document.createElement('h2'); heading.textContent = '文件操作恢复状态'
   const description = document.createElement('p')
   const operation = document.createElement('p')
@@ -114,10 +113,10 @@ function modal(opts: {
     }
     const overlay = openOverlay({
       label: opts.title,
+      className: 'modal',
       onClose: () => finish(null)
     })
     const dialog = overlay.root
-    dialog.classList.add('modal')
     const heading = document.createElement('h2')
     heading.textContent = opts.title
     const form = document.createElement('form')

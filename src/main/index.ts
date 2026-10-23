@@ -55,6 +55,7 @@ import { createMcpClient, type McpClient } from './mcp-client.ts'
 import { createSearchProvider, SEARCH_PROVIDERS } from './search.ts'
 import { fetchText } from './text-fetch.ts'
 import { TaskAuthorizationRegistry, isAuthorizationCommand } from './task-authorization.ts'
+import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 import { createScopedAgentTools, mcpToolCatalog, MCP_CATALOG_BYTES } from './scoped-agent-tools.ts'
 import { createMemoryIpc } from './memory-ipc.ts'
 
@@ -1975,6 +1976,7 @@ if (ownsInstance) app.whenReady().then(() => {
     },
     network: networkAvailability,
     mcp: mcpAvailability,
+    deleteAvailable: () => HUMAN_TRASH_ON_THIS_PLATFORM,
     configuration:(_extraReferences, modelRecordId,_memorySearch)=>{
       if(!modelConfig)throw Error(modelConfigError??'MODEL_CONFIG_UNAVAILABLE')
       const config=modelConfig.getPublic()

@@ -432,7 +432,7 @@ describe('vault paths', () => {
     expect(readVaultMedia(root, 'ok.png')).toEqual({ bytes: Buffer.from('ok') })
   })
 
-  it('refuses vault media that only stays inside the root via a symlink', async () => {
+  it.skipIf(process.platform === 'win32')('refuses vault media that only stays inside the root via a symlink', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-vault-'))
     const outside = await mkdtemp(path.join(os.tmpdir(), 'rgent-out-'))
     const secret = path.join(outside, 'secret.png')
@@ -719,9 +719,11 @@ it('uses actual native alias resolution for attachment ancestors and rejects mis
     if (nativeAlias) expect(() => check(root, ['alias/nested/read.md'])).toThrow('OUTSIDE_TASK_SCOPE')
     else expect(() => check(root, ['alias/nested/read.md'])).not.toThrow()
     await writeFile(path.join(root, '.hidden.md'), 'hidden')
-    await symlink(path.join(root, 'Alias.md'), path.join(root, 'linked.md'))
     expect(() => check(root, ['missing.md'])).toThrow()
     expect(() => check(root, ['.hidden.md'])).toThrow()
+    // Windows 无创建符号链接特权时 EPERM；链接源半边按 POSIX 夹具惯例跳过。
+    if (process.platform === 'win32') return
+    await symlink(path.join(root, 'Alias.md'), path.join(root, 'linked.md'))
     expect(() => check(root, ['linked.md'])).toThrow()
   } finally { await rm(root, { recursive: true, force: true }) }
 })

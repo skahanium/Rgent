@@ -78,6 +78,7 @@ export function openFetchDialog(handlers: FetchDialogHandlers): Overlay {
   let activeRequestId: string | null = null
   const overlay = openOverlay({
     label: '抓取网页或搜索',
+    className: 'fetch-dialog',
     initialFocus: () => input,
     // 关掉浮层等于放弃这次请求：不让它在后台继续外发。
     onClose: () => {
@@ -87,8 +88,6 @@ export function openFetchDialog(handlers: FetchDialogHandlers): Overlay {
       void handlers.humanAbort(requestId).catch(() => { /* the request's own result already ended */ })
     }
   })
-  overlay.root.classList.add('fetch-dialog')
-
   const heading = textOf('h2', 'fetch-dialog-title', '抓取网页或搜索')
   const modes = document.createElement('div')
   modes.className = 'fetch-dialog-modes'

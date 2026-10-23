@@ -117,6 +117,7 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     vaultPage?.dispose(); vaultPage = null; vaultBusy = false
     const current = openOverlay({
       label: '设置',
+      className: 'overlay-settings',
       canDismiss: () => !vaultBusy,
       initialFocus: () => current.root.querySelector<HTMLElement>('.settings-page-title'),
       onClose: () => {
@@ -148,11 +149,14 @@ export function createSettingsOverlay(handlers: SettingsHandlers): SettingsOverl
     blocked.hidden = true
     vaultBlocked = blocked
     const trackInput = (event: Event): void => {
-      if (!(event.target instanceof Element) || !event.target.closest('.vault-settings')) inputsEdited = true
+      if (!(event.target instanceof Element)) return
+      if (event.target.closest('.vault-settings')) return
+      // 主题即时落盘，不是草稿；已保存的主题不得挡住切库。
+      if (event.target.closest('.settings-theme-group')) return
+      inputsEdited = true
     }
     root.addEventListener('input', trackInput)
     root.addEventListener('change', trackInput)
-    root.classList.add('overlay-settings')
     root.addEventListener('click', (event) => {
       if (vaultBusy || event.target !== root || event.detail === 0) return
       const bounds = root.getBoundingClientRect()

@@ -29,12 +29,12 @@ export function promptConflict(input: ConflictInput): Promise<ConflictChoice> {
     }
     const overlay = openOverlay({
       label: '稿不一样了',
+      className: 'conflict',
       initialFocus: () => overlay.root.querySelector<HTMLElement>('[data-action="continue"]'),
       // 被上层浮层顶掉或 Esc 关闭：按「继续编辑」算，什么都不丢。
       onClose: () => finish('continue')
     })
     const dialog = overlay.root
-    dialog.classList.add('conflict')
     const preview = diffPreview(input.windowText, input.diskText)
 
     const heading = document.createElement('h2')

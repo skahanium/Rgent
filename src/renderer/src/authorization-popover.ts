@@ -43,12 +43,16 @@ function directoryPreset(entries:TreeEntry[],origin:string):DirectoryPreset|null
   return {relPath:parent,disabledReason:null}
 }
 
-/** 预览文案与宿主宣告同源：补／建始终在；读搜要另有篇；结构只要可参考外篇。 */
-function sessionToolLabels(origin:string, sources:readonly {relPath:string;tier:string}[]):string[] {
+/** 预览文案与宿主宣告同源：补／建始终在；读搜要另有篇；结构只要可参考外篇。
+ *  删笔记只在主进程披露 `deleteEnabled` 时出现，渲染层不猜平台。 */
+function sessionToolLabels(origin:string, sources:readonly {relPath:string;tier:string}[], deleteEnabled?:boolean):string[] {
   const labels=['补发起篇','建笔记']
   const extras=sources.filter(source=>source.relPath!==origin)
   if(extras.length)labels.push('读库','搜库')
-  if(extras.some(source=>source.tier!=='follow'))labels.push('改名','挪')
+  if(extras.some(source=>source.tier!=='follow')){
+    labels.push('改名','挪')
+    if(deleteEnabled)labels.push('删笔记')
+  }
   return labels
 }
 
@@ -59,8 +63,21 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Au
   let networkSelected=false
   let mcpSelected=false
   // 非模态：不抢编辑器焦点、不拦快捷键；Esc 由 overlay 在焦点进入卡片时接管。
-  const panel=openOverlay({label:'确认本场参考范围与模型接收方',modal:false,returnFocus:options.returnFocus,onClose:()=>{generation++;if(prepared)void options.discard?.(prepared.id);prepared=null;options.onClose?.()}})
-  panel.root.classList.add('overlay-authorization')
+  let panel: Overlay
+  const placeCard=():void=>{
+    if(!panel?.isOpen())return
+    const viewportWidth=window.innerWidth
+    const viewportHeight=window.innerHeight
+    panel.root.style.left=`${Math.max(12,Math.min(options.anchor.left,viewportWidth-432))}px`
+    panel.root.style.top=`${Math.max(12,Math.min(options.anchor.bottom+8,viewportHeight-420))}px`
+    panel.root.style.maxHeight=`${viewportHeight-parseFloat(panel.root.style.top)-12}px`
+  }
+  const onMove=():void=>placeCard()
+  panel=openOverlay({label:'确认本场参考范围与模型接收方',className:'overlay-authorization',modal:false,returnFocus:options.returnFocus,onClose:()=>{
+    window.removeEventListener('resize',onMove)
+    window.removeEventListener('scroll',onMove,true)
+    generation++;if(prepared)void options.discard?.(prepared.id);prepared=null;options.onClose?.()
+  }})
   panel.root.tabIndex=-1
   panel.root.innerHTML='<h2>本场口令</h2><p class="authorization-origin"></p><p class="authorization-recipient" aria-live="polite"></p><p class="authorization-disclosure">本场口令、获准资料与本篇账本会发送给下方模型接收方。授权仅本场有效。</p><fieldset class="authorization-scope"><legend>参考范围</legend></fieldset><div class="authorization-manifest"></div><p class="authorization-status" role="status"></p><footer><button type="button" class="authorization-cancel">取消</button><button type="button" class="authorization-send" disabled>确认并发送</button></footer>'
   panel.root.querySelector('.authorization-origin')!.textContent=`发起篇：${options.origin}（正文与账本）`
@@ -115,10 +132,9 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Au
   onlyOrigin.addEventListener('click',()=>applySelection([]))
   if(onlyDirectory && directoryTarget && !directoryTarget.disabledReason)onlyDirectory.addEventListener('click',()=>applySelection([directoryTarget.relPath]))
   if(!choices.childElementCount)choices.textContent='当前没有其他可选笔记。'
-  const viewportWidth=window.innerWidth;const viewportHeight=window.innerHeight
-  panel.root.style.left=`${Math.max(12,Math.min(options.anchor.left,viewportWidth-432))}px`
-  panel.root.style.top=`${Math.max(12,Math.min(options.anchor.bottom+8,viewportHeight-420))}px`
-  panel.root.style.maxHeight=`${viewportHeight-parseFloat(panel.root.style.top)-12}px`
+  placeCard()
+  window.addEventListener('resize',onMove)
+  window.addEventListener('scroll',onMove,true)
   /** 内容在卡片打开后发生变化：作废当前预览并拦住发送，等下一次成功预览再放行。
    *  已暴露给调用方；当前 shell 尚未接线，卡片打开期间改正文要等下一次 preview／send 才提示。 */
   function setStale(prefix=''):void{
@@ -216,7 +232,7 @@ export function openAuthorizationPopover(options:AuthorizationPopoverOptions):Au
       const title=document.createElement('p');title.textContent='本场固定对象：';manifest.append(title)
       const paths=document.createElement('ul');for(const source of prepared.sources){const item=document.createElement('li');item.textContent=source.relPath;paths.append(item)}manifest.append(paths)
       recipient.textContent=`模型：${prepared.recipient.modelId} · 主机：${prepared.recipient.host}`
-      const labels=sessionToolLabels(options.origin, prepared.sources)
+      const labels=sessionToolLabels(options.origin, prepared.sources, prepared.deleteEnabled)
       if(networkSelected&&prepared.network?.available)labels.push(prepared.network.search?'联网只读（抓网页＋搜索）':'联网只读（抓网页）')
       if(mcpSelected&&prepared.mcp?.available)labels.push('只读 MCP')
       status.textContent=`已核对 ${prepared.sources.length} 篇笔记。工具：${labels.join('、')}。其他篇账本与附件不在范围。`

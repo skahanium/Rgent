@@ -6,7 +6,7 @@ import {VaultSwitch} from '../../src/main/vault-switch.ts'
 const editorHarness=vi.hoisted(()=>({text:'',change:null as ((text:string)=>void)|null,focus:vi.fn()}))
 vi.mock('../../src/renderer/src/view/editor.ts',()=>({mountEditor:(_root:HTMLElement,change:(text:string)=>void)=>{editorHarness.change=change;
  const dom=document.createElement('div'),scrollDOM=document.createElement('div');let text=''
- return {view:{dom,contentDOM:dom,scrollDOM,compositionStarted:false},getText:()=>editorHarness.text,setText:(v:string)=>{text=v;editorHarness.text=v},setReadOnly:()=>{},setTheme:()=>{},setActiveTaskIds:()=>{},setNoteHost:()=>{},onStateChange:()=>{},focus:editorHarness.focus,selectionRange:()=>({anchor:0,head:0}),selectionInfo:()=>({line:1,column:1}),headings:()=>[],viewport:()=>({from:0,to:0}),caret:()=>0,markers:()=>[]}
+ return {view:{dom,contentDOM:dom,scrollDOM,compositionStarted:false},getText:()=>editorHarness.text,setText:(v:string)=>{text=v;editorHarness.text=v},setReadOnly:()=>{},setTheme:()=>{},setActiveTaskIds:()=>{},setNoteHost:()=>{},onStateChange:()=>{},onViewportChange:()=>{},focus:editorHarness.focus,selectionRange:()=>({anchor:0,head:0}),selectionInfo:()=>({line:1,column:1}),headings:()=>[],viewport:()=>({from:0,to:0}),caret:()=>0,markers:()=>[]}
 }}))
 vi.mock('../../src/renderer/src/view/read-only.ts',()=>({renderReadOnlyMarkdown:vi.fn(),disposeReadOnlyImages:()=>{}}))
 let handlers:Record<string,Function>,api:any,root:HTMLElement

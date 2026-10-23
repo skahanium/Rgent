@@ -66,7 +66,8 @@ describe('network preview overlay', () => {
   it('shows the source URL, fetch time, byte count and truncation state in the meta line', () => {
     const meta = show({ truncated: false }).root.querySelector('.network-preview-meta')!
     expect(meta.textContent).toContain('来源：https://example.com/page?q=1')
-    expect(meta.textContent).toContain('获取时间：2026-10-20T12:34:56.000Z')
+    expect(meta.textContent).toContain('获取时间：')
+    expect(meta.textContent).not.toContain('2026-10-20T12:34:56.000Z')
     expect(meta.textContent).toContain('字节数：1234 字节')
     expect(meta.textContent).toContain('未截断')
   })

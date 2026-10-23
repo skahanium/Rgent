@@ -60,6 +60,22 @@ describe('overlay modality', () => {
     expect(overlay.isOpen()).toBe(false)
   })
 
+  it('writes className before show so the first frame is the final state', () => {
+    const seen: string[] = []
+    Object.defineProperty(HTMLDialogElement.prototype, 'show', {
+      configurable: true,
+      value: function (this: HTMLDialogElement) {
+        seen.push(this.className)
+        this.setAttribute('open', '')
+      }
+    })
+    const overlay = openOverlay({ label: 'card', modal: false, className: 'overlay-write-confirm write-confirm' })
+    expect(seen[0]).toContain('overlay')
+    expect(seen[0]).toContain('overlay-write-confirm')
+    expect(seen[0]).toContain('write-confirm')
+    overlay.close()
+  })
+
   it('restores focus and closes the previous overlay only for modals', () => {
     const trigger = document.createElement('button')
     document.body.append(trigger)

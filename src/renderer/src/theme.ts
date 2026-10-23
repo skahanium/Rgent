@@ -17,6 +17,11 @@ export function applyTheme(theme: Theme, root: HTMLElement = document.documentEl
   root.dataset.theme = theme
 }
 
+/** 偏好保存成功后立刻落到根节点，不等 nativeTheme 媒体查询回传。 */
+export function applyResolvedTheme(mode: 'day' | 'night' | 'system', root: HTMLElement = document.documentElement): void {
+  applyTheme(mode === 'system' ? systemTheme() : mode, root)
+}
+
 /** 应用当前主题并在系统切换时跟随；返回取消订阅。 */
 export function watchTheme(onChange: (theme: Theme) => void): () => void {
   const apply = (): void => {

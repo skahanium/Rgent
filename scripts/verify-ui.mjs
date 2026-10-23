@@ -627,7 +627,7 @@ async function verifyScopedHost(page, vault, shot, requests) {
     await waitFor(page, `!!document.querySelector('.ledger-body details')`)
     await page.eval(`document.querySelectorAll('.ledger-body details').forEach(d=>d.open=true)`)
     await waitFor(page, `!!document.querySelector('.ledger-body details > div')?.childNodes.length`)
-  check('同篇账本回顾工具及读取、模型引用来源', await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return text.includes('工具摘要') && (text.includes('search_library')||text.includes('搜库')) && (text.includes('read_library')||text.includes('读库')) && text.includes('实际读取来源：工具其他.md、工具参考.md') && text.includes('模型消息引用来源：工具参考.md') && text.includes('本场技能：无')})()`))
+  check('同篇账本回顾工具及读取、模型引用来源', await waitFor(page, `(() => {const text=document.querySelector('.ledger-body')?.textContent||'';return text.includes('工具摘要') && (text.includes('search_library')||text.includes('搜库')) && (text.includes('read_library')||text.includes('读库')) && text.includes('实际读取来源：工具其他.md、工具参考.md') && text.includes('模型消息引用来源：工具参考.md') && text.includes('本场技能：无')})()`), await page.eval(`JSON.stringify({open:!!document.querySelector('.ledger-body'),text:(document.querySelector('.ledger-body')?.textContent||'').slice(0,800)})`))
   await shot(page, 'tool-ledger-800')
   await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
   await shot(page, 'tool-ledger-1200')
@@ -1858,6 +1858,25 @@ async function verifyUx(page, vault, shot) {
   const cardStayedOpen = await page.eval(`!!document.querySelector('dialog[open][data-modal="false"].overlay-authorization')`)
   check('UX：授权卡非模态，打开时编辑器仍能输入', vaultReady && fixturesReady && openedAuth && modelReady && authReady && !!authState && authState.modalSupported && authState.modal === false && authState.open === true && authState.dataModal === 'false' && authState.inViewport && authState.tookFocus === false && editorReachable && inputLanded && cardStayedOpen, JSON.stringify({ vaultReady, fixturesReady, openedAuth, modelReady, authReady, authState: authState ? { open: authState.open, dataModal: authState.dataModal, modal: authState.modal, modalSupported: authState.modalSupported, inViewport: authState.inViewport, tookFocus: authState.tookFocus } : null, editorReachable, inputLanded, cardStayedOpen }))
   await shot(page, 'ux-authorization-1200')
+  if (cardStayedOpen) {
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
+    await sleep(80)
+  }
+  const afterResize = cardStayedOpen ? await page.eval(`(() => {
+    const card = document.querySelector('dialog[open].overlay-authorization')
+    if (!card) return null
+    const rect = card.getBoundingClientRect()
+    return {
+      open: card.open,
+      dataModal: card.dataset.modal,
+      visible: rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight
+    }
+  })()`) : null
+  if (cardStayedOpen) {
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+    await sleep(80)
+  }
+  check('UX：授权卡打开期间缩放仍可见', !!afterResize && afterResize.open === true && afterResize.dataModal === 'false' && afterResize.visible === true, JSON.stringify({ afterResize }))
 
   // 二、卡内 Enter 发送：焦点放在发送键上按 Enter，任务启动并落回答。
   // 输入测试改过正文；先撤销回原稿。撤销可能把两次输入并成一组，所以再以事务精确还原一次：
@@ -1904,6 +1923,30 @@ async function verifyUx(page, vault, shot) {
   })()`) : null
   const editorStillFocusable = allowState ? await page.eval(`(() => { const content = document.querySelector('.cm-content'); if (!content) return false; content.focus(); return document.activeElement === content || document.querySelector('.cm-editor')?.contains(document.activeElement) })()`) : false
   await shot(page, 'ux-write-confirm-1200')
+  if (allowState) {
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 800, height: 560, deviceScaleFactor: 1, mobile: false })
+    await sleep(80)
+  }
+  const narrowConfirm = allowState ? await page.eval(`(() => {
+    const card = document.querySelector('.write-confirm')
+    const status = document.querySelector('.status')
+    const notice = document.querySelector('.notice')
+    if (!card || !status) return null
+    const a = card.getBoundingClientRect()
+    const b = status.getBoundingClientRect()
+    const overlap = (x, y) => x.left < y.right && x.right > y.left && x.top < y.bottom && x.bottom > y.top
+    return {
+      overlapStatus: overlap(a, b),
+      overlapNotice: notice ? overlap(a, notice.getBoundingClientRect()) : false,
+      cardBottom: Math.round(a.bottom),
+      statusTop: Math.round(b.top)
+    }
+  })()`) : null
+  if (allowState) {
+    await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+    await sleep(80)
+  }
+  check('UX：最低尺寸下写确认不压状态行/通知', !!narrowConfirm && narrowConfirm.overlapStatus === false && narrowConfirm.overlapNotice === false, JSON.stringify(narrowConfirm))
   const accepted = allowState && await clickSelector('.write-confirm-accept')
   const created = accepted && await waitFile(at('UX确认样张.md'))
   const createdBody = created ? readFileSync(at('UX确认样张.md'), 'utf8') : ''
@@ -1984,6 +2027,70 @@ async function verifyUx(page, vault, shot) {
     conflictDisk === '# UX 冲突\n\n磁盘改动标记：外部改了这一版。\n' &&
     conflictDraft.includes('窗口正文。') && conflictDraft.includes('窗口未保存标记')
   check('UX：收尾无横幅无模态、任务清空、笔记内容未被破坏', endState.tasks === 0 && !endState.taskBar && endState.notices === 0 && endState.dialogs === 0 && contentIntact && page.errors.length === 0, JSON.stringify({ endState, contentIntact, dialogs: nativeDialogs, errors: page.errors.slice(0, 1) }))
+
+  // 九、连续输入不拆 tab：焦点在关闭钮上时，正文输入不得把关闭钮从文档里拆掉。
+  const openedFocus = await openNote('UX 授权.md')
+  const closeFocused = openedFocus && await page.eval(`(() => {
+    const close = document.querySelector('.tab-wrap:has(.tab[aria-selected="true"]) .tab-close')
+    if (!close) return false
+    close.focus()
+    return document.activeElement === close
+  })()`)
+  if (closeFocused) {
+    await page.eval(`(() => {
+      const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+      if (!view) return false
+      view.dispatch({ changes: { from: 0, insert: '焦点探针' } })
+      return true
+    })()`)
+    await sleep(80)
+  }
+  const closeKept = closeFocused && await page.eval(`document.activeElement?.classList?.contains('tab-close') === true && !!document.querySelector('.tab-wrap:has(.tab[aria-selected="true"]) .tab-close')`)
+  check('UX：连续输入不丢当前 tab 关闭钮焦点', openedFocus && closeFocused && closeKept, JSON.stringify({ openedFocus, closeFocused, closeKept }))
+
+  // 十一、搜索过 700、编辑器过 820 无硬折；夜间第一帧用系统偏好，不加内联脚本。
+  await setTreeExpanded(page, true)
+  await page.eval(`document.querySelector('.search-open')?.click()`)
+  const searchReady = await waitFor(page, `!!document.querySelector('.overlay-search[open]')`)
+  const searchAt = async (width) => {
+    await page.call('Emulation.setDeviceMetricsOverride', { width, height: 560, deviceScaleFactor: 1, mobile: false })
+    await sleep(80)
+    return page.eval(`(() => {
+      const el = document.querySelector('.overlay-search')
+      if (!el) return null
+      const cs = getComputedStyle(el)
+      const rect = el.getBoundingClientRect()
+      return { top: Math.round(rect.top), transform: cs.transform }
+    })()`)
+  }
+  const search690 = searchReady ? await searchAt(690) : null
+  const search710 = searchReady ? await searchAt(710) : null
+  if (searchReady) await page.eval(`document.querySelector('.overlay-search')?.close()`)
+  const padAt = async (width) => {
+    await page.call('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 1, mobile: false })
+    await sleep(80)
+    return page.eval(`getComputedStyle(document.documentElement).getPropertyValue('--editor-top-padding').trim()`)
+  }
+  const pad810 = await padAt(810)
+  const pad830 = await padAt(830)
+  await page.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false })
+  const nightRule = await page.eval(`(() => {
+    for (const sheet of document.styleSheets) {
+      try {
+        for (const rule of sheet.cssRules) {
+          if (!(rule instanceof CSSMediaRule) || !rule.conditionText.includes('prefers-color-scheme: dark')) continue
+          for (const inner of rule.cssRules) {
+            if (inner.selectorText === 'html:not([data-theme])') return true
+          }
+        }
+      } catch { /* 跨源样式表读不到，继续看下一张 */ }
+    }
+    return false
+  })()`)
+  const inlineThemeBoot = await page.eval(`[...document.querySelectorAll('script:not([src])')].some((node) => /data-theme|prefers-color-scheme/.test(node.textContent || ''))`)
+  check('UX：搜索过 700 无硬折位移', !!search690 && !!search710 && search690.transform === search710.transform && Math.abs(search690.top - search710.top) <= 12, JSON.stringify({ search690, search710 }))
+  check('UX：编辑器过 820 顶垫连续', typeof pad810 === 'string' && pad810 === pad830 && pad810.includes('clamp'), JSON.stringify({ pad810, pad830 }))
+  check('UX：夜间冷启动用 prefers-color-scheme，无内联主题脚本', nightRule === true && inlineThemeBoot === false, JSON.stringify({ nightRule, inlineThemeBoot }))
 }
 
 async function availablePort() {
@@ -4542,7 +4649,7 @@ async function main() {
       return
     }
     if(uxOnly){
-      // 交互减负只有 8 条判据：初始化只作为前置条件，失败直接抛给总账，不另占一条检查。
+      // 交互减负／窗口稳定：初始化只作为前置条件，失败直接抛给总账，不另占一条检查。
       const uxRequests=[]
       hostServer=createUxHostServer(uxRequests)
       await new Promise(resolve=>hostServer.listen(0,'127.0.0.1',resolve))
@@ -5574,7 +5681,7 @@ async function main() {
       await waitFor(page, `document.querySelector('.lifecycle-recovery')?.textContent.includes('无法核验')`)
       await page.eval(`document.querySelector('.lifecycle-retry').focus(); document.querySelector('.lifecycle-retry').click()`)
       check('成员变化拒绝重试并保留记录与附件原位', await waitFor(page, `document.querySelector('.lifecycle-recovery [role=status]')?.textContent.includes('恢复记录')`) &&
-        readFileSync(path.join(vault, '.rgent-lifecycle'), 'utf8') === journal && existsSync(path.join(vault, '生命周期', '复原', '附件.png')))
+        readFileSync(path.join(vault, '.rgent-lifecycle'), 'utf8') === journal && existsSync(path.join(vault, '生命周期', '复原', '附件.png')), await page.eval(`JSON.stringify({overlay:!!document.querySelector('.lifecycle-recovery'),status:document.querySelector('.lifecycle-recovery [role=status]')?.textContent??null,text:(document.querySelector('.lifecycle-recovery')?.textContent||'').slice(0,240)})`))
       check('失败重试后键盘焦点仍在恢复浮层', await waitFor(page, `document.querySelector('.lifecycle-recovery')?.contains(document.activeElement)`))
       rmSync(path.join(vault, '生命周期', '复原', '外部新增.txt'))
       await page.eval(`document.querySelector('.lifecycle-retry').focus(); document.querySelector('.lifecycle-retry').click()`)

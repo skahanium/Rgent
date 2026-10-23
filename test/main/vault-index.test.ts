@@ -139,6 +139,8 @@ describe('vault index lifecycle', () => {
     expect(await index.search('甲')).toEqual([])
     expect(await index.search('丙')).toHaveLength(1)
 
+    // Windows 无创建符号链接特权时 EPERM；悬挂链接半边按 POSIX 夹具惯例跳过，不伪装已过。
+    if (process.platform === 'win32') return
     await symlink(path.join(root, 'nowhere'), path.join(root, 'gone.md'))
     index.markDirty()
     expect(await index.search('丙')).toHaveLength(1)
@@ -154,7 +156,7 @@ describe('vault index lifecycle', () => {
     expect(await index.search('甲')).toEqual([])
   })
 
-  it('skips notes it cannot read without failing the rebuild', async () => {
+  it.skipIf(process.platform === 'win32')('skips notes it cannot read without failing the rebuild', async () => {
     const root = await vault()
     await note(root, '好.md', '找得到\n')
     await symlink(path.join(root, 'nowhere'), path.join(root, '坏.md'))

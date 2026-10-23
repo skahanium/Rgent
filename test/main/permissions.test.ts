@@ -93,7 +93,7 @@ describe('permission policy', () => {
     await expect(modelTierFor(root, '工作/a.md')).rejects.toThrow('FORBIDDEN')
   })
 
-  it('rejects symlinked folders and permission files', async () => {
+  it.skipIf(process.platform === 'win32')('rejects symlinked folders and permission files', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'rgent-policy-'))
     const outside = await mkdtemp(path.join(os.tmpdir(), 'rgent-out-'))
     await symlink(outside, path.join(root, 'link'))

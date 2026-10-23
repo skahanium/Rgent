@@ -58,6 +58,7 @@ export function createSearchOverlay(handlers: SearchOverlayHandlers): SearchOver
     if (overlay?.isOpen()) return
     const current = openOverlay({
       label: '搜索笔记',
+      className: 'overlay-search',
       onClose: () => {
         overlay = null
         if (timer != null) window.clearTimeout(timer)
@@ -91,7 +92,6 @@ export function createSearchOverlay(handlers: SearchOverlayHandlers): SearchOver
     results.append(hint)
 
     const root = current.root
-    root.classList.add('overlay-search')
     root.append(head, field, results)
 
     input.addEventListener('input', () => {

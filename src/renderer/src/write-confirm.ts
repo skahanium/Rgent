@@ -16,6 +16,8 @@ export type WriteConfirmHost = {
 const TITLE_LIMIT = 40
 /** 正文预览默认露几行。 */
 const PREVIEW_LINES = 3
+/** 与主进程写确认兜底同一时钟：超时按拒绝，不得看起来像已执行。 */
+export const PREVIEW_TTL_MS = 120_000
 
 /** 卡片标题只认「笔记名」，路径全文进详情：标题要一眼能读完，不能变成第二个路径行。 */
 function noteName(relPath: string): string {
@@ -72,14 +74,25 @@ function previewPath(preview: AgentWritePreview): string {
 }
 
 export function installWriteConfirm(host: WriteConfirmHost): () => void {
-  let current: { overlay: Overlay; requestId: string; decided: boolean } | null = null
+  let current: { overlay: Overlay; requestId: string; decided: boolean; timer: number } | null = null
 
   const settle = (approved: boolean): void => {
     const pending = current
     if (!pending || pending.decided) return
     pending.decided = true
-    void host.decide({ requestId: pending.requestId, approved })
-    pending.overlay.close()
+    window.clearTimeout(pending.timer)
+    const close = (): void => {
+      if (current?.overlay === pending.overlay) current = null
+      pending.overlay.close()
+    }
+    try {
+      const result = host.decide({ requestId: pending.requestId, approved })
+      if (result && typeof (result as Promise<unknown>).then === 'function') {
+        void (result as Promise<unknown>).then(close, close)
+        return
+      }
+    } catch { close(); return }
+    close()
   }
 
   const stop = host.onRequest(preview => {
@@ -88,6 +101,7 @@ export function installWriteConfirm(host: WriteConfirmHost): () => void {
     const title = writeConfirmTitle(preview)
     const overlay = openOverlay({
       label: title,
+      className: 'overlay-write-confirm write-confirm',
       // 非模态：show() 而不是 showModal()，不拿焦点、不拦快捷键。也不能给 initialFocus。
       modal: false,
       // 不管怎么关掉（Esc、程序关闭），没答过就当不允许：人没点头就绝不落盘，
@@ -98,11 +112,11 @@ export function installWriteConfirm(host: WriteConfirmHost): () => void {
         current = null
         if (!pending.decided) {
           pending.decided = true
+          window.clearTimeout(pending.timer)
           void host.decide({ requestId: pending.requestId, approved: false })
         }
       }
     })
-    overlay.root.classList.add('overlay-write-confirm', 'write-confirm')
     // 右下角的常驻卡片：定位与尺寸在 styles.css 的 `.write-confirm`，内容多了在卡内滚动。
     // 保留 dialog 语义（根节点不改成 role=status）；播报用内层 live region，避免覆盖对话框角色。
     overlay.root.setAttribute('aria-label', title)
@@ -160,7 +174,12 @@ export function installWriteConfirm(host: WriteConfirmHost): () => void {
     const accept = overlay.root.querySelector<HTMLElement>('.write-confirm-accept')!
     accept.addEventListener('click', () => settle(true))
     // 不调 focus()：卡出现时编辑器的焦点与输入都不动。
-    current = { overlay, requestId: preview.requestId, decided: false }
+    current = {
+      overlay,
+      requestId: preview.requestId,
+      decided: false,
+      timer: window.setTimeout(() => settle(false), PREVIEW_TTL_MS)
+    }
   })
 
   return () => {

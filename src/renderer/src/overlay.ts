@@ -24,6 +24,8 @@ export type OverlayOptions = {
    * 不拦快捷键；它们同样进栈，但 `modalOpen()` 只把模态算作"挡住快捷键的浮层"。
    */
   modal?: boolean
+  /** 第一帧即终态：在 show／showModal 前写入，空格分隔多个类。 */
+  className?: string
 }
 
 export type Overlay = {
@@ -37,7 +39,7 @@ const stack: Overlay[] = []
 export function openOverlay(options: OverlayOptions): Overlay {
   const modal = options.modal !== false
   const root = document.createElement('dialog')
-  root.className = 'overlay'
+  root.className = ['overlay', options.className].filter(Boolean).join(' ')
   root.dataset.modal = modal ? 'true' : 'false'
   root.setAttribute('aria-label', options.label)
   document.body.append(root)

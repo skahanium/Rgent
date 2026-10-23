@@ -225,7 +225,17 @@ it('extra reference preview lists read search and struct; follow-only extras omi
   })
   await vi.waitFor(() => expect(first.root.querySelector('.authorization-status')!.textContent).toContain('读库'))
   expect(first.root.querySelector('.authorization-status')!.textContent).toContain('改名')
+  expect(first.root.querySelector('.authorization-status')!.textContent).not.toContain('删笔记')
   first.close()
+  const withDelete = openAuthorizationPopover({
+    anchor: { left: 100, top: 100, bottom: 120 },
+    origin: 'a.md',
+    entries: [],
+    preview: async () => ({ ok: true as const, preview: { ...withReference, deleteEnabled: true } }),
+    send: async () => ({ ok: true as const, id: 'task' })
+  })
+  await vi.waitFor(() => expect(withDelete.root.querySelector('.authorization-status')!.textContent).toContain('删笔记'))
+  withDelete.close()
   const second = openAuthorizationPopover({
     anchor: { left: 100, top: 100, bottom: 120 },
     origin: 'a.md',

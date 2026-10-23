@@ -12,7 +12,7 @@
             "OTHER_LDFLAGS": ["-framework Foundation"]
           }
         }],
-        ["OS=='win'", {"sources": ["native/vault_win.cc"], "msvs_settings": {"VCCLCompilerTool": {"AdditionalOptions": ["/std:c++17", "/EHsc"]}}}]
+        ["OS=='win'", {"sources": ["native/vault_win.cc"], "msvs_settings": {"VCCLCompilerTool": {"AdditionalOptions": ["/std:c++17", "/EHsc", "/utf-8"]}}}]
       ]
     }
   ]

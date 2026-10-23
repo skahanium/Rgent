@@ -59,6 +59,14 @@ describe('single task authorization',()=>{
   })
 })
 
+it('discloses deleteEnabled from the host and does not guess the platform', async () => {
+  const off = setup()
+  expect((await off.registry.preview('a', off.request)).deleteEnabled).toBe(false)
+  const on = setup()
+  const registry = new TaskAuthorizationRegistry({ ...on.deps, deleteAvailable: () => true })
+  expect((await registry.preview('a', on.request)).deleteEnabled).toBe(true)
+})
+
 it('permits only verified own write receipts while retaining immutable scope',async()=>{
   const app=setup();const p=await app.registry.preview('a',app.request);const grant=await app.registry.consume('a',{...app.request,previewId:p.id})
   const updated={content:'已标记口令',revision:'new',sessionId:'session-a',objectVersion:'o-a'}

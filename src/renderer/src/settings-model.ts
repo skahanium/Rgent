@@ -219,14 +219,15 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
     save.textContent = '保存配置'
     save.addEventListener('click', () => {
       const newKey = key.value.trim()
-      key.value = ''
       void mutate(() => handlers.saveProvider({
         provider,
         baseURL: base.value.trim(),
         modelId: models[0]?.modelId ?? (firstModelId ? firstModelId.value.trim() : preset.modelId),
         contextTokens: models[0]?.contextTokens ?? (firstCapacity ? Number(firstCapacity.value) : preset.contextTokens),
         ...(newKey ? { newKey } : {})
-      }), '.settings-provider-name')
+      }), '.settings-provider-name').then((ok) => {
+        if (ok) key.value = ''
+      })
     })
     actions.append(save)
     if (state?.hasKey) {

@@ -328,6 +328,16 @@ it('offers a retirement preview for a verified legacy object while keeping unkno
  }
 })
 
+it('does not claim unverified while quality evidence is still loading',()=>{
+ const body=document.createElement('div');document.body.append(body)
+ let resolve!:(value:unknown)=>void
+ const dispose=mountMemoryPage({body,isCurrent:()=>true,onChanged:vi.fn()},{get:()=>new Promise(r=>{resolve=r}),models:async()=>({ok:false,error:'IO_ERROR'})} as never)
+ expect(body.querySelector('.memory-quality-status')?.textContent).toBe('正在读取质量成绩…')
+ expect(body.textContent).not.toContain('自动学习质量尚未通过验证')
+ resolve({ok:true,value:view})
+ dispose();body.remove()
+})
+
 it('shows the four evidence states separately and marks missing human review',async()=>{
  const cases:[MemoryView['quality'],string[]][]=[
   [{state:'passed',humanReviewed:true,stale:false},['已通过本项目质量验收']],

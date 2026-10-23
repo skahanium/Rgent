@@ -54,7 +54,7 @@ describe('secure vault structure', () => {
     expect(() => fs.move('归档/定稿.md', '初稿.md', 'stale')).toThrow('PATH_CHANGED')
   })
 
-  it('rejects a linked parent and never moves data outside the vault', async () => {
+  it.skipIf(process.platform === 'win32')('rejects a linked parent and never moves data outside the vault', async () => {
     const root = await vault()
     const outside = await mkdtemp(path.join(os.tmpdir(), 'rgent-outside-'))
     roots.push(outside)

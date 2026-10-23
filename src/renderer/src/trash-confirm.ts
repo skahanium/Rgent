@@ -14,10 +14,10 @@ export function confirmTrash(preview: TrashPreviewView): Promise<boolean> {
     let decided = false
     const overlay = openOverlay({
       label: '移入系统废纸篓',
+      className: 'overlay-write-confirm write-confirm',
       initialFocus: () => overlay.root.querySelector<HTMLElement>('.write-confirm-cancel'),
       onClose: () => { if (!decided) { decided = true; resolve(false) } }
     })
-    overlay.root.classList.add('overlay-write-confirm')
     const note = preview.hasAttachments ? TRASH_CONFIRM_NOTES.withAttachments : TRASH_CONFIRM_NOTES.withoutAttachments
     overlay.root.innerHTML = `<h2>把这篇笔记移入系统废纸篓吗？</h2><p class="write-confirm-path"></p><p class="write-confirm-note settings-hint"></p><footer><button type="button" class="write-confirm-cancel">不删</button><button type="button" class="write-confirm-accept">移入废纸篓</button></footer>`
     overlay.root.querySelector('.write-confirm-path')!.textContent = preview.relPath

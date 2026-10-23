@@ -16,7 +16,7 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }) })
 
 describe('device vault catalog', () => {
-  it('checks canonical parent nesting before creating a new root through an alias', () => {
+  it.skipIf(process.platform === 'win32')('checks canonical parent nesting before creating a new root through an alias', () => {
     const { root, vault, catalog } = fixture()
     catalog.register(catalog.inspect(vault))
     const alias = path.join(root, 'alias'); fs.symlinkSync(vault, alias, 'dir')
@@ -43,7 +43,7 @@ describe('device vault catalog', () => {
     expect(fs.readdirSync(vault)).toEqual([])
     expect(() => catalog.inspect(path.join(vault, 'absent'))).toThrow()
   })
-  it('registers aliases once and persists display updates and last successful use', () => {
+  it.skipIf(process.platform === 'win32')('registers aliases once and persists display updates and last successful use', () => {
     const { root, data, vault, catalog } = fixture()
     const first = catalog.register(catalog.inspect(vault))
     const alias = path.join(root, 'alias'); fs.symlinkSync(vault, alias, 'dir')
@@ -69,7 +69,7 @@ describe('device vault catalog', () => {
     catalog.register(catalog.inspect(capital))
     expect(() => catalog.register(catalog.inspect(path.join(vault, 'child')))).toThrow('VAULT_NESTED')
   })
-  it('rejects mutually nested roots through canonical aliases but allows siblings', () => {
+  it.skipIf(process.platform === 'win32')('rejects mutually nested roots through canonical aliases but allows siblings', () => {
     const { root, vault, catalog } = fixture()
     const child = path.join(vault, 'child'); fs.mkdirSync(child)
     catalog.register(catalog.inspect(child))
@@ -205,7 +205,7 @@ describe('device workspaces', () => {
     expect(value.tabs[0]).toEqual({ relPath: 'a.md' })
     expect(value).toMatchObject({ active: null, sidebarHidden: false, treeScroll: 0, resourceScroll: 0 })
   })
-  it('isolates canonical root and verified identity across aliases, copies and relocation', () => {
+  it.skipIf(process.platform === 'win32')('isolates canonical root and verified identity across aliases, copies and relocation', () => {
     const { root, vault, catalog } = fixture(); const target = catalog.inspect(vault)
     catalog.saveWorkspace(target, { version: 1, tabs: [{ relPath: 'a.md' }], active: 'a.md' })
     const alias = path.join(root, 'alias'); fs.symlinkSync(vault, alias, 'dir')

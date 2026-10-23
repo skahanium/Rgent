@@ -505,8 +505,10 @@ export type EditorHost = {
   caret: () => number | null
   /** 跳过去：滚动到该处并把光标也放过去。 */
   scrollTo: (position: number) => void
-  /** 选区或可视范围变化时回调；返回取消订阅。 */
+  /** 选区或正文变化时回调；返回取消订阅。仅视口滚动不走这里。 */
   onStateChange: (listener: () => void) => () => void
+  /** 仅视口滚动；标题索引用它更新当前项，不重绘状态行。 */
+  onViewportChange: (listener: () => void) => () => void
   focus: () => void
   destroy: () => void
 }
@@ -623,8 +625,10 @@ export function mountEditor(
         const result = update.state.field(markdownField).result
         warning.hidden = !result.stale
         warning.textContent = result.stale ? `阅读呈现失败，以下是当前原文：${result.error ?? '解析错误'}` : ''
-        if (update.docChanged || update.selectionSet || update.viewportChanged || sourceOf(update.startState) !== sourceOf(update.state)) {
+        if (update.docChanged || update.selectionSet || sourceOf(update.startState) !== sourceOf(update.state)) {
           for (const listener of stateListeners) listener()
+        } else if (update.viewportChanged) {
+          for (const listener of viewportListeners) listener()
         }
         if (applying || !update.docChanged) return
         onChange(sourceOf(update.state).raw)
@@ -632,6 +636,7 @@ export function mountEditor(
     ]
   })
   const stateListeners = new Set<() => void>()
+  const viewportListeners = new Set<() => void>()
   const view = new EditorView({ state, parent })
   return {
     view,
@@ -761,6 +766,10 @@ export function mountEditor(
     onStateChange: (listener) => {
       stateListeners.add(listener)
       return () => stateListeners.delete(listener)
+    },
+    onViewportChange: (listener) => {
+      viewportListeners.add(listener)
+      return () => viewportListeners.delete(listener)
     },
     focus: () => view.focus(),
     destroy: () => { documentGeneration += 1; view.destroy(); warning.remove() }

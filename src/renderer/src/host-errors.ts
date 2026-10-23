@@ -156,13 +156,13 @@ const MESSAGES: Record<string, string> = {
   UNSAVED_DRAFT: '还有窗口稿没保存，先保存再发起本场。',
   NOTE_MISSING: '这篇笔记已不存在，本场已停止。',
   OBJECT_BINDING_LIMIT: '这篇笔记的对象绑定已达上限，本场已停止。',
-  PATH_CHANGED: '路径在核对期间发生变化，本场已停止。',
+  PATH_CHANGED: '路径在核对期间发生变化，没有删除。本场已停止；请重新查看后再试。',
   BAD_PATH: '路径不合法，本场未开始。',
   BAD_LIMIT: '运行上限无效，请在设置的「运行」页重新保存。',
   TASK_ID_BUSY: '任务标识冲突，请重新发起本场。',
   STRUCTURE_BUSY: '文件操作正在进行，本场未开始。',
   OTHER_TASK_RUNNING: '还有别的任务在运行，本场未开始。',
-  LIFECYCLE_RECOVERY_REQUIRED: '文件操作恢复未完成，本场已停止；先处理恢复状态再发起。',
+  LIFECYCLE_RECOVERY_REQUIRED: '文件操作恢复未完成，本场已停止。恢复记录仍在库中；先处理恢复状态再发起。',
   AI_BLOCK_CHANGED: '未采纳的回答被外部修改，本场已停止，不再覆盖它。',
   TASK_CANCELLED: '本场已停止。',
   NETWORK_NOT_AUTHORIZED: '本场未获准联网只读，或联网已在本次任务中停止；回答仍保留。',
@@ -212,7 +212,7 @@ const MESSAGES: Record<string, string> = {
  * 未登记且**不该**登记的码，避免以后误加：
  * - `UNKNOWN_TOOL`／`INVALID_TOOL_ARGUMENTS`／`INVALID_TOOL_CURSOR`：回给模型的工具错误，不成为任务失败原因；
  * - `BAD_SENDER`：IPC 调用方校验，渲染层只看到 invoke 失败，浮层给固定文案；
- * - `COPY_*`／`SOURCE_AVAILABLE`／`STALE_PREVIEW`／`LEDGER_BASIS_UNAVAILABLE`／`BAD_BODY`／`BAD_PERMISSION`／`EEXIST`：另存与生命周期通道，由 `shell.ts` 的 `LIFECYCLE_ERRORS` 翻译。
+ * - `COPY_*`／`SOURCE_AVAILABLE`／`STALE_PREVIEW`／`LEDGER_BASIS_UNAVAILABLE`／`BAD_BODY`／`BAD_PERMISSION`／`EEXIST`：另存与生命周期专属码，由 `shell.ts` 的 `LIFECYCLE_ERRORS` 翻译；重叠码以本文为权威。
  */
 
 /** 已登记码的中文说明；未登记返回 null，调用方可以给更贴合自己场景的兜底。 */
