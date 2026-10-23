@@ -104,22 +104,6 @@ const api = {
     ipcRenderer.on(IPC.memoryChanged, listener)
     return () => ipcRenderer.removeListener(IPC.memoryChanged, listener)
   },
-  onAgentWriteRequest: (fn: (preview: import('../shared/ipc.ts').AgentWritePreview) => void): (() => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, value: unknown): void => {
-      const args = boundEvent(value, mountedSession)
-      const preview = args?.[0] as import('../shared/ipc.ts').AgentWritePreview | undefined
-      if (!preview || typeof preview !== 'object' || typeof preview.requestId !== 'string') return
-      const valid = preview.kind === 'create'
-        ? typeof preview.relPath === 'string' && typeof preview.body === 'string'
-        : preview.kind === 'delete'
-          ? typeof preview.relPath === 'string' && typeof preview.hasAttachments === 'boolean'
-        : (preview.kind === 'rename' || preview.kind === 'move') && typeof preview.source === 'string' && typeof preview.target === 'string'
-      if (valid) fn(preview)
-    }
-    ipcRenderer.on(IPC.agentWriteRequest, listener)
-    return () => ipcRenderer.removeListener(IPC.agentWriteRequest, listener)
-  },
-  agentWriteConfirm: (decision: import('../shared/ipc.ts').AgentWriteDecision): Promise<boolean> => invoke(IPC.agentWriteConfirm, decision),
   memoryGet: (request: MemorySessionRequest): Promise<MemoryResult<MemoryView>> => invoke(IPC.memoryGet, request),
   memoryMaintenancePreview:(request:import('../shared/memory.ts').MemoryMaintenanceRequest):Promise<MemoryResult<MemoryPreview>>=>invoke(IPC.memoryMaintenancePreview,request),
   memoryConfigSave: (request: MemoryConfigRequest): Promise<MemoryResult<MemoryView>> => invoke(IPC.memoryConfigSave, request),
@@ -157,10 +141,6 @@ const api = {
     invoke(IPC.relocationPreview, request),
   relocationCommit: (request: RelocationCommitRequest): Promise<RelocationCommitResult> =>
     invoke(IPC.relocationCommit, request),
-  noteTrashPreview: (request: TrashPreviewRequest): Promise<TrashPreviewResult> =>
-    invoke(IPC.noteTrashPreview, request),
-  noteTrashCommit: (request: TrashCommitRequest): Promise<TrashCommitResult> =>
-    invoke(IPC.noteTrashCommit, request),
   /** 沙箱渲染进程读不到 process.platform；入口是否出现由 preload 在本机判定。 */
   humanTrashOnThisPlatform: HUMAN_TRASH_ON_THIS_PLATFORM,
   lifecycleStatus: (): Promise<LifecycleStatus> => invoke(IPC.lifecycleStatus),

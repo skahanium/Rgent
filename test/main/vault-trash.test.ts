@@ -53,9 +53,7 @@ describe('human trash', () => {
   it('registers delete_note for the model but not an agent trash channel', () => {
     expect(Object.keys(WRITE_TOOL_SCHEMAS)).toContain('delete_note')
     expect(WRITE_TOOL_SCHEMAS.delete_note.inputSchema.required).toEqual(['relPath'])
-    expect(IPC.noteTrashPreview).toBe('note:trash-preview')
-    expect(IPC.noteTrashCommit).toBe('note:trash-commit')
-    expect(Object.values(IPC).some((value) => /agent:.*trash|tool:.*delete/i.test(String(value)))).toBe(false)
+        expect(Object.values(IPC).some((value) => /agent:.*trash|tool:.*delete/i.test(String(value)))).toBe(false)
   })
 
   it('refuses preview on Windows and does not touch the note', async () => {

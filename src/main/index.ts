@@ -791,7 +791,7 @@ function registerIpc(): void {
       if (!trusted(event)) throw new Error('BAD_SENDER')
       const current = vault,session = current?.sessionId() ?? null
       const actual = isVaultChannel(channel) ? boundArguments(args, session) : args
-      if (vaultSwitch?.busy && [IPC.agentStart, IPC.agentAuthorizationPreview, IPC.noteCreate, IPC.folderCreate, IPC.relocationPreview, IPC.relocationCommit, IPC.noteTrashPreview, IPC.noteTrashCommit, IPC.lifecycleRetry, IPC.recoveryScan, IPC.recoveryConfirm, IPC.recoveryAbandon, IPC.noteSaveCopyPreview, IPC.noteSaveCopyCommit, IPC.permissionsSet, IPC.memoryConfigSave, IPC.memoryPreviewCommit, IPC.memoryItemEdit, IPC.memoryItemDisable, IPC.memoryItemForget, IPC.memoryJobRetryPreview, IPC.skillsSave, IPC.skillsSetEnabled, IPC.agentWriteConfirm, IPC.ledgerMaintenance, IPC.ledgerMigrate, IPC.ledgerRepair].includes(channel as never)) throw Error('VAULT_SWITCH_BUSY')
+      if (vaultSwitch?.busy && [IPC.agentStart, IPC.agentAuthorizationPreview, IPC.noteCreate, IPC.folderCreate, IPC.relocationPreview, IPC.relocationCommit,   IPC.lifecycleRetry, IPC.recoveryScan, IPC.recoveryConfirm, IPC.recoveryAbandon, IPC.noteSaveCopyPreview, IPC.noteSaveCopyCommit, IPC.permissionsSet, IPC.memoryConfigSave, IPC.memoryPreviewCommit, IPC.memoryItemEdit, IPC.memoryItemDisable, IPC.memoryItemForget, IPC.memoryJobRetryPreview, IPC.skillsSave, IPC.skillsSetEnabled,  IPC.ledgerMaintenance, IPC.ledgerMigrate, IPC.ledgerRepair].includes(channel as never)) throw Error('VAULT_SWITCH_BUSY')
       const result = isVaultChannel(channel) && current ? await current.runBound(session, () => listener(event, ...actual)) : await listener(event, ...actual)
       if (isVaultChannel(channel) && session !== (vault?.sessionId() ?? null)) throw Error('VAULT_CHANGED')
       return result
@@ -1843,25 +1843,6 @@ function registerIpc(): void {
       const outcome = await relocationCommitShared(request.id, request.repairLinks)
       return { ok: true, moved: outcome.moved, unrepaired: outcome.unrepaired }
     } catch (error) { return { ok: false, error: lifecycleError(error, 'COMMIT_FAILED') } }
-  })
-  registerTrustedHandle(IPC.noteTrashPreview, async (event, value: unknown): Promise<TrashPreviewResult> => {
-    const request = parseTrashPreviewRequest(value)
-    if (!trusted(event) || !request || !vault) return { ok: false, error: 'BAD_PATH' }
-    try { return { ok: true, preview: await trashPreviewShared(request.relPath) } }
-    catch (error) { return { ok: false, error: lifecycleError(error, 'PREVIEW_FAILED') } }
-  })
-  registerTrustedHandle(IPC.noteTrashCommit, async (event, value: unknown): Promise<TrashCommitResult> => {
-    const request = parseTrashCommitRequest(value)
-    if (!trusted(event) || !request || !vault) return { ok: false, error: 'BAD_REQUEST' }
-    try { return await trashCommitShared(request.id, request.allow) }
-    catch (error) {
-      // 落点核验失败时把系统实际落点一并交回；其它错误不编造落点。
-      const landing = error instanceof Error ? (error as Error & { landing?: unknown }).landing : undefined
-      return {
-        ok: false, error: lifecycleError(error, 'COMMIT_FAILED'),
-        ...(typeof landing === 'string' && landing ? { landing } : {})
-      }
-    }
   })
   registerTrustedHandle(IPC.lifecycleStatus, async (event) => {
     if (!trusted(event) || !vault) throw new Error('NO_VAULT')

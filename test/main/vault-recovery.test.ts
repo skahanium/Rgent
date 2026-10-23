@@ -426,7 +426,5 @@ it('does not name TRASH_GATE_OPEN and does not give the model a trash IPC', asyn
     const text = await readFile(path.join(file.parentPath, file.name), 'utf8')
     expect(text).not.toContain('TRASH_GATE_OPEN')
   }
-  expect(IPC.noteTrashPreview).toBe('note:trash-preview')
-  expect(IPC.noteTrashCommit).toBe('note:trash-commit')
   expect(Object.values(IPC).some((value) => /agent:.*trash|tool:.*delete/i.test(String(value)))).toBe(false)
 })
