@@ -339,7 +339,9 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
       panel.append(more)
     }
     const status = element('p', 'settings-hint')
-    status.textContent = `${candidateNote}${candidateTruncated ? ' 端点返回过多，只保留前 100 个。' : ''}端点未提供容量时必须填写。`
+    status.classList.add('settings-candidate-status')
+    const statusBase = `${candidateNote}${candidateTruncated ? ' 端点返回过多，只保留前 100 个。' : ''}端点未提供容量时必须填写。`
+    status.textContent = statusBase
     const capacityOf = (candidate: { contextTokens?: number; input?: string }): number | null => {
       const raw = candidate.input ?? (candidate.contextTokens !== undefined ? String(candidate.contextTokens) : '')
       const value = Number(raw)
@@ -349,10 +351,22 @@ export function mountModelPage(host: ModelPageHost, handlers: ModelPageHandlers)
     const footer = element('div', 'settings-actions')
     const add = element('button', 'settings-action')
     add.type = 'button'
+    const capacityInputs = (): HTMLInputElement[] => [...panel.querySelectorAll<HTMLInputElement>('.settings-candidate-capacity')]
     refreshAddState = (): void => {
       const chosen = chosenNow()
+      const missing = chosen.filter((candidate) => capacityOf(candidate) === null).length
       add.textContent = `添加所选${chosen.length ? `（${chosen.length}）` : ''}`
-      add.disabled = adding || chosen.length === 0 || chosen.some((candidate) => capacityOf(candidate) === null)
+      add.disabled = adding || chosen.length === 0 || missing > 0
+      // 按钮被禁用时必须说清为什么，并指出哪一格还没填——否则看起来就是"点了没反应"。
+      add.title = missing > 0 ? '先为所选模型填写上下文容量' : ''
+      status.textContent = missing > 0
+        ? `${statusBase} 已选 ${chosen.length} 个，其中 ${missing} 个还没填上下文容量，填好后才能添加。`
+        : chosen.length > 0 ? `${statusBase} 已选 ${chosen.length} 个，可以添加。` : statusBase
+      const inputs = capacityInputs()
+      shown.forEach((candidate, index) => {
+        const input = inputs[index]
+        if (input) input.classList.toggle('is-missing', candidate.checked && capacityOf(candidate) === null)
+      })
     }
     refreshAddState()
     add.addEventListener('click', () => {

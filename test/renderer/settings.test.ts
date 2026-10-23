@@ -372,11 +372,17 @@ describe('settings interface page', () => {
     expect([...document.querySelectorAll('.settings-candidate-note')].map((node) => node.textContent)).toEqual(['端点提供', '须填写'])
     const add = buttonByText('添加所选（2）')!
     expect(add.disabled).toBe(true)
+    // 禁用必须能被看见、能被解释：按钮带原因，缺容量的那格标红，状态行说清还差什么。
+    expect(add.title).toContain('上下文容量')
+    expect(document.querySelector('.settings-candidate-status')!.textContent).toContain('还没填上下文容量')
+    expect(document.querySelectorAll('.settings-candidate-capacity.is-missing')).toHaveLength(1)
 
     const capacities = document.querySelectorAll<HTMLInputElement>('.settings-candidate-capacity')
     capacities[1]!.value = '4096'
     capacities[1]!.dispatchEvent(new Event('input'))
     expect(add.disabled).toBe(false)
+    expect(add.title).toBe('')
+    expect(document.querySelectorAll('.settings-candidate-capacity.is-missing')).toHaveLength(0)
     add.click()
     await vi.waitFor(() => expect(handlers.addModel).toHaveBeenCalledTimes(2))
     expect(handlers.addModel.mock.calls[0]![0]).toEqual({ provider: 'minimax', modelId: 'MiniMax-M3', contextTokens: 204800 })

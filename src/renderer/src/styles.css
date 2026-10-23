@@ -475,6 +475,9 @@ a[href]:focus-visible,
 .settings-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .settings-actions .settings-action:first-child { border-color: var(--focus-ring); background: var(--accent-solid); color: var(--text-on-accent); }
 .settings-action { justify-self: start; min-height: 38px; padding: 7px 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-overlay); color: var(--text-heading); cursor: pointer; font: 0.8rem var(--font-ui); }
+.settings-action:disabled { opacity: .55; cursor: not-allowed; }
+.settings-actions .settings-action:first-child:disabled { background: var(--state-hover); color: var(--text-muted); border-color: var(--border-strong); }
+.settings-candidate-capacity.is-missing { border-color: var(--status-error); }
 .settings-action:hover { border-color: var(--focus-ring); background: var(--state-hover); }
 .settings-action:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .settings-limit-group { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 2px; padding: 18px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-canvas); }
