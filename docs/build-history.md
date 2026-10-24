@@ -1,5 +1,5 @@
 # 施工历史
-> **状态准据（2026-10-24）**：S1 已推送并全绿；I2 `7341819`／`9ad24a7`／`0fa7353`／`4ac5cbe` 仍在本机、未推送、零 CI。S1 代码/窗口 run `40070044886` 全绿。当前 tip 以 git／Actions 为准。
+> **状态准据（2026-10-24）**：S1 已推送并全绿；I2 `7341819`／`9ad24a7`／`0fa7353`／`4ac5cbe`／`e34b7ca` 仍在本机、未推送、零 CI。S1 代码/窗口 run `40070044886` 全绿。当前 tip 以 git／Actions 为准。
 
 
 本文是[施工图](build.md)的**冻结历史**：按日期的整轮施工与实测记录，含当时的数字、提交与 `/tmp` 证据路径。它们只描述自己那一刻，**不回填、不重写**，也不代表当前状态。
@@ -2496,7 +2496,7 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 
 **问题**：库内删除 `test` 后新建同名 `test`，旧 owner 仍在 active registry，路径相同、objectVersion 不同，`ledger-store` 判 `LEDGER_OWNERSHIP_UNVERIFIED`，发送前 preview 被拦住。
 
-**实现**（`7341819`／`9ad24a7`／`0fa7353`／`4ac5cbe`）
+**实现**（`7341819`／`9ad24a7`／`0fa7353`／`4ac5cbe`／`e34b7ca`）
 - active owner 留 `.rgent/registry.json`；被删除/替换的 owner 移到 `.rgent/ledger-history/<noteId>`，由 `index.json` 记录 state/trashId。
 - `lookupOwner` 只在当前 objectVersion 匹配时返回 owner；路径上的旧对象返回 null → `unregistered`，不再抛错。
 - `owner()` 首次为新对象建 owner；路径上旧 active owner 自动归档为 orphaned；删除走 `archiveTrashed`，还原走 `restoreArchived`（原位或副本）。
@@ -2508,8 +2508,9 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 - 媒体 URL 带 note image epoch；协议仍 `no-store`，同名新对象不沿用旧图片 URL。
 - 已删除页新增只读旧账本与「历史归档」区；归档清理必须显式触发并走系统废纸篓。
 - 5,000 owner 的 active lookup 夹具证明不扫 vault/ledger 目录。
+- 新建 owner 前先清理同路径、无 registry 行的孤儿 descriptor，避免残留目录把下一次 material 校验打成 `LEDGER_REGISTRY_INVALID`。
 
-**门（本机）**：单元 **169 文件 3043 通过／4 跳过**；完整窗口 **386／0**；构建、文档通过。
+**门（本机）**：单元 **169 文件 3044 通过／4 跳过**；完整窗口 **386／0**；构建、文档通过。
 
 **边界**：旧 v1 owner 仍按 active 读，当前用户的旧条目在首次打开已删除页时懒归档；没有做全量 v1→v2 迁移；I2 未推送、零 CI。
 
