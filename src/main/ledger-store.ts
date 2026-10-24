@@ -171,6 +171,9 @@ export class LedgerStore{
   if(same.length===1){const owner=same[0]!;const descriptor=this.read(`.rgent/ledgers/${owner.noteId}/owner.json`);if(!descriptor||descriptor.raw!==JSON.stringify(owner))throw Error('LEDGER_REGISTRY_INVALID');if(owner.relPath!==relPath){owner.relPath=relPath;this.publish(registry,owner)}return structuredClone(owner)}
   // A missing registry is not proof that the existing ledger tree has no history.
   if(!this.read(fixed)){try{if(this.fs.list('.rgent/ledgers').length)throw Error('LEDGER_REGISTRY_INVALID')}catch(e){if(!(e instanceof Error&&e.message==='ENOENT'))throw e}}
+  // A descriptor can survive without a registry row after an interrupted old write. It is history,
+  // never a second active owner; archive it before creating the current object.
+  this.archiveOrphanOwnersAtPath(relPath)
   const currentRegistry=this.registry()
   const body=note.bytes.toString('utf8'),parsed=compile(body)
   const anchors=[...new Set(parsed.index.markers.flatMap(b=>{const k=parseMarker(body.slice(b.range.start,b.range.end))?.attrs['task-id'];return k?[k]:[]}))].slice(0,256)
@@ -193,6 +196,18 @@ export class LedgerStore{
  private history():LedgerHistory{
   const disk=this.read(historyFixed);if(!disk)return {version:1,entries:[]}
   try{const v:unknown=JSON.parse(disk.raw);if(!obj(v)||!exact(v,['version','entries'])||v.version!==1||!Array.isArray(v.entries)||v.entries.length>100000||!v.entries.every(e=>obj(e)&&exact(e,['noteId','relPath','objectVersion','state','archivedAt',...('trashId'in e?['trashId']:[])] )&&typeof e.noteId==='string'&&typeof e.relPath==='string'&&typeof e.objectVersion==='string'&&['trashed','retired','orphaned','archived'].includes(String(e.state))&&typeof e.archivedAt==='string'&&(e.trashId===undefined||typeof e.trashId==='string')))throw Error('LEDGER_REGISTRY_INVALID');return v as LedgerHistory}catch{throw Error('LEDGER_REGISTRY_INVALID')}
+ }
+ private archiveOrphanOwnersAtPath(relPath:string):void{
+  let dirs:ReturnType<SecureVaultFs['list']>;try{dirs=this.fs.list('.rgent/ledgers')}catch{return}
+  const registry=this.registry(),current=this.fs.readSnapshot(relPath).objectVersion
+  for(const dir of dirs){
+   if(dir.name==='.DS_Store'||dir.kind!=='dir'||!id(dir.name))continue
+   const raw=this.read(`.rgent/ledgers/${dir.name}/owner.json`);if(!raw)continue
+   let evidence:unknown;try{evidence=JSON.parse(raw.raw)}catch{continue}
+   if(!validOwner(evidence)||evidence.relPath!==relPath||evidence.objectVersion===current)continue
+   if(registry.owners.some(o=>o.noteId===evidence.noteId))continue
+   this.archiveOwner(evidence,'orphaned')
+  }
  }
  private archiveOwner(owner:LedgerOwner,state:LedgerHistoryState,trashId?:string):LedgerHistoryEntry{
   const source=`.rgent/ledgers/${owner.noteId}`,target=`${historyRoot}/${owner.noteId}`

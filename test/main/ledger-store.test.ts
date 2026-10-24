@@ -291,3 +291,12 @@ it('resolves one active owner from a 5k-owner registry without scanning the vaul
   expect(found?.noteId).toBe('n4999');expect(Date.now()-started).toBeLessThan(500);expect(list).not.toHaveBeenCalled()
  } finally { list.mockRestore() }
 })
+
+it('archives an orphan descriptor before creating a new owner for the same path',()=>{
+ const {root,fs,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');const old=store.owner('a.md')
+ const file=path.join(root,'.rgent','registry.json'),registry=JSON.parse(readFileSync(file,'utf8'));registry.owners=[];writeFileSync(file,JSON.stringify(registry))
+ fs.replace('a.md','正文','新正文');const replacement=store.owner('a.md')
+ expect(replacement.noteId).not.toBe(old.noteId)
+ expect(store.historyEntries()).toEqual([expect.objectContaining({noteId:old.noteId,state:'orphaned'})])
+ expect(store.materialState()).toEqual({status:'verified',sequence:0})
+})
