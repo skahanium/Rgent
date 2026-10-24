@@ -1,5 +1,5 @@
 # 施工历史
-> **状态准据（2026-10-24）**：本地与 `origin/branch-v0.1.0` 一致；最近代码/窗口 CI [run 40070044886](https://github.com/skahanium/Rgent/actions/runs/40070044886)（`4b9ab6c`）全绿，随后 docs-only run `40071309403` 全绿。N／R／P／F1／S1 均已推送；当前 tip 以 git／Actions 为准。
+> **状态准据（2026-10-24）**：S1 已推送并全绿；I2 `7341819` 仍在本机、未推送、零 CI。S1 代码/窗口 run `40070044886` 全绿。当前 tip 以 git／Actions 为准。
 
 
 本文是[施工图](build.md)的**冻结历史**：按日期的整轮施工与实测记录，含当时的数字、提交与 `/tmp` 证据路径。它们只描述自己那一刻，**不回填、不重写**，也不代表当前状态。
@@ -2491,4 +2491,21 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 **边界**：H1 在最后一次 tier 检查与库层迁移之间仍有极窄 TOCTOU；native 在途撤网会结束当前任务（安全 fallback，不自动重试）；AI 结构失败只进任务状态/账本，无新模态；精确权限写回只做笔记条目，不开放人用“按笔记设档”界面；旧 `/` 仍不迁移；Windows 原生删除仍关；MCP 默认值/限额单位/位置无关链接留后续债务。
 
 **受验提交**：`a2668ce`（代码）＋本轮文档提交（已推送；CI run `40070044886`）。**Windows 夹具补丁**：删除并发用例按 `TRASH_OPERATIONS_ON_THIS_PLATFORM` 跳过，避免 Windows 关闭删除链路时误红。
+
+## 2026-10-24 I2 地址/账本身份分离（本机已交、未推送）
+
+**问题**：库内删除 `test` 后新建同名 `test`，旧 owner 仍在 active registry，路径相同、objectVersion 不同，`ledger-store` 判 `LEDGER_OWNERSHIP_UNVERIFIED`，发送前 preview 被拦住。
+
+**实现**（`7341819`）
+- active owner 留 `.rgent/registry.json`；被删除/替换的 owner 移到 `.rgent/ledger-history/<noteId>`，由 `index.json` 记录 state/trashId。
+- `lookupOwner` 只在当前 objectVersion 匹配时返回 owner；路径上的旧对象返回 null → `unregistered`，不再抛错。
+- `owner()` 首次为新对象建 owner；路径上旧 active owner 自动归档为 orphaned；删除走 `archiveTrashed`，还原走 `restoreArchived`（原位或副本）。
+- 归档的同时移除该 noteId 的活跃 material 单元；历史记录与 owner 描述保留。
+- `trashList` 懒归档旧格式已删除条目；已删除页 `hasLedger` 时提供只读「查看旧账本」，不进入正文。
+- 新笔记账本页隐藏迁移/修复控件；底栏不再因路径复用显示历史诊断。
+- 热路径 `lookupOwner` 对 active owner 不扫 ledger/history 目录。
+
+**门（本机）**：单元 **169 文件 3039 通过／4 跳过**；完整窗口 **386／0**；构建、文档通过。
+
+**边界**：未做完整资源 manifest/5k 性能夹具；未实现历史归档清理 UI；旧 v1 owner 仍按 active 读，当前用户的旧条目在首次打开已删除页时懒归档；I2 未推送、零 CI。
 
