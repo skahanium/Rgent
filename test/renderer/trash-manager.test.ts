@@ -336,4 +336,18 @@ describe('deleted page formatting', () => {
     expect(trashErrorText('TRASH_CONFLICT')).toContain('都被占用')
     expect(trashErrorText('SOMETHING_ELSE')).not.toContain('SOMETHING_ELSE')
   })
+
+  it('shows old ledger history only when the entry has one, without leaving the page', async () => {
+    const ledger = vi.fn(async () => ({ ok: true as const, value: { noteId: 'old-note', records: [{ version: 1 as const, noteId: 'old-note', taskId: 't-old', revision: 1, state: 'saved' as const, bodyStatus: 'present' as const, chapter: { taskId: 't-old', startedAt: '2026-10-01T00:00:00Z', status: 'completed' as const, prompt: '旧问题', answer: '旧回答' }, sequence: 1 }], cursor: null, ownership: 'verified' as const, gaps: [] } }))
+    const { row, action } = start({ list: vi.fn(async () => listed([entry({ hasLedger: true })])), ledger })
+    await flush()
+    const history = action('ledger')
+    expect(history.textContent).toBe('查看旧账本')
+    history.click()
+    await flush()
+    expect(ledger).toHaveBeenCalledWith('t1', null)
+    expect(row().querySelector('.trash-ledger')?.textContent).toContain('旧问题')
+    expect(row().querySelector('.trash-ledger')?.textContent).toContain('旧回答')
+  })
+
 })

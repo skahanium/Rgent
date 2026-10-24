@@ -768,7 +768,7 @@ it('previews and explicitly restores a copied library while rejecting same-root 
   // A new explicit library copy has a distinct root and a complete descriptor tree.
   await cp(first,second,{recursive:true,force:true});await attach(second)
   const preview=await session.ledgerRecoveryPreview('restore');expect(preview.canCommit).toBe(true);expect(preview.rows[0].outcome).toBe('associate')
-  expect((await session.readOpened('原篇.md')).ledger?.status).toBe('invalid')
+  expect((await session.readOpened('原篇.md')).ledger?.status).toBe('unregistered')
   const result=await session.ledgerRecoveryCommit(preview.id);expect(result.status).toBe('complete');expect((await session.readOpened('原篇.md')).ledger?.status).toBe('verified')
   await expect(session.ledgerRecoveryCommit(preview.id)).rejects.toThrow('STALE_PREVIEW')
  }finally{session.dispose()}

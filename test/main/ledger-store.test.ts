@@ -1,7 +1,7 @@
 import {mkdtempSync,readFileSync,rmSync,writeFileSync,renameSync,unlinkSync} from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import {afterEach,expect,it} from 'vitest'
+import {afterEach,expect,it,vi} from 'vitest'
 import {LedgerStore} from '../../src/main/ledger-store.ts'
 import {secureFsFor,closeSecureFs} from '../../src/main/secure-fs.ts'
 import {appendLedgerChapter} from '../../src/main/host-source.ts'
@@ -25,12 +25,12 @@ it('clears a shared archive only with the whole preview and matching archive rev
  const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),appendLedgerChapter(appendLedgerChapter('正文\n',task),{...task,taskId:'task-2'}));store.migrate('a.md');const preview=store.maintenancePreview('a.md','clear')
  expect(preview.archive).toBeDefined();expect(preview.warning).toContain('全部');const result=store.maintain('a.md','clear',preview.records,preview.archive);expect(result.archiveCleared).toBe(true);expect(store.legacyRaw('a.md')).toBe('<!-- rgent:ledger:v1 -->\n')
 })
-it('binds only continuous objects; Finder copy starts new history and replacement is unknown',()=>{
+it('binds only continuous objects; Finder copy starts new history and replacement starts a new object',()=>{
  const {root,fs,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文')
  const owner=store.owner('a.md');store.prepare('a.md',task)
  writeFileSync(path.join(root,'copy.md'),'正文');expect(store.owner('copy.md').noteId).not.toBe(owner.noteId)
  renameSync(path.join(root,'a.md'),path.join(root,'renamed.md'));expect(store.owner('renamed.md').noteId).toBe(owner.noteId)
- fs.replace('renamed.md','正文','替换正文');expect(()=>store.owner('renamed.md')).toThrow('LEDGER_OWNERSHIP_UNVERIFIED')
+ fs.replace('renamed.md','正文','替换正文');const replacement=store.owner('renamed.md');expect(replacement.noteId).not.toBe(owner.noteId);expect(store.historyEntries().some(e=>e.noteId===owner.noteId&&e.state==='orphaned')).toBe(true)
 })
 it('copies and verifies legacy exact bytes before stripping tail; opaque chapters remain opaque',()=>{
  const {root,fs,store}=fixture();const source='\ufeff正文\r\n\n<!-- rgent:prompt:v1 task-id="keep" -->\r'+appendLedgerChapter('',task).replaceAll('\n','\r\n')
@@ -196,9 +196,9 @@ it('rejects a reconstructed registry with orphan material units',()=>{
  const file=path.join(root,'.rgent','materials.json'),value=JSON.parse(readFileSync(file,'utf8'));value.units[0].noteId='missing-owner';writeFileSync(file,JSON.stringify(value))
  expect(()=>store.recoveryOwners()).toThrow('LEDGER_REGISTRY_INVALID')
 })
-it('does not present an orphan descriptor as unregistered history when the registry lacks its row',()=>{
+it('treats an orphan descriptor as unregistered for the current object',()=>{
  const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');store.owner('a.md');writeFileSync(path.join(root,'.rgent','registry.json'),JSON.stringify({version:1,owners:[],sequence:0}))
- expect(()=>store.page('a.md')).toThrow('LEDGER_REGISTRY_INVALID');expect(()=>store.owner('a.md')).toThrow('LEDGER_REGISTRY_INVALID')
+ expect(store.page('a.md').ownership).toBe('unregistered');expect(store.owner('a.md').noteId).toBeTruthy()
 })
 it('decodes unchanged historical records once across pages and invalidates an external change',()=>{
  const {root,fs,store}=fixture();writeFileSync(root+'/a.md','正文');const owner=store.owner('a.md')
@@ -265,4 +265,15 @@ it.each(['prepare','complete','clear'] as const)('preserves a legal terminal tas
  else if(action==='complete')expect(()=>store.complete('a.md',task.taskId,awaitHash(body))).toThrow('LEDGER_RECORD_LIMIT')
  else{const preview=store.maintenancePreview('a.md','clear'),result=store.maintain('a.md','clear',preview.records);expect(result.success).toEqual([]);expect(result.failed).toEqual([task.taskId])}
  const after=fs.readSnapshot(file);expect(after.bytes).toEqual(before.bytes);expect(after.objectVersion).toBe(before.objectVersion);expect(store.getRecord('a.md',task.taskId).revision).toBe(Number.MAX_SAFE_INTEGER)
+
+
+})
+
+it('resolves an active owner without scanning the ledger/history directories',()=>{
+ const {root,fs,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文');const owner=store.owner('a.md')
+ const list=vi.spyOn(fs,'list')
+ try {
+  expect(store.lookupOwner('a.md')?.noteId).toBe(owner.noteId)
+  expect(list).not.toHaveBeenCalled()
+ } finally { list.mockRestore() }
 })

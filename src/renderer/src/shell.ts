@@ -2048,6 +2048,7 @@ export async function start(root: HTMLElement): Promise<void> {
     let cursor:string|null=null,loading=false,pageGeneration=0,maintenanceFeedback=''
     let chunkText='',chunkHash:string|null=null,chunkOffset=0,decoder=new TextDecoder()
     const load=document.createElement('button');load.type='button';load.className='settings-action';load.textContent='加载更多历史'
+    const maintenanceControls:HTMLButtonElement[]=[]
     const renderRecord=(record:import('../../main/ledger-store.ts').LedgerRecord)=>{
       const details=document.createElement('details'),heading=document.createElement('summary'),content=document.createElement('div')
       details.dataset.taskId=record.taskId
@@ -2064,7 +2065,11 @@ export async function start(root: HTMLElement): Promise<void> {
       try{const result=await window.rgent.ledgerGet({sessionId:captured.sessionId,objectVersion:captured.objectVersion,relPath:captured.relPath,cursor})
         if(!ledgerOpen||current()!==captured||generation!==pageGeneration)return
         if(!result.ok){message.textContent=ledgerErrorText(result.error);if(['LEDGER_REGISTRY_INVALID','LEDGER_OWNERSHIP_UNVERIFIED','LEDGER_RECOVERY_AMBIGUOUS'].includes(result.error)){const repair=document.createElement('button');repair.type='button';repair.className='settings-action';repair.textContent='在笔记库设置中核验与恢复';repair.onclick=()=>settingsOverlay.open('笔记库');ledgerBody.append(repair)}return}
-        const value=result.value;message.textContent=maintenanceFeedback+(value.gaps.length?'部分历史存在清理或正文核验缺口。':'')+(value.maintenanceError?'后台维护未完成，历史保留；请重新核对。':'')
+        const value=result.value;const noHistory=value.ownership==='unregistered'&&!value.records.length&&!value.chunk
+        migrate.hidden=noHistory
+        for(const control of maintenanceControls)control.hidden=noHistory
+        load.hidden=noHistory
+        message.textContent=maintenanceFeedback+(value.gaps.length?'部分历史存在清理或正文核验缺口。':'')+(value.maintenanceError?'后台维护未完成，历史保留；请重新核对。':'')
         if(value.chunk){const c=value.chunk;if(c.offset===0){chunkText='';chunkHash=c.hash;chunkOffset=0;decoder=new TextDecoder()}
           if(c.offset!==chunkOffset||c.hash!==chunkHash)throw Error('LEDGER_CONFLICT')
           const bytes=Uint8Array.from(atob(c.data),x=>x.charCodeAt(0));chunkOffset+=bytes.length;chunkText+=decoder.decode(bytes,{stream:chunkOffset<c.total})
@@ -2092,7 +2097,7 @@ export async function start(root: HTMLElement): Promise<void> {
         const preview=result.value;message.textContent=`当前历史占用 ${preview.totalBytes} 字节；本次 ${preview.records.length} 场。${preview.warning}`
         const apply=document.createElement('button');apply.type='button';apply.className='settings-action';apply.textContent=action==='clear'?'确认清理列出的历史':'执行已核验压缩';ledgerBody.append(apply)
         apply.onclick=async()=>{apply.disabled=true;const committed=await window.rgent.ledgerMaintenance({...request,previewId:preview.id});if(!ledgerOpen||current()!==captured)return;if(committed.ok&&'success'in committed.value){maintenanceFeedback=`已完成 ${committed.value.success.length} 场；${committed.value.failed.length} 场未完成；实际减少 ${committed.value.savedBytes} 字节。`;message.textContent=maintenanceFeedback;apply.remove();ledgerBody.querySelectorAll('details').forEach(node=>node.remove());pageGeneration++;cursor=null;loading=false;chunkText='';chunkHash=null;chunkOffset=0;decoder=new TextDecoder();void fetchPage();ledgerClose.focus()}else{message.textContent='维护未完成，原记录与正文保持；请重新核对。';apply.remove()}}
-      };ledgerBody.append(control)
+      };maintenanceControls.push(control);ledgerBody.append(control)
     }
     void fetchPage()
     ledgerEl.hidden = false

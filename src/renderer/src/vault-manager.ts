@@ -411,7 +411,8 @@ function preloadTrashHandlers(): TrashManagerHandlers | null {
   return {
     list: () => api.vaultTrashList(),
     restore: id => api.vaultTrashRestore(id),
-    purge: id => api.vaultTrashPurge(id)
+    purge: id => api.vaultTrashPurge(id),
+    ...(typeof api.ledgerGetTrash === 'function' ? { ledger: async (id, cursor) => { const state = await api.vaultGet(); if (!state.sessionId) throw new Error('NO_VAULT'); return api.ledgerGetTrash({sessionId: state.sessionId, trashId: id, cursor}) } } : {})
   }
 }
 function errorText(error: unknown): string {

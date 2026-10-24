@@ -1714,6 +1714,16 @@ function registerIpc(): void {
       return {ok:true,value:await current.ledgerPage(r.relPath,(r.cursor??null) as string|null)}
     }catch(e){const code=e instanceof Error?e.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED','NOTE_REPLACED','LEDGER_REGISTRY_INVALID','LEDGER_OWNERSHIP_UNVERIFIED','LEDGER_RECORD_INVALID','LEDGER_CONFLICT'].includes(code)?code:'LEDGER_UNAVAILABLE',...(code==='LEDGER_REGISTRY_INVALID'&&current?.sessionId()===token?{registryRevision:current?.ledgerRegistryRevision()}: {})}}
   })
+  registerTrustedHandle(IPC.ledgerGetTrash,async(_event,value:unknown)=>{
+    const current=vault
+    try{
+      if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
+      const r=value as Record<string,unknown>
+      if(Object.keys(r).some(k=>!['trashId','sessionId','cursor'].includes(k))||typeof r.trashId!=='string'||typeof r.sessionId!=='string'||r.cursor!==undefined&&r.cursor!==null&&typeof r.cursor!=='string')throw Error('BAD_REQUEST')
+      if(!current)throw Error('NO_VAULT');current.assertSession(r.sessionId)
+      return {ok:true,value:await current.ledgerTrashPage(r.trashId,(r.cursor??null) as string|null)}
+    }catch(e){const code=e instanceof Error?e.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED','LEDGER_REGISTRY_INVALID','LEDGER_RECORD_INVALID','LEDGER_CONFLICT'].includes(code)?code:'LEDGER_UNAVAILABLE'}}
+  })
   registerTrustedHandle(IPC.ledgerMigrate,async(_event,value:unknown)=>{
     try{if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST');const r=value as Record<string,unknown>
       if(Object.keys(r).sort().join()!=='after,sessionId'||typeof r.sessionId!=='string'||r.after!==null&&(typeof r.after!=='string'||r.after.length>4096))throw Error('BAD_REQUEST')

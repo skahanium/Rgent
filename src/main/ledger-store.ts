@@ -12,6 +12,8 @@ import {upsertAiAnswer,type LedgerChapterWrite} from './host-source.ts'
 const digest=(s:string)=>createHash('sha256').update(s).digest('hex')
 function nextRecordRevision(revision:number):number{if(revision>=Number.MAX_SAFE_INTEGER)throw Error('LEDGER_RECORD_LIMIT');return revision+1}
 const fixed='.rgent/registry.json'
+const historyFixed='.rgent/ledger-history/index.json'
+const historyRoot='.rgent/ledger-history'
 const id=(s:unknown):s is string=>typeof s==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(s)
 const rel=(s:unknown):s is string=>typeof s==='string'&&s.length<=4096&&/\.md$/i.test(s)&&!s.split('/').some(x=>!x||x==='.'||x==='..'||x.startsWith('.'))&&!/[:\\\x00-\x1f]/.test(s)
 const obj=(s:unknown):s is Record<string,unknown>=>!!s&&typeof s==='object'&&!Array.isArray(s)
@@ -31,6 +33,9 @@ function lifecycleRaw(expected:string|null,active:unknown):string{
 }
 export type LedgerOwner={noteId:string;relPath:string;objectVersion:string;bodyRevision:string;anchors:string[];anchorsTruncated?:true;sequenceCeiling:number;recoveryEvidence?:{rootIdentity:string;attachments:{relPath:string;kind:'file'|'dir';hash?:string}[]}}
 type Registry={version:1;owners:LedgerOwner[];sequence:number}
+export type LedgerHistoryState='trashed'|'retired'|'orphaned'|'archived'
+export type LedgerHistoryEntry={noteId:string;relPath:string;objectVersion:string;state:LedgerHistoryState;trashId?:string;archivedAt:string}
+type LedgerHistory={version:1;entries:LedgerHistoryEntry[]}
 type MaterialUnit={id:string;noteId:string;start:number;end:number;sequence:number;hash?:string}
 export type LedgerRecord={version:1;noteId:string;taskId:string;revision:number;state:'pending-body'|'saved'|'legacy'|'cleared';bodyStatus:'present'|'unable-to-verify';chapter:Omit<LedgerChapterWrite,'reasoning'>|null;legacyRaw?:string;legacyReasoning?:string;sequence:number}
 export type LedgerPage={noteId:string;records:LedgerRecord[];cursor:string|null;ownership:'verified'|'unregistered';gaps:string[]}
@@ -125,7 +130,6 @@ export class LedgerStore{
  inspectOwner(relPath:string):import('../shared/ipc.ts').NoteSnapshot['ledger']{
   try{const note=this.fs.readSnapshot(relPath),owner=this.lookupOwner(relPath)
    if(!this.read(fixed))this.assertNoMaterialHistory()
-   if(owner&&owner.objectVersion!==note.objectVersion)throw Error('LEDGER_OWNERSHIP_UNVERIFIED')
    if(owner){const descriptor=this.read(`.rgent/ledgers/${owner.noteId}/owner.json`);if(!descriptor||descriptor.raw!==JSON.stringify(owner))throw Error('LEDGER_REGISTRY_INVALID')}
    if(partitionSource(note.bytes.toString()).ledger!==null)return {status:'unmigrated',next:'migrate'}
    return {status:owner?'verified':'unregistered',next:'none'}
@@ -142,12 +146,13 @@ export class LedgerStore{
   const note=this.fs.readSnapshot(relPath),owner=registry.owners.find(o=>o.relPath===relPath)
   if(!owner){
    let dirs:ReturnType<SecureVaultFs['list']>=[];try{dirs=this.fs.list('.rgent/ledgers')}catch(e){if(!(e instanceof Error&&e.message==='ENOENT'))throw e}
-   for(const dir of dirs){if(dir.name==='.DS_Store'&&dir.kind==='file')continue;if(dir.kind!=='dir'||!id(dir.name))throw Error('LEDGER_REGISTRY_INVALID');const descriptor=this.read(`.rgent/ledgers/${dir.name}/owner.json`);let evidence:unknown;try{evidence=JSON.parse(descriptor?.raw??'')}catch{throw Error('LEDGER_REGISTRY_INVALID')};if(!validOwner(evidence)||evidence.noteId!==dir.name||evidence.relPath===relPath||evidence.objectVersion===note.objectVersion)throw Error('LEDGER_REGISTRY_INVALID')}
+   for(const dir of dirs){if(dir.name==='.DS_Store'&&dir.kind==='file')continue;if(dir.kind!=='dir'||!id(dir.name))throw Error('LEDGER_REGISTRY_INVALID');const descriptor=this.read(`.rgent/ledgers/${dir.name}/owner.json`);let evidence:unknown;try{evidence=JSON.parse(descriptor?.raw??'')}catch{throw Error('LEDGER_REGISTRY_INVALID')};if(!validOwner(evidence))throw Error('LEDGER_REGISTRY_INVALID');if(evidence.relPath===relPath&&evidence.objectVersion!==note.objectVersion)return null}
    return null
   }
   const raw=this.read(`.rgent/ledgers/${owner.noteId}/owner.json`)
   if(!raw||raw.raw!==JSON.stringify(owner))throw Error('LEDGER_REGISTRY_INVALID')
-  if(owner.objectVersion!==note.objectVersion)throw Error('LEDGER_OWNERSHIP_UNVERIFIED')
+  // A different object at the same address is a new note, not a corrupt owner.
+  if(owner.objectVersion!==note.objectVersion)return null
   return structuredClone(owner)
  }
  private requiredOwner(relPath:string){const owner=this.lookupOwner(relPath);if(!owner)throw Error('LEDGER_RECORD_INVALID');return owner}
@@ -155,16 +160,92 @@ export class LedgerStore{
   if(!rel(relPath))throw Error('BAD_PATH');this.check();const note=this.fs.readSnapshot(relPath),registry=this.registry()
   const same=registry.owners.filter(o=>o.objectVersion===note.objectVersion)
   const atPath=registry.owners.find(o=>o.relPath===relPath)
-  if(atPath&&atPath.objectVersion!==note.objectVersion)throw Error('LEDGER_OWNERSHIP_UNVERIFIED')
   if(same.length>1)throw Error('LEDGER_OWNERSHIP_UNVERIFIED')
+  // A different object at the address is a new note; retire the old owner to history.
+  if(atPath&&atPath.objectVersion!==note.objectVersion)this.archiveOwner(atPath,'orphaned')
   if(same.length===1){const owner=same[0]!;const descriptor=this.read(`.rgent/ledgers/${owner.noteId}/owner.json`);if(!descriptor||descriptor.raw!==JSON.stringify(owner))throw Error('LEDGER_REGISTRY_INVALID');if(owner.relPath!==relPath){owner.relPath=relPath;this.publish(registry,owner)}return structuredClone(owner)}
   // A missing registry is not proof that the existing ledger tree has no history.
   if(!this.read(fixed)){try{if(this.fs.list('.rgent/ledgers').length)throw Error('LEDGER_REGISTRY_INVALID')}catch(e){if(!(e instanceof Error&&e.message==='ENOENT'))throw e}}
-  this.lookupOwner(relPath)
+  const currentRegistry=this.registry()
   const body=note.bytes.toString('utf8'),parsed=compile(body)
   const anchors=[...new Set(parsed.index.markers.flatMap(b=>{const k=parseMarker(body.slice(b.range.start,b.range.end))?.attrs['task-id'];return k?[k]:[]}))].slice(0,256)
-  const owner:LedgerOwner={noteId:randomUUID(),relPath,objectVersion:note.objectVersion,bodyRevision:digest(body),anchors,sequenceCeiling:registry.sequence,...(this.rootIdentity?{recoveryEvidence:{rootIdentity:this.rootIdentity(),attachments:this.attachmentEvidence(relPath)}}:{})};registry.owners.push(owner);this.publish(registry,owner);return structuredClone(owner)
+  const owner:LedgerOwner={noteId:randomUUID(),relPath,objectVersion:note.objectVersion,bodyRevision:digest(body),anchors,sequenceCeiling:currentRegistry.sequence,...(this.rootIdentity?{recoveryEvidence:{rootIdentity:this.rootIdentity(),attachments:this.attachmentEvidence(relPath)}}:{})};currentRegistry.owners.push(owner);this.publish(currentRegistry,owner);return structuredClone(owner)
  }
+ /** Active owners are the only hot-path records. Historical owners live in a separate index/dir. */
+ private history():LedgerHistory{
+  const disk=this.read(historyFixed);if(!disk)return {version:1,entries:[]}
+  try{const v:unknown=JSON.parse(disk.raw);if(!obj(v)||!exact(v,['version','entries'])||v.version!==1||!Array.isArray(v.entries)||v.entries.length>100000||!v.entries.every(e=>obj(e)&&exact(e,['noteId','relPath','objectVersion','state','archivedAt',...('trashId'in e?['trashId']:[])] )&&typeof e.noteId==='string'&&typeof e.relPath==='string'&&typeof e.objectVersion==='string'&&['trashed','retired','orphaned','archived'].includes(String(e.state))&&typeof e.archivedAt==='string'&&(e.trashId===undefined||typeof e.trashId==='string')))throw Error('LEDGER_REGISTRY_INVALID');return v as LedgerHistory}catch{throw Error('LEDGER_REGISTRY_INVALID')}
+ }
+ private archiveOwner(owner:LedgerOwner,state:LedgerHistoryState,trashId?:string):LedgerHistoryEntry{
+  const source=`.rgent/ledgers/${owner.noteId}`,target=`${historyRoot}/${owner.noteId}`
+  const sourceId=this.fs.resolve(source).at(-1)?.id
+  if(!sourceId)throw Error('LEDGER_STORAGE_INVALID')
+  this.dirs(['.rgent','ledger-history'])
+  if(this.read(target))throw Error('LEDGER_STORAGE_INVALID')
+  const entry:LedgerHistoryEntry={noteId:owner.noteId,relPath:owner.relPath,objectVersion:owner.objectVersion,state,archivedAt:new Date().toISOString(),...(trashId?{trashId}:{})}
+  const history=this.history();if(history.entries.some(e=>e.noteId===owner.noteId))throw Error('LEDGER_CONFLICT')
+  // Archived owners must not leave active material units behind: the source index is live, not history.
+  const units=this.materialUnits(),kept=units.filter(u=>u.noteId!==owner.noteId)
+  if(kept.length!==units.length)this.replace('.rgent/materials.json',JSON.stringify({version:1,units:kept}))
+  this.fs.move(source,target,sourceId)
+  try{
+   this.replace(historyFixed,JSON.stringify({version:1,entries:[...history.entries,entry]}))
+   const registry=this.registry(),next={...registry,owners:registry.owners.filter(o=>o.noteId!==owner.noteId)}
+   this.replace(fixed,JSON.stringify(next))
+   this.bases.delete(source)
+   return entry
+  }catch(e){
+   try{this.fs.move(target,source,this.fs.resolve(target).at(-1)!.id)}catch{/* leave diagnostics for the caller */}
+   try{const current=this.history();this.replace(historyFixed,JSON.stringify({version:1,entries:current.entries.filter(x=>x.noteId!==owner.noteId)}))}catch{/* best effort */}
+   throw e
+  }
+ }
+ /** Called by VaultSession when a trusted in-vault delete succeeds. */
+ archiveTrashed(objectVersion:string,trashId:string):LedgerHistoryEntry|null{
+  const registry=this.registry(),owner=registry.owners.find(o=>o.objectVersion===objectVersion)
+  return owner?this.archiveOwner(owner,'trashed',trashId):null
+ }
+ /** Called when a note is restored from in-vault trash: active again at the restored address. */
+ restoreArchived(trashId:string,relPath:string,objectVersion:string):LedgerOwner|null{
+  const history=this.history(),entry=history.entries.find(e=>e.trashId===trashId)
+  if(!entry)return null
+  const source=`${historyRoot}/${entry.noteId}`,target=`.rgent/ledgers/${entry.noteId}`
+  const sourceId=this.fs.resolve(source).at(-1)?.id
+  if(!sourceId)throw Error('LEDGER_STORAGE_INVALID')
+  const raw=this.read(`${source}/owner.json`);if(!raw)throw Error('LEDGER_REGISTRY_INVALID')
+  let owner:unknown;try{owner=JSON.parse(raw.raw)}catch{throw Error('LEDGER_REGISTRY_INVALID')}
+  if(!validOwner(owner))throw Error('LEDGER_REGISTRY_INVALID')
+  const nextOwner={...owner,relPath,objectVersion}
+  this.fs.replace(`${source}/owner.json`,raw.raw,JSON.stringify(nextOwner),raw.id)
+  this.fs.move(source,target,sourceId)
+  try{
+   const registry=this.registry()
+   const next={...registry,owners:[...registry.owners.filter(o=>o.noteId!==entry.noteId),nextOwner]}
+   this.replace(fixed,JSON.stringify(next))
+   this.replace(historyFixed,JSON.stringify({version:1,entries:history.entries.filter(e=>e.noteId!==entry.noteId)}))
+   this.bases.delete(`${source}/owner.json`)
+   return structuredClone(nextOwner)
+  }catch(e){
+   try{this.fs.move(target,source,this.fs.resolve(target).at(-1)!.id)}catch{/* leave diagnostics */}
+   throw e
+  }
+ }
+ historyEntryForTrash(trashId:string):LedgerHistoryEntry|null{
+  return this.history().entries.find(e=>e.trashId===trashId)??null
+ }
+ historyOwnerForTrash(trashId:string):{entry:LedgerHistoryEntry;owner:LedgerOwner}|null{
+  const entry=this.historyEntryForTrash(trashId);if(!entry)return null
+  const raw=this.read(`${historyRoot}/${entry.noteId}/owner.json`);if(!raw)return null
+  let owner:unknown;try{owner=JSON.parse(raw.raw)}catch{return null}
+  return validOwner(owner)?{entry,owner}:null
+ }
+ /** Explicit purge preserves the ledger archive, but records that it is no longer a trash entry. */
+ archivePurged(trashId:string):void{
+  const history=this.history(),entry=history.entries.find(e=>e.trashId===trashId)
+  if(!entry)return
+  this.replace(historyFixed,JSON.stringify({version:1,entries:history.entries.map(e=>e.noteId===entry.noteId?{...e,state:'archived'}:e)}))
+ }
+ historyEntries():LedgerHistoryEntry[]{return structuredClone(this.history().entries)}
  onWrite(relPath:string,before:string,after:string,body:string,previousBody?:string,basis?:WorkingSnapshot){const record=basis?.record,registry=this.registry(),owner=registry.owners.find(o=>o.relPath===relPath&&o.objectVersion===before);if(!owner)return
   const units=this.materialUnits();let changed=false
   const keep=new Set((record?[...record.entries,...record.recent]:[]).flatMap(e=>e.sources.flatMap(s=>[s.materialId,...(s.basisGroups??[])]))??[]),pending=record?.jobs.some(j=>['queued','running','interrupted'].includes(j.outcome)),removed=new Set<string>(),added:MaterialUnit[]=[]
@@ -405,12 +486,13 @@ export class LedgerStore{
   if(bytes<=16*1024*1024){while(this.decodedBytes+bytes>16*1024*1024){const [key,value]=this.decoded.entries().next().value!;this.decoded.delete(key);this.decodedBytes-=value.bytes}this.decoded.set(path,{raw,record,bytes});this.decodedBytes+=bytes}
   return record
  }
- private orderedRecords(owner:LedgerOwner,ceiling:number){
-  const members=this.fs.list(`.rgent/ledgers/${owner.noteId}`);if(members.some(f=>f.kind!=='file'||!['owner.json','legacy.json','recovery.json','.DS_Store'].includes(f.name)&&(!f.name.endsWith('.json')||!id(f.name.slice(0,-5)))))throw Error('LEDGER_REGISTRY_INVALID')
+ private orderedRecordsIn(owner:LedgerOwner,dir:string,ceiling:number){
+  const members=this.fs.list(dir);if(members.some(f=>f.kind!=='file'||!['owner.json','legacy.json','recovery.json','.DS_Store'].includes(f.name)&&(!f.name.endsWith('.json')||!id(f.name.slice(0,-5)))))throw Error('LEDGER_REGISTRY_INVALID')
   return members.filter(f=>f.kind==='file'&&!['owner.json','legacy.json','recovery.json'].includes(f.name)&&f.name.endsWith('.json')).map(file=>{
-   const p=`.rgent/ledgers/${owner.noteId}/${file.name}`,disk=this.read(p);if(!disk)throw Error('LEDGER_RECORD_INVALID');const record=this.decode(p,disk.raw);if(record.noteId!==owner.noteId||file.name!==record.taskId+'.json')throw Error('LEDGER_RECORD_INVALID');return {record,bytes:Buffer.byteLength(disk.raw)}
+   const p=`${dir}/${file.name}`,disk=this.read(p);if(!disk)throw Error('LEDGER_RECORD_INVALID');const record=this.decode(p,disk.raw);if(record.noteId!==owner.noteId||file.name!==record.taskId+'.json')throw Error('LEDGER_RECORD_INVALID');return {record,bytes:Buffer.byteLength(disk.raw)}
   }).filter(({record})=>record.sequence<=ceiling).sort((a,b)=>this.compare(a.record,b.record))
  }
+ private orderedRecords(owner:LedgerOwner,ceiling:number){return this.orderedRecordsIn(owner,`.rgent/ledgers/${owner.noteId}`,ceiling)}
  private compare(a:LedgerRecord,b:LedgerRecord){return b.sequence-a.sequence||(b.chapter?.startedAt??'').localeCompare(a.chapter?.startedAt??'')||b.taskId.localeCompare(a.taskId)}
  page(relPath:string,cursor:string|null=null,maxBytes=128*1024):LedgerPage{
   const owner=this.lookupOwner(relPath),registry=this.registry()
@@ -423,6 +505,22 @@ export class LedgerStore{
   const eligible=boundary?ordered.filter(({record})=>compare(record,{sequence:boundary![1],chapter:{startedAt:boundary![2]},taskId:boundary![3]} as LedgerRecord)>0):ordered
   const records:LedgerRecord[]=[];let bytes=0
   for(const entry of eligible){if(records.length&&(records.length>=20||bytes+entry.bytes>maxBytes))break;records.push(this.displayed(relPath,entry.record));bytes+=entry.bytes}
+  const last=records.at(-1),next=last&&records.length<eligible.length?Buffer.from(JSON.stringify([ceiling,last.sequence,last.chapter?.startedAt??'',last.taskId])).toString('base64url'):null
+  return {noteId:owner.noteId,records,cursor:next,ownership:'verified',gaps:records.filter(r=>r.state==='cleared'||r.bodyStatus==='unable-to-verify').map(r=>r.taskId)}
+ }
+ historyPage(trashId:string,cursor:string|null=null,maxBytes=128*1024):LedgerPage{
+  const found=this.historyOwnerForTrash(trashId)
+  if(!found){if(cursor!==null)throw Error('BAD_REQUEST');return {noteId:'',records:[],cursor:null,ownership:'unregistered',gaps:[]}}
+  const {owner}=found
+  const ceiling=owner.sequenceCeiling
+  const ordered=this.orderedRecordsIn(owner,`${historyRoot}/${owner.noteId}`,ceiling)
+  type Boundary=[number,number,string,string]
+  let boundary:Boundary|null=null
+  if(cursor!==null){try{const value:unknown=JSON.parse(Buffer.from(cursor,'base64url').toString());if(!Array.isArray(value)||value.length!==4||!Number.isSafeInteger(value[0])||!Number.isSafeInteger(value[1])||value[0]<0||value[1]<0||typeof value[2]!=='string'||!id(value[3]))throw Error();boundary=value as Boundary}catch{throw Error('BAD_REQUEST')}}
+  const compare=(a:LedgerRecord,b:LedgerRecord)=>this.compare(a,b)
+  const eligible=boundary?ordered.filter(({record})=>compare(record,{sequence:boundary![1],chapter:{startedAt:boundary![2]},taskId:boundary![3]} as LedgerRecord)>0):ordered
+  const records:LedgerRecord[]=[];let bytes=0
+  for(const entry of eligible){if(records.length&&(records.length>=20||bytes+entry.bytes>maxBytes))break;records.push(structuredClone(entry.record));bytes+=entry.bytes}
   const last=records.at(-1),next=last&&records.length<eligible.length?Buffer.from(JSON.stringify([ceiling,last.sequence,last.chapter?.startedAt??'',last.taskId])).toString('base64url'):null
   return {noteId:owner.noteId,records,cursor:next,ownership:'verified',gaps:records.filter(r=>r.state==='cleared'||r.bodyStatus==='unable-to-verify').map(r=>r.taskId)}
  }

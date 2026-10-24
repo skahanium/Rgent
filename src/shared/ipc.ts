@@ -11,6 +11,7 @@ export const IPC = {
   treeChanged: 'tree:changed',
   noteRead: 'note:read',
   ledgerGet:'ledger:get',
+  ledgerGetTrash:'ledger:get-trash',
   ledgerReasoning:'ledger:reasoning',
   memoryMaintenancePreview:'memory:maintenance-preview',
   ledgerMaintenance:'ledger:maintenance',
@@ -282,6 +283,8 @@ export type TrashEntryView = {
   bytes: number
   source: 'human' | 'ai'
   state: 'ok' | 'damaged'
+  /** 已删除条目是否仍有关联的只读历史；只影响设置页按钮，不进入正文。 */
+  hasLedger?: boolean
 }
 /** `bytes` 是全部条目的累计字节（含 damaged 条目）；坏条目仍以 damaged 列出，不丢。 */
 export type TrashListResult = { ok: true; entries: TrashEntryView[]; bytes: number } | { ok: false; error: string }

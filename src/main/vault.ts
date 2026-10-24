@@ -340,6 +340,7 @@ export class VaultSession {
   async ledgerKey(relPath:string){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);return this.memoryContext().vaultKey+':'+(this.ledgerStore!.lookupOwner(relPath)?.noteId??'unregistered:'+relPath)})}
   async summaryMaterials(relPath:string,taskIds:readonly string[],requiredBodyIds:readonly string[]=[],watermark=0){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.summaryMaterials(relPath,taskIds,requiredBodyIds,watermark,(p,b,a)=>this.acceptsObject(p,b,a))}
   async ledgerContexts(relPath:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.contexts(relPath)}
+  async ledgerTrashPage(trashId:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);const page=this.ledgerStore!.historyPage(trashId,cursor);return {...page,...(this.lifecycle?{}:{})} })}
   async ledgerPage(relPath:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(async()=>{this.assertSession(token);return {...this.ledgerStore!.wirePage(relPath,cursor),...(this.ledgerFailure?{maintenanceError:this.ledgerFailure}:{})}})}
 
   async materialUnit(relPath:string,start:number,end:number,proof?:Pick<import('./host-material.ts').SentFragment,'text'|'hash'|'objectVersion'|'classification'>){const token=this.captureSession();return this.mutations.run(async()=>{
@@ -1411,6 +1412,8 @@ export class VaultSession {
                   taskId: attribution.taskId ?? (source === 'ai' ? `aitrash-${meta.trashId}` : 'humantrash'),
                   prompt: source === 'ai' ? 'AI 移入库内已删除' : '移入库内已删除'
                 })
+              // Active path loses its owner; the old history moves out of the hot registry.
+              this.ledgerStore?.archiveTrashed(meta.objectVersion, meta.trashId)
             } catch (error) {
               // 账本写不进去就把刚写的 journal 记录退回：一次删除要么三样都落下，要么什么都不留。
               try { this.lifecycle!.removeTrashed(meta.trashId) } catch { this.trashIssues.push(`delete-journal:${meta.trashId}`) }
@@ -1445,7 +1448,19 @@ export class VaultSession {
         this.assertSession(token)
         this.requireUsableRoot()
         const listed = this.trashStore().list(this.lifecycle?.trashedObjects() ?? [])
-        return { ok: true as const, entries: listed.entries, bytes: listed.bytes }
+        // Old entries created before the history split: attach their active owner to history lazily.
+        for (const entry of listed.entries) {
+          if (this.ledgerStore?.historyEntryForTrash(entry.id)) continue
+          try {
+            const meta = this.trashStore().readMeta(entry.id)
+            if (meta) this.ledgerStore?.archiveTrashed(meta.objectVersion, entry.id)
+          } catch { /* a damaged/old entry stays readable in the list; no mutation is required */ }
+        }
+        const entries = listed.entries.map(entry => ({
+          ...entry,
+          ...(this.ledgerStore?.historyEntryForTrash(entry.id) ? { hasLedger: true } : {})
+        }))
+        return { ok: true as const, entries, bytes: listed.bytes }
       })
     } catch (error) {
       return { ok: false, error: codeOf(error) }
@@ -1462,7 +1477,7 @@ export class VaultSession {
       return await this.mutations.run(async () => {
         this.assertSession(token)
         this.requireStableStructure()
-        this.requireUsableRoot()
+        const root = this.requireUsableRoot()
         if (!TRASH_OPERATIONS_ON_THIS_PLATFORM) throw new Error('PLATFORM_UNPROVEN')
         if (!isTrashId(id)) throw new Error('BAD_REQUEST')
         const store = this.trashStore()
@@ -1470,6 +1485,13 @@ export class VaultSession {
         const result = store.restore(id)
         if (!result.ok) return result
         this.assertSession(token)
+        try {
+          const restored = secureFsFor(root).readSnapshot(result.relPath)
+          this.ledgerStore?.restoreArchived(id, result.relPath, restored.objectVersion)
+        } catch (error) {
+          // The file is already back; a failed history reattach is reported, never a reason to remove it.
+          this.trashIssues.push(`restore-ledger:${id}:${codeOf(error)}`)
+        }
         let permission: TrashRestorePermission | undefined
         try {
           permission = meta?.permissionTier
@@ -1540,6 +1562,7 @@ export class VaultSession {
         if (!result.ok) return result
         const removed = recorded ? this.lifecycle!.removeTrashed(id) : false
         if (!result.removed && !removed) return { ok: false as const, error: 'TRASH_ENTRY_MISSING' }
+        this.ledgerStore?.archivePurged(id)
         this.index.markDirty()
         return { ok: true as const }
       })

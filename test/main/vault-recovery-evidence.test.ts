@@ -329,11 +329,13 @@ describe('in-vault trash evidence', () => {
       // 不是 PATH_RESERVED：原路径立即可重建（还原时会落成副本）。
       await expect(f.vault.create('a')).resolves.toBe('a.md')
       // 既有账本记录照写，落点是库内条目而不是系统废纸篓。
-      const ledgers = path.join(f.root, '.rgent', 'ledgers')
-      const owners = (await readdir(ledgers)).filter((name) => name !== '.DS_Store')
-      const files = await readdir(path.join(ledgers, owners[0]!))
+      // Deleted history moves out of the active ledger tree; the active registry must not keep the path.
+      const history = path.join(f.root, '.rgent', 'ledger-history')
+      const owners = (await readdir(history)).filter((name) => name !== 'index.json' && name !== '.DS_Store')
+      expect(await readdir(path.join(f.root, '.rgent', 'ledgers'))).not.toContain(owners[0])
+      const files = await readdir(path.join(history, owners[0]!))
       expect(files).toContain('humantrash.json')
-      const record = JSON.parse(await readFile(path.join(ledgers, owners[0]!, 'humantrash.json'), 'utf8')) as { chapter: { prompt: string; answer: string } }
+      const record = JSON.parse(await readFile(path.join(history, owners[0]!, 'humantrash.json'), 'utf8')) as { chapter: { prompt: string; answer: string } }
       expect(record.chapter.prompt).toBe('移入库内已删除')
       expect(record.chapter.answer).toContain('.rgent-trash/')
       const listed = await f.vault.trashList()

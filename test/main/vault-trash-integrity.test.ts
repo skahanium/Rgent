@@ -8,6 +8,8 @@ import { serializeStoredVault } from '../../src/main/notes-fs.ts'
 import * as permissions from '../../src/main/permissions.ts'
 import { tierFor } from '../../src/main/permissions.ts'
 import { TRASH_DIR, TRASH_OPERATIONS_ON_THIS_PLATFORM } from '../../src/main/trash-store.ts'
+import { LedgerStore } from '../../src/main/ledger-store.ts'
+import { vaultRootIdentity } from '../../src/main/watch.ts'
 import { VaultSession } from '../../src/main/vault.ts'
 
 vi.mock('electron', () => ({ dialog: { showOpenDialog: vi.fn() } }))
@@ -195,4 +197,66 @@ describe('in-vault trash integrity', () => {
       expect(f.emit).toHaveBeenCalledWith('note:external-change', expect.objectContaining({ relPath: 'box/b.md', state: 'missing' }))
     } finally { f.vault.dispose() }
   })
+
+  it('archives the old owner on delete and lets a same-name new note start fresh', async () => {
+    if (!TRASH_OPERATIONS_ON_THIS_PLATFORM) return
+    const f = await fixture('reference')
+    mockNativeTrash(f.root)
+    try {
+      const ledger = new LedgerStore(secureFsFor(f.root), () => {}, undefined, () => vaultRootIdentity(f.root))
+      const old = ledger.owner('box/b.md')
+      const id = await deleteBoxNote(f.vault)
+      expect(ledger.historyEntryForTrash(id)).toMatchObject({ state: 'trashed', noteId: old.noteId })
+      expect(await readFile(path.join(f.root, '.rgent', 'ledger-history', old.noteId, 'owner.json'), 'utf8')).toContain(old.noteId)
+
+      await writeFile(path.join(f.root, 'box', 'b.md'), '新正文')
+      expect((await f.vault.readOpened('box/b.md')).ledger?.status).toBe('unregistered')
+      expect(await f.vault.ledgerContexts('box/b.md')).toEqual([])
+      const replacement = ledger.owner('box/b.md')
+      expect(replacement.noteId).not.toBe(old.noteId)
+      expect(ledger.historyEntryForTrash(id)?.noteId).toBe(old.noteId)
+    } finally { f.vault.dispose() }
+  })
+
+
+  it('lists and restores the archived ledger with the deleted note', async () => {
+    if (!TRASH_OPERATIONS_ON_THIS_PLATFORM) return
+    const f = await fixture('reference')
+    mockNativeTrash(f.root)
+    try {
+      const ledger = new LedgerStore(secureFsFor(f.root), () => {}, undefined, () => vaultRootIdentity(f.root))
+      const old = ledger.owner('box/b.md')
+      const id = await deleteBoxNote(f.vault)
+      const listed = await f.vault.trashList()
+      if (!listed.ok) throw new Error(listed.error)
+      expect(listed.entries.find(entry => entry.id === id)?.hasLedger).toBe(true)
+      expect(ledger.historyPage(id).ownership).toBe('verified')
+
+      const restored = await f.vault.trashRestore(id)
+      if (!restored.ok) throw new Error(restored.error)
+      expect(restored).toMatchObject({ relPath: 'box/b.md', copied: false })
+      expect((await f.vault.readOpened('box/b.md')).ledger?.status).toBe('verified')
+      expect(ledger.historyEntryForTrash(id)).toBeNull()
+      expect(ledger.owner('box/b.md').noteId).toBe(old.noteId)
+    } finally { f.vault.dispose() }
+  })
+
+  it('restores archived history to a copy when the original path is occupied', async () => {
+    if (!TRASH_OPERATIONS_ON_THIS_PLATFORM) return
+    const f = await fixture('reference')
+    mockNativeTrash(f.root)
+    try {
+      const ledger = new LedgerStore(secureFsFor(f.root), () => {}, undefined, () => vaultRootIdentity(f.root))
+      const old = ledger.owner('box/b.md')
+      const id = await deleteBoxNote(f.vault)
+      await writeFile(path.join(f.root, 'box', 'b.md'), '新笔记')
+      const restored = await f.vault.trashRestore(id)
+      if (!restored.ok) throw new Error(restored.error)
+      expect(restored).toMatchObject({ copied: true, relPath: 'box/b（恢复）.md' })
+      expect((await f.vault.readOpened('box/b（恢复）.md')).ledger?.status).toBe('verified')
+      expect((await f.vault.readOpened('box/b.md')).ledger?.status).toBe('unregistered')
+      expect(ledger.owner('box/b（恢复）.md').noteId).toBe(old.noteId)
+    } finally { f.vault.dispose() }
+  })
+
 })

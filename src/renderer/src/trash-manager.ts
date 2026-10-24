@@ -1,4 +1,6 @@
 import type { PermissionTier, TrashEntryView, TrashListResult, TrashPurgeResult, TrashRestorePermission, TrashRestoreResult } from '../../shared/ipc.ts'
+import type { LedgerResult } from '../../shared/ledger.ts'
+import { ledgerErrorText } from '../../shared/ledger-errors.ts'
 
 /**
  * 设置「笔记库 → 已删除」次级页。
@@ -11,6 +13,8 @@ export type TrashManagerHandlers = {
   list: () => Promise<TrashListResult>
   restore: (id: string) => Promise<TrashRestoreResult>
   purge: (id: string) => Promise<TrashPurgeResult>
+  /** 只读旧历史；不进入当前笔记账本。 */
+  ledger?: (id: string, cursor?: string | null) => Promise<LedgerResult>
 }
 
 export type TrashManagerContext = {
@@ -192,8 +196,53 @@ export function mountTrashManager(context: TrashManagerContext, handlers: TrashM
       if (damaged && action === 'restore') { node.disabled = true; node.dataset.trashBlocked = 'true' }
       actions.append(node)
     }
+    if (entry.hasLedger && handlers.ledger) {
+      const history = button('查看旧账本', () => { void showHistory(entry, row, actions) })
+      history.dataset.trashAction = 'ledger'
+      actions.append(history)
+    }
     row.append(actions)
     return row
+  }
+
+  async function showHistory(entry: TrashEntryView, row: HTMLElement, actions: HTMLElement): Promise<void> {
+    const existing = row.querySelector<HTMLElement>('.trash-ledger')
+    if (existing) { existing.hidden = !existing.hidden; return }
+    if (!handlers.ledger) return
+    const panel = element('section', 'trash-ledger')
+    panel.setAttribute('aria-label', '旧账本')
+    const heading = element('p', 'trash-ledger-title', '旧账本（只读）')
+    const list = element('div', 'trash-ledger-list')
+    const more = element('button', 'settings-action', '加载更多历史')
+    more.type = 'button'; more.hidden = true
+    const message = element('p', 'trash-ledger-status')
+    panel.append(heading, message, list, more)
+    actions.after(panel)
+    let cursor: string | null = null
+    let loading = false
+    const load = async (): Promise<void> => {
+      if (loading) return
+      loading = true; more.disabled = true
+      try {
+        const result = await handlers.ledger!(entry.id, cursor)
+        if (!alive() || !row.isConnected) return
+        if (!result.ok) { message.textContent = ledgerErrorText(result.error); return }
+        for (const record of result.value.records) {
+          const item = element('article', 'trash-ledger-record')
+          const summary = `${record.chapter?.startedAt ?? '旧记录'} · ${record.chapter?.status ?? '只读原文'}`
+          item.append(element('strong', '', summary))
+          if (record.chapter?.prompt) item.append(element('p', 'trash-ledger-prompt', record.chapter.prompt))
+          if (record.chapter?.answer) item.append(element('p', 'trash-ledger-answer', record.chapter.answer))
+          list.append(item)
+        }
+        cursor = result.value.cursor
+        more.hidden = cursor === null
+        message.textContent = result.value.records.length ? '' : '这篇没有可回顾的历史。'
+      } catch { if (alive()) message.textContent = '旧账本读取未完成；原记录仍保留。' }
+      finally { loading = false; more.disabled = false }
+    }
+    more.addEventListener('click', () => { void load() })
+    await load()
   }
 
   async function load(initial: boolean): Promise<void> {
