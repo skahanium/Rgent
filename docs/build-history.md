@@ -2521,7 +2521,7 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 
 **背景**：`MODEL_REQUEST_FAILED` 只留下泛化文案，用户无法区分 401/429/5xx/网络/上下文；失败任务留下 `task-id` 提问块，重试/清除路径不完整。
 
-**实现**（`f69e0f1`／`bc10019`／`d38eca8`）
+**实现**（`f69e0f1`／`bc10019`／`d38eca8`／`fd930fe`）
 - `TaskFailure`：family/stage/action/retryable/diagnosticId/一句 message/白名单 detail；任务失败码与通用 Host 错误分层。
 - Provider cause 只保留 HTTP、SDK 类型、网络码、供应商 code；不保存 prompt/answer/密钥/响应体/query/工具参数。
 - `chapter.failure` 可选写入任务账本；`.rgent/diagnostics/failures.json` 保存有界失败指针；preflight 失败写应用数据环（20 条/7 天）。
