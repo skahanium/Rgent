@@ -798,6 +798,8 @@ function buildMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+const failureClearSeen = new Set<string>()
+
 function registerIpc(): void {
   const preflightDiagnostics = new PreflightStore(app.getPath('userData'))
   const trusted = (event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean =>
@@ -2335,6 +2337,11 @@ if (ownsInstance) app.whenReady().then(() => {
     }),
     emit: ({ root, ...event }) => {
       if (vault?.root === root && event.sessionId === vault.sessionId()) {
+        if (event.status === 'running' && !failureClearSeen.has(event.id)) {
+          failureClearSeen.add(event.id)
+          if (failureClearSeen.size > 1000) failureClearSeen.clear()
+          try { vault.clearTaskFailures(event.relPath) } catch { /* diagnostics best effort */ }
+        }
         if (event.status === 'failed' && event.failure) {
           try { vault.recordTaskFailure(event.id, event.relPath, event.failure, !event.answer) } catch { /* ledger/event must not fail because diagnostics did */ }
         }

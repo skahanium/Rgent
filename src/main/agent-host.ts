@@ -1337,7 +1337,7 @@ export class AgentHost {
           snapshot(status, reason ? String(reason) : undefined, revision, failure)
         } catch (error) {
           this.pending.set(id, { root, relPath: input.relPath, source: finalSource, persisted, material:savedMaterial })
-          snapshot('failed', error instanceof Error ? error.message : 'WRITE_FAILED')
+          snapshot('failed', error instanceof Error ? error.message : 'WRITE_FAILED', undefined, failure)
           throw error
         } finally {
           this.finalizing.delete(key)

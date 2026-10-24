@@ -347,6 +347,7 @@ export class VaultSession {
     const root=this.requireUsableRoot()
     try { new VaultFailureStore(secureFsFor(root)).record(taskId,relPath,failure,answerEmpty) } catch { /* diagnostics must not fail the task */ }
   }
+  clearTaskFailures(relPath:string){try{new VaultFailureStore(secureFsFor(this.requireUsableRoot())).clearPath(relPath)}catch{/* best effort */}}
   forgetTaskFailure(taskId:string){
     try { new VaultFailureStore(secureFsFor(this.requireUsableRoot())).forget(taskId) } catch { /* best effort */ }
   }

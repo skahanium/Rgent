@@ -63,6 +63,11 @@ export class VaultFailureStore {
     this.write(next)
   }
 
+  clearPath(relPath: string): void {
+    const next = this.read().filter(entry => entry.relPath !== relPath)
+    this.write(next)
+  }
+
   forPath(relPath: string): FailurePointer[] {
     return this.read().filter(entry => entry.relPath === relPath)
   }

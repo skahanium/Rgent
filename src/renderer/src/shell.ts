@@ -29,6 +29,7 @@ import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
 import { hostErrorMessage, hostErrorText } from './host-errors.ts'
 import type { FailurePointer, TaskFailure } from '../../shared/task-failure.ts'
+import type { LedgerRecord } from '../../main/ledger-store.ts'
 import { createFileBrowser, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
 import { createSidebarSizer } from './sidebar.ts'
 import { applyResolvedTheme, type Theme } from './theme.ts'
@@ -1978,14 +1979,33 @@ export async function start(root: HTMLElement): Promise<void> {
     updateStatus()
   }
 
-  function diagnosticText(pointer: FailurePointer): string {
-    return JSON.stringify({ taskId: pointer.taskId, diagnostic: pointer.failure }, null, 2)
+  function diagnosticBundle(pointer: FailurePointer, record?: LedgerRecord): string {
+    const chapter = record?.chapter
+    const provenance = chapter?.provenance
+    return JSON.stringify({
+      taskId: pointer.taskId,
+      diagnostic: pointer.failure,
+      ...(provenance ? {
+        model: { provider: provenance.model.provider, modelId: provenance.model.modelId, endpointHost: provenance.model.endpointHost },
+        tools: provenance.tools.map(tool => ({ name: tool.name, outcome: tool.outcome }))
+      } : {}),
+      ...(chapter?.metrics?.length ? { steps: chapter.metrics.map(m => ({ step: m.step, estimatedInput: m.estimatedInput, actualInput: m.actualInput, actualOutput: m.actualOutput })) } : {}),
+      ...(chapter?.network?.length ? { network: chapter.network.map(entry => ({ at: entry.at, action: entry.action, host: entry.host, path: entry.path, count: entry.count, bytes: entry.bytes, outcome: entry.outcome })) } : {})
+    }, null, 2)
   }
 
   async function copyDiagnostic(pointer: FailurePointer): Promise<void> {
+    const tab = tabs.find(item => item.relPath === pointer.relPath)
+    let record: LedgerRecord | undefined
+    if (tab?.sessionId && tab.objectVersion) {
+      try {
+        const result = await window.rgent.ledgerGet({ sessionId: tab.sessionId, objectVersion: tab.objectVersion, relPath: tab.relPath, cursor: null })
+        if (result.ok) record = result.value.records.find(item => item.taskId === pointer.taskId)
+      } catch { /* failure pointer alone is still useful */ }
+    }
     try {
-      await navigator.clipboard.writeText(diagnosticText(pointer))
-      pushNotice({ title: '诊断已复制', detail: '只含失败分类和脱敏传输字段。', tone: 'info' })
+      await navigator.clipboard.writeText(diagnosticBundle(pointer, record))
+      pushNotice({ title: '诊断已复制', detail: '只含失败分类、模型/工具摘要和脱敏传输字段。', tone: 'info' })
     } catch {
       hostNotice = '复制诊断失败；可打开账本查看详情。'; updateStatus()
     }
@@ -2015,7 +2035,7 @@ export async function start(root: HTMLElement): Promise<void> {
 
   async function clearFailure(): Promise<void> {
     const found = failureForCurrent()
-    if (!found || found.tab.availability) return
+    if (!found || found.tab.availability || [...activeTasks.values()].some(task => task.relPath === found.tab.relPath)) return
     promptEditor.removeSentPromptTask?.(found.pointer.taskId)
     await forgetFailure(found.pointer)
     hostNotice = '失败标记已清除，提问正文保留。'; updateStatus()
@@ -2023,7 +2043,7 @@ export async function start(root: HTMLElement): Promise<void> {
 
   function failureAction(failure: TaskFailure): { label: string; run: () => void } | null {
     switch (failure.action) {
-      case 'open_model_settings': return { label: '更新密钥', run: () => settingsOverlay.open('助手') }
+      case 'open_model_settings': return { label: failure.family === 'MODEL_NOT_FOUND' ? '换模型' : '更新密钥', run: () => settingsOverlay.open('助手') }
       case 'open_network_settings': return { label: '联网设置', run: () => settingsOverlay.open('联网') }
       case 'repair_ledger': return { label: '修复账本', run: () => settingsOverlay.open('笔记库') }
       case 'edit_prompt': return { label: '编辑提问', run: () => editor.focus() }

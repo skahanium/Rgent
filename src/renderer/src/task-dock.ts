@@ -112,9 +112,12 @@ export function renderTaskDock(model: TaskDockModel): void {
       const detail = document.createElement('pre')
       detail.className = 'task-dock-detail-json'
       detail.textContent = JSON.stringify({ code: model.failure.code, diagnosticId: model.failure.diagnosticId, detail: model.failure.detail ?? null }, null, 2)
+      const retryNote = document.createElement('p')
+      retryNote.className = 'task-dock-retry-note'
+      retryNote.textContent = '重试会重新执行本场已发起的工具；不会自动重试。'
       const copy = document.createElement('button')
       copy.type = 'button'; copy.className = 'task-dock-copy'; copy.textContent = '复制诊断'
-      panel.append(facts, detail, copy)
+      panel.append(facts, detail, retryNote, copy)
       root.append(label)
       if (model.onAction) root.append(action)
       if (model.canRetry) root.append(retry)
