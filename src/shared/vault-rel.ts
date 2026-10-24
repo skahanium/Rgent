@@ -58,8 +58,8 @@ export function joinVaultRel(
   return parts.join('/')
 }
 
-export function vaultMediaUrl(relPath: string, sessionId?: string): string {
-  return `${VAULT_MEDIA_SCHEME}://media/?p=${encodeURIComponent(relPath)}${sessionId ? `&s=${encodeURIComponent(sessionId)}` : ''}`
+export function vaultMediaUrl(relPath: string, sessionId?: string, version?: string): string {
+  return `${VAULT_MEDIA_SCHEME}://media/?p=${encodeURIComponent(relPath)}${sessionId ? `&s=${encodeURIComponent(sessionId)}` : ''}${version ? `&v=${encodeURIComponent(version)}` : ''}`
 }
 
 export function parseVaultMediaUrl(url: string): string | null {

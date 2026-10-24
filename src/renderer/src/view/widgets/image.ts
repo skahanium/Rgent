@@ -58,7 +58,7 @@ export class ImageWidget extends WidgetType {
     if (!rel || !this.host.vaultHas(rel)) {
       return attachRevealSource(placeholder(this.image.alt, this.standalone), view, this.image.range.start, this.image.range.end)
     }
-    return attachRevealSource(createVaultImageElement(this.image.alt, rel, this.standalone, this.image.source, () => view?.requestMeasure(), this.host.sessionId), view, this.image.range.start, this.image.range.end)
+    return attachRevealSource(createVaultImageElement(this.image.alt, rel, this.standalone, this.image.source, () => view?.requestMeasure(), this.host.sessionId, this.host.imageEpoch), view, this.image.range.start, this.image.range.end)
   }
 
   destroy(dom: HTMLElement): void {
@@ -96,7 +96,8 @@ export function createVaultImageElement(
   standalone: boolean,
   source: ImagePresentation['source'],
   measured?: () => void,
-  sessionId?: string
+  sessionId?: string,
+  version?: string
 ): HTMLElement {
   const root = container(standalone)
   let disposed = false
@@ -106,7 +107,7 @@ export function createVaultImageElement(
     const img = document.createElement('img')
     img.className = 'md-image'
     img.alt = alt || '图片'
-    img.src = vaultMediaUrl(rel, sessionId)
+    img.src = vaultMediaUrl(rel, sessionId, version)
     img.addEventListener('load', () => { if (!disposed) measured?.() }, { once: true })
     img.addEventListener('error', () => {
       if (disposed) return
