@@ -350,4 +350,19 @@ describe('deleted page formatting', () => {
     expect(row().querySelector('.trash-ledger')?.textContent).toContain('旧回答')
   })
 
+
+  it('renders the explicit history archive and purges only after the button is clicked', async () => {
+    const history = vi.fn(async () => ({ ok: true as const, entries: [{ noteId: 'old', relPath: 'old.md', state: 'archived' as const, archivedAt: '2026-10-01T00:00:00Z' }], bytes: 12 }))
+    const purgeHistory = vi.fn(async () => ({ ok: true as const, purged: 'old' }))
+    const { page } = start({ history, purgeHistory })
+    await flush()
+    const section = container.querySelector('.trash-history-archive')!
+    expect(section.textContent).toContain('old.md')
+    ;(section.querySelector('[data-trash-action="history-purge"]') as HTMLButtonElement).click()
+    await flush()
+    expect(purgeHistory).toHaveBeenCalledWith('old')
+    expect(history).toHaveBeenCalledTimes(2)
+    page.dispose()
+  })
+
 })
