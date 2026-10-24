@@ -97,7 +97,10 @@ const api = {
   ledgerRepair:(request:import('../shared/ledger.ts').LedgerRepairRequest):Promise<import('../shared/ledger.ts').LedgerRepairResult>=>invoke(IPC.ledgerRepair,request),
   ledgerMaintenance:(request:import('../shared/ledger.ts').LedgerMaintenanceRequest):Promise<import('../shared/ledger.ts').LedgerMaintenanceResult>=>invoke(IPC.ledgerMaintenance,request),
   ledgerReasoning:(request:import('../shared/ledger.ts').LedgerReasoningRequest):Promise<import('../shared/ledger.ts').LedgerReasoningResult>=>invoke(IPC.ledgerReasoning,request),
-  ledgerGet:(request:import('../shared/ledger.ts').LedgerRequest):Promise<import('../shared/ledger.ts').LedgerResult>=>invoke(IPC.ledgerGet,request),
+  ledgerGet:(request:import('../shared/ledger.ts').LedgerRequest):Promise<import('../shared/ledger.ts').LedgerResult>=>invoke(IPC.ledgerGet,request),  diagnosticsGet:(request:{sessionId:string;relPath:string})=>invoke(IPC.diagnosticsGet,request),
+  diagnosticsReport:(request:{sessionId:string;code:string;stage:string;detail?:unknown})=>invoke(IPC.diagnosticsReport,request),
+  diagnosticsForget:(request:{sessionId:string;taskId:string})=>invoke(IPC.diagnosticsForget,request),
+
   ledgerGetTrash:(request:import('../shared/ledger.ts').LedgerTrashRequest):Promise<import('../shared/ledger.ts').LedgerResult>=>invoke(IPC.ledgerGetTrash,request),
   ledgerHistory:(request:import('../shared/ledger.ts').LedgerHistoryRequest):Promise<import('../shared/ledger.ts').LedgerHistoryResult>=>invoke(IPC.ledgerHistory,request),
   ledgerMigrate:(request:import('../shared/ledger.ts').LedgerMigrationRequest):Promise<import('../shared/ledger.ts').LedgerMigrationResult>=>invoke(IPC.ledgerMigrate,request),

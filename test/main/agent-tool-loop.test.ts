@@ -109,7 +109,7 @@ describe('Host manual read-only loop', () => {
   it('refuses unknown and duplicate calls, while counting each attempt against the shared tool cap', async () => {
     const app = appFor([[call('x', 'foreign', { stolen: 'secret' }), call('x'), finish()], [call('y'), finish()]], { tools: 2 })
     const task = await app.start()
-    expect(await task.done).toEqual({ status: 'failed', reason: 'TOOL_CALL_LIMIT' })
+    expect(await task.done).toMatchObject({ status: 'failed', reason: 'TOOL_CALL_LIMIT' })
     expect(app.executed).toEqual([])
     expect(JSON.stringify(app.messages[1])).toContain('TOOL_NOT_ALLOWED')
     expect(JSON.stringify(app.messages[1])).not.toContain('stolen')
@@ -121,7 +121,7 @@ describe('Host manual read-only loop', () => {
     const task = await app.start(); await reached.promise
     app.setFault('SOURCE_CHANGED')
     await app.host.recheckSources('/vault', 's')
-    expect(await task.done).toEqual({ status: 'failed', reason: 'SOURCE_CHANGED' })
+    expect(await task.done).toMatchObject({ status: 'failed', reason: 'SOURCE_CHANGED' })
     expect(app.content()).toContain('保留回答')
     expect(app.calls()).toBe(0)
     resume.resolve()
@@ -139,7 +139,7 @@ describe('Host manual read-only loop', () => {
   it('shares model step budget across tool continuations', async () => {
     const app = appFor([[call('a'), finish()], [call('b'), finish()]], { modelSteps: 1 })
     const task = await app.start()
-    expect(await task.done).toEqual({ status: 'failed', reason: 'MODEL_STEP_LIMIT' })
+    expect(await task.done).toMatchObject({ status: 'failed', reason: 'MODEL_STEP_LIMIT' })
     expect(app.calls()).toBe(1)
   })
   it('serializes an already-running watcher check before the next own checkpoint', async () => {
@@ -208,20 +208,20 @@ describe('Host manual read-only loop', () => {
   it('rejects a tool-calls finish with no calls and never falls back', async () => {
     const app = appFor([[finish()]])
     const task = await app.start()
-    expect(await task.done).toEqual({ status: 'failed', reason: 'MODEL_PROTOCOL_ERROR' })
+    expect(await task.done).toMatchObject({ status: 'failed', reason: 'MODEL_PROTOCOL_ERROR' })
     expect(app.calls()).toBe(1)
   })
   it('does not mark sources sent when model step budget rejects the next request', async () => {
     const app = appFor([[call('a'), finish()]], { modelSteps: 1 })
     let sent = 0; app.tools.markSent = () => { sent++ }
     const task = await app.start()
-    expect(await task.done).toEqual({ status: 'failed', reason: 'MODEL_STEP_LIMIT' })
+    expect(await task.done).toMatchObject({ status: 'failed', reason: 'MODEL_STEP_LIMIT' })
     expect(sent).toBe(1)
   })
   it('bounds aggregate generated text even if the provider ignores maxOutputTokens', async () => {
     const app = appFor([[{ type: 'text', text: 'x'.repeat(1048577) }, finish('stop')]])
     const task = await app.start()
-    expect(await task.done).toEqual({ status: 'failed', reason: 'MODEL_OUTPUT_LIMIT' })
+    expect(await task.done).toMatchObject({ status: 'failed', reason: 'MODEL_OUTPUT_LIMIT' })
     expect(app.content().length).toBeLessThan(10000)
   })
 
@@ -296,7 +296,7 @@ it('rechecks memory while a provider is stalled and cancels without waiting for 
  await app.host.recheckSources('/vault','s')
  const result=await Promise.race([task.done,new Promise(resolve=>setTimeout(()=>resolve('HUNG'),200))])
  release.resolve()
- expect(result).toEqual({status:'failed',reason:'MEMORY_PERMISSION_CHANGED'})
+ expect(result).toMatchObject({status:'failed',reason:'MEMORY_PERMISSION_CHANGED'})
  expect(app.content()).toContain('流中保稿')
 })
 
@@ -421,5 +421,5 @@ it('keeps an earlier summary audit but stops forwarding its derived snapshot aft
 it('ends a no-progress recording refusal before any model call',async()=>{
  const app=appFor([[{type:'text',text:'不应发送'},finish('stop')]])
  app.tools.summary=()=>[{name:'search_library',outcome:'x'.repeat(1025)}]
- expect(await (await app.start()).done).toEqual({status:'failed',reason:'LEDGER_RECORD_LIMIT'});expect(app.calls()).toBe(0)
+ expect(await (await app.start()).done).toMatchObject({status:'failed',reason:'LEDGER_RECORD_LIMIT'});expect(app.calls()).toBe(0)
 })

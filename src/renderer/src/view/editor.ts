@@ -54,6 +54,9 @@ import {
   planPromptInsertion,
   promptDraftChrome,
   removeDraftMarker,
+  removeSentPromptTask,
+  replacePromptTaskId,
+  sentPromptBlockForTask,
   type PromptBlockAtCaret,
   type PromptBlockOptions
 } from '../prompt-block.ts'
@@ -537,6 +540,11 @@ export type EditorHost = {
   createPromptBlock: (options?: PromptBlockOptions) => 'created' | 'focused' | 'refused'
   /** 光标所在草稿提问块的原文范围与正文；已发送、人的块或光标不在提问行上时为 null。 */
   promptBlockAtCaret: () => PromptBlockAtCaret | null
+  /** 失败重试：找到指定 task-id 的已发送块并只替换 marker 的 task-id。 */
+  promptBlockForTask: (taskId: string) => PromptBlockAtCaret | null
+  replacePromptTaskId: (taskId: string, nextTaskId: string) => boolean
+  /** 失败清除：只移除已发送 marker，保留提问正文。 */
+  removeSentPromptTask: (taskId: string) => boolean
   removeEmptyPromptBlockAtCaret: () => boolean
   /** 发送前同步保证 marker 已落；待发送行还没有正文、或补不上时返回 false。 */
   ensurePromptMarker: () => boolean
@@ -861,6 +869,29 @@ export function mountEditor(
       if (found) return { range: found.range, prompt: found.prompt, empty: found.empty }
       const pending = view.state.field(pendingPromptField)
       return pending ? locatePendingPrompt(projection.raw, projection.toRaw(pending.at), caret) : null
+    },
+    promptBlockForTask: (taskId) => {
+      const projection = sourceOf(view.state)
+      const found = sentPromptBlockForTask(projection.raw, view.state.field(markdownField).result.index, taskId)
+      return found ? { range: found.range, prompt: found.prompt, empty: found.empty } : null
+    },
+    replacePromptTaskId: (taskId, nextTaskId) => {
+      if (readOnly || view.state.readOnly || !/^[A-Za-z0-9_-]{1,128}$/.test(nextTaskId)) return false
+      const projection = sourceOf(view.state)
+      const edit = replacePromptTaskId(projection.raw, view.state.field(markdownField).result.index, taskId, nextTaskId)
+      if (!edit) return false
+      const spec = rawEditSpec(view.state, edit)
+      view.dispatch({ ...spec, userEvent: 'rgent.promptRetry' })
+      return true
+    },
+    removeSentPromptTask: (taskId) => {
+      if (readOnly || view.state.readOnly) return false
+      const projection = sourceOf(view.state)
+      const edit = removeSentPromptTask(projection.raw, view.state.field(markdownField).result.index, taskId)
+      if (!edit) return false
+      const spec = rawEditSpec(view.state, edit)
+      view.dispatch({ ...spec, userEvent: 'rgent.promptClear' })
+      return true
     },
     removeEmptyPromptBlockAtCaret: () => {
       if (readOnly || view.state.readOnly) return false

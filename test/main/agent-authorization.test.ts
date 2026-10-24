@@ -60,7 +60,7 @@ it('source invalidation aborts the provider and closes its iterator without chan
   changed=()=>{app.source['a.md']!.revision='source-changed';app.source['a.md']!.content+='\n外部改变'}
   const p=await app.registry.preview('owner',app.request)
   const task=await app.host.start({...app.request,previewId:p.id,authorizationOwner:'owner'})
-  expect(await task.done).toEqual({status:'failed',reason:'SOURCE_CHANGED'})
+  expect(await task.done).toMatchObject({status:'failed',reason:'SOURCE_CHANGED'})
   expect(providerSignal.aborted).toBe(true);expect(returned).toBe(true)
   expect(app.source['a.md']!.content).toContain('此前已生成')
   expect(app.source['a.md']!.content).not.toContain('过期增量')

@@ -5,6 +5,7 @@ import {afterEach,expect,it,vi} from 'vitest'
 import {LedgerStore} from '../../src/main/ledger-store.ts'
 import {secureFsFor,closeSecureFs} from '../../src/main/secure-fs.ts'
 import {appendLedgerChapter} from '../../src/main/host-source.ts'
+import {makeTaskFailure} from '../../src/shared/task-failure.ts'
 const roots:string[]=[]
 const fixture=()=>{const root=mkdtempSync(path.join(os.tmpdir(),'rgent-ledger-v2-'));roots.push(root);const fs=secureFsFor(root);return {root,fs,store:new LedgerStore(fs,()=>{})}}
 afterEach(()=>roots.splice(0).forEach(r=>{closeSecureFs(r);rmSync(r,{recursive:true,force:true})}))
@@ -299,4 +300,11 @@ it('archives an orphan descriptor before creating a new owner for the same path'
  expect(replacement.noteId).not.toBe(old.noteId)
  expect(store.historyEntries()).toEqual([expect.objectContaining({noteId:old.noteId,state:'orphaned'})])
  expect(store.materialState()).toEqual({status:'verified',sequence:0})
+})
+
+it('stores a bounded structured task failure in the ledger chapter',()=>{
+ const {root,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文')
+ const failure=makeTaskFailure({code:'MODEL_REQUEST_FAILED',diagnosticId:'diag',detail:{httpStatus:429,retryAfterMs:1000}})
+ const record=store.prepare('a.md',{...task,failure})
+ expect(store.getRecord('a.md',record.taskId).chapter?.failure).toEqual(failure)
 })

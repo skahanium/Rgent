@@ -9,6 +9,7 @@ import {partitionSource,compile,parseMarker} from '../markdown/index.ts'
 import {ledgerChapters,ledgerTaskFields,historicalBodyTasks,type ContextChapter} from './host-context.ts'
 import {ledgerProvenance,encodeLedgerProvenance,type LedgerProvenance} from './ledger-provenance.ts'
 import {upsertAiAnswer,type LedgerChapterWrite} from './host-source.ts'
+import {validTaskFailure} from '../shared/task-failure.ts'
 const digest=(s:string)=>createHash('sha256').update(s).digest('hex')
 function nextRecordRevision(revision:number):number{if(revision>=Number.MAX_SAFE_INTEGER)throw Error('LEDGER_RECORD_LIMIT');return revision+1}
 const fixed='.rgent/registry.json'
@@ -78,9 +79,10 @@ function validNetworkEntry(v:unknown):boolean{
 function validChapter(v:unknown):v is LedgerRecord['chapter']{
  if(v===null)return true
  if(!obj(v)||!id(v.taskId)||typeof v.startedAt!=='string'||!Number.isFinite(Date.parse(v.startedAt))||!['completed','cancelled','failed','limit'].includes(String(v.status))||typeof v.prompt!=='string'||typeof v.answer!=='string')return false
- if(Object.keys(v).some(k=>!['taskId','startedAt','status','prompt','answer','reason','provenance','trace','assistant','metrics','summaryGenerators','sentSummaries','material','network'].includes(k)))return false
+ if(Object.keys(v).some(k=>!['taskId','startedAt','status','prompt','answer','reason','provenance','trace','assistant','metrics','summaryGenerators','sentSummaries','material','network','failure'].includes(k)))return false
  if(v.reason!==undefined&&typeof v.reason!=='string'||v.assistant!==undefined&&typeof v.assistant!=='string'||v.trace!==undefined&&(!Array.isArray(v.trace)||v.trace.some(t=>typeof t!=='string')))return false
  if(v.network!==undefined&&(!Array.isArray(v.network)||v.network.length>50||!v.network.every(validNetworkEntry)))return false
+ if(v.failure!==undefined&&!validTaskFailure(v.failure))return false
  if(v.material!==undefined&&!validTaskMaterial(v.material))return false
  if(v.metrics!==undefined&&(!Array.isArray(v.metrics)||v.metrics.length>1000||v.metrics.some(m=>!obj(m)||!Number.isSafeInteger(m.step)||!Number.isFinite(m.estimatedInput)||m.actualInput!==null&&!Number.isFinite(m.actualInput)||m.actualOutput!==null&&!Number.isFinite(m.actualOutput))))return false
  if(v.sentSummaries!==undefined&&(!Array.isArray(v.sentSummaries)||!v.sentSummaries.every(validSentSummary)||!summaryAuditFits(v.sentSummaries)))return false

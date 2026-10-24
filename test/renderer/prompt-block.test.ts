@@ -13,6 +13,9 @@ import {
   planPendingPromptRemoval,
   planPromptInsertion,
   removeDraftMarker,
+  removeSentPromptTask,
+  replacePromptTaskId,
+  sentPromptBlockForTask,
   type PromptBlockOptions
 } from '../../src/renderer/src/prompt-block.ts'
 
@@ -309,5 +312,27 @@ describe('first marker, draft empty rollback', () => {
     expect(draftPrompts(source, index)).toMatchObject([
       { prompt: '', empty: true, range: { start: line, end: line } }
     ])
+  })
+})
+
+describe('sent prompt retry markers', () => {
+  it('finds and rewrites only the task-id of a failed prompt', () => {
+    const source = '<!-- rgent:prompt:v1 task-id="old-task" -->\n问\n'
+    const index = compile(source).index
+    expect(sentPromptBlockForTask(source, index, 'old-task')?.prompt).toBe('问')
+    const edit = replacePromptTaskId(source, index, 'old-task', 'new-task')
+    expect(edit).not.toBeNull()
+    expect(source.slice(edit!.from, edit!.to)).toContain('old-task')
+    expect(edit!.insert).toContain('new-task')
+    expect(edit!.insert).not.toContain('old-task')
+  })
+
+  it('removes the marker line without touching the prompt text', () => {
+    const source = '<!-- rgent:prompt:v1 task-id="old-task" -->\n问\n'
+    const index = compile(source).index
+    const edit = removeSentPromptTask(source, index, 'old-task')
+    expect(edit).not.toBeNull()
+    expect(source.slice(edit!.from, edit!.to)).toContain('task-id')
+    expect(source.slice(0, edit!.from) + source.slice(edit!.to)).toBe('问\n')
   })
 })

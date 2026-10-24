@@ -402,7 +402,7 @@ describe('Host minimal loop', () => {
     const app = harness(async function* () { throw new Error('remote echoed secret in failure') })
     const source = app.source()
     const task = await app.host.start({ relPath: 'a.md', ...ask(source) })
-    expect(await task.done).toEqual({ status: 'failed', reason: 'MODEL_REQUEST_FAILED' })
+    expect(await task.done).toMatchObject({ status: 'failed', reason: 'MODEL_REQUEST_FAILED' })
     expect(app.source()).not.toContain('remote echoed secret')
     expect(JSON.stringify(app.events)).not.toContain('remote echoed secret')
   })
@@ -655,7 +655,7 @@ it('refuses invalid parameters and duplicate IDs before spending the four memory
 })
 it('stops a note-only memory task at the global attempt limit while preserving its ledger',async()=>{
  const app=memoryToolHarness({tools:1,calls:['one','two'].map(id=>({id,name:'search_memory',input:{query:'火星'}}))});const task=await app.run()
- expect(await task.done).toEqual({status:'failed',reason:'TOOL_CALL_LIMIT'});expect(app.requests).toHaveLength(1);expect(app.history.records().at(-1)?.status).toBe('failed')
+ expect(await task.done).toMatchObject({status:'failed',reason:'TOOL_CALL_LIMIT'});expect(app.requests).toHaveLength(1);expect(app.history.records().at(-1)?.status).toBe('failed')
 })
 it.each(['unverified','empty'] as const)('keeps %s note-only tasks in local recall without registering library tools',async mode=>{
  const app=memoryToolHarness({verified:mode!=='unverified',empty:mode==='empty'});const task=await app.run();expect((await task.done).status).toBe('failed');expect(app.requests[0].tools).toBeUndefined()
@@ -688,7 +688,7 @@ it('persists an executed memory search failure and stops later dispatches',async
  const tools=app.history.records().at(-1)?.provenance?.tools??[];expect(tools.some(t=>t.outcome.includes('失败 1 次'))).toBe(true);expect(tools.some(t=>t.outcome.includes('后续发送停止'))).toBe(true)
 })
 it('enforces the global model step limit after memory retrieval',async()=>{
- const app=memoryToolHarness({steps:1}),task=await app.run();expect(await task.done).toEqual({status:'failed',reason:'MODEL_STEP_LIMIT'});expect(app.requests).toHaveLength(1)
+ const app=memoryToolHarness({steps:1}),task=await app.run();expect(await task.done).toMatchObject({status:'failed',reason:'MODEL_STEP_LIMIT'});expect(app.requests).toHaveLength(1)
 })
 
 it('memory-only actual outgoing contains the ordinary note context without a library read requirement',async()=>{
@@ -722,7 +722,7 @@ it('reuses a valid partial cache in the production chapters path without another
 it('saves a valid visible prefix when control characters exceed the JSON encoded answer allowance',async()=>{
  const app=harness(async function*(){yield '已有回答';yield '\u0000'.repeat(500000)})
  const task=await app.host.start({relPath:'a.md',...ask(app.source())})
- expect(await task.done).toEqual({status:'failed',reason:'MODEL_OUTPUT_LIMIT'})
+ expect(await task.done).toMatchObject({status:'failed',reason:'MODEL_OUTPUT_LIMIT'})
  const saved=app.history.records().at(-1)!
  expect(saved.answer.startsWith('已有回答')).toBe(true)
  expect(saved.answer.length).toBeLessThan(500000)

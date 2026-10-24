@@ -20,6 +20,8 @@ import type { TaskGrant } from './task-authorization.ts'
 import { closeSecureFs, secureFsFor } from './secure-fs.ts'
 import { postTrashOutcome, verifyLanding } from './trash-result.ts'
 import { TRASH_OPERATIONS_ON_THIS_PLATFORM, TRASH_RECORD_LIMIT, TrashStore, isTrashId } from './trash-store.ts'
+import { VaultFailureStore } from './diagnostic-store.ts'
+import type { TaskFailure } from '../shared/task-failure.ts'
 import { VaultIndex } from './vault-index.ts'
 import { vaultRootIdentity, watchVault } from './watch.ts'
 import { assertLedgerPreserved, composeSource, partitionSource } from '../markdown/partition.ts'
@@ -340,6 +342,17 @@ export class VaultSession {
   async ledgerKey(relPath:string){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);return this.memoryContext().vaultKey+':'+(this.ledgerStore!.lookupOwner(relPath)?.noteId??'unregistered:'+relPath)})}
   async summaryMaterials(relPath:string,taskIds:readonly string[],requiredBodyIds:readonly string[]=[],watermark=0){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.summaryMaterials(relPath,taskIds,requiredBodyIds,watermark,(p,b,a)=>this.acceptsObject(p,b,a))}
   async ledgerContexts(relPath:string){const token=this.captureSession();await this.lifecycleReady;this.assertSession(token);return this.ledgerStore!.contexts(relPath)}
+  /** Durable task-failure pointers. No prompt/answer/body is stored here. */
+  recordTaskFailure(taskId:string,relPath:string,failure:TaskFailure,answerEmpty=true){
+    const root=this.requireUsableRoot()
+    try { new VaultFailureStore(secureFsFor(root)).record(taskId,relPath,failure,answerEmpty) } catch { /* diagnostics must not fail the task */ }
+  }
+  forgetTaskFailure(taskId:string){
+    try { new VaultFailureStore(secureFsFor(this.requireUsableRoot())).forget(taskId) } catch { /* best effort */ }
+  }
+  taskFailures(relPath:string){
+    try { return new VaultFailureStore(secureFsFor(this.requireUsableRoot())).forPath(relPath) } catch { return [] }
+  }
   async ledgerHistoryList(){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);return this.ledgerStore!.historyDetails()})}
   async ledgerHistoryPurge(noteId:string){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);this.requireStableStructure();return this.ledgerStore!.purgeHistory(noteId)})}
   async ledgerTrashPage(trashId:string,cursor:string|null){const token=this.captureSession();await this.lifecycleReady;return this.mutations.run(()=>{this.assertSession(token);const page=this.ledgerStore!.historyPage(trashId,cursor);return {...page,...(this.lifecycle?{}:{})} })}

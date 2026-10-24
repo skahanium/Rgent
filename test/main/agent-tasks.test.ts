@@ -38,7 +38,7 @@ describe('Agent task ownership', () => {
     const b = deferred()
     const two = tasks.start({ root: '/vault', relPath: 'b.md', seconds: 30 }, async () => { await b.promise })
     await tasks.cancel(one.id, 'user')
-    expect(final).toHaveBeenCalledWith('cancelled', 'user', undefined)
+    expect(final).toHaveBeenCalledWith('cancelled', 'user', undefined, undefined)
     expect(tasks.active().map((task) => task.id)).toEqual([two.id])
     b.resolve()
     await two.done
@@ -54,7 +54,7 @@ describe('Agent task ownership', () => {
       }), final)
       await vi.advanceTimersByTimeAsync(1000)
       await task.done
-      expect(final).toHaveBeenCalledWith('cancelled', 'timeout', undefined)
+      expect(final).toHaveBeenCalledWith('cancelled', 'timeout', undefined, undefined)
     } finally {
       vi.useRealTimers()
     }
@@ -63,7 +63,7 @@ describe('Agent task ownership', () => {
 it('aborts an in-flight provider on runner failure while preserving failed cause',async()=>{
   const tasks=new AgentTasks();let signal!:AbortSignal
   const task=tasks.start({root:'/vault',relPath:'a.md',seconds:30},async current=>{signal=current;throw Error('SOURCE_CHANGED')})
-  expect(await task.done).toEqual({status:'failed',reason:'SOURCE_CHANGED'})
+  expect(await task.done).toMatchObject({status:'failed',reason:'SOURCE_CHANGED'})
   expect(signal.aborted).toBe(true)
   expect(signal.reason).toBe('SOURCE_CHANGED')
 })
@@ -75,5 +75,5 @@ it('keeps only sanitized transport facts as failure detail',async()=>{
  const result=await task.done
  expect(result.reason).toBe('MODEL_REQUEST_FAILED')
  expect(result.reasonDetail).toBe('{"httpStatus":400,"type":"AI_APICallError","code":"ENOTFOUND","providerCode":1001}')
- expect(await final.mock.calls[0]).toEqual(['failed','MODEL_REQUEST_FAILED',result.reasonDetail])
+ expect(await final.mock.calls[0]).toMatchObject(['failed','MODEL_REQUEST_FAILED',result.reasonDetail,result.failure])
 })

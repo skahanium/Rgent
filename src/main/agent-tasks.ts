@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
+import { makeTaskFailure, type TaskFailure } from '../shared/task-failure.ts'
 
 export type StopReason = 'user' | 'timeout' | 'close' | 'vault-change' | 'permission-change'
-export type TaskResult = { status: 'completed' | 'cancelled' | 'failed'; reason?: StopReason | string; reasonDetail?: string }
+export type TaskResult = { status: 'completed' | 'cancelled' | 'failed'; reason?: StopReason | string; reasonDetail?: string; failure?: TaskFailure }
 export type ActiveTask = { id: string; root: string; relPath: string; startedAt: number }
 type Runner = (signal: AbortSignal) => Promise<void>
-type Finalizer = (status: TaskResult['status'], reason?: TaskResult['reason'], reasonDetail?: string) => Promise<void>
+type Finalizer = (status: TaskResult['status'], reason?: TaskResult['reason'], reasonDetail?: string, failure?: TaskFailure) => Promise<void>
 
 type Running = ActiveTask & {
   controller: AbortController
@@ -23,6 +24,19 @@ function failureDetail(error: unknown): string | undefined {
   if (!Object.keys(safe).length) return undefined
   const value = JSON.stringify(safe)
   return value.length <= 512 ? value : undefined
+}
+
+/** Build a bounded task failure from a thrown error without persisting the original error text. */
+function taskFailureOf(error: unknown): TaskFailure | undefined {
+  if (!(error instanceof Error) || !error.message) return undefined
+  const code = error.message
+  const detail = error.cause && typeof error.cause === 'object' ? error.cause : undefined
+  return makeTaskFailure({
+    code,
+    diagnosticId: randomUUID(),
+    detail,
+    stage: code.startsWith('LEDGER_') ? 'ledger' : code.startsWith('TOOL_') ? 'tool' : 'provider'
+  })
 }
 
 /** Owns task lifetime; one task per note, while different notes may run concurrently. */
@@ -62,15 +76,15 @@ export class AgentTasks {
           ? task.failureReason ? { status: 'failed', reason: task.failureReason } : { status: 'cancelled', reason: task.stopReason ?? 'user' }
           : { status: 'completed' }
       } catch (error) {
-        const detail = failureDetail(error)
+        const detail = failureDetail(error), failure = taskFailureOf(error)
         result = controller.signal.aborted
-          ? task.failureReason ? { status: 'failed', reason: task.failureReason, ...(detail ? {reasonDetail:detail} : {}) } : { status: 'cancelled', reason: task.stopReason ?? 'user' }
-          : { status: 'failed', reason: error instanceof Error ? error.message : 'UNKNOWN', ...(detail ? {reasonDetail:detail} : {}) }
+          ? task.failureReason ? { status: 'failed', reason: task.failureReason, ...(detail ? {reasonDetail:detail} : {}), ...(failure ? {failure} : {}) } : { status: 'cancelled', reason: task.stopReason ?? 'user' }
+          : { status: 'failed', reason: error instanceof Error ? error.message : 'UNKNOWN', ...(detail ? {reasonDetail:detail} : {}), ...(failure ? {failure} : {}) }
         // Determine the failure first: aborting transport must not rewrite it as user cancellation.
         if (!controller.signal.aborted) controller.abort(result.reason)
       }
       try {
-        await finalize(result.status, result.reason, result.reasonDetail)
+        await finalize(result.status, result.reason, result.reasonDetail, result.failure)
       } finally {
         clearTimeout(timer)
         this.running.delete(id)

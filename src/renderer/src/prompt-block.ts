@@ -273,6 +273,37 @@ export function locatePromptBlock(source: string, index: DocIndex, caret: number
  * 空行返回 `{range:{start,end}, prompt:'', empty:true}`；已经打进正文但 marker 还没落下
  * 的异步窗口里返回正文，让发送前能同步补 marker 再重取范围。
  */
+export type SentPromptBlock = PromptBlockAtCaret & { marker: SourceRange; taskId: string }
+
+/** 找到带指定 task-id、且 marker 紧贴其正文的已发送提问块。 */
+export function sentPromptBlockForTask(source: string, index: DocIndex, taskId: string): SentPromptBlock | null {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(taskId)) return null
+  for (const block of index.blocks) {
+    if (block.identity !== 'command') continue
+    const marker = markerBefore(index, block.range.start)
+    if (!marker || marker.identity !== 'command' || !adjacent(source, marker, block.range.start)) continue
+    const attrs = markerAttrs(source, marker)
+    if (!attrs || attrs['task-id'] !== taskId) continue
+    return { range: block.range, prompt: source.slice(block.range.start, block.range.end), empty: source.slice(block.range.start, block.range.end).trim().length === 0, marker: marker.range, taskId }
+  }
+  return null
+}
+
+/** 只替换已发送 marker 的 task-id；正文、行类与位置不动。 */
+export function replacePromptTaskId(source: string, index: DocIndex, taskId: string, nextTaskId: string): TextEdit | null {
+  const found = sentPromptBlockForTask(source, index, taskId)
+  if (!found) return null
+  const marker = source.slice(found.marker.start, found.marker.end)
+  const replacement = marker.replace(/task-id="[^"]*"/u, `task-id="${nextTaskId}"`)
+  return replacement === marker ? null : { from: found.marker.start, to: found.marker.end, insert: replacement }
+}
+
+/** 只移除已发送 marker 那一行，保留提问正文。 */
+export function removeSentPromptTask(source: string, index: DocIndex, taskId: string): TextEdit | null {
+  const found = sentPromptBlockForTask(source, index, taskId)
+  return found ? removeDraftMarker(source, found.marker) : null
+}
+
 export function locatePendingPrompt(source: string, at: number, caret: number): PromptBlockAtCaret | null {
   if (!Number.isInteger(at) || at < 0 || at > source.length) return null
   if (!Number.isInteger(caret) || caret < 0 || caret > source.length) return null

@@ -49,6 +49,7 @@ export type LedgerNetworkEntry = {
 }
 
 export interface LedgerChapterWrite {
+  failure?: import('../shared/task-failure.ts').TaskFailure
   material?:import('./host-material.ts').SentTaskMaterial
   metrics?:{step:number;estimatedInput:number;actualInput:number|null;actualOutput:number|null}[]
   sentSummaries?: SentSummary[]

@@ -28,6 +28,7 @@ import { modelModuleGroups, renderStatusbar, statusModel, wordsOf, type StatusMo
 import { reconcileNote, type ReconcileResult } from './note-reconcile.ts'
 import { mergeHostBody } from './host-merge.ts'
 import { hostErrorMessage, hostErrorText } from './host-errors.ts'
+import type { FailurePointer, TaskFailure } from '../../shared/task-failure.ts'
 import { createFileBrowser, titleOf, collectRelPaths, type TreeAction } from './tree.ts'
 import { createSidebarSizer } from './sidebar.ts'
 import { applyResolvedTheme, type Theme } from './theme.ts'
@@ -465,6 +466,8 @@ export async function start(root: HTMLElement): Promise<void> {
   let countedWords = 0
   const activeTasks = new Map<string, AgentTaskView>()
   const endedTaskIds = new Set<string>()
+  const failedTasks = new Map<string, FailurePointer>()
+  const failedExpanded = new Set<string>()
   const hostRevisions = new Map<string, string>()
   let taskOverlay: ReturnType<typeof openOverlay> | null = null
   let hostNotice = ''
@@ -512,6 +515,11 @@ export async function start(root: HTMLElement): Promise<void> {
 
   /** 创建提问块的唯一前端入口：快捷键与菜单都到这里；编辑器内没有按钮、图标或提示。
    *  只在可编辑的活动笔记、没有同篇任务、没有设置／搜索／冲突／对话框／恢复浮层时创建。 */
+  function reportPreflight(code: string): void {
+    if (!vaultSession) return
+    void window.rgent.diagnosticsReport({ sessionId: vaultSession, code, stage: 'preflight' }).catch(() => {})
+  }
+
   function canCreatePromptBlock(): boolean {
     const tab = current()
     return !!tab && !tab.availability && !editor.view.state.readOnly &&
@@ -760,41 +768,41 @@ export async function start(root: HTMLElement): Promise<void> {
    * 请求里的 range／expectedText／promptText 都是提问正文，不带 `/` 前缀。
    * 范围来自这个 tab 的记忆（默认本篇），任务运行中改档只影响下一场。
    */
-  async function submitPrompt(block: PromptBlockSnapshot): Promise<void> {
+  async function submitPrompt(block: PromptBlockSnapshot, prepared = false): Promise<boolean> {
     const tab = current()
-    if (!tab || block.empty || conflictDecisionOpen) return
-    if (tab.availability || !tab.sessionId || !tab.objectVersion) return
+    if (!tab || block.empty || conflictDecisionOpen) return false
+    if (tab.availability || !tab.sessionId || !tab.objectVersion) return false
     // F1：首字落 marker 是微任务；发送前在这里同步补，补不上就不发、草稿原样保留。
-    if (promptEditor.ensurePromptMarker && !promptEditor.ensurePromptMarker()) {
+    if (!prepared && promptEditor.ensurePromptMarker && !promptEditor.ensurePromptMarker()) {
       hostNotice = '提问块还没准备好；草稿已保留，请再按一次 Enter。'
       updateStatus()
-      return
+      return false
     }
     // marker 落在正文上方后 raw 偏移会变：重取一次，绝不拿快捷键前的旧范围去发。
-    const ensured = promptEditor.promptBlockAtCaret?.() ?? null
+    const ensured = prepared ? block : promptEditor.promptBlockAtCaret?.() ?? null
     if (!ensured || ensured.empty) {
       hostNotice = '提问块还没准备好；草稿已保留，请再按一次 Enter。'
       updateStatus()
-      return
+      return false
     }
     const promptText = ensured.prompt
-    if (!promptText.trim()) return
+    if (!promptText.trim()) return false
     const { start, end } = ensured.range
-    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > editor.getText().length || start >= end) return
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > editor.getText().length || start >= end) return false
     const selectedModelId = taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null)
     if (!selectedModelId || !modelConfigSnapshot || !modelModuleGroups(modelConfigSnapshot).some(group => group.items.some(item => item.id === selectedModelId))) {
-      hostNotice = '请选择可用模型；设备默认可在设置的「助手」页保存。'; updateStatus(); return
+      reportPreflight('MODEL_CONFIG_UNAVAILABLE'); hostNotice = '请选择可用模型；设备默认可在设置的「助手」页保存。'; updateStatus(); return false
     }
-    if ([...activeTasks.values()].some(task => task.relPath === tab.relPath)) { hostNotice = '这篇笔记已有正在运行的任务。'; updateStatus(); return }
-    if (!await flushSave()) { hostNotice = hostErrorText('UNSAVED_DRAFT'); updateStatus(); return }
-    if (current() !== tab || !tabs.includes(tab)) return
+    if ([...activeTasks.values()].some(task => task.relPath === tab.relPath)) { hostNotice = '这篇笔记已有正在运行的任务。'; updateStatus(); return false }
+    if (!await flushSave()) { reportPreflight('UNSAVED_DRAFT'); hostNotice = hostErrorText('UNSAVED_DRAFT'); updateStatus(); return false }
+    if (current() !== tab || !tabs.includes(tab)) return false
     const draft = editor.getText()
     // 草稿在保存/排队期间被改过：不拿旧 range 去猜正文，保留草稿让下次 Enter 重来。
-    if (draft.slice(start, end) !== promptText) return
+    if (draft.slice(start, end) !== promptText) return false
     const scope = scopeOf(tab)
     // 防御：界面已把根目录的「同册」标灰并回落本篇；任何路径也不把非法 folder 交给主进程。
     if (scope === 'folder' && isRootNote(tab.relPath)) {
-      hostNotice = '根目录笔记请用本篇或整库。'; updateStatus(); return
+      hostNotice = '根目录笔记请用本篇或整库。'; updateStatus(); return false
     }
     const request = {
       modelRecordId: selectedModelId,
@@ -806,22 +814,23 @@ export async function start(root: HTMLElement): Promise<void> {
       scope
     }
     const preview = await window.rgent.agentAuthorizationPreview(request).catch(() => null)
-    if (!preview) { hostNotice = hostErrorText('MODEL_REQUEST_FAILED'); updateStatus(); return }
-    if (!preview.ok) { hostNotice = hostErrorText(preview.error); updateStatus(); return }
+    if (!preview) { reportPreflight('MODEL_REQUEST_FAILED'); hostNotice = hostErrorText('MODEL_REQUEST_FAILED'); updateStatus(); return false }
+    if (!preview.ok) { reportPreflight(preview.error); hostNotice = hostErrorText(preview.error); updateStatus(); return false }
     const stale = current() !== tab || !tabs.includes(tab) || editor.getText() !== draft ||
       taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null) !== request.modelRecordId
     if (stale) {
       void window.rgent.agentAuthorizationDiscard(preview.preview.id)
-      hostNotice = hostErrorText('STALE_AUTHORIZATION'); updateStatus(); return
+      hostNotice = hostErrorText('STALE_AUTHORIZATION'); updateStatus(); return false
     }
     const result = await window.rgent.agentStart({ ...request, previewId: preview.preview.id, scope })
-    if (!result.ok) { hostNotice = hostErrorText(result.error); updateStatus(); return }
+    if (!result.ok) { reportPreflight(result.error); hostNotice = hostErrorText(result.error); updateStatus(); return false }
     // 供「暂停中」重发使用；任务运行中改档不会改已启动的这一场。
     tab.pausedRestart = { promptText: request.promptText, modelRecordId: request.modelRecordId, scope }
     tab.pausedByUser = false
     if (!endedTaskIds.has(result.id)) activeTasks.set(result.id, { id: result.id, relPath: tab.relPath, startedAt: Date.now() })
     hostNotice = ''; syncActiveLocks(); updateStatus()
     void runExclusiveConflict(() => syncHostTab(tab, vaultEpoch))
+    return true
   }
 
   function onHostEvent(event: AgentEvent): void {
@@ -838,6 +847,8 @@ export async function start(root: HTMLElement): Promise<void> {
     }
     if (event.persisted && event.revision) hostRevisions.set(event.relPath, event.revision)
     if (event.status === 'running') {
+      failedTasks.delete(event.relPath)
+      failedExpanded.delete(event.relPath)
       if (!endedTaskIds.has(event.id)) activeTasks.set(event.id, { id: event.id, relPath: event.relPath, startedAt: activeTasks.get(event.id)?.startedAt ?? Date.now(), activity: event.activity })
     } else {
       endedTaskIds.add(event.id)
@@ -847,8 +858,19 @@ export async function start(root: HTMLElement): Promise<void> {
         hostNotice = `已停止：${event.relPath}`
       } else {
         if (owner) { delete owner.pausedRestart; owner.pausedByUser = false }
-        if (event.status === 'failed') hostNotice = `生成失败：${hostErrorText(event.reason ?? '未知错误')}`
-        else if (event.status === 'cancelled') hostNotice = `已停止：${event.relPath}`
+        if (event.status === 'failed') {
+          if (event.failure) {
+            failedTasks.set(event.relPath, { taskId: event.id, relPath: event.relPath, at: new Date().toISOString(), failure: event.failure, answerEmpty: !event.answer })
+            failedExpanded.delete(event.relPath)
+            hostNotice = event.failure.message
+          } else {
+            hostNotice = `生成失败：${hostErrorText(event.reason ?? '未知错误')}`
+          }
+        } else if (event.status === 'cancelled') hostNotice = `已停止：${event.relPath}`
+        else {
+          const prior = failedTasks.get(event.relPath)
+          if (prior?.taskId === event.id) failedTasks.delete(event.relPath)
+        }
       }
     }
     syncActiveLocks()
@@ -1665,6 +1687,7 @@ export async function start(root: HTMLElement): Promise<void> {
     renderTabs(true)
     paintTree()
     updateStatus()
+    void loadFailureFor(tab)
     renderOutline()
     emptyEl.hidden = true
     void refreshBacklinks()
@@ -1926,6 +1949,74 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   /** 底栏：行列、字数、总闸。字数只算正文，标记行不算。库名只写在 #app[data-vault]。 */
+  function failureForCurrent(): { pointer: FailurePointer; tab: Tab } | null {
+    const tab = current()
+    const pointer = tab ? failedTasks.get(tab.relPath) : undefined
+    return tab && pointer ? { pointer, tab } : null
+  }
+
+  async function loadFailureFor(tab: Tab): Promise<void> {
+    if (!tab.sessionId) return
+    try {
+      const result = await window.rgent.diagnosticsGet({ sessionId: tab.sessionId, relPath: tab.relPath })
+      if (!result.ok || current() !== tab) return
+      const latest = [...result.value.failures].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).at(-1)
+      if (latest) failedTasks.set(tab.relPath, latest)
+      else failedTasks.delete(tab.relPath)
+      updateStatus()
+    } catch { /* diagnostics cannot block the note */ }
+  }
+
+  async function forgetFailure(pointer: FailurePointer): Promise<void> {
+    failedTasks.delete(pointer.relPath)
+    failedExpanded.delete(pointer.relPath)
+    if (vaultSession) { try { await window.rgent.diagnosticsForget({ sessionId: vaultSession, taskId: pointer.taskId }) } catch { /* best effort */ } }
+    updateStatus()
+  }
+
+  function diagnosticText(pointer: FailurePointer): string {
+    return JSON.stringify({ taskId: pointer.taskId, diagnostic: pointer.failure }, null, 2)
+  }
+
+  async function copyDiagnostic(pointer: FailurePointer): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(diagnosticText(pointer))
+      pushNotice({ title: '诊断已复制', detail: '只含失败分类和脱敏传输字段。', tone: 'info' })
+    } catch {
+      hostNotice = '复制诊断失败；可打开账本查看详情。'; updateStatus()
+    }
+  }
+
+  async function retryFailure(): Promise<void> {
+    const found = failureForCurrent()
+    if (!found || !found.pointer.answerEmpty || !found.pointer.failure.retryable) return
+    if ([...activeTasks.values()].some(task => task.relPath === found.tab.relPath)) return
+    const oldTaskId = found.pointer.taskId
+    const nextTaskId = crypto.randomUUID()
+    if (!promptEditor.replacePromptTaskId?.(oldTaskId, nextTaskId)) {
+      hostNotice = '找不到这次失败的提问块；可以清除标记后重新输入。'; updateStatus(); return
+    }
+    const block = promptEditor.promptBlockForTask?.(nextTaskId) ?? null
+    if (!block || block.empty) {
+      promptEditor.replacePromptTaskId?.(nextTaskId, oldTaskId)
+      hostNotice = '失败标记无法安全重试；可以清除标记后重新输入。'; updateStatus(); return
+    }
+    const ok = await submitPrompt(block, true)
+    if (!ok) {
+      promptEditor.replacePromptTaskId?.(nextTaskId, oldTaskId)
+      return
+    }
+    await forgetFailure(found.pointer)
+  }
+
+  async function clearFailure(): Promise<void> {
+    const found = failureForCurrent()
+    if (!found || found.tab.availability) return
+    promptEditor.removeSentPromptTask?.(found.pointer.taskId)
+    await forgetFailure(found.pointer)
+    hostNotice = '失败标记已清除，提问正文保留。'; updateStatus()
+  }
+
   function updateStatus(): void {
     paintUnavailable()
     if (vaultNameText) root.dataset.vault = vaultNameText
@@ -1974,7 +2065,21 @@ export async function start(root: HTMLElement): Promise<void> {
     }
     const mine = tab ? [...activeTasks.values()].find((task) => task.relPath === tab.relPath) : undefined
     const others = [...activeTasks.values()].filter((task) => task.relPath !== tab?.relPath)
+    const failed = tab ? failedTasks.get(tab.relPath) : undefined
     if (mine) renderTaskDock({ kind: 'generating', onAbort: abortCurrent })
+    else if (failed && tab) renderTaskDock({
+      kind: 'failed', failure: failed.failure, taskId: failed.taskId,
+      expanded: failedExpanded.has(tab.relPath),
+      canRetry: failed.answerEmpty && failed.failure.retryable,
+      onRetry: () => { void retryFailure() },
+      onClear: () => { void clearFailure() },
+      onToggleDetails: () => {
+        if (failedExpanded.has(tab.relPath)) failedExpanded.delete(tab.relPath)
+        else failedExpanded.add(tab.relPath)
+        updateStatus()
+      },
+      onCopy: () => { void copyDiagnostic(failed) }
+    })
     else if (tab?.pausedByUser && tab.pausedRestart) renderTaskDock({ kind: 'paused', onResume: () => { void resumeOrRestart() }, onEnd: endPaused })
     else if (others.length) renderTaskDock({ kind: 'others', count: others.length, onOpen: openTaskOverlay })
     else renderTaskDock({ kind: 'hidden' })
@@ -2056,7 +2161,7 @@ export async function start(root: HTMLElement): Promise<void> {
       details.append(heading,content);ledgerBody.insertBefore(details,load)
       const reasoning=document.createElement('button');reasoning.type='button';reasoning.className='settings-action';reasoning.textContent=record.legacyReasoning?'查看旧推理原文':'查看短期推理';reasoning.onclick=async()=>{reasoning.disabled=true;const result=await window.rgent.ledgerReasoning({sessionId:captured.sessionId!,objectVersion:captured.objectVersion!,relPath:captured.relPath,taskId:record.taskId});if(!ledgerOpen||current()!==captured)return;const text=document.createElement('pre');text.textContent=result.ok?result.text??'短期推理已清理或不可用；原回答与历史仍保留。':'推理读取未能核验，原记录保持。';content.append(text);reasoning.remove()};details.append(reasoning)
       details.addEventListener('toggle',()=>{if(!details.open||content.dataset.rendered)return;content.dataset.rendered='true'
-        if(record.chapter){const meta=document.createElement('p'),p=record.chapter.provenance;meta.textContent=p?`模型：${p.model.modelId} · 接收方：${p.model.endpointHost}；工具摘要：${p.tools.map(t=>(t.name==='search_memory'?'检索记忆':t.name)+' '+(t.name==='search_memory'&&/^拒绝 MEMORY_SEARCH_LIMIT × [0-9]+$/.test(t.outcome)?memoryErrorText('MEMORY_SEARCH_LIMIT')+' 未执行次数：'+t.outcome.slice('拒绝 MEMORY_SEARCH_LIMIT × '.length):t.outcome)).join('、')||'无'}；实际读取来源：${p.sources.map(d=>d.relPath).join('、')||'无'}；模型消息引用来源：${p.sentSources?.join('、')||'无'}；${skillsEvidenceText(p)}`:'旧记录元数据无法核验。';content.append(meta);const network=document.createElement('p');network.className='ledger-network-evidence';network.textContent=networkEvidenceText(record.chapter.network);content.append(network);if(record.chapter.metrics?.length){const steps=document.createElement('p');steps.textContent='模型步骤：'+record.chapter.metrics.map(m=>`第 ${m.step} 步`).join('、');content.append(steps)}for(const trace of record.chapter.trace??[]){const item=document.createElement('p');const refusal='：未执行（MEMORY_SEARCH_LIMIT）';item.textContent=trace.startsWith('工具 检索记忆')&&trace.endsWith(refusal)?trace.slice(0,-refusal.length)+'：未执行（'+memoryErrorText('MEMORY_SEARCH_LIMIT')+'）':trace;content.append(item)}const prompt=document.createElement('p');prompt.textContent=`口令：${record.chapter.prompt}`;content.append(prompt);const choice=ledgerRememberCommand(record);if(choice){const remember=document.createElement('button');remember.type='button';remember.className='memory-ledger-remember';remember.textContent='记住口令';remember.onclick=()=>void rememberSelection('ledger',choice.start,choice.end,choice.taskId);content.append(remember)}const answer=document.createElement('div');content.append(answer);renderReadOnlyMarkdown(answer,record.chapter.answer,noteHost({taskId:record.taskId,revision:record.revision,field:'answer'}))}
+        if(record.chapter){const failure=record.chapter.failure;if(failure){const box=document.createElement('div');box.className='ledger-failure';const title=document.createElement('p');title.textContent=`失败：${failure.message}`;const facts=document.createElement('p');facts.textContent=`${failure.family} · ${failure.stage} · ${failure.action} · 可重试：${failure.retryable?'是':'否'} · ${failure.code}`;const detail=document.createElement('pre');detail.className='ledger-failure-detail';detail.textContent=JSON.stringify({diagnosticId:failure.diagnosticId,detail:failure.detail??null},null,2);box.append(title,facts,detail);content.append(box)}const meta=document.createElement('p'),p=record.chapter.provenance;meta.textContent=p?`模型：${p.model.modelId} · 接收方：${p.model.endpointHost}；工具摘要：${p.tools.map(t=>(t.name==='search_memory'?'检索记忆':t.name)+' '+(t.name==='search_memory'&&/^拒绝 MEMORY_SEARCH_LIMIT × [0-9]+$/.test(t.outcome)?memoryErrorText('MEMORY_SEARCH_LIMIT')+' 未执行次数：'+t.outcome.slice('拒绝 MEMORY_SEARCH_LIMIT × '.length):t.outcome)).join('、')||'无'}；实际读取来源：${p.sources.map(d=>d.relPath).join('、')||'无'}；模型消息引用来源：${p.sentSources?.join('、')||'无'}；${skillsEvidenceText(p)}`:'旧记录元数据无法核验。';content.append(meta);const network=document.createElement('p');network.className='ledger-network-evidence';network.textContent=networkEvidenceText(record.chapter.network);content.append(network);if(record.chapter.metrics?.length){const steps=document.createElement('p');steps.textContent='模型步骤：'+record.chapter.metrics.map(m=>`第 ${m.step} 步`).join('、');content.append(steps)}for(const trace of record.chapter.trace??[]){const item=document.createElement('p');const refusal='：未执行（MEMORY_SEARCH_LIMIT）';item.textContent=trace.startsWith('工具 检索记忆')&&trace.endsWith(refusal)?trace.slice(0,-refusal.length)+'：未执行（'+memoryErrorText('MEMORY_SEARCH_LIMIT')+'）':trace;content.append(item)}const prompt=document.createElement('p');prompt.textContent=`口令：${record.chapter.prompt}`;content.append(prompt);const choice=ledgerRememberCommand(record);if(choice){const remember=document.createElement('button');remember.type='button';remember.className='memory-ledger-remember';remember.textContent='记住口令';remember.onclick=()=>void rememberSelection('ledger',choice.start,choice.end,choice.taskId);content.append(remember)}const answer=document.createElement('div');content.append(answer);renderReadOnlyMarkdown(answer,record.chapter.answer,noteHost({taskId:record.taskId,revision:record.revision,field:'answer'}))}
         else {const raw=document.createElement('div');content.append(raw);if(record.legacyRaw)renderReadOnlyMarkdown(raw,record.legacyRaw);else raw.textContent='此记录的正文已清理。'}
       })
     }

@@ -13,6 +13,9 @@ export const IPC = {
   ledgerGet:'ledger:get',
   ledgerGetTrash:'ledger:get-trash',
   ledgerHistory:'ledger:history',
+  diagnosticsGet:'diagnostics:get',
+  diagnosticsReport:'diagnostics:report',
+  diagnosticsForget:'diagnostics:forget',
   ledgerReasoning:'ledger:reasoning',
   memoryMaintenancePreview:'memory:maintenance-preview',
   ledgerMaintenance:'ledger:maintenance',
@@ -416,6 +419,7 @@ export type AgentEvent = {
   objectVersion?: string
   activity?: string
   network?: AgentNetworkEvent
+  failure?: import('./task-failure.ts').TaskFailure
   /** 自动批准的新建落盘后通知界面（仅自动档；普通档由确认卡随后打开）。 */
   created?: { relPath: string }
 }

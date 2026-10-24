@@ -5,10 +5,13 @@
  * 今天 resume = 同口令新开一场。真断点接续未开，按钮仍走调用方的三个命名函数。
  */
 
+import type { TaskFailure } from '../../shared/task-failure.ts'
+
 export type TaskDockModel =
   | { kind: 'hidden' }
   | { kind: 'generating'; onAbort: () => void }
   | { kind: 'paused'; onResume: () => void; onEnd: () => void }
+  | { kind: 'failed'; failure: TaskFailure; taskId: string; expanded: boolean; canRetry: boolean; onRetry: () => void; onClear: () => void; onToggleDetails: () => void; onCopy: () => void }
   | { kind: 'others'; count: number; onOpen: () => void }
 
 let host: HTMLElement | null = null
@@ -82,6 +85,47 @@ export function renderTaskDock(model: TaskDockModel): void {
     }
     bindButton(root.querySelector<HTMLButtonElement>('.task-dock-resume')!, model.onResume)
     bindButton(root.querySelector<HTMLButtonElement>('.task-dock-end')!, model.onEnd)
+    return
+  }
+  if (model.kind === 'failed') {
+    if (root.dataset.kind !== 'failed') {
+      root.dataset.kind = 'failed'
+      root.setAttribute('aria-label', '上一场失败')
+      root.replaceChildren()
+      const label = document.createElement('span')
+      label.className = 'task-dock-label'
+      label.textContent = model.failure.message
+      const retry = document.createElement('button')
+      retry.type = 'button'; retry.className = 'task-dock-retry'; retry.textContent = '重试'
+      const details = document.createElement('button')
+      details.type = 'button'; details.className = 'task-dock-details'; details.textContent = '详情'
+      const clear = document.createElement('button')
+      clear.type = 'button'; clear.className = 'task-dock-end'; clear.textContent = '清除标记'
+      const panel = document.createElement('div')
+      panel.className = 'task-dock-detail'
+      const facts = document.createElement('code')
+      facts.className = 'task-dock-facts'
+      facts.textContent = `${model.failure.family} · ${model.failure.stage} · ${model.failure.action} · 可重试：${model.failure.retryable ? '是' : '否'}`
+      const detail = document.createElement('pre')
+      detail.className = 'task-dock-detail-json'
+      detail.textContent = JSON.stringify({ code: model.failure.code, diagnosticId: model.failure.diagnosticId, detail: model.failure.detail ?? null }, null, 2)
+      const copy = document.createElement('button')
+      copy.type = 'button'; copy.className = 'task-dock-copy'; copy.textContent = '复制诊断'
+      panel.append(facts, detail, copy)
+      root.append(label)
+      if (model.canRetry) root.append(retry)
+      root.append(details, clear, panel)
+    }
+    const retry = root.querySelector<HTMLButtonElement>('.task-dock-retry')
+    if (retry) bindButton(retry, model.onRetry)
+    bindButton(root.querySelector<HTMLButtonElement>('.task-dock-details')!, model.onToggleDetails)
+    bindButton(root.querySelector<HTMLButtonElement>('.task-dock-end')!, model.onClear)
+    bindButton(root.querySelector<HTMLButtonElement>('.task-dock-copy')!, model.onCopy)
+    const label = root.querySelector<HTMLElement>('.task-dock-label')
+    if (label) label.textContent = model.failure.message
+    const panel = root.querySelector<HTMLElement>('.task-dock-detail')!
+    panel.hidden = !model.expanded
+    panel.dataset.failure = JSON.stringify(model.failure)
     return
   }
   const text = `另有 ${model.count} 项`

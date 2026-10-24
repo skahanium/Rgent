@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { start } from '../../src/renderer/src/shell.ts'
 import { IPC, type AgentAuthorizationPreview, type AgentAuthorizationRequest, type AgentStartRequest, type NoteSnapshot } from '../../src/shared/ipc.ts'
+import { makeTaskFailure } from '../../src/shared/task-failure.ts'
 
 /**
  * 真实外壳 + 假 editor/API：提问块创建与 Enter 发送、三档作业范围的静默提交、
@@ -57,6 +58,9 @@ vi.mock('../../src/renderer/src/view/editor.ts', () => ({
         return editorHarness.createResult
       },
       promptBlockAtCaret: () => editorHarness.block,
+      promptBlockForTask: () => editorHarness.block,
+      replacePromptTaskId: () => true,
+      removeSentPromptTask: () => true,
       ensurePromptMarker: () => {
         editorHarness.ensureCalls += 1
         if (!editorHarness.ensureResult) return false
@@ -597,4 +601,16 @@ it('resumes with the scope captured when the task was paused', async () => {
   expect(editorHarness.createCalls).toEqual([{ at: 'end', text: '暂停一场' }])
   await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(2))
   expect(api.agentStart.mock.calls.at(-1)![0].scope).toBe('note')
+})
+
+it('shows a failed task with details and clears the marker without a modal', async () => {
+  await waitForNote()
+  handlers.onAgentEvent({ id: 'failed-task', relPath: '甲.md', status: 'failed', sessionId: 's', answer: '', failure: makeTaskFailure({ code: 'MODEL_REQUEST_FAILED', diagnosticId: 'diag', detail: { httpStatus: 503 } }) })
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')?.dataset.kind).toBe('failed'))
+  expect(root.querySelector('.status-host-notice')?.textContent).toContain('模型服务没完成请求')
+  root.querySelector<HTMLButtonElement>('.task-dock-details')!.click()
+  expect(root.querySelector<HTMLElement>('.task-dock-detail')?.hidden).toBe(false)
+  expect(document.querySelector('dialog[open]')).toBeNull()
+  root.querySelector<HTMLButtonElement>('.task-dock-end')!.click()
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')?.dataset.kind).toBe('hidden'))
 })

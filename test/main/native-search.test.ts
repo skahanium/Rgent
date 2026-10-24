@@ -447,7 +447,7 @@ describe('AgentHost 选择模型自带联网', () => {
     await vi.waitFor(() => expect(app.nativeSignals).toHaveLength(1))
     if (mode === 'stop') app.host.stopNetwork(task.id)
     else app.host.revokeNetworkForAll()
-    expect(await task.done).toEqual({ status: 'failed', reason: 'NETWORK_NOT_AUTHORIZED' })
+    expect(await task.done).toMatchObject({ status: 'failed', reason: 'NETWORK_NOT_AUTHORIZED' })
     expect(app.nativeSignals[0]!.aborted).toBe(true)
     expect(app.nativeRequests).toHaveLength(1)
     expect(app.streamRequests).toHaveLength(0)

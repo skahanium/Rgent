@@ -63,6 +63,8 @@ import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 import { createScopedAgentTools, mcpToolCatalog, MCP_CATALOG_BYTES } from './scoped-agent-tools.ts'
 import { createMemoryIpc } from './memory-ipc.ts'
 
+import { PreflightStore } from './diagnostic-store.ts'
+import { makeTaskFailure } from '../shared/task-failure.ts'
 import { AgentHost } from './agent-host.ts'
 import { modelTierFor } from './permissions.ts'
 import { streamModelText, streamModelStep } from './model-stream.ts'
@@ -797,6 +799,7 @@ function buildMenu(): void {
 }
 
 function registerIpc(): void {
+  const preflightDiagnostics = new PreflightStore(app.getPath('userData'))
   const trusted = (event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean =>
     isTrustedIpcSender(event, mainWindow, rendererEntryUrl)
   const registerTrustedHandle = (channel: string, listener: Parameters<typeof ipcMain.handle>[1]): void => {
@@ -1704,6 +1707,39 @@ function registerIpc(): void {
       return {ok:true,text:record.state==='cleared'?null:record.legacyReasoning??reasoningStore.read(current.memoryContext().vaultKey,r.taskId)}
     }catch{return {ok:false,error:'LEDGER_UNAVAILABLE'}}
   })
+  registerTrustedHandle(IPC.diagnosticsGet,async(event,value:unknown)=>{
+    const current=vault
+    try{
+      if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
+      const r=value as Record<string,unknown>
+      if(Object.keys(r).sort().join()!=='relPath,sessionId'||typeof r.sessionId!=='string'||typeof r.relPath!=='string')throw Error('BAD_REQUEST')
+      if(!current)throw Error('NO_VAULT');current.assertSession(r.sessionId)
+      return {ok:true,value:{failures:current.taskFailures(r.relPath),preflight:preflightDiagnostics.all()}}
+    }catch(e){const code=e instanceof Error?e.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED'].includes(code)?code:'DIAGNOSTICS_UNAVAILABLE'}}
+  })
+  registerTrustedHandle(IPC.diagnosticsReport,async(event,value:unknown)=>{
+    const current=vault
+    try{
+      if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
+      const r=value as Record<string,unknown>
+      if(Object.keys(r).some(k=>!['sessionId','code','stage','detail'].includes(k))||typeof r.sessionId!=='string'||typeof r.code!=='string'||typeof r.stage!=='string')throw Error('BAD_REQUEST')
+      if(!current)throw Error('NO_VAULT');current.assertSession(r.sessionId)
+      const failure=makeTaskFailure({code:r.code,diagnosticId:randomUUID(),stage:r.stage as never,detail:r.detail})
+      preflightDiagnostics.record({code:failure.code,family:failure.family,stage:failure.stage,action:failure.action,retryable:failure.retryable,message:failure.message,...(failure.detail?{detail:failure.detail}:{})})
+      return {ok:true}
+    }catch(e){const code=e instanceof Error?e.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED'].includes(code)?code:'DIAGNOSTICS_UNAVAILABLE'}}
+  })
+  registerTrustedHandle(IPC.diagnosticsForget,async(event,value:unknown)=>{
+    const current=vault
+    try{
+      if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
+      const r=value as Record<string,unknown>
+      if(Object.keys(r).sort().join()!=='sessionId,taskId'||typeof r.sessionId!=='string'||typeof r.taskId!=='string')throw Error('BAD_REQUEST')
+      if(!current)throw Error('NO_VAULT');current.assertSession(r.sessionId)
+      current.forgetTaskFailure(r.taskId)
+      return {ok:true}
+    }catch(e){const code=e instanceof Error?e.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED'].includes(code)?code:'DIAGNOSTICS_UNAVAILABLE'}}
+  })
   registerTrustedHandle(IPC.ledgerGet,async(_event,value:unknown)=>{
     const current=vault,token=current?.sessionId()
     try{
@@ -2298,7 +2334,12 @@ if (ownsInstance) app.whenReady().then(() => {
       ...(mcp ? { mcp } : {})
     }),
     emit: ({ root, ...event }) => {
-      if (vault?.root === root && event.sessionId === vault.sessionId()) send(IPC.agentEvent, event)
+      if (vault?.root === root && event.sessionId === vault.sessionId()) {
+        if (event.status === 'failed' && event.failure) {
+          try { vault.recordTaskFailure(event.id, event.relPath, event.failure, !event.answer) } catch { /* ledger/event must not fail because diagnostics did */ }
+        }
+        send(IPC.agentEvent, event)
+      }
     }
   })
   attachVaultProtocol(() => vault)

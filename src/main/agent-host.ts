@@ -44,6 +44,8 @@ export type HostEvent = {
   created?: { relPath: string }
   /** 一次联网只读外发的状态行摘要：只带主机、去查询串的路径与服务商，不带正文与查询。 */
   network?: AgentNetworkEvent
+  /** 任务失败的结构化、脱敏诊断。 */
+  failure?: import('../shared/task-failure.ts').TaskFailure
 }
 
 export type HostStart = Partial<ObjectBinding> & {
@@ -978,8 +980,8 @@ export class AgentHost {
         return {...(skills?.record.length ? { skills: skills.record } : {}), version:2 as const,memoryDeps:[...new Map([...(memory?.dependencies(includeStaged)??[]),...(scoped?.memoryDependencies?.()??[]),...inherited.flatMap(p=>p.version===2?p.memoryDeps:[])].map(d=>[d.id,d])).values()],model:{provider:credential.provider,modelId:credential.modelId,endpointHost:new URL(credential.baseURL).host},scope:[input.relPath,...recorded.map(d=>d.relPath)],sources:recorded,sentSources:sent,tools:[...(scoped?.summary()??[]),...(capped?[{name:'sources',outcome:`实际来源 ${actual.length} 篇，超过账本上限 256，只记了前 ${recorded.length} 篇`}]:[]),...(memorySearchCalls?[{name:'search_memory',outcome:`执行 ${memorySearchCalls} 次，失败 ${memorySearchFailures} 次`}]:[]),...memoryToolOutcomes,...networkToolOutcomes,...[...refused].map(([label,count])=>({name:label.split(':')[0]!,outcome:`拒绝 ${label.split(':')[1]} × ${count}`}))]}
       }
       let lastCheckpoint = 0
-      const snapshot = (status: HostEvent['status'], reason?: string, revision?: string): void => {
-        this.deps.emit({ ...this.bindings.get(key), id, root, relPath: input.relPath, status, answer, reason, activity, persisted: revision !== undefined, revision })
+      const snapshot = (status: HostEvent['status'], reason?: string, revision?: string, failure?: import('../shared/task-failure.ts').TaskFailure): void => {
+        this.deps.emit({ ...this.bindings.get(key), id, root, relPath: input.relPath, status, answer, reason, activity, persisted: revision !== undefined, revision, ...(failure ? {failure} : {}) })
       }
       const checkpoint = async (): Promise<void> => {
         const saving = (async () => {
@@ -1311,7 +1313,7 @@ export class AgentHost {
           }
           if (answer) await wait(checkpoint())
         }
-      }, async (status, reason, reasonDetail) => {
+      }, async (status, reason, reasonDetail, failure) => {
         this.finalizing.add(key)
         await this.checkpoints.get(key)?.catch(() => {})
         grant?.revoke()
@@ -1322,6 +1324,7 @@ export class AgentHost {
         const finalSource = {material:materials.snapshot(),metrics,sentSummaries,
           taskId: id, startedAt, status, prompt: input.promptText, answer,
           ...(reason ? { reason: String(reason) } : {}),
+          ...(failure ? { failure } : {}),
           ...(reasoning ? { reasoning } : {}),
           ...(trace.length ? { trace } : {}),
           ...(assistantLine ? { assistant: assistantLine } : {}),
@@ -1331,7 +1334,7 @@ export class AgentHost {
         }
         try {
           const revision = await this.finishWrite(root, input.relPath, finalSource, persisted, savedMaterial)
-          snapshot(status, reason ? String(reason) : undefined, revision)
+          snapshot(status, reason ? String(reason) : undefined, revision, failure)
         } catch (error) {
           this.pending.set(id, { root, relPath: input.relPath, source: finalSource, persisted, material:savedMaterial })
           snapshot('failed', error instanceof Error ? error.message : 'WRITE_FAILED')
