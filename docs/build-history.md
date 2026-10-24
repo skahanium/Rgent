@@ -1,5 +1,5 @@
 # 施工历史
-> **状态准据（2026-10-24）**：`origin/branch-v0.1.0` 在 **`4b9ab6c`**；CI [run 40070044886](https://github.com/skahanium/Rgent/actions/runs/40070044886) **全绿**（macOS／Windows／docs／CI gate）。N／R／P／F1／S1 均已推送。旧的 `39942310121` 视觉红与 `39875286692` 全绿 run 只描述当时。
+> **状态准据（2026-10-24）**：本地与 `origin/branch-v0.1.0` 一致；最近代码/窗口 CI [run 40070044886](https://github.com/skahanium/Rgent/actions/runs/40070044886)（`4b9ab6c`）全绿，随后 docs-only run `40071309403` 全绿。N／R／P／F1／S1 均已推送；当前 tip 以 git／Actions 为准。
 
 
 本文是[施工图](build.md)的**冻结历史**：按日期的整轮施工与实测记录，含当时的数字、提交与 `/tmp` 证据路径。它们只描述自己那一刻，**不回填、不重写**，也不代表当前状态。

@@ -21,7 +21,7 @@
 
 **远端 MCP 与联网。** 阶段名不变；2026-10-22 收口后已完成 S1 安全/完整性修复。
 
-- **远端事实**：`origin/branch-v0.1.0` 在 **`4b9ab6c`**；CI [run 40070044886](https://github.com/skahanium/Rgent/actions/runs/40070044886) **全绿**（plan／docs／macOS／Windows／CI gate）。本地与远端一致，无未推送代码。
+- **远端事实**：本地与 `origin/branch-v0.1.0` 一致，无未推送代码。最近一次代码/窗口 CI [run 40070044886](https://github.com/skahanium/Rgent/actions/runs/40070044886)（`4b9ab6c`）**全绿**（plan／docs／macOS／Windows／CI gate）；随后 docs-only CI run `40071309403` 也全绿。当前 tip 与运行列表以 `git rev-parse`／GitHub Actions 为准。
 - **S1 已推送**：H1 引用修复权限、H2 词片顺序、H3 native 撤网、网页粘贴 marker、删除事务完整性、视觉搜索浮层修复。
 - **当前准据**：git／CI 与[施工历史](docs/build-history.md)；本入口不再维护逐轮编年。远端旧 run `39942310121` 是已修复的视觉红，不是当前状态。
 - 硬停、已交局部能力与产品性格见下文；阶段名、对象矩阵与交接表以[施工图](docs/build.md)为准。
