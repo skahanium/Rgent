@@ -61,14 +61,16 @@
 
 | # | 包 | 内容 | 依赖 | 状态 |
 |---|---|---|---|---|
-| D0 | 文档 | family/动作/重试/失败指针/隐私/支持包；D 表与入口 | 所有者批准 | **当前** |
-| D1 | 目录 | `TaskFailure`、family/action/retryable、脱敏 detail | D0 | **未开** |
-| D2 | 采集 | provider 分类、TaskResult/HostEvent、`chapter.failure`、失败指针 | D1 | **未开** |
-| D3 | 呈现 | failed 任务浮层、详情、preflight 环、重启恢复 | D2 | **未开** |
-| D4 | 恢复 | 新 taskId 重试、失败 marker 替换、清除 marker | D3 | **未开** |
-| D5 | 收口 | 支持包、排障手册、全量门、history 回填 | D4 | **未开** |
+| D0 | 文档 | family/动作/重试/失败指针/隐私/支持包；D 表与入口 | 所有者批准 | **已交**（`edc3766`） |
+| D1 | 目录 | `TaskFailure`、family/action/retryable、脱敏 detail | D0 | **本机已交**（`f69e0f1`） |
+| D2 | 采集 | provider 分类、TaskResult/HostEvent、`chapter.failure`、失败指针 | D1 | **本机已交**（`f69e0f1`） |
+| D3 | 呈现 | failed 任务浮层、详情、preflight 环、重启恢复 | D2 | **本机已交**（`f69e0f1`） |
+| D4 | 恢复 | 新 taskId 重试、失败 marker 替换、清除 marker | D3 | **本机已交**（`f69e0f1`） |
+| D5 | 收口 | 支持包、排障手册、全量门、history 回填 | D4 | **本机已交**（`f69e0f1`） |
 
 **D0 验收**：`pnpm docs:check` 通过；D1–D5 未写代码；文档只保留 family 合同与排障方法，不复制完整错误码表。
+
+**D 结果（2026-10-24 本机）**：单元 **171 文件 3056 通过／4 跳过**、完整窗口 **386／0**；构建、文档通过。**未推送、未跑 CI。** 任务失败有 `chapter.failure`/失败指针/结构化事件；failed 浮层可详情、复制、重试、清除；preflight 环与应用数据写入已接；旧账本无 failure 仍可读。
 
 
 **联网整合结果（2026-10-23）**：N0–N8 **已交、已推送**。门：单元 **167 文件 2908 通过／4 跳过**、完整窗口 **403／0**、联网 **32／0**、人发起 **25／0**、MCP **44／0**、写工具 **46／0**、UX **16／0**、旅程 **14／0**、人删除 **14／0**、恢复 **13／0**、文档 14 篇、构建通过。**真实外发烟测未跑**（需所有者密钥/付费调用；DeepSeek 与 MiniMax native 仅单测/探测代码，见历史边界）。
