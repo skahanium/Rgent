@@ -106,3 +106,24 @@ GitHub 的手动入口要求默认分支已有 `workflow_dispatch`。历史上�
 - 交付对照表按施工包绑定实际提交 ID；待提交不冒充证据。定向、本机集成、Windows／CI、人工确认分别标通过、失败、待核、未运行或不适用。临时截图目录不是永久证据，补稳定提交／CI artifact 引用后仍保留原失败说明。
 - 全绿复跑与原失败同时记录，负载仅为假设时不能写成根因；先隔离首个独立失败。用户视觉确认只覆盖实际核对画面，现场厂商调用只覆盖记录的模型、端点与场景。
 - 文档检查核结构和引用，不代替权限、来源或原生机制验证；当前阶段及对象矩阵一致，未来能力不因为文档丰厚而自动开放。
+
+## AI 对话排障（2026-10-24）
+
+先看四个字段：`code`、`family`、`stage`、`detail.httpStatus` / `detail.networkCode`。
+
+| 现象 | 先看 | 动作 |
+|---|---|---|
+| 401/403、密钥解密失败 | `MODEL_AUTH` / `KEY_DECRYPT_FAILED` | 设置→助手更新密钥 |
+| 404 或模型名异常 | `MODEL_NOT_FOUND` / endpointHost | 换模型，不重试旧请求 |
+| 429 / quota / retry-after | `MODEL_RATE_LIMIT` | 稍后重试 |
+| 400 且明确上下文信号 | `MODEL_CONTEXT` | 缩小范围或另开一篇 |
+| 5xx、连接重置、超时 | `MODEL_UNAVAILABLE` / `NETWORK` | 可重试；先确认网络 |
+| 流/工具协议异常 | `MODEL_PROTOCOL` | 查看详情，不重试 |
+| 账本 registry/owner 异常 | `LEDGER` | 设置→笔记库修复 |
+| 任务前配置/预览失败 | preflight 环 | 按动作修正；不伪造任务账本 |
+
+**支持包**：只复制 taskId、diagnosticId、TaskFailure、provider/model/endpoint host、步骤/工具/网络摘要、应用版本。不得包含 prompt、answer、密钥、Authorization、完整响应体、请求头、搜索 query、工具参数、笔记正文。
+
+**重试**：只在空回答时默认提供；新 taskId；旧账本保留；有工具写操作时详情写明会再次执行；不自动重试。清除只删 marker，保留 prompt 文本。
+
+**验收**：fake provider 失败矩阵、账本 failure/失败指针、重启恢复、脱敏、无模态、`⌘⇧↵` 不被失败 marker 卡住。

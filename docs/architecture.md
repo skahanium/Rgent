@@ -125,6 +125,12 @@ workspace 的唯一性规则与寻址一致：有 id 行按 id 唯一，无 id �
 5. 后续工具须经 [统一授权与资源代理](topics.md#沙箱与任务授权)；受信任文件与网络服务在主进程核验执行，第三方代码须另经隔离。具体清单只见 [已拍板决定](decisions.md#工具)。当前范围授权约束 Host、读库／搜库、补／建／改名／挪与 macOS 上的 `delete_note`；人删除与 AI 删除都按三档零确认。MCP 已交并推送；执行隔离仍未开放。
 6. Esc、停止按钮或关窗取消仍在运行的任务。未采纳块留在原笔记，并记中止原因。
 
+## AI 对话失败诊断（2026-10-24）
+
+任务内失败沿一条链：模型流/工具/账本边界产生脱敏 `TaskFailure` → `AgentTasks` 保留 → `AgentHost` 写 `chapter.failure` 和一行 trace → 写 `.rgent/diagnostics/failures.json` → `HostEvent`/`AgentEvent` 带 failure 与 diagnosticId → 任务浮层/账本显示动作与详情。失败指针有界，成功、取消、重试或清除时移除；旧账本仍保留。
+
+任务前的配置、密钥、预览、提问块失败没有任务账本，写应用数据目录的 preflight 环；它不是权限或恢复依据。支持包只从这两处读取，复制前做白名单脱敏。
+
 ## 信任边界
 
 | 对象 | 态度 |
