@@ -174,6 +174,19 @@ export function effectivePermissionEntries(root: string, entries: readonly Permi
 }
 
 export async function setPermission(root: string, relPath: string, tier: PermissionTier): Promise<PermissionState> {
+  return writePermission(root, relPath, tier, 'dir')
+}
+
+/**
+ * 内部还原专用：允许把删除时记下的档精确写回一篇笔记。
+ * 不暴露给人用的设档入口——人仍然只能按文件夹设档，避免把“这一篇”的例外
+ * 误当成新的界面能力。
+ */
+export async function setPermissionFile(root: string, relPath: string, tier: PermissionTier): Promise<PermissionState> {
+  return writePermission(root, relPath, tier, 'file')
+}
+
+async function writePermission(root: string, relPath: string, tier: PermissionTier, kind: 'dir' | 'file'): Promise<PermissionState> {
   if (!validRelPath(relPath)) throw new Error('BAD_PATH')
   if (tier !== 'reference' && tier !== 'follow' && tier !== 'forbidden') throw new Error('BAD_TIER')
   const abs = resolveInVault(root, relPath)
@@ -186,7 +199,7 @@ export async function setPermission(root: string, relPath: string, tier: Permiss
     if (error instanceof Error && error.message === 'UNSAFE_PATH') throw new Error('不能设置符号链接文件夹')
     throw error
   }
-  if (components.at(-1)?.kind !== 'dir') throw new Error('只能对文件夹设档')
+  if (components.at(-1)?.kind !== kind) throw new Error(kind === 'dir' ? '只能对文件夹设档' : '只能对笔记设档')
   if (!sameComponents(components, fs.resolve(relPath))) throw new Error('PATH_CHANGED')
   const canonical = components.map((part) => part.name).join('/')
   return serializedSet(path.resolve(root), async () => {

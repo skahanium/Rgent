@@ -227,6 +227,8 @@ function structHarness(over: StructuralOver = {}, depsOver: Partial<WriteGateDep
       // 现实中 grant.sources 含发起篇本身：对它的拒绝理由是「它是这一场的写入目标」，不是「不在范围里」，
       // 所以这条顺序（先认发起篇）必须被钉住。
       authorized: relPath => relPath === STRUCT_SOURCE || relPath === '资料/另一篇.md' || relPath === ORIGIN,
+      // 引用修复来源：只有可参考、非发起篇、普通笔记才可写；默认覆盖夹具里的来源。
+      linkRepairAuthorized: async relPath => relPath === STRUCT_SOURCE || relPath === '资料/另一篇.md' || relPath === '资料/引用者.md' || relPath === '资料/参考篇.md',
       origin: () => ORIGIN,
       otherTaskRunning: () => false,
       preview: async request => {
@@ -296,11 +298,46 @@ describe('write gate · 改名与挪', () => {
     expect(await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '新名' })).toEqual({ ok: false, reason: 'LINK_REPAIR_OUT_OF_SCOPE' })
   })
 
-  it('范围外引用不需要修复时放行：门只看会不会动到范围外的正文', async () => {
+  it('引用来源仍是可参考普通笔记时放行：门只看会不会动到不允许写的正文', async () => {
     const app = structHarness({
       preview: async request => ({ id: 'rel-4', source: request.source, target: request.target, moves: [], linkChanges: [{ relPath: STRUCT_SOURCE }], permissionChanges: [{ from: '资料/参考篇.md', to: '资料/新名.md', tier: 'reference' }] })
     })
     expect(await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '新名' })).toMatchObject({ ok: true, linkChanges: 1, permissionChanges: 1 })
+  })
+
+  it('引用来源是 follow／发起篇／非普通笔记时整件事拒，不签发 token', async () => {
+    for (const ref of ['资料/必须遵循.md', ORIGIN, '资料/附件/引用.md']) {
+      const app = structHarness({
+        linkRepairAuthorized: async path => path === STRUCT_SOURCE,
+        preview: async request => ({ id: `rel-${ref}`, source: request.source, target: request.target, moves: [], linkChanges: [{ relPath: ref }], permissionChanges: [] })
+      })
+      expect(await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '新名' })).toEqual({ ok: false, reason: 'LINK_REPAIR_OUT_OF_SCOPE' })
+      expect(app.commits).toEqual([])
+      expect(app.gate.state().structural).toBe(0)
+    }
+  })
+
+  it('结构目标预检的 authorized 不再决定引用修复范围', async () => {
+    const app = structHarness({
+      authorized: () => true,
+      linkRepairAuthorized: async () => false,
+      preview: async request => ({ id: 'rel-5', source: request.source, target: request.target, moves: [], linkChanges: [{ relPath: '别处/引用者.md' }], permissionChanges: [] })
+    })
+    expect(await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '新名' })).toEqual({ ok: false, reason: 'LINK_REPAIR_OUT_OF_SCOPE' })
+  })
+
+  it('预览后引用来源权限变化：提交前拒，不调用库层提交', async () => {
+    let allowed = true
+    const app = structHarness({
+      linkRepairAuthorized: async () => allowed,
+      preview: async request => ({ id: 'rel-6', source: request.source, target: request.target, moves: [], linkChanges: [{ relPath: '资料/引用者.md' }], permissionChanges: [] })
+    })
+    const preview = await app.gate.previewStruct({ kind: 'rename', relPath: STRUCT_SOURCE, newName: '新名' })
+    expect(preview.ok).toBe(true)
+    allowed = false
+    expect(await app.gate.commitStruct({ previewId: (preview as { previewId: string }).previewId })).toEqual({ ok: false, reason: 'LINK_REPAIR_OUT_OF_SCOPE' })
+    expect(app.commits).toEqual([])
+    expect(app.gate.state().structural).toBe(0)
   })
 
   it('令牌一次性：重放与丢弃后提交都被拒', async () => {
@@ -446,6 +483,7 @@ describe('write gate · 删除', () => {
       composeAppend: (previous, text) => `${previous}\n<!-- rgent:ai:v1 -->\n${text}\n`,
       structural: {
         authorized: relPath => relPath === STRUCT_SOURCE || relPath === ORIGIN,
+        linkRepairAuthorized: async relPath => relPath === STRUCT_SOURCE,
         origin: () => ORIGIN,
         otherTaskRunning: () => false,
         preview: async request => ({ id: `rel-${request.target}`, source: request.source, target: request.target, moves: [], linkChanges: [], permissionChanges: [] }),

@@ -660,7 +660,7 @@ a[href]:focus-visible,
   .settings-limit-group { grid-template-columns: 1fr; }
 }
 
-.overlay-search { padding: 20px 24px 16px; overflow: hidden; }
+.overlay-search { margin: 120px auto auto; padding: 20px 24px 16px; overflow: hidden; }
 .overlay-search-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; font-size: 0.85rem; }
 .overlay-search-title kbd { padding: 3px 10px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); color: var(--text-muted); font: 0.75rem var(--font-ui); }
 .overlay-search-head {
@@ -2276,7 +2276,7 @@ a[href]:focus-visible,
 .vault-settings-trash { gap: 14px; }
 .vault-settings .settings-back { justify-self: start; width: fit-content; min-height: 30px; padding: 4px 10px 4px 6px; border-color: transparent; background: transparent; color: var(--text-muted); font-size: .8rem; }
 .vault-settings .settings-back:hover { border-color: var(--border-subtle); background: var(--state-hover); color: var(--text-heading); }
-.trash-intro, .trash-loading, .trash-empty { margin: 0; color: var(--text-muted); font-size: .78rem; line-height: 1.6; overflow-wrap: anywhere; }
+.trash-intro, .trash-capacity, .trash-loading, .trash-empty { margin: 0; color: var(--text-muted); font-size: .78rem; line-height: 1.6; overflow-wrap: anywhere; }
 .trash-status { min-height: 1.6em; margin: 0; color: var(--text-muted); font-size: .8rem; line-height: 1.6; overflow-wrap: anywhere; }
 .trash-error { margin: 0; color: var(--status-error); font-size: .78rem; line-height: 1.6; overflow-wrap: anywhere; }
 .trash-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }

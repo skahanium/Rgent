@@ -303,11 +303,23 @@ describe('AgentHost 选择模型自带联网', () => {
     classification: 'human' as const, start: 0, end: 2, hash: 'a'.repeat(64), basisHash: 'b'.repeat(64), sourceDeps: [], memoryDeps: []
   })
 
-  function nativeHarness(options: { native?: boolean; modelId?: string } = {}) {
+  type NativeCall = { id: string; name: string; input: unknown }
+  function nativeHarness(options: {
+    native?: boolean
+    modelId?: string
+    /** native 流每一步出什么；默认是一句文本回答。 */
+    nativeSteps?: { calls?: NativeCall[]; text?: string }[]
+    /** native 流挂起，等撤网 abort；用来测在途撤网。 */
+    hangNative?: boolean
+    /** 抓页依赖被调到时通知测试：可在这里撤网。 */
+    onFetch?: () => void
+  } = {}) {
     let content = '人写的段落。\n\n' + draftBody('问') + '\n'
     let revision = 1
+    let networkLive = true
     const history = hostLedgerFixture()
     const nativeRequests: Parameters<NonNullable<import('../../src/main/agent-host.ts').HostDependencies['nativeStreamStep']>>[0][] = []
+    const nativeSignals: AbortSignal[] = []
     const streamRequests: Parameters<NonNullable<import('../../src/main/agent-host.ts').HostDependencies['streamStep']>>[0][] = []
     const credential: ModelCredential = {
       provider: 'minimax', baseURL: 'https://api.minimax.cn/v1', modelId: options.modelId ?? 'MiniMax-M3.1',
@@ -317,8 +329,12 @@ describe('AgentHost 选择模型自带联网', () => {
     const grant = {
       id: 'g', root: '/vault', sessionId: 's', origin: 'a.md', originProof: originSource(), sources: [originSource()],
       credential, limits, level: 'reference' as const, autoApproveWrites: false,
+      // 动态撤网：native 是否还能用，看每一步开始时的 grant.network。
+      get network() { return networkLive ? { allowed: true as const } : undefined },
       assertActive() {}, validateSources: async () => {}, acknowledgeOrigin() {}, revoke() {},
-      assertNetwork() {}, revokeNetwork() {}, assertMcp() {}, revokeMcp() {},
+      assertNetwork() { if (!networkLive) throw Error('NETWORK_NOT_AUTHORIZED') },
+      revokeNetwork() { networkLive = false },
+      assertMcp() {}, revokeMcp() {},
       assertWriteTarget(path: string) { if (path !== 'a.md') throw Error('OUTSIDE_TASK_SCOPE') },
       assertLive: async () => {}
     } as unknown as TaskGrant
@@ -344,16 +360,35 @@ describe('AgentHost 选择模型自带联网', () => {
         yield { type: 'text', text: '内置搜索回答' }
         yield { type: 'finish', reason: 'stop' }
       },
-      nativeStreamStep: async function* (input) {
+      nativeStreamStep: async function* (input, signal) {
         nativeRequests.push(input)
-        yield { type: 'text', text: '模型自带联网回答' }
-        yield { type: 'finish', reason: 'stop' }
+        nativeSignals.push(signal)
+        if (options.hangNative) {
+          // 真实适配器把调用方 signal 接到 fetch；撤网 abort 后按 AbortError 结束。
+          await new Promise<never>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+          })
+          return
+        }
+        const step = options.nativeSteps?.[nativeRequests.length - 1]
+        const calls = step?.calls ?? []
+        for (const call of calls) yield { type: 'tool-call', ...call } as never
+        if (calls.length) yield { type: 'finish', reason: 'tool-calls' }
+        else {
+          yield { type: 'text', text: step?.text ?? '模型自带联网回答' }
+          yield { type: 'finish', reason: 'stop' }
+        }
       },
       createReadOnlyTools: (granted, id, _memory, _materials, _write, network) => createScopedAgentTools(granted, id, {
         read, tier: async () => 'reference', acceptsObject: () => false, ...(network ? { network } : {})
       }),
       network: {
-        fetch: async () => ({ text: '页面', host: 'example.com', url: 'https://example.com', bytes: 3, truncated: false, lowTrust: true }),
+        fetch: async (_url: string, signal: AbortSignal) => {
+          options.onFetch?.()
+          await Promise.resolve()
+          if (signal.aborted) throw Error('EGRESS_ABORTED')
+          return { text: '页面', host: 'example.com', url: 'https://example.com', bytes: 3, truncated: false, lowTrust: true }
+        },
         search: async () => ({ provider: 'brave', host: 'api.search.brave.com', results: [] }),
         availability: () => ({ available: true, search: true, providerHost: 'api.search.brave.com', native: options.native !== false })
       },
@@ -363,7 +398,7 @@ describe('AgentHost 选择模型自带联网', () => {
       relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: '1',
       ...draftRequest(content, '问')
     })
-    return { history, start, nativeRequests, streamRequests }
+    return { host, history, start, nativeRequests, nativeSignals, streamRequests, networkLive: () => networkLive }
   }
 
   it('native 生效时改用 nativeStreamStep，不宣告 search_web，保留 fetch_url', async () => {
@@ -388,5 +423,36 @@ describe('AgentHost 选择模型自带联网', () => {
       expect(app.streamRequests).toHaveLength(1)
       expect(Object.keys(app.streamRequests[0]!.tools ?? {})).toEqual(expect.arrayContaining(['fetch_url', 'search_web']))
     }
+  })
+
+  it('步前撤网后本步改走非 native 流，任务继续收尾', async () => {
+    const app = nativeHarness({
+      nativeSteps: [{ calls: [{ id: 'c1', name: 'fetch_url', input: { url: 'https://example.com/x' } }] }],
+      // 第一次抓页时撤网：它发生在第 1 步工具环里，第 2 步必须已经不能再用 native。
+      onFetch: () => { app.host.stopNetwork(app.host.active()[0]!.id) }
+    })
+    const task = await app.start()
+    expect(await task.done).toEqual({ status: 'completed' })
+    expect(app.networkLive()).toBe(false)
+    expect(app.nativeRequests).toHaveLength(1)
+    expect(app.streamRequests).toHaveLength(1)
+    expect(Object.keys(app.streamRequests[0]!.tools ?? {})).not.toContain('search_web')
+    expect(app.history.records().at(-1)?.status).toBe('completed')
+    expect(app.host.active()).toEqual([])
+  })
+
+  it.each(['stop', 'all'] as const)('在途 native 步撤网（%s）：立即 abort，当前步 NETWORK_NOT_AUTHORIZED，不再走 native', async mode => {
+    const app = nativeHarness({ hangNative: true })
+    const task = await app.start()
+    await vi.waitFor(() => expect(app.nativeSignals).toHaveLength(1))
+    if (mode === 'stop') app.host.stopNetwork(task.id)
+    else app.host.revokeNetworkForAll()
+    expect(await task.done).toEqual({ status: 'failed', reason: 'NETWORK_NOT_AUTHORIZED' })
+    expect(app.nativeSignals[0]!.aborted).toBe(true)
+    expect(app.nativeRequests).toHaveLength(1)
+    expect(app.streamRequests).toHaveLength(0)
+    // 不自动重试、不改走另一条流：任务按现有状态收尾，没有后续模型步。
+    expect(app.history.records().at(-1)).toMatchObject({ status: 'failed', reason: 'NETWORK_NOT_AUTHORIZED' })
+    expect(app.host.active()).toEqual([])
   })
 })

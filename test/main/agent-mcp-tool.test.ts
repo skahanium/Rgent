@@ -70,6 +70,7 @@ function mcpHarness(options: {
     list: async () => ({ items: [], total: 0, complete: true }),
     actualSources: () => [],
     assertStructuralTarget: async () => {},
+    assertLinkRepairSource: async () => {},
     assertCreateTarget: async () => {},
     
     get network() { return { allowed: true as const } },
@@ -555,6 +556,7 @@ function mcpPairHarness() {
     list: async () => ({ items: [], total: 0, complete: true }),
     actualSources: () => [],
     assertStructuralTarget: async () => {},
+    assertLinkRepairSource: async () => {},
     assertCreateTarget: async () => {},
     
       get network() { return { allowed: true as const } },

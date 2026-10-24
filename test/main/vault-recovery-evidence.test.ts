@@ -37,7 +37,7 @@ async function emptyVault() {
   const root = path.join(base, 'vault')
   await mkdir(root)
   await writeFile(path.join(base, 'vault.json'), serializeStoredVault(root))
-  const vault = new VaultSession(base, vi.fn())
+  const vault = new VaultSession(base, vi.fn(), undefined, undefined, undefined, true)
   vault.restore()
   return { base, root, vault }
 }
@@ -52,7 +52,7 @@ async function registeredVault() {
   await writeFile(path.join(root, 'a', '附件.txt'), '附件正文')
   const marked = markPrompt(draftSource('以后用中文').source, { taskId: 'task', ...draftSource('以后用中文'), expectedText: '以后用中文', promptText: '以后用中文' })
   await writeFile(path.join(root, 'a.md'), marked)
-  const vault = new VaultSession(base, vi.fn())
+  const vault = new VaultSession(base, vi.fn(), undefined, undefined, undefined, true)
   vault.restore()
   let note = await vault.readOpened('a.md')
   await vault.ledgerPrepare('a.md', { taskId: 'task', startedAt: new Date().toISOString(), status: 'completed', prompt: '以后用中文', answer: '好的' })
@@ -71,7 +71,7 @@ async function folderRegisteredVault() {
   await writeFile(path.join(base, 'vault.json'), serializeStoredVault(root))
   const marked = markPrompt(draftSource('问').source, { taskId: 'task', ...draftSource('问'), expectedText: '问', promptText: '问' })
   await writeFile(path.join(root, 'box', 'b.md'), marked)
-  const vault = new VaultSession(base, vi.fn())
+  const vault = new VaultSession(base, vi.fn(), undefined, undefined, undefined, true)
   vault.restore()
   let note = await vault.readOpened('box/b.md')
   await vault.ledgerPrepare('box/b.md', { taskId: 'task', startedAt: new Date().toISOString(), status: 'completed', prompt: '问', answer: '答' })

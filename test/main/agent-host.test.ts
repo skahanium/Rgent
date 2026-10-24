@@ -110,6 +110,11 @@ function fakeGrant(options: {
       if (path === options.origin) throw Error('ORIGIN_LOCKED')
       if (await options.tier(path) !== 'reference') throw Error('OUTSIDE_TASK_SCOPE')
     },
+    async assertLinkRepairSource(path: string) {
+      assertActive()
+      if (options.scope !== 'vault' || !contains(path) || path === options.origin) throw Error('LINK_REPAIR_OUT_OF_SCOPE')
+      if (await options.tier(path) !== 'reference') throw Error('LINK_REPAIR_OUT_OF_SCOPE')
+    },
     async assertCreateTarget(path: string) {
       assertActive()
       if (options.scope === 'note') throw Error('OUTSIDE_TASK_SCOPE')

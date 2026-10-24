@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SecureVaultFs, closeSecureFs, secureFsFor } from '../../src/main/secure-fs.ts'
-import { TrashStore, TRASH_DIR, TRASH_RETENTION_MS } from '../../src/main/trash-store.ts'
+import { TrashStore, TRASH_DIR, TRASH_RETENTION_MS, validTrashMeta } from '../../src/main/trash-store.ts'
 import { serializeStoredVault } from '../../src/main/notes-fs.ts'
 import { VaultSession } from '../../src/main/vault.ts'
 
@@ -75,6 +75,21 @@ describe('in-vault trash store', () => {
     expect(listed.entries[0]!.bytes).toBeGreaterThan(Buffer.byteLength('正文'))
     // 不再是库里的普通路径：树扫描与笔记读取都到不了。
     expect(secureFsFor(root).list('').some((entry) => entry.name === TRASH_DIR)).toBe(true)
+  })
+
+  it('stores an optional permission tier while old meta without it stays readable', async () => {
+    const root = await vault()
+    const store = new TrashStore(root)
+    const result = store.delete('a.md', { source: 'human', permissionTier: 'forbidden' })
+    expect(result.meta.permissionTier).toBe('forbidden')
+    const raw = JSON.parse(await readFile(path.join(root, TRASH_DIR, result.meta.trashId, 'meta.json'), 'utf8')) as Record<string, unknown>
+    expect(raw.permissionTier).toBe('forbidden')
+    expect(validTrashMeta(raw)).toBe(true)
+    // 旧 meta（没有 permissionTier）仍是有效条目，不因新增可选字段变坏。
+    const { permissionTier: _permissionTier, ...legacy } = raw
+    expect(validTrashMeta(legacy)).toBe(true)
+    await writeFile(path.join(root, TRASH_DIR, result.meta.trashId, 'meta.json'), `${JSON.stringify({ ...legacy, permissionTier: 'unknown' })}\n`)
+    expect(store.list().entries[0]).toMatchObject({ id: result.meta.trashId, state: 'damaged' })
   })
 
   it('restores in place and leaves no entry behind', async () => {
@@ -183,6 +198,22 @@ describe('in-vault trash store', () => {
     expect(await entryDirs(root)).toEqual([second.trashId])
   })
 
+  it('counts damaged entries against the sweep capacity without auto-purging them', async () => {
+    const root = await vault()
+    const store = new TrashStore(root, { bytesLimit: 40 })
+    const damaged = '33333333-3333-3333-3333-333333333333'
+    await mkdir(path.join(root, TRASH_DIR, damaged, 'payload'), { recursive: true })
+    await writeFile(path.join(root, TRASH_DIR, damaged, 'payload', '残留.bin'), 'x'.repeat(200))
+    await writeFile(path.join(root, 'b.md'), 'y'.repeat(200))
+    const fresh = store.delete('b.md', { source: 'human' }).meta
+    mockNativeTrash(root)
+    const report = store.sweep()
+    // 半截／损坏条目占用 200 B，已超过 40 B 预算；只清可清的完整条目，不自动送走 damaged。
+    expect(report.purged).toEqual([fresh.trashId])
+    expect(report.bytes).toBe(200)
+    expect(await entryDirs(root)).toEqual([damaged])
+  })
+
   it('keeps unreadable entries as damaged instead of dropping them', async () => {
     const root = await vault()
     const store = new TrashStore(root)
@@ -209,6 +240,10 @@ describe('in-vault trash store', () => {
     mockNativeTrash(root)
     expect(store.sweep()).toMatchObject({ purged: [] })
     expect(listed.entries.some((entry) => entry.id === good.trashId && entry.state === 'ok')).toBe(true)
+    // 不能还原的 damaged 条目仍可整体移入系统废纸篓，不能无路可走。
+    expect(store.purge(broken)).toEqual({ ok: true, removed: true })
+    expect(existsSync(path.join(root, TRASH_DIR, broken))).toBe(false)
+    expect(await entryDirs(root)).toContain(bare)
   })
 
   it('rolls back every moved object when the journal write fails', async () => {
@@ -262,6 +297,29 @@ describe('in-vault trash store', () => {
     expect(store.list().entries[0]).toMatchObject({ id, state: 'ok' })
   })
 
+  it('keeps a half-moved entry damaged when the attachment folder never reached the payload', async () => {
+    const root = await vault()
+    const store = new TrashStore(root)
+    const id = store.delete('a.md', { source: 'human' }).meta.trashId
+    // 模拟「笔记已搬进 payload、附件夹还没搬」时进程退出：夹子仍在原路径，payload 只有笔记。
+    await rename(path.join(root, TRASH_DIR, id, 'payload', 'a'), path.join(root, 'a'))
+    const metaPath = path.join(root, TRASH_DIR, id, 'meta.json')
+    const meta = JSON.parse(await readFile(metaPath, 'utf8')) as Record<string, unknown>
+    await writeFile(metaPath, `${JSON.stringify({ ...meta, state: 'moving' })}\n`)
+
+    const report = store.reconcile([])
+    expect(report.completed).toEqual([])
+    expect(report.upsert).toEqual([])
+    expect(report.damaged).toEqual([id])
+    expect(report.issues).toContain(`attachment-missing:${id}`)
+    const listed = store.list()
+    expect(listed.entries[0]).toMatchObject({ id, state: 'damaged', bytes: Buffer.byteLength('正文') })
+    expect(listed.bytes).toBe(Buffer.byteLength('正文'))
+    expect(JSON.parse(await readFile(metaPath, 'utf8')).state).toBe('damaged')
+    // 附件夹还在原路径：对账没有把它搬进 payload，也没有当成完整删除。
+    expect(await readFile(path.join(root, 'a', '附件.txt'), 'utf8')).toBe('附件正文')
+  })
+
   it('rolls a moving entry back when the object never left the original path', async () => {
     const root = await vault()
     const store = new TrashStore(root)
@@ -277,6 +335,39 @@ describe('in-vault trash store', () => {
     expect(report.rolledBack).toEqual([id])
     expect(report.remove).toEqual([id])
     expect(report.damaged).toEqual([])
+    expect(await entryDirs(root)).toEqual([])
+  })
+
+  it('returns the attachment folder when only the note rolled back', async () => {
+    const root = await vault()
+    const store = new TrashStore(root)
+    const meta = store.delete('a.md', { source: 'human' }).meta
+    // 笔记回到原位、附件夹仍留在 payload：这是回滚中断的半截状态。
+    await rename(path.join(root, TRASH_DIR, meta.trashId, 'payload', 'a.md'), path.join(root, 'a.md'))
+    const metaPath = path.join(root, TRASH_DIR, meta.trashId, 'meta.json')
+    const moving = JSON.parse(await readFile(metaPath, 'utf8')) as Record<string, unknown>
+    await writeFile(metaPath, `${JSON.stringify({ ...moving, state: 'moving' })}\n`)
+    mockNativeTrash(root)
+    const report = store.reconcile([{ trashId: meta.trashId, relPath: 'a.md', objectVersion: meta.objectVersion, contentHash: meta.contentHash, at: meta.deletedAt }])
+    expect(report.rolledBack).toEqual([meta.trashId])
+    expect(report.remove).toEqual([meta.trashId])
+    expect(report.damaged).toEqual([])
+    expect(await readFile(path.join(root, 'a', '附件.txt'), 'utf8')).toBe('附件正文')
+    expect(await entryDirs(root)).toEqual([])
+  })
+
+  it('returns the attachment folder when a restore stopped after moving the note back', async () => {
+    const root = await vault()
+    const store = new TrashStore(root)
+    const meta = store.delete('a.md', { source: 'human' }).meta
+    await rename(path.join(root, TRASH_DIR, meta.trashId, 'payload', 'a.md'), path.join(root, 'a.md'))
+    mockNativeTrash(root)
+    const report = store.reconcile([{ trashId: meta.trashId, relPath: 'a.md', objectVersion: meta.objectVersion, contentHash: meta.contentHash, at: meta.deletedAt }])
+    expect(report.restored).toEqual([meta.trashId])
+    expect(report.remove).toEqual([meta.trashId])
+    expect(report.damaged).toEqual([])
+    expect(await readFile(path.join(root, 'a', '附件.txt'), 'utf8')).toBe('附件正文')
+    expect(await readFile(path.join(root, 'a.md'), 'utf8')).toBe('正文')
     expect(await entryDirs(root)).toEqual([])
   })
 

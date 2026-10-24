@@ -19,6 +19,19 @@ describe('Host failure messages', () => {
     expect(hostErrorText('PATH_CHANGED')).toContain('没有删除')
   })
 
+  it('explains partial trash work and the in-vault record limit', () => {
+    expect(hostErrorText('TRASH_PARTIAL')).toContain('只完成了一部分')
+    expect(hostErrorText('TRASH_PARTIAL')).toContain('已删除')
+    expect(hostErrorText('TRASH_RECORD_LIMIT')).toContain('256 条')
+    expect(hostErrorText('TRASH_RECORD_LIMIT')).toContain('已删除')
+  })
+
+  it('points trash conflicts at the in-vault deletion instead of the old system-trash landing', () => {
+    expect(hostErrorText('TRASH_CONFLICT')).toContain('已删除记录仍在')
+    expect(hostErrorText('TRASH_CONFLICT')).not.toContain('系统废纸篓')
+    expect(hostErrorText('LANDING_MISMATCH')).not.toContain('系统废纸篓')
+  })
+
   it('covers the authorization and start-up codes the popover can show', () => {
     const popoverCodes = ['STALE_AUTHORIZATION', 'INVALID_AUTHORIZATION', 'AUTHORIZATION_SCOPE_TOO_LARGE', 'UNSAVED_DRAFT', 'NOTE_BUSY', 'MODEL_CONFIG_UNAVAILABLE', 'LIFECYCLE_RECOVERY_REQUIRED', 'AI_BLOCK_CHANGED']
     for (const code of popoverCodes) expect(hostErrorText(code)).not.toBe(code)

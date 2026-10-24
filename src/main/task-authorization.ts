@@ -53,6 +53,8 @@ export interface ScopeResolver {
   list(page: ScopePageRequest): Promise<ScopePage>
   /** 结构操作（改名／挪／删）的目标：只在整库范围、非发起篇、普通笔记、可参考。 */
   assertStructuralTarget(relPath: string, signal?: AbortSignal): Promise<void>
+  /** 引用修复来源：整库范围、非发起篇、普通笔记、当前可参考。会改正文，判据比结构目标更窄。 */
+  assertLinkRepairSource(relPath: string, signal?: AbortSignal): Promise<void>
   /** 新建目标：只在发起篇所在目录；本篇范围不宣告建，调用也按越界拒。 */
   assertCreateTarget(relPath: string): Promise<void>
 }
@@ -93,6 +95,8 @@ export interface TaskGrant {
   actualSources(): readonly ScopeReadProof[]
   /** 结构操作目标：只在整库、非发起篇、普通笔记、可参考时放行。 */
   assertStructuralTarget(path: string, signal?: AbortSignal): Promise<void>
+  /** 引用修复来源：整库、非发起篇、普通笔记、当前可参考；任一不满足整次结构操作失败。 */
+  assertLinkRepairSource(path: string, signal?: AbortSignal): Promise<void>
   /** 新建目标：落点必须是发起篇所在目录。 */
   assertCreateTarget(path: string): Promise<void>
   assertWriteTarget(path: string): void
@@ -142,6 +146,11 @@ function ordinaryEntries(tree: TreeEntry[]): Map<string, TreeEntry> {
 }
 function assertOrdinaryNotes(entries: Map<string, TreeEntry>, paths: Iterable<string>): void {
   for (const path of paths) if (entries.get(path)?.kind !== 'note') throw Error('OUTSIDE_TASK_SCOPE')
+}
+
+/** 撤权、取消与换库不是「来源不合规」：这些控制错误必须原样透出，不能被归成范围拒绝。 */
+function isLiveControlError(error: unknown): boolean {
+  return error instanceof Error && (error.message === 'TASK_CANCELLED' || error.message === 'AUTHORIZATION_REVOKED' || error.message === 'VAULT_CHANGED')
 }
 
 async function verifyOrdinaryNotes(deps: AuthorizationDependencies, paths: readonly string[], check: () => void): Promise<void> {
@@ -232,6 +241,44 @@ class LiveScopeResolver implements ScopeResolver {
     // 必须遵循可读，但不能当结构对象（旧的门就是按 reference 卡）。
     if (tier !== 'reference') throw Error('OUTSIDE_TASK_SCOPE')
     const after = await this.deps.tier(root, relPath)
+    this.stop(signal)
+    if (after !== tier) throw Error('SOURCE_PERMISSION_CHANGED')
+  }
+
+  /** 引用修复来源的判据与结构目标分开：修复会写来源正文，所以来源必须整库、非发起篇、
+   *  普通笔记、当前可参考；任一不满足，整次结构操作失败（不是只跳过这一条）。
+   *  `LINK_REPAIR_OUT_OF_SCOPE` 表示当前就不在允许集合；`SOURCE_PERMISSION_CHANGED`
+   *  表示两次核验之间档位变了。撤权／取消照旧原样透出，不折成范围拒绝。 */
+  async assertLinkRepairSource(relPath: string, signal?: AbortSignal): Promise<void> {
+    this.stop(signal)
+    if (this.scope !== 'vault') throw Error('LINK_REPAIR_OUT_OF_SCOPE')
+    if (!this.contains(relPath)) throw Error('LINK_REPAIR_OUT_OF_SCOPE')
+    if (relPath === this.origin) throw Error('LINK_REPAIR_OUT_OF_SCOPE')
+    if (!/\.md$/iu.test(relPath)) throw Error('LINK_REPAIR_OUT_OF_SCOPE')
+    try { await this.ordinary(relPath, signal) }
+    catch (error) {
+      this.stop(signal)
+      if (isLiveControlError(error)) throw error
+      throw Error('LINK_REPAIR_OUT_OF_SCOPE')
+    }
+    const root = this.deps.root()
+    if (!root) throw Error('LINK_REPAIR_OUT_OF_SCOPE')
+    let tier: 'reference' | 'follow'
+    try { tier = await this.deps.tier(root, relPath) }
+    catch (error) {
+      this.stop(signal)
+      if (isLiveControlError(error)) throw error
+      throw Error('LINK_REPAIR_OUT_OF_SCOPE')
+    }
+    this.stop(signal)
+    if (tier !== 'reference') throw Error('LINK_REPAIR_OUT_OF_SCOPE')
+    let after: 'reference' | 'follow'
+    try { after = await this.deps.tier(root, relPath) }
+    catch (error) {
+      this.stop(signal)
+      if (isLiveControlError(error)) throw error
+      throw Error('SOURCE_PERMISSION_CHANGED')
+    }
     this.stop(signal)
     if (after !== tier) throw Error('SOURCE_PERMISSION_CHANGED')
   }
@@ -451,6 +498,7 @@ class LiveGrant implements TaskGrant {
     return result
   }
   assertStructuralTarget(path:string,signal?:AbortSignal):Promise<void>{return this.resolver.assertStructuralTarget(path,signal)}
+  assertLinkRepairSource(path:string,signal?:AbortSignal):Promise<void>{return this.resolver.assertLinkRepairSource(path,signal)}
   assertCreateTarget(path:string):Promise<void>{return this.resolver.assertCreateTarget(path)}
   acknowledgeOrigin(snapshot:NoteSnapshot):void {
     this.assertActive()

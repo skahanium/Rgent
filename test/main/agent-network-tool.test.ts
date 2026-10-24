@@ -9,7 +9,7 @@ import { hostLedgerFixture } from './host-ledger-fixture.ts'
 import { buildShingles } from '../../src/main/content-echo.ts'
 import { createScopedAgentTools } from '../../src/main/scoped-agent-tools.ts'
 import { fetchText } from '../../src/main/text-fetch.ts'
-import type { TaskGrant } from '../../src/main/task-authorization.ts'
+import type { ScopeReadProof, TaskGrant } from '../../src/main/task-authorization.ts'
 import { AgentHost, type HostDependencies } from '../../src/main/agent-host.ts'
 import { partitionSource } from '../../src/markdown/partition.ts'
 import { draftBody, draftRequest } from './draft-fixture.ts'
@@ -23,6 +23,8 @@ const CREDENTIAL = { provider: 'custom' as const, baseURL: 'https://model.exampl
 const fetchCall = (url = 'https://example.com/page?q=SECRET_QUERY'): Call[] => [{ id: 'c1', name: 'fetch_url', input: { url } }]
 const searchCall = (query = '小猫 研究', maxResults?: number, id = 's1'): Call[] => [{ id, name: 'search_web', input: { query, ...(maxResults ? { maxResults } : {}) } }]
 
+type StepInput = Parameters<NonNullable<HostDependencies['streamStep']>>[0]
+
 function networkHarness(options: {
   authorized?: boolean
   available?: boolean
@@ -35,28 +37,44 @@ function networkHarness(options: {
   onStep?: (step: number) => void
   /** 参考篇 b.md 的正文：用来证明词片集确实来自本场授权来源。 */
   extraText?: string
+  /** 惰性外篇：启动时不在 sources 里，只有 read_library 真正读过才成为实际来源。 */
+  lazyExternal?: { relPath: string; text: string }
+  /** 动态工具调用：能读取上一步的工具结果（read_library 的 sourceId 只能这样拿到）。 */
+  callsFor?: (input: StepInput, step: number) => Call[]
 } = {}) {
   let content = '人写的段落。\n\n' + draftBody('问') + '\n'
   let revision = 1
   let networkLive = options.authorized !== false
   const history = hostLedgerFixture()
-  const requests: Parameters<NonNullable<HostDependencies['streamStep']>>[0][] = []
+  const requests: StepInput[] = []
   const events: unknown[] = []
   const fetched: { url: string; aborted: boolean }[] = []
   const searched: { query: string; maxResults: number; aborted: boolean }[] = []
+  const actual = new Map<string, ScopeReadProof>()
   const source = (relPath: string) => ({
     sourceId: relPath === 'a.md' ? 'origin' : relPath, relPath, title: relPath, sessionId: 's', objectVersion: 'o', revision: '1',
     fingerprint: createHash('sha256').update(relPath === 'a.md' ? content : '外篇正文').digest('hex'), tier: 'reference' as const
   })
   const grant: TaskGrant = {
     id: 'g', root: '/vault', sessionId: 's', origin: 'a.md',
-    originProof: source('a.md'), sources: [source('a.md'), source('b.md')],
+    originProof: source('a.md'),
+    sources: options.lazyExternal ? [source('a.md')] : [source('a.md'), source('b.md')],
     credential: CREDENTIAL, limits: { seconds: 30, steps: 6, tools: 6 }, scope: 'vault' as const,
     contains: () => true,
-    validateRead: async (path: string) => { const snapshot = await read(path); return { snapshot, proof: { relPath: path, sessionId: 's', objectVersion: snapshot.objectVersion ?? 'o', revision: snapshot.revision, fingerprint: createHash('sha256').update(snapshot.content).digest('hex'), tier: 'reference' as const } } },
-    list: async () => ({ items: [], total: 0, complete: true }),
-    actualSources: () => [],
+    validateRead: async (path: string) => {
+      const snapshot = await read(path)
+      const proof: ScopeReadProof = { relPath: path, sessionId: 's', objectVersion: snapshot.objectVersion ?? 'o', revision: snapshot.revision, fingerprint: createHash('sha256').update(snapshot.content).digest('hex'), tier: 'reference' }
+      if (path !== 'a.md') actual.set(path, proof)
+      return { snapshot, proof }
+    },
+    list: async (page: { offset: number; limit: number }) => {
+      const paths = options.lazyExternal ? [options.lazyExternal.relPath] : []
+      const items = paths.slice(page.offset, page.offset + page.limit).map(relPath => ({ relPath, title: relPath }))
+      return { items, total: paths.length, complete: page.offset + items.length >= paths.length }
+    },
+    actualSources: () => [source('a.md'), ...actual.values()],
     assertStructuralTarget: async () => {},
+    assertLinkRepairSource: async () => {},
     assertCreateTarget: async () => {},
     
     get network() { return networkLive ? { allowed: true as const } : undefined },
@@ -73,7 +91,7 @@ function networkHarness(options: {
   }
   const read = async (relPath: string) => relPath === 'a.md'
     ? { content, revision: String(revision), sessionId: 's', objectVersion: 'o' }
-    : { content: options.extraText ?? '外篇正文', revision: 'b', sessionId: 's', objectVersion: 'o' }
+    : { content: options.lazyExternal && relPath === options.lazyExternal.relPath ? options.lazyExternal.text : options.extraText ?? '外篇正文', revision: 'b', sessionId: 's', objectVersion: 'o' }
   const write = async (_relPath: string, next: string, expected: string) => {
     if (expected !== String(revision)) throw Error('CONFLICT')
     if (partitionSource(next).ledger !== null) throw Error('LEDGER_IN_BODY')
@@ -99,7 +117,7 @@ function networkHarness(options: {
       requests.push(input)
       const step = requests.length
       options.onStep?.(step)
-      const calls = options.steps?.[step - 1] ?? []
+      const calls = options.callsFor?.(input, step) ?? options.steps?.[step - 1] ?? []
       for (const call of calls) yield { type: 'tool-call', ...call } as never
       if (calls.length) yield { type: 'finish', reason: 'tool-calls' }
       else { yield { type: 'text', text: '已答。' }; yield { type: 'finish', reason: 'stop' } }
@@ -131,7 +149,7 @@ function networkHarness(options: {
     relPath: 'a.md', sessionId: 's', objectVersion: 'o', expectedRevision: '1',
     ...draftRequest(content, '问')
   })
-  return { host, history, requests, events, fetched, searched, run, content: () => content }
+  return { host, history, requests, events, fetched, searched, grant, run, content: () => content }
 }
 
 describe('fetch_url 联网只读工具', () => {
@@ -328,6 +346,60 @@ describe('fetch_url 联网只读工具', () => {
     const wrapped = tool.content[0]!.output.value.text
     expect(Buffer.byteLength(wrapped)).toBeLessThanOrEqual(16 * 1024)
     expect(wrapped.endsWith('⟦外部内容结束⟧')).toBe(true)
+  })
+})
+
+/** 上一步工具结果里的 sourceId：read_library 的正文读取只能从上一次列表／检索结果拿 id。 */
+function sourceIdFrom(input: StepInput): string {
+  const tool = [...input.messages].reverse().find(message => message.role === 'tool')
+  if (!tool) return ''
+  const content = tool.content as unknown as { output?: { value?: { items?: { sourceId?: string }[] } } }[]
+  return content[0]?.output?.value?.items?.[0]?.sourceId ?? ''
+}
+
+describe('read_library 读到外篇后的偷渡检测', () => {
+  const external = '这是一段来自外篇的完整正文内容'
+  const url = `https://example.com/${external}`
+
+  it('同一步先读外篇再外发其正文：命中 EGRESS_CONTENT_ECHO，抓页函数零调用', async () => {
+    const app = networkHarness({
+      lazyExternal: { relPath: '外部/资料.md', text: external },
+      callsFor: (input, step) => step === 1
+        ? [{ id: 'l1', name: 'read_library', input: {} }]
+        : step === 2
+          ? [{ id: 'r1', name: 'read_library', input: { sourceId: sourceIdFrom(input) } }, { id: 'f1', name: 'fetch_url', input: { url } }]
+          : []
+    })
+    const task = await app.run()
+    expect(await task.done).toEqual({ status: 'completed' })
+    // 读库确实读到了外篇正文（不是启动时注入的词片），且它已进入实际来源。
+    expect(app.grant.actualSources().map(proof => proof.relPath)).toContain('外部/资料.md')
+    expect(JSON.stringify(app.requests[2]?.messages ?? [])).toContain(external)
+    // 外发函数一次都没调：检查在工具环里先命中。
+    expect(app.fetched).toEqual([])
+    const record = app.history.records().at(-1)!
+    expect(record.trace?.join('\n')).toContain('EGRESS_CONTENT_ECHO')
+    expect(record.network?.[0]).toMatchObject({ action: 'fetch', host: 'example.com', outcome: 'refused:EGRESS_CONTENT_ECHO' })
+  })
+
+  it('下一步外发上一步读到的外篇正文：同样命中，抓页函数零调用', async () => {
+    const app = networkHarness({
+      lazyExternal: { relPath: '外部/资料.md', text: external },
+      callsFor: (input, step) => step === 1
+        ? [{ id: 'l1', name: 'read_library', input: {} }]
+        : step === 2
+          ? [{ id: 'r1', name: 'read_library', input: { sourceId: sourceIdFrom(input) } }]
+          : step === 3
+            ? [{ id: 'f1', name: 'fetch_url', input: { url } }]
+            : []
+    })
+    const task = await app.run()
+    expect(await task.done).toEqual({ status: 'completed' })
+    expect(app.grant.actualSources().map(proof => proof.relPath)).toContain('外部/资料.md')
+    expect(app.fetched).toEqual([])
+    const record = app.history.records().at(-1)!
+    expect(record.trace?.join('\n')).toContain('EGRESS_CONTENT_ECHO')
+    expect(record.network?.[0]).toMatchObject({ action: 'fetch', host: 'example.com', outcome: 'refused:EGRESS_CONTENT_ECHO' })
   })
 })
 
@@ -618,6 +690,7 @@ describe('revokeNetworkForAll（配置变更撤网）', () => {
     list: async () => ({ items: [], total: 0, complete: true }),
     actualSources: () => [],
     assertStructuralTarget: async () => {},
+    assertLinkRepairSource: async () => {},
     assertCreateTarget: async () => {},
     
         get network() { return live.get(relPath) ? { allowed: true as const } : undefined },

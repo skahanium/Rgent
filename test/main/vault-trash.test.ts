@@ -19,7 +19,7 @@ async function reclaim(landing: string | null | undefined): Promise<void> {
   await rm(landing, { recursive: true, force: true })
 }
 
-async function fixture() {
+async function fixture(legacySystemTrash = true) {
   const base = await mkdtemp(path.join(os.tmpdir(), 'rgent-trash-'))
   const root = path.join(base, 'vault')
   await mkdir(root)
@@ -28,7 +28,7 @@ async function fixture() {
   await writeFile(path.join(root, 'a', '附件.txt'), '附件正文')
   const marked = markPrompt(draftSource('以后用中文').source, { taskId: 'task', ...draftSource('以后用中文'), expectedText: '以后用中文', promptText: '以后用中文' })
   await writeFile(path.join(root, 'a.md'), marked)
-  const vault = new VaultSession(base, vi.fn())
+  const vault = new VaultSession(base, vi.fn(), undefined, undefined, undefined, legacySystemTrash)
   vault.restore()
   let note = await vault.readOpened('a.md')
   await vault.ledgerPrepare('a.md', { taskId: 'task', startedAt: new Date().toISOString(), status: 'completed', prompt: '以后用中文', answer: '好的' })
@@ -76,6 +76,18 @@ describe('human trash', () => {
       expect(preview.hasAttachments).toBe(true)
       const result = await f.vault.commitTrash(preview.id, false)
       expect(result.cancelled).toBe(true)
+      expect(await readFile(path.join(f.root, 'a.md'), 'utf8')).toContain('以后用中文')
+      expect(existsSync(path.join(f.root, 'a', '附件.txt'))).toBe(true)
+    } finally { f.vault.dispose() }
+  })
+
+  it('keeps the retired system-trash commit test-only', async () => {
+    if (!HUMAN_TRASH_ON_THIS_PLATFORM) return
+    const f = await fixture(false)
+    bases.push(f.base)
+    try {
+      const preview = await f.vault.previewTrash('a.md')
+      await expect(f.vault.commitTrash(preview.id, true)).rejects.toThrow('TRASH_LEGACY_TEST_ONLY')
       expect(await readFile(path.join(f.root, 'a.md'), 'utf8')).toContain('以后用中文')
       expect(existsSync(path.join(f.root, 'a', '附件.txt'))).toBe(true)
     } finally { f.vault.dispose() }

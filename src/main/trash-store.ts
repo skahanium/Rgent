@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { TrashEntryView } from '../shared/ipc.ts'
+import type { PermissionTier, TrashEntryView } from '../shared/ipc.ts'
 import { hasHiddenSegment, isNotePath } from './paths.ts'
 import { secureFsFor } from './secure-fs.ts'
 
@@ -58,6 +58,8 @@ export type TrashMeta = {
   deletedAt: string
   source: TrashSource
   taskId?: string
+  /** 删除时的生效权限档；旧 meta 没有这一项，按当前默认／现状还原，不伪造。 */
+  permissionTier?: PermissionTier
   state: TrashMetaState
 }
 
@@ -144,7 +146,8 @@ export function validTrashMeta(value: unknown): value is TrashMeta {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const meta = value as TrashMeta
   const keys = ['attachmentRelPath', 'bytes', 'contentHash', 'deletedAt', 'kind', 'objectVersion',
-    'originalRelPath', 'source', 'state', 'trashId', 'version', ...(meta.taskId === undefined ? [] : ['taskId'])]
+    'originalRelPath', 'source', 'state', 'trashId', 'version', ...(meta.taskId === undefined ? [] : ['taskId']),
+    ...(meta.permissionTier === undefined ? [] : ['permissionTier'])]
   if (Object.keys(meta).sort().join() !== keys.sort().join()) return false
   if (meta.version !== 1 || typeof meta.trashId !== 'string' || !ID_PATTERN.test(meta.trashId)) return false
   if (!validRelPath(meta.originalRelPath)) return false
@@ -164,6 +167,8 @@ export function validTrashMeta(value: unknown): value is TrashMeta {
   if (typeof meta.deletedAt !== 'string' || !Number.isFinite(Date.parse(meta.deletedAt))) return false
   if (meta.source !== 'human' && meta.source !== 'ai') return false
   if (meta.taskId !== undefined && (typeof meta.taskId !== 'string' || meta.taskId.length === 0 || meta.taskId.length > 128)) return false
+  if (meta.permissionTier !== undefined &&
+    meta.permissionTier !== 'reference' && meta.permissionTier !== 'follow' && meta.permissionTier !== 'forbidden') return false
   return meta.state === 'moving' || meta.state === 'trashed' || meta.state === 'damaged'
 }
 
@@ -247,6 +252,39 @@ export class TrashStore {
     }
   }
 
+  /** 一条条目占用的字节：完整的 `trashed` 用删除时记下的合计，半截／损坏条目按磁盘实际量，
+   *  坏到读不懂 meta 的条目也能给出一个可计入容量统计的上界。 */
+  private entryBytes(trashId: string, meta: TrashMeta | null): number {
+    if (meta?.state === 'trashed') return meta.bytes
+    return this.payloadBytes(trashId)
+  }
+
+  /** 同名附件夹是否还在 payload 里；与 `trashed` 对账同一口径（只认目录，不跟随链接）。 */
+  private payloadAttachmentPresent(meta: TrashMeta): boolean {
+    if (meta.attachmentRelPath === null) return true
+    const folder = this.resolveOrNull(`${this.payloadDir(meta.trashId)}/${basename(meta.attachmentRelPath)}`)
+    return folder?.kind === 'dir'
+  }
+
+  /**
+   * 笔记已经回到原路径、附件夹却还留在 payload 时的收尾：目标名字空着就把它搬回去；
+   * 被占或搬不动返回 false，由调用方标 damaged，绝不把夹子送系统废纸篓了事。
+   */
+  private returnPayloadAttachment(meta: TrashMeta): boolean {
+    if (meta.attachmentRelPath === null) return true
+    const from = `${this.payloadDir(meta.trashId)}/${basename(meta.attachmentRelPath)}`
+    const folder = this.resolveOrNull(from)
+    if (folder === null) return true
+    if (folder.kind !== 'dir') return false
+    if (this.statusOf(meta.attachmentRelPath) !== 'free') return false
+    try {
+      this.fs().move(from, meta.attachmentRelPath, folder.id)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   private folderBytes(relPath: string): number {
     let total = 0
     for (const entry of this.fs().list(relPath)) {
@@ -293,6 +331,8 @@ export class TrashStore {
       const meta = this.readMeta(trashId)
       if (meta) {
         const deletedAt = meta.deletedAt
+        // 半截／损坏条目按实际 payload 计入容量，不拿可能已经对不上的 meta.bytes 充数。
+        const measured = this.entryBytes(trashId, meta)
         entries.push({
           id: trashId,
           originalRelPath: meta.originalRelPath,
@@ -300,12 +340,12 @@ export class TrashStore {
           kind: meta.kind,
           deletedAt,
           expiresAt: this.expiryOf(deletedAt),
-          bytes: meta.bytes,
+          bytes: measured,
           source: meta.source,
           // 半截移动与损坏条目都不是可还原状态，列表如实标 damaged。
           state: meta.state === 'trashed' ? 'ok' : 'damaged'
         })
-        bytes += meta.bytes
+        bytes += measured
         continue
       }
       // 没有可解析的 meta：用目录时间给一个可读的删除时间，条目不丢。
@@ -342,7 +382,13 @@ export class TrashStore {
    * `record` 是第 3 步的 journal 落盘；它抛错就回滚已移动项并报 `TRASH_PARTIAL`。
    * 账本留痕在返回之后由调用方写（删除已经成立，账本失败不回滚）。
    */
-  delete(relPath: string, options: { source: TrashSource; taskId?: string; record?: (meta: TrashMeta) => void }): TrashDeleteOutcome {
+  delete(relPath: string, options: {
+    source: TrashSource
+    taskId?: string
+    /** 删除时生效的权限档，随 meta 保存，供还原时恢复。 */
+    permissionTier?: PermissionTier
+    record?: (meta: TrashMeta) => void
+  }): TrashDeleteOutcome {
     const inspected = this.inspect(relPath)
     const trashId = randomUUID()
     this.ensureDirectory(TRASH_DIR)
@@ -360,6 +406,7 @@ export class TrashStore {
       deletedAt: this.now().toISOString(),
       source: options.source,
       ...(options.taskId ? { taskId: options.taskId } : {}),
+      ...(options.permissionTier ? { permissionTier: options.permissionTier } : {}),
       state: 'moving'
     }
     const payload = this.payloadDir(trashId)
@@ -553,9 +600,10 @@ export class TrashStore {
     let total = 0
     for (const trashId of this.entryNames()) {
       const meta = this.readMeta(trashId)
+      // 全部条目都计入 1 GiB：坏条目与半截条目也占着磁盘，不能因为不自动清就漏算。
+      total += this.entryBytes(trashId, meta)
       if (!meta || meta.state !== 'trashed') continue
       candidates.push({ id: trashId, meta })
-      total += meta.bytes
     }
     candidates.sort((left, right) => Date.parse(left.meta.deletedAt) - Date.parse(right.meta.deletedAt))
     const now = this.now().getTime()
@@ -613,6 +661,14 @@ export class TrashStore {
         originalUnreadable = true
       }
       if (meta.state === 'moving') {
+        // 补完删除必须同时看到笔记与附件夹：只核笔记会把「夹子还没搬进来」的半截条目
+        // 说成完整，列表随后显示 ok，附件夹却留在原路径。缺夹子按 damaged 留下证据。
+        if (payloadIntact && !this.payloadAttachmentPresent(meta) && original === null && !originalUnreadable) {
+          this.markDamaged(meta)
+          report.damaged.push(trashId)
+          report.issues.push(`attachment-missing:${trashId}`)
+          continue
+        }
         if (payloadIntact && original === null && !originalUnreadable) {
           // 对象已经离开原路径：把这次删除补完（journal 记录由调用方写入）。
           try {
@@ -629,6 +685,13 @@ export class TrashStore {
         }
         if (!payloadIntact && original?.kind === 'file' && original.id === meta.objectVersion) {
           // 移动其实没有发生（或已回滚）：对象还在原位，条目清掉、记录去掉。
+          // 但附件夹可能已经搬进 payload：先搬回原位，搬不回去就留下 damaged 证据。
+          if (!this.returnPayloadAttachment(meta)) {
+            this.markDamaged(meta)
+            report.damaged.push(trashId)
+            report.issues.push(`rollback-attachment-blocked:${trashId}`)
+            continue
+          }
           if (this.discardEntry(meta)) {
             if (record) report.remove.push(trashId)
             report.rolledBack.push(trashId)
@@ -648,7 +711,14 @@ export class TrashStore {
       }
       if (!payloadIntact) {
         if (original?.kind === 'file' && original.id === meta.objectVersion) {
-          // 还原已经完成，只剩条目目录没清理。
+          // 还原已经完成，只剩条目目录没清理。附件夹若还留在 payload（还原中途中止），
+          // 先按原名字搬回；搬不回去就标 damaged，不能把它一起送进系统废纸篓。
+          if (!this.returnPayloadAttachment(meta)) {
+            this.markDamaged(meta)
+            report.damaged.push(trashId)
+            report.issues.push(`restore-attachment-blocked:${trashId}`)
+            continue
+          }
           if (this.discardEntry(meta)) {
             if (record) report.remove.push(trashId)
             report.restored.push(trashId)
@@ -662,13 +732,10 @@ export class TrashStore {
         report.issues.push(`payload-missing:${trashId}`)
         continue
       }
-      if (meta.attachmentRelPath !== null) {
-        const folder = this.resolveOrNull(`${payload}/${basename(meta.attachmentRelPath)}`)
-        if (folder?.kind !== 'dir') {
-          this.markDamaged(meta)
-          report.damaged.push(trashId)
-          report.issues.push(`attachment-missing:${trashId}`)
-        }
+      if (!this.payloadAttachmentPresent(meta)) {
+        this.markDamaged(meta)
+        report.damaged.push(trashId)
+        report.issues.push(`attachment-missing:${trashId}`)
       }
       const expected = toRecord(meta)
       if (!record || !sameRecord(record, expected)) report.upsert.push(expected)

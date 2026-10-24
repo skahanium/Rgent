@@ -7,7 +7,7 @@ import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { dialog, type BrowserWindow } from 'electron'
-import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, RecoveryRow, RecoveryScanView, RecoveryVerdict, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason, TrashListResult, TrashPurgeResult, TrashRestoreResult } from '../shared/ipc.ts'
+import type { BacklinkGroup, LifecycleRetryRequest, LifecycleStatus, NotePayload, NoteSnapshot, ObjectBinding, PermissionEntry, PermissionState, PermissionTier, RecoveryRow, RecoveryScanView, RecoveryVerdict, SearchHit, TreeEntry, VaultState, SaveCopyPreviewRequest, SaveCopyPreviewView, SaveCopyCommitRequest, TrashDegradedReason, TrashLandingVerdict, TrashOrphanReason, TrashListResult, TrashPurgeResult, TrashRestorePermission, TrashRestoreResult } from '../shared/ipc.ts'
 import { createFolder, createNote, createNoteWithBody, listVaultTree, parseStoredVault, readNoteSnapshot, requireOrdinaryNotes as verifyOrdinaryNotes, revisionOf, serializeStoredVault, writeNote } from './notes-fs.ts'
 import { VaultMutationQueue } from './vault-mutation-queue.ts'
 import { VaultLifecycle, type MissingObject, type RelocationPreview, type RelocationRequest, type RelocationMove, type CommittedNoteWrite, type RetiredObject, type TrashPreview } from './vault-lifecycle.ts'
@@ -15,7 +15,7 @@ import { sameRootInode } from './vault-catalog.ts'
 import { HUMAN_TRASH_ON_THIS_PLATFORM } from '../shared/human-trash.ts'
 import { isOwnEcho, type RecentWrite } from './echo.ts'
 import { hasHiddenSegment, isNotePath, resolveInVault, sanitizeFolderName, sanitizeNoteName } from './paths.ts'
-import { effectivePermissionEntries, loadPermissions, loadPermissionSnapshot, modelTierFor, setPermission as savePermission, tierFor } from './permissions.ts'
+import { effectivePermissionEntries, loadPermissions, loadPermissionSnapshot, modelTierFor, setPermission as savePermission, setPermissionFile, tierFor } from './permissions.ts'
 import type { TaskGrant } from './task-authorization.ts'
 import { closeSecureFs, secureFsFor } from './secure-fs.ts'
 import { postTrashOutcome, verifyLanding } from './trash-result.ts'
@@ -106,7 +106,9 @@ export class VaultSession {
     private emit: (channel: string, payload?: unknown) => void,
     private beforeChange: (previousRoot: string) => Promise<void> = async () => {},
     private catalogIdentity?:(root:string,identity:string)=>string|null,
-    private afterMemoryRetirement:()=>void=()=>{}
+    private afterMemoryRetirement:()=>void=()=>{},
+    /** 仅测试开：旧「先送系统废纸篓」管线已退役，生产不再从 `commitTrash(allow=true)` 可达。 */
+    private readonly allowLegacySystemTrashForTests = false
   ) {}
 
   private stateFile(): string {
@@ -1252,6 +1254,12 @@ export class VaultSession {
       lifecycle.discardTrash(id)
       throw new Error('PLATFORM_UNPROVEN')
     }
+    if (!this.allowLegacySystemTrashForTests) {
+      // 新删除走 `trashDelete`（库内 .rgent-trash）。旧系统送篓管线只留给钉住历史语义的
+      // 测试；生产入口即使拿到预览也不许再从这里删盘。
+      lifecycle.discardTrash(id)
+      throw new Error('TRASH_LEGACY_TEST_ONLY')
+    }
     return this.mutations.run(async () => {
       this.assertSession(token)
       this.requireStableStructure()
@@ -1381,10 +1389,13 @@ export class VaultSession {
         this.requireStableStructure()
         if (policy.state.status !== 'ready') throw new Error('PERMISSIONS_INVALID')
         if (this.lifecycle!.trashedObjects().length >= TRASH_RECORD_LIMIT) throw new Error('TRASH_RECORD_LIMIT')
+        const canonicalPath = secureFsFor(root).resolve(relPath).map((part) => part.name).join('/')
+        const permissionTier = tierFor(canonicalPath, effectivePermissionEntries(root, policy.state.entries))
         const source = attribution.source ?? 'human'
         const store = this.trashStore()
         const outcome = store.delete(relPath, {
           source,
+          permissionTier,
           ...(attribution.taskId ? { taskId: attribution.taskId } : {}),
           // 第 3 步的整体：meta 已写成 trashed，这里写 journal 与既有账本记录。
           // 任一步失败都让调用方回滚已移动项（文件退回原位、条目清掉），报 TRASH_PARTIAL。
@@ -1441,28 +1452,73 @@ export class VaultSession {
     }
   }
 
-  /** 还原一条已删除记录：原位或 `名字（恢复）.md` 副本；父目录缺失则重建。 */
+  /** 还原一条已删除记录：原位或 `名字（恢复）.md` 副本；父目录缺失则重建。
+   *  权限档随 meta 保存；还原后按内核的 `setPermission` 路径写回，不直接碰名单文件。 */
   async trashRestore(id: string): Promise<TrashRestoreResult> {
     const token = this.captureSession()
     await this.lifecycleReady
     this.assertSession(token)
     try {
-      return await this.mutations.run(() => {
+      return await this.mutations.run(async () => {
         this.assertSession(token)
         this.requireStableStructure()
         this.requireUsableRoot()
         if (!TRASH_OPERATIONS_ON_THIS_PLATFORM) throw new Error('PLATFORM_UNPROVEN')
         if (!isTrashId(id)) throw new Error('BAD_REQUEST')
-        const result = this.trashStore().restore(id)
+        const store = this.trashStore()
+        const meta = store.readMeta(id)
+        const result = store.restore(id)
         if (!result.ok) return result
+        this.assertSession(token)
+        let permission: TrashRestorePermission | undefined
+        try {
+          permission = meta?.permissionTier
+            ? await this.restoreTrashPermission(meta.permissionTier, result.relPath, meta.originalRelPath)
+            : undefined
+        } catch (error) {
+          // 文件已经还原：权限写不回去只留诊断，不能把整次还原报成失败或撤掉文件。
+          this.trashIssues.push(`restore-permission:${id}:${codeOf(error)}`)
+        }
         // 记录移除失败不回滚已还原的笔记：旧记录会以 damaged 出现在列表里，可明确删除，不算静默丢。
         try { this.lifecycle!.removeTrashed(id) } catch (error) { this.trashIssues.push(`restore-journal:${id}:${codeOf(error)}`) }
         this.index.markDirty()
         this.emit('tree:changed')
-        return result
+        return { ...result, ...(permission ? { permission } : {}) }
       })
     } catch (error) {
       return { ok: false, error: codeOf(error) }
+    }
+  }
+
+  /**
+   * 把删除时记下的权限档写回还原后的目标：原路径或副本路径当前档一致就什么都不做；
+   * 目标已有人显式设过档（含删除期间新设的）就不覆盖，只如实回报；名单读不了也不伪造。
+   * 写入走 `permissions.setPermission`（文件夹＋三档、经句柄核验、原子替换）；失败只回报，
+   * 不撤已还原的文件。
+   */
+  private async restoreTrashPermission(original: PermissionTier, relPath: string, originalRelPath: string): Promise<TrashRestorePermission | undefined> {
+    const root = this.requireUsableRoot()
+    let snapshot
+    try { snapshot = await loadPermissionSnapshot(root) } catch { return undefined }
+    if (snapshot.state.status !== 'ready') return undefined
+    let current: PermissionTier
+    let canonicalPath: string
+    try {
+      canonicalPath = secureFsFor(root).resolve(relPath).map((part) => part.name).join('/')
+      current = tierFor(canonicalPath, effectivePermissionEntries(root, snapshot.state.entries))
+    } catch { return undefined }
+    if (current === original) return undefined
+    // 名单里已有直接或上级目录的显式规则：那是人的设置，保留并说明，绝不静默改回原档。
+    if (hasExplicitPermissionRule(canonicalPath, snapshot.state.entries)) return { original, current, outcome: 'kept-new' }
+    // 还原到副本时只给这一篇写精确档，不能把父目录整层改成原档；还原到原路径同理。
+    // 根目录笔记现在也能写精确规则，不再以“没有父目录”为由放弃原档。
+    try {
+      const state = await setPermissionFile(root, canonicalPath, original)
+      const after = state.status === 'ready' ? tierFor(canonicalPath, state.entries) : null
+      if (after === original) return { original, current: original, outcome: 'restored', rulePath: canonicalPath }
+      return { original, current: after ?? current, outcome: 'unavailable', rulePath: canonicalPath, error: 'PERMISSION_NOT_APPLIED' }
+    } catch (error) {
+      return { original, current, outcome: 'unavailable', rulePath: canonicalPath, error: codeOf(error) }
     }
   }
 
@@ -1547,9 +1603,9 @@ export class VaultSession {
     try { return this.lifecycle?.isTrashed(relPath) ?? false } catch { return false }
   }
 
-  /** 一批文件变化里要跳过的已删除路径；一次读 journal，失败按空集继续上报外部变化。 */
-  private trashedPaths(): Set<string> {
-    try { return new Set((this.lifecycle?.trashedObjects() ?? []).map((item) => item.relPath)) } catch { return new Set() }
+  /** 一批文件变化里的已删除路径 → 删除记录身份；一次读 journal，失败按空集继续上报外部变化。 */
+  private trashedPaths(): Map<string, string> {
+    try { return new Map((this.lifecycle?.trashedObjects() ?? []).map((item) => [item.relPath, item.objectVersion])) } catch { return new Map() }
   }
 
   async commitRelocation(id: string, repairLinks: boolean, token = this.captureSession()): Promise<{ moved: RelocationMove[]; unrepaired: string[] }> {
@@ -1731,10 +1787,26 @@ export class VaultSession {
       this.emit('tree:changed')
       const notes = this.changedNotes
       this.changedNotes = new Set()
-      // 主动删进库内「已删除」的路径由删除方发过 `note:deleted`，不再补一条「库外消失」。
-      // 每批只读一次 journal（整批几十条笔记时不至于每条读一遍记录）。
+      // 主动删进库内「已删除」的路径只在「路径仍不存在、删除记录身份未变」时抑制
+      // `note:external-change`：每批只读一次 journal（整批几十条笔记时不至于每条读一遍记录）。
+      // 原路径出现新对象就要照常通知，不能拿旧删除记录永久吞掉外部变化；记录已不在时也照常通知。
       const trashed = this.trashedPaths()
-      if (this.root) for (const note of notes) if (!trashed.has(note)) void this.emitNoteChange(note)
+      if (this.root) for (const note of notes) {
+        if (trashed.has(note)) {
+          let present = true
+          try { present = !!secureFsFor(this.root).resolve(note) } catch (error) {
+            present = !(error instanceof Error && error.message === 'ENOENT')
+          }
+          // 路径还空着，且运行时没有别的身份占着它：这条变化的语义就是「已删除」，不重复报外部消失。
+          // 已经打开的新对象（latestObjects 是另一个版本）再消失时必须照常通知，不能拿旧记录吞掉。
+          if (!present) {
+            const recordVersion = trashed.get(note)
+            const latest = this.latestObjects.get(note)
+            if (recordVersion && (!latest || latest === recordVersion)) continue
+          }
+        }
+        void this.emitNoteChange(note)
+      }
     }, 80)
   }
 
@@ -1817,6 +1889,12 @@ function markRecovery(entries: TreeEntry[], missing: readonly { relPath: string 
     if (missing.some((item) => item.relPath === entry.relPath)) entry.recovery = true
     if (entry.children) markRecovery(entry.children, missing)
   }
+}
+
+/** 目标笔记是否有直接／上级目录的显式权限规则（不是默认档）。 */
+function hasExplicitPermissionRule(relPath: string, entries: readonly PermissionEntry[]): boolean {
+  return entries.some((entry) => entry.relPath === relPath ||
+    (!entry.relPath.toLowerCase().endsWith('.md') && relPath.startsWith(`${entry.relPath}/`)))
 }
 
 function isUsableDir(dir: string): boolean {

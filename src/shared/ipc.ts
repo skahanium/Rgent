@@ -285,9 +285,19 @@ export type TrashEntryView = {
 }
 /** `bytes` 是全部条目的累计字节（含 damaged 条目）；坏条目仍以 damaged 列出，不丢。 */
 export type TrashListResult = { ok: true; entries: TrashEntryView[]; bytes: number } | { ok: false; error: string }
-/** `copied`：原路径被占，笔记落成 `名字（恢复）.md` 副本（同名附件夹一起改名）。 */
+/** 还原时的权限档处理：`kept-new` 表示删除期间目标路径已有新人显式设置的档，不覆盖。 */
+export type TrashRestorePermission = {
+  original: PermissionTier
+  current: PermissionTier
+  outcome: 'restored' | 'kept-new' | 'unavailable'
+  /** `restored` 时实际写回原档的文件夹路径；根目录笔记无法单独写档时为空。 */
+  rulePath?: string
+  error?: string
+}
+/** `copied`：原路径被占，笔记落成 `名字（恢复）.md` 副本（同名附件夹一起改名）。
+ *  `permission` 只在原档与当前档不一致、需要如实说明处理结果时出现；旧 meta 不伪造。 */
 export type TrashRestoreResult =
-  | { ok: true; relPath: string; copied: boolean }
+  | { ok: true; relPath: string; copied: boolean; permission?: TrashRestorePermission }
   | { ok: false; error: string }
 /** 明确删除／过期清理：失败时条目保留在原处，不 unlink、不假装成功。 */
 export type TrashPurgeResult = { ok: true } | { ok: false; error: string }

@@ -24,6 +24,12 @@ const FORBIDDEN = 'script|style|noscript|iframe|svg|object'
 const PAIRED = new RegExp(`<(${FORBIDDEN})\\b[^>]*>[\\s\\S]*?<\\/\\1\\s*>`, 'gi')
 const FORBIDDEN_TAG = new RegExp(`</?(?:${FORBIDDEN})\\b[^>]*>`, 'gi')
 const INNERMOST_TABLE = /<table\b[^>]*>(?:(?!<table\b)[\s\S])*?<\/table\s*>/gi
+/**
+ * 解码后才拼出来的身份标记：行首（缩进 ≤3）的一整枚注释，内容以 `rgent:ai|prompt:v1` 开头。
+ * 剥注释那一步拦不住它——那时它还是 `&lt;!--` 文本。多行注释也要认，`\s*` 允许跨行。
+ */
+const MARKER_COMMENT = /^([ \t]{0,3})<!--(\s*rgent:(?:ai|prompt):v1\b[\s\S]*?)-->/gm
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/
 
 /** 粘贴 HTML 上限，与抓页 1 MiB 对齐。 */
 export const PASTE_HTML_LIMIT = 1_048_576
@@ -100,7 +106,7 @@ export function tidyPastedPlain(text: string): string {
     if (!cleaned && output.at(-1) === '') continue
     output.push(cleaned)
   }
-  return output.join('\n').trim()
+  return neutralizeIdentityMarkers(output.join('\n').trim())
 }
 
 export function convertPaste(input: { html?: string; plain?: string; maxHtmlBytes?: number }): string | undefined {
@@ -134,8 +140,9 @@ export function htmlToMarkdown(html: string, baseUrl = ''): { text: string; titl
     return `\u0001${blocks.length - 1}\u0001`
   }
   source = source.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre\s*>/gi, (_all, inner: string) => {
-    const code = decodeEntities(inner.replace(/<[^>]*>/g, '')).replace(/\r\n?/g, '\n')
-    return hold(`\`\`\`\n${code.trim()}\n\`\`\``)
+    const code = decodeEntities(inner.replace(/<[^>]*>/g, '')).replace(/\r\n?/g, '\n').trim()
+    const fence = codeFence(code)
+    return hold(`${fence}\n${code}\n${fence}`)
   })
   for (let pass = 0; pass < 8; pass += 1) {
     const next = source.replace(INNERMOST_TABLE, (all) => {
@@ -170,8 +177,76 @@ export function htmlToMarkdown(html: string, baseUrl = ''): { text: string; titl
   source = source.replace(/<[^>]*>/g, ' ')
   source = decodeEntities(source)
   const tidied = collapseCjkSpace(tidy(source))
-  const text = tidied.replace(/\u0001(\d+)\u0001/g, (_all, index: string) => blocks[Number(index)] ?? '')
-  return { text, ...(title ? { title } : {}) }
+  const restored = tidied.replace(/\u0001(\d+)\u0001/g, (_all, index: string) => blocks[Number(index)] ?? '')
+  return { text: neutralizeIdentityMarkers(restored), ...(title ? { title } : {}) }
+}
+
+type FencedBlock = { start: number; end: number }
+
+/** 标出围栏代码块（含围栏行）的范围；代码内容里出现 marker 也不该被改写。 */
+function fencedBlocks(markdown: string): FencedBlock[] {
+  const blocks: FencedBlock[] = []
+  let open: { char: '`' | '~'; length: number; start: number } | null = null
+  let offset = 0
+  for (const line of markdown.split('\n')) {
+    const start = offset
+    const end = start + line.length
+    offset = end + 1
+    if (open) {
+      if (new RegExp(`^ {0,3}${open.char}{${open.length},}[ \\t]*$`).test(line)) {
+        blocks.push({ start: open.start, end })
+        open = null
+      }
+      continue
+    }
+    const opening = FENCE_OPEN.exec(line)
+    if (!opening) continue
+    const fence = opening[1]!
+    // 反引号围栏的 info string 里不能再有反引号，否则那不是围栏。
+    if (fence[0] === '`' && opening[2]!.includes('`')) continue
+    open = { char: fence[0] === '`' ? '`' : '~', length: fence.length, start }
+  }
+  if (open) blocks.push({ start: open.start, end: markdown.length })
+  return blocks
+}
+
+/**
+ * 解码后的文本可能重新拼出 `<!-- rgent:ai:v1 -->`。把行首整枚伪 marker 的定界符
+ * 写成实体：渲染后仍是同一段可见文本，但 mdast 只会当普通段落，parseMarker 读不到。
+ * 代码围栏里的同名文本保持原样（它本来就不是身份）。
+ */
+function neutralizeIdentityMarkers(markdown: string): string {
+  const fences = fencedBlocks(markdown)
+  let cursor = 0
+  let output = ''
+  for (const match of markdown.matchAll(MARKER_COMMENT)) {
+    const start = match.index
+    if (start == null || fences.some((block) => start >= block.start && start < block.end)) continue
+    output += markdown.slice(cursor, start)
+    output += `${match[1]}&lt;!--${match[2]}--&gt;`
+    cursor = start + match[0].length
+  }
+  return cursor ? output + markdown.slice(cursor) : markdown
+}
+
+/** 最长连续同字符串；围栏长度要压过正文里最长的反引号／波浪线，闭合才不会提前发生。 */
+function longestRun(value: string, char: string): number {
+  let longest = 0
+  let current = 0
+  for (const letter of value) {
+    current = letter === char ? current + 1 : 0
+    if (current > longest) longest = current
+  }
+  return longest
+}
+
+function codeFence(code: string): string {
+  const backticks = longestRun(code, '`')
+  const tildes = longestRun(code, '~')
+  const longest = Math.max(backticks, tildes)
+  // 默认反引号；正文里的波浪线更长时改用波浪线，围栏仍比最长 run 多 1。
+  const char = tildes > backticks ? '~' : '`'
+  return char.repeat(Math.max(3, longest + 1))
 }
 
 function utf8Bytes(text: string): number {

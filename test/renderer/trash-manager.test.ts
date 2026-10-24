@@ -89,6 +89,9 @@ describe('in-vault deleted page', () => {
     expect(oldest.textContent).toContain('512 B')
     expect(container.querySelector<HTMLElement>('.trash-empty')!.hidden).toBe(true)
     expect(container.querySelector<HTMLElement>('.trash-list')!.hidden).toBe(false)
+    // 容量按主进程累计字节显示；损坏／半截条目也计入，不能看起来像没占磁盘。
+    expect(container.querySelector('.trash-capacity')!.textContent).toContain('已用 2 MB')
+    expect(container.querySelector('.trash-capacity')!.textContent).toContain('损坏和半截条目也计入')
   })
 
   it('shows the empty state instead of an invented list', async () => {
@@ -100,18 +103,19 @@ describe('in-vault deleted page', () => {
     expect(container.querySelector<HTMLElement>('.trash-loading')!.hidden).toBe(true)
   })
 
-  it('marks damaged entries and keeps both actions disabled with an explanation', async () => {
-    const { action, handlers } = start({ list: vi.fn(async () => listed([entry({ state: 'damaged' })])) })
+  it('keeps restore disabled for damaged entries but leaves the system-trash exit open', async () => {
+    const purge = vi.fn(async (): Promise<TrashPurgeResult> => ({ ok: true }))
+    const { action, handlers } = start({ list: vi.fn(async () => listed([entry({ state: 'damaged' })])), purge })
     await flush()
     const row = container.querySelector<HTMLElement>('[data-trash-id="t1"]')!
     expect(row.dataset.trashState).toBe('damaged')
     expect(row.querySelector('.trash-state')!.textContent).toBe('损坏')
-    expect(row.textContent).toContain('记录已损坏')
+    expect(row.textContent).toContain('可以移入系统废纸篓')
     expect(action('restore').disabled).toBe(true)
-    expect(action('purge').disabled).toBe(true)
+    expect(action('purge').disabled).toBe(false)
     action('restore').click(); action('purge').click(); await flush()
     expect(handlers.restore).not.toHaveBeenCalled()
-    expect(handlers.purge).not.toHaveBeenCalled()
+    expect(purge).toHaveBeenCalledWith('t1')
   })
 
   it('restores in place, reports the path and reloads the authoritative list', async () => {
@@ -140,6 +144,43 @@ describe('in-vault deleted page', () => {
     await flush()
     action('restore').click(); await flush()
     expect(container.querySelector('.trash-status')!.textContent).toBe('已还原为副本：a 副本.md')
+  })
+
+  it('reports a kept-new permission tier instead of silently overwriting it', async () => {
+    const restore = vi.fn(async (): Promise<TrashRestoreResult> => ({
+      ok: true, relPath: 'a.md', copied: false,
+      permission: { original: 'forbidden', current: 'follow', outcome: 'kept-new' }
+    }))
+    const { action } = start({ restore })
+    await flush()
+    action('restore').click(); await flush()
+    const text = container.querySelector('.trash-status')!.textContent ?? ''
+    expect(text).toContain('保留没有覆盖')
+    expect(text).toContain('跟随')
+    expect(text).toContain('禁止')
+  })
+
+  it('reports a restored original permission tier and an unavailable write', async () => {
+    const restored = vi.fn(async (): Promise<TrashRestoreResult> => ({
+      ok: true, relPath: 'a.md', copied: false,
+      permission: { original: 'forbidden', current: 'forbidden', outcome: 'restored', rulePath: 'box' }
+    }))
+    const { action } = start({ restore: restored })
+    await flush()
+    action('restore').click(); await flush()
+    expect(container.querySelector('.trash-status')!.textContent).toContain('已把删除时的权限档「禁止」写回文件夹 box')
+
+    const unavailable = vi.fn(async (): Promise<TrashRestoreResult> => ({
+      ok: true, relPath: 'a.md', copied: false,
+      permission: { original: 'forbidden', current: 'reference', outcome: 'unavailable', error: 'PERMISSION_RULE_UNAVAILABLE' }
+    }))
+    container.replaceChildren()
+    const second = start({ restore: unavailable })
+    await flush()
+    second.action('restore').click(); await flush()
+    const text = container.querySelector('.trash-status')!.textContent ?? ''
+    expect(text).toContain('没有写回')
+    expect(text).toContain('文件未受影响')
   })
 
   it('moves a record to the system trash with one click and no confirmation step', async () => {
@@ -188,7 +229,7 @@ describe('in-vault deleted page', () => {
     })
     await flush()
     action('restore').click(); await flush()
-    expect(container.querySelector('.trash-error')!.textContent).toBe('这条记录已损坏，无法还原或删除。')
+    expect(container.querySelector('.trash-error')!.textContent).toBe('这条记录已损坏，无法还原；可以移入系统废纸篓，文件不会留在库里。')
     expect(container.textContent).not.toContain('Error invoking remote method')
   })
 
@@ -291,6 +332,7 @@ describe('deleted page formatting', () => {
     expect(trashErrorText('TRASH_ENTRY_MISSING')).toContain('这条记录已不在已删除里')
     expect(trashErrorText(Error('PATH_RESERVED'))).toContain('原路径已被保留占用')
     expect(trashErrorText('TRASH_PARTIAL')).toContain('只完成了一部分')
+    expect(trashErrorText('TRASH_RECORD_LIMIT')).toContain('256 条')
     expect(trashErrorText('TRASH_CONFLICT')).toContain('都被占用')
     expect(trashErrorText('SOMETHING_ELSE')).not.toContain('SOMETHING_ELSE')
   })

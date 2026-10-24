@@ -193,6 +193,33 @@ describe('三档范围与惰性授权', () => {
     app.deny('')
   })
 
+  it('引用修复来源只在整库、非发起篇、普通笔记、当前可参考时才放行', async () => {
+    const app = setup()
+    const folder = await app.registry.consume('owner', { ...app.request, previewId: (await app.registry.preview('owner', app.request)).id })
+    await expect(folder.assertLinkRepairSource('dir/b.md')).rejects.toThrow('LINK_REPAIR_OUT_OF_SCOPE')
+    const noteRequest = withScope(app.request, 'note')
+    const note = await app.registry.consume('owner', { ...noteRequest, previewId: (await app.registry.preview('owner', noteRequest)).id })
+    await expect(note.assertLinkRepairSource('dir/b.md')).rejects.toThrow('LINK_REPAIR_OUT_OF_SCOPE')
+    const vaultRequest = withScope(app.request, 'vault')
+    const vault = await app.registry.consume('owner', { ...vaultRequest, previewId: (await app.registry.preview('owner', vaultRequest)).id })
+    await expect(vault.assertLinkRepairSource('dir/b.md')).resolves.toBeUndefined()
+    // 发起篇自己的正文只能追加新块，不能当引用修复来源。
+    await expect(vault.assertLinkRepairSource('dir/a.md')).rejects.toThrow('LINK_REPAIR_OUT_OF_SCOPE')
+    // 附件子树里的 Markdown 不是普通笔记。
+    await expect(vault.assertLinkRepairSource('dir/Note/image.md')).rejects.toThrow('LINK_REPAIR_OUT_OF_SCOPE')
+    await expect(vault.assertLinkRepairSource('pic.png')).rejects.toThrow('LINK_REPAIR_OUT_OF_SCOPE')
+    app.setFollow(['dir/b.md'])
+    await expect(vault.assertLinkRepairSource('dir/b.md')).rejects.toThrow('LINK_REPAIR_OUT_OF_SCOPE')
+    app.setFollow([])
+    app.deny('dir/b.md')
+    await expect(vault.assertLinkRepairSource('dir/b.md')).rejects.toThrow('LINK_REPAIR_OUT_OF_SCOPE')
+    app.deny('')
+    // 两次核验之间档位从可参考变成必须遵循：按权限变化拒，不折成范围拒绝。
+    let tiers = 0
+    app.onTier(path => { if (path === 'dir/b.md' && ++tiers === 2) app.setFollow(['dir/b.md']) })
+    await expect(vault.assertLinkRepairSource('dir/b.md')).rejects.toThrow('SOURCE_PERMISSION_CHANGED')
+  })
+
   it('新建落点只能是发起篇所在目录；本篇范围不宣告也不放行建', async () => {
     const app = setup()
     const vaultRequest = withScope(app.request, 'vault')

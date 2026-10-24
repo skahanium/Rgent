@@ -80,8 +80,12 @@ export type StructuralPreview = {
   permissionChanges: { from: string; to: string; tier: string }[]
 }
 export type StructuralDeps = {
-  /** 可当结构对象的笔记：授权范围内且档位为可参考。必须遵循不算。 */
+  /** 可当结构对象的笔记：授权范围内且档位为可参考。必须遵循不算。
+   *  只用于结构目标预检；被修复引用的来源另用 `linkRepairAuthorized` 逐条核。 */
   authorized: (relPath: string) => boolean
+  /** 引用修复来源是否可写：整库、非发起篇、普通笔记、当前可参考。
+   *  这里是可等待的实时判据（权限可能刚变过），false 即整次结构操作失败。 */
+  linkRepairAuthorized: (relPath: string) => Promise<boolean>
   /** 发起篇：本场不对它做结构操作。 */
   origin: () => string
   /** 本场之外还有任务在跑。 */
@@ -133,7 +137,7 @@ export function createWriteGate(deps: WriteGateDeps) {
   const now = deps.now ?? (() => Date.now())
   const appends = new Map<string, number>()
   const previews = new Map<string, { relPath: string; name: string; expiresAt: number }>()
-  const structPreviews = new Map<string, { kind: 'rename' | 'move'; source: string; target: string; libId: string; expiresAt: number }>()
+  const structPreviews = new Map<string, { kind: 'rename' | 'move'; source: string; target: string; libId: string; linkSources: string[]; expiresAt: number }>()
   const trashPreviews = new Map<string, { relPath: string; libId: string; expiresAt: number }>()
   let notes = 0
   let bytes = 0
@@ -296,10 +300,12 @@ export function createWriteGate(deps: WriteGateDeps) {
       try {
         await deps.assertLive()
         const preview = await deps0.preview({ kind: 'note', source: request.relPath, target: target.relPath })
-        // 引用修复只允许落在授权范围内：范围外要改正文，整件事交给人做。
-        if (preview.linkChanges.some(change => !deps0!.authorized(change.relPath))) return failure('LINK_REPAIR_OUT_OF_SCOPE')
+        // 引用修复会改来源正文：来源必须逐条实时核过。范围外／发起篇／follow／forbidden／
+        // 非普通笔记任一出现，整件事交给人做，不签发可提交 token。
+        const linkSources = preview.linkChanges.map(change => change.relPath)
+        for (const relPath of linkSources) if (!(await deps0.linkRepairAuthorized(relPath))) return failure('LINK_REPAIR_OUT_OF_SCOPE')
         const previewId = randomUUID()
-        structPreviews.set(previewId, { kind: request.kind, source: request.relPath, target: target.relPath, libId: preview.id, expiresAt: now() + PREVIEW_TTL_MS })
+        structPreviews.set(previewId, { kind: request.kind, source: request.relPath, target: target.relPath, libId: preview.id, linkSources, expiresAt: now() + PREVIEW_TTL_MS })
         return { ok: true, previewId, kind: request.kind, source: request.relPath, target: target.relPath, moves: preview.moves.length, linkChanges: preview.linkChanges.length, permissionChanges: preview.permissionChanges.length }
       } catch (error) {
         return failure(reasonOf(error))
@@ -317,6 +323,8 @@ export function createWriteGate(deps: WriteGateDeps) {
       if (!deps0.authorized(pending.source)) return failure('OUTSIDE_TASK_SCOPE')
       try {
         await deps.assertLive()
+        // 预览到提交之间权限可能变化：按同一判据再核一遍引用来源，任一失效都不写文件。
+        for (const relPath of pending.linkSources) if (!(await deps0.linkRepairAuthorized(relPath))) return failure('LINK_REPAIR_OUT_OF_SCOPE')
         const result = await deps0.commit(pending.libId, true)
         structural += 1
         return { ok: true, target: pending.target, moved: result.moved }

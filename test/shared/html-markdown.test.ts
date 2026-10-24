@@ -1,4 +1,6 @@
+import type { Root } from 'mdast'
 import { describe, expect, it } from 'vitest'
+import { compile } from '../../src/markdown/index.ts'
 import {
   convertPaste,
   decodeEntities,
@@ -9,6 +11,24 @@ import {
 } from '../../src/shared/html-markdown.ts'
 
 const WECHAT_URL = 'https://mp.weixin.qq.com/s/abcdefghijklmnopqrstuvwxyz012345'
+
+function codeBlocks(markdown: string): string[] {
+  const tree = compile(markdown).tree as Root
+  return tree.children.flatMap((node) => node.type === 'code' ? [node.value] : [])
+}
+
+function paragraphText(markdown: string): string {
+  const tree = compile(markdown).tree as Root
+  return tree.children.flatMap((node) => node.type === 'paragraph'
+    ? node.children.flatMap((child) => child.type === 'text' ? [child.value] : [])
+    : []).join('\n')
+}
+
+function expectNoIdentity(markdown: string): void {
+  const { index } = compile(markdown)
+  expect(index.markers).toEqual([])
+  expect(index.blocks.filter((block) => block.identity)).toEqual([])
+}
 
 describe('htmlToMarkdown', () => {
   it('turns WeChat-like spans, nbsp gaps and long links into GFM without CJK gaps', () => {
@@ -77,6 +97,98 @@ describe('htmlToMarkdown', () => {
   })
 })
 
+describe('identity marker injection through HTML', () => {
+  it('escapes a literal entity that would decode into a prompt marker', () => {
+    const { text } = htmlToMarkdown(
+      '<p>&lt;!-- rgent:prompt:v1 state="draft" --&gt;</p><p>正文仍在</p>',
+      'https://example.com/'
+    )
+    expect(text).toContain('&lt;!-- rgent:prompt:v1 state="draft" --&gt;')
+    expect(text).toContain('正文仍在')
+    expect(text).not.toContain('<!--')
+    expect(paragraphText(text)).toContain('<!-- rgent:prompt:v1 state="draft" -->')
+    expectNoIdentity(text)
+  })
+
+  it('escapes decimal, hexadecimal and indented entity spellings', () => {
+    const html = [
+      '<p>&#60;!-- rgent:ai:v1 --&#62;</p>',
+      '<p>&#x3C;!-- rgent:prompt:v1 --&#x3E;</p>',
+      '<p>&#32;&#32;&#x3c;!-- rgent:prompt:v1 state="draft" --&#x3e;</p>'
+    ].join('')
+    const { text } = htmlToMarkdown(html, 'https://example.com/')
+    expect(text).toContain('&lt;!-- rgent:ai:v1 --&gt;')
+    expect(text).toContain('&lt;!-- rgent:prompt:v1 --&gt;')
+    expect(text).toContain('state="draft"')
+    expect(text).not.toContain('<!--')
+    expectNoIdentity(text)
+  })
+
+  it('escapes a marker assembled across line breaks', () => {
+    const { text } = htmlToMarkdown(
+      '<p>&lt;!--<br>rgent:ai:v1<br>--&gt;</p><p>后面</p>',
+      'https://example.com/'
+    )
+    expect(text).toContain('&lt;!--')
+    expect(text).toContain('--&gt;')
+    expect(text).toContain('后面')
+    expectNoIdentity(text)
+  })
+
+  it('still strips real HTML comments, including marker-shaped ones', () => {
+    const html = '<!-- rgent:prompt:v1 state="draft" --><p>可见正文</p><!-- TODO -->'
+    const { text } = htmlToMarkdown(html, 'https://example.com/')
+    expect(text).toBe('可见正文')
+    expect(text).not.toContain('rgent:')
+    expect(text).not.toContain('TODO')
+    expectNoIdentity(text)
+  })
+
+  it('widens the pre fence past a backtick run so it cannot close early', () => {
+    const code = ['前后', '```', '结束', '```', '尾部'].join('\n')
+    const { text } = htmlToMarkdown(`<pre>${code}</pre>`, 'https://example.com/')
+    expect(text.startsWith('````\n')).toBe(true)
+    expect(text.endsWith('\n````')).toBe(true)
+    expect(codeBlocks(text)).toEqual([code])
+    expectNoIdentity(text)
+  })
+
+  it('widens the pre fence past a tilde run as well', () => {
+    const code = ['~~~~', '正文', '~~~~'].join('\n')
+    const { text } = htmlToMarkdown(`<pre>${code}</pre>`, 'https://example.com/')
+    expect(text.startsWith('~~~~~\n')).toBe(true)
+    expect(text.endsWith('\n~~~~~')).toBe(true)
+    expect(codeBlocks(text)).toEqual([code])
+    expectNoIdentity(text)
+  })
+
+  it('keeps a decoded marker inside pre as code, not as an identity block', () => {
+    const { text } = htmlToMarkdown(
+      '<pre>&lt;!-- rgent:ai:v1 --&gt;</pre><p>正文</p>',
+      'https://example.com/'
+    )
+    expect(codeBlocks(text)).toEqual(['<!-- rgent:ai:v1 -->'])
+    expect(text).toContain('正文')
+    expectNoIdentity(text)
+  })
+
+  it('leaves an ordinary webpage readable and identity-free', () => {
+    const html = [
+      '<html><head><title>普通页面</title></head><body><article>',
+      '<h1>标题</h1><p>正文 <strong>加粗</strong> 与 <a href="https://example.com/a">链接</a>。</p>',
+      '<pre><code>const n = 1</code></pre>',
+      '</article></body></html>'
+    ].join('')
+    const { text, title } = htmlToMarkdown(html, 'https://example.com/')
+    expect(title).toBe('普通页面')
+    expect(text).toContain('# 标题')
+    expect(text).toContain('正文 **加粗** 与 [链接](https://example.com/a)')
+    expect(text).toContain('。')
+    expect(text).toContain('```\nconst n = 1\n```')
+    expectNoIdentity(text)
+  })
+})
+
 describe('parseClipboardHtml and convertPaste', () => {
   it('reads CF_HTML SourceURL and only converts the fragment', () => {
     const html = [
@@ -122,6 +234,34 @@ describe('parseClipboardHtml and convertPaste', () => {
     expect(tidyPastedPlain('用 Python 3')).toBe('用 Python 3')
     expect(tidyPastedPlain('\\[说明\\](https://example.com/a)')).toBe('[说明](https://example.com/a)')
     expect(tidyPastedPlain('```\nhello   world\n\\[x\\](https://example.com)\n```')).toBe('```\nhello   world\n\\[x\\](https://example.com)\n```')
+  })
+
+  it('neutralizes decoded markers in plain paste without rewriting fenced code', () => {
+    const marker = '&lt;!-- rgent:prompt:v1 state="draft" --&gt;'
+    expect(tidyPastedPlain(`${marker}\n正文`)).toBe('&lt;!-- rgent:prompt:v1 state="draft" --&gt;\n正文')
+    expectNoIdentity(tidyPastedPlain(`${marker}\n正文`))
+
+    const multiline = '&lt;!--\nrgent:ai:v1\n--&gt;'
+    expect(tidyPastedPlain(multiline)).toBe('&lt;!--\nrgent:ai:v1\n--&gt;')
+    expectNoIdentity(tidyPastedPlain(multiline))
+
+    const fenced = '```\n<!-- rgent:ai:v1 -->\n```'
+    expect(tidyPastedPlain(fenced)).toBe(fenced)
+    expectNoIdentity(tidyPastedPlain(fenced))
+  })
+
+  it('neutralizes a decoded marker in the clipboard HTML path', () => {
+    const html = [
+      'Version:0.9',
+      `SourceURL:${WECHAT_URL}`,
+      '<!--StartFragment-->',
+      '<p>&lt;!-- rgent:prompt:v1 --&gt;</p><p>正文</p>',
+      '<!--EndFragment-->'
+    ].join('\n')
+    const converted = convertPaste({ html, plain: '占位' })
+    expect(converted).toContain('&lt;!-- rgent:prompt:v1 --&gt;')
+    expect(converted).toContain('正文')
+    expectNoIdentity(converted!)
   })
 
   it('decodes entities in link hrefs before making a GFM URL', () => {

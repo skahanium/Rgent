@@ -2932,7 +2932,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
       })()`))
       return { ok: geometry.top >= 24 && geometry.top <= 55 && geometry.width >= 980 && geometry.width <= 1050 && geometry.height >= 680 && geometry.height < 800 && geometry.titleTop >= 35 && geometry.titleTop <= 70 && geometry.titleLeft >= 240, detail: JSON.stringify(geometry) }
     })
-    await probe('设置遮罩柔焦且导航仅列出七页与同系图标', async () => {
+    await probe('设置遮罩柔焦且导航仅列出八页与同系图标', async () => {
       await waitFor(page, `(() => { const dialog = document.querySelector('.overlay-settings[open]'); if (!dialog) return false; const style = getComputedStyle(dialog, '::backdrop'); const blur = style.backdropFilter || style.webkitBackdropFilter; return typeof blur === 'string' && blur.includes('blur(') })()`)
       const state = JSON.parse(await page.eval(`(() => {
         const dialog = document.querySelector('.overlay-settings')
@@ -2942,7 +2942,7 @@ async function captureVisualBaseline(page, shot, nativeShot) {
         return JSON.stringify({ blur, labels, icons: dialog.querySelectorAll('.settings-nav .icon').length, workspaceChrome: document.documentElement.dataset.workspaceChrome })
       })()`))
       return {
-        ok: typeof state.blur === 'string' && state.blur.includes('blur(') && JSON.stringify(state.labels) === JSON.stringify(['笔记库','界面','助手','记忆','技能','模型','运行']) && state.icons === 7 && state.workspaceChrome === 'off',
+        ok: typeof state.blur === 'string' && state.blur.includes('blur(') && JSON.stringify(state.labels) === JSON.stringify(['笔记库','界面','联网','助手','记忆','技能','模型','运行']) && state.icons === 8 && state.workspaceChrome === 'off',
         detail: JSON.stringify(state)
       }
     })

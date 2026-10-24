@@ -1131,20 +1131,23 @@ function registerIpc(): void {
       return { ok: false, error: /^[A-Z][A-Z0-9_]{1,63}$/u.test(message) ? message : 'IO_ERROR' }
     }
   }
-  /** 配置前后比对「用哪家、哪些家已有密钥、当前密钥、抓页路径、DeepSeek 密钥来源」；
-   *  密钥只留在主进程内存里。任一项变化都撤销活动任务的联网能力（在途请求随之中止）。 */
+  /** 配置前后比对「用哪家、哪些家已有密钥、当前密钥、抓页路径、DeepSeek 密钥来源、
+   *  模型自带联网开关」；密钥只留在主进程内存里。任一项变化都撤销活动任务的联网能力
+   *  （在途请求随之中止），只关 native 也算。 */
   type NetworkCredentialSnapshot = {
     searchProvider: string | null
     keyedProviders: string
     key: string | null
     fetch: string
     deepseekKeySource: string
+    nativeSearch: string
   }
   const networkCredentialSnapshot = (): NetworkCredentialSnapshot => {
     let searchProvider: string | null = null
     let keyedProviders = ''
     let fetch = ''
     let deepseekKeySource = ''
+    let nativeSearch = ''
     let key: string | null = null
     try {
       const view = networkConfig?.getPublic()
@@ -1152,14 +1155,17 @@ function registerIpc(): void {
       keyedProviders = (view?.keyedProviders ?? []).join(',')
       fetch = view?.fetch ?? ''
       deepseekKeySource = view?.deepseekKeySource ?? ''
+      nativeSearch = view?.nativeSearch?.minimax === true ? '1' : '0'
     } catch { /* fail closed */ }
     try { key = networkConfig?.credential()?.key ?? null } catch { key = null }
-    return { searchProvider, keyedProviders, key, fetch, deepseekKeySource }
+    return { searchProvider, keyedProviders, key, fetch, deepseekKeySource, nativeSearch }
   }
   const networkCredentialChanged = (before: NetworkCredentialSnapshot): boolean => {
     const after = networkCredentialSnapshot()
     return before.searchProvider !== after.searchProvider || before.keyedProviders !== after.keyedProviders ||
-      before.key !== after.key || before.fetch !== after.fetch || before.deepseekKeySource !== after.deepseekKeySource
+      before.key !== after.key || before.fetch !== after.fetch || before.deepseekKeySource !== after.deepseekKeySource ||
+      // 只关 native 也撤网：活动任务已经按 native 宣告过模型步，必须重新预览才能再用。
+      before.nativeSearch !== after.nativeSearch
   }
   /** 设备级选项：不带参数只读，带 `{enabled?, fetch?, nativeSearch?, deepseekKeySource?}` 保存并立即生效。
    *  所有字段先校验再写，避免同一请求里前一项落盘、后一项被拒的半套状态。 */

@@ -283,10 +283,10 @@ const SYSTEM_RULES = [
   '不要生成 rgent 机器标记或账本锚点。'
 ].join('\n')
 
-/** 系统送篓之后才可能报的错：对象可能已经离开原路径，工具报错不等于没发生副作用。
+/** 删除事务已经动过磁盘之后才可能报的错：对象可能已经离开原路径，工具报错不等于没发生副作用。
  *  这些原因必须保留 `structuralMoves`，否则工具环接下来按旧来源复核会假失败成 ENOENT，
  *  把「删了但落点/原路径有冲突」误记成来源消失。 */
-const TRASH_SIDE_EFFECT_REASONS = new Set(['TRASH_CONFLICT', 'LANDING_MISMATCH', 'TRASH_INCOMPLETE'])
+const TRASH_SIDE_EFFECT_REASONS = new Set(['TRASH_CONFLICT', 'LANDING_MISMATCH', 'TRASH_INCOMPLETE', 'TRASH_PARTIAL'])
 
 /** 偷渡词片只从本场授权来源建，且读正文有界：来源数、单篇字符与总字节都封顶。 */
 const NETWORK_ECHO_SOURCES = 64
@@ -665,14 +665,13 @@ export class AgentHost {
       const networkAvailable = availability?.available === true
       // `available` 管抓页；`search` 另要求预设服务与密钥可用。
       const networkEnabled = networkAvailable && !!grant && !!this.deps.network
-      // 模型自带联网：总闸开着、服务商是 MiniMax 且模型在 M3 允许列表里才替换模型步。
+      // 模型自带联网的“能力”只表示设备允许与模型适配；是否真的走 native 由每一步现判
+      // `grant.network`（运行中撤网后立即退回非 native 流，任务继续）。
       // 同时不宣告内置 `search_web`；抓页 `fetch_url` 仍照常宣告。其它步骤（记忆检索等）不换。
-      const nativeSearchEnabled = availability?.native === true && credential.provider === 'minimax' &&
+      const nativeSearchCapable = availability?.native === true && credential.provider === 'minimax' &&
         supportsNativeSearch(credential.provider, credential.modelId) && !!this.deps.nativeStreamStep
-      const searchEnabled = Boolean(networkEnabled && availability?.search === true && !nativeSearchEnabled)
+      const searchEnabled = Boolean(networkEnabled && availability?.search === true && !nativeSearchCapable)
       const searchHost = searchEnabled ? availability?.providerHost ?? '' : ''
-      // 唯一的模型步调用点：native 与内置适配器二选一；两者都没有时退回纯文本流。
-      const stepStream = nativeSearchEnabled ? this.deps.nativeStreamStep : this.deps.streamStep
       // 远端只读 MCP：可用性（含系统提示里那份工具清单）+ 本场勾选 + 宿主能力三条都在才算启用。
       // 清单超过 4 KiB 时主进程已判不可用；这里再判一次，确保系统提示总长不超过合同上限。
       const mcpAvailability = (() => { try { return this.deps.mcp?.availability() ?? null } catch { return null } })()
@@ -695,7 +694,7 @@ export class AgentHost {
       // 任务结束／切库时清空预览；网络与 MCP 共用同一个在途集合，`network:stop` 一次 abort 两类请求。
       // 只勾 MCP、没勾抓页时也要有预览缓存：MCP 结果同样给人看。
       if (networkEnabled || mcpEnabled) this.networkPreviews.set(id, networkPreviews)
-      if (networkEnabled || mcpEnabled) this.networkAborts.set(id, networkAborts)
+      if (networkEnabled || mcpEnabled || (nativeSearchCapable && !!grant?.network)) this.networkAborts.set(id, networkAborts)
       type NetworkRecordTarget = { action: 'fetch' | 'search' | 'mcp'; host: string; path: string; service?: 'direct' | 'deepseek' | 'provider'; query?: string; server?: string; tool?: string }
       const recordNetwork = (at: string, target: NetworkRecordTarget | null, outcome: string, extra: { bytes?: number; truncated?: boolean; count?: number } = {}): void => {
         if (!target?.host) return
@@ -932,7 +931,7 @@ export class AgentHost {
       // 偷渡检测在调用工具前做：命中的调用不进 execute，账本记 refused:EGRESS_CONTENT_ECHO。
       const networkToolOutcomes:{name:string;outcome:string}[]=[]
       let successfulLibraryTool=false
-      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled || deleteEnabled || networkRegistered || searchRegistered || mcpRegistered) && (!scoped || !stepStream)) throw Error('TOOLS_UNAVAILABLE')
+      if ((libraryReadEnabled || writeEnabled || createEnabled || structuralEnabled || deleteEnabled || networkRegistered || searchRegistered || mcpRegistered) && (!scoped || !this.deps.streamStep)) throw Error('TOOLS_UNAVAILABLE')
       if (scoped) this.scoped.set(key, scoped)
       const marked = markPrompt(original.content, { ...input, taskId: id })
       const submitted = promptBlock(marked, id)
@@ -1017,7 +1016,7 @@ export class AgentHost {
         const audit=(value:ContextSummary,chapters:readonly ContextChapter[],nextStep=steps+1):SentSummary=>({step:nextStep,text:value.text,sourceChapterIds:[...value.sourceChapterIds],generators:structuredClone(value.generators??[]),dependencies:value.sourceChapterIds.map(sourceId=>{const c=chapters.find(c=>c.sourceId===sourceId);if(!c||c.eligible===false)throw Error('SOURCE_CHANGED');return {sourceId,hash:summaryHash(c.text),...(c.provenance?{provenance:structuredClone(c.provenance)}:{})}})})
         const fits=(values:SentSummary[])=>{const all=[...sentSummaries,...values];if(!summaryAuditFits(all)||!all.every(validSentSummary))return false;try{encodeLedgerProvenance(recordProvenance(all,true));return true}catch{return false}}
         const resolveSummary=(candidate:ContextSummary,status:SummaryResolution['status'],chapters:readonly ContextChapter[]):SummaryResolution=>candidate.text&&!fits([audit(candidate,chapters)])?{status:'omitted',summary:{text:'',sourceChapterIds:[]}}:{status,summary:candidate}
-        const step = (outgoing: ModelMessage[], withTools: boolean, maxOutputTokens: number, summaries:SentSummary[]=[], native = false): AsyncIterable<ModelStepEvent> => {
+        const step = (outgoing: ModelMessage[], withTools: boolean, maxOutputTokens: number, summaries:SentSummary[]=[], mainStep = false): AsyncIterable<ModelStepEvent> => {
           if(!fits(summaries))throw Error('LEDGER_RECORD_LIMIT')
           if (++steps > limits.steps) throw Error('MODEL_STEP_LIMIT')
           const schemas = withTools ? toolSchemas : undefined
@@ -1032,11 +1031,35 @@ export class AgentHost {
             sentSummaries.push(...structuredClone(summaries))
             scoped?.markSent(withTools)
             memory?.markSent()
-            // 只有本场主对话步走模型自带联网；账本摘要／格式修复等内部步骤仍用内置适配器。
-            const selected = native ? stepStream : this.deps.streamStep
-            return selected
-            ? selected({ ...credential, system, messages: outgoing, ...(schemas ? { tools: schemas } : {}), maxOutputTokens }, signal)
-            : textEvents(this.deps.stream({ ...credential, system, prompt: String(outgoing[0]?.content ?? ''), maxOutputTokens }, signal))
+            const input = { ...credential, system, messages: outgoing, ...(schemas ? { tools: schemas } : {}), maxOutputTokens }
+            // native 每一步现判：撤网后 grant.network 立即消失，本步改走内置适配器，任务继续。
+            // 只有本场主对话步会走 native；账本摘要／格式修复等内部步骤仍用内置适配器。
+            if (mainStep && nativeSearchCapable && grant?.network && this.deps.nativeStreamStep) {
+              const nativeStream = this.deps.nativeStreamStep
+              const controller = new AbortController()
+              const forward = (): void => controller.abort()
+              if (signal.aborted) controller.abort()
+              else signal.addEventListener('abort', forward, { once: true })
+              // 在途 native 模型请求登记进本场集合：停止联网／设备配置撤网会 abort 它。
+              networkAborts.add(controller)
+              return (async function* () {
+                try {
+                  for await (const event of nativeStream(input, controller.signal)) yield event
+                  if (controller.signal.aborted) throw Error('NETWORK_NOT_AUTHORIZED')
+                } catch (error) {
+                  // 撤网 abort 不能折成普通模型失败：本步以 NETWORK_NOT_AUTHORIZED 结束，
+                  // 由任务现有状态收尾；不自动重试，也不偷偷改走另一条流。
+                  if (controller.signal.aborted) throw Error('NETWORK_NOT_AUTHORIZED')
+                  throw error
+                } finally {
+                  signal.removeEventListener('abort', forward)
+                  networkAborts.delete(controller)
+                }
+              })()
+            }
+            return this.deps.streamStep
+              ? this.deps.streamStep(input, signal)
+              : textEvents(this.deps.stream({ ...credential, system, prompt: String(outgoing[0]?.content ?? ''), maxOutputTokens }, signal))
           }
           return (async function*(){if(summaries.length&&!await derivedAllowed(summaries.flatMap(s=>s.sourceChapterIds)))throw Error('MEMORY_CHANGED');for await(const event of safeModelStep(create,signal,credential.apiKey)){if(event.type==='finish'&&event.usage){metric.actualInput=event.usage.inputTokens;metric.actualOutput=event.usage.outputTokens}yield event}})()
         }
@@ -1166,10 +1189,12 @@ export class AgentHost {
             let reportedByTool = false
             let value: unknown
             if (this.structuralMoves.has(id)) break
-            // 偷渡检测：外发前在本场授权来源的词片集里查一遍（含百分号解码形式）。
-            // 搜索的查询串与抓页的网址走同一道检查，命中就都不外发。
+            // 偷渡检测：外发前先按实际读过的来源刷新词片集（读库读到外篇后，外篇正文也必须在集合里），
+            // 再在本场授权来源的词片集里查一遍（含百分号解码形式）。搜索的查询串与抓页的网址走同一道检查，
+            // 命中就都不外发。
             if (!failure && (call.name === 'fetch_url' && networkRegistered || call.name === 'search_web' && searchRegistered)) {
               const requested = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {}
+              await refreshEcho()
               if (networkEcho.size && containsEcho(networkEcho, JSON.stringify(call.input))) {
                 failure = 'EGRESS_CONTENT_ECHO'
                 reportedByTool = true
@@ -1195,9 +1220,11 @@ export class AgentHost {
                 if (!failure) {
                   const server = mcpAttempt ? mcpServers.find(item => item.name === mcpAttempt!.server) : undefined
                   if (!server || !server.tools.includes(mcpAttempt!.tool)) failure = 'MCP_TOOL_UNKNOWN'
-                  else if (networkEcho.size && request.arguments !== undefined) {
+                  else if (request.arguments !== undefined) {
                     const serialized = JSON.stringify(request.arguments)
-                    if (serialized && containsEcho(networkEcho, serialized)) {
+                    // MCP 参数同样先刷新实际来源词片：读库读到外篇后，下一步把它塞进参数也必须命中。
+                    if (serialized) await refreshEcho()
+                    if (serialized && networkEcho.size && containsEcho(networkEcho, serialized)) {
                       failure = 'EGRESS_CONTENT_ECHO'
                       reportedByTool = true
                       networkToolOutcomes.push({ name: 'mcp_call', outcome: 'refused:EGRESS_CONTENT_ECHO' })
@@ -1354,6 +1381,34 @@ export class AgentHost {
     const canCreate = grant.scope !== 'note'
     const canStructure = grant.scope === 'vault'
     const reasonOf = (error: unknown): string => error instanceof Error && error.message ? error.message : 'WRITE_FAILED'
+    /** 引用修复来源的实时判据：整库、非发起篇、普通笔记、当前可参考。
+     *  和结构目标预检分开；撤权／取消／换库照旧原样透出，不折成范围拒绝。 */
+    const linkRepairAuthorized = async (path: string): Promise<boolean> => {
+      try { await grant.assertLinkRepairSource(path); return true }
+      catch (error) {
+        if (error instanceof Error && ['AUTHORIZATION_REVOKED', 'TASK_CANCELLED', 'VAULT_CHANGED'].includes(error.message)) throw error
+        return false
+      }
+    }
+    const structural = canStructure && this.deps.relocationPreview && this.deps.relocationCommit
+      ? {
+        // 只做结构目标预检：目标本身的权限／归属由宿主在每次调用前用 ScopeResolver 实时核。
+        // 引用修复来源不共用这个粗判，另由 `linkRepairAuthorized` 逐条核。
+        authorized: (path: string) => canStructure && path.length > 0,
+        linkRepairAuthorized,
+        origin: () => relPath,
+        otherTaskRunning: () => this.active().some(task => task.id !== taskId),
+        // 取得库层 preview 后逐条核验 linkChanges：任一来源越界／非普通笔记／不可参考，
+        // 整次操作失败，不签发 token。门里还有同一判据的第二次核验。
+        preview: async (request: { kind: 'note'; source: string; target: string }) => {
+          const preview = await this.deps.relocationPreview!(request, taskId)
+          for (const change of preview.linkChanges) await grant.assertLinkRepairSource(change.relPath)
+          return preview
+        },
+        // 把本场任务 id 交给迁移路径：它不能把自己停掉。
+        commit: (previewId: string, repairLinks: boolean) => this.deps.relocationCommit!(previewId, repairLinks, taskId)
+      }
+      : undefined
     const gate = createWriteGate({
       origin: () => relPath,
       session: () => this.deps.session?.() ?? null,
@@ -1362,15 +1417,7 @@ export class AgentHost {
       read: () => this.readBound(root, relPath),
       write: async (path, content, revision) => ({ revision: await this.writeBound(root, path, content, revision) }),
       composeAppend: (previous, text) => appendAiBlock(previous, { taskId, text }),
-      ...(canStructure && this.deps.relocationPreview && this.deps.relocationCommit ? { structural: {
-        // 结构目标与引用修复都只在整库范围；目标本身的权限/归属由宿主在每次调用前用 ScopeResolver 实时核。
-        authorized: (path: string) => canStructure && path.length > 0,
-        origin: () => relPath,
-        otherTaskRunning: () => this.active().some(task => task.id !== taskId),
-        // 把本场任务 id 交给迁移路径：它不能把自己停掉。
-        preview: (request: { kind: 'note'; source: string; target: string }) => this.deps.relocationPreview!(request, taskId),
-        commit: (previewId: string, repairLinks: boolean) => this.deps.relocationCommit!(previewId, repairLinks, taskId)
-      } } : {}),
+      ...(structural ? { structural } : {}),
       ...(canCreate && this.deps.createNote ? { create: (relPath: string, body: string) => this.deps.createNote!(relPath, body) } : {}),
       ...(this.deps.attachmentFolder ? { attachmentFolder: (relPath: string) => this.deps.attachmentFolder!(relPath) } : {}),
       ...(canStructure && HUMAN_TRASH_ON_THIS_PLATFORM && this.deps.trashPreview && this.deps.trashCommit ? { trash: {
@@ -1403,16 +1450,6 @@ export class AgentHost {
         // 没有确认卡，必须给界面一条可打开的落点通知。
         if (created.ok) this.deps.emit({ ...this.bindings.get(`${root}\0${relPath}`), id: taskId, root, relPath, status: 'running', created: { relPath: created.relPath } })
         return created
-      }
-      : undefined
-    const structural = canStructure && this.deps.relocationPreview && this.deps.relocationCommit
-      ? {
-        authorized: (path: string) => canStructure && path.length > 0,
-        origin: () => relPath,
-        otherTaskRunning: () => this.active().some(task => task.id !== taskId),
-        // 把本场任务 id 交给迁移路径：它不能把自己停掉。
-        preview: (request: { kind: 'note'; source: string; target: string }) => this.deps.relocationPreview!(request, taskId),
-        commit: (previewId: string, repairLinks: boolean) => this.deps.relocationCommit!(previewId, repairLinks, taskId)
       }
       : undefined
     // 结构操作失败一律不落盘；成功则本场收尾（来源已搬迁，继续读旧路径会假失败）。
@@ -1619,6 +1656,6 @@ async function* safeModelStep(create: () => AsyncIterable<ModelStepEvent>, signa
     const text = flush(true); if (text) yield { type: 'text', text }
     if (signal.aborted) return
     const reason = error instanceof Error ? error.message : ''
-    throw Error(['MODEL_PROTOCOL_ERROR', 'MODEL_OUTPUT_LIMIT', 'TOOL_CALL_LIMIT', 'TOOL_ARGUMENT_LIMIT', 'MODEL_CONTEXT_LIMIT', 'MODEL_STEP_LIMIT'].includes(reason) ? reason : 'MODEL_REQUEST_FAILED')
+    throw Error(['MODEL_PROTOCOL_ERROR', 'MODEL_OUTPUT_LIMIT', 'TOOL_CALL_LIMIT', 'TOOL_ARGUMENT_LIMIT', 'MODEL_CONTEXT_LIMIT', 'MODEL_STEP_LIMIT', 'NETWORK_NOT_AUTHORIZED'].includes(reason) ? reason : 'MODEL_REQUEST_FAILED')
   }
 }
