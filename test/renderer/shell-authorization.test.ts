@@ -614,3 +614,16 @@ it('shows a failed task with details and clears the marker without a modal', asy
   root.querySelector<HTMLButtonElement>('.task-dock-end')!.click()
   await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')?.dataset.kind).toBe('hidden'))
 })
+
+it('retries an empty-answer failure with a new task and keeps the prompt text', async () => {
+  await waitForNote()
+  editorHarness.text = '问'
+  editorHarness.block = { range: { start: 0, end: 1 }, prompt: '问', empty: false }
+  handlers.onAgentEvent({ id: 'failed-task', relPath: '甲.md', status: 'failed', sessionId: 's', answer: '', failure: makeTaskFailure({ code: 'MODEL_REQUEST_FAILED', diagnosticId: 'diag', detail: { httpStatus: 503 } }) })
+  await vi.waitFor(() => expect(root.querySelector<HTMLElement>('.task-dock')?.dataset.kind).toBe('failed'))
+  root.querySelector<HTMLButtonElement>('.task-dock-retry')!.click()
+  await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
+  expect(editorHarness.text).toBe('问')
+  expect(api.agentStart.mock.calls[0]![0].promptText).toBe('问')
+  expect(api.agentStart.mock.calls[0]![0].expectedText).toBe('问')
+})
