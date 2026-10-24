@@ -523,8 +523,8 @@ export async function start(root: HTMLElement): Promise<void> {
   }
 
   function askAI(fromMenu: boolean): void {
-    // 快捷键要求编辑器焦点；菜单点击先把焦点送进编辑器，再在光标处创建。
-    if (!fromMenu && !editor.view.hasFocus) return
+    // 快捷键从目录/模型选择等处也要能落到当前笔记；浮层与不可编辑状态仍由 canCreatePromptBlock 拒绝。
+    if (!fromMenu && !editor.view.hasFocus) editor.focus()
     if (!canCreatePromptBlock()) return
     if (fromMenu) editor.focus()
     const result = promptEditor.createPromptBlock?.() ?? 'refused'

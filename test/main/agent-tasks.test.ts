@@ -38,7 +38,7 @@ describe('Agent task ownership', () => {
     const b = deferred()
     const two = tasks.start({ root: '/vault', relPath: 'b.md', seconds: 30 }, async () => { await b.promise })
     await tasks.cancel(one.id, 'user')
-    expect(final).toHaveBeenCalledWith('cancelled', 'user')
+    expect(final).toHaveBeenCalledWith('cancelled', 'user', undefined)
     expect(tasks.active().map((task) => task.id)).toEqual([two.id])
     b.resolve()
     await two.done
@@ -54,7 +54,7 @@ describe('Agent task ownership', () => {
       }), final)
       await vi.advanceTimersByTimeAsync(1000)
       await task.done
-      expect(final).toHaveBeenCalledWith('cancelled', 'timeout')
+      expect(final).toHaveBeenCalledWith('cancelled', 'timeout', undefined)
     } finally {
       vi.useRealTimers()
     }
@@ -66,4 +66,14 @@ it('aborts an in-flight provider on runner failure while preserving failed cause
   expect(await task.done).toEqual({status:'failed',reason:'SOURCE_CHANGED'})
   expect(signal.aborted).toBe(true)
   expect(signal.reason).toBe('SOURCE_CHANGED')
+})
+
+it('keeps only sanitized transport facts as failure detail',async()=>{
+ const tasks=new AgentTasks(),final=vi.fn(async()=>{})
+ const cause={httpStatus:400,type:'AI_APICallError',code:'ENOTFOUND',providerCode:1001,secret:'do-not-store'}
+ const task=tasks.start({root:'/vault',relPath:'a.md',seconds:30},async()=>{throw Error('MODEL_REQUEST_FAILED',{cause})},final)
+ const result=await task.done
+ expect(result.reason).toBe('MODEL_REQUEST_FAILED')
+ expect(result.reasonDetail).toBe('{"httpStatus":400,"type":"AI_APICallError","code":"ENOTFOUND","providerCode":1001}')
+ expect(await final.mock.calls[0]).toEqual(['failed','MODEL_REQUEST_FAILED',result.reasonDetail])
 })

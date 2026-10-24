@@ -276,7 +276,7 @@ it('refreshes the block range after the editor inserts the marker before send', 
 })
 
 
-it('creates a prompt block from ⌘⇧↵ only while the editor has focus', async () => {
+it('focuses the editor and creates a prompt block from ⌘⇧↵ even when the tree had focus', async () => {
   await waitForNote()
   pressAskShortcut()
   expect(editorHarness.createCalls).toEqual([undefined])
@@ -285,12 +285,13 @@ it('creates a prompt block from ⌘⇧↵ only while the editor has focus', asyn
 
   editorHarness.hasFocus = false
   pressAskShortcut()
-  expect(editorHarness.createCalls).toHaveLength(1)
+  expect(editorHarness.createCalls).toHaveLength(2)
+  expect(editorHarness.focus).toHaveBeenCalled()
 
   editorHarness.hasFocus = true
   editorHarness.readOnly = true
   pressAskShortcut()
-  expect(editorHarness.createCalls).toHaveLength(1)
+  expect(editorHarness.createCalls).toHaveLength(2)
 })
 
 it('leaves a non-empty paragraph to the editor API and only focuses the result', async () => {

@@ -1,16 +1,28 @@
 import { randomUUID } from 'node:crypto'
 
 export type StopReason = 'user' | 'timeout' | 'close' | 'vault-change' | 'permission-change'
-export type TaskResult = { status: 'completed' | 'cancelled' | 'failed'; reason?: StopReason | string }
+export type TaskResult = { status: 'completed' | 'cancelled' | 'failed'; reason?: StopReason | string; reasonDetail?: string }
 export type ActiveTask = { id: string; root: string; relPath: string; startedAt: number }
 type Runner = (signal: AbortSignal) => Promise<void>
-type Finalizer = (status: TaskResult['status'], reason?: TaskResult['reason']) => Promise<void>
+type Finalizer = (status: TaskResult['status'], reason?: TaskResult['reason'], reasonDetail?: string) => Promise<void>
 
 type Running = ActiveTask & {
   controller: AbortController
   done: Promise<TaskResult>
   stopReason?: StopReason
   failureReason?: string
+  failureDetail?: string
+}
+
+/** Only sanitized, non-secret transport facts are persisted for diagnosis. */
+function failureDetail(error: unknown): string | undefined {
+  const cause = error instanceof Error && error.cause && typeof error.cause === 'object' ? error.cause as Record<string, unknown> : null
+  if (!cause) return undefined
+  const safe: Record<string, unknown> = {}
+  for (const key of ['httpStatus','type','code','providerCode']) if (cause[key] !== undefined) safe[key] = cause[key]
+  if (!Object.keys(safe).length) return undefined
+  const value = JSON.stringify(safe)
+  return value.length <= 512 ? value : undefined
 }
 
 /** Owns task lifetime; one task per note, while different notes may run concurrently. */
@@ -50,14 +62,15 @@ export class AgentTasks {
           ? task.failureReason ? { status: 'failed', reason: task.failureReason } : { status: 'cancelled', reason: task.stopReason ?? 'user' }
           : { status: 'completed' }
       } catch (error) {
+        const detail = failureDetail(error)
         result = controller.signal.aborted
-          ? task.failureReason ? { status: 'failed', reason: task.failureReason } : { status: 'cancelled', reason: task.stopReason ?? 'user' }
-          : { status: 'failed', reason: error instanceof Error ? error.message : 'UNKNOWN' }
+          ? task.failureReason ? { status: 'failed', reason: task.failureReason, ...(detail ? {reasonDetail:detail} : {}) } : { status: 'cancelled', reason: task.stopReason ?? 'user' }
+          : { status: 'failed', reason: error instanceof Error ? error.message : 'UNKNOWN', ...(detail ? {reasonDetail:detail} : {}) }
         // Determine the failure first: aborting transport must not rewrite it as user cancellation.
         if (!controller.signal.aborted) controller.abort(result.reason)
       }
       try {
-        await finalize(result.status, result.reason)
+        await finalize(result.status, result.reason, result.reasonDetail)
       } finally {
         clearTimeout(timer)
         this.running.delete(id)
