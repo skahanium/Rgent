@@ -847,6 +847,10 @@ export async function start(root: HTMLElement): Promise<void> {
     }
     if (event.persisted && event.revision) hostRevisions.set(event.relPath, event.revision)
     if (event.status === 'running') {
+      const priorFailure = failedTasks.get(event.relPath)
+      if (priorFailure && priorFailure.taskId !== event.id && vaultSession) {
+        void window.rgent.diagnosticsForget({ sessionId: vaultSession, taskId: priorFailure.taskId }).catch(() => {})
+      }
       failedTasks.delete(event.relPath)
       failedExpanded.delete(event.relPath)
       if (!endedTaskIds.has(event.id)) activeTasks.set(event.id, { id: event.id, relPath: event.relPath, startedAt: activeTasks.get(event.id)?.startedAt ?? Date.now(), activity: event.activity })

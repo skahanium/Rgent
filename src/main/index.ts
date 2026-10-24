@@ -1722,7 +1722,7 @@ function registerIpc(): void {
     try{
       if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
       const r=value as Record<string,unknown>
-      if(Object.keys(r).some(k=>!['sessionId','code','stage','detail'].includes(k))||typeof r.sessionId!=='string'||typeof r.code!=='string'||typeof r.stage!=='string')throw Error('BAD_REQUEST')
+      if(Object.keys(r).some(k=>!['sessionId','code','stage','detail'].includes(k))||typeof r.sessionId!=='string'||typeof r.code!=='string'||!r.code||r.code.length>128||typeof r.stage!=='string'||!['preflight','provider','stream','tool','finalize','ledger'].includes(r.stage))throw Error('BAD_REQUEST')
       if(!current)throw Error('NO_VAULT');current.assertSession(r.sessionId)
       const failure=makeTaskFailure({code:r.code,diagnosticId:randomUUID(),stage:r.stage as never,detail:r.detail})
       preflightDiagnostics.record({code:failure.code,family:failure.family,stage:failure.stage,action:failure.action,retryable:failure.retryable,message:failure.message,...(failure.detail?{detail:failure.detail}:{})})

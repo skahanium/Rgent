@@ -110,17 +110,19 @@ export function makeTaskFailure(input: {
   message?: string
 }): TaskFailure {
   const detail = sanitizeFailureDetail(input.detail)
-  const inferred = failureFamily(input.code, detail)
+  const rawCode = input.code
+  const code = rawCode.length > 0 && rawCode.length <= 128 && !/[\u0000-\u001f]/u.test(rawCode) ? rawCode : 'INTERNAL'
+  const inferred = failureFamily(code, detail)
   const family = input.family ?? inferred.family
   const action = input.action ?? inferred.action
   return {
-    code: input.code,
+    code,
     family,
     stage: input.stage ?? (family === 'LEDGER' ? 'ledger' : family === 'TOOL' ? 'tool' : 'provider'),
     action,
     retryable: input.retryable ?? inferred.retryable,
     diagnosticId: input.diagnosticId,
-    message: input.message ?? CODE_MESSAGE[input.code] ?? FAMILY_MESSAGE[family],
+    message: input.message ?? CODE_MESSAGE[code] ?? FAMILY_MESSAGE[family],
     ...(detail ? { detail } : {})
   }
 }
