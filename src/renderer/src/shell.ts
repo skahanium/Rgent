@@ -518,7 +518,19 @@ export async function start(root: HTMLElement): Promise<void> {
    *  只在可编辑的活动笔记、没有同篇任务、没有设置／搜索／冲突／对话框／恢复浮层时创建。 */
   function reportPreflight(code: string): void {
     if (!vaultSession) return
-    void window.rgent.diagnosticsReport({ sessionId: vaultSession, code, stage: 'preflight' }).catch(() => {})
+    void window.rgent.diagnosticsReport({ sessionId: vaultSession, code, stage: 'preflight' }).then(result => {
+      if (!result?.ok || !result.entry) return
+      const entry = result.entry
+      pushNotice({
+        title: '这次没有开始',
+        detail: entry.message,
+        tone: 'warning',
+        action: {
+          label: '复制诊断',
+          run: () => { void navigator.clipboard.writeText(JSON.stringify(entry, null, 2)).catch(() => {}) }
+        }
+      })
+    }).catch(() => {})
   }
 
   function canCreatePromptBlock(): boolean {

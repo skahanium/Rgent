@@ -20,6 +20,11 @@ describe('task failure catalog', () => {
     expect(sanitizeFailureDetail({ httpStatus: 429, secret: 'x', sdkType: 'AI_APICallError', networkCode: '\u0001', providerCode: 1 })).toEqual({ httpStatus: 429, sdkType: 'AI_APICallError', providerCode: 1 })
   })
 
+  it('falls back for an unbounded or control-character error code', () => {
+    expect(makeTaskFailure({ code: 'x'.repeat(200), diagnosticId: 'd' }).code).toBe('INTERNAL')
+    expect(makeTaskFailure({ code: 'bad\u0001code', diagnosticId: 'd' }).code).toBe('INTERNAL')
+  })
+
   it('validates the persisted shape', () => {
     const failure = makeTaskFailure({ code: 'MODEL_REQUEST_FAILED', diagnosticId: 'd', detail: { httpStatus: 503 } })
     expect(validTaskFailure(failure)).toBe(true)

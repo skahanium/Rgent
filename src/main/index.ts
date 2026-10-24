@@ -1727,8 +1727,8 @@ function registerIpc(): void {
       if(Object.keys(r).some(k=>!['sessionId','code','stage','detail'].includes(k))||typeof r.sessionId!=='string'||typeof r.code!=='string'||!r.code||r.code.length>128||typeof r.stage!=='string'||!['preflight','provider','stream','tool','finalize','ledger'].includes(r.stage))throw Error('BAD_REQUEST')
       if(!current)throw Error('NO_VAULT');current.assertSession(r.sessionId)
       const failure=makeTaskFailure({code:r.code,diagnosticId:randomUUID(),stage:r.stage as never,detail:r.detail})
-      preflightDiagnostics.record({code:failure.code,family:failure.family,stage:failure.stage,action:failure.action,retryable:failure.retryable,message:failure.message,...(failure.detail?{detail:failure.detail}:{})})
-      return {ok:true}
+      const entries=preflightDiagnostics.record({code:failure.code,family:failure.family,stage:failure.stage,action:failure.action,retryable:failure.retryable,message:failure.message,...(failure.detail?{detail:failure.detail}:{})})
+      return {ok:true,entry:entries.at(-1)}
     }catch(e){const code=e instanceof Error?e.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED'].includes(code)?code:'DIAGNOSTICS_UNAVAILABLE'}}
   })
   registerTrustedHandle(IPC.diagnosticsForget,async(event,value:unknown)=>{
