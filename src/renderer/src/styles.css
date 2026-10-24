@@ -2375,6 +2375,7 @@ a[href]:focus-visible,
   white-space: normal;
   overflow-wrap: anywhere;
 }
+.task-dock-action,
 .task-dock-retry,
 .task-dock-details,
 .task-dock-copy {
@@ -2397,6 +2398,7 @@ a[href]:focus-visible,
 }
 .task-dock-facts { display: block; margin-bottom: 6px; }
 .task-dock-detail-json { margin: 0 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-dock-action:focus-visible,
 .task-dock-retry:focus-visible,
 .task-dock-details:focus-visible,
 .task-dock-copy:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }

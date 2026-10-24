@@ -11,7 +11,7 @@ export type TaskDockModel =
   | { kind: 'hidden' }
   | { kind: 'generating'; onAbort: () => void }
   | { kind: 'paused'; onResume: () => void; onEnd: () => void }
-  | { kind: 'failed'; failure: TaskFailure; taskId: string; expanded: boolean; canRetry: boolean; onRetry: () => void; onClear: () => void; onToggleDetails: () => void; onCopy: () => void }
+  | { kind: 'failed'; failure: TaskFailure; taskId: string; expanded: boolean; canRetry: boolean; actionLabel?: string; onAction?: () => void; onRetry: () => void; onClear: () => void; onToggleDetails: () => void; onCopy: () => void }
   | { kind: 'others'; count: number; onOpen: () => void }
 
 let host: HTMLElement | null = null
@@ -95,6 +95,9 @@ export function renderTaskDock(model: TaskDockModel): void {
       const label = document.createElement('span')
       label.className = 'task-dock-label'
       label.textContent = model.failure.message
+      const action = document.createElement('button')
+      action.type = 'button'; action.className = 'task-dock-action'; action.textContent = model.actionLabel ?? ''
+      if (model.onAction) root.append(action)
       const retry = document.createElement('button')
       retry.type = 'button'; retry.className = 'task-dock-retry'; retry.textContent = '重试'
       const details = document.createElement('button')
@@ -113,9 +116,12 @@ export function renderTaskDock(model: TaskDockModel): void {
       copy.type = 'button'; copy.className = 'task-dock-copy'; copy.textContent = '复制诊断'
       panel.append(facts, detail, copy)
       root.append(label)
+      if (model.onAction) root.append(action)
       if (model.canRetry) root.append(retry)
       root.append(details, clear, panel)
     }
+    const action = root.querySelector<HTMLButtonElement>('.task-dock-action')
+    if (action) bindButton(action, model.onAction ?? (() => {}))
     const retry = root.querySelector<HTMLButtonElement>('.task-dock-retry')
     if (retry) bindButton(retry, model.onRetry)
     bindButton(root.querySelector<HTMLButtonElement>('.task-dock-details')!, model.onToggleDetails)

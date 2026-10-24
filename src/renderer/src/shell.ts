@@ -2021,6 +2021,16 @@ export async function start(root: HTMLElement): Promise<void> {
     hostNotice = '失败标记已清除，提问正文保留。'; updateStatus()
   }
 
+  function failureAction(failure: TaskFailure): { label: string; run: () => void } | null {
+    switch (failure.action) {
+      case 'open_model_settings': return { label: '更新密钥', run: () => settingsOverlay.open('助手') }
+      case 'open_network_settings': return { label: '联网设置', run: () => settingsOverlay.open('联网') }
+      case 'repair_ledger': return { label: '修复账本', run: () => settingsOverlay.open('笔记库') }
+      case 'edit_prompt': return { label: '编辑提问', run: () => editor.focus() }
+      default: return null
+    }
+  }
+
   function updateStatus(): void {
     paintUnavailable()
     if (vaultNameText) root.dataset.vault = vaultNameText
@@ -2075,6 +2085,7 @@ export async function start(root: HTMLElement): Promise<void> {
       kind: 'failed', failure: failed.failure, taskId: failed.taskId,
       expanded: failedExpanded.has(tab.relPath),
       canRetry: failed.answerEmpty && failed.failure.retryable,
+      ...(failureAction(failed.failure) ? { actionLabel: failureAction(failed.failure)!.label, onAction: failureAction(failed.failure)!.run } : {}),
       onRetry: () => { void retryFailure() },
       onClear: () => { void clearFailure() },
       onToggleDetails: () => {
