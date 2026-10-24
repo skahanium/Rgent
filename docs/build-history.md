@@ -2521,7 +2521,7 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 
 **背景**：`MODEL_REQUEST_FAILED` 只留下泛化文案，用户无法区分 401/429/5xx/网络/上下文；失败任务留下 `task-id` 提问块，重试/清除路径不完整。
 
-**实现**（`f69e0f1`／`bc10019`／`d38eca8`／`fd930fe`）
+**实现**（`f69e0f1`／`bc10019`／`d38eca8`／`fd930fe`／`ac02722`）
 - `TaskFailure`：family/stage/action/retryable/diagnosticId/一句 message/白名单 detail；任务失败码与通用 Host 错误分层。
 - Provider cause 只保留 HTTP、SDK 类型、网络码、供应商 code；不保存 prompt/answer/密钥/响应体/query/工具参数。
 - `chapter.failure` 可选写入任务账本；`.rgent/diagnostics/failures.json` 保存有界失败指针；preflight 失败写应用数据环（20 条/7 天）。
@@ -2529,6 +2529,6 @@ revision 13 第一轮跑完（30 例、**27 次计费调用**，账本 1572→15
 - 账本详情显示 family/stage/action/diagnosticId；通用 Host 错误不强行归入 AI family。
 - 旧账本无 failure 仍可读；失败指针/事件不阻塞普通编辑、阅读或新快捷键。
 
-**门（本机）**：单元 **171 文件 3057 通过／4 跳过**；完整窗口 **386／0**；构建、文档通过。
+**门（本机）**：单元 **171 文件 3058 通过／4 跳过**；完整窗口 **386／0**；构建、文档通过。
 
 **边界**：真实供应商失败仍只能由 fake provider 覆盖；未做自动重试；任务前 ring 不是恢复依据；重试会重新执行工具，详情提示但不弹确认；D 轮未推送、零 CI。
