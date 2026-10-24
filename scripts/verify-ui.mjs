@@ -918,7 +918,8 @@ async function verifyScopedHost(page, vault, shot, requests, allRequests = []) {
   check('整库口令一次回车直接开工且没有确认卡', await ask('工具查证'), await page.eval(`JSON.stringify({ dock: document.querySelector('.task-dock')?.dataset.kind ?? null })`))
   check('整库任务正常收尾并写回答', await waitFor(page, `(async()=>{const n=await window.rgent.noteRead('工作区/工具发起.md');return n.content.includes('工具查证完成：已核对参考原文。')&&(await window.rgent.agentTasks()).length===0})()`))
   const vaultRequests = requests.slice(vaultBase)
-  check('整库宣告读、搜、补、建、改、挪、删', vaultRequests.length === 3 && vaultRequests.every(request => ['read_library','search_library','append_to_note','create_note','rename_note','move_note','delete_note'].every(name => toolsOf(request).includes(name))), JSON.stringify(vaultRequests.map(toolsOf)))
+  const vaultExpectedTools = ['read_library','search_library','append_to_note','create_note','rename_note','move_note', ...(process.platform === 'darwin' ? ['delete_note'] : [])]
+  check(process.platform === 'darwin' ? '整库宣告读、搜、补、建、改、挪、删' : '整库宣告读、搜、补、建、改、挪（Windows 不宣告删）', vaultRequests.length === 3 && vaultRequests.every(request => vaultExpectedTools.every(name => toolsOf(request).includes(name))), JSON.stringify(vaultRequests.map(toolsOf)))
   check('整库仍没有确认卡', await noConfirm())
   await shot(page, 'scope-vault-ledger-1200')
   await page.eval(`document.querySelector('.ledger-close')?.click()`)
@@ -4748,7 +4749,7 @@ function createControlledHostServer(memoryRequests,toolLoopRequests,writeRequest
           response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"第二句。"},"finish_reason":null}]}\n\n')
           response.write('data: {"id":"ui","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n')
           response.end('data: [DONE]\n\n')
-        }, body.includes('多任务') ? 10000 : body.includes('快速完成') ? 0 : 1200)
+        }, body.includes('多任务') ? 10000 : body.includes('请写两句话') ? 5000 : body.includes('快速完成') ? 0 : 1200)
         response.on('close', () => clearTimeout(timer))
       })
     })
