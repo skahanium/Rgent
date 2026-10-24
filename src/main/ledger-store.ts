@@ -14,6 +14,7 @@ function nextRecordRevision(revision:number):number{if(revision>=Number.MAX_SAFE
 const fixed='.rgent/registry.json'
 const historyFixed='.rgent/ledger-history/index.json'
 const historyRoot='.rgent/ledger-history'
+const resourcesRoot='.rgent/resources'
 const id=(s:unknown):s is string=>typeof s==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(s)
 const rel=(s:unknown):s is string=>typeof s==='string'&&s.length<=4096&&/\.md$/i.test(s)&&!s.split('/').some(x=>!x||x==='.'||x==='..'||x.startsWith('.'))&&!/[:\\\x00-\x1f]/.test(s)
 const obj=(s:unknown):s is Record<string,unknown>=>!!s&&typeof s==='object'&&!Array.isArray(s)
@@ -173,9 +174,22 @@ export class LedgerStore{
   const currentRegistry=this.registry()
   const body=note.bytes.toString('utf8'),parsed=compile(body)
   const anchors=[...new Set(parsed.index.markers.flatMap(b=>{const k=parseMarker(body.slice(b.range.start,b.range.end))?.attrs['task-id'];return k?[k]:[]}))].slice(0,256)
-  const owner:LedgerOwner={noteId:randomUUID(),relPath,objectVersion:note.objectVersion,bodyRevision:digest(body),anchors,sequenceCeiling:currentRegistry.sequence,...(this.rootIdentity?{recoveryEvidence:{rootIdentity:this.rootIdentity(),attachments:this.attachmentEvidence(relPath)}}:{})};currentRegistry.owners.push(owner);this.publish(currentRegistry,owner);return structuredClone(owner)
+  const owner:LedgerOwner={noteId:randomUUID(),relPath,objectVersion:note.objectVersion,bodyRevision:digest(body),anchors,sequenceCeiling:currentRegistry.sequence,...(this.rootIdentity?{recoveryEvidence:{rootIdentity:this.rootIdentity(),attachments:this.attachmentEvidence(relPath)}}:{})};currentRegistry.owners.push(owner);this.publish(currentRegistry,owner);try{this.writeResourceManifest(owner)}catch{/* manifest is provenance, not a write gate */}return structuredClone(owner)
  }
  /** Active owners are the only hot-path records. Historical owners live in a separate index/dir. */
+ /** A resource manifest is provenance only: it never gates ordinary path-based image rendering. */
+ resourcePath(noteId:string){if(!id(noteId))throw Error('BAD_REQUEST');return `${resourcesRoot}/${noteId}.json`}
+ private writeResourceManifest(owner:LedgerOwner):void{
+  const assets=this.attachmentEvidence(owner.relPath)
+  const raw=JSON.stringify({version:1,noteId:owner.noteId,objectVersion:owner.objectVersion,assets})
+  this.dirs(['.rgent','resources'])
+  this.replace(this.resourcePath(owner.noteId),raw)
+ }
+ resourceManifest(noteId:string):{version:1;noteId:string;objectVersion:string;assets:NonNullable<LedgerOwner['recoveryEvidence']>['attachments']}|null{
+  const disk=this.read(this.resourcePath(noteId));if(!disk)return null
+  try{const v:unknown=JSON.parse(disk.raw);if(!obj(v)||!exact(v,['version','noteId','objectVersion','assets'])||v.version!==1||v.noteId!==noteId||typeof v.objectVersion!=='string'||!Array.isArray(v.assets))throw Error('LEDGER_REGISTRY_INVALID');return v as never}catch{throw Error('LEDGER_REGISTRY_INVALID')}
+ }
+ removeResourceManifest(noteId:string):void{this.replace(this.resourcePath(noteId),'')}
  private history():LedgerHistory{
   const disk=this.read(historyFixed);if(!disk)return {version:1,entries:[]}
   try{const v:unknown=JSON.parse(disk.raw);if(!obj(v)||!exact(v,['version','entries'])||v.version!==1||!Array.isArray(v.entries)||v.entries.length>100000||!v.entries.every(e=>obj(e)&&exact(e,['noteId','relPath','objectVersion','state','archivedAt',...('trashId'in e?['trashId']:[])] )&&typeof e.noteId==='string'&&typeof e.relPath==='string'&&typeof e.objectVersion==='string'&&['trashed','retired','orphaned','archived'].includes(String(e.state))&&typeof e.archivedAt==='string'&&(e.trashId===undefined||typeof e.trashId==='string')))throw Error('LEDGER_REGISTRY_INVALID');return v as LedgerHistory}catch{throw Error('LEDGER_REGISTRY_INVALID')}
@@ -250,6 +264,30 @@ export class LedgerStore{
   this.replace(historyFixed,JSON.stringify({version:1,entries:history.entries.map(e=>e.noteId===entry.noteId?{...e,state:'archived'}:e)}))
  }
  historyEntries():LedgerHistoryEntry[]{return structuredClone(this.history().entries)}
+ private historyBytes(noteId:string):number{
+  let total=0
+  const walk=(dir:string):void=>{let items:ReturnType<SecureVaultFs['list']>;try{items=this.fs.list(dir)}catch{return};for(const item of items){if(item.kind==='dir')walk(`${dir}/${item.name}`);else total+=item.size}}
+  walk(`${historyRoot}/${noteId}`);return total
+ }
+ historyDetails():{entries:LedgerHistoryEntry[];bytes:number}{
+  const entries=this.historyEntries();return {entries,bytes:entries.reduce((sum,e)=>sum+this.historyBytes(e.noteId),0)}
+ }
+ /** Explicit archive cleanup; the sidecar goes to the system trash, never unlink. */
+ purgeHistory(noteId:string):{ok:true}|{ok:false;error:string}{
+  if(!id(noteId))return {ok:false,error:'BAD_REQUEST'}
+  const history=this.history(),entry=history.entries.find(e=>e.noteId===noteId)
+  if(!entry)return {ok:false,error:'HISTORY_NOT_FOUND'}
+  if(this.registry().owners.some(o=>o.noteId===noteId))return {ok:false,error:'LEDGER_CONFLICT'}
+  try{
+   const dir=`${historyRoot}/${noteId}`,leaf=this.fs.resolve(dir).at(-1)?.id
+   if(!leaf)return {ok:false,error:'HISTORY_NOT_FOUND'}
+   this.fs.trash(dir,leaf)
+   try{this.fs.trash(this.resourcePath(noteId),this.fs.resolve(this.resourcePath(noteId)).at(-1)!.id)}catch{/* no manifest is fine */}
+   this.replace(historyFixed,JSON.stringify({version:1,entries:history.entries.filter(e=>e.noteId!==noteId)}))
+   return {ok:true}
+  }catch(e){return {ok:false,error:e instanceof Error?e.message:'LEDGER_STORAGE_INVALID'}}
+ }
+
  onWrite(relPath:string,before:string,after:string,body:string,previousBody?:string,basis?:WorkingSnapshot){const record=basis?.record,registry=this.registry(),owner=registry.owners.find(o=>o.relPath===relPath&&o.objectVersion===before);if(!owner)return
   const units=this.materialUnits();let changed=false
   const keep=new Set((record?[...record.entries,...record.recent]:[]).flatMap(e=>e.sources.flatMap(s=>[s.materialId,...(s.basisGroups??[])]))??[]),pending=record?.jobs.some(j=>['queued','running','interrupted'].includes(j.outcome)),removed=new Set<string>(),added:MaterialUnit[]=[]

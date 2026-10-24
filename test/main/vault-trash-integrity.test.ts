@@ -259,4 +259,42 @@ describe('in-vault trash integrity', () => {
     } finally { f.vault.dispose() }
   })
 
+
+  it('lists and explicitly purges archived history without touching the note', async () => {
+    if (!TRASH_OPERATIONS_ON_THIS_PLATFORM) return
+    const f = await fixture('reference')
+    mockNativeTrash(f.root)
+    try {
+      const ledger = new LedgerStore(secureFsFor(f.root), () => {}, undefined, () => vaultRootIdentity(f.root))
+      const old = ledger.owner('box/b.md')
+      await deleteBoxNote(f.vault)
+      const details = ledger.historyDetails()
+      expect(details.entries).toEqual([expect.objectContaining({ noteId: old.noteId, state: 'trashed' })])
+      expect(ledger.purgeHistory(old.noteId)).toEqual({ ok: true })
+      expect(ledger.historyEntries()).toEqual([])
+      expect(existsSync(path.join(f.root, '.rgent', 'ledger-history', old.noteId))).toBe(false)
+    } finally { f.vault.dispose() }
+  })
+
+
+  it('writes a resource manifest for the old object and never adopts it into the new note', async () => {
+    if (!TRASH_OPERATIONS_ON_THIS_PLATFORM) return
+    const f = await fixture('reference')
+    mockNativeTrash(f.root)
+    try {
+      await mkdir(path.join(f.root, 'box', 'b'), { recursive: true })
+      await writeFile(path.join(f.root, 'box', 'b', 'asset.txt'), 'asset')
+      const ledger = new LedgerStore(secureFsFor(f.root), () => {}, undefined, () => vaultRootIdentity(f.root))
+      const old = ledger.owner('box/b.md')
+      expect(ledger.resourceManifest(old.noteId)?.assets.some(a => a.relPath === 'box/b/asset.txt')).toBe(true)
+      const id = await deleteBoxNote(f.vault)
+      expect(ledger.resourceManifest(old.noteId)).not.toBeNull()
+      await writeFile(path.join(f.root, 'box', 'b.md'), '新正文')
+      const replacement = ledger.owner('box/b.md')
+      expect(replacement.noteId).not.toBe(old.noteId)
+      expect(ledger.resourceManifest(replacement.noteId)?.assets).toEqual([])
+      expect(ledger.historyEntryForTrash(id)?.noteId).toBe(old.noteId)
+    } finally { f.vault.dispose() }
+  })
+
 })

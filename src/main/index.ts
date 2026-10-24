@@ -1714,6 +1714,18 @@ function registerIpc(): void {
       return {ok:true,value:await current.ledgerPage(r.relPath,(r.cursor??null) as string|null)}
     }catch(e){const code=e instanceof Error?e.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED','NOTE_REPLACED','LEDGER_REGISTRY_INVALID','LEDGER_OWNERSHIP_UNVERIFIED','LEDGER_RECORD_INVALID','LEDGER_CONFLICT'].includes(code)?code:'LEDGER_UNAVAILABLE',...(code==='LEDGER_REGISTRY_INVALID'&&current?.sessionId()===token?{registryRevision:current?.ledgerRegistryRevision()}: {})}}
   })
+  registerTrustedHandle(IPC.ledgerHistory,async(_event,value:unknown):Promise<import('../shared/ledger.ts').LedgerHistoryResult>=>{
+    const current=vault
+    try{
+      if(!value||typeof value!=='object'||Array.isArray(value))throw Error('BAD_REQUEST')
+      const r=value as Record<string,unknown>
+      if(Object.keys(r).some(k=>!['sessionId','action','noteId'].includes(k))||typeof r.sessionId!=='string'||(r.action!=='list'&&r.action!=='purge')||r.action==='purge'&&typeof r.noteId!=='string'||r.action==='list'&&r.noteId!==undefined)throw Error('BAD_REQUEST')
+      if(!current)throw Error('NO_VAULT');current.assertSession(r.sessionId)
+      if(r.action==='list'){const value=await current.ledgerHistoryList();return {ok:true,entries:value.entries,bytes:value.bytes}}
+      const result=await current.ledgerHistoryPurge(r.noteId as string)
+      return result.ok?{ok:true,purged:r.noteId as string}:result
+    }catch(e){const code=e instanceof Error?e.message:'';return {ok:false,error:['BAD_REQUEST','NO_VAULT','VAULT_CHANGED','LEDGER_CONFLICT','HISTORY_NOT_FOUND','LEDGER_STORAGE_INVALID'].includes(code)?code:'LEDGER_UNAVAILABLE'}}
+  })
   registerTrustedHandle(IPC.ledgerGetTrash,async(_event,value:unknown)=>{
     const current=vault
     try{

@@ -1,5 +1,5 @@
 import type { PermissionTier, TrashEntryView, TrashListResult, TrashPurgeResult, TrashRestorePermission, TrashRestoreResult } from '../../shared/ipc.ts'
-import type { LedgerResult } from '../../shared/ledger.ts'
+import type { LedgerHistoryResult, LedgerResult } from '../../shared/ledger.ts'
 import { ledgerErrorText } from '../../shared/ledger-errors.ts'
 
 /**
@@ -15,6 +15,8 @@ export type TrashManagerHandlers = {
   purge: (id: string) => Promise<TrashPurgeResult>
   /** 只读旧历史；不进入当前笔记账本。 */
   ledger?: (id: string, cursor?: string | null) => Promise<LedgerResult>
+  history?: () => Promise<LedgerHistoryResult>
+  purgeHistory?: (noteId: string) => Promise<LedgerHistoryResult>
 }
 
 export type TrashManagerContext = {
@@ -126,7 +128,14 @@ export function mountTrashManager(context: TrashManagerContext, handlers: TrashM
   empty.hidden = true
   const list = element('ul', 'trash-list')
   list.hidden = true
-  root.append(back, title, intro, capacity, status, error, loading, empty, list)
+  const historyTitle = element('h3', 'settings-section-title', '历史归档')
+  const historyIntro = element('p', 'trash-intro', '已清除笔记的账本归档；只有在这里明确清理才会移入系统废纸篓。')
+  const historyCapacity = element('p', 'trash-capacity')
+  const historyStatus = element('p', 'trash-status'); historyStatus.setAttribute('role','status')
+  const historyList = element('ul', 'trash-list')
+  const historySection = element('section', 'trash-history-archive')
+  historySection.append(historyTitle, historyIntro, historyCapacity, historyStatus, historyList)
+  root.append(back, title, intro, capacity, status, error, loading, empty, list, historySection)
 
   function refreshControls(): void {
     root.setAttribute('aria-busy', String(busy))
@@ -245,6 +254,45 @@ export function mountTrashManager(context: TrashManagerContext, handlers: TrashM
     await load()
   }
 
+  async function loadHistory(): Promise<void> {
+    if (!handlers.history) { historySection.hidden = true; return }
+    historySection.hidden = false
+    try {
+      const result = await handlers.history()
+      if (!alive()) return
+      if (!result.ok || !result.entries) { historyStatus.textContent = '历史归档暂时无法读取。'; return }
+      historyList.replaceChildren()
+      historyCapacity.textContent = `已用 ${formatTrashBytes(result.bytes ?? 0)}。`
+      if (!result.entries.length) { historyStatus.textContent = '没有历史归档。'; return }
+      historyStatus.textContent = ''
+      for (const entry of result.entries) {
+        const row = element('li', 'trash-row')
+        row.dataset.historyNoteId = entry.noteId
+        const head = element('div', 'trash-row-head')
+        head.append(element('strong', 'trash-name', entry.relPath), element('span', 'trash-state', entry.state === 'archived' ? '已归档' : entry.state === 'trashed' ? '待还原' : '已退休'))
+        const meta = element('p', 'trash-meta-line', `${formatTrashTime(entry.archivedAt)}${entry.trashId ? ` · 原删除条目 ${entry.trashId}` : ''}`)
+        const actions = element('div', 'trash-actions')
+        if (handlers.purgeHistory) {
+          const clear = button('清理归档', () => { void purgeHistory(entry.noteId) })
+          clear.dataset.trashAction = 'history-purge'; clear.classList.add('trash-danger')
+          actions.append(clear)
+        }
+        row.append(head, meta, actions)
+        historyList.append(row)
+      }
+    } catch { if (alive()) historyStatus.textContent = '历史归档读取未完成；原记录仍保留。' }
+  }
+  async function purgeHistory(noteId: string): Promise<void> {
+    if (!handlers.purgeHistory || busy) return
+    busy = true; context.onBusyChange?.(true); historyStatus.textContent = '正在清理归档…'; refreshControls()
+    try {
+      const result = await handlers.purgeHistory(noteId)
+      if (!alive()) return
+      if (!result.ok) { historyStatus.textContent = ledgerErrorText(result.error); return }
+      await loadHistory()
+    } catch { if (alive()) historyStatus.textContent = '归档清理未完成；原记录仍保留。' }
+    finally { busy = false; context.onBusyChange?.(false); refreshControls() }
+  }
   async function load(initial: boolean): Promise<void> {
     const ticket = ++listSequence
     if (initial || entries === null) {
@@ -314,6 +362,7 @@ export function mountTrashManager(context: TrashManagerContext, handlers: TrashM
   }
 
   void load(true)
+    void loadHistory()
 
   return {
     dispose: () => { disposed = true; listSequence++ },

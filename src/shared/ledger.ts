@@ -1,6 +1,9 @@
 import type {LedgerRecord} from '../main/ledger-store.ts'
 export type LedgerRequest={sessionId:string;objectVersion:string;relPath:string;cursor?:string|null}
 export type LedgerTrashRequest={sessionId:string;trashId:string;cursor?:string|null}
+export type LedgerHistoryRequest={sessionId:string;action:'list'|'purge';noteId?:string}
+export type LedgerHistoryEntryView={noteId:string;relPath:string;state:'trashed'|'retired'|'orphaned'|'archived';trashId?:string;archivedAt:string}
+export type LedgerHistoryResult={ok:true;entries?:LedgerHistoryEntryView[];bytes?:number;purged?:string}|{ok:false;error:string}
 export type LedgerView={noteId:string;records:LedgerRecord[];cursor:string|null;ownership:'verified'|'unregistered';gaps:string[];maintenanceError?:string;chunk?:{taskId:string;data:string;offset:number;total:number;hash:string}}
 export type LedgerResult={ok:true;value:LedgerView}|{ok:false;error:string;registryRevision?:string|null}
 export type LedgerMigrationRequest={sessionId:string;after:string|null}

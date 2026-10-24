@@ -12,6 +12,7 @@ export const IPC = {
   noteRead: 'note:read',
   ledgerGet:'ledger:get',
   ledgerGetTrash:'ledger:get-trash',
+  ledgerHistory:'ledger:history',
   ledgerReasoning:'ledger:reasoning',
   memoryMaintenancePreview:'memory:maintenance-preview',
   ledgerMaintenance:'ledger:maintenance',

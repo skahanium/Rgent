@@ -1,4 +1,4 @@
-import {mkdtempSync,readFileSync,rmSync,writeFileSync,renameSync,unlinkSync} from 'node:fs'
+import {mkdirSync,mkdtempSync,readFileSync,rmSync,writeFileSync,renameSync,unlinkSync} from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {afterEach,expect,it,vi} from 'vitest'
@@ -275,5 +275,19 @@ it('resolves an active owner without scanning the ledger/history directories',()
  try {
   expect(store.lookupOwner('a.md')?.noteId).toBe(owner.noteId)
   expect(list).not.toHaveBeenCalled()
+ } finally { list.mockRestore() }
+})
+
+it('resolves one active owner from a 5k-owner registry without scanning the vault',()=>{
+ const {root,fs,store}=fixture();writeFileSync(path.join(root,'target.md'),'正文')
+ const objectVersion=fs.readSnapshot('target.md').objectVersion
+ const owners=Array.from({length:5000},(_,i)=>({noteId:`n${i}`,relPath:i===4999?'target.md':`note${i}.md`,objectVersion:i===4999?objectVersion:`obj${i}`,bodyRevision:'a'.repeat(64),anchors:[],sequenceCeiling:0}))
+ mkdirSync(path.join(root,'.rgent','ledgers',owners[4999]!.noteId),{recursive:true})
+ writeFileSync(path.join(root,'.rgent','ledgers',owners[4999]!.noteId,'owner.json'),JSON.stringify(owners[4999]))
+ writeFileSync(path.join(root,'.rgent','registry.json'),JSON.stringify({version:1,owners,sequence:0}))
+ const list=vi.spyOn(fs,'list')
+ try {
+  const started=Date.now(),found=store.lookupOwner('target.md')
+  expect(found?.noteId).toBe('n4999');expect(Date.now()-started).toBeLessThan(500);expect(list).not.toHaveBeenCalled()
  } finally { list.mockRestore() }
 })

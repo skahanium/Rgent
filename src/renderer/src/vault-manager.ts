@@ -412,7 +412,11 @@ function preloadTrashHandlers(): TrashManagerHandlers | null {
     list: () => api.vaultTrashList(),
     restore: id => api.vaultTrashRestore(id),
     purge: id => api.vaultTrashPurge(id),
-    ...(typeof api.ledgerGetTrash === 'function' ? { ledger: async (id, cursor) => { const state = await api.vaultGet(); if (!state.sessionId) throw new Error('NO_VAULT'); return api.ledgerGetTrash({sessionId: state.sessionId, trashId: id, cursor}) } } : {})
+    ...(typeof api.ledgerGetTrash === 'function' ? { ledger: async (id, cursor) => { const state = await api.vaultGet(); if (!state.sessionId) throw new Error('NO_VAULT'); return api.ledgerGetTrash({sessionId: state.sessionId, trashId: id, cursor}) } } : {}),
+    ...(typeof api.ledgerHistory === 'function' ? {
+      history: async () => { const state = await api.vaultGet(); if (!state.sessionId) return {ok:false,error:'NO_VAULT'} as const; return api.ledgerHistory({sessionId: state.sessionId, action:'list'}) },
+      purgeHistory: async (noteId) => { const state = await api.vaultGet(); if (!state.sessionId) return {ok:false,error:'NO_VAULT'} as const; return api.ledgerHistory({sessionId: state.sessionId, action:'purge', noteId}) }
+    } : {})
   }
 }
 function errorText(error: unknown): string {

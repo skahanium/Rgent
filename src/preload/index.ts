@@ -99,6 +99,7 @@ const api = {
   ledgerReasoning:(request:import('../shared/ledger.ts').LedgerReasoningRequest):Promise<import('../shared/ledger.ts').LedgerReasoningResult>=>invoke(IPC.ledgerReasoning,request),
   ledgerGet:(request:import('../shared/ledger.ts').LedgerRequest):Promise<import('../shared/ledger.ts').LedgerResult>=>invoke(IPC.ledgerGet,request),
   ledgerGetTrash:(request:import('../shared/ledger.ts').LedgerTrashRequest):Promise<import('../shared/ledger.ts').LedgerResult>=>invoke(IPC.ledgerGetTrash,request),
+  ledgerHistory:(request:import('../shared/ledger.ts').LedgerHistoryRequest):Promise<import('../shared/ledger.ts').LedgerHistoryResult>=>invoke(IPC.ledgerHistory,request),
   ledgerMigrate:(request:import('../shared/ledger.ts').LedgerMigrationRequest):Promise<import('../shared/ledger.ts').LedgerMigrationResult>=>invoke(IPC.ledgerMigrate,request),
   onMemoryChanged: (fn: (sessionId: string) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, value: unknown): void => { const args = boundEvent(value, mountedSession); if (typeof args?.[0] === 'string') fn(args[0]) }
