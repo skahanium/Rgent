@@ -62,11 +62,11 @@
 | # | 包 | 内容 | 依赖 | 状态 |
 |---|---|---|---|---|
 | D0 | 文档 | family/动作/重试/失败指针/隐私/支持包；D 表与入口 | 所有者批准 | **已交**（`edc3766`） |
-| D1 | 目录 | `TaskFailure`、family/action/retryable、脱敏 detail | D0 | **本机已交**（`f69e0f1`） |
-| D2 | 采集 | provider 分类、TaskResult/HostEvent、`chapter.failure`、失败指针 | D1 | **本机已交**（`f69e0f1`） |
-| D3 | 呈现 | failed 任务浮层、详情、preflight 环、重启恢复 | D2 | **本机已交**（`f69e0f1`） |
-| D4 | 恢复 | 新 taskId 重试、失败 marker 替换、清除 marker | D3 | **本机已交**（`f69e0f1`） |
-| D5 | 收口 | 支持包、排障手册、全量门、history 回填 | D4 | **本机已交**（`f69e0f1`） |
+| D1 | 目录 | `TaskFailure`、family/action/retryable、脱敏 detail | D0 | **本机已交**（`f69e0f1`／`bc10019`） |
+| D2 | 采集 | provider 分类、TaskResult/HostEvent、`chapter.failure`、失败指针 | D1 | **本机已交**（`f69e0f1`／`bc10019`） |
+| D3 | 呈现 | failed 任务浮层、详情、preflight 环、重启恢复 | D2 | **本机已交**（`f69e0f1`／`bc10019`） |
+| D4 | 恢复 | 新 taskId 重试、失败 marker 替换、清除 marker | D3 | **本机已交**（`f69e0f1`／`bc10019`） |
+| D5 | 收口 | 支持包、排障手册、全量门、history 回填 | D4 | **本机已交**（`f69e0f1`／`bc10019`） |
 
 **D0 验收**：`pnpm docs:check` 通过；D1–D5 未写代码；文档只保留 family 合同与排障方法，不复制完整错误码表。
 
