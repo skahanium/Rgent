@@ -29,7 +29,7 @@ it('binds only continuous objects; Finder copy starts new history and replacemen
  const {root,fs,store}=fixture();writeFileSync(path.join(root,'a.md'),'正文')
  const owner=store.owner('a.md');store.prepare('a.md',task)
  writeFileSync(path.join(root,'copy.md'),'正文');expect(store.owner('copy.md').noteId).not.toBe(owner.noteId)
- renameSync(path.join(root,'a.md'),path.join(root,'renamed.md'));expect(store.owner('renamed.md').noteId).toBe(owner.noteId)
+ renameSync(path.join(root,'a.md'),path.join(root,'renamed.md'));expect(store.lookupOwner('renamed.md')?.noteId).toBe(owner.noteId);expect(store.owner('renamed.md').noteId).toBe(owner.noteId)
  fs.replace('renamed.md','正文','替换正文');const replacement=store.owner('renamed.md');expect(replacement.noteId).not.toBe(owner.noteId);expect(store.historyEntries().some(e=>e.noteId===owner.noteId&&e.state==='orphaned')).toBe(true)
 })
 it('copies and verifies legacy exact bytes before stripping tail; opaque chapters remain opaque',()=>{

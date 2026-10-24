@@ -145,6 +145,10 @@ export class LedgerStore{
   const registry=this.registry();if(!this.read(fixed))this.assertNoMaterialHistory()
   const note=this.fs.readSnapshot(relPath),owner=registry.owners.find(o=>o.relPath===relPath)
   if(!owner){
+   // A Finder rename keeps the object identity but changes the address. Follow it only when unique.
+   const moved=registry.owners.filter(o=>o.objectVersion===note.objectVersion)
+   if(moved.length===1)return structuredClone(moved[0]!)
+   if(moved.length>1)throw Error('LEDGER_OWNERSHIP_UNVERIFIED')
    let dirs:ReturnType<SecureVaultFs['list']>=[];try{dirs=this.fs.list('.rgent/ledgers')}catch(e){if(!(e instanceof Error&&e.message==='ENOENT'))throw e}
    for(const dir of dirs){if(dir.name==='.DS_Store'&&dir.kind==='file')continue;if(dir.kind!=='dir'||!id(dir.name))throw Error('LEDGER_REGISTRY_INVALID');const descriptor=this.read(`.rgent/ledgers/${dir.name}/owner.json`);let evidence:unknown;try{evidence=JSON.parse(descriptor?.raw??'')}catch{throw Error('LEDGER_REGISTRY_INVALID')};if(!validOwner(evidence))throw Error('LEDGER_REGISTRY_INVALID');if(evidence.relPath===relPath&&evidence.objectVersion!==note.objectVersion)return null}
    return null
