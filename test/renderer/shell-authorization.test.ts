@@ -20,7 +20,10 @@ const editorHarness = vi.hoisted(() => ({
   block: null as PromptBlockSnapshot | null,
   createResult: 'created' as 'created' | 'focused' | 'refused',
   createCall: vi.fn(),
-  createCalls: [] as ({ at?: 'caret' | 'end'; text?: string } | undefined)[]
+  createCalls: [] as ({ at?: 'caret' | 'end'; text?: string } | undefined)[],
+  ensureResult: true,
+  ensureCalls: 0,
+  ensureRefresh: null as (() => void) | null
 }))
 vi.mock('../../src/renderer/src/view/editor.ts', () => ({
   mountEditor: (_root: HTMLElement, change: (text: string) => void) => {
@@ -54,6 +57,12 @@ vi.mock('../../src/renderer/src/view/editor.ts', () => ({
         return editorHarness.createResult
       },
       promptBlockAtCaret: () => editorHarness.block,
+      ensurePromptMarker: () => {
+        editorHarness.ensureCalls += 1
+        if (!editorHarness.ensureResult) return false
+        editorHarness.ensureRefresh?.()
+        return true
+      },
       setReadOnly: () => {}, setTheme: () => {}, setActiveTaskIds: () => {}, setNoteHost: () => {},
       onStateChange: () => {}, onViewportChange: () => {}, focus: editorHarness.focus,
       selectionRange: () => ({ anchor: editorHarness.text.length, head: editorHarness.text.length }),
@@ -105,6 +114,7 @@ beforeEach(() => {
   editorHarness.text = ''; editorHarness.change = null
   editorHarness.hasFocus = true; editorHarness.readOnly = false
   editorHarness.block = null; editorHarness.createResult = 'created'; editorHarness.createCalls = []
+  editorHarness.ensureResult = true; editorHarness.ensureCalls = 0; editorHarness.ensureRefresh = null
   editorHarness.createCall.mockClear()
   editorHarness.focus.mockClear()
   localStorage.clear()
@@ -174,7 +184,7 @@ const waitForNote = async (relPath = '甲.md'): Promise<void> => {
   await vi.waitFor(() => expect(root.querySelector('.tab')?.getAttribute('data-rel')).toBe(relPath))
   await vi.waitFor(() => expect(root.querySelector('.status-dot')).not.toBeNull())
 }
-/** 模拟 P2 已把光标放进一枚提问块：Enter 由壳转成一次发送。 */
+/** 模拟编辑器已把光标放进提问块／待发送行：Enter 由壳转成一次发送。 */
 const setPrompt = (prompt: string): void => {
   editorHarness.text = prompt
   editorHarness.block = { range: { start: 0, end: prompt.length }, prompt, empty: prompt.length === 0 }
@@ -232,6 +242,37 @@ it('submits silently with the default note scope and never opens a card', async 
   expect(startedRequest).not.toHaveProperty('references')
   expect(startedRequest).not.toHaveProperty('network')
   expect(startedRequest).not.toHaveProperty('mcp')
+})
+
+it('does not send when the marker cannot be ensured, keeping the draft', async () => {
+  await waitForNote()
+  editorHarness.ensureResult = false
+  const event = sendPrompt('还没落 marker')
+  await vi.waitFor(() => expect(editorHarness.ensureCalls).toBe(1))
+  expect(event.defaultPrevented).toBe(true)
+  expect(api.agentAuthorizationPreview).not.toHaveBeenCalled()
+  expect(api.agentStart).not.toHaveBeenCalled()
+  expect(editorHarness.text).toBe('还没落 marker')
+  expect(editorHarness.block).toMatchObject({ prompt: '还没落 marker', empty: false })
+  await vi.waitFor(() => expect(root.querySelector('.status-host-notice')?.textContent).toContain('草稿已保留'))
+})
+
+it('refreshes the block range after the editor inserts the marker before send', async () => {
+  await waitForNote()
+  setPrompt('问题')
+  // 模拟 ensurePromptMarker 在正文上方补了 10 个字符的 marker 行。
+  editorHarness.ensureRefresh = () => {
+    editorHarness.text = `${'甲'.repeat(10)}问题`
+    editorHarness.block = { range: { start: 10, end: 12 }, prompt: '问题', empty: false }
+    editorHarness.change!(editorHarness.text)
+  }
+  pressEnter()
+  await vi.waitFor(() => expect(api.agentAuthorizationPreview).toHaveBeenCalledTimes(1))
+  expect(api.agentAuthorizationPreview.mock.calls[0]![0]).toMatchObject({
+    range: { start: 10, end: 12 }, expectedText: '问题', promptText: '问题'
+  })
+  await vi.waitFor(() => expect(api.agentStart).toHaveBeenCalledTimes(1))
+  expect(api.agentStart.mock.calls[0]![0]).toMatchObject({ range: { start: 10, end: 12 }, promptText: '问题' })
 })
 
 

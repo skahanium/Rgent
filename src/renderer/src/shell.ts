@@ -488,6 +488,7 @@ export async function start(root: HTMLElement): Promise<void> {
     createPromptBlock: (options?: { at?: 'caret' | 'end'; text?: string }) => 'created' | 'focused' | 'refused'
     promptBlockAtCaret: () => PromptBlockSnapshot | null
     removeEmptyPromptBlockAtCaret?: () => boolean
+    ensurePromptMarker?: () => boolean
   }
   const promptEditor = editor as EditorHost & Partial<PromptBlockEditor>
 
@@ -763,9 +764,22 @@ export async function start(root: HTMLElement): Promise<void> {
     const tab = current()
     if (!tab || block.empty || conflictDecisionOpen) return
     if (tab.availability || !tab.sessionId || !tab.objectVersion) return
-    const promptText = block.prompt
+    // F1：首字落 marker 是微任务；发送前在这里同步补，补不上就不发、草稿原样保留。
+    if (promptEditor.ensurePromptMarker && !promptEditor.ensurePromptMarker()) {
+      hostNotice = '提问块还没准备好；草稿已保留，请再按一次 Enter。'
+      updateStatus()
+      return
+    }
+    // marker 落在正文上方后 raw 偏移会变：重取一次，绝不拿快捷键前的旧范围去发。
+    const ensured = promptEditor.promptBlockAtCaret?.() ?? null
+    if (!ensured || ensured.empty) {
+      hostNotice = '提问块还没准备好；草稿已保留，请再按一次 Enter。'
+      updateStatus()
+      return
+    }
+    const promptText = ensured.prompt
     if (!promptText.trim()) return
-    const { start, end } = block.range
+    const { start, end } = ensured.range
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > editor.getText().length || start >= end) return
     const selectedModelId = taskModelId(tab, modelConfigSnapshot?.defaultModelId ?? null)
     if (!selectedModelId || !modelConfigSnapshot || !modelModuleGroups(modelConfigSnapshot).some(group => group.items.some(item => item.id === selectedModelId))) {
@@ -785,7 +799,7 @@ export async function start(root: HTMLElement): Promise<void> {
     const request = {
       modelRecordId: selectedModelId,
       relPath: tab.relPath,
-      range: block.range,
+      range: ensured.range,
       expectedText: promptText,
       promptText,
       sessionId: tab.sessionId!, objectVersion: tab.objectVersion!, expectedRevision: tab.revision,

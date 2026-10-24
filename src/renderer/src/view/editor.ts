@@ -16,13 +16,23 @@ import {
   type PresentationPlan,
   type EditChange
 } from '@markdown'
-import { defaultKeymap, history, historyKeymap, isolateHistory } from '@codemirror/commands'
-import { Compartment, EditorState, Facet, StateField, Transaction, type Range } from '@codemirror/state'
+import { defaultKeymap, history, historyKeymap, invertedEffects, isolateHistory } from '@codemirror/commands'
+import {
+  Compartment,
+  EditorState,
+  Facet,
+  StateEffect,
+  StateField,
+  Transaction,
+  type Range,
+  type TransactionSpec
+} from '@codemirror/state'
 import {
   Decoration,
   type DecorationSet,
   EditorView,
   keymap,
+  type ViewUpdate,
   WidgetType
 } from '@codemirror/view'
 import { SourceProjection, normalizeSource, rawEditSpec, sourceOf, rawSourceField, rawSourceHistory, setRawSource } from './source.ts'
@@ -33,10 +43,17 @@ import { renderSafeHtmlFragment } from './safe-html.ts'
 import { renderReadOnlyNode } from './read-only.ts'
 import { joinVaultRel } from '../../../shared/vault-rel.ts'
 import {
+  draftPromptBecameEmpty,
+  draftPrompts,
+  firstMarker,
+  locatePendingPrompt,
   locatePromptBlock,
   planEmptyPromptRemoval,
+  planPendingPromptInsertion,
+  planPendingPromptRemoval,
   planPromptInsertion,
   promptDraftChrome,
+  removeDraftMarker,
   type PromptBlockAtCaret,
   type PromptBlockOptions
 } from '../prompt-block.ts'
@@ -209,6 +226,66 @@ export const markdownField = StateField.define<MarkdownState>({
   },
   provide: (field) => [rawSourceField, rawSourceHistory, EditorView.decorations.from(field, (value) => value.decorations)]
 })
+
+/**
+ * 待发送空行（F1）：唤起提问块时只在编辑器里记一个行锚点，不往原文写 marker。
+ * 锚点参与事务映射；用户在同一段空行里按 Shift+Enter 时跟着光标走。
+ * 状态值存视图偏移（与 CM 事务同坐标），用的时候经 SourceProjection 换成原文 raw。
+ */
+type PendingPrompt = { at: number }
+
+const setPendingPrompt = StateEffect.define<PendingPrompt | null>({
+  map: (value, changes) => value ? { at: changes.mapPos(value.at, -1) } : null
+})
+
+function blankLineText(text: string): boolean {
+  return text.trim() === ''
+}
+
+const pendingPromptField = StateField.define<PendingPrompt | null>({
+  create: () => null,
+  update: (value, tr) => {
+    const set = tr.effects.find((effect) => effect.is(setPendingPrompt))
+    if (set) return set.value as PendingPrompt | null
+    if (!value) return null
+    // 换 tab / 外部正文合并不把 pending 带过去：那已经是另一篇的文字。
+    if (tr.isUserEvent('rgent.setText') || tr.isUserEvent('rgent.host')) return null
+    const doc = tr.state.doc
+    let at = tr.changes.mapPos(value.at, -1)
+    if (at < 0 || at > doc.length) return null
+    at = Math.min(at, doc.length)
+    const line = doc.lineAt(at)
+    if (line.from !== at) return null
+    if (blankLineText(line.text)) {
+      // 同一段连续空行里换行/移动光标：待发送行跟着光标，避免按过 Shift+Enter 后落错行。
+      let first = line.number
+      let last = line.number
+      while (first > 1 && blankLineText(doc.line(first - 1).text)) first -= 1
+      while (last < doc.lines && blankLineText(doc.line(last + 1).text)) last += 1
+      const head = tr.state.selection.main.head
+      if (head >= doc.line(first).from && head <= doc.line(last).to) at = doc.lineAt(head).from
+    }
+    return { at }
+  },
+  // 行装饰只需要一条；与身份装饰同序，首次落字换成 marker 后 className 不变。
+  provide: (field) => EditorView.decorations.from(field, (value) => value
+    ? Decoration.set([
+      Decoration.line({ class: 'rgent-block-command-first rgent-block-command' }).range(value.at)
+    ])
+    : Decoration.none)
+})
+
+/** 让撤销创建提问块时 pending 装饰一起回退，而不是留在别的空行上。 */
+const pendingPromptHistory = invertedEffects.of((tr) => {
+  if (!tr.effects.some((effect) => effect.is(setPendingPrompt))) return []
+  return [setPendingPrompt.of(tr.startState.field(pendingPromptField))]
+})
+
+function promptEffects(spec: TransactionSpec, effects: readonly StateEffect<unknown>[]): TransactionSpec {
+  const base = spec.effects as StateEffect<unknown> | readonly StateEffect<unknown>[] | undefined
+  const list = base == null ? [] : Array.isArray(base) ? [...base] : [base as StateEffect<unknown>]
+  return { ...spec, effects: [...list, ...effects] }
+}
 
 function decorationsFor(
   result: CompileResult,
@@ -454,13 +531,15 @@ export type EditorHost = {
   view: EditorView
   getText: () => string
   /**
-   * 创建一等提问块：光标已在草稿里则只聚焦（'focused'），否则插入草稿 marker
-   * 与提问行（'created'）；只读时 'refused'。
+   * 创建一等提问块：光标已在草稿／待发送行里则只聚焦（'focused'），否则只插
+   * 待发送空行（'created'，F1：不落 marker）；只读时 'refused'。
    */
   createPromptBlock: (options?: PromptBlockOptions) => 'created' | 'focused' | 'refused'
   /** 光标所在草稿提问块的原文范围与正文；已发送、人的块或光标不在提问行上时为 null。 */
   promptBlockAtCaret: () => PromptBlockAtCaret | null
   removeEmptyPromptBlockAtCaret: () => boolean
+  /** 发送前同步保证 marker 已落；待发送行还没有正文、或补不上时返回 false。 */
+  ensurePromptMarker: () => boolean
   setText: (text: string, host?: NoteHost, selection?: { anchor: number; head: number }) => void
   /** 在光标处插入、有选区时替换选区；只读／被身份锁拦下时返回 false。保留撤销。 */
   insertAtSelection: (text: string) => boolean
@@ -514,6 +593,10 @@ export function mountEditor(
   const readOnlyCompartment = new Compartment()
   let readOnly = false
   let dark = false
+  let editorDestroyed = false
+  let promptMarkerScheduled = false
+  let promptRemovalScheduled = false
+  const promptRemovals: { marker: number; body: number }[] = []
   const state = EditorState.create({
     doc: '',
     extensions: [
@@ -537,7 +620,10 @@ export function mountEditor(
       activeTaskCompartment.of(activeTaskIdsFacet.of(new Set<string>())),
       hostCompartment.of(noteHostFacet.of(emptyNoteHost)),
       markdownField,
+      pendingPromptField,
+      pendingPromptHistory,
       identityLock,
+      EditorView.updateListener.of((update) => observePromptEdit(update)),
       EditorView.domEventHandlers({
         compositionstart: (_event, view) => {
           compositionBoundary = null
@@ -559,6 +645,16 @@ export function mountEditor(
           if (boundary && !event.data) queueMicrotask(() => {
             // CM 先刷新取消后的 DOM；只撤回仍为空、仍属本篇的自动断段。
             if (boundary.generation === documentGeneration && sourceOf(view.state).raw === boundary.raw) view.dispatch({ changes: { from: boundary.from, to: boundary.from + 1 }, annotations: Transaction.addToHistory.of(false) })
+          })
+          // 输入法组合期间不补 marker（避免打断组合）；组合结束拿到正文后再补。
+          queueMicrotask(() => {
+            if (editorDestroyed) return
+            const pending = view.state.field(pendingPromptField)
+            if (!pending) return
+            const projection = sourceOf(view.state)
+            const at = projection.toRaw(pending.at)
+            const located = locatePendingPrompt(projection.raw, at, projection.toRaw(view.state.selection.main.head))
+            if (located && !located.empty) schedulePendingMarker(view)
           })
           return false
         },
@@ -598,6 +694,122 @@ export function mountEditor(
   const stateListeners = new Set<() => void>()
   const viewportListeners = new Set<() => void>()
   const view = new EditorView({ state, parent })
+
+  /** 待发送行已经有正文：同步补 marker（发送前保证），失败返回 false 且不动原文。 */
+  function insertPendingMarker(target: EditorView): boolean {
+    if (editorDestroyed || readOnly || target.state.readOnly) return false
+    const pending = target.state.field(pendingPromptField)
+    if (!pending) return false
+    const projection = sourceOf(target.state)
+    const edit = firstMarker(projection.raw, projection.toRaw(pending.at))
+    if (!edit) return false
+    const from = projection.toView(edit.from)
+    const inserted = normalizeSource(edit.insert).length
+    const selection = target.state.selection.main
+    const shift = (position: number): number => position >= from ? position + inserted : position
+    const spec = rawEditSpec(target.state, edit)
+    target.dispatch({
+      ...promptEffects(spec, [setPendingPrompt.of(null)]),
+      selection: { anchor: shift(selection.anchor), head: shift(selection.head) },
+      annotations: [Transaction.addToHistory.of(false)],
+      userEvent: 'rgent.promptMarker'
+    })
+    // 被身份锁整笔拦下时 effects 也不会生效：只有 pending 真的清掉才算补上。
+    return target.state.field(pendingPromptField) === null
+  }
+
+  function schedulePendingMarker(target: EditorView): void {
+    if (editorDestroyed || promptMarkerScheduled) return
+    promptMarkerScheduled = true
+    queueMicrotask(() => {
+      promptMarkerScheduled = false
+      if (editorDestroyed) return
+      insertPendingMarker(target)
+    })
+  }
+
+  /** 草稿正文删空后，把 marker 行移除回到待发送空行；等微任务避免在事务里递归 dispatch。 */
+  function scheduleDraftMarkerRemoval(target: EditorView, marker: number, body: number): void {
+    promptRemovals.push({ marker, body })
+    if (editorDestroyed || promptRemovalScheduled) return
+    promptRemovalScheduled = true
+    queueMicrotask(() => {
+      promptRemovalScheduled = false
+      if (editorDestroyed) {
+        promptRemovals.length = 0
+        return
+      }
+      // 一次事务可能把多段草稿同时删空；逐段移除，并把后面的 raw 偏移跟着挪。
+      while (promptRemovals.length) {
+        const targetRemoval = promptRemovals.shift()!
+        const source = sourceOf(target.state)
+        const index = target.state.field(markdownField).result.index
+        const found = draftPrompts(source.raw, index)
+          .find((draft) => draft.empty && draft.marker.range.start === targetRemoval.marker)
+        if (!found) continue
+        const edit = removeDraftMarker(source.raw, found.marker.range)
+        if (!edit) continue
+        const rawAfter = source.raw.slice(0, edit.from) + source.raw.slice(edit.to)
+        const removed = edit.to - edit.from
+        const bodyAfter = targetRemoval.body >= edit.to ? targetRemoval.body - removed : Math.max(edit.from, targetRemoval.body)
+        const at = new SourceProjection(rawAfter).toView(Math.min(bodyAfter, rawAfter.length))
+        const spec = rawEditSpec(target.state, edit)
+        target.dispatch({
+          ...promptEffects(spec, [setPendingPrompt.of({ at })]),
+          annotations: [Transaction.addToHistory.of(false)],
+          userEvent: 'rgent.promptMarker'
+        })
+        for (const rest of promptRemovals) {
+          if (rest.marker >= edit.to) rest.marker -= removed
+          if (rest.body >= edit.to) rest.body -= removed
+        }
+      }
+    })
+  }
+
+  /**
+   * 改动后看一眼提问草稿：
+   * - 有 pending：待发送行首次出现非空白就补 marker；
+   * - 没有 pending：某段有正文的草稿被删到只剩空白，就移除 marker 回到 pending。
+   * 两者都由微任务完成，避免在 updateListener 里递归 dispatch；发送前另有同步保证。
+   */
+  function observePromptEdit(update: ViewUpdate): void {
+    if (editorDestroyed || applying || !update.docChanged) return
+    if (update.transactions.some((tr) =>
+      tr.isUserEvent('rgent.setText') || tr.isUserEvent('rgent.host') || tr.isUserEvent('rgent.promptMarker'))) return
+    const pending = update.state.field(pendingPromptField)
+    if (pending) {
+      const projection = sourceOf(update.state)
+      const at = projection.toRaw(pending.at)
+      const located = locatePendingPrompt(projection.raw, at, at)
+      // 组合期间不补 marker：等 compositionend 再补，别把预编辑范围打断。
+      if (located && !located.empty && !update.view.compositionStarted) schedulePendingMarker(update.view)
+      return
+    }
+    // pending 是这个事务里被 marker 顶替/清掉的：不是「正文被删空」。
+    if (update.startState.field(pendingPromptField)) return
+    const oldProjection = sourceOf(update.startState)
+    const oldIndex = update.startState.field(markdownField).result.index
+    const oldDrafts = draftPrompts(oldProjection.raw, oldIndex)
+    if (!oldDrafts.length) return
+    const rawChanges = changesOf(update).map((change) => ({
+      from: oldProjection.toRaw(change.from),
+      to: oldProjection.toRaw(change.to)
+    }))
+    const projection = sourceOf(update.state)
+    const index = update.state.field(markdownField).result.index
+    for (const draft of oldDrafts) {
+      if (draft.empty) continue
+      if (!rawChanges.some((change) => change.from <= draft.range.end && change.to >= draft.range.start)) continue
+      const marker = projection.toRaw(update.changes.mapPos(oldProjection.toView(draft.marker.range.start), -1))
+      const now = draftPrompts(projection.raw, index)
+        .find((item) => item.marker.range.start === marker)
+      if (!now || !draftPromptBecameEmpty(draft, now)) continue
+      scheduleDraftMarkerRemoval(update.view, now.marker.range.start, projection.toRaw(now.range.start))
+      break
+    }
+  }
+
   return {
     view,
     getText: () => sourceOf(view.state).raw,
@@ -608,19 +820,31 @@ export function mountEditor(
       const result = view.state.field(markdownField).result
       // 显式的「文末 + 正文」是暂停重发，不能因为光标恰好在别的草稿里就改成聚焦。
       const explicit = options?.at === 'end' || (options?.text != null && options.text.length > 0)
-      if (!explicit && locatePromptBlock(projection.raw, result.index, caret)) {
-        view.focus()
-        return 'focused'
+      if (!explicit) {
+        const pending = view.state.field(pendingPromptField)
+        const onPending = pending
+          ? locatePendingPrompt(projection.raw, projection.toRaw(pending.at), caret)
+          : null
+        if (onPending || locatePromptBlock(projection.raw, result.index, caret)) {
+          view.focus()
+          return 'focused'
+        }
       }
-      const plan = planPromptInsertion(projection.raw, result.index, caret, options)
-      const from = projection.toView(plan.edit.from)
-      const insertedLength = Math.max(0, Math.min(plan.edit.insert.length, plan.caret - plan.edit.from))
-      // 光标落在新提问行上：插入内容的 raw 前缀换成视图投影后算长度。
-      const caretAt = from + normalizeSource(plan.edit.insert.slice(0, insertedLength)).length
+      // F1：普通唤起只插待发送空行；只有暂停重发（显式带正文）才立刻落 marker。
+      const plan = explicit
+        ? planPromptInsertion(projection.raw, result.index, caret, options)
+        : planPendingPromptInsertion(projection.raw, result.index, caret, options)
+      const rawAfter = projection.raw.slice(0, plan.edit.from) + plan.edit.insert + projection.raw.slice(plan.edit.to)
+      const nextProjection = new SourceProjection(rawAfter)
+      const caretAt = nextProjection.toView(plan.caret)
       view.dispatch({
-        ...rawEditSpec(view.state, plan.edit),
+        ...promptEffects(rawEditSpec(view.state, plan.edit), [
+          setPendingPrompt.of(explicit ? null : { at: caretAt })
+        ]),
         selection: { anchor: caretAt },
         scrollIntoView: true,
+        // 复用现成空行时没有正文变化；effect-only 事件会卡住更早的撤销，不入历史。
+        ...(plan.edit.insert.length === 0 ? { annotations: [Transaction.addToHistory.of(false)] } : {}),
         userEvent: 'rgent.promptBlock'
       })
       view.focus()
@@ -628,16 +852,43 @@ export function mountEditor(
     },
     promptBlockAtCaret: () => {
       const projection = sourceOf(view.state)
+      const caret = projection.toRaw(view.state.selection.main.head)
       const found = locatePromptBlock(
         projection.raw,
         view.state.field(markdownField).result.index,
-        projection.toRaw(view.state.selection.main.head)
+        caret
       )
-      return found ? { range: found.range, prompt: found.prompt, empty: found.empty } : null
+      if (found) return { range: found.range, prompt: found.prompt, empty: found.empty }
+      const pending = view.state.field(pendingPromptField)
+      return pending ? locatePendingPrompt(projection.raw, projection.toRaw(pending.at), caret) : null
     },
     removeEmptyPromptBlockAtCaret: () => {
       if (readOnly || view.state.readOnly) return false
       const projection = sourceOf(view.state)
+      const pending = view.state.field(pendingPromptField)
+      if (pending) {
+        const at = projection.toRaw(pending.at)
+        const located = locatePendingPrompt(projection.raw, at, projection.toRaw(view.state.selection.main.head))
+        // 光标在 pending 行上才删这一行；在别的旧空草稿上要落到下面的 marker 清理。
+        if (located) {
+          if (!located.empty) return false
+          const plan = planPendingPromptRemoval(projection.raw, at)
+          if (!plan) {
+            view.dispatch({
+              effects: setPendingPrompt.of(null),
+              annotations: [Transaction.addToHistory.of(false)],
+              userEvent: 'rgent.promptBlock'
+            })
+          } else {
+            view.dispatch({
+              ...promptEffects(rawEditSpec(view.state, plan), [setPendingPrompt.of(null)]),
+              userEvent: 'rgent.promptBlock'
+            })
+          }
+          view.focus()
+          return true
+        }
+      }
       const plan = planEmptyPromptRemoval(
         projection.raw,
         view.state.field(markdownField).result.index,
@@ -650,6 +901,18 @@ export function mountEditor(
       })
       view.focus()
       return true
+    },
+    ensurePromptMarker: () => {
+      if (readOnly || view.state.readOnly) return false
+      const pending = view.state.field(pendingPromptField)
+      if (pending) return insertPendingMarker(view)
+      const projection = sourceOf(view.state)
+      const found = locatePromptBlock(
+        projection.raw,
+        view.state.field(markdownField).result.index,
+        projection.toRaw(view.state.selection.main.head)
+      )
+      return !!found && !found.empty
     },
     setText: (text, host, selection) => {
       documentGeneration += 1
@@ -776,6 +1039,12 @@ export function mountEditor(
       return () => viewportListeners.delete(listener)
     },
     focus: () => view.focus(),
-    destroy: () => { documentGeneration += 1; view.destroy(); warning.remove() }
+    destroy: () => {
+      editorDestroyed = true
+      promptRemovals.length = 0
+      documentGeneration += 1
+      view.destroy()
+      warning.remove()
+    }
   }
 }

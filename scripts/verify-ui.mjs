@@ -89,8 +89,11 @@ const DRAFT_MARKER_TEXT = '<!-- rgent:prompt:v1 state="draft" -->'
 const ASK_MODIFIERS = process.platform === 'darwin' ? 4 + 8 : 2 + 8
 
 /**
- * 光标处草稿块的可判定状态：marker 只认 `state="draft"`，已发送（带 task-id）的块不算草稿。
- * `Shift+Enter` 的软换行仍属同一个提问块（CommonMark 里是同一段落），所以按行块算正文。
+ * 光标处提问块的可判定状态（F1 两种形态）：
+ * - `draft`：原文里已有 `state="draft"` marker（首字输入后才落），cursor 在紧贴 marker 的那一段；
+ * - `pending`：只有编辑器里的待发送空行行类（`.rgent-block-command*`），没有 marker、没有 chip；
+ * - `empty`：两种形态都只看正文是否空白；`promptText` 对 pending 取待发送行文字。
+ * `Shift+Enter` 的软换行仍属同一个提问块（CommonMark 里是同一段落）。
  */
 const PROMPT_STATE = `(() => {
   const view = document.querySelector('.cm-content')?.cmTile?.root?.view
@@ -112,15 +115,36 @@ const PROMPT_STATE = `(() => {
     if (next.text.trim() === '') break
     end = next.number
   }
-  const promptText = end >= start ? doc.sliceString(doc.line(start).from, doc.line(end).to) : ''
+  const draftText = end >= start ? doc.sliceString(doc.line(start).from, doc.line(end).to) : ''
+  // pending 行是唯一「有提问行类、上一行却没有 marker chip」的行；已发送/草稿行上方都有 chip。
+  const classed = [...document.querySelectorAll('.cm-content .cm-line')]
+    .filter(line => line.classList.contains('rgent-block-command') && line.classList.contains('rgent-block-command-first'))
+  const pendingLine = draft ? null : classed.filter(line => !line.previousElementSibling?.querySelector?.('.rgent-marker-command, .rgent-marker-ai')).at(-1) ?? null
+  let pending = false
+  if (pendingLine) {
+    // 光标确实在这条待发送行上：CM 的 domAtPos 优先，退回 DOM 选区节点。
+    try {
+      const node = view.domAtPos(head).node
+      const element = node && node.nodeType === 3 ? node.parentElement : node
+      pending = element?.closest?.('.cm-line') === pendingLine
+    } catch { pending = false }
+    if (!pending) {
+      const node = document.getSelection()?.anchorNode
+      const element = node && node.nodeType === 3 ? node.parentElement : node
+      pending = element?.closest?.('.cm-line') === pendingLine
+    }
+  }
+  const pendingText = pending ? pendingLine.textContent : ''
   return {
     draft,
-    empty: draft && promptText.trim() === '',
-    promptText,
+    pending,
+    empty: draft ? draftText.trim() === '' : pending ? pendingText.trim() === '' : false,
+    promptText: draft ? draftText : pendingText,
     head,
     atDocEnd: head === doc.length,
     draftCount: doc.toString().split(marker).length - 1,
-    commandLines: document.querySelectorAll('.cm-content .cm-line.rgent-block-command').length
+    commandLines: classed.length,
+    lineClass: (pending ? pendingLine : null)?.className ?? null
   }
 })()`
 
@@ -197,11 +221,12 @@ function insertedText(before, after) {
 }
 
 /**
- * 把一条提问写进草稿块。`/` 已退役：唯一创建入口是 `⌘⇧↵`／`Ctrl+Shift+Enter`。
+ * 把一条提问写进提问块（F1 两段式）。`/` 已退役：唯一创建入口是 `⌘⇧↵`／`Ctrl+Shift+Enter`。
  * - 光标先落到文末：新块接在最后一段之后，末尾空行（空段）就复用那一行。
- * - 只有在光标处还没有草稿块时才按键；已有空草稿块就复用它，不叠第二个。
- * - 快捷键插入的只能是 marker（不含 `/`），正文才用真实输入送进块里。
- * - 编辑器里没有按钮／图标／提示类提问入口。
+ * - 唤起只建**待发送空行**：原文不写 marker、没有 chip，只有 `.rgent-block-command*` 行类；
+ *   空笔记连空行都不写。已有待发送行／草稿就复用它，不叠第二个。
+ * - 首个非空白输入才补 `state="draft"` marker（微任务）；这里等 marker 真出现后才算就绪。
+ * - 快捷键与输入都不得带 `/`；编辑器里没有按钮／图标／提示类提问入口。
  * 返回 true 只代表草稿就绪；发送由 `submitDirect` 的真实 Enter 完成。
  */
 async function ensurePrompt(page, prompt) {
@@ -211,36 +236,40 @@ async function ensurePrompt(page, prompt) {
   const docText = `document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null`
   const before = await page.eval(docText)
   let state = await page.eval(PROMPT_STATE)
-  if (!state?.draft) {
-    const expectedDrafts = (state?.draftCount ?? 0) + 1
+  if (!state?.draft && !state?.pending) {
+    const markersBefore = state?.draftCount ?? 0
     await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
+    // 唤起后先断言：没有 marker、没有空的提问块，只有一条待发送空行（普通空行＋行类）。
     const created = await waitFor(page, `(() => {
       const state = ${PROMPT_STATE}
-      return !!state && state.draft && state.empty && state.draftCount === ${expectedDrafts} &&
+      return !!state && state.pending && !state.draft && state.empty && state.draftCount === ${markersBefore} &&
         document.querySelectorAll('.cm-content .cm-line.rgent-block-command').length >= 1
     })()`, 8000)
     if (!created) return false
     const after = await page.eval(docText)
     const change = insertedText(before, after)
-    // 快捷键只插 marker（和必要的空行），不能插 `/`；也只能多一个草稿块。
-    if (!change || !change.inserted.includes(DRAFT_MARKER_TEXT) || change.inserted.includes('/')) return false
+    // 快捷键只可能补空行：不写 marker、不写 `/`、也不改原文。
+    if (!change || change.removed !== '' || change.inserted.includes('/') ||
+      change.inserted.includes(DRAFT_MARKER_TEXT) || change.inserted.replace(/[\r\n]/g, '') !== '') return false
     state = await page.eval(PROMPT_STATE)
   }
-  if (!state?.draft || !state.empty) return false
-  // CM 的事务选区要等一次 DOM 同步；这里等 DOM 光标确实落在空提问行再输入，免得字进错位置。
+  if (!state?.pending && !state?.draft) return false
+  if (!state.empty) return false
+  // CM 的事务选区要等一次 DOM 同步；这里等 DOM 光标确实落在待发送行再输入，免得字进错位置。
   await waitFor(page, `(() => {
-    const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+    const state = ${PROMPT_STATE}
+    if (!state || !(state.pending || state.draft) || !state.empty) return false
     const selection = document.getSelection()
-    if (!view || !selection || selection.rangeCount === 0) return false
-    const node = selection.anchorNode
+    const node = selection?.anchorNode
     const element = node && node.nodeType === 3 ? node.parentElement : node
     const line = element?.closest?.('.cm-line')
     return !!line && line.classList.contains('rgent-block-command') && line.textContent === ''
   })()`, 4000)
   await page.call('Input.insertText', { text: prompt })
+  // 首字落 marker 是微任务：等 marker 出现、待发送行消失，且正文逐字等于 prompt。
   const typed = await waitFor(page, `(() => {
     const state = ${PROMPT_STATE}
-    return !!state && state.draft && state.promptText === ${JSON.stringify(prompt)}
+    return !!state && state.draft && !state.pending && state.promptText === ${JSON.stringify(prompt)}
   })()`, 5000)
   if (!typed) return false
   // 草稿行立刻就是 `.rgent-block-command.rgent-block-command-first`（`>`、紫色），且行内只有文字。
@@ -263,10 +292,11 @@ async function ensurePrompt(page, prompt) {
 }
 
 /**
- * 提问块提交：草稿里已有正文时按一次真实回车就开工；空块不发送。
- * 传 prompt 时先由 `ensurePrompt` 建块并把正文放进去。
+ * 提问块提交：待发送行／草稿里已有正文时按一次真实回车就开工；空块（含 pending 空行）不发送。
+ * 传 prompt 时先由 `ensurePrompt` 建待发送行、输入正文，并等首个非空白输入落下的 marker。
+ * 发送前以 marker 为前提：pending 带正文时等微任务补完再按 Enter（产品另有同步兜底）。
  * 按完回车同时断言：零确认面；本篇本次只出现一个 running 任务（同一个按键不能双发）；
- * 草稿 marker 已升级（块被复用，没有复制出第二个）。
+ * marker 已升级（块被复用，没有复制出第二个）。
  */
 async function submitDirect(page, prompt = null) {
   /** 失败时把窗口里的现场留下，专项打印它，不用靠猜。 */
@@ -290,9 +320,18 @@ async function submitDirect(page, prompt = null) {
       return false
     }
   }
-  const state = await page.eval(PROMPT_STATE)
+  let state = await page.eval(PROMPT_STATE)
+  if (state?.pending && !state.empty) {
+    // F1：首字落 marker 是微任务；发送前以 marker 为前提，先等它落下再按 Enter。
+    // （产品在 submitPrompt 里另有 ensurePromptMarker 同步兜底，补不上会保留草稿不发。）
+    await waitFor(page, `(() => {
+      const state = ${PROMPT_STATE}
+      return !!state && state.draft && !state.pending
+    })()`, 3000)
+    state = await page.eval(PROMPT_STATE)
+  }
   if (!state?.draft || state.empty) {
-    await remember('not-ready', { hasDraft: !!state?.draft, empty: state?.empty ?? null, promptText: state?.promptText ?? null })
+    await remember('not-ready', { hasDraft: !!state?.draft, pending: !!state?.pending, empty: state?.empty ?? null, promptText: state?.promptText ?? null })
     return false
   }
   const relPath = await page.eval(`document.querySelector('.tab[aria-selected=true]')?.dataset.rel ?? null`)
@@ -2225,6 +2264,7 @@ async function verifyUx(page, vault, shot) {
     tasks: (await window.rgent.agentTasks()).length,
     taskBar: document.querySelector('.task-dock')?.dataset.kind==='generating',
     notices: document.querySelectorAll('.notice').length,
+    noticeTexts: [...document.querySelectorAll('.notice')].map(node => (node.innerText || '').slice(0, 160)),
     dialogs: document.querySelectorAll('dialog[open]').length,
     editor: document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null
   }))()`)
@@ -2304,9 +2344,10 @@ async function verifyUx(page, vault, shot) {
 }
 
 /**
- * 提问块专项（RGENT_UI_UX_ONLY=1 里接着跑）：`⌘⇧↵`／`Ctrl+Shift+Enter` 建块、`/` 只是普通文本、
+ * 提问块专项（RGENT_UI_UX_ONLY=1 里接着跑）：`⌘⇧↵`／`Ctrl+Shift+Enter` 只建待发送空行（F1）、
+ * 首字才落 `state="draft"` marker、删空回退待发送行、关闭/重开不留 marker 与空提问块、
  * 空段立刻紫色、非空段后插、Shift+Enter 换行、空块 Esc 删除、发送前后样式不变、
- * 菜单与快捷键各只建一个块（无双发）。受控主机的回答固定，零真实模型与外网。
+ * 菜单与快捷键各只建一条待发送行（无双发）。受控主机的回答固定，零真实模型与外网。
  */
 async function verifyPromptBlock(page, vault, shot, nativePage, nativeDialogs = []) {
   process.stdout.write('\n提问块（快捷键、空段、换行、Esc 与无双发）\n')
@@ -2363,64 +2404,106 @@ async function verifyPromptBlock(page, vault, shot, nativePage, nativeDialogs = 
   check('提问块：三个夹具进入目录', ready)
   if (!ready) return
 
-  // 一、空段立刻就是 `>`＋紫色提问行；不输入 `/`；快捷键只建一个块。
+  // 一、唤起只建待发送空行：原文不写 marker、没有 chip，行类已经就位；首字才补 marker。
   check('提问块：打开空段夹具', await openNote('提问块空.md'))
   const emptyBefore = await viewText()
   await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
   const emptyCreated = await waitFor(page, `(() => {
     const state = ${PROMPT_STATE}
-    return !!state && state.draft && state.empty && state.draftCount === 1 && !!document.querySelector('.cm-content .cm-line.rgent-block-command.rgent-block-command-first')
+    return !!state && state.pending && !state.draft && state.empty && state.draftCount === 0 && !!document.querySelector('.cm-content .cm-line.rgent-block-command.rgent-block-command-first')
   })()`, 8000)
   const emptyAfter = await viewText()
   const emptyStyle = await page.eval(`(() => {
-    const chips = [...document.querySelectorAll('.cm-content .rgent-marker-command')]
-    const line = chips.at(-1)?.closest('.cm-line')?.nextElementSibling
+    const line = document.querySelector('.cm-content .cm-line.rgent-block-command.rgent-block-command-first')
     if (!line) return null
     const probe = document.createElement('span'); probe.style.color = 'var(--ai-prompt)'; document.body.append(probe)
     const expected = getComputedStyle(probe).color; probe.remove()
     const style = getComputedStyle(line), before = getComputedStyle(line, '::before')
     return { className: line.className, text: line.textContent, before: before.content, color: style.color, expected, weight: Number(style.fontWeight), controls: line.querySelectorAll('button, [role="button"], img, svg, a').length }
   })()`)
-  check('提问块：空段立刻 `>`＋紫色，正文里没有 `/`', emptyCreated && emptyAfter === emptyBefore + DRAFT_MARKER_TEXT + '\n' && !emptyAfter.includes('/') &&
+  const emptyChips = await page.eval(`document.querySelectorAll('.cm-content .rgent-marker-command').length`)
+  check('提问块：快捷键后只有待发送空行，没有 marker、没有 `/`', emptyCreated && emptyAfter === emptyBefore && !emptyAfter.includes('/') && emptyChips === 0 &&
     emptyStyle?.text === '' && emptyStyle.className.includes('rgent-block-command') && emptyStyle.className.includes('rgent-block-command-first') &&
     emptyStyle.before === '">"' && emptyStyle.color === emptyStyle.expected && emptyStyle.weight >= 600 && emptyStyle.controls === 0,
-  JSON.stringify({ emptyCreated, emptyAfter, emptyStyle }))
+  JSON.stringify({ emptyCreated, emptyAfter, emptyChips, emptyStyle }))
   check('提问块：编辑器里没有按钮／图标／提示类提问入口', await page.eval(NO_ASK_ENTRY) === true)
-  await shot(page, 'prompt-block-empty-1200')
+  await shot(page, 'prompt-block-pending-empty-1200')
   await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
   await sleep(300)
-  const repeated = await page.eval(`(() => ({ drafts: (document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').split(${JSON.stringify(DRAFT_MARKER_TEXT)}).length - 1, lines: document.querySelectorAll('.cm-content .cm-line.rgent-block-command').length }))()`)
-  check('提问块：再按一次快捷键只聚焦同一个草稿，不叠第二个块', repeated.drafts === 1 && repeated.lines === 1, JSON.stringify(repeated))
+  const repeated = await page.eval(`(() => { const state = ${PROMPT_STATE}; const view = document.querySelector('.cm-content')?.cmTile?.root?.view; return { pending: state?.pending ?? null, drafts: state?.draftCount ?? null, doc: view?.state.doc.toString() ?? null, lines: document.querySelectorAll('.cm-content .cm-line.rgent-block-command').length } })()`)
+  check('提问块：再按一次快捷键只聚焦同一条待发送行，不叠第二个空行', repeated.pending === true && repeated.drafts === 0 && repeated.doc === emptyAfter && repeated.lines === 1, JSON.stringify(repeated))
   await page.key('Enter', 'Enter', 0, 13)
   await sleep(800)
-  const emptyEnter = await page.eval(`(async () => ({ tasks: (await window.rgent.agentTasks()).length, drafts: (document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').split(${JSON.stringify(DRAFT_MARKER_TEXT)}).length - 1, dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialogs: document.querySelectorAll('dialog[open]').length }))()`)
-  check('提问块：空块回车不发送、也不删除、没有确认卡', emptyEnter.tasks === 0 && emptyEnter.drafts === 1 && emptyEnter.dock !== 'generating' && emptyEnter.dialogs === 0, JSON.stringify(emptyEnter))
+  const emptyEnterState = await page.eval(PROMPT_STATE)
+  const emptyEnter = await page.eval(`(async () => ({ tasks: (await window.rgent.agentTasks()).length, doc: document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null, dock: document.querySelector('.task-dock')?.dataset.kind ?? null, dialogs: document.querySelectorAll('dialog[open]').length }))()`)
+  check('提问块：空块回车不发送、也不换行、仍然没有 marker', emptyEnter.tasks === 0 && emptyEnter.doc === emptyBefore && emptyEnter.dock !== 'generating' && emptyEnter.dialogs === 0 && emptyEnterState?.pending === true && emptyEnterState?.draftCount === 0, JSON.stringify({ emptyEnter, pending: emptyEnterState?.pending ?? null }))
   await page.key('Escape', 'Escape', 0, 27)
-  check('提问块：空块 Esc 删除，原文逐字节恢复', await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null) === ${JSON.stringify(emptyBefore)}`, 5000) && await draftCount() === 0)
+  check('提问块：空待发送行 Esc 删除，原文逐字节恢复', await waitFor(page, `(() => { const view = document.querySelector('.cm-content')?.cmTile?.root?.view; return (view?.state.doc.toString() ?? null) === ${JSON.stringify(emptyBefore)} && document.querySelectorAll('.cm-content .cm-line.rgent-block-command').length === 0 })()`, 5000))
 
-  // 二、非空段唤起：原文不动，新块在整段之后（光标在段落中间也一样）。
+  // 一·二、首个非空白输入才落 marker；删空又移除 marker、回到待发送行。
+  await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
+  const pendingForTyping = await waitFor(page, `(() => { const state = ${PROMPT_STATE}; return !!state && state.pending && !state.draft && state.empty })()`, 8000)
+  await page.call('Input.insertText', { text: '首字' })
+  const markerAppeared = await waitFor(page, `(() => {
+    const state = ${PROMPT_STATE}
+    return !!state && state.draft && !state.pending && state.promptText === '首字' && state.draftCount === 1
+  })()`, 5000)
+  const markerLine = await page.eval(`(() => {
+    const chips = [...document.querySelectorAll('.cm-content .rgent-marker-command')]
+    const line = chips.at(-1)?.closest('.cm-line')?.nextElementSibling
+    return { chips: chips.length, text: line?.textContent ?? null, className: line?.className ?? null }
+  })()`)
+  check('提问块：首个非空白输入才落 marker，落字前后行类不变', pendingForTyping && markerAppeared && markerLine.chips === 1 && markerLine.text === '首字' && (markerLine.className ?? '').includes('rgent-block-command-first') && (markerLine.className ?? '').includes('rgent-block-command'), JSON.stringify({ pendingForTyping, markerAppeared, markerLine }))
+  await page.key('Backspace', 'Backspace', 0, 8)
+  await page.key('Backspace', 'Backspace', 0, 8)
+  const backToPending = await waitFor(page, `(() => {
+    const state = ${PROMPT_STATE}
+    const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+    return !!state && state.pending && !state.draft && state.draftCount === 0 && (view?.state.doc.toString() ?? '') === ''
+  })()`, 5000)
+  const chipsAfterEmpty = await page.eval(`document.querySelectorAll('.cm-content .rgent-marker-command').length`)
+  check('提问块：删空后移除 marker，回到无 marker 的待发送行', backToPending && chipsAfterEmpty === 0, JSON.stringify({ backToPending, chipsAfterEmpty }))
+  await page.key('Escape', 'Escape', 0, 27)
+  check('提问块：删空后的待发送行 Esc 仍能清掉', await waitFor(page, `(() => (document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null) === '' && document.querySelectorAll('.cm-content .cm-line.rgent-block-command').length === 0)()`, 5000))
+
+  // 一·三、关闭/重开：待发送行只是编辑器状态，关掉 tab 再打开既不写 marker 也不留空提问块。
+  check('提问块：关闭前重建待发送行', await openNote('提问块空.md'))
+  await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
+  const closePending = await waitFor(page, `(() => { const state = ${PROMPT_STATE}; return !!state && state.pending && !state.draft && state.draftCount === 0 })()`, 8000)
+  const closeDoc = await viewText()
+  const closeChips = await page.eval(`document.querySelectorAll('.cm-content .rgent-marker-command').length`)
+  check('提问块：关闭前只有待发送行、没有 marker', closePending && closeDoc === '' && closeChips === 0, JSON.stringify({ closePending, closeDoc, closeChips }))
+  const tabClosed = await page.eval(`(() => { const close = document.querySelector('.tab-wrap:has(.tab[aria-selected="true"]) .tab-close'); if (!close) return false; close.click(); return true })()`)
+  check('提问块：关闭待发送行所在的 tab', tabClosed === true && await waitFor(page, `document.querySelector('.tab[aria-selected=true]')?.dataset.rel !== '提问块空.md'`, 10000))
+  const reopenedClean = await openNote('提问块空.md') && await waitFor(page, `(() => {
+    const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+    return (view?.state.doc.toString() ?? null) === '' && document.querySelectorAll('.cm-content .cm-line.rgent-block-command').length === 0 && document.querySelectorAll('.cm-content .rgent-marker-command').length === 0
+  })()`, 15000)
+  check('提问块：关闭再打开后无 marker、无空提问块', reopenedClean)
+
+  // 二、非空段唤起：原文不动，只多一条空行，marker 要等首字；新行在整段之后。
   check('提问块：打开非空段夹具', await openNote('提问块非空.md'))
   const nonEmptyBefore = await viewText()
   await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ selection: { anchor: 2 } }); view.focus(); return true })()`)
   await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
-  await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').includes(${JSON.stringify(DRAFT_MARKER_TEXT)})`, 8000)
+  const nonEmptyPending = await waitFor(page, `(() => { const state = ${PROMPT_STATE}; return !!state && state.pending && !state.draft && state.empty })()`, 8000)
   const nonEmptyAfter = await viewText()
-  check('提问块：非空段唤起后原文不动、新块在其后', nonEmptyAfter === nonEmptyBefore + '\n' + DRAFT_MARKER_TEXT + '\n' && nonEmptyAfter.indexOf(DRAFT_MARKER_TEXT) > nonEmptyAfter.indexOf('原有正文第一段。'), JSON.stringify({ nonEmptyBefore, nonEmptyAfter }))
+  check('提问块：非空段唤起后原文不动、只多一条空行、没有 marker', nonEmptyPending && nonEmptyAfter === nonEmptyBefore + '\n' && nonEmptyAfter.startsWith('原有正文第一段。') && !nonEmptyAfter.includes(DRAFT_MARKER_TEXT) && !nonEmptyAfter.includes('/'), JSON.stringify({ nonEmptyBefore, nonEmptyAfter }))
   await shot(page, 'prompt-block-after-nonempty-1200')
   const nonEmptySent = await ensurePrompt(page, '非空段后的提问') && await submitDirect(page)
   check('提问块：非空段后的块一次回车开工，原文仍在', nonEmptySent && await waitFor(page, `(async () => { const note = await window.rgent.noteRead('提问块非空.md'); return note.content.includes('原有正文第一段。') && note.content.includes('受控回答第一句。第二句。') && (await window.rgent.agentTasks()).length === 0 })()`, 30000), JSON.stringify({ submit: await page.eval('window.__r5aSubmitFailure ?? null') }))
 
-  // 三、末尾空段复用：只多 marker，不另加空行。
+  // 三、末尾空段复用：待发送行直接落在那一行，doc 一个字节都不变，也不写 marker。
   check('提问块：打开末尾空段夹具', await openNote('提问块复用.md'))
   const reuseBefore = await viewText()
   // 「空段复用」要求光标就在那一行空行上：先把光标落到文末（与 ⌘⇧↵ 前台人手的位置一致）。
   await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ selection: { anchor: view.state.doc.length } }); view.focus(); return true })()`)
   await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
-  await waitFor(page, `(() => { const state = ${PROMPT_STATE}; return !!state && state.draft && state.empty })()`, 8000)
+  const reusePending = await waitFor(page, `(() => { const state = ${PROMPT_STATE}; return !!state && state.pending && !state.draft && state.empty })()`, 8000)
   const reuseAfter = await viewText()
-  check('提问块：末尾空段被复用（只多一枚 marker）', reuseAfter === reuseBefore + DRAFT_MARKER_TEXT + '\n', JSON.stringify({ reuseBefore, reuseAfter }))
+  check('提问块：末尾空段被复用（doc 不变、没有 marker）', reusePending && reuseAfter === reuseBefore && !reuseAfter.includes(DRAFT_MARKER_TEXT), JSON.stringify({ reuseBefore, reuseAfter }))
   await page.key('Escape', 'Escape', 0, 27)
-  check('提问块：复用出来的空块 Esc 后夹具复原', await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? null) === ${JSON.stringify(reuseBefore)}`, 5000))
+  check('提问块：复用出来的待发送行 Esc 后夹具复原', await waitFor(page, `(() => { const view = document.querySelector('.cm-content')?.cmTile?.root?.view; return (view?.state.doc.toString() ?? null) === ${JSON.stringify(reuseBefore)} && document.querySelectorAll('.cm-content .cm-line.rgent-block-command').length === 0 })()`, 5000))
 
   // 四、Shift+Enter 在块内换行，不发送；多行块一次回车只开一场。
   check('提问块：打开发送夹具', await openNote('提问块空.md'))
@@ -2450,15 +2533,23 @@ async function verifyPromptBlock(page, vault, shot, nativePage, nativeDialogs = 
   check('提问块：菜单「问 AI」显示快捷键且未注册原生 accelerator（不会双发）', !!menuInfo && acceleratorShown && menuInfo.registerAccelerator === false, JSON.stringify(menuInfo))
   await page.eval(`document.querySelector('.cm-content')?.focus()`)
   await page.key(process.platform === 'darwin' ? 'ArrowDown' : 'End', process.platform === 'darwin' ? 'ArrowDown' : 'End', process.platform === 'darwin' ? 4 : 2, process.platform === 'darwin' ? 40 : 35)
-  const menuBefore = await draftCount()
-  const menuCreated = await menuItem(true) && await waitFor(page, `(document.querySelector('.cm-content')?.cmTile?.root?.view?.state?.doc?.toString() ?? '').split(${JSON.stringify(DRAFT_MARKER_TEXT)}).length - 1 === ${menuBefore + 1}`, 8000)
+  const menuDocBefore = await viewText()
+  const menuDraftsBefore = await draftCount()
+  const menuCreated = await menuItem(true) && await waitFor(page, `(() => {
+    const state = ${PROMPT_STATE}
+    const view = document.querySelector('.cm-content')?.cmTile?.root?.view
+    return !!state && state.pending && !state.draft && state.draftCount === ${menuDraftsBefore} && (view?.state.doc.toString() ?? '').split(${JSON.stringify(DRAFT_MARKER_TEXT)}).length - 1 === ${menuDraftsBefore}
+  })()`, 8000)
+  const menuDocAfter = await viewText()
   await page.key('Enter', 'Enter', ASK_MODIFIERS, 13)
   await sleep(300)
-  const menuCount = await draftCount()
-  check('提问块：菜单只建一个块，再按快捷键不复制', menuCreated === true && menuCount === menuBefore + 1, JSON.stringify({ menuBefore, menuCreated, menuCount }))
+  const menuDocAgain = await viewText()
+  const menuPending = await page.eval(PROMPT_STATE)
+  check('提问块：菜单只建一条待发送行，再按快捷键不复制', menuCreated === true && menuPending?.pending === true && menuPending?.draftCount === menuDraftsBefore && menuDocAgain === menuDocAfter && menuDocAfter.replace(/[\r\n]/g, '') === menuDocBefore.replace(/[\r\n]/g, ''), JSON.stringify({ menuDocBefore, menuDocAfter, menuDocAgain }))
   await page.key('Escape', 'Escape', 0, 27)
   await sleep(300)
-  check('提问块：菜单建出的空块 Esc 删除', await draftCount() === menuBefore)
+  const menuAfterEscape = await page.eval(PROMPT_STATE)
+  check('提问块：菜单建出的待发送行 Esc 清掉且不写 marker', menuAfterEscape?.pending !== true && await draftCount() === menuDraftsBefore, JSON.stringify({ pending: menuAfterEscape?.pending ?? null }))
 
   // 七、旧 `/` 普通文本回归：输入 `/路径/日期` 回车只换行，不建任务、不出现草稿块。
   await page.eval(`(() => { const view = document.querySelector('.cm-content').cmTile.root.view; view.dispatch({ selection: { anchor: view.state.doc.length } }); view.focus(); return true })()`)

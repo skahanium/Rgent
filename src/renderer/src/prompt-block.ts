@@ -268,6 +268,25 @@ export function locatePromptBlock(source: string, index: DocIndex, caret: number
   return null
 }
 
+/**
+ * 待发送空行（F1）：没有 marker 时也认得出光标所在的提问行。
+ * 空行返回 `{range:{start,end}, prompt:'', empty:true}`；已经打进正文但 marker 还没落下
+ * 的异步窗口里返回正文，让发送前能同步补 marker 再重取范围。
+ */
+export function locatePendingPrompt(source: string, at: number, caret: number): PromptBlockAtCaret | null {
+  if (!Number.isInteger(at) || at < 0 || at > source.length) return null
+  if (!Number.isInteger(caret) || caret < 0 || caret > source.length) return null
+  const line = lineAt(source, at)
+  const contentStart = contentStartOf(source)
+  if (line.start !== at && !(line.start === 0 && at === contentStart)) return null
+  if (caret < line.start || caret > line.contentEnd) return null
+  const prompt = source.slice(line.contentStart, line.contentEnd)
+  if (prompt.trim() === '') {
+    return { range: { start: line.contentStart, end: line.contentStart }, prompt: '', empty: true }
+  }
+  return { range: { start: line.contentStart, end: line.contentEnd }, prompt, empty: false }
+}
+
 /** 空草稿的一次性删除：marker 行 + 空提问行一起移除，不碰其它内容。 */
 export function planEmptyPromptRemoval(source: string, index: DocIndex, caret: number): TextEdit | null {
   const found = locatePromptBlock(source, index, caret)
@@ -277,6 +296,74 @@ export function planEmptyPromptRemoval(source: string, index: DocIndex, caret: n
   if (source.startsWith('\r\n', to)) to += 2
   else if (to < source.length && (source[to] === '\n' || source[to] === '\r')) to += 1
   return { from, to, insert: '' }
+}
+
+/** 空 pending 行的整行删除；没有物理字符（文末虚拟空行）时没有可删的文本。 */
+export function planPendingPromptRemoval(source: string, at: number): TextEdit | null {
+  if (!Number.isInteger(at) || at < 0 || at > source.length) return null
+  const line = lineAt(source, at)
+  if (at < line.start || at > line.contentEnd) return null
+  if (source.slice(line.contentStart, line.contentEnd).trim() !== '') return null
+  const from = line.start === 0 && source.startsWith('\ufeff') ? 1 : line.start
+  return line.end > from ? { from, to: line.end, insert: '' } : null
+}
+
+/** 首次非空白输入：把草稿 marker 补在待发送行上方，正文与行类一个字节都不动。 */
+export function firstMarker(source: string, at: number): TextEdit | null {
+  if (!Number.isInteger(at) || at < 0 || at > source.length) return null
+  const line = lineAt(source, at)
+  if (source.slice(line.contentStart, line.contentEnd).trim() === '') return null
+  const from = line.start === 0 && source.startsWith('\ufeff') ? 1 : line.start
+  return { from, to: from, insert: `${DRAFT_PROMPT_MARKER}${newlineAt(source, from)}` }
+}
+
+/** 草稿正文删空：只移除 marker 那一行，提问行（现在只剩空白）留给 pending。 */
+export function removeDraftMarker(source: string, marker: SourceRange): TextEdit | null {
+  const line = markerLineBlock(source, marker)
+  const from = line.start === 0 && source.startsWith('\ufeff') ? 1 : line.start
+  return line.end > from ? { from, to: line.end, insert: '' } : null
+}
+
+/** 同一处草稿从「有正文」变成「只剩空白」时才该回退；孤立空 marker 不在这里清。 */
+export function draftPromptBecameEmpty(
+  before: { empty: boolean } | null | undefined,
+  after: { empty: boolean } | null | undefined
+): boolean {
+  return !!before && !before.empty && !!after && after.empty
+}
+
+/** 全篇所有紧贴正文的草稿；正文为空时 range 是 marker 下面那一行。 */
+export type DraftPromptRef = {
+  marker: MarkerRef
+  range: SourceRange
+  prompt: string
+  empty: boolean
+}
+
+export function draftPrompts(source: string, index: DocIndex): DraftPromptRef[] {
+  const blocks = [...index.blocks].sort((left, right) => left.range.start - right.range.start)
+  const markers = [...index.markers].sort((left, right) => left.range.start - right.range.start)
+  const found: DraftPromptRef[] = []
+  const used = new Set<number>()
+  for (const block of blocks) {
+    if (block.identity !== 'command') continue
+    const marker = markerBefore(index, block.range.start)
+    if (!marker || used.has(marker.range.start)) continue
+    if (!isDraftPromptMarker(source, marker) || !adjacent(source, marker, block.range.start)) continue
+    used.add(marker.range.start)
+    const prompt = source.slice(block.range.start, block.range.end)
+    found.push({ marker, range: block.range, prompt, empty: prompt.trim() === '' })
+  }
+  for (const marker of markers) {
+    if (used.has(marker.range.start) || !isDraftPromptMarker(source, marker)) continue
+    const line = markerLineBlock(source, marker.range)
+    if (!/[\r\n]/.test(source.slice(marker.range.end, line.end))) continue
+    const promptLine = lineAt(source, line.end)
+    const prompt = source.slice(promptLine.contentStart, promptLine.contentEnd)
+    if (prompt.trim() !== '') continue
+    found.push({ marker, range: { start: line.end, end: promptLine.contentEnd }, prompt: '', empty: true })
+  }
+  return found.sort((left, right) => left.marker.range.start - right.marker.range.start)
 }
 
 /**
@@ -351,4 +438,70 @@ export function planPromptInsertion(
   }
   const reference = containingBlock(blocks, safeCaret)
   return appendAfter(source, reference ? afterBlock(source, reference.end) : lineAt(source, safeCaret).end, text)
+}
+
+/**
+ * 只插普通空行（F1）：待发送行先不落 marker。
+ *
+ * 提问行要同时满足「上一行空」「下一行空（后面还有正文时）」，否则第一次落字时
+ * 会和相邻段落并进同一段。已经在空行带上、两侧都空时插入为空，直接复用。
+ * 文末 / 空笔记同样按这个规则补最少的新行。
+ */
+function pendingInsertionAt(source: string, position: number): PromptInsertion {
+  const at = Math.max(0, Math.min(source.length, Math.trunc(position)))
+  if (source.length === 0) return { edit: { from: 0, to: 0, insert: '' }, caret: 0 }
+  const contentStart = contentStartOf(source)
+  const lineStart = lineStartOf(source, at)
+  const atLineStart = at === lineStart || (lineStart === 0 && at === contentStart)
+  const eol = newlineAt(source, at)
+  const previousBlank = at <= contentStart ||
+    (atLineStart && blankLineBefore(source, at))
+  let pre = ''
+  if (at > contentStart) {
+    if (atLineStart) {
+      if (!previousBlank) pre = eol
+    } else {
+      // 光标所在行还有正文：先结束这一行，再空一行。
+      pre = eol + eol
+    }
+  }
+  const nextIsEol = at < source.length && (source[at] === '\n' || source[at] === '\r')
+  let post = ''
+  if (at === source.length) {
+    // 文末：pre 已经结束上一行并留出空行，待发送行就是最后的空行，不再补尾换行。
+    post = ''
+  } else if (!nextIsEol) {
+    // 原位置没有换行：补一个结束待发送行；后面若还有同一行的正文，再补一个空行。
+    post = eol
+    if (hasContent(source, at)) post += eol
+  } else {
+    const after = at + (source.startsWith('\r\n', at) ? 2 : 1)
+    if (hasContent(source, after) && leadingBlankLines(source, after) === 0) post = eol
+  }
+  return {
+    edit: { from: at, to: at, insert: pre + post },
+    caret: at + pre.length
+  }
+}
+
+/**
+ * 唤起提问块：只创建编辑器里的待发送空行，不写 `state="draft"` marker。
+ * 暂停重发带正文，走 `planPromptInsertion`，不经过这里。
+ */
+export function planPendingPromptInsertion(
+  source: string,
+  index: DocIndex,
+  caret: number,
+  options: PromptBlockOptions = {}
+): PromptInsertion {
+  const safeCaret = Number.isFinite(caret) ? Math.max(0, Math.min(source.length, Math.trunc(caret))) : 0
+  const blocks = [...index.blocks].map((block) => block.range).sort((left, right) => left.start - right.start)
+  if (options.at === 'end') {
+    const last = blocks.at(-1)
+    return pendingInsertionAt(source, last ? afterBlock(source, last.end) : source.length)
+  }
+  const empty = topLevelEmptyLine(source, blocks, safeCaret)
+  if (empty) return pendingInsertionAt(source, empty.contentStart)
+  const reference = containingBlock(blocks, safeCaret)
+  return pendingInsertionAt(source, reference ? afterBlock(source, reference.end) : lineAt(source, safeCaret).end)
 }

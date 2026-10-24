@@ -2,10 +2,17 @@ import { describe, expect, it } from 'vitest'
 import { compile } from '@markdown'
 import {
   commandBlockHasDraftGap,
+  draftPromptBecameEmpty,
+  draftPrompts,
+  firstMarker,
   isDraftPromptMarker,
+  locatePendingPrompt,
   locatePromptBlock,
   pendingPromptDraftLines,
+  planPendingPromptInsertion,
+  planPendingPromptRemoval,
   planPromptInsertion,
+  removeDraftMarker,
   type PromptBlockOptions
 } from '../../src/renderer/src/prompt-block.ts'
 
@@ -175,5 +182,132 @@ describe('prompt block lookup', () => {
     expect(locate(sent, sent.indexOf('问'))).toBeNull()
     // 行类由身份渲染，升级后仍是 command。
     expect(indexOf(sent).blocks.find((item) => item.identity === 'command')?.type).toBe('paragraph')
+  })
+})
+
+describe('pending prompt insertion (F1: no marker until first input)', () => {
+  function pending(source: string, caret = source.length) {
+    return planPendingPromptInsertion(source, indexOf(source), caret)
+  }
+
+  it('leaves an empty note empty and never writes a marker', () => {
+    const insertion = pending('', 0)
+    expect(insertion.edit).toEqual({ from: 0, to: 0, insert: '' })
+    expect(insertion.caret).toBe(0)
+    expect(apply('', insertion)).toBe('')
+    expect(apply('', insertion)).not.toContain('rgent:prompt')
+  })
+
+  it('inserts only blank lines after a paragraph', () => {
+    const source = '甲\n'
+    const insertion = pending(source, 1)
+    expect(apply(source, insertion)).toBe('甲\n\n')
+    expect(apply(source, insertion)).not.toContain('rgent:prompt')
+    expect(insertion.caret).toBe(3)
+  })
+
+  it('surrounds the pending line with blank lines between paragraphs', () => {
+    const source = '甲\n\n乙\n'
+    const insertion = pending(source, 1)
+    expect(apply(source, insertion)).toBe('甲\n\n\n\n乙\n')
+    expect(insertion.caret).toBe(3)
+    // 目标行两侧都是空行：首次落字后自成一段，不并入甲／乙。
+    expect(apply(source, insertion).slice(insertion.caret - 1, insertion.caret + 1)).toBe('\n\n')
+  })
+
+  it('reuses a blank line that already has blank neighbours without any edit', () => {
+    const source = '甲\n\n\n\n乙\n'
+    const insertion = pending(source, 3)
+    expect(insertion.edit).toEqual({ from: 3, to: 3, insert: '' })
+    expect(insertion.caret).toBe(3)
+  })
+
+  it('keeps CRLF when creating the pending line', () => {
+    const insertion = pending('甲\r\n', 1)
+    expect(insertion.edit).toEqual({ from: 3, to: 3, insert: '\r\n' })
+    expect(insertion.edit.insert).not.toMatch(/[^\r]\n/)
+    expect(insertion.caret).toBe(5)
+    expect(apply('甲\r\n', insertion)).toBe('甲\r\n\r\n')
+  })
+
+  it('keeps BOM and EOF without a trailing newline', () => {
+    const bom = pending('\ufeff甲\r\n', 2)
+    expect(apply('\ufeff甲\r\n', bom).startsWith('\ufeff甲')).toBe(true)
+    expect(apply('\ufeff甲\r\n', bom)).toBe('\ufeff甲\r\n\r\n')
+    expect(apply('甲', pending('甲', 1))).toBe('甲\n\n')
+  })
+})
+
+describe('pending prompt lookup and removal', () => {
+  it('locates the empty pending line without a marker', () => {
+    const source = '甲\n\n\n\n乙\n'
+    expect(locatePendingPrompt(source, 3, 3)).toEqual({
+      range: { start: 3, end: 3 },
+      prompt: '',
+      empty: true
+    })
+    expect(locatePendingPrompt(source, 3, 2)).toBeNull()
+    expect(locatePendingPrompt(source, 2, 3)).toBeNull()
+  })
+
+  it('returns body text typed before the marker lands', () => {
+    const source = '甲\n\n问\n\n乙\n'
+    expect(locatePendingPrompt(source, 3, 4)).toEqual({
+      range: { start: 3, end: 4 },
+      prompt: '问',
+      empty: false
+    })
+  })
+
+  it('removes only the empty pending line', () => {
+    expect(planPendingPromptRemoval('甲\n\n\n\n乙\n', 3)).toEqual({ from: 3, to: 4, insert: '' })
+    expect(planPendingPromptRemoval('甲\n', 2)).toBeNull()
+    expect(planPendingPromptRemoval('甲\n\n \n乙\n', 3)).toEqual({ from: 3, to: 5, insert: '' })
+  })
+})
+
+describe('first marker, draft empty rollback', () => {
+  it('inserts the draft marker above the first non-blank input', () => {
+    expect(firstMarker('问\n', 0)).toEqual({ from: 0, to: 0, insert: `${MARKER}\n` })
+    expect(firstMarker('甲\n\n问\n', 3)).toEqual({ from: 3, to: 3, insert: `${MARKER}\n` })
+    expect(firstMarker('甲\n\n\n', 3)).toBeNull()
+    expect(firstMarker('   \n', 0)).toBeNull()
+  })
+
+  it('keeps CRLF and a leading BOM', () => {
+    expect(firstMarker('甲\r\n\r\n问\r\n', 5)).toEqual({ from: 5, to: 5, insert: `${MARKER}\r\n` })
+    expect(firstMarker('\ufeff问\n', 1)).toEqual({ from: 1, to: 1, insert: `${MARKER}\n` })
+  })
+
+  it('removes only the marker line when the body is emptied', () => {
+    const source = `${MARKER}\n\n乙\n`
+    const marker = indexOf(source).markers[0]!
+    expect(removeDraftMarker(source, marker.range)).toEqual({ from: 0, to: MARKER.length + 1, insert: '' })
+    const crlf = `\ufeff${MARKER}\r\n\r\n乙`
+    const crlfMarker = indexOf(crlf).markers[0]!
+    expect(removeDraftMarker(crlf, crlfMarker.range)).toEqual({
+      from: 1,
+      to: 1 + MARKER.length + 2,
+      insert: ''
+    })
+  })
+
+  it('lists adjacent drafts and only rolls back non-empty to empty', () => {
+    const source = `甲\n\n${MARKER}\n问\n\n${SENT}\n已发送\n`
+    const drafts = draftPrompts(source, indexOf(source))
+    expect(drafts).toHaveLength(1)
+    expect(drafts[0]).toMatchObject({ prompt: '问', empty: false })
+    expect(draftPromptBecameEmpty(drafts[0], { empty: true })).toBe(true)
+    expect(draftPromptBecameEmpty({ empty: true }, { empty: true })).toBe(false)
+    expect(draftPromptBecameEmpty(drafts[0], null)).toBe(false)
+  })
+
+  it('lists an empty draft with no Markdown block as the line under its marker', () => {
+    const source = `甲\n\n${MARKER}\n\n\n乙\n`
+    const index = indexOf(source)
+    const line = source.indexOf(MARKER) + MARKER.length + 1
+    expect(draftPrompts(source, index)).toMatchObject([
+      { prompt: '', empty: true, range: { start: line, end: line } }
+    ])
   })
 })
