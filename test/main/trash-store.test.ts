@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SecureVaultFs, closeSecureFs, secureFsFor } from '../../src/main/secure-fs.ts'
-import { TrashStore, TRASH_DIR, TRASH_RETENTION_MS, validTrashMeta } from '../../src/main/trash-store.ts'
+import { TrashStore, TRASH_DIR, TRASH_OPERATIONS_ON_THIS_PLATFORM, TRASH_RETENTION_MS, validTrashMeta } from '../../src/main/trash-store.ts'
 import { serializeStoredVault } from '../../src/main/notes-fs.ts'
 import { VaultSession } from '../../src/main/vault.ts'
 
@@ -401,6 +401,7 @@ describe('in-vault trash through the session queue', () => {
   }
 
   it('settles two concurrent deletes of the same note with one winner', async () => {
+    if (!TRASH_OPERATIONS_ON_THIS_PLATFORM) return
     const { root, vaultSession } = await session()
     try {
       const [first, second] = await Promise.all([
