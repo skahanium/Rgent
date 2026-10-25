@@ -21,7 +21,7 @@ pnpm version 0.2.0 --no-git-checks
 git diff -- package.json pnpm-lock.yaml
 ```
 
-- 不新增一次性版本脚本；不创建 Git tag；升级后手动提交。
+- 不新增一次性版本脚本；`pnpm version` 会**创建本地提交**（0.2.0 实测为 `b2d83d5`），但不创建 Git tag；升级后检查提交信息。若不想自动提交，改用手动编辑 `package.json` 后自行提交。
 - 不重命名 `branch-v0.1.0`：它是远端／CI 引用，不是应用版本。
 - 纯文档版本只跑 `pnpm docs:check` 与文档检查器定向测试；代码版本才跑全量 `pnpm test`、`pnpm build`、`pnpm ui:check`。
 
