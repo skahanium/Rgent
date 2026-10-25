@@ -263,7 +263,7 @@ describe('docs stage invariants', () => {
   it('rejects an unstructured evidence claim in the delivery table', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const changed = source.replace(/(\| W0 文档与版本切换 \| `[a-f\d]{7,40}` \| 通过 \| 不适用 \| 未运行 \| )不适用( \|)/, '$1应该通过$2')
+    const changed = source.replace(/(\| W0 文档与版本切换 \| `[a-f\d]{7,40}` \| 通过 \| 不适用 \| 通过 \| )不适用( \|)/, '$1应该通过$2')
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
@@ -335,7 +335,7 @@ describe('commit references and package status cells', () => {
   it('rejects a package table status outside the five existing words', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\*\*本机已交\*\*(?:（[^）]*）)?/, '$1**冻结**')
+    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\| \*\*已交\*\*（\[run [^\]]*\]\([^)]*\)） \|/, '$1| **冻结** |')
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
@@ -348,7 +348,7 @@ describe('commit references and package status cells', () => {
   it('rejects a delivered package row without a commit or run link', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\*\*本机已交\*\*(?:（[^）]*）)?/, '$1**已交**')
+    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\| \*\*已交\*\*（\[run [^\]]*\]\([^)]*\)） \|/, '$1| **已交** |')
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
@@ -361,7 +361,9 @@ describe('commit references and package status cells', () => {
   it('accepts a locally delivered package row without remote evidence', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    expect(source).toMatch(/\| W0 \| 文档与版本 \|[^\n]*?\*\*本机已交\*\*/)
+    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\| \*\*已交\*\*（\[run [^\]]*\]\([^)]*\)） \|/, '$1| **本机已交** |')
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
     const result = run()
     expect(result.stderr).toBe('')
     expect(result.status).toBe(0)
@@ -371,7 +373,7 @@ describe('commit references and package status cells', () => {
   it('accepts a delivered row whose evidence is a run link', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\*\*本机已交\*\*(?:（[^）]*）)?/, '$1**已交** [run 123](https://github.com/skahanium/Rgent/actions/runs/123)')
+    const changed = source.replace(/actions\/runs\/40166390331/, 'actions/runs/123')
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
@@ -387,7 +389,7 @@ describe('commit references and package status cells', () => {
   it('accepts the existing package states', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\*\*本机已交\*\*(?:（[^）]*）)?/, '$1**进行中**')
+    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\| \*\*已交\*\*（\[run [^\]]*\]\([^)]*\)） \|/, '$1| **进行中** |')
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
