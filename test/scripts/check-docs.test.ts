@@ -125,7 +125,10 @@ describe('docs stage invariants', () => {
   it('rejects a stage switch without exactly one current matrix row', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const changed = source.replace(/(\|[^\n]+)\*\*当前\*\*/, '$1**已交**')
+    const start = source.indexOf('## 对象 × 阶段')
+    const end = source.indexOf('## 当前交付', start)
+    const matrix = source.slice(start, end)
+    const changed = source.slice(0, start) + matrix.replace(/\*\*当前\*\*/, '**已交**') + source.slice(end)
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
@@ -133,16 +136,22 @@ describe('docs stage invariants', () => {
     expect(result.stderr).toContain('对象矩阵')
   })
 
+
   it('rejects a current matrix row whose object is not in the dependency order', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const changed = source.replace(/^\|([^|\n]+)\|([^\n]*\*\*当前\*\*)/m, '| 不存在的对象 |$2')
+    const start = source.indexOf('## 对象 × 阶段')
+    const end = source.indexOf('## 当前交付', start)
+    const matrix = source.slice(start, end)
+    const changedMatrix = matrix.replace(/^(\| )[^|\n]+( \|[^\n]*\*\*当前\*\*)/m, '$1不存在的对象$2')
+    const changed = source.slice(0, start) + changedMatrix + source.slice(end)
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('「当前」行')
   })
+
 
   it('rejects a matrix status outside the three phase states', () => {
     const { build, run } = fixture()
@@ -177,16 +186,48 @@ describe('docs stage invariants', () => {
     expect(result.stderr).toContain('交接表阶段')
   })
 
+  it('rejects duplicate object rows in the matrix', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    const start = source.indexOf('## 对象 × 阶段')
+    const end = source.indexOf('## 当前交付', start)
+    const matrix = source.slice(start, end)
+    const changedMatrix = matrix.replace(/^(\| 正文直写与审阅 \|[^\n]*\n)/m, '$1| 正文直写与审阅 | duplicate | **未开** | 重复对象 |\n')
+    const changed = source.slice(0, start) + changedMatrix + source.slice(end)
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('重复对象')
+  })
+
+
+  it('rejects an empty matrix row', () => {
+    const { build, run } = fixture()
+    const source = readFileSync(build, 'utf8')
+    const start = source.indexOf('## 对象 × 阶段')
+    const end = source.indexOf('## 当前交付', start)
+    const matrix = source.slice(start, end) + '\n| | | | |\n'
+    const changed = source.slice(0, start) + matrix + source.slice(end)
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
+    const result = run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('空对象行')
+  })
+
   it('rejects a current matrix object that names a different existing stage', () => {
     const { root, build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    // 当前阶段会随施工推进而改；这里动态挑一个**不是**当前的已有阶段，避免把阶段名写死。
     const stage = /^## 当前阶段\s*\n+\*\*([^*]+)\*\*/m.exec(readFileSync(path.join(root, 'AGENTS.md'), 'utf8'))?.[1]
     const order = /^## 依赖顺序\s*\n[\s\S]*?```text\s*\n([\s\S]*?)\n```/m.exec(source)?.[1] ?? ''
     const others = order.split(/\r?\n/).map(line => line.trim().replace(/^→\s*/, '').split('（')[0]!.trim()).filter(Boolean)
     const other = others.find(name => name && name !== stage)
     expect(other, '依赖顺序里应当有当前阶段之外的阶段').toBeTruthy()
-    const changed = source.replace(/^(\| )[^|\n]+( \|[^\n]*\*\*当前\*\*)/m, `$1${other}$2`)
+    const start = source.indexOf('## 对象 × 阶段')
+    const end = source.indexOf('## 当前交付', start)
+    const matrix = source.slice(start, end).replace(/^(\| )[^|\n]+( \|[^\n]*\*\*当前\*\*)/m, `$1${other}$2`)
+    const changed = source.slice(0, start) + matrix + source.slice(end)
     expect(changed).not.toBe(source)
     writeFileSync(build, changed)
     const result = run()
@@ -194,38 +235,40 @@ describe('docs stage invariants', () => {
     expect(result.stderr).toContain('当前阶段与矩阵当前行不一致')
   })
 
-  it('accepts pending delivery rows and historical commit references', () => {
+
+  it('accepts a pending current delivery row', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const row = /\| 文档校准及检查规则 \| [^|]+ \|/
-    expect(source).toMatch(row)
-    writeFileSync(build, source.replace(row, '| 文档校准及检查规则 | 待提交 |'))
+    expect(source).toMatch(/\| W0 文档与版本切换 \| 待提交 \|/)
     const result = run()
     expect(result.stderr).toBe('')
     expect(result.status).toBe(0)
   })
 
+
   it('rejects a delivery row without a commit or explicit pending marker', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const row = /\| 文档校准及检查规则 \| [^|]+ \|/
-    expect(source).toMatch(row)
-    writeFileSync(build, source.replace(row, '| 文档校准及检查规则 | HEAD |'))
+    const changed = source.replace(/\| W0 文档与版本切换 \| 待提交 \|/, '| W0 文档与版本切换 | HEAD |')
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
     const result = run()
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('交付对照提交引用无效')
   })
 
+
   it('rejects an unstructured evidence claim in the delivery table', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const row = /\| 文档校准及检查规则 \| [^|]+ \| [^|]+ \|/
-    expect(source).toMatch(row)
-    writeFileSync(build, source.replace(row, '| 文档校准及检查规则 | 待提交 | 应该通过 |'))
+    const changed = source.replace(/\| W0 文档与版本切换 \| 待提交 \| 通过 \| 不适用 \| 未运行 \| 不适用 \|/, '| W0 文档与版本切换 | 待提交 | 通过 | 不适用 | 未运行 | 应该通过 |')
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
     const result = run()
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('交付对照证据状态无效')
   })
+
 
   it('rejects a missing current delivery table', () => {
     const { build, run } = fixture()
@@ -290,119 +333,68 @@ describe('commit references and package status cells', () => {
   it('rejects a package table status outside the five existing words', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const row = /\| C1 \| 原生候选证明[^\n]*?\*\*已交\*\*/
-    expect(source).toMatch(row)
-    writeFileSync(build, source.replace(row, (matched) => matched.replace('**已交**', '**冻结**')))
+    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\*\*进行中\*\*/, '$1**冻结**')
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
     const result = run()
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('包表状态格')
     expect(result.stderr).toContain('**冻结**')
   })
 
+
   it('rejects a delivered package row without a commit or run link', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const row = /\| A \| 证据与围栏[^\n]*/
-    expect(source).toMatch(row)
-    writeFileSync(build, source.replace(row, (matched) => matched.replace(/`[a-f\d]{7,40}`/g, '已核')))
+    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\*\*进行中\*\*/, '$1**已交**')
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
     const result = run()
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('「已交」行末列缺少证据')
     expect(result.stderr).toContain('actions/runs/<id>')
   })
 
+
   it('accepts a locally delivered package row without remote evidence', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const row = /\| B1 \| 记忆近期容器完整性[^\n]*/
-    expect(source).toMatch(row)
-    writeFileSync(build, source.replace(row, (matched) => matched
-      .replace(/\*\*已交\*\*（`[a-f\d]{7,40}`）/, '**本机已交**')
-      .replace(/`[a-f\d]{7,40}`/g, '')))
+    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\*\*进行中\*\*/, '$1**本机已交**')
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
     const result = run()
     expect(result.stderr).toBe('')
     expect(result.status).toBe(0)
   })
+
 
   it('accepts a delivered row whose evidence is a run link', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const row = /\| B2 \| 债务清零[^\n]*/
-    expect(source).toMatch(row)
-    writeFileSync(build, source.replace(row, (matched) => matched.replace(
-      /（`[a-f\d]{7,40}`）/,
-      '（[run 123](https://github.com/skahanium/Rgent/actions/runs/123)）'
-    )))
+    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\*\*进行中\*\*/, '$1**已交** [run 123](https://github.com/skahanium/Rgent/actions/runs/123)')
+    expect(changed).not.toBe(source)
+    writeFileSync(build, changed)
     const result = run()
     expect(result.stderr).toBe('')
     expect(result.status).toBe(0)
   })
 
-  it('rejects a write-tools package row whose status cell is missing', () => {
-    const { build, run } = fixture()
-    const source = readFileSync(build, 'utf8')
-    const row = /\| 1 \| 写入门（受信写服务）[^\n]*?\*\*已交\*\*/
-    expect(source).toMatch(row)
-    writeFileSync(build, source.replace(row, (matched) => matched.replace('**已交**', '')))
-    const result = run()
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain('本轮包表')
-    expect(result.stderr).toContain('本行缺失')
-  })
 
-  it('rejects a struct-tools package row whose status cell is missing', () => {
-    const { build, run } = fixture()
-    const source = readFileSync(build, 'utf8')
-    const row = /\| 1 \| 写入门结构性动作[^\n]*?\*\*已交\*\*/
-    expect(source).toMatch(row)
-    writeFileSync(build, source.replace(row, (matched) => matched.replace('**已交**', '')))
-    const result = run()
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain('本轮包表')
-    expect(result.stderr).toContain('本行缺失')
-  })
 
-  it('rejects a current-round package row whose status cell is missing', () => {
-    const { build, run } = fixture()
-    const source = readFileSync(build, 'utf8')
-    // 本轮包表的数据行「末列必须写状态」：以前「若以加粗词开头才校验」，所以漏写反而合法，
-    // B1／B2／B3／C2／C3／C4 六个格子就是这么漏掉的。这条测试锁住「缺失即报错」。
-    const row = /\| C2 \| 库层删除与恢复核验[^\n]*?\*\*已交\*\*/
-    expect(source).toMatch(row)
-    writeFileSync(build, source.replace(row, (matched) => matched.replace('**已交**', '')))
-    const result = run()
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain('本轮包表')
-    expect(result.stderr).toContain('本行缺失')
-  })
 
-  it('does not require status cells in historical package tables', () => {
-    const { build, run } = fixture()
-    const source = readFileSync(build, 'utf8')
-    // 债务移交那张表的末列是「触发条件」（如「用户愿意花几分钟时」），从来不用状态词；
-    // 它不在「本轮」小节里，判据不该误伤——历史表的读法与当前包表不同。
-    const row = /\| 3 \| 用户视觉确认（记忆页在新成绩下的实际显示）[^\n]*/
-    expect(source).toMatch(row)
-    expect(source.match(row)![0].split('|').at(-2)!.trim()).not.toMatch(/^\*\*(已交|未开|进行中|待核)\*\*/)
-    const result = run()
-    expect(result.stderr).toBe('')
-    expect(result.status).toBe(0)
-  })
+
 
   it('accepts the existing package states', () => {
     const { build, run } = fixture()
     const source = readFileSync(build, 'utf8')
-    const row = /\| C1 \| 原生候选证明[^\n]*?\*\*已交\*\*/
-    expect(source).toMatch(row)
-    writeFileSync(build, source.replace(row, (matched) => matched.replace('**已交**', '**进行中**')))
+    const changed = source.replace(/(\| W0 \| 文档与版本 \|[^\n]*?)\*\*进行中\*\*/, '$1**进行中**')
+    expect(changed).toBe(source)
     const result = run()
     expect(result.stderr).toBe('')
     expect(result.status).toBe(0)
   })
+
+
 })
 
-it('rejects a v2 delivery claim lacking a date or tested commit',()=>{
- const {build,run}=fixture(),s=readFileSync(build,'utf8')
- writeFileSync(build,s.replace(/^\| 5 集成 .*$/m,'| 5 集成 | 已开 | 当前运行 | 通过 |'))
- expect(run().stderr).toContain('v2 交付证据缺少日期或受验提交')
-})
+

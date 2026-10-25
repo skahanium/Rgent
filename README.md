@@ -1,6 +1,6 @@
 # Rgent
 
-AI 原生的单机笔记兼资料库。Markdown 是真相。AI 写在文档里，不是旁边再开一个聊天室。
+AI 原生的单机笔记兼资料库。Markdown 是真相。AI 在文档上工作；问答是短暂结果，修改可审、可撤回。
 
 ## 从哪读起
 
@@ -28,4 +28,4 @@ ELECTRON_GET_USE_PROXY=true GLOBAL_AGENT_HTTPS_PROXY=http://127.0.0.1:7897 pnpm 
 
 ## 现状
 
-产品骨架是 Electron + TypeScript，库的读写边界是受控的 Node-API 原生模块。实际进度与当前施工许可只见 [施工图](docs/build.md#当前阶段)，已有强制点见 [架构](docs/architecture.md)。未来沙箱、单场授权与第三方接入规则见 [文档地图](docs/README.md)，规划不代表运行时能力已经交付。
+产品骨架是 Electron + TypeScript，库的读写边界是受控的 Node-API 原生模块。当前版本 0.2.0；进度与施工许可只见 [施工图](docs/build.md#当前阶段)，已有强制点见 [架构](docs/architecture.md)。未来沙箱、单场授权与第三方接入规则见 [文档地图](docs/README.md)，规划不代表运行时能力已经交付。

@@ -124,8 +124,16 @@ if (buildStage && currentObject !== buildStage.replace(/[。.!！\s]+$/u, '')) {
 
 const matrixRows = matrixSection?.split(/\r?\n/).filter((line) => /^\|[^-]/.test(line)).slice(1) ?? []
 if (matrixRows.length === 0) errors.push('docs/build.md: 对象矩阵缺少阶段状态行')
+const matrixObjects = new Set()
 for (const row of matrixRows) {
-  const [object, , status] = row.split('|').slice(1).map((cell) => cell.trim())
+  const cells = row.split('|').slice(1).map((cell) => cell.trim())
+  const [object, , status] = cells
+  if (!object) {
+    errors.push('docs/build.md: 对象矩阵存在空对象行')
+    continue
+  }
+  if (matrixObjects.has(object)) errors.push(`docs/build.md: 对象矩阵重复对象「${object}」`)
+  matrixObjects.add(object)
   if (!['**已交**', '**当前**', '**未开**'].includes(status)) {
     errors.push(`docs/build.md: 对象「${object}」的阶段状态无效：${status ?? '缺失'}`)
   }
